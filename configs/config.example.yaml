@@ -1,0 +1,53 @@
+server:
+  # IMAP server configuration (for email clients to connect)
+  imap_port: 1143
+  imap_tls_port: 1993
+
+  # SMTP server configuration (for email clients to send)
+  smtp_port: 1587
+  smtp_tls_port: 1465
+
+  # Web interface and API
+  web_port: 8080
+  web_host: "0.0.0.0"
+
+database:
+  host: "localhost"
+  port: 5432
+  user: "mailserver"
+  password: "changeme"
+  dbname: "mailserver"
+  sslmode: "disable"
+
+# Security settings
+security:
+  # JWT secret for web authentication
+  jwt_secret: "change-this-secret-key"
+
+  # TLS certificates (optional, for encrypted connections)
+  tls_cert: ""
+  tls_key: ""
+
+# Sync settings
+sync:
+  # How often to check for new emails (in seconds)
+  interval: 60
+
+  # Maximum concurrent IMAP connections per account
+  max_connections: 5
+
+# Worker pool settings
+workers:
+  # CPU usage limit in percent (1-100)
+  cpu_limit: 50
+
+  # Percentage of workers dedicated to IMAP tasks (rest goes to SMTP)
+  imap_worker_percent: 50
+
+  # Task queue size (buffered channel size)
+  queue_size: 1000
+
+# Logging
+logging:
+  level: "info"  # debug, info, warn, error
+  format: "json" # json, text

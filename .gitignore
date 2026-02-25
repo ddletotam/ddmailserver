@@ -1,0 +1,39 @@
+# Binaries
+mailserver
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+*.out
+
+# Go workspace file
+go.work
+
+# Configuration files with secrets
+configs/config.yaml
+!configs/config.example.yaml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Database
+*.db
+*.sqlite
+
+# Build artifacts
+/bin/
+/dist/

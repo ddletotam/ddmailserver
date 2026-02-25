@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mailserver-db
+    environment:
+      POSTGRES_USER: mailserver
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: mailserver
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mailserver"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mailserver:
+    build: .
+    container_name: mailserver-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - CONFIG_PATH=/app/configs/config.yaml
+    volumes:
+      - ./configs:/app/configs
+    ports:
+      - "1143:1143"   # IMAP
+      - "1993:1993"   # IMAP TLS
+      - "1587:1587"   # SMTP
+      - "1465:1465"   # SMTP TLS
+      - "8080:8080"   # Web UI
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
