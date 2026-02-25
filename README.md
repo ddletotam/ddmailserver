@@ -1,6 +1,12 @@
-# MailServer - Self-Hosted Email Aggregator
+# DDMailServer - Self-Hosted Email Aggregator
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Go Version](https://img.shields.io/badge/Go-1.22-blue.svg)](https://golang.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14+-green.svg)](https://www.postgresql.org/)
 
 A self-hosted email aggregation service that allows you to manage multiple email accounts through a single IMAP/SMTP server.
+
+🔗 **Repository**: https://github.com/ddletotam/ddmailserver
 
 ## Features
 
