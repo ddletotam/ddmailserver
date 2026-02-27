@@ -44,10 +44,21 @@ echo ""
 echo "🔨 Building application..."
 make build
 
-# Restart service
+# Stop service before replacing binary
 echo ""
-echo "🔄 Restarting $SERVICE_NAME service..."
-sudo systemctl restart $SERVICE_NAME
+echo "⏸️  Stopping $SERVICE_NAME service..."
+sudo systemctl stop $SERVICE_NAME
+
+# Install new binary
+echo "📦 Installing new binary..."
+sudo cp build/mailserver /usr/local/bin/mailserver
+sudo chmod +x /usr/local/bin/mailserver
+echo "   Binary updated: /usr/local/bin/mailserver"
+
+# Start service
+echo ""
+echo "▶️  Starting $SERVICE_NAME service..."
+sudo systemctl start $SERVICE_NAME
 
 # Wait a bit for service to start
 sleep 2
