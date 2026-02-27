@@ -1,12 +1,15 @@
 package web
 
 import (
+	"context"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 
 	"github.com/gorilla/mux"
 	"github.com/yourusername/mailserver/internal/db"
+	"github.com/yourusername/mailserver/internal/models"
 )
 
 // Server represents the web server
@@ -46,22 +49,54 @@ func (s *Server) setupRoutes() {
 	// Apply global middleware
 	s.router.Use(s.LoggingMiddleware)
 	s.router.Use(s.CORSMiddleware)
+	s.router.Use(s.SessionMiddleware)
 
-	// Public routes
+	// Serve static files
+	staticFiles, _ := fs.Sub(staticFS, "static")
+	s.router.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.FS(staticFiles))))
+
+	// Public web routes
+	s.router.HandleFunc("/", s.HandleIndex).Methods("GET")
+	s.router.HandleFunc("/login", s.HandleLoginPage).Methods("GET")
+	s.router.HandleFunc("/logout", s.HandleLogout).Methods("GET")
+
+	// Public API routes
 	s.router.HandleFunc("/health", s.HandleHealthCheck).Methods("GET")
 	s.router.HandleFunc("/api/register", s.HandleRegister).Methods("POST")
 	s.router.HandleFunc("/api/login", s.HandleLogin).Methods("POST")
 
-	// Protected routes
+	// Protected API routes
 	api := s.router.PathPrefix("/api").Subrouter()
 	api.Use(s.AuthMiddleware)
 
-	// Accounts
+	// Accounts API
 	api.HandleFunc("/accounts", s.HandleGetAccounts).Methods("GET")
 	api.HandleFunc("/accounts", s.HandleCreateAccount).Methods("POST")
 	api.HandleFunc("/accounts/{id}", s.HandleGetAccount).Methods("GET")
 	api.HandleFunc("/accounts/{id}", s.HandleUpdateAccount).Methods("PUT")
 	api.HandleFunc("/accounts/{id}", s.HandleDeleteAccount).Methods("DELETE")
+
+	// Protected web routes
+	web := s.router.PathPrefix("/").Subrouter()
+	web.Use(s.WebAuthMiddleware)
+
+	// Dashboard
+	web.HandleFunc("/dashboard", s.HandleDashboard).Methods("GET")
+
+	// Accounts web pages
+	web.HandleFunc("/accounts", s.HandleAccountsPage).Methods("GET")
+	web.HandleFunc("/accounts/list", s.HandleAccountsList).Methods("GET")
+	web.HandleFunc("/accounts/new", s.HandleAccountFormPage).Methods("GET")
+	web.HandleFunc("/accounts/{id}/edit", s.HandleAccountFormPage).Methods("GET")
+
+	// Inbox
+	web.HandleFunc("/inbox", s.HandleInboxPage).Methods("GET")
+	web.HandleFunc("/messages/list", s.HandleMessagesList).Methods("GET")
+	web.HandleFunc("/messages/{id}", s.HandleMessagePage).Methods("GET")
+	web.HandleFunc("/message/{id}", s.HandleMessagePage).Methods("GET")
+
+	// Compose
+	web.HandleFunc("/compose", s.HandleComposePage).Methods("GET")
 
 	log.Printf("Routes configured")
 }

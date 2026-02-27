@@ -1,0 +1,83 @@
+{{define "content"}}
+<div class="message-page">
+    <div class="message-toolbar">
+        <div class="toolbar-left">
+            <a href="/inbox" class="btn btn-sm btn-secondary">← Back to Inbox</a>
+        </div>
+        <div class="toolbar-right">
+            <button hx-post="/messages/{{.Message.ID}}/reply"
+                    hx-target="#compose-modal"
+                    class="btn btn-sm btn-primary">
+                ↩️ Reply
+            </button>
+            <button hx-post="/messages/{{.Message.ID}}/forward"
+                    hx-target="#compose-modal"
+                    class="btn btn-sm btn-secondary">
+                ➡️ Forward
+            </button>
+            <button hx-delete="/messages/{{.Message.ID}}"
+                    hx-confirm="Delete this message?"
+                    hx-target="body"
+                    hx-push-url="/inbox"
+                    class="btn btn-sm btn-danger">
+                🗑️ Delete
+            </button>
+        </div>
+    </div>
+
+    <div class="message-viewer">
+        <div class="message-header">
+            <h2 class="message-subject">{{.Message.Subject}}</h2>
+
+            <div class="message-meta">
+                <div class="message-from-to">
+                    <div class="meta-row">
+                        <span class="meta-label">From:</span>
+                        <span class="meta-value">{{.Message.From}}</span>
+                    </div>
+                    <div class="meta-row">
+                        <span class="meta-label">To:</span>
+                        <span class="meta-value">{{.Message.To}}</span>
+                    </div>
+                    {{if .Message.Cc}}
+                    <div class="meta-row">
+                        <span class="meta-label">Cc:</span>
+                        <span class="meta-value">{{.Message.Cc}}</span>
+                    </div>
+                    {{end}}
+                    <div class="meta-row">
+                        <span class="meta-label">Date:</span>
+                        <span class="meta-value">{{.Message.Date.Format "Monday, January 2, 2006 at 3:04 PM"}}</span>
+                    </div>
+                </div>
+
+                {{if .Attachments}}
+                <div class="message-attachments">
+                    <h4>Attachments ({{len .Attachments}})</h4>
+                    <div class="attachment-list">
+                        {{range .Attachments}}
+                        <a href="/attachments/{{.ID}}/download" class="attachment-item">
+                            📎 {{.Filename}} ({{formatSize .Size}})
+                        </a>
+                        {{end}}
+                    </div>
+                </div>
+                {{end}}
+            </div>
+        </div>
+
+        <div class="message-body">
+            {{if .Message.BodyHTML}}
+            <iframe srcdoc="{{.Message.BodyHTML}}"
+                    sandbox="allow-same-origin"
+                    class="message-html-frame"></iframe>
+            {{else}}
+            <pre class="message-text">{{.Message.Body}}</pre>
+            {{end}}
+        </div>
+    </div>
+</div>
+
+<!-- Modal for compose -->
+<div id="compose-modal"></div>
+{{end}}

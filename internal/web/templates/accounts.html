@@ -1,0 +1,208 @@
+{{define "content"}}
+<div class="accounts-page">
+    <div class="page-header">
+        <h1>Email Accounts</h1>
+        <a href="/accounts/new" class="btn btn-primary">+ Add Account</a>
+    </div>
+
+    <div id="accounts-list"
+         hx-get="/accounts/list"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+        <p>Loading accounts...</p>
+    </div>
+</div>
+{{end}}
+
+{{define "accounts-list"}}
+{{if .Accounts}}
+<div class="accounts-grid">
+    {{range .Accounts}}
+    <div class="account-card" x-data="{ menu: false }">
+        <div class="account-header">
+            <div class="account-info">
+                <h3>{{.Name}}</h3>
+                <p class="account-email">{{.Email}}</p>
+            </div>
+            <div class="account-status">
+                {{if .Enabled}}
+                <span class="badge badge-success">Active</span>
+                {{else}}
+                <span class="badge badge-secondary">Disabled</span>
+                {{end}}
+            </div>
+        </div>
+
+        <div class="account-details">
+            <div class="detail-row">
+                <span class="detail-label">IMAP:</span>
+                <span>{{.IMAPHost}}:{{.IMAPPort}}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">SMTP:</span>
+                <span>{{.SMTPHost}}:{{.SMTPPort}}</span>
+            </div>
+            {{if .LastSync}}
+            <div class="detail-row">
+                <span class="detail-label">Last Sync:</span>
+                <span>{{.LastSync.Format "2006-01-02 15:04"}}</span>
+            </div>
+            {{end}}
+        </div>
+
+        <div class="account-actions">
+            <button hx-post="/accounts/{{.ID}}/sync"
+                    hx-target="#sync-status-{{.ID}}"
+                    class="btn btn-sm btn-secondary">
+                Sync Now
+            </button>
+            <button hx-post="/accounts/{{.ID}}/toggle"
+                    hx-target="closest .account-card"
+                    hx-swap="outerHTML"
+                    class="btn btn-sm btn-secondary">
+                {{if .Enabled}}Disable{{else}}Enable{{end}}
+            </button>
+            <button hx-delete="/accounts/{{.ID}}"
+                    hx-confirm="Delete account '{{.Name}}'?"
+                    hx-target="closest .account-card"
+                    hx-swap="outerHTML swap:1s"
+                    class="btn btn-sm btn-danger">
+                Delete
+            </button>
+        </div>
+        <div id="sync-status-{{.ID}}" class="sync-status"></div>
+    </div>
+    {{end}}
+</div>
+{{else}}
+<div class="empty-state">
+    <h3>No email accounts yet</h3>
+    <p>Add your first email account to get started</p>
+    <a href="/accounts/new" class="btn btn-primary">+ Add Account</a>
+</div>
+{{end}}
+{{end}}
+
+{{define "account-form"}}
+<div class="account-form-page">
+    <div class="page-header">
+        <h1>{{if .Account}}Edit{{else}}Add{{end}} Email Account</h1>
+    </div>
+
+    <form hx-post="/accounts/save"
+          hx-target="#form-error"
+          class="account-form">
+        <div id="form-error" class="error-message"></div>
+
+        {{if .Account}}
+        <input type="hidden" name="id" value="{{.Account.ID}}">
+        {{end}}
+
+        <div class="form-section">
+            <h3>Account Information</h3>
+
+            <div class="form-group">
+                <label for="name">Account Name</label>
+                <input type="text" id="name" name="name" required
+                       value="{{if .Account}}{{.Account.Name}}{{end}}"
+                       placeholder="My Gmail">
+            </div>
+
+            <div class="form-group">
+                <label for="email">Email Address</label>
+                <input type="email" id="email" name="email" required
+                       value="{{if .Account}}{{.Account.Email}}{{end}}"
+                       placeholder="you@gmail.com">
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>IMAP Settings (Incoming Mail)</h3>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="imap_host">IMAP Server</label>
+                    <input type="text" id="imap_host" name="imap_host" required
+                           value="{{if .Account}}{{.Account.IMAPHost}}{{end}}"
+                           placeholder="imap.gmail.com">
+                </div>
+
+                <div class="form-group">
+                    <label for="imap_port">Port</label>
+                    <input type="number" id="imap_port" name="imap_port" required
+                           value="{{if .Account}}{{.Account.IMAPPort}}{{else}}993{{end}}">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="imap_username">Username</label>
+                <input type="text" id="imap_username" name="imap_username" required
+                       value="{{if .Account}}{{.Account.IMAPUsername}}{{end}}"
+                       placeholder="Usually same as email">
+            </div>
+
+            <div class="form-group">
+                <label for="imap_password">Password</label>
+                <input type="password" id="imap_password" name="imap_password" {{if not .Account}}required{{end}}
+                       placeholder="{{if .Account}}Leave blank to keep current{{else}}App-specific password{{end}}">
+                <small>For Gmail, use an <a href="https://myaccount.google.com/apppasswords" target="_blank">App Password</a></small>
+            </div>
+
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" name="imap_tls" value="true"
+                           {{if .Account}}{{if .Account.IMAPTLS}}checked{{end}}{{else}}checked{{end}}>
+                    Use TLS/SSL
+                </label>
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>SMTP Settings (Outgoing Mail)</h3>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="smtp_host">SMTP Server</label>
+                    <input type="text" id="smtp_host" name="smtp_host" required
+                           value="{{if .Account}}{{.Account.SMTPHost}}{{end}}"
+                           placeholder="smtp.gmail.com">
+                </div>
+
+                <div class="form-group">
+                    <label for="smtp_port">Port</label>
+                    <input type="number" id="smtp_port" name="smtp_port" required
+                           value="{{if .Account}}{{.Account.SMTPPort}}{{else}}587{{end}}">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="smtp_username">Username</label>
+                <input type="text" id="smtp_username" name="smtp_username" required
+                       value="{{if .Account}}{{.Account.SMTPUsername}}{{end}}"
+                       placeholder="Usually same as email">
+            </div>
+
+            <div class="form-group">
+                <label for="smtp_password">Password</label>
+                <input type="password" id="smtp_password" name="smtp_password" {{if not .Account}}required{{end}}
+                       placeholder="{{if .Account}}Leave blank to keep current{{else}}App-specific password{{end}}">
+            </div>
+
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" name="smtp_tls" value="true"
+                           {{if .Account}}{{if .Account.SMTPTLS}}checked{{end}}{{else}}checked{{end}}>
+                    Use TLS/SSL
+                </label>
+            </div>
+        </div>
+
+        <div class="form-actions">
+            <button type="submit" class="btn btn-primary">
+                {{if .Account}}Update{{else}}Add{{end}} Account
+            </button>
+            <a href="/accounts" class="btn btn-secondary">Cancel</a>
+        </div>
+    </form>
+</div>
+{{end}}

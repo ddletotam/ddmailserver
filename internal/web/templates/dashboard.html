@@ -1,0 +1,54 @@
+{{define "content"}}
+<div class="dashboard">
+    <h1>Welcome, {{.User.Username}}!</h1>
+
+    <div class="dashboard-stats">
+        <div class="stat-card">
+            <h3>Email Accounts</h3>
+            <p class="stat-number">{{.AccountCount}}</p>
+        </div>
+        <div class="stat-card">
+            <h3>Total Messages</h3>
+            <p class="stat-number">{{.MessageCount}}</p>
+        </div>
+        <div class="stat-card">
+            <h3>Unread</h3>
+            <p class="stat-number">{{.UnreadCount}}</p>
+        </div>
+    </div>
+
+    <div class="dashboard-section">
+        <div class="section-header">
+            <h2>Your Email Accounts</h2>
+            <a href="/accounts/new" class="btn btn-primary">+ Add Account</a>
+        </div>
+
+        <div id="accounts-list"
+             hx-get="/accounts/list"
+             hx-trigger="load"
+             hx-swap="innerHTML">
+            <p>Loading accounts...</p>
+        </div>
+    </div>
+
+    <div class="dashboard-section">
+        <div class="section-header">
+            <h2>Quick Actions</h2>
+        </div>
+        <div class="quick-actions">
+            <a href="/inbox" class="action-card">
+                <h3>📥 Inbox</h3>
+                <p>Read your emails</p>
+            </a>
+            <a href="/compose" class="action-card">
+                <h3>✉️ Compose</h3>
+                <p>Write new email</p>
+            </a>
+            <a href="/accounts" class="action-card">
+                <h3>⚙️ Accounts</h3>
+                <p>Manage email accounts</p>
+            </a>
+        </div>
+    </div>
+</div>
+{{end}}

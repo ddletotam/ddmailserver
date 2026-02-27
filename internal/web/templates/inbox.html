@@ -1,0 +1,122 @@
+{{define "content"}}
+<div class="inbox-page">
+    <div class="page-header">
+        <h1>Inbox</h1>
+        <a href="/compose" class="btn btn-primary">✉️ Compose</a>
+    </div>
+
+    <div class="inbox-layout">
+        <!-- Sidebar with folders -->
+        <div class="inbox-sidebar">
+            <div class="folder-list">
+                <a href="/inbox?folder=all" class="folder-item active">
+                    📥 All Messages
+                    {{if .UnreadCount}}
+                    <span class="badge">{{.UnreadCount}}</span>
+                    {{end}}
+                </a>
+                <a href="/inbox?folder=inbox" class="folder-item">
+                    📨 Inbox
+                </a>
+                <a href="/inbox?folder=sent" class="folder-item">
+                    📤 Sent
+                </a>
+                <a href="/inbox?folder=drafts" class="folder-item">
+                    📝 Drafts
+                </a>
+                <a href="/inbox?folder=trash" class="folder-item">
+                    🗑️ Trash
+                </a>
+            </div>
+
+            {{if .Accounts}}
+            <div class="accounts-sidebar">
+                <h4>Accounts</h4>
+                {{range .Accounts}}
+                <a href="/inbox?account={{.ID}}" class="account-item">
+                    {{.Name}}
+                </a>
+                {{end}}
+            </div>
+            {{end}}
+        </div>
+
+        <!-- Message list -->
+        <div class="inbox-content">
+            <div class="inbox-toolbar">
+                <div class="toolbar-left">
+                    <button hx-post="/messages/refresh"
+                            hx-target="#message-list"
+                            class="btn btn-sm btn-secondary">
+                        🔄 Refresh
+                    </button>
+                </div>
+                <div class="toolbar-right">
+                    <input type="search"
+                           placeholder="Search messages..."
+                           hx-get="/messages/search"
+                           hx-target="#message-list"
+                           hx-trigger="keyup changed delay:500ms"
+                           name="q"
+                           class="search-input">
+                </div>
+            </div>
+
+            <div id="message-list"
+                 hx-get="/messages/list"
+                 hx-trigger="load"
+                 hx-swap="innerHTML">
+                <p>Loading messages...</p>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+
+{{define "message-list"}}
+{{if .Messages}}
+<div class="message-list">
+    {{range .Messages}}
+    <div class="message-item {{if not .Seen}}unread{{end}}"
+         hx-get="/messages/{{.ID}}"
+         hx-target="#message-viewer"
+         hx-push-url="/message/{{.ID}}"
+         style="cursor: pointer;">
+        <div class="message-checkbox">
+            <input type="checkbox" onclick="event.stopPropagation()">
+        </div>
+        <div class="message-from">
+            {{.From}}
+        </div>
+        <div class="message-subject">
+            <span class="subject-text">{{.Subject}}</span>
+            {{if .Attachments}}
+            <span class="attachment-icon">📎</span>
+            {{end}}
+        </div>
+        <div class="message-preview">
+            {{substr .Body 0 100}}...
+        </div>
+        <div class="message-date">
+            {{.Date.Format "Jan 02, 15:04"}}
+        </div>
+    </div>
+    {{end}}
+</div>
+
+<div class="pagination">
+    {{if .HasPrev}}
+    <a href="?page={{.PrevPage}}" class="btn btn-sm">← Previous</a>
+    {{end}}
+    <span>Page {{.CurrentPage}} of {{.TotalPages}}</span>
+    {{if .HasNext}}
+    <a href="?page={{.NextPage}}" class="btn btn-sm">Next →</a>
+    {{end}}
+</div>
+{{else}}
+<div class="empty-state">
+    <h3>No messages</h3>
+    <p>Your inbox is empty</p>
+</div>
+{{end}}
+{{end}}

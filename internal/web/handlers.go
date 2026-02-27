@@ -67,6 +67,9 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("User registered: %s", user.Username)
 
+	// Set session cookie for web UI
+	s.SetSessionCookie(w, token)
+
 	respondJSON(w, http.StatusCreated, map[string]interface{}{
 		"user":  user,
 		"token": token,
@@ -104,6 +107,9 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("User logged in: %s", user.Username)
+
+	// Set session cookie for web UI
+	s.SetSessionCookie(w, token)
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"user":  user,
