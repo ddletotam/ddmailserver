@@ -84,10 +84,50 @@ echo "  ✓ Binary installed at $INSTALL_DIR/$BINARY_NAME"
 
 # Install config
 echo -e "${GREEN}[4/8]${NC} Installing configuration..."
+
+# Initialize variables with defaults
+DB_HOST="localhost"
+DB_PORT="5432"
+DB_NAME="mailserver"
+DB_USER="mailserver"
+DB_PASS="changeme"
+
 if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
     if [ -f "configs/config.example.yaml" ]; then
         cp configs/config.example.yaml $CONFIG_DIR/config.yaml
-        echo "  ✓ Config installed at $CONFIG_DIR/config.yaml"
+
+        # Ask for database configuration
+        echo "  Configure database connection:"
+        read -p "  Database host (default: localhost): " DB_HOST
+        DB_HOST=${DB_HOST:-localhost}
+
+        read -p "  Database port (default: 5432): " DB_PORT
+        DB_PORT=${DB_PORT:-5432}
+
+        read -p "  Database name (default: mailserver): " DB_NAME
+        DB_NAME=${DB_NAME:-mailserver}
+
+        read -p "  Database user (default: mailserver): " DB_USER
+        DB_USER=${DB_USER:-mailserver}
+
+        read -sp "  Database password (default: changeme): " DB_PASS
+        DB_PASS=${DB_PASS:-changeme}
+        echo ""
+
+        read -p "  JWT secret (press Enter to generate random): " JWT_SECRET
+        if [ -z "$JWT_SECRET" ]; then
+            JWT_SECRET=$(openssl rand -hex 32 2>/dev/null || cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 64 | head -n 1)
+        fi
+
+        # Update config file
+        sed -i "s/host: \"localhost\"/host: \"$DB_HOST\"/" $CONFIG_DIR/config.yaml
+        sed -i "s/port: 5432/port: $DB_PORT/" $CONFIG_DIR/config.yaml
+        sed -i "s/dbname: \"mailserver\"/dbname: \"$DB_NAME\"/" $CONFIG_DIR/config.yaml
+        sed -i "s/user: \"mailserver\"/user: \"$DB_USER\"/" $CONFIG_DIR/config.yaml
+        sed -i "s/password: \"changeme\"/password: \"$DB_PASS\"/" $CONFIG_DIR/config.yaml
+        sed -i "s/jwt_secret: \"change-this-secret-key\"/jwt_secret: \"$JWT_SECRET\"/" $CONFIG_DIR/config.yaml
+
+        echo "  ✓ Config installed and configured at $CONFIG_DIR/config.yaml"
     else
         echo -e "${RED}  Error: config.example.yaml not found${NC}"
         exit 1
@@ -109,26 +149,42 @@ fi
 
 # Setup database
 echo -e "${GREEN}[6/8]${NC} Database setup..."
-echo "  Would you like to setup the database now? (requires PostgreSQL running)"
-read -p "  Setup database? (y/n) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    echo "  Enter PostgreSQL superuser (default: postgres):"
-    read -r PG_USER
-    PG_USER=${PG_USER:-postgres}
 
-    echo "  Creating database and user..."
-    sudo -u postgres psql << EOF
-CREATE USER mailserver WITH PASSWORD 'changeme';
-CREATE DATABASE mailserver OWNER mailserver;
-\c mailserver
+if [ "$DB_HOST" = "localhost" ] || [ "$DB_HOST" = "127.0.0.1" ]; then
+    echo "  Would you like to setup the database now? (requires PostgreSQL running locally)"
+    read -p "  Setup database? (y/n) " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        read -p "  PostgreSQL superuser (default: postgres): " PG_ADMIN
+        PG_ADMIN=${PG_ADMIN:-postgres}
+
+        echo "  Creating database and user..."
+        sudo -u $PG_ADMIN psql << EOF
+CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';
+CREATE DATABASE $DB_NAME OWNER $DB_USER;
+\c $DB_NAME
 \i migrations/001_initial_schema.sql
 \i migrations/002_outbox.sql
 EOF
-    echo "  ✓ Database setup complete"
-    echo -e "${YELLOW}  ! Remember to change the password in config.yaml${NC}"
+        echo "  ✓ Database setup complete"
+    else
+        echo "  Skipped. Run migrations manually later."
+    fi
 else
-    echo "  Skipped. Run migrations manually later."
+    echo "  Database host is remote ($DB_HOST)"
+    echo "  You need to setup the database manually:"
+    echo ""
+    echo "  On database server ($DB_HOST):"
+    echo "  psql -U postgres << EOF"
+    echo "  CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';"
+    echo "  CREATE DATABASE $DB_NAME OWNER $DB_USER;"
+    echo "  EOF"
+    echo ""
+    echo "  Then run migrations from this server:"
+    echo "  PGPASSWORD='$DB_PASS' psql -h $DB_HOST -U $DB_USER -d $DB_NAME -f migrations/001_initial_schema.sql"
+    echo "  PGPASSWORD='$DB_PASS' psql -h $DB_HOST -U $DB_USER -d $DB_NAME -f migrations/002_outbox.sql"
+    echo ""
+    read -p "  Press Enter to continue..."
 fi
 
 # Configure firewall (if ufw is installed)
@@ -179,3 +235,10 @@ echo -e "${GREEN}Configuration:${NC} $CONFIG_DIR/config.yaml"
 echo -e "${GREEN}Data directory:${NC} $DATA_DIR"
 echo -e "${GREEN}Service user:${NC} $SERVICE_USER"
 echo ""
+if [ ! -z "$DB_HOST" ]; then
+    echo -e "${GREEN}Database Configuration:${NC}"
+    echo "  Host: $DB_HOST:$DB_PORT"
+    echo "  Database: $DB_NAME"
+    echo "  User: $DB_USER"
+    echo ""
+fi
