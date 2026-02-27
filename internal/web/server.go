@@ -69,11 +69,13 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/", s.HandleIndex).Methods("GET")
 	s.router.HandleFunc("/login", s.HandleLoginPage).Methods("GET")
 	s.router.HandleFunc("/logout", s.HandleLogout).Methods("GET")
+	s.router.HandleFunc("/forgot-password", s.HandleForgotPasswordPage).Methods("GET")
 
 	// Public API routes
 	s.router.HandleFunc("/health", s.HandleHealthCheck).Methods("GET")
 	s.router.HandleFunc("/api/register", s.HandleRegister).Methods("POST")
 	s.router.HandleFunc("/api/login", s.HandleLogin).Methods("POST")
+	s.router.HandleFunc("/api/forgot-password", s.HandleForgotPassword).Methods("POST")
 
 	// Protected API routes
 	api := s.router.PathPrefix("/api").Subrouter()
@@ -92,6 +94,9 @@ func (s *Server) setupRoutes() {
 
 	// Dashboard
 	web.HandleFunc("/dashboard", s.HandleDashboard).Methods("GET")
+
+	// Recovery key display (after registration)
+	web.HandleFunc("/recovery-key", s.HandleShowRecoveryKeyPage).Methods("GET")
 
 	// Accounts web pages
 	web.HandleFunc("/accounts", s.HandleAccountsPage).Methods("GET")

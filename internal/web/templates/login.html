@@ -35,6 +35,10 @@
             <button type="submit" class="btn btn-primary btn-block">
                 {{t "auth.login"}}
             </button>
+
+            <div style="text-align: center; margin-top: 1rem;">
+                <a href="/forgot-password" class="btn-link">{{t "forgot.title"}}?</a>
+            </div>
         </form>
 
         <!-- Register form -->
@@ -51,8 +55,8 @@
             </div>
 
             <div class="form-group">
-                <label for="register-email">{{t "auth.email"}}</label>
-                <input type="email" id="register-email" name="email" required>
+                <label for="register-email">{{t "auth.email"}} <small style="color: var(--text-muted);">(optional)</small></label>
+                <input type="email" id="register-email" name="email">
             </div>
 
             <div class="form-group">
@@ -71,4 +75,24 @@
         </form>
     </div>
 </div>
+
+<script>
+// Handle successful registration - redirect to recovery key page
+document.body.addEventListener('htmx:afterRequest', function(evt) {
+    if (evt.detail.successful && evt.detail.xhr.responseURL.includes('/api/register')) {
+        try {
+            const response = JSON.parse(evt.detail.xhr.responseText);
+            if (response.recovery_key) {
+                // Redirect to recovery key page with the key
+                window.location.href = '/recovery-key?key=' + encodeURIComponent(response.recovery_key);
+            }
+        } catch (e) {
+            console.error('Failed to parse registration response:', e);
+        }
+    } else if (evt.detail.successful && evt.detail.xhr.responseURL.includes('/api/login')) {
+        // Redirect to dashboard on successful login
+        window.location.href = '/dashboard';
+    }
+});
+</script>
 {{end}}
