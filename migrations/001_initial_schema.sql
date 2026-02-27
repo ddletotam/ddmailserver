@@ -1,5 +1,12 @@
 -- Initial database schema
 
+-- Grant permissions to mailserver user on public schema
+GRANT ALL ON SCHEMA public TO mailserver;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO mailserver;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO mailserver;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO mailserver;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO mailserver;
+
 -- Users table
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
@@ -73,7 +80,7 @@ CREATE TABLE IF NOT EXISTS messages (
     draft BOOLEAN DEFAULT false,
     deleted BOOLEAN DEFAULT false,
     in_reply_to VARCHAR(512),
-    references TEXT,
+    message_references TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(account_id, folder_id, uid)

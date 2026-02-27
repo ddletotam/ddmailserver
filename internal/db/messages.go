@@ -17,7 +17,7 @@ func (db *DB) CreateMessage(msg *models.Message) error {
 		INSERT INTO messages (
 			account_id, user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 			date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
-			in_reply_to, references, created_at, updated_at
+			in_reply_to, message_references, created_at, updated_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
 		RETURNING id
 	`
@@ -28,7 +28,7 @@ func (db *DB) CreateMessage(msg *models.Message) error {
 		msg.From, msg.To, msg.Cc, msg.Bcc, msg.ReplyTo,
 		msg.Date, msg.Body, msg.BodyHTML, msg.Attachments, msg.Size,
 		msg.UID, msg.Seen, msg.Flagged, msg.Answered, msg.Draft, msg.Deleted,
-		msg.InReplyTo, msg.References, msg.CreatedAt, msg.UpdatedAt,
+		msg.InReplyTo, msg.MessageReferences, msg.CreatedAt, msg.UpdatedAt,
 	).Scan(&msg.ID)
 
 	if err != nil {
@@ -43,7 +43,7 @@ func (db *DB) GetMessagesByFolder(folderID int64, limit, offset int) ([]*models.
 	query := `
 		SELECT id, account_id, user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
-		       in_reply_to, references, created_at, updated_at
+		       in_reply_to, message_references, created_at, updated_at
 		FROM messages
 		WHERE folder_id = $1 AND deleted = false
 		ORDER BY date DESC
@@ -64,7 +64,7 @@ func (db *DB) GetMessagesByUser(userID int64, limit, offset int) ([]*models.Mess
 	query := `
 		SELECT id, account_id, user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
-		       in_reply_to, references, created_at, updated_at
+		       in_reply_to, message_references, created_at, updated_at
 		FROM messages
 		WHERE user_id = $1 AND deleted = false
 		ORDER BY date DESC
@@ -86,7 +86,7 @@ func (db *DB) GetMessageByID(id int64) (*models.Message, error) {
 	query := `
 		SELECT id, account_id, user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
-		       in_reply_to, references, created_at, updated_at
+		       in_reply_to, message_references, created_at, updated_at
 		FROM messages
 		WHERE id = $1
 	`
@@ -140,7 +140,7 @@ func (db *DB) SearchMessages(userID int64, query string, limit, offset int) ([]*
 	searchQuery := `
 		SELECT id, account_id, user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
-		       in_reply_to, references, created_at, updated_at
+		       in_reply_to, message_references, created_at, updated_at
 		FROM messages
 		WHERE user_id = $1 AND deleted = false
 		AND (subject ILIKE $2 OR from_addr ILIKE $2 OR to_addr ILIKE $2 OR body ILIKE $2)

@@ -59,7 +59,7 @@ type Message struct {
 	Draft         bool      `json:"draft"`
 	Deleted       bool      `json:"deleted"`
 	InReplyTo     string    `json:"in_reply_to"`    // Message-ID of parent message
-	References    string    `json:"references"`     // Thread references
+	MessageReferences string `json:"message_references"` // Thread references
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 }
