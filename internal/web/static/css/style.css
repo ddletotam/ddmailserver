@@ -5,6 +5,11 @@
     box-sizing: border-box;
 }
 
+/* Utility classes */
+.hidden {
+    display: none !important;
+}
+
 :root {
     --primary: #2563eb;
     --primary-hover: #1d4ed8;

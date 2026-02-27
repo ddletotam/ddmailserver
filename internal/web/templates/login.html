@@ -15,7 +15,7 @@
         </div>
 
         <!-- Login form -->
-        <form x-show="tab === 'login'"
+        <form :class="{ 'hidden': tab !== 'login' }"
               hx-post="/api/login"
               hx-target="#auth-error"
               hx-swap="innerHTML"
@@ -42,7 +42,7 @@
         </form>
 
         <!-- Register form -->
-        <form x-show="tab === 'register'"
+        <form :class="{ 'hidden': tab !== 'register' }"
               hx-post="/api/register"
               hx-target="#auth-error"
               hx-swap="innerHTML"
