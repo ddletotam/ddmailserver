@@ -96,7 +96,7 @@ func (db *DB) GetMessageByID(id int64) (*models.Message, error) {
 		&msg.From, &msg.To, &msg.Cc, &msg.Bcc, &msg.ReplyTo,
 		&msg.Date, &msg.Body, &msg.BodyHTML, &msg.Attachments, &msg.Size,
 		&msg.UID, &msg.Seen, &msg.Flagged, &msg.Answered, &msg.Draft, &msg.Deleted,
-		&msg.InReplyTo, &msg.References, &msg.CreatedAt, &msg.UpdatedAt,
+		&msg.InReplyTo, &msg.MessageReferences, &msg.CreatedAt, &msg.UpdatedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -168,7 +168,7 @@ func scanMessages(rows *sql.Rows) ([]*models.Message, error) {
 			&msg.From, &msg.To, &msg.Cc, &msg.Bcc, &msg.ReplyTo,
 			&msg.Date, &msg.Body, &msg.BodyHTML, &msg.Attachments, &msg.Size,
 			&msg.UID, &msg.Seen, &msg.Flagged, &msg.Answered, &msg.Draft, &msg.Deleted,
-			&msg.InReplyTo, &msg.References, &msg.CreatedAt, &msg.UpdatedAt,
+			&msg.InReplyTo, &msg.MessageReferences, &msg.CreatedAt, &msg.UpdatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan message: %w", err)
