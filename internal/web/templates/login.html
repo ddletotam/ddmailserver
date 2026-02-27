@@ -1,16 +1,16 @@
 {{define "content"}}
 <div class="auth-container">
     <div class="auth-box" x-data="{ tab: 'login' }">
-        <h1 class="auth-title">DDMailServer</h1>
-        <p class="auth-subtitle">Self-hosted Email Aggregator</p>
+        <h1 class="auth-title">{{t "app.name"}}</h1>
+        <p class="auth-subtitle">{{t "app.subtitle"}}</p>
 
         <!-- Tab buttons -->
         <div class="tabs">
             <button @click="tab = 'login'" :class="{ 'active': tab === 'login' }" class="tab">
-                Login
+                {{t "auth.login"}}
             </button>
             <button @click="tab = 'register'" :class="{ 'active': tab === 'register' }" class="tab">
-                Register
+                {{t "auth.register"}}
             </button>
         </div>
 
@@ -23,17 +23,17 @@
             <div id="auth-error" class="error-message"></div>
 
             <div class="form-group">
-                <label for="login-username">Username</label>
+                <label for="login-username">{{t "auth.username"}}</label>
                 <input type="text" id="login-username" name="username" required autofocus>
             </div>
 
             <div class="form-group">
-                <label for="login-password">Password</label>
+                <label for="login-password">{{t "auth.password"}}</label>
                 <input type="password" id="login-password" name="password" required>
             </div>
 
             <button type="submit" class="btn btn-primary btn-block">
-                Login
+                {{t "auth.login"}}
             </button>
         </form>
 
@@ -46,27 +46,27 @@
             <div id="auth-error" class="error-message"></div>
 
             <div class="form-group">
-                <label for="register-username">Username</label>
+                <label for="register-username">{{t "auth.username"}}</label>
                 <input type="text" id="register-username" name="username" required>
             </div>
 
             <div class="form-group">
-                <label for="register-email">Email</label>
+                <label for="register-email">{{t "auth.email"}}</label>
                 <input type="email" id="register-email" name="email" required>
             </div>
 
             <div class="form-group">
-                <label for="register-password">Password</label>
+                <label for="register-password">{{t "auth.password"}}</label>
                 <input type="password" id="register-password" name="password" required minlength="6">
             </div>
 
             <div class="form-group">
-                <label for="register-password-confirm">Confirm Password</label>
+                <label for="register-password-confirm">{{t "auth.password_confirm"}}</label>
                 <input type="password" id="register-password-confirm" name="password_confirm" required minlength="6">
             </div>
 
             <button type="submit" class="btn btn-primary btn-block">
-                Register
+                {{t "auth.register"}}
             </button>
         </form>
     </div>

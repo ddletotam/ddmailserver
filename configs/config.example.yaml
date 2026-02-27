@@ -11,6 +11,9 @@ server:
   web_port: 8080
   web_host: "0.0.0.0"
 
+  # Web UI language (en, ru)
+  locale: "en"
+
 database:
   host: "localhost"
   port: 5432

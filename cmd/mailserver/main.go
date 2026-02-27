@@ -93,7 +93,7 @@ func main() {
 
 	// Initialize web server
 	log.Printf("Initializing web server...")
-	webSrv := web.New(database, cfg.Security.JWTSecret, cfg.Server.WebHost, cfg.Server.WebPort)
+	webSrv := web.New(database, cfg.Security.JWTSecret, cfg.Server.WebHost, cfg.Server.WebPort, cfg.Server.Locale)
 	go func() {
 		if err := webSrv.Start(); err != nil {
 			log.Fatalf("Web server error: %v", err)

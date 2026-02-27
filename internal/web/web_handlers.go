@@ -64,6 +64,7 @@ type ComposeData struct{
 func (s *Server) renderTemplate(w http.ResponseWriter, templateName string, data interface{}) {
 	// Add template functions
 	funcMap := template.FuncMap{
+		"t": s.i18n.T, // Translation function
 		"substr": func(s string, start, end int) string {
 			if len(s) < end {
 				return s

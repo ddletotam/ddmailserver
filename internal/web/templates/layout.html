@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{.Title}} - DDMailServer</title>
+    <title>{{.Title}} - {{t "app.name"}}</title>
     <link rel="stylesheet" href="/static/css/style.css">
     <!-- htmx for AJAX interactions -->
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
@@ -15,19 +15,19 @@
     <!-- Navigation for logged-in users -->
     <nav class="navbar">
         <div class="nav-brand">
-            <a href="/dashboard">DDMailServer</a>
+            <a href="/dashboard">{{t "app.name"}}</a>
         </div>
         <div class="nav-links">
-            <a href="/inbox" class="nav-link">Inbox</a>
-            <a href="/compose" class="nav-link">Compose</a>
-            <a href="/accounts" class="nav-link">Accounts</a>
+            <a href="/inbox" class="nav-link">{{t "nav.inbox"}}</a>
+            <a href="/compose" class="nav-link">{{t "nav.compose"}}</a>
+            <a href="/accounts" class="nav-link">{{t "nav.accounts"}}</a>
             <div x-data="{ open: false }" class="dropdown">
                 <button @click="open = !open" class="nav-link">
                     {{.User.Username}} ▾
                 </button>
                 <div x-show="open" @click.away="open = false" class="dropdown-menu">
-                    <a href="/settings" class="dropdown-item">Settings</a>
-                    <a href="/logout" class="dropdown-item">Logout</a>
+                    <a href="/settings" class="dropdown-item">{{t "nav.settings"}}</a>
+                    <a href="/logout" class="dropdown-item">{{t "auth.logout"}}</a>
                 </div>
             </div>
         </div>
@@ -48,7 +48,7 @@
     </main>
 
     <footer class="footer">
-        <p>&copy; 2024 DDMailServer - Self-hosted Email Aggregator</p>
+        <p>&copy; 2024 {{t "app.footer"}}</p>
     </footer>
 </body>
 </html>

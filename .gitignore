@@ -37,3 +37,6 @@ Thumbs.db
 # Build artifacts
 /bin/
 /dist/
+node_modules/
+screenshot-*.png
+test-ui.js

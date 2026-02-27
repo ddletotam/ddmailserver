@@ -23,6 +23,7 @@ type ServerConfig struct {
 	SMTPTLSPort int    `yaml:"smtp_tls_port"`
 	WebPort     int    `yaml:"web_port"`
 	WebHost     string `yaml:"web_host"`
+	Locale      string `yaml:"locale"`
 }
 
 type DatabaseConfig struct {

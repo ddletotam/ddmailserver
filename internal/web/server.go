@@ -17,17 +17,29 @@ type Server struct {
 	router    *mux.Router
 	addr      string
 	server    *http.Server
+	i18n      *I18n
 }
 
 // New creates a new web server
-func New(database *db.DB, jwtSecret string, host string, port int) *Server {
+func New(database *db.DB, jwtSecret string, host string, port int, locale string) *Server {
 	addr := fmt.Sprintf("%s:%d", host, port)
+
+	// Initialize i18n
+	if locale == "" {
+		locale = "en" // default to English
+	}
+	i18n, err := NewI18n(locale)
+	if err != nil {
+		log.Printf("Failed to initialize i18n: %v, using English", err)
+		i18n, _ = NewI18n("en")
+	}
 
 	s := &Server{
 		database:  database,
 		jwtSecret: jwtSecret,
 		router:    mux.NewRouter(),
 		addr:      addr,
+		i18n:      i18n,
 	}
 
 	s.setupRoutes()
@@ -37,7 +49,7 @@ func New(database *db.DB, jwtSecret string, host string, port int) *Server {
 		Handler: s.router,
 	}
 
-	log.Printf("Web server created, will listen on %s", addr)
+	log.Printf("Web server created, will listen on %s (locale: %s)", addr, i18n.GetLocale())
 
 	return s
 }
