@@ -125,6 +125,24 @@ func (db *DB) UpdateMessageFlags(id int64, seen, flagged, answered, deleted bool
 	return nil
 }
 
+// UpdateMessage updates a message
+func (db *DB) UpdateMessage(msg *models.Message) error {
+	msg.UpdatedAt = time.Now()
+
+	query := `
+		UPDATE messages SET
+			seen = $1, flagged = $2, answered = $3, draft = $4, deleted = $5, updated_at = $6
+		WHERE id = $7
+	`
+
+	_, err := db.Exec(query, msg.Seen, msg.Flagged, msg.Answered, msg.Draft, msg.Deleted, msg.UpdatedAt, msg.ID)
+	if err != nil {
+		return fmt.Errorf("failed to update message: %w", err)
+	}
+
+	return nil
+}
+
 // DeleteMessage deletes a message
 func (db *DB) DeleteMessage(id int64) error {
 	query := `DELETE FROM messages WHERE id = $1`

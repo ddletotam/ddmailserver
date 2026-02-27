@@ -7,8 +7,6 @@ import (
 	"github.com/yourusername/mailserver/internal/models"
 )
 
-type contextKey string
-
 const userContextKey contextKey = "user"
 
 // SessionMiddleware extracts user from JWT cookie
@@ -18,10 +16,9 @@ func (s *Server) SessionMiddleware(next http.Handler) http.Handler {
 		cookie, err := r.Cookie("session")
 		if err == nil && cookie.Value != "" {
 			// Validate JWT and get user
-			claims, err := s.ValidateJWT(cookie.Value)
+			claims, err := ValidateToken(cookie.Value, s.jwtSecret)
 			if err == nil {
-				userID := int64(claims["user_id"].(float64))
-				user, err := s.database.GetUserByID(userID)
+				user, err := s.database.GetUserByID(claims.UserID)
 				if err == nil {
 					// Add user to context
 					ctx := context.WithValue(r.Context(), userContextKey, user)

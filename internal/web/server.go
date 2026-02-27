@@ -1,7 +1,6 @@
 package web
 
 import (
-	"context"
 	"fmt"
 	"io/fs"
 	"log"
@@ -9,7 +8,6 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
 )
 
 // Server represents the web server
