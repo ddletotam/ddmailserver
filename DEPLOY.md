@@ -333,23 +333,44 @@ sudo netstat -tlnp | grep mailserver
 
 ## Updating
 
-### Update from Git
+### Quick Update (Recommended)
+
+We provide convenient scripts for updating:
 
 ```bash
-cd /path/to/ddmailserver
+cd /opt/ddmailserver
+
+# Update and restart (interactive)
+./deployments/update.sh
+
+# View logs
+./deployments/logs.sh
+
+# Check status
+./deployments/status.sh
+```
+
+The `update.sh` script will:
+- Pull latest changes from git
+- Check for new migrations (prompts you to run them)
+- Rebuild the application
+- Restart the service
+- Show service status
+
+### Manual Update
+
+```bash
+cd /opt/ddmailserver
 git pull origin main
 
+# Run new migrations if any
+psql -h <HOST> -U ddmail -d ddmail -f migrations/003_recovery_key.sql
+
 # Rebuild
-make build-linux
+make build
 
-# Stop service
-sudo systemctl stop mailserver
-
-# Replace binary
-sudo cp build/mailserver-linux-amd64 /usr/local/bin/mailserver
-
-# Start service
-sudo systemctl start mailserver
+# Restart service
+sudo systemctl restart mailserver
 
 # Check logs
 sudo journalctl -u mailserver -f
