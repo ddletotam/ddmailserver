@@ -27,6 +27,49 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# ============================================
+# STEP 0: Collect configuration parameters
+# ============================================
+echo -e "${YELLOW}=== Configuration Setup ===${NC}"
+echo ""
+
+# Database configuration
+echo -e "${GREEN}Database Configuration:${NC}"
+read -p "Database host (default: localhost): " DB_HOST
+DB_HOST=${DB_HOST:-localhost}
+
+read -p "Database port (default: 5432): " DB_PORT
+DB_PORT=${DB_PORT:-5432}
+
+read -p "Database name (default: mailserver): " DB_NAME
+DB_NAME=${DB_NAME:-mailserver}
+
+read -p "Database user (default: mailserver): " DB_USER
+DB_USER=${DB_USER:-mailserver}
+
+read -sp "Database password (default: changeme): " DB_PASS
+echo ""
+DB_PASS=${DB_PASS:-changeme}
+
+# JWT Secret
+echo ""
+read -p "JWT secret (press Enter to auto-generate): " JWT_SECRET
+if [ -z "$JWT_SECRET" ]; then
+    JWT_SECRET=$(openssl rand -hex 32 2>/dev/null || cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 64 | head -n 1)
+    echo "  Generated JWT secret"
+fi
+
+# Database setup decision
+echo ""
+echo -e "${GREEN}Database Setup:${NC}"
+read -p "Would you like to setup the database now? (y/n): " -n 1 -r SETUP_DB
+echo ""
+
+echo ""
+echo -e "${YELLOW}Configuration collected. Starting installation...${NC}"
+echo ""
+sleep 2
+
 # Check if PostgreSQL is installed
 if ! command -v psql &> /dev/null; then
     echo -e "${YELLOW}Warning: PostgreSQL not found. You'll need to install it.${NC}"
@@ -85,41 +128,22 @@ echo "  ✓ Binary installed at $INSTALL_DIR/$BINARY_NAME"
 # Install config
 echo -e "${GREEN}[4/8]${NC} Installing configuration..."
 
-# Initialize variables with defaults
-DB_HOST="localhost"
-DB_PORT="5432"
-DB_NAME="mailserver"
-DB_USER="mailserver"
-DB_PASS="changeme"
+if [ -f "$CONFIG_DIR/config.yaml" ]; then
+    echo -e "${YELLOW}  Config already exists at $CONFIG_DIR/config.yaml${NC}"
+    read -p "  Overwrite with new configuration? (y/n): " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "  Keeping existing config"
+    else
+        rm -f $CONFIG_DIR/config.yaml
+    fi
+fi
 
 if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
     if [ -f "configs/config.example.yaml" ]; then
         cp configs/config.example.yaml $CONFIG_DIR/config.yaml
 
-        # Ask for database configuration
-        echo "  Configure database connection:"
-        read -p "  Database host (default: localhost): " DB_HOST
-        DB_HOST=${DB_HOST:-localhost}
-
-        read -p "  Database port (default: 5432): " DB_PORT
-        DB_PORT=${DB_PORT:-5432}
-
-        read -p "  Database name (default: mailserver): " DB_NAME
-        DB_NAME=${DB_NAME:-mailserver}
-
-        read -p "  Database user (default: mailserver): " DB_USER
-        DB_USER=${DB_USER:-mailserver}
-
-        read -sp "  Database password (default: changeme): " DB_PASS
-        DB_PASS=${DB_PASS:-changeme}
-        echo ""
-
-        read -p "  JWT secret (press Enter to generate random): " JWT_SECRET
-        if [ -z "$JWT_SECRET" ]; then
-            JWT_SECRET=$(openssl rand -hex 32 2>/dev/null || cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 64 | head -n 1)
-        fi
-
-        # Update config file
+        # Update config file with provided values
         sed -i "s/host: \"localhost\"/host: \"$DB_HOST\"/" $CONFIG_DIR/config.yaml
         sed -i "s/port: 5432/port: $DB_PORT/" $CONFIG_DIR/config.yaml
         sed -i "s/dbname: \"mailserver\"/dbname: \"$DB_NAME\"/" $CONFIG_DIR/config.yaml
@@ -132,8 +156,6 @@ if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
         echo -e "${RED}  Error: config.example.yaml not found${NC}"
         exit 1
     fi
-else
-    echo "  ! Config already exists, skipping"
 fi
 
 # Install systemd service
@@ -150,41 +172,90 @@ fi
 # Setup database
 echo -e "${GREEN}[6/8]${NC} Database setup..."
 
-if [ "$DB_HOST" = "localhost" ] || [ "$DB_HOST" = "127.0.0.1" ]; then
-    echo "  Would you like to setup the database now? (requires PostgreSQL running locally)"
-    read -p "  Setup database? (y/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        read -p "  PostgreSQL superuser (default: postgres): " PG_ADMIN
-        PG_ADMIN=${PG_ADMIN:-postgres}
+if [[ $SETUP_DB =~ ^[Yy]$ ]]; then
+    if [ "$DB_HOST" = "localhost" ] || [ "$DB_HOST" = "127.0.0.1" ]; then
+        # Local database setup
+        echo "  Setting up local database..."
 
-        echo "  Creating database and user..."
+        # Detect PostgreSQL superuser
+        if id "postgres" &>/dev/null; then
+            PG_ADMIN="postgres"
+        elif id "pgsql" &>/dev/null; then
+            PG_ADMIN="pgsql"
+        else
+            read -p "  PostgreSQL superuser name: " PG_ADMIN
+        fi
+
+        echo "  Creating database and user as $PG_ADMIN..."
         sudo -u $PG_ADMIN psql << EOF
+-- Drop existing if exists
+DROP DATABASE IF EXISTS $DB_NAME;
+DROP USER IF EXISTS $DB_USER;
+
+-- Create new
 CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';
 CREATE DATABASE $DB_NAME OWNER $DB_USER;
-\c $DB_NAME
-\i migrations/001_initial_schema.sql
-\i migrations/002_outbox.sql
 EOF
-        echo "  ✓ Database setup complete"
+
+        if [ $? -eq 0 ]; then
+            echo "  ✓ Database and user created"
+
+            # Run migrations
+            echo "  Running migrations..."
+            sudo -u $PG_ADMIN psql -d $DB_NAME -f migrations/001_initial_schema.sql
+            sudo -u $PG_ADMIN psql -d $DB_NAME -f migrations/002_outbox.sql
+
+            if [ $? -eq 0 ]; then
+                echo "  ✓ Database setup complete"
+            else
+                echo -e "${YELLOW}  ! Migrations failed. You may need to run them manually.${NC}"
+            fi
+        else
+            echo -e "${RED}  Error creating database. Please check PostgreSQL is running.${NC}"
+        fi
     else
-        echo "  Skipped. Run migrations manually later."
+        # Remote database setup
+        echo "  Database host is remote: $DB_HOST:$DB_PORT"
+        echo ""
+        echo -e "${YELLOW}  You need to setup the database on the remote server.${NC}"
+        echo ""
+        echo "  1. On database server ($DB_HOST), create user and database:"
+        echo ""
+        echo "     psql -U postgres << EOF"
+        echo "     CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';"
+        echo "     CREATE DATABASE $DB_NAME OWNER $DB_USER;"
+        echo "     EOF"
+        echo ""
+        echo "  2. From this server, run migrations:"
+        echo ""
+        echo "     cd $(pwd)"
+        echo "     PGPASSWORD='$DB_PASS' psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/001_initial_schema.sql"
+        echo "     PGPASSWORD='$DB_PASS' psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/002_outbox.sql"
+        echo ""
+        echo "  Or if you have psql client installed:"
+        read -p "  Run migrations now? (y/n): " -n 1 -r
+        echo ""
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            if command -v psql &> /dev/null; then
+                echo "  Running migrations on remote database..."
+                PGPASSWORD="$DB_PASS" psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/001_initial_schema.sql
+                PGPASSWORD="$DB_PASS" psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/002_outbox.sql
+
+                if [ $? -eq 0 ]; then
+                    echo "  ✓ Migrations completed"
+                else
+                    echo -e "${RED}  Failed to run migrations. Check connection and credentials.${NC}"
+                fi
+            else
+                echo -e "${RED}  psql client not found. Install postgresql-client first.${NC}"
+            fi
+        else
+            echo "  Skipped. Run migrations manually as shown above."
+        fi
     fi
 else
-    echo "  Database host is remote ($DB_HOST)"
-    echo "  You need to setup the database manually:"
-    echo ""
-    echo "  On database server ($DB_HOST):"
-    echo "  psql -U postgres << EOF"
-    echo "  CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';"
-    echo "  CREATE DATABASE $DB_NAME OWNER $DB_USER;"
-    echo "  EOF"
-    echo ""
-    echo "  Then run migrations from this server:"
-    echo "  PGPASSWORD='$DB_PASS' psql -h $DB_HOST -U $DB_USER -d $DB_NAME -f migrations/001_initial_schema.sql"
-    echo "  PGPASSWORD='$DB_PASS' psql -h $DB_HOST -U $DB_USER -d $DB_NAME -f migrations/002_outbox.sql"
-    echo ""
-    read -p "  Press Enter to continue..."
+    echo "  Database setup skipped."
+    echo "  You can setup database later manually."
 fi
 
 # Configure firewall (if ufw is installed)
