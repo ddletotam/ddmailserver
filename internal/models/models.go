@@ -4,12 +4,13 @@ import "time"
 
 // User represents a user of the mailserver
 type User struct {
-	ID           int64     `json:"id"`
-	Username     string    `json:"username"`
-	PasswordHash string    `json:"-"` // never expose in JSON
-	Email        string    `json:"email"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID               int64     `json:"id"`
+	Username         string    `json:"username"`
+	PasswordHash     string    `json:"-"` // never expose in JSON
+	Email            string    `json:"email,omitempty"`
+	RecoveryKeyHash  string    `json:"-"` // never expose in JSON
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // Account represents an external email account (Gmail, Outlook, etc.)
