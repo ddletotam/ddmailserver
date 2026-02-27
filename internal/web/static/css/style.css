@@ -775,6 +775,10 @@ textarea:focus {
     border: 1px solid var(--danger);
 }
 
+.error-message:empty {
+    display: none;
+}
+
 /* Modal */
 .modal {
     position: fixed;
