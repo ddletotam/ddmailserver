@@ -59,6 +59,23 @@ if [ -z "$JWT_SECRET" ]; then
     echo "  Generated JWT secret"
 fi
 
+# Language/Locale
+echo ""
+echo -e "${GREEN}Web Interface Language:${NC}"
+echo "  1) English (en)"
+echo "  2) Русский (ru)"
+read -p "Select language (default: 1): " LOCALE_CHOICE
+case $LOCALE_CHOICE in
+    2)
+        LOCALE="ru"
+        echo "  Selected: Русский"
+        ;;
+    *)
+        LOCALE="en"
+        echo "  Selected: English"
+        ;;
+esac
+
 # Database setup decision
 echo ""
 echo -e "${GREEN}Database Setup:${NC}"
@@ -150,6 +167,7 @@ if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
         sed -i "s/user: \"mailserver\"/user: \"$DB_USER\"/" $CONFIG_DIR/config.yaml
         sed -i "s/password: \"changeme\"/password: \"$DB_PASS\"/" $CONFIG_DIR/config.yaml
         sed -i "s/jwt_secret: \"change-this-secret-key\"/jwt_secret: \"$JWT_SECRET\"/" $CONFIG_DIR/config.yaml
+        sed -i "s/locale: \"en\"/locale: \"$LOCALE\"/" $CONFIG_DIR/config.yaml
 
         echo "  ✓ Config installed and configured at $CONFIG_DIR/config.yaml"
     else
