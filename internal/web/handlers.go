@@ -42,15 +42,31 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate input
-	if req.Username == "" || req.Password == "" || req.Email == "" {
-		respondError(w, http.StatusBadRequest, "username, password, and email are required")
+	// Validate input (email is now optional)
+	if req.Username == "" || req.Password == "" {
+		respondError(w, http.StatusBadRequest, "username and password are required")
+		return
+	}
+
+	// Generate recovery key
+	recoveryKey, err := GenerateRecoveryKey()
+	if err != nil {
+		log.Printf("Failed to generate recovery key: %v", err)
+		respondError(w, http.StatusInternalServerError, "failed to generate recovery key")
+		return
+	}
+
+	// Hash recovery key
+	recoveryKeyHash, err := HashRecoveryKey(recoveryKey)
+	if err != nil {
+		log.Printf("Failed to hash recovery key: %v", err)
+		respondError(w, http.StatusInternalServerError, "failed to hash recovery key")
 		return
 	}
 
 	// TODO: Hash password properly
 	// For now, storing plain text (THIS IS NOT SECURE - FIX THIS!)
-	user, err := s.database.CreateUser(req.Username, req.Password, req.Email)
+	user, err := s.database.CreateUser(req.Username, req.Password, req.Email, recoveryKeyHash)
 	if err != nil {
 		log.Printf("Failed to create user: %v", err)
 		respondError(w, http.StatusInternalServerError, "failed to create user")
@@ -70,9 +86,11 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	// Set session cookie for web UI
 	s.SetSessionCookie(w, token)
 
+	// IMPORTANT: Recovery key is returned ONLY ONCE here!
 	respondJSON(w, http.StatusCreated, map[string]interface{}{
-		"user":  user,
-		"token": token,
+		"user":         user,
+		"token":        token,
+		"recovery_key": recoveryKey, // User MUST save this!
 	})
 }
 

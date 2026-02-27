@@ -128,5 +128,27 @@
 
   "status.loading": "Загрузка...",
   "status.error": "Ошибка",
-  "status.success": "Успешно"
+  "status.success": "Успешно",
+
+  "recovery.title": "Ваш ключ восстановления",
+  "recovery.warning_title": "СОХРАНИТЕ ПРЯМО СЕЙЧАС!",
+  "recovery.warning_text": "Этот ключ восстановления будет показан ТОЛЬКО ОДИН РАЗ. Если вы потеряете пароль И этот ключ, вы НАВСЕГДА потеряете доступ к аккаунту. Мы не сможем вам помочь восстановить его!",
+  "recovery.copy": "Скопировать",
+  "recovery.how_to_save": "Как сохранить ключ восстановления:",
+  "recovery.instruction_1": "Запишите эти слова на бумаге и храните в безопасном месте",
+  "recovery.instruction_2": "Сохраните в менеджере паролей",
+  "recovery.instruction_3": "НЕ делайте скриншот и не отправляйте себе на email",
+  "recovery.i_saved": "Я сохранил ключ восстановления в безопасном месте",
+  "recovery.continue": "Продолжить к панели управления",
+
+  "forgot.title": "Забыли пароль",
+  "forgot.subtitle": "Сбросьте пароль используя ключ восстановления",
+  "forgot.username": "Имя пользователя",
+  "forgot.recovery_key": "Ключ восстановления",
+  "forgot.recovery_key_placeholder": "Введите ваш ключ из 12 слов",
+  "forgot.new_password": "Новый пароль",
+  "forgot.confirm_password": "Подтвердите новый пароль",
+  "forgot.reset_button": "Сбросить пароль",
+  "forgot.back_to_login": "Вернуться ко входу",
+  "forgot.success": "Пароль успешно сброшен! Теперь вы можете войти с новым паролем."
 }

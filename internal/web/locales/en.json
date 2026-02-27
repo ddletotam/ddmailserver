@@ -128,5 +128,27 @@
 
   "status.loading": "Loading...",
   "status.error": "Error",
-  "status.success": "Success"
+  "status.success": "Success",
+
+  "recovery.title": "Your Recovery Key",
+  "recovery.warning_title": "SAVE THIS NOW!",
+  "recovery.warning_text": "This recovery key will be shown ONLY ONCE. If you lose your password AND this key, you will PERMANENTLY lose access to your account. We cannot help you recover it!",
+  "recovery.copy": "Copy to Clipboard",
+  "recovery.how_to_save": "How to save your recovery key:",
+  "recovery.instruction_1": "Write these words on paper and store it safely",
+  "recovery.instruction_2": "Save it in a password manager",
+  "recovery.instruction_3": "DO NOT screenshot or email it to yourself",
+  "recovery.i_saved": "I have saved my recovery key in a safe place",
+  "recovery.continue": "Continue to Dashboard",
+
+  "forgot.title": "Forgot Password",
+  "forgot.subtitle": "Reset your password using your recovery key",
+  "forgot.username": "Username",
+  "forgot.recovery_key": "Recovery Key",
+  "forgot.recovery_key_placeholder": "Enter your 12-word recovery key",
+  "forgot.new_password": "New Password",
+  "forgot.confirm_password": "Confirm New Password",
+  "forgot.reset_button": "Reset Password",
+  "forgot.back_to_login": "Back to Login",
+  "forgot.success": "Password reset successfully! You can now login with your new password."
 }
