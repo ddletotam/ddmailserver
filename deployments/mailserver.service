@@ -1,8 +1,8 @@
 [Unit]
 Description=DDMailServer - Self-hosted Email Aggregator
 Documentation=https://github.com/ddletotam/ddmailserver
-After=network.target postgresql.service
-Requires=postgresql.service
+After=network.target
+Wants=network-online.target
 
 [Service]
 Type=simple
