@@ -371,6 +371,7 @@ type ChangePasswordRequest struct {
 
 // HandleChangePassword handles password change
 func (s *Server) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
+	log.Printf("HandleChangePassword called from %s", r.RemoteAddr)
 	userID := getUserID(r)
 	log.Printf("HandleChangePassword: userID=%d", userID)
 
@@ -467,6 +468,7 @@ type ChangeLanguageRequest struct {
 
 // HandleChangeLanguage handles language preference change
 func (s *Server) HandleChangeLanguage(w http.ResponseWriter, r *http.Request) {
+	log.Printf("HandleChangeLanguage called from %s", r.RemoteAddr)
 	userID := getUserID(r)
 	log.Printf("HandleChangeLanguage: userID=%d", userID)
 

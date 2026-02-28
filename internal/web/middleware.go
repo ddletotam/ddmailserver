@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"strings"
+
+	"github.com/yourusername/mailserver/internal/models"
 )
 
 type contextKey string
@@ -73,9 +75,17 @@ func (s *Server) LoggingMiddleware(next http.Handler) http.Handler {
 
 // Helper to get user ID from context
 func getUserID(r *http.Request) int64 {
+	// Try to get userID from JWT context (for API routes)
 	userID, ok := r.Context().Value(userIDKey).(int64)
-	if !ok {
-		return 0
+	if ok {
+		return userID
 	}
-	return userID
+
+	// Try to get user from session context (for web routes)
+	user, ok := r.Context().Value(userContextKey).(*models.User)
+	if ok && user != nil {
+		return user.ID
+	}
+
+	return 0
 }
