@@ -117,6 +117,7 @@ func (s *Server) setupRoutes() {
 	web.HandleFunc("/inbox", s.HandleInboxPage).Methods("GET")
 	web.HandleFunc("/messages/list", s.HandleMessagesList).Methods("GET")
 	web.HandleFunc("/messages/{id}", s.HandleMessagePage).Methods("GET")
+	web.HandleFunc("/messages/send", s.HandleSendMessage).Methods("POST")
 	web.HandleFunc("/message/{id}", s.HandleMessagePage).Methods("GET")
 
 	// Compose

@@ -609,3 +609,83 @@ func (s *Server) HandleDeleteUserAccount(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("HX-Redirect", "/login")
 	respondJSON(w, http.StatusOK, map[string]string{"message": "account deleted"})
 }
+
+// HandleSendMessage handles sending an email
+func (s *Server) HandleSendMessage(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r)
+	log.Printf("HandleSendMessage: userID=%d", userID)
+
+	// Parse form data
+	if err := r.ParseForm(); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid form data")
+		return
+	}
+
+	accountIDStr := r.FormValue("account_id")
+	to := r.FormValue("to")
+	subject := r.FormValue("subject")
+	body := r.FormValue("body")
+	format := r.FormValue("format") // "text" or "html"
+	cc := r.FormValue("cc")
+	bcc := r.FormValue("bcc")
+
+	// Validate required fields
+	if accountIDStr == "" || to == "" || body == "" {
+		respondError(w, http.StatusBadRequest, "account_id, to, and body are required")
+		return
+	}
+
+	// Parse account ID
+	accountID, err := strconv.ParseInt(accountIDStr, 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid account_id")
+		return
+	}
+
+	// Get account
+	account, err := s.database.GetAccountByID(accountID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "account not found")
+		return
+	}
+
+	// Check ownership
+	if account.UserID != userID {
+		respondError(w, http.StatusForbidden, "access denied")
+		return
+	}
+
+	// Create outbox message
+	outboxMsg := &models.OutboxMessage{
+		UserID:    userID,
+		AccountID: accountID,
+		From:      account.Email,
+		To:        to,
+		Cc:        cc,
+		Bcc:       bcc,
+		Subject:   subject,
+		Status:    "pending",
+		Retries:   0,
+	}
+
+	// Set body based on format
+	if format == "html" {
+		outboxMsg.BodyHTML = body
+	} else {
+		outboxMsg.Body = body
+	}
+
+	// Save to database
+	if err := s.database.CreateOutboxMessage(outboxMsg); err != nil {
+		log.Printf("Failed to create outbox message: %v", err)
+		respondError(w, http.StatusInternalServerError, "failed to queue message for sending")
+		return
+	}
+
+	log.Printf("Outbox message created: %d (from %s to %s)", outboxMsg.ID, outboxMsg.From, outboxMsg.To)
+
+	// Return success with HTMX response
+	w.Header().Set("Content-Type", "text/html")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`<div class="alert alert-success">✅ Email queued for sending! <a href="/inbox">View Inbox</a></div>`))
+}
