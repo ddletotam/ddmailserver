@@ -77,6 +77,13 @@
 </div>
 
 <script>
+// Initialize htmx on forms after page load
+document.addEventListener('DOMContentLoaded', function() {
+    if (typeof htmx !== 'undefined') {
+        htmx.process(document.body);
+    }
+});
+
 // Simple tab switching without Alpine
 function switchTab(tab) {
     const loginForm = document.getElementById('login-form');
