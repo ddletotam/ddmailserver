@@ -125,28 +125,38 @@ func (s *Server) CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 
-		// Only allow same-origin requests or requests without Origin header
-		// For cross-origin needs, add specific allowed origins to config
 		if origin != "" {
-			// Validate origin matches the server host
-			allowedOrigin := "https://" + r.Host
+			isAllowed := false
+
+			// Get the actual host (check X-Forwarded-Host for reverse proxy setups)
+			host := r.Header.Get("X-Forwarded-Host")
+			if host == "" {
+				host = r.Host
+			}
+
+			// Check localhost for development
 			if strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1") {
-				// Allow localhost for development
-				allowedOrigin = origin
-			} else if origin == allowedOrigin || origin == "http://"+r.Host {
-				allowedOrigin = origin
+				isAllowed = true
+			}
+
+			// Check if origin matches actual host (handles reverse proxy)
+			hostWithoutPort := strings.Split(host, ":")[0]
+			if strings.Contains(origin, hostWithoutPort) {
+				isAllowed = true
+			}
+
+			if isAllowed {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
 			} else {
-				// Reject unknown origins
-				log.Printf("CORS rejected origin: %s", origin)
+				log.Printf("CORS rejected origin: %s (host: %s, x-forwarded: %s)", origin, r.Host, r.Header.Get("X-Forwarded-Host"))
 				http.Error(w, "CORS origin not allowed", http.StatusForbidden)
 				return
 			}
-			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
 
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, HX-Request, HX-Current-URL")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
