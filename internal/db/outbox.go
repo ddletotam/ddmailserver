@@ -155,11 +155,12 @@ func scanOutboxMessages(rows *sql.Rows) ([]*models.OutboxMessage, error) {
 	for rows.Next() {
 		msg := &models.OutboxMessage{}
 		var sentAt sql.NullTime
+		var lastError sql.NullString
 
 		err := rows.Scan(
 			&msg.ID, &msg.UserID, &msg.AccountID, &msg.From, &msg.To, &msg.Cc, &msg.Bcc,
 			&msg.Subject, &msg.Body, &msg.BodyHTML, &msg.RawEmail,
-			&msg.Status, &msg.Retries, &msg.LastError, &msg.CreatedAt, &msg.UpdatedAt, &sentAt,
+			&msg.Status, &msg.Retries, &lastError, &msg.CreatedAt, &msg.UpdatedAt, &sentAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan outbox message: %w", err)
@@ -167,6 +168,9 @@ func scanOutboxMessages(rows *sql.Rows) ([]*models.OutboxMessage, error) {
 
 		if sentAt.Valid {
 			msg.SentAt = sentAt.Time
+		}
+		if lastError.Valid {
+			msg.LastError = lastError.String
 		}
 
 		messages = append(messages, msg)
