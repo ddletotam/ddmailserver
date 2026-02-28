@@ -88,11 +88,6 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/accounts/{id}", s.HandleUpdateAccount).Methods("PUT")
 	api.HandleFunc("/accounts/{id}", s.HandleDeleteAccount).Methods("DELETE")
 
-	// Settings API
-	api.HandleFunc("/settings/password", s.HandleChangePassword).Methods("POST")
-	api.HandleFunc("/settings/language", s.HandleChangeLanguage).Methods("POST")
-	api.HandleFunc("/settings/account", s.HandleDeleteUserAccount).Methods("DELETE")
-
 	// Protected web routes
 	web := s.router.PathPrefix("/").Subrouter()
 	web.Use(s.WebAuthMiddleware)
@@ -120,6 +115,11 @@ func (s *Server) setupRoutes() {
 
 	// Settings
 	web.HandleFunc("/settings", s.HandleSettingsPage).Methods("GET")
+
+	// Settings API (uses session cookie auth, not JWT)
+	web.HandleFunc("/api/settings/password", s.HandleChangePassword).Methods("POST")
+	web.HandleFunc("/api/settings/language", s.HandleChangeLanguage).Methods("POST")
+	web.HandleFunc("/api/settings/account", s.HandleDeleteUserAccount).Methods("DELETE")
 
 	log.Printf("Routes configured")
 }
