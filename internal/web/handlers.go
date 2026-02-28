@@ -25,7 +25,6 @@ func respondError(w http.ResponseWriter, status int, message string) {
 type RegisterRequest struct {
 	Username        string `json:"username"`
 	Password        string `json:"password"`
-	Email           string `json:"email"`
 	PasswordConfirm string `json:"password_confirm"`
 }
 
@@ -48,7 +47,6 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.Username = r.FormValue("username")
-		req.Email = r.FormValue("email")
 		req.Password = r.FormValue("password")
 		req.PasswordConfirm = r.FormValue("password_confirm")
 	} else {
@@ -59,7 +57,7 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Validate input (email is now optional)
+	// Validate input
 	if req.Username == "" || req.Password == "" {
 		respondError(w, http.StatusBadRequest, "username and password are required")
 		return
@@ -95,8 +93,8 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create user
-	user, err := s.database.CreateUser(req.Username, passwordHash, req.Email, recoveryKeyHash)
+	// Create user (email not used)
+	user, err := s.database.CreateUser(req.Username, passwordHash, "", recoveryKeyHash)
 	if err != nil {
 		log.Printf("Failed to create user: %v", err)
 		respondError(w, http.StatusInternalServerError, "failed to create user")
