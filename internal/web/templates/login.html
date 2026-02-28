@@ -102,15 +102,9 @@ function switchTab(tab) {
 // Handle successful registration - redirect to recovery key page
 document.body.addEventListener('htmx:afterRequest', function(evt) {
     if (evt.detail.successful && evt.detail.xhr.responseURL.includes('/api/register')) {
-        try {
-            const response = JSON.parse(evt.detail.xhr.responseText);
-            if (response.recovery_key) {
-                // Redirect to recovery key page with the key
-                window.location.href = '/recovery-key?key=' + encodeURIComponent(response.recovery_key);
-            }
-        } catch (e) {
-            console.error('Failed to parse registration response:', e);
-        }
+        // Recovery key is now stored in secure HttpOnly cookie
+        // Just redirect to recovery key page (no key in URL)
+        window.location.href = '/recovery-key';
     } else if (evt.detail.successful && evt.detail.xhr.responseURL.includes('/api/login')) {
         // Redirect to dashboard on successful login
         window.location.href = '/dashboard';

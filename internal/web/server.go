@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/yourusername/mailserver/internal/db"
@@ -12,12 +13,13 @@ import (
 
 // Server represents the web server
 type Server struct {
-	database  *db.DB
-	jwtSecret string
-	router    *mux.Router
-	addr      string
-	server    *http.Server
-	i18n      *I18n
+	database        *db.DB
+	jwtSecret       string
+	router          *mux.Router
+	addr            string
+	server          *http.Server
+	i18n            *I18n
+	authRateLimiter *RateLimiter
 }
 
 // New creates a new web server
@@ -35,11 +37,12 @@ func New(database *db.DB, jwtSecret string, host string, port int, locale string
 	}
 
 	s := &Server{
-		database:  database,
-		jwtSecret: jwtSecret,
-		router:    mux.NewRouter(),
-		addr:      addr,
-		i18n:      i18n,
+		database:        database,
+		jwtSecret:       jwtSecret,
+		router:          mux.NewRouter(),
+		addr:            addr,
+		i18n:            i18n,
+		authRateLimiter: NewRateLimiter(5, time.Minute), // 5 attempts per minute
 	}
 
 	s.setupRoutes()
@@ -73,9 +76,13 @@ func (s *Server) setupRoutes() {
 
 	// Public API routes
 	s.router.HandleFunc("/health", s.HandleHealthCheck).Methods("GET")
-	s.router.HandleFunc("/api/register", s.HandleRegister).Methods("POST")
-	s.router.HandleFunc("/api/login", s.HandleLogin).Methods("POST")
-	s.router.HandleFunc("/api/forgot-password", s.HandleForgotPassword).Methods("POST")
+
+	// Auth routes with rate limiting (5 attempts per minute per IP)
+	authRouter := s.router.PathPrefix("/api").Subrouter()
+	authRouter.Use(s.RateLimitMiddleware(s.authRateLimiter))
+	authRouter.HandleFunc("/register", s.HandleRegister).Methods("POST")
+	authRouter.HandleFunc("/login", s.HandleLogin).Methods("POST")
+	authRouter.HandleFunc("/forgot-password", s.HandleForgotPassword).Methods("POST")
 
 	// Settings API (uses session cookie auth, must be registered before general API routes)
 	settingsAPI := s.router.PathPrefix("/api/settings").Subrouter()

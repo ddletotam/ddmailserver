@@ -12,6 +12,7 @@ import (
 	"github.com/emersion/go-smtp"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Session represents an SMTP session
@@ -35,9 +36,8 @@ func (s *Session) AuthPlain(username, password string) error {
 		return errors.New("invalid credentials")
 	}
 
-	// TODO: Implement proper password hashing verification
-	// For now, doing simple comparison (THIS IS NOT SECURE - FIX THIS!)
-	if user.PasswordHash != password {
+	// Verify password using bcrypt
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
 		log.Printf("Invalid password for user: %s", username)
 		return errors.New("invalid credentials")
 	}

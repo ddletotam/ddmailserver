@@ -332,12 +332,24 @@ func (s *Server) HandleMessagePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check ownership - prevent reading other users' messages
+	if message.UserID != user.ID {
+		http.Error(w, "Access denied", http.StatusForbidden)
+		return
+	}
+
 	// Get attachments
-	attachments, _ := s.database.GetAttachmentsByMessageID(id)
+	attachments, err := s.database.GetAttachmentsByMessageID(id)
+	if err != nil {
+		log.Printf("Failed to get attachments for message %d: %v", id, err)
+		// Continue without attachments
+	}
 
 	// Mark as read
 	message.Seen = true
-	s.database.UpdateMessage(message)
+	if err := s.database.UpdateMessage(message); err != nil {
+		log.Printf("Failed to mark message %d as read: %v", id, err)
+	}
 
 	data := MessageData{
 		PageData: PageData{
