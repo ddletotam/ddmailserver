@@ -45,9 +45,36 @@
 <script>
 function copyRecoveryKey() {
     const recoveryKey = document.getElementById('recovery-key').textContent;
-    navigator.clipboard.writeText(recoveryKey).then(() => {
+
+    // Try modern Clipboard API first (requires HTTPS or localhost)
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(recoveryKey).then(() => {
+            alert('Recovery key copied to clipboard!');
+        }).catch(err => {
+            console.error('Failed to copy:', err);
+            fallbackCopy(recoveryKey);
+        });
+    } else {
+        // Fallback for HTTP or older browsers
+        fallbackCopy(recoveryKey);
+    }
+}
+
+function fallbackCopy(text) {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+        document.execCommand('copy');
         alert('Recovery key copied to clipboard!');
-    });
+    } catch (err) {
+        console.error('Failed to copy:', err);
+        alert('Failed to copy. Please select and copy manually.');
+    }
+    document.body.removeChild(textarea);
 }
 </script>
 
