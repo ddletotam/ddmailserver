@@ -207,6 +207,7 @@ func (t *SyncTask) saveMessage(imapMsg *imap.Message, folder *models.Folder) err
 	}
 
 	if rfc822Body != nil {
+		// Create reader with charset support (CharsetReader registered globally in main.go)
 		mr, err := mail.CreateReader(rfc822Body)
 		if err != nil {
 			return fmt.Errorf("failed to create mail reader: %w", err)

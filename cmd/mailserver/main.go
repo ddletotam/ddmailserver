@@ -8,8 +8,10 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/emersion/go-message"
 	"github.com/yourusername/mailserver/internal/config"
 	"github.com/yourusername/mailserver/internal/db"
+	imapclient "github.com/yourusername/mailserver/internal/imap/client"
 	imapserver "github.com/yourusername/mailserver/internal/imap/server"
 	smtpserver "github.com/yourusername/mailserver/internal/smtp/server"
 	"github.com/yourusername/mailserver/internal/web"
@@ -24,6 +26,9 @@ const banner = `
 `
 
 func main() {
+	// Register charset reader for non-UTF8 email encodings
+	message.CharsetReader = imapclient.CharsetReader
+
 	// Parse command line flags
 	configPath := flag.String("config", "configs/config.yaml", "Path to configuration file")
 	flag.Parse()
