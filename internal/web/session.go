@@ -43,6 +43,18 @@ func (s *Server) WebAuthMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// APIAuthMiddleware protects API routes (returns JSON error if not authenticated)
+func (s *Server) APIAuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user := s.GetUserFromContext(r.Context())
+		if user == nil {
+			respondError(w, http.StatusUnauthorized, "unauthorized - please login")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // GetUserFromContext retrieves user from context
 func (s *Server) GetUserFromContext(ctx context.Context) *models.User {
 	user, ok := ctx.Value(userContextKey).(*models.User)

@@ -79,8 +79,7 @@ func (s *Server) setupRoutes() {
 
 	// Settings API (uses session cookie auth, must be registered before general API routes)
 	settingsAPI := s.router.PathPrefix("/api/settings").Subrouter()
-	settingsAPI.Use(s.SessionMiddleware)
-	settingsAPI.Use(s.WebAuthMiddleware)
+	settingsAPI.Use(s.APIAuthMiddleware) // Returns JSON error instead of redirect
 	settingsAPI.HandleFunc("/password", s.HandleChangePassword).Methods("POST")
 	settingsAPI.HandleFunc("/language", s.HandleChangeLanguage).Methods("POST")
 	settingsAPI.HandleFunc("/account", s.HandleDeleteUserAccount).Methods("DELETE")
