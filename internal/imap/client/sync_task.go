@@ -196,6 +196,11 @@ func (t *SyncTask) saveMessage(imapMsg *imap.Message, folder *models.Folder) err
 
 	var body string
 	var bodyHTML string
+	var attachments []struct {
+		filename    string
+		contentType string
+		data        []byte
+	}
 
 	// Parse message body
 	// Get the full message body
@@ -234,6 +239,25 @@ func (t *SyncTask) saveMessage(imapMsg *imap.Message, folder *models.Folder) err
 				} else if contentType == "text/html" {
 					bodyHTML = string(bodyBytes)
 				}
+			case *mail.AttachmentHeader:
+				// Parse attachment
+				filename, _ := h.Filename()
+				contentType, _, _ := h.ContentType()
+				attachmentData, err := io.ReadAll(p.Body)
+				if err != nil {
+					log.Printf("Error reading attachment: %v", err)
+					continue
+				}
+
+				attachments = append(attachments, struct {
+					filename    string
+					contentType string
+					data        []byte
+				}{
+					filename:    filename,
+					contentType: contentType,
+					data:        attachmentData,
+				})
 			}
 		}
 	}
@@ -265,6 +289,23 @@ func (t *SyncTask) saveMessage(imapMsg *imap.Message, folder *models.Folder) err
 	// Save to database
 	if err := t.database.CreateMessage(msg); err != nil {
 		return err
+	}
+
+	// Save attachments
+	for _, att := range attachments {
+		attachment := &models.Attachment{
+			MessageID:   msg.ID,
+			Filename:    att.filename,
+			ContentType: att.contentType,
+			Size:        int64(len(att.data)),
+			Data:        att.data,
+		}
+
+		if err := t.database.CreateAttachment(attachment); err != nil {
+			log.Printf("Failed to save attachment %s: %v", att.filename, err)
+			// Continue with other attachments
+			continue
+		}
 	}
 
 	return nil
