@@ -58,6 +58,8 @@ type ComposeData struct{
 	To       string
 	Subject  string
 	Body     string
+	ShowCc   bool
+	ShowBcc  bool
 }
 
 // Helper function to render templates
