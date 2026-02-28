@@ -23,9 +23,10 @@ func respondError(w http.ResponseWriter, status int, message string) {
 
 // RegisterRequest represents registration request
 type RegisterRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Email    string `json:"email"`
+	Username        string `json:"username"`
+	Password        string `json:"password"`
+	Email           string `json:"email"`
+	PasswordConfirm string `json:"password_confirm"`
 }
 
 // LoginRequest represents login request
@@ -61,6 +62,12 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	// Validate input (email is now optional)
 	if req.Username == "" || req.Password == "" {
 		respondError(w, http.StatusBadRequest, "username and password are required")
+		return
+	}
+
+	// Check passwords match
+	if req.Password != req.PasswordConfirm {
+		respondError(w, http.StatusBadRequest, "passwords do not match")
 		return
 	}
 
