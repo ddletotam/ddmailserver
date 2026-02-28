@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:howborisusesclaudecode.com)",
+      "Bash(go build:*)",
+      "Bash(go test:*)",
+      "Bash(npm test)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix\\(security\\): address critical vulnerabilities from code review\n\n- Fix IMAP/SMTP auth: use bcrypt instead of direct hash comparison\n- Fix CORS: validate Origin instead of allowing wildcard\n- Fix recovery key: pass via HttpOnly cookie instead of URL parameter\n- Add message ownership check to prevent reading other users'' messages\n- Add rate limiting middleware \\(5 req/min\\) for auth endpoints\n- Enable Secure cookie flag in production\n- Add crypto module for future password encryption\n- Update CLAUDE.md with project conventions\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push)",
+      "Bash(ssh ddm.logdoc.ru \"cd /home/mailserver/ddmailserver && ./deployments/update.sh\")",
+      "Skill(playwright-cli)",
+      "Bash(ssh lucky@jwebhelp.ru \"cd /home/mailserver/ddmailserver && git pull origin main && make build && sudo systemctl stop mailserver && sudo cp build/mailserver /usr/local/bin/mailserver && sudo systemctl start mailserver && echo ''Deploy complete!''\")",
+      "Bash(ssh lucky@jwebhelp.ru \"find /home -name ''ddmailserver'' -type d 2>/dev/null || find / -name ''mailserver'' -type d 2>/dev/null | head -5\")",
+      "Bash(ssh lucky@jwebhelp.ru \"cd /opt/ddmailserver && git pull origin main && make build && sudo systemctl stop mailserver && sudo cp build/mailserver /usr/local/bin/mailserver && sudo systemctl start mailserver && sleep 2 && sudo systemctl status mailserver --no-pager\")",
+      "Bash(set GOOS=linux)",
+      "Bash(set GOARCH=amd64:*)",
+      "Bash(set CGO_ENABLED=0)",
+      "Bash(scp:*)",
+      "Bash(ssh lucky@jwebhelp.ru \"sudo systemctl stop mailserver && sudo cp /tmp/mailserver /usr/local/bin/mailserver && sudo chmod +x /usr/local/bin/mailserver && sudo systemctl start mailserver && sleep 2 && sudo systemctl status mailserver --no-pager\")",
+      "Bash(ssh lucky@jwebhelp.ru \"file /usr/local/bin/mailserver && ls -la /usr/local/bin/mailserver\")",
+      "Bash($env:GOOS=\"linux\")",
+      "Bash($env:GOARCH=\"amd64\")",
+      "Bash($env:CGO_ENABLED=\"0\")",
+      "Bash(GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build:*)",
+      "Bash(ssh lucky@jwebhelp.ru \"sudo systemctl stop mailserver; sudo cp /tmp/mailserver /usr/local/bin/mailserver; sudo chmod +x /usr/local/bin/mailserver; sudo systemctl start mailserver; sleep 3; sudo systemctl status mailserver --no-pager -l | head -20\")",
+      "Bash(ssh lucky@jwebhelp.ru \"sudo journalctl -u mailserver --since ''1 minute ago'' --no-pager | grep -i cors\")",
+      "Bash(ssh:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix\\(cors\\): support reverse proxy with X-Forwarded-Host\n\nCORS middleware now checks X-Forwarded-Host header for proper origin\nvalidation behind nginx/reverse proxy setups.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
+    ]
+  }
+}

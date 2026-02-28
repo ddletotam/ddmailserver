@@ -1,0 +1,21 @@
+- generic [ref=e1]:
+  - main [ref=e2]:
+    - generic [ref=e4]:
+      - heading "DDMailServer" [level=1] [ref=e5]
+      - paragraph [ref=e6]: Self-hosted Email Aggregator
+      - generic [ref=e7]:
+        - button "Login" [ref=e8] [cursor=pointer]
+        - button "Register" [ref=e9] [cursor=pointer]
+      - generic [ref=e22]:
+        - generic [ref=e23]:
+          - generic [ref=e24]: Username
+          - textbox "Username" [ref=e25]: sectest_1772302342
+        - generic [ref=e26]:
+          - generic [ref=e27]: Password
+          - textbox "Password" [ref=e28]: TestPass123!
+        - generic [ref=e29]:
+          - generic [ref=e30]: Confirm Password
+          - textbox "Confirm Password" [ref=e31]: TestPass123!
+        - button "Register" [active] [ref=e32] [cursor=pointer]
+  - contentinfo [ref=e20]:
+    - paragraph [ref=e21]: © 2024 DDMailServer - Self-hosted Email Aggregator
