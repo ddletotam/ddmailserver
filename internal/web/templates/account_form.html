@@ -55,8 +55,7 @@
             <div class="form-group">
                 <label for="imap_password">{{t "accounts.form.password"}}</label>
                 <input type="password" id="imap_password" name="imap_password" {{if not .Account}}required{{end}}
-                       placeholder="{{if .Account}}{{t "accounts.form.password_placeholder_edit"}}{{else}}{{t "accounts.form.password_placeholder_new"}}{{end}}">
-                <small>{{t "accounts.form.password_help"}} <a href="https://myaccount.google.com/apppasswords" target="_blank">{{t "accounts.form.password_help_link"}}</a></small>
+                       placeholder="{{if .Account}}{{t "accounts.form.password_placeholder_edit"}}{{else}}{{t "accounts.form.password_placeholder"}}{{end}}">
             </div>
 
             <div class="form-group">
