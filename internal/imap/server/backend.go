@@ -7,6 +7,7 @@ import (
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/backend"
 	"github.com/yourusername/mailserver/internal/db"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Backend implements IMAP backend
@@ -32,9 +33,8 @@ func (b *Backend) Login(connInfo *imap.ConnInfo, username, password string) (bac
 		return nil, errors.New("invalid credentials")
 	}
 
-	// TODO: Implement proper password hashing verification
-	// For now, doing simple comparison (THIS IS NOT SECURE - FIX THIS!)
-	if user.PasswordHash != password {
+	// Verify password using bcrypt
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
 		log.Printf("Invalid password for user: %s", username)
 		return nil, errors.New("invalid credentials")
 	}

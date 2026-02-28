@@ -5,9 +5,80 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
 )
+
+// RateLimiter provides IP-based rate limiting
+type RateLimiter struct {
+	requests map[string][]time.Time
+	mu       sync.RWMutex
+	limit    int           // max requests
+	window   time.Duration // time window
+}
+
+// NewRateLimiter creates a new rate limiter
+func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
+	rl := &RateLimiter{
+		requests: make(map[string][]time.Time),
+		limit:    limit,
+		window:   window,
+	}
+	// Cleanup old entries periodically
+	go rl.cleanup()
+	return rl
+}
+
+// Allow checks if a request from the given IP is allowed
+func (rl *RateLimiter) Allow(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	windowStart := now.Add(-rl.window)
+
+	// Filter out old requests
+	var recent []time.Time
+	for _, t := range rl.requests[ip] {
+		if t.After(windowStart) {
+			recent = append(recent, t)
+		}
+	}
+
+	if len(recent) >= rl.limit {
+		rl.requests[ip] = recent
+		return false
+	}
+
+	rl.requests[ip] = append(recent, now)
+	return true
+}
+
+// cleanup removes old entries periodically
+func (rl *RateLimiter) cleanup() {
+	ticker := time.NewTicker(rl.window)
+	for range ticker.C {
+		rl.mu.Lock()
+		now := time.Now()
+		windowStart := now.Add(-rl.window)
+		for ip, times := range rl.requests {
+			var recent []time.Time
+			for _, t := range times {
+				if t.After(windowStart) {
+					recent = append(recent, t)
+				}
+			}
+			if len(recent) == 0 {
+				delete(rl.requests, ip)
+			} else {
+				rl.requests[ip] = recent
+			}
+		}
+		rl.mu.Unlock()
+	}
+}
 
 type contextKey string
 
@@ -52,7 +123,28 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 // CORS middleware
 func (s *Server) CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := r.Header.Get("Origin")
+
+		// Only allow same-origin requests or requests without Origin header
+		// For cross-origin needs, add specific allowed origins to config
+		if origin != "" {
+			// Validate origin matches the server host
+			allowedOrigin := "https://" + r.Host
+			if strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1") {
+				// Allow localhost for development
+				allowedOrigin = origin
+			} else if origin == allowedOrigin || origin == "http://"+r.Host {
+				allowedOrigin = origin
+			} else {
+				// Reject unknown origins
+				log.Printf("CORS rejected origin: %s", origin)
+				http.Error(w, "CORS origin not allowed", http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
+
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
@@ -71,6 +163,28 @@ func (s *Server) LoggingMiddleware(next http.Handler) http.Handler {
 		log.Printf("%s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// RateLimitMiddleware applies rate limiting to a handler
+func (s *Server) RateLimitMiddleware(rl *RateLimiter) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Extract IP from RemoteAddr or X-Forwarded-For
+			ip := r.RemoteAddr
+			if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+				ip = strings.Split(forwarded, ",")[0]
+			}
+			ip = strings.TrimSpace(strings.Split(ip, ":")[0])
+
+			if !rl.Allow(ip) {
+				log.Printf("Rate limit exceeded for IP: %s on %s", ip, r.URL.Path)
+				http.Error(w, "Too many requests. Please try again later.", http.StatusTooManyRequests)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // Helper to get user ID from context

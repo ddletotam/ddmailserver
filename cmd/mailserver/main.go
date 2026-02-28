@@ -33,7 +33,7 @@ func main() {
 	configPath := flag.String("config", "configs/config.yaml", "Path to configuration file")
 	flag.Parse()
 
-	fmt.Println(banner)
+	fmt.Print(banner)
 
 	// Load configuration
 	log.Printf("Loading configuration from %s", *configPath)

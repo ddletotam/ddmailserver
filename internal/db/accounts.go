@@ -9,6 +9,8 @@ import (
 )
 
 // CreateAccount creates a new external email account
+// TODO: Encrypt IMAPPassword and SMTPPassword before storing
+// This requires passing encryption key through the application layers
 func (db *DB) CreateAccount(account *models.Account) error {
 	account.CreatedAt = time.Now()
 	account.UpdatedAt = time.Now()

@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/yourusername/mailserver/internal/models"
 )
@@ -73,6 +74,13 @@ func (s *Server) SetSessionCookie(w http.ResponseWriter, token string) {
 		MaxAge:   86400 * 7, // 7 days
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		// Secure:   true, // Enable in production with HTTPS
+		Secure:   s.isProduction(), // Enable in production with HTTPS
 	})
+}
+
+// isProduction checks if running in production mode
+func (s *Server) isProduction() bool {
+	// Check if not running on localhost (indicates production)
+	return s.addr != "localhost" && s.addr != "127.0.0.1" &&
+		!strings.HasPrefix(s.addr, "localhost:") && !strings.HasPrefix(s.addr, "127.0.0.1:")
 }

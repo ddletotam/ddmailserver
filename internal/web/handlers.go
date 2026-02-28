@@ -114,11 +114,21 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	// Set session cookie for web UI
 	s.SetSessionCookie(w, token)
 
-	// IMPORTANT: Recovery key is returned ONLY ONCE here!
+	// Set recovery key in secure temporary cookie (one-time use)
+	// This avoids exposing the key in URL parameters or logs
+	http.SetCookie(w, &http.Cookie{
+		Name:     "recovery_key_temp",
+		Value:    recoveryKey,
+		Path:     "/",
+		MaxAge:   300, // 5 minutes - enough time to view and save
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+
+	// Return success - client should redirect to /recovery-key
 	respondJSON(w, http.StatusCreated, map[string]interface{}{
-		"user":         user,
-		"token":        token,
-		"recovery_key": recoveryKey, // User MUST save this!
+		"user":  user,
+		"token": token,
 	})
 }
 
