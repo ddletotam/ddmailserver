@@ -378,8 +378,11 @@ func (s *Server) HandleSettingsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Get user's language preference from database when implemented
-	language := "en"
+	// Get user's language preference (default to English)
+	language := user.Language
+	if language == "" {
+		language = "en"
+	}
 
 	data := struct {
 		PageData

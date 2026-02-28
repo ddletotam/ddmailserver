@@ -73,9 +73,16 @@ func (s *Server) HandleForgotPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Hash password properly
-	// For now, storing plain text (THIS IS NOT SECURE - FIX THIS!)
-	err = s.database.UpdatePasswordByRecoveryKey(req.Username, req.NewPassword)
+	// Hash new password
+	passwordHash, err := HashPassword(req.NewPassword)
+	if err != nil {
+		log.Printf("Failed to hash password: %v", err)
+		respondError(w, http.StatusInternalServerError, "failed to reset password")
+		return
+	}
+
+	// Update password
+	err = s.database.UpdatePasswordByRecoveryKey(req.Username, passwordHash)
 	if err != nil {
 		log.Printf("Failed to update password: %v", err)
 		respondError(w, http.StatusInternalServerError, "failed to reset password")

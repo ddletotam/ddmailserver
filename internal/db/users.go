@@ -42,14 +42,14 @@ func (db *DB) CreateUser(username, passwordHash, email, recoveryKeyHash string) 
 func (db *DB) GetUserByUsername(username string) (*models.User, error) {
 	user := &models.User{}
 	query := `
-		SELECT id, username, password_hash, email, recovery_key_hash, created_at, updated_at
+		SELECT id, username, password_hash, email, language, recovery_key_hash, created_at, updated_at
 		FROM users
 		WHERE username = $1
 	`
 
-	var email sql.NullString
+	var email, language sql.NullString
 	err := db.QueryRow(query, username).Scan(
-		&user.ID, &user.Username, &user.PasswordHash, &email, &user.RecoveryKeyHash, &user.CreatedAt, &user.UpdatedAt,
+		&user.ID, &user.Username, &user.PasswordHash, &email, &language, &user.RecoveryKeyHash, &user.CreatedAt, &user.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("user not found")
@@ -60,6 +60,9 @@ func (db *DB) GetUserByUsername(username string) (*models.User, error) {
 
 	if email.Valid {
 		user.Email = email.String
+	}
+	if language.Valid {
+		user.Language = language.String
 	}
 
 	return user, nil
@@ -69,14 +72,14 @@ func (db *DB) GetUserByUsername(username string) (*models.User, error) {
 func (db *DB) GetUserByID(id int64) (*models.User, error) {
 	user := &models.User{}
 	query := `
-		SELECT id, username, password_hash, email, recovery_key_hash, created_at, updated_at
+		SELECT id, username, password_hash, email, language, recovery_key_hash, created_at, updated_at
 		FROM users
 		WHERE id = $1
 	`
 
-	var email sql.NullString
+	var email, language sql.NullString
 	err := db.QueryRow(query, id).Scan(
-		&user.ID, &user.Username, &user.PasswordHash, &email, &user.RecoveryKeyHash, &user.CreatedAt, &user.UpdatedAt,
+		&user.ID, &user.Username, &user.PasswordHash, &email, &language, &user.RecoveryKeyHash, &user.CreatedAt, &user.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("user not found")
@@ -87,6 +90,9 @@ func (db *DB) GetUserByID(id int64) (*models.User, error) {
 
 	if email.Valid {
 		user.Email = email.String
+	}
+	if language.Valid {
+		user.Language = language.String
 	}
 
 	return user, nil
@@ -130,8 +136,41 @@ func (db *DB) UpdatePasswordByRecoveryKey(username, newPasswordHash string) erro
 	return nil
 }
 
-// DeleteUser deletes a user
+// UpdatePassword updates user's password
+func (db *DB) UpdatePassword(userID int64, newPasswordHash string) error {
+	query := `
+		UPDATE users
+		SET password_hash = $1, updated_at = $2
+		WHERE id = $3
+	`
+
+	_, err := db.Exec(query, newPasswordHash, time.Now(), userID)
+	if err != nil {
+		return fmt.Errorf("failed to update password: %w", err)
+	}
+
+	return nil
+}
+
+// UpdateLanguage updates user's language preference
+func (db *DB) UpdateLanguage(userID int64, language string) error {
+	query := `
+		UPDATE users
+		SET language = $1, updated_at = $2
+		WHERE id = $3
+	`
+
+	_, err := db.Exec(query, language, time.Now(), userID)
+	if err != nil {
+		return fmt.Errorf("failed to update language: %w", err)
+	}
+
+	return nil
+}
+
+// DeleteUser deletes a user and all associated data
 func (db *DB) DeleteUser(id int64) error {
+	// Delete user (CASCADE should handle related data)
 	query := `DELETE FROM users WHERE id = $1`
 	_, err := db.Exec(query, id)
 	if err != nil {

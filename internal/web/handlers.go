@@ -79,6 +79,14 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Hash password
+	passwordHash, err := HashPassword(req.Password)
+	if err != nil {
+		log.Printf("Failed to hash password: %v", err)
+		respondError(w, http.StatusInternalServerError, "failed to hash password")
+		return
+	}
+
 	// Hash recovery key
 	recoveryKeyHash, err := HashRecoveryKey(recoveryKey)
 	if err != nil {
@@ -87,9 +95,8 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Hash password properly
-	// For now, storing plain text (THIS IS NOT SECURE - FIX THIS!)
-	user, err := s.database.CreateUser(req.Username, req.Password, req.Email, recoveryKeyHash)
+	// Create user
+	user, err := s.database.CreateUser(req.Username, passwordHash, req.Email, recoveryKeyHash)
 	if err != nil {
 		log.Printf("Failed to create user: %v", err)
 		respondError(w, http.StatusInternalServerError, "failed to create user")
@@ -146,9 +153,8 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Verify hashed password
-	// For now, comparing plain text (THIS IS NOT SECURE - FIX THIS!)
-	if user.PasswordHash != req.Password {
+	// Verify password
+	if !VerifyPassword(user.PasswordHash, req.Password) {
 		respondError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -354,4 +360,181 @@ func (s *Server) HandleHealthCheck(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{
 		"status": "ok",
 	})
+}
+
+// ChangePasswordRequest represents password change request
+type ChangePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+	ConfirmPassword string `json:"confirm_password"`
+}
+
+// HandleChangePassword handles password change
+func (s *Server) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r)
+
+	// Parse form data or JSON
+	var req ChangePasswordRequest
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "application/x-www-form-urlencoded" || contentType == "multipart/form-data" {
+		if err := r.ParseForm(); err != nil {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`<div class="error-message">Invalid form data</div>`))
+			return
+		}
+		req.CurrentPassword = r.FormValue("current_password")
+		req.NewPassword = r.FormValue("new_password")
+		req.ConfirmPassword = r.FormValue("confirm_password")
+	} else {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+	}
+
+	// Validate input
+	if req.CurrentPassword == "" || req.NewPassword == "" {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`<div class="error-message">Current and new password are required</div>`))
+		return
+	}
+
+	if req.NewPassword != req.ConfirmPassword {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`<div class="error-message">New passwords do not match</div>`))
+		return
+	}
+
+	if len(req.NewPassword) < 8 {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`<div class="error-message">New password must be at least 8 characters</div>`))
+		return
+	}
+
+	// Get user
+	user, err := s.database.GetUserByID(userID)
+	if err != nil {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`<div class="error-message">User not found</div>`))
+		return
+	}
+
+	// Verify current password
+	if !VerifyPassword(user.PasswordHash, req.CurrentPassword) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`<div class="error-message">Current password is incorrect</div>`))
+		return
+	}
+
+	// Hash new password
+	newPasswordHash, err := HashPassword(req.NewPassword)
+	if err != nil {
+		log.Printf("Failed to hash password: %v", err)
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`<div class="error-message">Failed to update password</div>`))
+		return
+	}
+
+	// Update password
+	if err := s.database.UpdatePassword(userID, newPasswordHash); err != nil {
+		log.Printf("Failed to update password: %v", err)
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`<div class="error-message">Failed to update password</div>`))
+		return
+	}
+
+	log.Printf("Password updated for user ID: %d", userID)
+
+	// Return success message
+	w.Header().Set("Content-Type", "text/html")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`<div class="success-message">Password updated successfully!</div>`))
+}
+
+// ChangeLanguageRequest represents language change request
+type ChangeLanguageRequest struct {
+	Language string `json:"language"`
+}
+
+// HandleChangeLanguage handles language preference change
+func (s *Server) HandleChangeLanguage(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r)
+
+	// Parse form data or JSON
+	var req ChangeLanguageRequest
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "application/x-www-form-urlencoded" || contentType == "multipart/form-data" {
+		if err := r.ParseForm(); err != nil {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`<div class="error-message">Invalid form data</div>`))
+			return
+		}
+		req.Language = r.FormValue("language")
+	} else {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+	}
+
+	// Validate language
+	if req.Language != "en" && req.Language != "ru" {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`<div class="error-message">Invalid language. Must be 'en' or 'ru'</div>`))
+		return
+	}
+
+	// Update language
+	if err := s.database.UpdateLanguage(userID, req.Language); err != nil {
+		log.Printf("Failed to update language: %v", err)
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`<div class="error-message">Failed to update language</div>`))
+		return
+	}
+
+	log.Printf("Language updated for user ID: %d to: %s", userID, req.Language)
+
+	// Return success message
+	w.Header().Set("Content-Type", "text/html")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`<div class="success-message">Language updated successfully! Please refresh the page.</div>`))
+}
+
+// HandleDeleteUserAccount handles user account deletion
+func (s *Server) HandleDeleteUserAccount(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r)
+
+	log.Printf("Deleting user account: %d", userID)
+
+	// Delete user
+	if err := s.database.DeleteUser(userID); err != nil {
+		log.Printf("Failed to delete user: %v", err)
+		respondError(w, http.StatusInternalServerError, "failed to delete account")
+		return
+	}
+
+	log.Printf("User account deleted: %d", userID)
+
+	// Clear session cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:   "session",
+		Value:  "",
+		Path:   "/",
+		MaxAge: -1,
+	})
+
+	// Redirect to login page
+	w.Header().Set("HX-Redirect", "/login")
+	respondJSON(w, http.StatusOK, map[string]string{"message": "account deleted"})
 }

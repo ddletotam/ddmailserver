@@ -88,6 +88,11 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/accounts/{id}", s.HandleUpdateAccount).Methods("PUT")
 	api.HandleFunc("/accounts/{id}", s.HandleDeleteAccount).Methods("DELETE")
 
+	// Settings API
+	api.HandleFunc("/settings/password", s.HandleChangePassword).Methods("POST")
+	api.HandleFunc("/settings/language", s.HandleChangeLanguage).Methods("POST")
+	api.HandleFunc("/settings/account", s.HandleDeleteUserAccount).Methods("DELETE")
+
 	// Protected web routes
 	web := s.router.PathPrefix("/").Subrouter()
 	web.Use(s.WebAuthMiddleware)
