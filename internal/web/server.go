@@ -84,16 +84,18 @@ func (s *Server) setupRoutes() {
 	settingsAPI.HandleFunc("/language", s.HandleChangeLanguage).Methods("POST")
 	settingsAPI.HandleFunc("/account", s.HandleDeleteUserAccount).Methods("DELETE")
 
+	// Accounts API (uses session cookie auth, must be registered before general API routes)
+	accountsAPI := s.router.PathPrefix("/api/accounts").Subrouter()
+	accountsAPI.Use(s.APIAuthMiddleware) // Returns JSON error instead of redirect
+	accountsAPI.HandleFunc("", s.HandleGetAccounts).Methods("GET")
+	accountsAPI.HandleFunc("", s.HandleCreateAccount).Methods("POST")
+	accountsAPI.HandleFunc("/{id}", s.HandleGetAccount).Methods("GET")
+	accountsAPI.HandleFunc("/{id}", s.HandleUpdateAccount).Methods("PUT")
+	accountsAPI.HandleFunc("/{id}", s.HandleDeleteAccount).Methods("DELETE")
+
 	// Protected API routes (uses JWT token auth)
 	api := s.router.PathPrefix("/api").Subrouter()
 	api.Use(s.AuthMiddleware)
-
-	// Accounts API
-	api.HandleFunc("/accounts", s.HandleGetAccounts).Methods("GET")
-	api.HandleFunc("/accounts", s.HandleCreateAccount).Methods("POST")
-	api.HandleFunc("/accounts/{id}", s.HandleGetAccount).Methods("GET")
-	api.HandleFunc("/accounts/{id}", s.HandleUpdateAccount).Methods("PUT")
-	api.HandleFunc("/accounts/{id}", s.HandleDeleteAccount).Methods("DELETE")
 
 	// Protected web routes
 	web := s.router.PathPrefix("/").Subrouter()
