@@ -222,20 +222,8 @@ func (s *Server) HandleAccountFormPage(w http.ResponseWriter, r *http.Request) {
 		Account: account,
 	}
 
-	// Render the form template
-	funcMap := template.FuncMap{
-		"t": s.i18n.T,
-	}
-	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templatesFS, "templates/layout.html", "templates/accounts.html")
-	if err != nil {
-		log.Printf("Error parsing template: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	if err := tmpl.ExecuteTemplate(w, "account-form", data); err != nil {
-		log.Printf("Error executing template: %v", err)
-	}
+	// Use the standard renderTemplate method to get full layout with styles
+	s.renderTemplate(w, "account_form.html", data)
 }
 
 // HandleInboxPage shows the inbox
