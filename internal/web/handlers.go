@@ -195,11 +195,45 @@ func (s *Server) HandleGetAccounts(w http.ResponseWriter, r *http.Request) {
 // HandleCreateAccount creates a new email account
 func (s *Server) HandleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	userID := getUserID(r)
+	log.Printf("HandleCreateAccount: userID=%d", userID)
 
 	var account models.Account
-	if err := json.NewDecoder(r.Body).Decode(&account); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid request body")
-		return
+
+	// Parse form data or JSON
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "application/x-www-form-urlencoded" || contentType == "multipart/form-data" {
+		if err := r.ParseForm(); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid form data")
+			return
+		}
+
+		account.Name = r.FormValue("name")
+		account.Email = r.FormValue("email")
+		account.IMAPHost = r.FormValue("imap_host")
+		account.IMAPUsername = r.FormValue("imap_username")
+		account.IMAPPassword = r.FormValue("imap_password")
+		account.IMAPTLS = r.FormValue("imap_tls") == "true"
+		account.SMTPHost = r.FormValue("smtp_host")
+		account.SMTPUsername = r.FormValue("smtp_username")
+		account.SMTPPassword = r.FormValue("smtp_password")
+		account.SMTPTLS = r.FormValue("smtp_tls") == "true"
+
+		// Parse ports
+		if imapPort := r.FormValue("imap_port"); imapPort != "" {
+			if port, err := strconv.Atoi(imapPort); err == nil {
+				account.IMAPPort = port
+			}
+		}
+		if smtpPort := r.FormValue("smtp_port"); smtpPort != "" {
+			if port, err := strconv.Atoi(smtpPort); err == nil {
+				account.SMTPPort = port
+			}
+		}
+	} else {
+		if err := json.NewDecoder(r.Body).Decode(&account); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
 	}
 
 	// Set user ID
@@ -284,9 +318,42 @@ func (s *Server) HandleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 
 	// Decode update data
 	var update models.Account
-	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid request body")
-		return
+
+	// Parse form data or JSON
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "application/x-www-form-urlencoded" || contentType == "multipart/form-data" {
+		if err := r.ParseForm(); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid form data")
+			return
+		}
+
+		update.Name = r.FormValue("name")
+		update.Email = r.FormValue("email")
+		update.IMAPHost = r.FormValue("imap_host")
+		update.IMAPUsername = r.FormValue("imap_username")
+		update.IMAPPassword = r.FormValue("imap_password")
+		update.IMAPTLS = r.FormValue("imap_tls") == "true"
+		update.SMTPHost = r.FormValue("smtp_host")
+		update.SMTPUsername = r.FormValue("smtp_username")
+		update.SMTPPassword = r.FormValue("smtp_password")
+		update.SMTPTLS = r.FormValue("smtp_tls") == "true"
+
+		// Parse ports
+		if imapPort := r.FormValue("imap_port"); imapPort != "" {
+			if port, err := strconv.Atoi(imapPort); err == nil {
+				update.IMAPPort = port
+			}
+		}
+		if smtpPort := r.FormValue("smtp_port"); smtpPort != "" {
+			if port, err := strconv.Atoi(smtpPort); err == nil {
+				update.SMTPPort = port
+			}
+		}
+	} else {
+		if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
 	}
 
 	// Update fields
