@@ -1,0 +1,98 @@
+{{define "content"}}
+<div class="auth-container">
+    <div class="auth-box" x-data="{ tab: 'login' }">
+        <h1 class="auth-title">{{t "app.name"}}</h1>
+        <p class="auth-subtitle">{{t "app.subtitle"}}</p>
+
+        <!-- Tab buttons -->
+        <div class="tabs">
+            <button @click="tab = 'login'" :class="{ 'active': tab === 'login' }" class="tab">
+                {{t "auth.login"}}
+            </button>
+            <button @click="tab = 'register'" :class="{ 'active': tab === 'register' }" class="tab">
+                {{t "auth.register"}}
+            </button>
+        </div>
+
+        <!-- Login form -->
+        <form :class="{ 'hidden': tab !== 'login' }"
+              hx-post="/api/login"
+              hx-target="#login-error"
+              hx-swap="innerHTML"
+              class="auth-form">
+            <div id="login-error" class="error-message"></div>
+
+            <div class="form-group">
+                <label for="login-username">{{t "auth.username"}}</label>
+                <input type="text" id="login-username" name="username" required autofocus>
+            </div>
+
+            <div class="form-group">
+                <label for="login-password">{{t "auth.password"}}</label>
+                <input type="password" id="login-password" name="password" required>
+            </div>
+
+            <button type="submit" class="btn btn-primary btn-block">
+                {{t "auth.login"}}
+            </button>
+
+            <div style="text-align: center; margin-top: 1rem;">
+                <a href="/forgot-password" class="btn-link">{{t "forgot.title"}}?</a>
+            </div>
+        </form>
+
+        <!-- Register form -->
+        <form :class="{ 'hidden': tab !== 'register' }"
+              hx-post="/api/register"
+              hx-target="#register-error"
+              hx-swap="innerHTML"
+              class="auth-form">
+            <div id="register-error" class="error-message"></div>
+
+            <div class="form-group">
+                <label for="register-username">{{t "auth.username"}}</label>
+                <input type="text" id="register-username" name="username" required>
+            </div>
+
+            <div class="form-group">
+                <label for="register-email">{{t "auth.email"}} <small style="color: var(--text-muted);">(optional)</small></label>
+                <input type="email" id="register-email" name="email">
+            </div>
+
+            <div class="form-group">
+                <label for="register-password">{{t "auth.password"}}</label>
+                <input type="password" id="register-password" name="password" required minlength="6">
+            </div>
+
+            <div class="form-group">
+                <label for="register-password-confirm">{{t "auth.password_confirm"}}</label>
+                <input type="password" id="register-password-confirm" name="password_confirm" required minlength="6">
+            </div>
+
+            <button type="submit" class="btn btn-primary btn-block">
+                {{t "auth.register"}}
+            </button>
+        </form>
+    </div>
+</div>
+
+<script>
+// Handle successful registration - redirect to recovery key page
+document.body.addEventListener('htmx:afterRequest', function(evt) {
+    if (evt.detail.successful && evt.detail.xhr.responseURL.includes('/api/register')) {
+        try {
+            const response = JSON.parse(evt.detail.xhr.responseText);
+            if (response.recovery_key) {
+                // Redirect to recovery key page with the key
+                window.location.href = '/recovery-key?key=' + encodeURIComponent(response.recovery_key);
+            }
+        } catch (e) {
+            console.error('Failed to parse registration response:', e);
+        }
+    } else if (evt.detail.successful && evt.detail.xhr.responseURL.includes('/api/login')) {
+        // Redirect to dashboard on successful login
+        window.location.href = '/dashboard';
+    }
+});
+</script>
+{{end}}

@@ -113,6 +113,9 @@ func (s *Server) setupRoutes() {
 	// Compose
 	web.HandleFunc("/compose", s.HandleComposePage).Methods("GET")
 
+	// Settings
+	web.HandleFunc("/settings", s.HandleSettingsPage).Methods("GET")
+
 	log.Printf("Routes configured")
 }
 

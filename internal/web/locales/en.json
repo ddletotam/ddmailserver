@@ -150,5 +150,24 @@
   "forgot.confirm_password": "Confirm New Password",
   "forgot.reset_button": "Reset Password",
   "forgot.back_to_login": "Back to Login",
-  "forgot.success": "Password reset successfully! You can now login with your new password."
+  "forgot.success": "Password reset successfully! You can now login with your new password.",
+
+  "settings.title": "Settings",
+  "settings.user_info": "User Information",
+  "settings.username": "Username",
+  "settings.email": "Email",
+  "settings.not_set": "Not set",
+  "settings.change_password": "Change Password",
+  "settings.current_password": "Current Password",
+  "settings.new_password": "New Password",
+  "settings.confirm_password": "Confirm New Password",
+  "settings.update_password": "Update Password",
+  "settings.language": "Language",
+  "settings.preferred_language": "Preferred Language",
+  "settings.update_language": "Update Language",
+  "settings.danger_zone": "Danger Zone",
+  "settings.danger_zone_description": "Once you delete your account, there is no going back. Please be certain.",
+  "settings.delete_account": "Delete Account",
+  "settings.delete_confirm": "Are you sure you want to delete your account? This action cannot be undone.",
+  "settings.delete_confirm_final": "This is your last chance. All your data will be permanently deleted. Continue?"
 }

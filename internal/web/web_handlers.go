@@ -370,6 +370,31 @@ func (s *Server) HandleComposePage(w http.ResponseWriter, r *http.Request) {
 	s.renderTemplate(w, "compose.html", data)
 }
 
+// HandleSettingsPage shows the settings page
+func (s *Server) HandleSettingsPage(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+
+	// TODO: Get user's language preference from database when implemented
+	language := "en"
+
+	data := struct {
+		PageData
+		Language string
+	}{
+		PageData: PageData{
+			Title: "Settings",
+			User:  user,
+		},
+		Language: language,
+	}
+
+	s.renderTemplate(w, "settings.html", data)
+}
+
 // HandleLogout logs out the user
 func (s *Server) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	// Clear session cookie

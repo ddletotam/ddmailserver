@@ -150,5 +150,24 @@
   "forgot.confirm_password": "Подтвердите новый пароль",
   "forgot.reset_button": "Сбросить пароль",
   "forgot.back_to_login": "Вернуться ко входу",
-  "forgot.success": "Пароль успешно сброшен! Теперь вы можете войти с новым паролем."
+  "forgot.success": "Пароль успешно сброшен! Теперь вы можете войти с новым паролем.",
+
+  "settings.title": "Настройки",
+  "settings.user_info": "Информация о пользователе",
+  "settings.username": "Имя пользователя",
+  "settings.email": "Email",
+  "settings.not_set": "Не установлено",
+  "settings.change_password": "Изменить пароль",
+  "settings.current_password": "Текущий пароль",
+  "settings.new_password": "Новый пароль",
+  "settings.confirm_password": "Подтвердите новый пароль",
+  "settings.update_password": "Обновить пароль",
+  "settings.language": "Язык",
+  "settings.preferred_language": "Предпочитаемый язык",
+  "settings.update_language": "Обновить язык",
+  "settings.danger_zone": "Опасная зона",
+  "settings.danger_zone_description": "После удаления аккаунта восстановление невозможно. Будьте уверены в своем решении.",
+  "settings.delete_account": "Удалить аккаунт",
+  "settings.delete_confirm": "Вы уверены, что хотите удалить свой аккаунт? Это действие невозможно отменить.",
+  "settings.delete_confirm_final": "Это ваш последний шанс. Все ваши данные будут безвозвратно удалены. Продолжить?"
 }
