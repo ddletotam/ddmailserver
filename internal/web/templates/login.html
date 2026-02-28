@@ -1,26 +1,26 @@
 {{define "content"}}
 <div class="auth-container">
-    <div class="auth-box" x-data="{ tab: 'login' }">
+    <div class="auth-box">
         <h1 class="auth-title">{{t "app.name"}}</h1>
         <p class="auth-subtitle">{{t "app.subtitle"}}</p>
 
         <!-- Tab buttons -->
         <div class="tabs">
-            <button @click="tab = 'login'" :class="{ 'active': tab === 'login' }" class="tab">
+            <button onclick="switchTab('login')" id="login-tab" class="tab active">
                 {{t "auth.login"}}
             </button>
-            <button @click="tab = 'register'" :class="{ 'active': tab === 'register' }" class="tab">
+            <button onclick="switchTab('register')" id="register-tab" class="tab">
                 {{t "auth.register"}}
             </button>
         </div>
 
         <!-- Login form -->
-        <form :class="{ 'hidden': tab !== 'login' }"
+        <form id="login-form"
               hx-post="/api/login"
-              hx-target="#auth-error"
+              hx-target="#login-error"
               hx-swap="innerHTML"
               class="auth-form">
-            <div id="auth-error" class="error-message"></div>
+            <div id="login-error" class="error-message"></div>
 
             <div class="form-group">
                 <label for="login-username">{{t "auth.username"}}</label>
@@ -42,12 +42,12 @@
         </form>
 
         <!-- Register form -->
-        <form :class="{ 'hidden': tab !== 'register' }"
+        <form id="register-form"
               hx-post="/api/register"
-              hx-target="#auth-error"
+              hx-target="#register-error"
               hx-swap="innerHTML"
-              class="auth-form">
-            <div id="auth-error" class="error-message"></div>
+              class="auth-form hidden">
+            <div id="register-error" class="error-message"></div>
 
             <div class="form-group">
                 <label for="register-username">{{t "auth.username"}}</label>
@@ -77,6 +77,26 @@
 </div>
 
 <script>
+// Simple tab switching without Alpine
+function switchTab(tab) {
+    const loginForm = document.getElementById('login-form');
+    const registerForm = document.getElementById('register-form');
+    const loginTab = document.getElementById('login-tab');
+    const registerTab = document.getElementById('register-tab');
+
+    if (tab === 'login') {
+        loginForm.classList.remove('hidden');
+        registerForm.classList.add('hidden');
+        loginTab.classList.add('active');
+        registerTab.classList.remove('active');
+    } else {
+        loginForm.classList.add('hidden');
+        registerForm.classList.remove('hidden');
+        loginTab.classList.remove('active');
+        registerTab.classList.add('active');
+    }
+}
+
 // Handle successful registration - redirect to recovery key page
 document.body.addEventListener('htmx:afterRequest', function(evt) {
     if (evt.detail.successful && evt.detail.xhr.responseURL.includes('/api/register')) {
