@@ -77,7 +77,15 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/api/login", s.HandleLogin).Methods("POST")
 	s.router.HandleFunc("/api/forgot-password", s.HandleForgotPassword).Methods("POST")
 
-	// Protected API routes
+	// Settings API (uses session cookie auth, must be registered before general API routes)
+	settingsAPI := s.router.PathPrefix("/api/settings").Subrouter()
+	settingsAPI.Use(s.SessionMiddleware)
+	settingsAPI.Use(s.WebAuthMiddleware)
+	settingsAPI.HandleFunc("/password", s.HandleChangePassword).Methods("POST")
+	settingsAPI.HandleFunc("/language", s.HandleChangeLanguage).Methods("POST")
+	settingsAPI.HandleFunc("/account", s.HandleDeleteUserAccount).Methods("DELETE")
+
+	// Protected API routes (uses JWT token auth)
 	api := s.router.PathPrefix("/api").Subrouter()
 	api.Use(s.AuthMiddleware)
 
@@ -115,11 +123,6 @@ func (s *Server) setupRoutes() {
 
 	// Settings
 	web.HandleFunc("/settings", s.HandleSettingsPage).Methods("GET")
-
-	// Settings API (uses session cookie auth, not JWT)
-	web.HandleFunc("/api/settings/password", s.HandleChangePassword).Methods("POST")
-	web.HandleFunc("/api/settings/language", s.HandleChangeLanguage).Methods("POST")
-	web.HandleFunc("/api/settings/account", s.HandleDeleteUserAccount).Methods("DELETE")
 
 	log.Printf("Routes configured")
 }
