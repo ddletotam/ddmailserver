@@ -24,10 +24,26 @@ func (s *Server) HandleForgotPasswordPage(w http.ResponseWriter, r *http.Request
 
 // HandleForgotPassword handles password reset via recovery key
 func (s *Server) HandleForgotPassword(w http.ResponseWriter, r *http.Request) {
+	// Parse form data (for htmx form submissions) or JSON (for API)
 	var req ForgotPasswordRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid request body")
-		return
+
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "application/x-www-form-urlencoded" || contentType == "multipart/form-data" {
+		// Parse form data
+		if err := r.ParseForm(); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid form data")
+			return
+		}
+		req.Username = r.FormValue("username")
+		req.RecoveryKey = r.FormValue("recovery_key")
+		req.NewPassword = r.FormValue("new_password")
+		req.ConfirmPassword = r.FormValue("confirm_password")
+	} else {
+		// Parse JSON
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
 	}
 
 	// Validate input

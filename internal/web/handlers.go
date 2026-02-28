@@ -36,10 +36,26 @@ type LoginRequest struct {
 
 // HandleRegister handles user registration
 func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
+	// Parse form data (for htmx form submissions) or JSON (for API)
 	var req RegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid request body")
-		return
+
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "application/x-www-form-urlencoded" || contentType == "multipart/form-data" {
+		// Parse form data
+		if err := r.ParseForm(); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid form data")
+			return
+		}
+		req.Username = r.FormValue("username")
+		req.Email = r.FormValue("email")
+		req.Password = r.FormValue("password")
+		req.PasswordConfirm = r.FormValue("password_confirm")
+	} else {
+		// Parse JSON
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
 	}
 
 	// Validate input (email is now optional)
@@ -96,10 +112,24 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 
 // HandleLogin handles user login
 func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
+	// Parse form data (for htmx form submissions) or JSON (for API)
 	var req LoginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid request body")
-		return
+
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "application/x-www-form-urlencoded" || contentType == "multipart/form-data" {
+		// Parse form data
+		if err := r.ParseForm(); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid form data")
+			return
+		}
+		req.Username = r.FormValue("username")
+		req.Password = r.FormValue("password")
+	} else {
+		// Parse JSON
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
 	}
 
 	// Get user
