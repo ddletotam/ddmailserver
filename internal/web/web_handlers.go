@@ -179,7 +179,10 @@ func (s *Server) HandleAccountsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Render just the accounts-list template
-	tmpl, err := template.ParseFS(templatesFS, "templates/accounts.html")
+	funcMap := template.FuncMap{
+		"t": s.i18n.T,
+	}
+	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templatesFS, "templates/accounts.html")
 	if err != nil {
 		log.Printf("Error parsing template: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -220,7 +223,10 @@ func (s *Server) HandleAccountFormPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Render the form template
-	tmpl, err := template.ParseFS(templatesFS, "templates/layout.html", "templates/accounts.html")
+	funcMap := template.FuncMap{
+		"t": s.i18n.T,
+	}
+	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templatesFS, "templates/layout.html", "templates/accounts.html")
 	if err != nil {
 		log.Printf("Error parsing template: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -293,6 +299,7 @@ func (s *Server) HandleMessagesList(w http.ResponseWriter, r *http.Request) {
 
 	// Render just the message-list template
 	funcMap := template.FuncMap{
+		"t": s.i18n.T,
 		"substr": func(s string, start, end int) string {
 			if len(s) < end {
 				return s
