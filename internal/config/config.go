@@ -24,6 +24,7 @@ type ServerConfig struct {
 	SMTPMXPort  int    `yaml:"smtp_mx_port"` // MX server port for incoming mail (default 25)
 	WebPort     int    `yaml:"web_port"`
 	WebHost     string `yaml:"web_host"`
+	Domain      string `yaml:"domain"` // Mail server hostname (e.g., mail.example.com)
 	Locale      string `yaml:"locale"`
 }
 

@@ -303,10 +303,10 @@ func (m *Mailbox) convertToIMAPMessage(msg *models.Message, seqNum uint32, items
 		case imap.FetchBody, imap.FetchBodyStructure:
 			// TODO: Implement proper body structure
 			imapMsg.BodyStructure = &imap.BodyStructure{
-				MIMEType: "text",
+				MIMEType:    "text",
 				MIMESubType: "plain",
-				Params: map[string]string{},
-				Size: uint32(len(msg.Body)),
+				Params:      map[string]string{},
+				Size:        uint32(len(msg.Body)),
 			}
 
 		case imap.FetchFlags:
