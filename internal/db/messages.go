@@ -22,9 +22,16 @@ func (db *DB) CreateMessage(msg *models.Message) error {
 		RETURNING id
 	`
 
+	// Use NULL for account_id = 0 (local delivery)
+	var accountID sql.NullInt64
+	if msg.AccountID > 0 {
+		accountID.Int64 = msg.AccountID
+		accountID.Valid = true
+	}
+
 	err := db.QueryRow(
 		query,
-		msg.AccountID, msg.UserID, msg.FolderID, msg.MessageID, msg.Subject,
+		accountID, msg.UserID, msg.FolderID, msg.MessageID, msg.Subject,
 		msg.From, msg.To, msg.Cc, msg.Bcc, msg.ReplyTo,
 		msg.Date, msg.Body, msg.BodyHTML, msg.Attachments, msg.Size,
 		msg.UID, msg.Seen, msg.Flagged, msg.Answered, msg.Draft, msg.Deleted,
@@ -41,7 +48,7 @@ func (db *DB) CreateMessage(msg *models.Message) error {
 // GetMessagesByFolder retrieves messages in a folder
 func (db *DB) GetMessagesByFolder(folderID int64, limit, offset int) ([]*models.Message, error) {
 	query := `
-		SELECT id, account_id, user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
+		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 		       in_reply_to, message_references, created_at, updated_at
 		FROM messages
@@ -62,7 +69,7 @@ func (db *DB) GetMessagesByFolder(folderID int64, limit, offset int) ([]*models.
 // GetMessagesByUser retrieves all messages for a user
 func (db *DB) GetMessagesByUser(userID int64, limit, offset int) ([]*models.Message, error) {
 	query := `
-		SELECT id, account_id, user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
+		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 		       in_reply_to, message_references, created_at, updated_at
 		FROM messages
@@ -84,7 +91,7 @@ func (db *DB) GetMessagesByUser(userID int64, limit, offset int) ([]*models.Mess
 func (db *DB) GetMessageByID(id int64) (*models.Message, error) {
 	msg := &models.Message{}
 	query := `
-		SELECT id, account_id, user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
+		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 		       in_reply_to, message_references, created_at, updated_at
 		FROM messages
@@ -156,7 +163,7 @@ func (db *DB) DeleteMessage(id int64) error {
 // SearchMessages searches messages by query
 func (db *DB) SearchMessages(userID int64, query string, limit, offset int) ([]*models.Message, error) {
 	searchQuery := `
-		SELECT id, account_id, user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
+		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 		       in_reply_to, message_references, created_at, updated_at
 		FROM messages
