@@ -32,3 +32,25 @@
 ## i18n
 - Locales in `/internal/web/locales/` (en.json, ru.json)
 - Use i18n functions for all user-facing text
+
+## Deployment
+- SSH: `lucky@jwebhelp.ru`
+- Project: `/opt/ddmailserver`
+- Database: `PGPASSWORD=mailserver psql -h 10.0.0.2 -U mailserver -d mailserver`
+- Deploy commands:
+```bash
+cd /opt/ddmailserver
+sudo git pull
+/usr/local/go/bin/go build -o build/mailserver ./cmd/mailserver
+sudo systemctl stop mailserver
+sudo cp build/mailserver /usr/local/bin/mailserver
+sudo systemctl start mailserver
+sudo journalctl -u mailserver -f  # view logs
+```
+
+## Server Info
+- Production URL: https://ddm.logdoc.ru/ (proxied via nginx)
+- IMAP: mail.letotam.ru:993 (TLS) - redirected 993→10993
+- SMTP: mail.letotam.ru:465 (TLS) - redirected 465→10465
+- MX: port 25 (redirected 25→2525)
+- TLS certs: /etc/mailserver/certs/ (Let's Encrypt for mail.letotam.ru)
