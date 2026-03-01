@@ -46,6 +46,7 @@ func (db *DB) CreateMessage(msg *models.Message) error {
 }
 
 // GetMessagesByFolder retrieves messages in a folder
+// IMPORTANT: Order by UID ASC for correct IMAP sequence number mapping
 func (db *DB) GetMessagesByFolder(folderID int64, limit, offset int) ([]*models.Message, error) {
 	query := `
 		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
@@ -53,7 +54,7 @@ func (db *DB) GetMessagesByFolder(folderID int64, limit, offset int) ([]*models.
 		       in_reply_to, message_references, created_at, updated_at
 		FROM messages
 		WHERE folder_id = $1 AND deleted = false
-		ORDER BY date DESC
+		ORDER BY uid ASC
 		LIMIT $2 OFFSET $3
 	`
 

@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"log"
 
+	"github.com/emersion/go-imap-idle"
 	"github.com/emersion/go-imap/server"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/notify"
@@ -50,6 +51,49 @@ func NewWithHub(database *db.DB, addr string, hub *notify.Hub) *Server {
 		imapServer: s,
 		addr:       addr,
 	}
+}
+
+// NewWithBackend creates a new IMAP server with existing backend (for shared backend usage)
+func NewWithBackend(be *Backend, addr string) *Server {
+	// Create IMAP server with provided backend
+	s := server.New(be)
+	s.Addr = addr
+	s.AllowInsecureAuth = true
+
+	log.Printf("IMAP server with shared backend created, will listen on %s", addr)
+
+	return &Server{
+		imapServer: s,
+		addr:       addr,
+	}
+}
+
+// NewWithBackendTLS creates a new IMAP server with existing backend and TLS support
+func NewWithBackendTLS(be *Backend, addr string, certFile, keyFile string) (*Server, error) {
+	// Load TLS certificate
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, err
+	}
+
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}
+
+	// Create IMAP server with provided backend
+	s := server.New(be)
+	s.Addr = addr
+	s.AllowInsecureAuth = true
+	s.TLSConfig = tlsConfig
+
+	log.Printf("IMAP server with shared backend and TLS created, will listen on %s", addr)
+
+	return &Server{
+		imapServer: s,
+		addr:       addr,
+		tlsConfig:  tlsConfig,
+	}, nil
 }
 
 // NewWithTLS creates a new IMAP server with TLS support
@@ -105,7 +149,9 @@ func NewWithTLSAndHub(database *db.DB, addr string, certFile, keyFile string, hu
 	s.AllowInsecureAuth = true
 	s.TLSConfig = tlsConfig
 
-	log.Printf("IMAP server with TLS and IDLE support created, will listen on %s", addr)
+	// Enable IDLE extension for push notifications
+	s.Enable(idle.NewExtension())
+	log.Printf("IMAP server with TLS and IDLE extension enabled, will listen on %s", addr)
 
 	return &Server{
 		imapServer: s,
