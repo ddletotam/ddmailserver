@@ -239,3 +239,16 @@ func (db *DB) DeleteMessagesByFolder(folderID int64) (int64, error) {
 
 	return count, nil
 }
+
+// GetMessageCountByFolder returns the count of non-deleted messages in a folder
+func (db *DB) GetMessageCountByFolder(folderID int64) (uint32, error) {
+	var count int64
+	query := `SELECT COUNT(*) FROM messages WHERE folder_id = $1 AND deleted = false`
+
+	err := db.QueryRow(query, folderID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count messages: %w", err)
+	}
+
+	return uint32(count), nil
+}

@@ -13,6 +13,7 @@ import (
 	"github.com/yourusername/mailserver/internal/db"
 	imapclient "github.com/yourusername/mailserver/internal/imap/client"
 	imapserver "github.com/yourusername/mailserver/internal/imap/server"
+	"github.com/yourusername/mailserver/internal/notify"
 	smtpmx "github.com/yourusername/mailserver/internal/smtp/mx"
 	smtpserver "github.com/yourusername/mailserver/internal/smtp/server"
 	"github.com/yourusername/mailserver/internal/web"
@@ -93,10 +94,14 @@ func main() {
 	// Check if TLS is configured
 	hasTLS := cfg.Security.TLSCert != "" && cfg.Security.TLSKey != ""
 
-	// Initialize IMAP server (plain)
+	// Initialize notification hub for IMAP IDLE support
+	log.Printf("Initializing notification hub for IMAP IDLE...")
+	notifyHub := notify.NewHub()
+
+	// Initialize IMAP server (plain) with IDLE support
 	log.Printf("Initializing IMAP server...")
 	imapAddr := fmt.Sprintf("%s:%d", cfg.Server.WebHost, cfg.Server.IMAPPort)
-	imapSrv := imapserver.New(database, imapAddr)
+	imapSrv := imapserver.NewWithHub(database, imapAddr, notifyHub)
 	go func() {
 		if err := imapSrv.Start(); err != nil {
 			log.Fatalf("IMAP server error: %v", err)
@@ -108,7 +113,7 @@ func main() {
 	if hasTLS && cfg.Server.IMAPTLSPort > 0 {
 		log.Printf("Initializing IMAP TLS server...")
 		imapTLSAddr := fmt.Sprintf("%s:%d", cfg.Server.WebHost, cfg.Server.IMAPTLSPort)
-		imapTLSSrv, err := imapserver.NewWithTLS(database, imapTLSAddr, cfg.Security.TLSCert, cfg.Security.TLSKey)
+		imapTLSSrv, err := imapserver.NewWithTLSAndHub(database, imapTLSAddr, cfg.Security.TLSCert, cfg.Security.TLSKey, notifyHub)
 		if err != nil {
 			log.Printf("Failed to create IMAP TLS server: %v", err)
 		} else {
@@ -151,13 +156,13 @@ func main() {
 
 	// Initialize MX server (for receiving external mail) if port is configured
 	if cfg.Server.SMTPMXPort > 0 {
-		log.Printf("Initializing MX server...")
+		log.Printf("Initializing MX server with IDLE notifications...")
 		mxAddr := fmt.Sprintf("%s:%d", cfg.Server.WebHost, cfg.Server.SMTPMXPort)
-		hostname := "localhost"
+		mxHostname := "localhost"
 		if cfg.Server.WebHost != "" && cfg.Server.WebHost != "0.0.0.0" {
-			hostname = cfg.Server.WebHost
+			mxHostname = cfg.Server.WebHost
 		}
-		mxSrv := smtpmx.New(database, mxAddr, hostname)
+		mxSrv := smtpmx.NewWithHub(database, mxAddr, mxHostname, notifyHub)
 		go func() {
 			if err := mxSrv.Start(); err != nil {
 				log.Printf("MX server error: %v (may need root for port 25)", err)

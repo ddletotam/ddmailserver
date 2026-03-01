@@ -5,6 +5,7 @@ import (
 
 	"github.com/emersion/go-smtp"
 	"github.com/yourusername/mailserver/internal/db"
+	"github.com/yourusername/mailserver/internal/notify"
 )
 
 // Server wraps the MX SMTP server for incoming mail
@@ -27,6 +28,27 @@ func New(database *db.DB, addr string, hostname string) *Server {
 	s.MaxRecipients = 100
 
 	log.Printf("MX server created, will listen on %s", addr)
+
+	return &Server{
+		smtpServer: s,
+		addr:       addr,
+	}
+}
+
+// NewWithHub creates a new MX SMTP server with notification hub for IDLE support
+func NewWithHub(database *db.DB, addr string, hostname string, hub *notify.Hub) *Server {
+	// Create backend with hub
+	be := NewBackendWithHub(database, hub)
+
+	// Create SMTP server
+	s := smtp.NewServer(be)
+	s.Addr = addr
+	s.Domain = hostname
+	s.AllowInsecureAuth = true           // No auth required for MX
+	s.MaxMessageBytes = 25 * 1024 * 1024 // 25MB max message size
+	s.MaxRecipients = 100
+
+	log.Printf("MX server with IDLE notifications created, will listen on %s", addr)
 
 	return &Server{
 		smtpServer: s,
