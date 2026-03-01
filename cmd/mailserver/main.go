@@ -58,6 +58,15 @@ func main() {
 	defer database.Close()
 	log.Printf("Database connection established")
 
+	// Set encryption key for password encryption/decryption
+	database.SetEncryptionKey(cfg.Security.EncryptionKey)
+
+	// Migrate any unencrypted passwords
+	log.Printf("Checking for unencrypted passwords...")
+	if err := database.MigrateUnencryptedPasswords(); err != nil {
+		log.Fatalf("Failed to migrate unencrypted passwords: %v", err)
+	}
+
 	// Initialize worker pool
 	log.Printf("Initializing worker pool...")
 	pool := worker.NewPool(

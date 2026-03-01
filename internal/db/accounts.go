@@ -3,17 +3,28 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"time"
 
+	"github.com/yourusername/mailserver/internal/crypto"
 	"github.com/yourusername/mailserver/internal/models"
 )
 
 // CreateAccount creates a new external email account
-// TODO: Encrypt IMAPPassword and SMTPPassword before storing
-// This requires passing encryption key through the application layers
 func (db *DB) CreateAccount(account *models.Account) error {
 	account.CreatedAt = time.Now()
 	account.UpdatedAt = time.Now()
+
+	// Encrypt passwords before storing
+	encryptedIMAPPassword, err := crypto.EncryptPassword(account.IMAPPassword, db.encryptionKey)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt IMAP password: %w", err)
+	}
+
+	encryptedSMTPPassword, err := crypto.EncryptPassword(account.SMTPPassword, db.encryptionKey)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt SMTP password: %w", err)
+	}
 
 	query := `
 		INSERT INTO accounts (
@@ -23,11 +34,11 @@ func (db *DB) CreateAccount(account *models.Account) error {
 		RETURNING id
 	`
 
-	err := db.QueryRow(
+	err = db.QueryRow(
 		query,
 		account.UserID, account.Name, account.Email,
-		account.IMAPHost, account.IMAPPort, account.IMAPUsername, account.IMAPPassword, account.IMAPTLS,
-		account.SMTPHost, account.SMTPPort, account.SMTPUsername, account.SMTPPassword, account.SMTPTLS,
+		account.IMAPHost, account.IMAPPort, account.IMAPUsername, encryptedIMAPPassword, account.IMAPTLS,
+		account.SMTPHost, account.SMTPPort, account.SMTPUsername, encryptedSMTPPassword, account.SMTPTLS,
 		account.Enabled, account.CreatedAt, account.UpdatedAt,
 	).Scan(&account.ID)
 
@@ -73,6 +84,11 @@ func (db *DB) GetAccountsByUserID(userID int64) ([]*models.Account, error) {
 			account.LastSync = lastSync.Time
 		}
 
+		// Decrypt passwords
+		if err := db.decryptAccountPasswords(account); err != nil {
+			return nil, fmt.Errorf("failed to decrypt passwords for account %d: %w", account.ID, err)
+		}
+
 		accounts = append(accounts, account)
 	}
 
@@ -109,12 +125,28 @@ func (db *DB) GetAccountByID(id int64) (*models.Account, error) {
 		account.LastSync = lastSync.Time
 	}
 
+	// Decrypt passwords
+	if err := db.decryptAccountPasswords(account); err != nil {
+		return nil, fmt.Errorf("failed to decrypt passwords: %w", err)
+	}
+
 	return account, nil
 }
 
 // UpdateAccount updates an account
 func (db *DB) UpdateAccount(account *models.Account) error {
 	account.UpdatedAt = time.Now()
+
+	// Encrypt passwords before storing
+	encryptedIMAPPassword, err := crypto.EncryptPassword(account.IMAPPassword, db.encryptionKey)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt IMAP password: %w", err)
+	}
+
+	encryptedSMTPPassword, err := crypto.EncryptPassword(account.SMTPPassword, db.encryptionKey)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt SMTP password: %w", err)
+	}
 
 	query := `
 		UPDATE accounts
@@ -124,11 +156,11 @@ func (db *DB) UpdateAccount(account *models.Account) error {
 		WHERE id = $16
 	`
 
-	_, err := db.Exec(
+	_, err = db.Exec(
 		query,
 		account.Name, account.Email,
-		account.IMAPHost, account.IMAPPort, account.IMAPUsername, account.IMAPPassword, account.IMAPTLS,
-		account.SMTPHost, account.SMTPPort, account.SMTPUsername, account.SMTPPassword, account.SMTPTLS,
+		account.IMAPHost, account.IMAPPort, account.IMAPUsername, encryptedIMAPPassword, account.IMAPTLS,
+		account.SMTPHost, account.SMTPPort, account.SMTPUsername, encryptedSMTPPassword, account.SMTPTLS,
 		account.Enabled, account.LastSync, account.UpdatedAt, account.ID,
 	)
 
@@ -194,8 +226,95 @@ func (db *DB) GetAllEnabledAccounts() ([]*models.Account, error) {
 			account.LastSync = lastSync.Time
 		}
 
+		// Decrypt passwords
+		if err := db.decryptAccountPasswords(account); err != nil {
+			return nil, fmt.Errorf("failed to decrypt passwords for account %d: %w", account.ID, err)
+		}
+
 		accounts = append(accounts, account)
 	}
 
 	return accounts, nil
+}
+
+// decryptAccountPasswords decrypts IMAP and SMTP passwords in the account
+func (db *DB) decryptAccountPasswords(account *models.Account) error {
+	// Decrypt IMAP password
+	decryptedIMAP, err := crypto.DecryptPassword(account.IMAPPassword, db.encryptionKey)
+	if err != nil {
+		return fmt.Errorf("failed to decrypt IMAP password: %w", err)
+	}
+	account.IMAPPassword = decryptedIMAP
+
+	// Decrypt SMTP password
+	decryptedSMTP, err := crypto.DecryptPassword(account.SMTPPassword, db.encryptionKey)
+	if err != nil {
+		return fmt.Errorf("failed to decrypt SMTP password: %w", err)
+	}
+	account.SMTPPassword = decryptedSMTP
+
+	return nil
+}
+
+// MigrateUnencryptedPasswords finds and encrypts any plaintext passwords in the database
+func (db *DB) MigrateUnencryptedPasswords() error {
+	query := `SELECT id, imap_password, smtp_password FROM accounts`
+
+	rows, err := db.Query(query)
+	if err != nil {
+		return fmt.Errorf("failed to query accounts: %w", err)
+	}
+	defer rows.Close()
+
+	var migratedCount int
+	for rows.Next() {
+		var id int64
+		var imapPassword, smtpPassword string
+
+		if err := rows.Scan(&id, &imapPassword, &smtpPassword); err != nil {
+			return fmt.Errorf("failed to scan account: %w", err)
+		}
+
+		needsUpdate := false
+		var newIMAPPassword, newSMTPPassword string
+
+		// Check if IMAP password needs encryption
+		if !crypto.IsEncrypted(imapPassword) {
+			encrypted, err := crypto.EncryptPassword(imapPassword, db.encryptionKey)
+			if err != nil {
+				return fmt.Errorf("failed to encrypt IMAP password for account %d: %w", id, err)
+			}
+			newIMAPPassword = encrypted
+			needsUpdate = true
+		} else {
+			newIMAPPassword = imapPassword
+		}
+
+		// Check if SMTP password needs encryption
+		if !crypto.IsEncrypted(smtpPassword) {
+			encrypted, err := crypto.EncryptPassword(smtpPassword, db.encryptionKey)
+			if err != nil {
+				return fmt.Errorf("failed to encrypt SMTP password for account %d: %w", id, err)
+			}
+			newSMTPPassword = encrypted
+			needsUpdate = true
+		} else {
+			newSMTPPassword = smtpPassword
+		}
+
+		// Update if needed
+		if needsUpdate {
+			updateQuery := `UPDATE accounts SET imap_password = $1, smtp_password = $2 WHERE id = $3`
+			if _, err := db.Exec(updateQuery, newIMAPPassword, newSMTPPassword, id); err != nil {
+				return fmt.Errorf("failed to update account %d: %w", id, err)
+			}
+			migratedCount++
+		}
+	}
+
+	if migratedCount > 0 {
+		log.Printf("Migrated %d accounts with unencrypted passwords", migratedCount)
+	}
+
+	return nil
 }

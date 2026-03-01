@@ -36,9 +36,10 @@ type DatabaseConfig struct {
 }
 
 type SecurityConfig struct {
-	JWTSecret string `yaml:"jwt_secret"`
-	TLSCert   string `yaml:"tls_cert"`
-	TLSKey    string `yaml:"tls_key"`
+	JWTSecret     string `yaml:"jwt_secret"`
+	EncryptionKey string `yaml:"encryption_key"`
+	TLSCert       string `yaml:"tls_cert"`
+	TLSKey        string `yaml:"tls_key"`
 }
 
 type SyncConfig struct {
@@ -91,6 +92,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Security.JWTSecret == "" {
 		return fmt.Errorf("JWT secret is required")
+	}
+	if c.Security.EncryptionKey == "" {
+		return fmt.Errorf("encryption key is required")
+	}
+	if len(c.Security.EncryptionKey) < 32 {
+		return fmt.Errorf("encryption key must be at least 32 characters")
 	}
 	if c.Workers.CPULimit < 1 || c.Workers.CPULimit > 100 {
 		return fmt.Errorf("CPU limit must be between 1 and 100")

@@ -9,6 +9,7 @@ import (
 
 type DB struct {
 	*sql.DB
+	encryptionKey string
 }
 
 // Connect establishes a connection to PostgreSQL
@@ -27,12 +28,17 @@ func Connect(dsn string) (*DB, error) {
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(5)
 
-	return &DB{db}, nil
+	return &DB{DB: db}, nil
 }
 
 // Close closes the database connection
 func (db *DB) Close() error {
 	return db.DB.Close()
+}
+
+// SetEncryptionKey sets the encryption key for encrypting/decrypting passwords
+func (db *DB) SetEncryptionKey(key string) {
+	db.encryptionKey = key
 }
 
 // RunMigrations applies database migrations
