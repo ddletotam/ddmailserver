@@ -25,9 +25,15 @@ func (db *DB) CreateFolder(folder *models.Folder) error {
 		parentID.Valid = true
 	}
 
+	var accountID sql.NullInt64
+	if folder.AccountID > 0 {
+		accountID.Int64 = folder.AccountID
+		accountID.Valid = true
+	}
+
 	err := db.QueryRow(
 		query,
-		folder.UserID, folder.AccountID, folder.Name, folder.Path, folder.Type,
+		folder.UserID, accountID, folder.Name, folder.Path, folder.Type,
 		parentID, folder.UIDNext, folder.UIDValidity, folder.CreatedAt, folder.UpdatedAt,
 	).Scan(&folder.ID)
 
@@ -41,7 +47,7 @@ func (db *DB) CreateFolder(folder *models.Folder) error {
 // GetFoldersByUser retrieves all folders for a user
 func (db *DB) GetFoldersByUser(userID int64) ([]*models.Folder, error) {
 	query := `
-		SELECT id, user_id, account_id, name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
+		SELECT id, user_id, COALESCE(account_id, 0), name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
 		FROM folders
 		WHERE user_id = $1
 		ORDER BY path
@@ -59,7 +65,7 @@ func (db *DB) GetFoldersByUser(userID int64) ([]*models.Folder, error) {
 // GetFoldersByAccount retrieves folders for a specific account
 func (db *DB) GetFoldersByAccount(accountID int64) ([]*models.Folder, error) {
 	query := `
-		SELECT id, user_id, account_id, name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
+		SELECT id, user_id, COALESCE(account_id, 0), name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
 		FROM folders
 		WHERE account_id = $1
 		ORDER BY path
@@ -78,7 +84,7 @@ func (db *DB) GetFoldersByAccount(accountID int64) ([]*models.Folder, error) {
 func (db *DB) GetFolderByID(id int64) (*models.Folder, error) {
 	folder := &models.Folder{}
 	query := `
-		SELECT id, user_id, account_id, name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
+		SELECT id, user_id, COALESCE(account_id, 0), name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
 		FROM folders
 		WHERE id = $1
 	`
@@ -102,7 +108,7 @@ func (db *DB) GetFolderByID(id int64) (*models.Folder, error) {
 func (db *DB) GetFolderByPath(accountID int64, path string) (*models.Folder, error) {
 	folder := &models.Folder{}
 	query := `
-		SELECT id, user_id, account_id, name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
+		SELECT id, user_id, COALESCE(account_id, 0), name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
 		FROM folders
 		WHERE account_id = $1 AND path = $2
 	`
@@ -120,6 +126,55 @@ func (db *DB) GetFolderByPath(accountID int64, path string) (*models.Folder, err
 	}
 
 	return folder, nil
+}
+
+// GetLocalInboxByUser retrieves the local inbox folder for a user (account_id IS NULL)
+func (db *DB) GetLocalInboxByUser(userID int64) (*models.Folder, error) {
+	folder := &models.Folder{}
+	query := `
+		SELECT id, user_id, COALESCE(account_id, 0), name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
+		FROM folders
+		WHERE user_id = $1 AND account_id IS NULL AND type = 'inbox'
+	`
+
+	err := db.QueryRow(query, userID).Scan(
+		&folder.ID, &folder.UserID, &folder.AccountID, &folder.Name, &folder.Path,
+		&folder.Type, &folder.ParentID, &folder.UIDNext, &folder.UIDValidity, &folder.CreatedAt, &folder.UpdatedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("local inbox not found")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get local inbox: %w", err)
+	}
+
+	return folder, nil
+}
+
+// GetOrCreateLocalInbox gets or creates the local INBOX folder for a user (for MX delivery)
+func (db *DB) GetOrCreateLocalInbox(userID int64) (*models.Folder, error) {
+	// Try to find existing local INBOX
+	folder, err := db.GetLocalInboxByUser(userID)
+	if err == nil {
+		return folder, nil
+	}
+
+	// Create new local INBOX
+	inbox := &models.Folder{
+		UserID:    userID,
+		AccountID: 0, // Will be converted to NULL
+		Name:      "INBOX",
+		Path:      "INBOX",
+		Type:      "inbox",
+		UIDNext:   1,
+	}
+
+	if err := db.CreateFolder(inbox); err != nil {
+		return nil, err
+	}
+
+	return inbox, nil
 }
 
 // UpdateFolder updates a folder

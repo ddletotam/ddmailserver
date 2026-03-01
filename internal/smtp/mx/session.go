@@ -266,33 +266,10 @@ func (s *Session) Logout() error {
 
 // getOrCreateInbox finds or creates an INBOX folder for the user
 func (s *Session) getOrCreateInbox(userID int64) (int64, error) {
-	// Try to find existing INBOX for local delivery (account_id = 0)
-	folders, err := s.database.GetFoldersByUser(userID)
+	folder, err := s.database.GetOrCreateLocalInbox(userID)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get folders: %w", err)
+		return 0, fmt.Errorf("failed to get/create local inbox: %w", err)
 	}
-
-	// Look for INBOX with account_id = 0 (local)
-	for _, f := range folders {
-		if f.AccountID == 0 && f.Type == "inbox" {
-			return f.ID, nil
-		}
-	}
-
-	// Create local INBOX folder
-	folder := &models.Folder{
-		UserID:    userID,
-		AccountID: 0, // Local delivery
-		Name:      "INBOX",
-		Path:      "INBOX",
-		Type:      "inbox",
-	}
-
-	if err := s.database.CreateFolder(folder); err != nil {
-		return 0, fmt.Errorf("failed to create inbox: %w", err)
-	}
-
-	log.Printf("MX: Created local INBOX folder %d for user %d", folder.ID, userID)
 	return folder.ID, nil
 }
 
