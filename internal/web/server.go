@@ -133,6 +133,21 @@ func (s *Server) setupRoutes() {
 	// Settings
 	web.HandleFunc("/settings", s.HandleSettingsPage).Methods("GET")
 
+	// Domains (for MX server)
+	web.HandleFunc("/domains", s.HandleDomainsPage).Methods("GET")
+
+	// Domains API
+	domainsAPI := s.router.PathPrefix("/api/domains").Subrouter()
+	domainsAPI.Use(s.APIAuthMiddleware)
+	domainsAPI.HandleFunc("", s.HandleCreateDomain).Methods("POST")
+	domainsAPI.HandleFunc("/{id}", s.HandleDeleteDomain).Methods("DELETE")
+
+	// Mailboxes API
+	mailboxesAPI := s.router.PathPrefix("/api/mailboxes").Subrouter()
+	mailboxesAPI.Use(s.APIAuthMiddleware)
+	mailboxesAPI.HandleFunc("", s.HandleCreateMailbox).Methods("POST")
+	mailboxesAPI.HandleFunc("/{id}", s.HandleDeleteMailbox).Methods("DELETE")
+
 	log.Printf("Routes configured")
 }
 

@@ -15,6 +15,7 @@
   "nav.inbox": "Входящие",
   "nav.compose": "Написать",
   "nav.accounts": "Аккаунты",
+  "nav.domains": "Домены",
   "nav.settings": "Настройки",
 
   "dashboard.welcome": "Добро пожаловать",
@@ -169,5 +170,27 @@
   "settings.danger_zone_description": "После удаления аккаунта восстановление невозможно. Будьте уверены в своем решении.",
   "settings.delete_account": "Удалить аккаунт",
   "settings.delete_confirm": "Вы уверены, что хотите удалить свой аккаунт? Это действие невозможно отменить.",
-  "settings.delete_confirm_final": "Это ваш последний шанс. Все ваши данные будут безвозвратно удалены. Продолжить?"
+  "settings.delete_confirm_final": "Это ваш последний шанс. Все ваши данные будут безвозвратно удалены. Продолжить?",
+
+  "domains.title": "Домены и почтовые ящики",
+  "domains.add_domain": "Добавить домен",
+  "domains.domain_name": "Имя домена",
+  "domains.your_domains": "Ваши домены",
+  "domains.domain": "Домен",
+  "domains.status": "Статус",
+  "domains.created": "Создан",
+  "domains.actions": "Действия",
+  "domains.active": "Активен",
+  "domains.disabled": "Отключён",
+  "domains.delete": "Удалить",
+  "domains.delete_confirm": "Удалить",
+  "domains.no_domains": "Домены ещё не настроены",
+  "domains.add": "Добавить",
+  "domains.add_mailbox": "Добавить почтовый ящик",
+  "domains.local_part": "Локальная часть",
+  "domains.your_mailboxes": "Ваши почтовые ящики",
+  "domains.email": "Email",
+  "domains.no_mailboxes": "Почтовые ящики ещё не настроены",
+  "domains.dns_setup": "Настройка DNS",
+  "domains.dns_instructions": "Добавьте следующие DNS записи для вашего домена чтобы получать почту:"
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/yourusername/mailserver/internal/db"
 	imapclient "github.com/yourusername/mailserver/internal/imap/client"
 	imapserver "github.com/yourusername/mailserver/internal/imap/server"
+	smtpmx "github.com/yourusername/mailserver/internal/smtp/mx"
 	smtpserver "github.com/yourusername/mailserver/internal/smtp/server"
 	"github.com/yourusername/mailserver/internal/web"
 	"github.com/yourusername/mailserver/internal/worker"
@@ -94,7 +95,7 @@ func main() {
 	}()
 	defer imapSrv.Stop()
 
-	// Initialize SMTP server
+	// Initialize SMTP server (submission - for authenticated users)
 	log.Printf("Initializing SMTP server...")
 	smtpAddr := fmt.Sprintf("%s:%d", cfg.Server.WebHost, cfg.Server.SMTPPort)
 	smtpSrv := smtpserver.New(database, smtpAddr)
@@ -104,6 +105,23 @@ func main() {
 		}
 	}()
 	defer smtpSrv.Stop()
+
+	// Initialize MX server (for receiving external mail) if port is configured
+	if cfg.Server.SMTPMXPort > 0 {
+		log.Printf("Initializing MX server...")
+		mxAddr := fmt.Sprintf("%s:%d", cfg.Server.WebHost, cfg.Server.SMTPMXPort)
+		hostname := "localhost"
+		if cfg.Server.WebHost != "" && cfg.Server.WebHost != "0.0.0.0" {
+			hostname = cfg.Server.WebHost
+		}
+		mxSrv := smtpmx.New(database, mxAddr, hostname)
+		go func() {
+			if err := mxSrv.Start(); err != nil {
+				log.Printf("MX server error: %v (may need root for port 25)", err)
+			}
+		}()
+		defer mxSrv.Stop()
+	}
 
 	// Initialize web server
 	log.Printf("Initializing web server...")

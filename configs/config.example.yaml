@@ -7,6 +7,9 @@ server:
   smtp_port: 1587
   smtp_tls_port: 1465
 
+  # SMTP MX server (for receiving external mail, port 25)
+  smtp_mx_port: 25
+
   # Web interface and API
   web_port: 8080
   web_host: "0.0.0.0"

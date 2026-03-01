@@ -21,6 +21,7 @@ type ServerConfig struct {
 	IMAPTLSPort int    `yaml:"imap_tls_port"`
 	SMTPPort    int    `yaml:"smtp_port"`
 	SMTPTLSPort int    `yaml:"smtp_tls_port"`
+	SMTPMXPort  int    `yaml:"smtp_mx_port"` // MX server port for incoming mail (default 25)
 	WebPort     int    `yaml:"web_port"`
 	WebHost     string `yaml:"web_host"`
 	Locale      string `yaml:"locale"`
