@@ -13,22 +13,27 @@ import (
 
 // HandleDomainsPage renders the domains management page
 func (s *Server) HandleDomainsPage(w http.ResponseWriter, r *http.Request) {
-	userID := getUserID(r)
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
 
-	domains, err := s.database.GetDomainsByUserID(userID)
+	domains, err := s.database.GetDomainsByUserID(user.ID)
 	if err != nil {
 		log.Printf("Failed to get domains: %v", err)
 		domains = []*models.Domain{}
 	}
 
 	// Get mailboxes with domain info
-	mailboxes, err := s.database.GetMailboxesWithDomainByUserID(userID)
+	mailboxes, err := s.database.GetMailboxesWithDomainByUserID(user.ID)
 	if err != nil {
 		log.Printf("Failed to get mailboxes: %v", err)
 	}
 
 	s.renderTemplate(w, "domains.html", map[string]interface{}{
 		"Title":     s.i18n.T("domains.title"),
+		"User":      user,
 		"Domains":   domains,
 		"Mailboxes": mailboxes,
 	})
