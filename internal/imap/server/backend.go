@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"log"
+	"time"
 
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/backend"
@@ -44,6 +45,7 @@ func NewBackendWithHub(database *db.DB, hub *notify.Hub) *Backend {
 
 // Updates returns the channel for sending updates to clients (implements BackendUpdater)
 func (b *Backend) Updates() <-chan backend.Update {
+	log.Printf("IMAP Backend: Updates() method called by go-imap server")
 	return b.updates
 }
 
@@ -63,13 +65,29 @@ func (b *Backend) listenNotifications() {
 		switch event.Type {
 		case notify.EventNewMessage:
 			// Create MailboxUpdate with new message count
-			update := &backend.MailboxUpdate{
-				Update:        backend.NewUpdate(event.Username, event.Mailbox),
-				MailboxStatus: &imap.MailboxStatus{Name: event.Mailbox, Messages: event.Count},
+			// Use empty username and mailbox to broadcast to ALL connections
+			// IMPORTANT: Must set Items[StatusMessages] for EXISTS to be written!
+			status := &imap.MailboxStatus{
+				Name:     event.Mailbox,
+				Messages: event.Count,
+				Items:    map[imap.StatusItem]interface{}{imap.StatusMessages: nil},
 			}
-			b.updates <- update
-			log.Printf("IMAP Backend: Sent EXISTS update (messages: %d) for %s/%s",
-				event.Count, event.Username, event.Mailbox)
+			update := &backend.MailboxUpdate{
+				Update:        backend.NewUpdate("", ""),
+				MailboxStatus: status,
+			}
+
+			// Log channel status before sending
+			log.Printf("IMAP Backend: Channel len=%d, cap=%d before send", len(b.updates), cap(b.updates))
+
+			// Send with timeout to detect if channel is being consumed
+			select {
+			case b.updates <- update:
+				log.Printf("IMAP Backend: Sent EXISTS update (messages: %d) - channel len now=%d",
+					event.Count, len(b.updates))
+			case <-time.After(5 * time.Second):
+				log.Printf("IMAP Backend: TIMEOUT - channel not being read! len=%d", len(b.updates))
+			}
 		}
 	}
 }

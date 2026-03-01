@@ -98,10 +98,10 @@ func main() {
 	log.Printf("Initializing notification hub for IMAP IDLE...")
 	notifyHub := notify.NewHub()
 
-	// Initialize IMAP server (plain) with IDLE support
-	log.Printf("Initializing IMAP server...")
+	// Initialize IMAP server (plain) WITHOUT IDLE support
+	log.Printf("Initializing IMAP server (plain, no IDLE)...")
 	imapAddr := fmt.Sprintf("%s:%d", cfg.Server.WebHost, cfg.Server.IMAPPort)
-	imapSrv := imapserver.NewWithHub(database, imapAddr, notifyHub)
+	imapSrv := imapserver.New(database, imapAddr)
 	go func() {
 		if err := imapSrv.Start(); err != nil {
 			log.Fatalf("IMAP server error: %v", err)
@@ -109,9 +109,9 @@ func main() {
 	}()
 	defer imapSrv.Stop()
 
-	// Initialize IMAP TLS server if configured
+	// Initialize IMAP TLS server WITH IDLE support (only TLS gets push notifications)
 	if hasTLS && cfg.Server.IMAPTLSPort > 0 {
-		log.Printf("Initializing IMAP TLS server...")
+		log.Printf("Initializing IMAP TLS server with IDLE support...")
 		imapTLSAddr := fmt.Sprintf("%s:%d", cfg.Server.WebHost, cfg.Server.IMAPTLSPort)
 		imapTLSSrv, err := imapserver.NewWithTLSAndHub(database, imapTLSAddr, cfg.Security.TLSCert, cfg.Security.TLSKey, notifyHub)
 		if err != nil {
