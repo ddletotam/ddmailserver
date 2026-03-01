@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"fmt"
 	"log"
 	"time"
 
@@ -306,11 +308,10 @@ func (m *Mailbox) convertToIMAPMessage(msg *models.Message, seqNum uint32, items
 			}
 
 		case imap.FetchBody, imap.FetchBodyStructure:
-			// TODO: Implement proper body structure
 			imapMsg.BodyStructure = &imap.BodyStructure{
 				MIMEType:    "text",
 				MIMESubType: "plain",
-				Params:      map[string]string{},
+				Params:      map[string]string{"charset": "utf-8"},
 				Size:        uint32(len(msg.Body)),
 			}
 
@@ -341,10 +342,53 @@ func (m *Mailbox) convertToIMAPMessage(msg *models.Message, seqNum uint32, items
 
 		case imap.FetchRFC822Size:
 			imapMsg.Size = uint32(msg.Size)
+
+		case imap.FetchRFC822, imap.FetchRFC822Header, imap.FetchRFC822Text:
+			// Handle RFC822 fetches
+			section, _ := imap.ParseBodySectionName(item)
+			if section != nil {
+				literal := m.buildMessageLiteral(msg, section)
+				imapMsg.Body[section] = literal
+			}
+
+		default:
+			// Handle BODY[] section requests
+			section, err := imap.ParseBodySectionName(item)
+			if err == nil && section != nil {
+				literal := m.buildMessageLiteral(msg, section)
+				imapMsg.Body[section] = literal
+			}
 		}
 	}
 
 	return imapMsg
+}
+
+// buildMessageLiteral creates a literal for body section requests
+func (m *Mailbox) buildMessageLiteral(msg *models.Message, section *imap.BodySectionName) imap.Literal {
+	// Build RFC822 formatted message
+	var buf bytes.Buffer
+
+	// Write headers
+	buf.WriteString(fmt.Sprintf("From: %s\r\n", msg.From))
+	buf.WriteString(fmt.Sprintf("To: %s\r\n", msg.To))
+	if msg.Cc != "" {
+		buf.WriteString(fmt.Sprintf("Cc: %s\r\n", msg.Cc))
+	}
+	buf.WriteString(fmt.Sprintf("Subject: %s\r\n", msg.Subject))
+	buf.WriteString(fmt.Sprintf("Date: %s\r\n", msg.Date.Format("Mon, 02 Jan 2006 15:04:05 -0700")))
+	buf.WriteString(fmt.Sprintf("Message-ID: %s\r\n", msg.MessageID))
+	buf.WriteString("MIME-Version: 1.0\r\n")
+	buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+	buf.WriteString("\r\n")
+
+	// Write body (unless only headers requested)
+	specifier := section.Specifier
+	if specifier != imap.HeaderSpecifier {
+		buf.WriteString(msg.Body)
+	}
+
+	return bytes.NewReader(buf.Bytes())
 }
 
 // Helper function to match message against search criteria
