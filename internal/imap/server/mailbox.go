@@ -188,7 +188,8 @@ func (m *Mailbox) CreateMessage(flags []string, date time.Time, body imap.Litera
 
 // UpdateMessagesFlags updates message flags
 func (m *Mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, operation imap.FlagsOp, flags []string) error {
-	log.Printf("Updating flags for messages in mailbox %s", m.name)
+	log.Printf("UpdateMessagesFlags called: mailbox=%s, uid=%v, seqSet=%v, operation=%v, flags=%v",
+		m.name, uid, seqSet, operation, flags)
 
 	// Get messages
 	var messages []*models.Message
@@ -238,6 +239,9 @@ func (m *Mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, operation i
 		err := m.database.UpdateMessageFlags(msg.ID, seen, flagged, answered, deleted)
 		if err != nil {
 			log.Printf("Failed to update flags for message %d: %v", msg.ID, err)
+		} else {
+			log.Printf("Updated flags for message %d: seen=%v, flagged=%v, answered=%v, deleted=%v",
+				msg.ID, seen, flagged, answered, deleted)
 		}
 	}
 
