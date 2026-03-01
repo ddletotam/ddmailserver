@@ -207,6 +207,14 @@ func (s *Session) Data(r io.Reader) error {
 			continue
 		}
 
+		// Get next UID for this folder
+		maxUID, err := s.database.GetMaxUIDForFolder(folderID)
+		if err != nil {
+			log.Printf("MX: Failed to get max UID for folder %d: %v", folderID, err)
+			maxUID = 0
+		}
+		nextUID := maxUID + 1
+
 		// Create message
 		msg := &models.Message{
 			AccountID:         0, // No external account - local delivery
@@ -222,7 +230,7 @@ func (s *Session) Data(r io.Reader) error {
 			Body:              body,
 			BodyHTML:          bodyHTML,
 			Size:              messageSize,
-			UID:               0, // Will be assigned
+			UID:               nextUID,
 			Seen:              false,
 			Flagged:           false,
 			Answered:          false,
