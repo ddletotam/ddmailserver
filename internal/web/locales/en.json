@@ -15,6 +15,7 @@
   "nav.inbox": "Inbox",
   "nav.compose": "Compose",
   "nav.accounts": "Accounts",
+  "nav.domains": "Domains",
   "nav.settings": "Settings",
 
   "dashboard.welcome": "Welcome",
@@ -169,5 +170,27 @@
   "settings.danger_zone_description": "Once you delete your account, there is no going back. Please be certain.",
   "settings.delete_account": "Delete Account",
   "settings.delete_confirm": "Are you sure you want to delete your account? This action cannot be undone.",
-  "settings.delete_confirm_final": "This is your last chance. All your data will be permanently deleted. Continue?"
+  "settings.delete_confirm_final": "This is your last chance. All your data will be permanently deleted. Continue?",
+
+  "domains.title": "Domains & Mailboxes",
+  "domains.add_domain": "Add Domain",
+  "domains.domain_name": "Domain Name",
+  "domains.your_domains": "Your Domains",
+  "domains.domain": "Domain",
+  "domains.status": "Status",
+  "domains.created": "Created",
+  "domains.actions": "Actions",
+  "domains.active": "Active",
+  "domains.disabled": "Disabled",
+  "domains.delete": "Delete",
+  "domains.delete_confirm": "Delete",
+  "domains.no_domains": "No domains configured yet",
+  "domains.add": "Add",
+  "domains.add_mailbox": "Add Mailbox",
+  "domains.local_part": "Local Part",
+  "domains.your_mailboxes": "Your Mailboxes",
+  "domains.email": "Email",
+  "domains.no_mailboxes": "No mailboxes configured yet",
+  "domains.dns_setup": "DNS Setup Instructions",
+  "domains.dns_instructions": "Add the following DNS records to your domain to receive email:"
 }

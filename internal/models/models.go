@@ -122,3 +122,22 @@ type OutboxMessage struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	SentAt    time.Time `json:"sent_at"`
 }
+
+// Domain represents a local domain that the MX server accepts mail for
+type Domain struct {
+	ID        int64     `json:"id"`
+	Domain    string    `json:"domain"`  // e.g. "example.com"
+	UserID    int64     `json:"user_id"` // Owner of the domain
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Mailbox represents a mailbox on a local domain
+type Mailbox struct {
+	ID        int64     `json:"id"`
+	UserID    int64     `json:"user_id"`    // User who receives mail
+	DomainID  int64     `json:"domain_id"`  // Domain this mailbox belongs to
+	LocalPart string    `json:"local_part"` // Part before @ (e.g. "info" for info@example.com)
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
+}

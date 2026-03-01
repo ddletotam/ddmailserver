@@ -21,6 +21,19 @@ func respondError(w http.ResponseWriter, status int, message string) {
 	respondJSON(w, status, map[string]string{"error": message})
 }
 
+// respondHTMXError returns an HTML error message for HTMX requests
+func respondHTMXError(w http.ResponseWriter, r *http.Request, status int, message string) {
+	// Check if request is from HTMX
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(status)
+		// Return plain text - the target div already has error-message styling
+		w.Write([]byte(message))
+		return
+	}
+	respondJSON(w, status, map[string]string{"error": message})
+}
+
 // RegisterRequest represents registration request
 type RegisterRequest struct {
 	Username        string `json:"username"`
@@ -43,7 +56,7 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	if contentType == "application/x-www-form-urlencoded" || contentType == "multipart/form-data" {
 		// Parse form data
 		if err := r.ParseForm(); err != nil {
-			respondError(w, http.StatusBadRequest, "invalid form data")
+			respondHTMXError(w, r, http.StatusBadRequest, "Invalid form data")
 			return
 		}
 		req.Username = r.FormValue("username")
@@ -52,20 +65,20 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Parse JSON
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondError(w, http.StatusBadRequest, "invalid request body")
+			respondHTMXError(w, r, http.StatusBadRequest, "Invalid request body")
 			return
 		}
 	}
 
 	// Validate input
 	if req.Username == "" || req.Password == "" {
-		respondError(w, http.StatusBadRequest, "username and password are required")
+		respondHTMXError(w, r, http.StatusBadRequest, "Username and password are required")
 		return
 	}
 
 	// Check passwords match
 	if req.Password != req.PasswordConfirm {
-		respondError(w, http.StatusBadRequest, "passwords do not match")
+		respondHTMXError(w, r, http.StatusBadRequest, "Passwords do not match")
 		return
 	}
 
@@ -73,7 +86,7 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	recoveryKey, err := GenerateRecoveryKey()
 	if err != nil {
 		log.Printf("Failed to generate recovery key: %v", err)
-		respondError(w, http.StatusInternalServerError, "failed to generate recovery key")
+		respondHTMXError(w, r, http.StatusInternalServerError, "Failed to generate recovery key")
 		return
 	}
 
@@ -81,7 +94,7 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	passwordHash, err := HashPassword(req.Password)
 	if err != nil {
 		log.Printf("Failed to hash password: %v", err)
-		respondError(w, http.StatusInternalServerError, "failed to hash password")
+		respondHTMXError(w, r, http.StatusInternalServerError, "Failed to hash password")
 		return
 	}
 
@@ -89,7 +102,7 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	recoveryKeyHash, err := HashRecoveryKey(recoveryKey)
 	if err != nil {
 		log.Printf("Failed to hash recovery key: %v", err)
-		respondError(w, http.StatusInternalServerError, "failed to hash recovery key")
+		respondHTMXError(w, r, http.StatusInternalServerError, "Failed to hash recovery key")
 		return
 	}
 
@@ -97,7 +110,7 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	user, err := s.database.CreateUser(req.Username, passwordHash, "", recoveryKeyHash)
 	if err != nil {
 		log.Printf("Failed to create user: %v", err)
-		respondError(w, http.StatusInternalServerError, "failed to create user")
+		respondHTMXError(w, r, http.StatusBadRequest, "Username already exists")
 		return
 	}
 
@@ -125,7 +138,13 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 	})
 
-	// Return success - client should redirect to /recovery-key
+	// For HTMX requests, return empty response - JS will handle redirect
+	if r.Header.Get("HX-Request") == "true" {
+		w.WriteHeader(http.StatusCreated)
+		return
+	}
+
+	// For API requests, return JSON with token
 	respondJSON(w, http.StatusCreated, map[string]interface{}{
 		"user":  user,
 		"token": token,
@@ -141,7 +160,7 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	if contentType == "application/x-www-form-urlencoded" || contentType == "multipart/form-data" {
 		// Parse form data
 		if err := r.ParseForm(); err != nil {
-			respondError(w, http.StatusBadRequest, "invalid form data")
+			respondHTMXError(w, r, http.StatusBadRequest, "Invalid form data")
 			return
 		}
 		req.Username = r.FormValue("username")
@@ -149,7 +168,7 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Parse JSON
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondError(w, http.StatusBadRequest, "invalid request body")
+			respondHTMXError(w, r, http.StatusBadRequest, "Invalid request body")
 			return
 		}
 	}
@@ -157,13 +176,13 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	// Get user
 	user, err := s.database.GetUserByUsername(req.Username)
 	if err != nil {
-		respondError(w, http.StatusUnauthorized, "invalid credentials")
+		respondHTMXError(w, r, http.StatusUnauthorized, "Invalid username or password")
 		return
 	}
 
 	// Verify password
 	if !VerifyPassword(user.PasswordHash, req.Password) {
-		respondError(w, http.StatusUnauthorized, "invalid credentials")
+		respondHTMXError(w, r, http.StatusUnauthorized, "Invalid username or password")
 		return
 	}
 
@@ -171,7 +190,7 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	token, err := GenerateToken(user.ID, user.Username, s.jwtSecret)
 	if err != nil {
 		log.Printf("Failed to generate token: %v", err)
-		respondError(w, http.StatusInternalServerError, "failed to generate token")
+		respondHTMXError(w, r, http.StatusInternalServerError, "Login failed, please try again")
 		return
 	}
 
@@ -180,6 +199,13 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	// Set session cookie for web UI
 	s.SetSessionCookie(w, token)
 
+	// For HTMX requests, return empty response - JS will handle redirect
+	if r.Header.Get("HX-Request") == "true" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// For API requests, return JSON with token
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"user":  user,
 		"token": token,
