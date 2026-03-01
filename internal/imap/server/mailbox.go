@@ -127,7 +127,6 @@ func (m *Mailbox) ListMessages(uid bool, seqSet *imap.SeqSet, items []imap.Fetch
 	log.Printf("Found %d messages in mailbox %s", len(messages), m.name)
 
 	// Convert to IMAP messages and send to channel
-	sentCount := 0
 	for seqNum, msg := range messages {
 		// Check if this message matches the sequence set
 		id := uint32(seqNum + 1)
@@ -135,17 +134,13 @@ func (m *Mailbox) ListMessages(uid bool, seqSet *imap.SeqSet, items []imap.Fetch
 			id = msg.UID
 		}
 
-		log.Printf("Message %d: seqNum=%d, UID=%d, id=%d, contains=%v", msg.ID, seqNum+1, msg.UID, id, seqSet.Contains(id))
-
 		if !seqSet.Contains(id) {
 			continue
 		}
 
 		imapMsg := m.convertToIMAPMessage(msg, uint32(seqNum+1), items)
 		ch <- imapMsg
-		sentCount++
 	}
-	log.Printf("Sent %d messages to client for mailbox %s", sentCount, m.name)
 
 	return nil
 }
