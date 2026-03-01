@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"time"
 
 	"github.com/emersion/go-imap"
@@ -98,11 +99,11 @@ func (t *SyncTask) Execute(ctx context.Context) error {
 	return nil
 }
 
-// syncFolder synchronizes a single folder
+// syncFolder synchronizes a single folder using incremental UID-based sync
 func (t *SyncTask) syncFolder(ctx context.Context, client *Client, folderInfo *imap.MailboxInfo) error {
 	log.Printf("Syncing folder %s for %s", folderInfo.Name, t.account.Email)
 
-	// Select the folder
+	// Select the folder on IMAP server
 	mbox, err := client.SelectFolder(folderInfo.Name)
 	if err != nil {
 		return err
@@ -114,24 +115,57 @@ func (t *SyncTask) syncFolder(ctx context.Context, client *Client, folderInfo *i
 		return err
 	}
 
-	// If mailbox is empty, nothing to do
+	// Check UIDVALIDITY - if changed, folder was recreated on server
+	serverUIDValidity := mbox.UidValidity
+	uidValidityChanged := folder.UIDValidity != 0 && folder.UIDValidity != serverUIDValidity
+	if uidValidityChanged {
+		log.Printf("UIDVALIDITY changed for folder %s (was %d, now %d) - purging local messages",
+			folderInfo.Name, folder.UIDValidity, serverUIDValidity)
+
+		deletedCount, err := t.database.DeleteMessagesByFolder(folder.ID)
+		if err != nil {
+			return fmt.Errorf("failed to delete messages after UIDVALIDITY change: %w", err)
+		}
+		log.Printf("Deleted %d messages from folder %s due to UIDVALIDITY change", deletedCount, folderInfo.Name)
+	}
+
+	// If mailbox is empty, just update UIDVALIDITY and return
 	if mbox.Messages == 0 {
 		log.Printf("Folder %s is empty", folderInfo.Name)
+		if err := t.database.UpdateFolderUIDInfo(folder.ID, mbox.UidNext, serverUIDValidity); err != nil {
+			return fmt.Errorf("failed to update folder UID info: %w", err)
+		}
 		return nil
 	}
 
-	// For now, sync only recent messages (last 100)
-	// TODO: Implement incremental sync based on UIDs
-	from := uint32(1)
-	to := mbox.Messages
-	if mbox.Messages > 100 {
-		from = mbox.Messages - 99
+	// Get max UID already synced for this folder
+	maxUID, err := t.database.GetMaxUIDForFolder(folder.ID)
+	if err != nil {
+		return fmt.Errorf("failed to get max UID: %w", err)
 	}
 
-	seqSet := new(imap.SeqSet)
-	seqSet.AddRange(from, to)
+	// Check for UID overflow (maxUID is uint32)
+	if maxUID == math.MaxUint32 {
+		log.Printf("Folder %s has reached max UID, no new messages possible", folderInfo.Name)
+		if err := t.database.UpdateFolderUIDInfo(folder.ID, mbox.UidNext, serverUIDValidity); err != nil {
+			return fmt.Errorf("failed to update folder UID info: %w", err)
+		}
+		return nil
+	}
 
-	// Fetch messages
+	// Build UID range for fetch
+	uidSet := new(imap.SeqSet)
+	if maxUID == 0 {
+		// First sync: fetch all messages (UID 1:*)
+		log.Printf("Initial sync for folder %s - fetching all messages", folderInfo.Name)
+		uidSet.AddRange(1, 0) // 0 means * (all)
+	} else {
+		// Incremental sync: fetch only new messages (UID maxUID+1:*)
+		log.Printf("Incremental sync for folder %s - fetching UIDs > %d", folderInfo.Name, maxUID)
+		uidSet.AddRange(maxUID+1, 0)
+	}
+
+	// Fetch messages by UID
 	section := &imap.BodySectionName{}
 	items := []imap.FetchItem{
 		imap.FetchEnvelope,
@@ -140,10 +174,7 @@ func (t *SyncTask) syncFolder(ctx context.Context, client *Client, folderInfo *i
 		section.FetchItem(),
 	}
 
-	messages, err := client.FetchMessages(seqSet, items)
-	if err != nil {
-		return err
-	}
+	messages, fetchDone := client.FetchMessagesByUID(uidSet, items)
 
 	messageCount := 0
 	for msg := range messages {
@@ -157,6 +188,16 @@ func (t *SyncTask) syncFolder(ctx context.Context, client *Client, folderInfo *i
 			continue
 		}
 		messageCount++
+	}
+
+	// Check for fetch errors
+	if err := <-fetchDone; err != nil {
+		return fmt.Errorf("IMAP fetch failed: %w", err)
+	}
+
+	// Update folder's UIDVALIDITY and UIDNext (must succeed)
+	if err := t.database.UpdateFolderUIDInfo(folder.ID, mbox.UidNext, serverUIDValidity); err != nil {
+		return fmt.Errorf("failed to update folder UID info: %w", err)
 	}
 
 	log.Printf("Synced %d messages from folder %s", messageCount, folderInfo.Name)

@@ -98,8 +98,9 @@ func (c *Client) SelectFolder(name string) (*imap.MailboxStatus, error) {
 	return mbox, nil
 }
 
-// FetchMessages fetches messages from the current mailbox
-func (c *Client) FetchMessages(seqSet *imap.SeqSet, items []imap.FetchItem) (chan *imap.Message, error) {
+// FetchMessages fetches messages from the current mailbox by sequence numbers
+// Returns a channel of messages and an error channel for async error handling
+func (c *Client) FetchMessages(seqSet *imap.SeqSet, items []imap.FetchItem) (chan *imap.Message, chan error) {
 	messages := make(chan *imap.Message, 100)
 	done := make(chan error, 1)
 
@@ -107,9 +108,20 @@ func (c *Client) FetchMessages(seqSet *imap.SeqSet, items []imap.FetchItem) (cha
 		done <- c.conn.Fetch(seqSet, items, messages)
 	}()
 
-	// Return channel immediately, caller will read from it
-	// Caller should check the done channel for errors after reading all messages
-	return messages, nil
+	return messages, done
+}
+
+// FetchMessagesByUID fetches messages from the current mailbox by UIDs
+// Returns a channel of messages and an error channel for async error handling
+func (c *Client) FetchMessagesByUID(uidSet *imap.SeqSet, items []imap.FetchItem) (chan *imap.Message, chan error) {
+	messages := make(chan *imap.Message, 100)
+	done := make(chan error, 1)
+
+	go func() {
+		done <- c.conn.UidFetch(uidSet, items, messages)
+	}()
+
+	return messages, done
 }
 
 // GetConnection returns the underlying IMAP connection

@@ -14,8 +14,8 @@ func (db *DB) CreateFolder(folder *models.Folder) error {
 	folder.UpdatedAt = time.Now()
 
 	query := `
-		INSERT INTO folders (user_id, account_id, name, path, type, parent_id, uid_next, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO folders (user_id, account_id, name, path, type, parent_id, uid_next, uid_validity, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING id
 	`
 
@@ -28,7 +28,7 @@ func (db *DB) CreateFolder(folder *models.Folder) error {
 	err := db.QueryRow(
 		query,
 		folder.UserID, folder.AccountID, folder.Name, folder.Path, folder.Type,
-		parentID, folder.UIDNext, folder.CreatedAt, folder.UpdatedAt,
+		parentID, folder.UIDNext, folder.UIDValidity, folder.CreatedAt, folder.UpdatedAt,
 	).Scan(&folder.ID)
 
 	if err != nil {
@@ -41,7 +41,7 @@ func (db *DB) CreateFolder(folder *models.Folder) error {
 // GetFoldersByUser retrieves all folders for a user
 func (db *DB) GetFoldersByUser(userID int64) ([]*models.Folder, error) {
 	query := `
-		SELECT id, user_id, account_id, name, path, type, COALESCE(parent_id, 0), uid_next, created_at, updated_at
+		SELECT id, user_id, account_id, name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
 		FROM folders
 		WHERE user_id = $1
 		ORDER BY path
@@ -59,7 +59,7 @@ func (db *DB) GetFoldersByUser(userID int64) ([]*models.Folder, error) {
 // GetFoldersByAccount retrieves folders for a specific account
 func (db *DB) GetFoldersByAccount(accountID int64) ([]*models.Folder, error) {
 	query := `
-		SELECT id, user_id, account_id, name, path, type, COALESCE(parent_id, 0), uid_next, created_at, updated_at
+		SELECT id, user_id, account_id, name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
 		FROM folders
 		WHERE account_id = $1
 		ORDER BY path
@@ -78,14 +78,14 @@ func (db *DB) GetFoldersByAccount(accountID int64) ([]*models.Folder, error) {
 func (db *DB) GetFolderByID(id int64) (*models.Folder, error) {
 	folder := &models.Folder{}
 	query := `
-		SELECT id, user_id, account_id, name, path, type, COALESCE(parent_id, 0), uid_next, created_at, updated_at
+		SELECT id, user_id, account_id, name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
 		FROM folders
 		WHERE id = $1
 	`
 
 	err := db.QueryRow(query, id).Scan(
 		&folder.ID, &folder.UserID, &folder.AccountID, &folder.Name, &folder.Path,
-		&folder.Type, &folder.ParentID, &folder.UIDNext, &folder.CreatedAt, &folder.UpdatedAt,
+		&folder.Type, &folder.ParentID, &folder.UIDNext, &folder.UIDValidity, &folder.CreatedAt, &folder.UpdatedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -102,14 +102,14 @@ func (db *DB) GetFolderByID(id int64) (*models.Folder, error) {
 func (db *DB) GetFolderByPath(accountID int64, path string) (*models.Folder, error) {
 	folder := &models.Folder{}
 	query := `
-		SELECT id, user_id, account_id, name, path, type, COALESCE(parent_id, 0), uid_next, created_at, updated_at
+		SELECT id, user_id, account_id, name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
 		FROM folders
 		WHERE account_id = $1 AND path = $2
 	`
 
 	err := db.QueryRow(query, accountID, path).Scan(
 		&folder.ID, &folder.UserID, &folder.AccountID, &folder.Name, &folder.Path,
-		&folder.Type, &folder.ParentID, &folder.UIDNext, &folder.CreatedAt, &folder.UpdatedAt,
+		&folder.Type, &folder.ParentID, &folder.UIDNext, &folder.UIDValidity, &folder.CreatedAt, &folder.UpdatedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -128,8 +128,8 @@ func (db *DB) UpdateFolder(folder *models.Folder) error {
 
 	query := `
 		UPDATE folders
-		SET name = $1, path = $2, type = $3, parent_id = $4, uid_next = $5, updated_at = $6
-		WHERE id = $7
+		SET name = $1, path = $2, type = $3, parent_id = $4, uid_next = $5, uid_validity = $6, updated_at = $7
+		WHERE id = $8
 	`
 
 	var parentID sql.NullInt64
@@ -138,9 +138,25 @@ func (db *DB) UpdateFolder(folder *models.Folder) error {
 		parentID.Valid = true
 	}
 
-	_, err := db.Exec(query, folder.Name, folder.Path, folder.Type, parentID, folder.UIDNext, folder.UpdatedAt, folder.ID)
+	_, err := db.Exec(query, folder.Name, folder.Path, folder.Type, parentID, folder.UIDNext, folder.UIDValidity, folder.UpdatedAt, folder.ID)
 	if err != nil {
 		return fmt.Errorf("failed to update folder: %w", err)
+	}
+
+	return nil
+}
+
+// UpdateFolderUIDInfo updates the UID tracking fields for a folder
+func (db *DB) UpdateFolderUIDInfo(folderID int64, uidNext, uidValidity uint32) error {
+	query := `
+		UPDATE folders
+		SET uid_next = $1, uid_validity = $2, updated_at = $3
+		WHERE id = $4
+	`
+
+	_, err := db.Exec(query, uidNext, uidValidity, time.Now(), folderID)
+	if err != nil {
+		return fmt.Errorf("failed to update folder UID info: %w", err)
 	}
 
 	return nil
@@ -189,7 +205,7 @@ func scanFolders(rows *sql.Rows) ([]*models.Folder, error) {
 		folder := &models.Folder{}
 		err := rows.Scan(
 			&folder.ID, &folder.UserID, &folder.AccountID, &folder.Name, &folder.Path,
-			&folder.Type, &folder.ParentID, &folder.UIDNext, &folder.CreatedAt, &folder.UpdatedAt,
+			&folder.Type, &folder.ParentID, &folder.UIDNext, &folder.UIDValidity, &folder.CreatedAt, &folder.UpdatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan folder: %w", err)

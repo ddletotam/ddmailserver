@@ -196,3 +196,39 @@ func scanMessages(rows *sql.Rows) ([]*models.Message, error) {
 
 	return messages, nil
 }
+
+// GetMaxUIDForFolder returns the maximum UID for messages in a folder
+// Returns 0 if no messages exist in the folder
+func (db *DB) GetMaxUIDForFolder(folderID int64) (uint32, error) {
+	var maxUID sql.NullInt64
+	query := `SELECT MAX(uid) FROM messages WHERE folder_id = $1`
+
+	err := db.QueryRow(query, folderID).Scan(&maxUID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get max UID: %w", err)
+	}
+
+	if !maxUID.Valid {
+		return 0, nil
+	}
+
+	return uint32(maxUID.Int64), nil
+}
+
+// DeleteMessagesByFolder deletes all messages in a folder
+// Used when UIDVALIDITY changes (folder was recreated on server)
+func (db *DB) DeleteMessagesByFolder(folderID int64) (int64, error) {
+	query := `DELETE FROM messages WHERE folder_id = $1`
+
+	result, err := db.Exec(query, folderID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete messages: %w", err)
+	}
+
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get affected rows: %w", err)
+	}
+
+	return count, nil
+}
