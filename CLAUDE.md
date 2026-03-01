@@ -18,9 +18,6 @@
 - No global variables
 - Use conventional commits (feat:, fix:, refactor:, etc.)
 
-## Security TODOs
-- [ ] Encrypt IMAP/SMTP passwords in DB (requires passing encryption key to workers)
-
 ## Project Structure
 - `/cmd/mailserver` - main entry point
 - `/internal/web` - web handlers, templates, static files
