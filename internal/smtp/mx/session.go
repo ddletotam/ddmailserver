@@ -13,6 +13,7 @@ import (
 	"github.com/emersion/go-smtp"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/notify"
 )
 
 // Recipient holds info about a validated recipient
@@ -26,6 +27,7 @@ type Recipient struct {
 // Session represents an MX SMTP session
 type Session struct {
 	database   *db.DB
+	hub        *notify.Hub
 	conn       *smtp.Conn
 	from       string
 	recipients []*Recipient
@@ -249,6 +251,26 @@ func (s *Session) Data(r io.Reader) error {
 		savedCount++
 		log.Printf("MX: Message %d saved for %s (user_id=%d, folder_id=%d)",
 			msg.ID, recipient.Email, recipient.Mailbox.UserID, folderID)
+
+		// Publish notification for IMAP IDLE clients
+		if s.hub != nil {
+			// Get message count and username for IMAP update
+			count, _ := s.database.GetMessageCountByFolder(folderID)
+			user, _ := s.database.GetUserByID(recipient.Mailbox.UserID)
+			username := ""
+			if user != nil {
+				username = user.Username
+			}
+
+			s.hub.Publish(notify.Event{
+				UserID:   recipient.Mailbox.UserID,
+				FolderID: folderID,
+				Type:     notify.EventNewMessage,
+				Count:    count,
+				Username: username,
+				Mailbox:  "INBOX",
+			})
+		}
 	}
 
 	if savedCount == 0 {
