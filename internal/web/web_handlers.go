@@ -52,7 +52,7 @@ type MessageData struct {
 	Attachments []*models.Attachment
 }
 
-type ComposeData struct{
+type ComposeData struct {
 	PageData
 	Accounts []*models.Account
 	To       string

@@ -84,7 +84,16 @@ func main() {
 	go scheduler.Start()
 	defer scheduler.Stop()
 
-	// Initialize IMAP server
+	// Determine hostname for SMTP
+	hostname := "localhost"
+	if cfg.Server.Domain != "" {
+		hostname = cfg.Server.Domain
+	}
+
+	// Check if TLS is configured
+	hasTLS := cfg.Security.TLSCert != "" && cfg.Security.TLSKey != ""
+
+	// Initialize IMAP server (plain)
 	log.Printf("Initializing IMAP server...")
 	imapAddr := fmt.Sprintf("%s:%d", cfg.Server.WebHost, cfg.Server.IMAPPort)
 	imapSrv := imapserver.New(database, imapAddr)
@@ -95,16 +104,50 @@ func main() {
 	}()
 	defer imapSrv.Stop()
 
+	// Initialize IMAP TLS server if configured
+	if hasTLS && cfg.Server.IMAPTLSPort > 0 {
+		log.Printf("Initializing IMAP TLS server...")
+		imapTLSAddr := fmt.Sprintf("%s:%d", cfg.Server.WebHost, cfg.Server.IMAPTLSPort)
+		imapTLSSrv, err := imapserver.NewWithTLS(database, imapTLSAddr, cfg.Security.TLSCert, cfg.Security.TLSKey)
+		if err != nil {
+			log.Printf("Failed to create IMAP TLS server: %v", err)
+		} else {
+			go func() {
+				if err := imapTLSSrv.StartTLS(); err != nil {
+					log.Printf("IMAP TLS server error: %v", err)
+				}
+			}()
+			defer imapTLSSrv.Stop()
+		}
+	}
+
 	// Initialize SMTP server (submission - for authenticated users)
 	log.Printf("Initializing SMTP server...")
 	smtpAddr := fmt.Sprintf("%s:%d", cfg.Server.WebHost, cfg.Server.SMTPPort)
-	smtpSrv := smtpserver.New(database, smtpAddr)
+	smtpSrv := smtpserver.New(database, smtpAddr, hostname)
 	go func() {
 		if err := smtpSrv.Start(); err != nil {
 			log.Fatalf("SMTP server error: %v", err)
 		}
 	}()
 	defer smtpSrv.Stop()
+
+	// Initialize SMTP TLS server if configured
+	if hasTLS && cfg.Server.SMTPTLSPort > 0 {
+		log.Printf("Initializing SMTP TLS server...")
+		smtpTLSAddr := fmt.Sprintf("%s:%d", cfg.Server.WebHost, cfg.Server.SMTPTLSPort)
+		smtpTLSSrv, err := smtpserver.NewWithTLS(database, smtpTLSAddr, hostname, cfg.Security.TLSCert, cfg.Security.TLSKey)
+		if err != nil {
+			log.Printf("Failed to create SMTP TLS server: %v", err)
+		} else {
+			go func() {
+				if err := smtpTLSSrv.StartTLS(); err != nil {
+					log.Printf("SMTP TLS server error: %v", err)
+				}
+			}()
+			defer smtpTLSSrv.Stop()
+		}
+	}
 
 	// Initialize MX server (for receiving external mail) if port is configured
 	if cfg.Server.SMTPMXPort > 0 {

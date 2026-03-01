@@ -23,14 +23,14 @@ type Pool struct {
 
 // Stats holds pool statistics
 type Stats struct {
-	IMAPQueued     int64
-	IMAPCompleted  int64
-	IMAPFailed     int64
-	SMTPQueued     int64
-	SMTPCompleted  int64
-	SMTPFailed     int64
-	IMAPWorkers    int
-	SMTPWorkers    int
+	IMAPQueued    int64
+	IMAPCompleted int64
+	IMAPFailed    int64
+	SMTPQueued    int64
+	SMTPCompleted int64
+	SMTPFailed    int64
+	IMAPWorkers   int
+	SMTPWorkers   int
 }
 
 // NewPool creates a new worker pool
