@@ -42,14 +42,14 @@ func (db *DB) CreateUser(username, passwordHash, email, recoveryKeyHash string) 
 func (db *DB) GetUserByUsername(username string) (*models.User, error) {
 	user := &models.User{}
 	query := `
-		SELECT id, username, password_hash, email, language, recovery_key_hash, created_at, updated_at
+		SELECT id, username, password_hash, email, language, recovery_key_hash, COALESCE(is_admin, false), created_at, updated_at
 		FROM users
 		WHERE username = $1
 	`
 
 	var email, language sql.NullString
 	err := db.QueryRow(query, username).Scan(
-		&user.ID, &user.Username, &user.PasswordHash, &email, &language, &user.RecoveryKeyHash, &user.CreatedAt, &user.UpdatedAt,
+		&user.ID, &user.Username, &user.PasswordHash, &email, &language, &user.RecoveryKeyHash, &user.IsAdminFlag, &user.CreatedAt, &user.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("user not found")
@@ -72,14 +72,14 @@ func (db *DB) GetUserByUsername(username string) (*models.User, error) {
 func (db *DB) GetUserByID(id int64) (*models.User, error) {
 	user := &models.User{}
 	query := `
-		SELECT id, username, password_hash, email, language, recovery_key_hash, created_at, updated_at
+		SELECT id, username, password_hash, email, language, recovery_key_hash, COALESCE(is_admin, false), created_at, updated_at
 		FROM users
 		WHERE id = $1
 	`
 
 	var email, language sql.NullString
 	err := db.QueryRow(query, id).Scan(
-		&user.ID, &user.Username, &user.PasswordHash, &email, &language, &user.RecoveryKeyHash, &user.CreatedAt, &user.UpdatedAt,
+		&user.ID, &user.Username, &user.PasswordHash, &email, &language, &user.RecoveryKeyHash, &user.IsAdminFlag, &user.CreatedAt, &user.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("user not found")
