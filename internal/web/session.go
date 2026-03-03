@@ -73,8 +73,8 @@ func (s *Server) SetSessionCookie(w http.ResponseWriter, token string) {
 		Path:     "/",
 		MaxAge:   86400 * 7, // 7 days
 		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-		Secure:   s.isProduction(), // Enable in production with HTTPS
+		SameSite: http.SameSiteLaxMode, // Lax allows OAuth redirects while protecting against CSRF
+		Secure:   s.isProduction(),     // Enable in production with HTTPS
 	})
 }
 
