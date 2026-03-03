@@ -10,13 +10,14 @@ type User struct {
 	Email           string    `json:"email,omitempty"`
 	Language        string    `json:"language,omitempty"`
 	RecoveryKeyHash string    `json:"-"` // never expose in JSON
+	IsAdminFlag     bool      `json:"is_admin"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
-// IsAdmin returns true if user is an administrator (first registered user)
+// IsAdmin returns true if user is an administrator
 func (u *User) IsAdmin() bool {
-	return u.ID == 1
+	return u.IsAdminFlag
 }
 
 // Account represents an external email account (Gmail, Outlook, etc.)
