@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -97,8 +98,42 @@ func (s *Server) getUserLanguage(data interface{}) string {
 		if user, ok := d["User"].(*models.User); ok && user != nil && user.Language != "" {
 			return user.Language
 		}
+	default:
+		// Use reflection for anonymous structs
+		if lang := s.extractLanguageViaReflection(data); lang != "" {
+			return lang
+		}
 	}
 	return "en" // default to English
+}
+
+// extractLanguageViaReflection extracts user language from anonymous structs using reflection
+func (s *Server) extractLanguageViaReflection(data interface{}) string {
+	v := reflect.ValueOf(data)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return ""
+	}
+
+	// Try to find User field
+	userField := v.FieldByName("User")
+	if !userField.IsValid() {
+		// Try PageData embedded struct
+		pageDataField := v.FieldByName("PageData")
+		if pageDataField.IsValid() && pageDataField.Kind() == reflect.Struct {
+			userField = pageDataField.FieldByName("User")
+		}
+	}
+
+	if userField.IsValid() && !userField.IsNil() {
+		if user, ok := userField.Interface().(*models.User); ok && user != nil && user.Language != "" {
+			return user.Language
+		}
+	}
+
+	return ""
 }
 
 // Helper function to render templates
