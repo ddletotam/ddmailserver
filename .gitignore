@@ -30,6 +30,9 @@ Thumbs.db
 # Logs
 *.log
 
+# Private Claude settings (not committed)
+CLAUDE.local.md
+
 # Database
 *.db
 *.sqlite

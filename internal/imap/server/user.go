@@ -6,6 +6,7 @@ import (
 
 	"github.com/emersion/go-imap/backend"
 	"github.com/yourusername/mailserver/internal/db"
+	"github.com/yourusername/mailserver/internal/models"
 )
 
 var errNotImplemented = errors.New("not implemented")
@@ -26,20 +27,49 @@ func (u *User) Username() string {
 func (u *User) ListMailboxes(subscribed bool) ([]backend.Mailbox, error) {
 	log.Printf("Listing mailboxes for user %s (subscribed: %v)", u.username, subscribed)
 
-	// Get all folders for this user
-	folders, err := u.database.GetFoldersByUser(u.userID)
+	// Get only local folders (account_id IS NULL)
+	folders, err := u.database.GetLocalFoldersByUser(u.userID)
 	if err != nil {
 		log.Printf("Failed to get folders: %v", err)
 		return nil, err
 	}
 
-	mailboxes := make([]backend.Mailbox, len(folders))
-	for i, folder := range folders {
-		mailboxes[i] = &Mailbox{
-			name:     folder.Name,
-			user:     u,
-			database: u.database,
-			folderID: folder.ID,
+	var mailboxes []backend.Mailbox
+
+	// Add folders - INBOX first if present, then others
+	inboxFound := false
+	for _, folder := range folders {
+		if folder.Name == "INBOX" {
+			// Add INBOX first
+			mailboxes = append([]backend.Mailbox{&Mailbox{
+				name:     "INBOX",
+				user:     u,
+				database: u.database,
+				folderID: folder.ID,
+			}}, mailboxes...)
+			inboxFound = true
+		} else {
+			mailboxes = append(mailboxes, &Mailbox{
+				name:     folder.Name,
+				user:     u,
+				database: u.database,
+				folderID: folder.ID,
+			})
+		}
+	}
+
+	// Create INBOX if not found
+	if !inboxFound {
+		inbox, err := u.database.GetOrCreateLocalInbox(u.userID)
+		if err != nil {
+			log.Printf("Failed to create INBOX: %v", err)
+		} else {
+			mailboxes = append([]backend.Mailbox{&Mailbox{
+				name:     "INBOX",
+				user:     u,
+				database: u.database,
+				folderID: inbox.ID,
+			}}, mailboxes...)
 		}
 	}
 
@@ -51,33 +81,30 @@ func (u *User) ListMailboxes(subscribed bool) ([]backend.Mailbox, error) {
 func (u *User) GetMailbox(name string) (backend.Mailbox, error) {
 	log.Printf("Getting mailbox %s for user %s", name, u.username)
 
-	// Try to find folder by path
-	// We need to search across all user's accounts
-	folders, err := u.database.GetFoldersByUser(u.userID)
-	if err != nil {
-		return nil, err
+	// Try to find local folder by name
+	folder, err := u.database.GetLocalFolderByName(u.userID, name)
+	if err == nil {
+		log.Printf("Found mailbox %s (folder ID: %d)", name, folder.ID)
+		return &Mailbox{
+			name:     folder.Name,
+			user:     u,
+			database: u.database,
+			folderID: folder.ID,
+		}, nil
 	}
 
-	for _, folder := range folders {
-		if folder.Path == name || folder.Name == name {
-			log.Printf("Found mailbox %s (folder ID: %d)", name, folder.ID)
-			return &Mailbox{
-				name:     folder.Name,
-				user:     u,
-				database: u.database,
-				folderID: folder.ID,
-			}, nil
-		}
-	}
-
-	// If not found, check if this is "INBOX" and create virtual unified inbox
+	// If INBOX not found, create it
 	if name == "INBOX" {
-		log.Printf("Creating virtual INBOX for user %s", u.username)
+		inbox, err := u.database.GetOrCreateLocalInbox(u.userID)
+		if err != nil {
+			return nil, err
+		}
+		log.Printf("Created INBOX for user %s (folder ID: %d)", u.username, inbox.ID)
 		return &Mailbox{
 			name:     "INBOX",
 			user:     u,
 			database: u.database,
-			folderID: 0, // 0 means unified inbox across all accounts
+			folderID: inbox.ID,
 		}, nil
 	}
 
@@ -87,9 +114,31 @@ func (u *User) GetMailbox(name string) (backend.Mailbox, error) {
 
 // CreateMailbox creates a new mailbox
 func (u *User) CreateMailbox(name string) error {
-	log.Printf("CreateMailbox not implemented: %s", name)
-	// TODO: Implement mailbox creation if needed
-	return errNotImplemented
+	log.Printf("Creating mailbox %s for user %s", name, u.username)
+
+	// Check if folder already exists
+	_, err := u.database.GetLocalFolderByName(u.userID, name)
+	if err == nil {
+		return errors.New("mailbox already exists")
+	}
+
+	// Create new local folder
+	folder := &models.Folder{
+		UserID:    u.userID,
+		AccountID: 0, // Local folder (will be NULL in DB)
+		Name:      name,
+		Path:      name,
+		Type:      "custom",
+		UIDNext:   1,
+	}
+
+	if err := u.database.CreateFolder(folder); err != nil {
+		log.Printf("Failed to create mailbox: %v", err)
+		return err
+	}
+
+	log.Printf("Created mailbox %s (folder ID: %d) for user %s", name, folder.ID, u.username)
+	return nil
 }
 
 // DeleteMailbox deletes a mailbox

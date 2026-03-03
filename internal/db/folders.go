@@ -62,6 +62,48 @@ func (db *DB) GetFoldersByUser(userID int64) ([]*models.Folder, error) {
 	return scanFolders(rows)
 }
 
+// GetLocalFoldersByUser retrieves only local folders (account_id IS NULL) for a user
+func (db *DB) GetLocalFoldersByUser(userID int64) ([]*models.Folder, error) {
+	query := `
+		SELECT id, user_id, COALESCE(account_id, 0), name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
+		FROM folders
+		WHERE user_id = $1 AND account_id IS NULL
+		ORDER BY path
+	`
+
+	rows, err := db.Query(query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get local folders: %w", err)
+	}
+	defer rows.Close()
+
+	return scanFolders(rows)
+}
+
+// GetLocalFolderByName retrieves a local folder by name for a user
+func (db *DB) GetLocalFolderByName(userID int64, name string) (*models.Folder, error) {
+	folder := &models.Folder{}
+	query := `
+		SELECT id, user_id, COALESCE(account_id, 0), name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
+		FROM folders
+		WHERE user_id = $1 AND account_id IS NULL AND name = $2
+	`
+
+	err := db.QueryRow(query, userID, name).Scan(
+		&folder.ID, &folder.UserID, &folder.AccountID, &folder.Name, &folder.Path,
+		&folder.Type, &folder.ParentID, &folder.UIDNext, &folder.UIDValidity, &folder.CreatedAt, &folder.UpdatedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("folder not found")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get folder: %w", err)
+	}
+
+	return folder, nil
+}
+
 // GetFoldersByAccount retrieves folders for a specific account
 func (db *DB) GetFoldersByAccount(accountID int64) ([]*models.Folder, error) {
 	query := `

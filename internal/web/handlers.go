@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gorilla/mux"
 	"github.com/yourusername/mailserver/internal/models"
@@ -235,9 +236,9 @@ func (s *Server) HandleCreateAccount(w http.ResponseWriter, r *http.Request) {
 
 	// Parse form data or JSON
 	contentType := r.Header.Get("Content-Type")
-	if contentType == "application/x-www-form-urlencoded" || contentType == "multipart/form-data" {
+	if contentType == "application/x-www-form-urlencoded" || strings.HasPrefix(contentType, "multipart/form-data") {
 		if err := r.ParseForm(); err != nil {
-			respondError(w, http.StatusBadRequest, "invalid form data")
+			respondHTMXError(w, r, http.StatusBadRequest, "Invalid form data")
 			return
 		}
 
@@ -265,7 +266,7 @@ func (s *Server) HandleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		if err := json.NewDecoder(r.Body).Decode(&account); err != nil {
-			respondError(w, http.StatusBadRequest, "invalid request body")
+			respondHTMXError(w, r, http.StatusBadRequest, "Invalid request body")
 			return
 		}
 	}
@@ -276,28 +277,35 @@ func (s *Server) HandleCreateAccount(w http.ResponseWriter, r *http.Request) {
 
 	// Validate required fields
 	if account.Name == "" || account.Email == "" {
-		respondError(w, http.StatusBadRequest, "name and email are required")
+		respondHTMXError(w, r, http.StatusBadRequest, "Name and email are required")
 		return
 	}
 
 	if account.IMAPHost == "" || account.IMAPPort == 0 {
-		respondError(w, http.StatusBadRequest, "IMAP host and port are required")
+		respondHTMXError(w, r, http.StatusBadRequest, "IMAP host and port are required")
 		return
 	}
 
 	if account.SMTPHost == "" || account.SMTPPort == 0 {
-		respondError(w, http.StatusBadRequest, "SMTP host and port are required")
+		respondHTMXError(w, r, http.StatusBadRequest, "SMTP host and port are required")
 		return
 	}
 
 	// Create account
 	if err := s.database.CreateAccount(&account); err != nil {
 		log.Printf("Failed to create account: %v", err)
-		respondError(w, http.StatusInternalServerError, "failed to create account")
+		respondHTMXError(w, r, http.StatusInternalServerError, "Failed to create account")
 		return
 	}
 
 	log.Printf("Account created: %s for user %d", account.Email, userID)
+
+	// For HTMX requests, redirect to accounts page
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("HX-Redirect", "/accounts")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 
 	respondJSON(w, http.StatusCreated, account)
 }
