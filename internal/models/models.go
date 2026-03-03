@@ -50,7 +50,17 @@ type Account struct {
 
 // IsOAuth returns true if this account uses OAuth2 authentication
 func (a *Account) IsOAuth() bool {
+	return a.AuthType == "oauth2_google" || a.AuthType == "oauth2_microsoft"
+}
+
+// IsGoogleOAuth returns true if this account uses Google OAuth2
+func (a *Account) IsGoogleOAuth() bool {
 	return a.AuthType == "oauth2_google"
+}
+
+// IsMicrosoftOAuth returns true if this account uses Microsoft OAuth2
+func (a *Account) IsMicrosoftOAuth() bool {
+	return a.AuthType == "oauth2_microsoft"
 }
 
 // NeedsTokenRefresh returns true if OAuth token needs to be refreshed

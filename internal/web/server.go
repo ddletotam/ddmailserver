@@ -25,6 +25,7 @@ type Server struct {
 	authRateLimiter *RateLimiter
 	oauthConfig     *config.OAuthConfig
 	googleOAuth     *oauth.GoogleOAuth
+	microsoftOAuth  *oauth.MicrosoftOAuth
 }
 
 // New creates a new web server
@@ -57,6 +58,15 @@ func New(database *db.DB, jwtSecret string, host string, port int, locale string
 	} else {
 		// Try to load from database
 		s.initGoogleOAuthFromDB()
+	}
+
+	// Initialize Microsoft OAuth - check config.yaml first, then database
+	if oauthConfig != nil && oauthConfig.IsMicrosoftOAuthConfigured() {
+		s.microsoftOAuth = oauth.NewMicrosoftOAuth(&oauthConfig.Microsoft)
+		log.Printf("Microsoft OAuth configured from config file with redirect URI: %s", oauthConfig.Microsoft.RedirectURI)
+	} else {
+		// Try to load from database
+		s.initMicrosoftOAuthFromDB()
 	}
 
 	s.setupRoutes()
@@ -104,6 +114,8 @@ func (s *Server) setupRoutes() {
 	oauthRouter.Use(s.WebAuthMiddleware)
 	oauthRouter.HandleFunc("/google/start", s.HandleGoogleOAuthStart).Methods("GET")
 	oauthRouter.HandleFunc("/google/callback", s.HandleGoogleOAuthCallback).Methods("GET")
+	oauthRouter.HandleFunc("/microsoft/start", s.HandleMicrosoftOAuthStart).Methods("GET")
+	oauthRouter.HandleFunc("/microsoft/callback", s.HandleMicrosoftOAuthCallback).Methods("GET")
 
 	// Settings API (uses session cookie auth, must be registered before general API routes)
 	settingsAPI := s.router.PathPrefix("/api/settings").Subrouter()
@@ -112,6 +124,7 @@ func (s *Server) setupRoutes() {
 	settingsAPI.HandleFunc("/language", s.HandleChangeLanguage).Methods("POST")
 	settingsAPI.HandleFunc("/account", s.HandleDeleteUserAccount).Methods("DELETE")
 	settingsAPI.HandleFunc("/oauth/google", s.HandleSaveGoogleOAuthSettings).Methods("POST")
+	settingsAPI.HandleFunc("/oauth/microsoft", s.HandleSaveMicrosoftOAuthSettings).Methods("POST")
 
 	// Accounts API (uses session cookie auth, must be registered before general API routes)
 	accountsAPI := s.router.PathPrefix("/api/accounts").Subrouter()
@@ -195,7 +208,7 @@ func (s *Server) Stop() error {
 func (s *Server) initGoogleOAuthFromDB() {
 	settings, err := s.database.GetGoogleOAuthSettings()
 	if err != nil {
-		log.Printf("Failed to load OAuth settings from DB: %v", err)
+		log.Printf("Failed to load Google OAuth settings from DB: %v", err)
 		return
 	}
 
@@ -209,4 +222,24 @@ func (s *Server) initGoogleOAuthFromDB() {
 		RedirectURI:  settings.RedirectURI,
 	})
 	log.Printf("Google OAuth configured from database with redirect URI: %s", settings.RedirectURI)
+}
+
+// initMicrosoftOAuthFromDB loads Microsoft OAuth settings from database
+func (s *Server) initMicrosoftOAuthFromDB() {
+	settings, err := s.database.GetMicrosoftOAuthSettings()
+	if err != nil {
+		log.Printf("Failed to load Microsoft OAuth settings from DB: %v", err)
+		return
+	}
+
+	if settings.ClientID == "" || settings.ClientSecret == "" {
+		return
+	}
+
+	s.microsoftOAuth = oauth.NewMicrosoftOAuth(&config.MicrosoftOAuthConfig{
+		ClientID:     settings.ClientID,
+		ClientSecret: settings.ClientSecret,
+		RedirectURI:  settings.RedirectURI,
+	})
+	log.Printf("Microsoft OAuth configured from database with redirect URI: %s", settings.RedirectURI)
 }

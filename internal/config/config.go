@@ -18,10 +18,17 @@ type Config struct {
 }
 
 type OAuthConfig struct {
-	Google GoogleOAuthConfig `yaml:"google"`
+	Google    GoogleOAuthConfig    `yaml:"google"`
+	Microsoft MicrosoftOAuthConfig `yaml:"microsoft"`
 }
 
 type GoogleOAuthConfig struct {
+	ClientID     string `yaml:"client_id"`
+	ClientSecret string `yaml:"client_secret"`
+	RedirectURI  string `yaml:"redirect_uri"`
+}
+
+type MicrosoftOAuthConfig struct {
 	ClientID     string `yaml:"client_id"`
 	ClientSecret string `yaml:"client_secret"`
 	RedirectURI  string `yaml:"redirect_uri"`
@@ -135,4 +142,9 @@ func (c *DatabaseConfig) GetDSN() string {
 // IsGoogleOAuthConfigured returns true if Google OAuth is configured
 func (c *OAuthConfig) IsGoogleOAuthConfigured() bool {
 	return c.Google.ClientID != "" && c.Google.ClientSecret != ""
+}
+
+// IsMicrosoftOAuthConfigured returns true if Microsoft OAuth is configured
+func (c *OAuthConfig) IsMicrosoftOAuthConfigured() bool {
+	return c.Microsoft.ClientID != "" && c.Microsoft.ClientSecret != ""
 }
