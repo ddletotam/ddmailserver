@@ -20,7 +20,8 @@ type Server struct {
 	router          *mux.Router
 	addr            string
 	server          *http.Server
-	i18n            *I18n
+	i18n            *I18n        // default i18n (for backward compatibility)
+	i18nManager     *I18nManager // manages all locales
 	authRateLimiter *RateLimiter
 	oauthConfig     *config.OAuthConfig
 	googleOAuth     *oauth.GoogleOAuth
@@ -30,14 +31,12 @@ type Server struct {
 func New(database *db.DB, jwtSecret string, host string, port int, locale string, oauthConfig *config.OAuthConfig) *Server {
 	addr := fmt.Sprintf("%s:%d", host, port)
 
-	// Initialize i18n
+	// Initialize i18n manager with all locales
+	i18nManager := NewI18nManager()
+
+	// Default locale for backward compatibility
 	if locale == "" {
-		locale = "en" // default to English
-	}
-	i18n, err := NewI18n(locale)
-	if err != nil {
-		log.Printf("Failed to initialize i18n: %v, using English", err)
-		i18n, _ = NewI18n("en")
+		locale = "en"
 	}
 
 	s := &Server{
@@ -45,7 +44,8 @@ func New(database *db.DB, jwtSecret string, host string, port int, locale string
 		jwtSecret:       jwtSecret,
 		router:          mux.NewRouter(),
 		addr:            addr,
-		i18n:            i18n,
+		i18n:            i18nManager.Get(locale), // default i18n
+		i18nManager:     i18nManager,
 		authRateLimiter: NewRateLimiter(5, time.Minute), // 5 attempts per minute
 		oauthConfig:     oauthConfig,
 	}
@@ -66,7 +66,7 @@ func New(database *db.DB, jwtSecret string, host string, port int, locale string
 		Handler: s.router,
 	}
 
-	log.Printf("Web server created, will listen on %s (locale: %s)", addr, i18n.GetLocale())
+	log.Printf("Web server created, will listen on %s (default locale: %s)", addr, locale)
 
 	return s
 }

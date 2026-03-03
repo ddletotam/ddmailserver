@@ -5,10 +5,49 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 )
 
 //go:embed locales/*.json
 var localesFS embed.FS
+
+// I18nManager manages i18n instances for different locales
+type I18nManager struct {
+	locales map[string]*I18n
+	mu      sync.RWMutex
+}
+
+// NewI18nManager creates a new i18n manager preloading all locales
+func NewI18nManager() *I18nManager {
+	m := &I18nManager{
+		locales: make(map[string]*I18n),
+	}
+
+	// Preload supported locales
+	for _, locale := range []string{"en", "ru"} {
+		i18n, err := NewI18n(locale)
+		if err != nil {
+			log.Printf("Failed to load locale %s: %v", locale, err)
+			continue
+		}
+		m.locales[locale] = i18n
+	}
+
+	log.Printf("I18nManager initialized with %d locales", len(m.locales))
+	return m
+}
+
+// Get returns i18n instance for given locale (falls back to "en")
+func (m *I18nManager) Get(locale string) *I18n {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if i18n, ok := m.locales[locale]; ok {
+		return i18n
+	}
+	// Fallback to English
+	return m.locales["en"]
+}
 
 // I18n handles internationalization
 type I18n struct {

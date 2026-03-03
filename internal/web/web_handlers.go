@@ -65,11 +65,51 @@ type ComposeData struct {
 	ShowBcc  bool
 }
 
+// getUserLanguage extracts user's language preference from template data
+func (s *Server) getUserLanguage(data interface{}) string {
+	// Try to extract User from common data structures
+	switch d := data.(type) {
+	case PageData:
+		if d.User != nil && d.User.Language != "" {
+			return d.User.Language
+		}
+	case DashboardData:
+		if d.User != nil && d.User.Language != "" {
+			return d.User.Language
+		}
+	case AccountsData:
+		if d.User != nil && d.User.Language != "" {
+			return d.User.Language
+		}
+	case InboxData:
+		if d.User != nil && d.User.Language != "" {
+			return d.User.Language
+		}
+	case MessageData:
+		if d.User != nil && d.User.Language != "" {
+			return d.User.Language
+		}
+	case ComposeData:
+		if d.User != nil && d.User.Language != "" {
+			return d.User.Language
+		}
+	case map[string]interface{}:
+		if user, ok := d["User"].(*models.User); ok && user != nil && user.Language != "" {
+			return user.Language
+		}
+	}
+	return "en" // default to English
+}
+
 // Helper function to render templates
 func (s *Server) renderTemplate(w http.ResponseWriter, templateName string, data interface{}) {
+	// Get user's language preference
+	userLang := s.getUserLanguage(data)
+	i18n := s.i18nManager.Get(userLang)
+
 	// Add template functions
 	funcMap := template.FuncMap{
-		"t": s.i18n.T, // Translation function
+		"t": i18n.T, // Translation function using user's language
 		"substr": func(s string, start, end int) string {
 			if len(s) < end {
 				return s
