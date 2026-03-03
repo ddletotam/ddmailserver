@@ -13,6 +13,10 @@ const (
 	SettingGoogleOAuthClientID     = "google_oauth_client_id"
 	SettingGoogleOAuthClientSecret = "google_oauth_client_secret"
 	SettingGoogleOAuthRedirectURI  = "google_oauth_redirect_uri"
+
+	SettingMicrosoftOAuthClientID     = "microsoft_oauth_client_id"
+	SettingMicrosoftOAuthClientSecret = "microsoft_oauth_client_secret"
+	SettingMicrosoftOAuthRedirectURI  = "microsoft_oauth_redirect_uri"
 )
 
 // GetSetting retrieves a setting value by key
@@ -121,6 +125,60 @@ func (db *DB) SetGoogleOAuthSettings(settings *GoogleOAuthSettings) error {
 // IsGoogleOAuthConfigured checks if Google OAuth is configured in DB
 func (db *DB) IsGoogleOAuthConfigured() bool {
 	settings, err := db.GetGoogleOAuthSettings()
+	if err != nil {
+		return false
+	}
+	return settings.ClientID != "" && settings.ClientSecret != ""
+}
+
+// MicrosoftOAuthSettings holds Microsoft OAuth configuration
+type MicrosoftOAuthSettings struct {
+	ClientID     string
+	ClientSecret string
+	RedirectURI  string
+}
+
+// GetMicrosoftOAuthSettings retrieves all Microsoft OAuth settings
+func (db *DB) GetMicrosoftOAuthSettings() (*MicrosoftOAuthSettings, error) {
+	clientID, err := db.GetSetting(SettingMicrosoftOAuthClientID)
+	if err != nil {
+		return nil, err
+	}
+
+	clientSecret, err := db.GetSecretSetting(SettingMicrosoftOAuthClientSecret)
+	if err != nil {
+		return nil, err
+	}
+
+	redirectURI, err := db.GetSetting(SettingMicrosoftOAuthRedirectURI)
+	if err != nil {
+		return nil, err
+	}
+
+	return &MicrosoftOAuthSettings{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		RedirectURI:  redirectURI,
+	}, nil
+}
+
+// SetMicrosoftOAuthSettings saves all Microsoft OAuth settings
+func (db *DB) SetMicrosoftOAuthSettings(settings *MicrosoftOAuthSettings) error {
+	if err := db.SetSetting(SettingMicrosoftOAuthClientID, settings.ClientID); err != nil {
+		return err
+	}
+	if err := db.SetSecretSetting(SettingMicrosoftOAuthClientSecret, settings.ClientSecret); err != nil {
+		return err
+	}
+	if err := db.SetSetting(SettingMicrosoftOAuthRedirectURI, settings.RedirectURI); err != nil {
+		return err
+	}
+	return nil
+}
+
+// IsMicrosoftOAuthConfigured checks if Microsoft OAuth is configured in DB
+func (db *DB) IsMicrosoftOAuthConfigured() bool {
+	settings, err := db.GetMicrosoftOAuthSettings()
 	if err != nil {
 		return false
 	}

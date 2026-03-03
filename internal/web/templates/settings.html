@@ -128,6 +128,66 @@
                 {{end}}
             </form>
         </div>
+
+        <!-- Microsoft OAuth Settings (Admin only) -->
+        <div class="settings-section">
+            <h2>Microsoft OAuth Settings</h2>
+            <p class="section-description">
+                Configure Microsoft OAuth to allow users to add Outlook/Hotmail/Office 365 accounts.
+                <a href="#" onclick="toggleMicrosoftOAuthInstructions(); return false;">Show setup instructions</a>
+            </p>
+
+            <div id="microsoft-oauth-instructions" class="oauth-instructions" style="display: none;">
+                <h4>Setup Instructions:</h4>
+                <ol>
+                    <li>Go to <a href="https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank">Azure Portal - App registrations</a></li>
+                    <li>Click "New registration"</li>
+                    <li>Name: "DDMailServer" (or your choice)</li>
+                    <li>Supported account types: "Accounts in any organizational directory and personal Microsoft accounts"</li>
+                    <li>Redirect URI: Web → <code>{{.MicrosoftRedirectURI}}</code></li>
+                    <li>After creation, copy "Application (client) ID" below</li>
+                    <li>Go to "Certificates & secrets" → "New client secret"</li>
+                    <li>Copy the secret value (not ID) below</li>
+                    <li>Go to "API permissions" → "Add a permission"</li>
+                    <li>Select "Microsoft Graph" → Delegated permissions → add: openid, email, offline_access</li>
+                    <li>Add "APIs my organization uses" → search "Office 365 Exchange Online" → Delegated → add: IMAP.AccessAsUser.All, SMTP.Send</li>
+                </ol>
+            </div>
+
+            <form hx-post="/api/settings/oauth/microsoft"
+                  hx-target="#microsoft-oauth-message"
+                  hx-swap="innerHTML"
+                  class="settings-form">
+                <div id="microsoft-oauth-message" class="message"></div>
+
+                <div class="form-group">
+                    <label for="microsoft_client_id">Application (Client) ID</label>
+                    <input type="text" id="microsoft_client_id" name="client_id"
+                           value="{{.MicrosoftOAuthSettings.ClientID}}"
+                           placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+                </div>
+
+                <div class="form-group">
+                    <label for="microsoft_client_secret">Client Secret Value</label>
+                    <input type="password" id="microsoft_client_secret" name="client_secret"
+                           placeholder="{{if .MicrosoftOAuthSettings.ClientSecret}}(configured - leave blank to keep){{else}}Enter client secret{{end}}">
+                </div>
+
+                <div class="form-group">
+                    <label for="microsoft_redirect_uri">Redirect URI</label>
+                    <input type="text" id="microsoft_redirect_uri" name="redirect_uri"
+                           value="{{if .MicrosoftOAuthSettings.RedirectURI}}{{.MicrosoftOAuthSettings.RedirectURI}}{{else}}{{.MicrosoftRedirectURI}}{{end}}"
+                           placeholder="{{.MicrosoftRedirectURI}}">
+                    <small>Must match exactly what you entered in Azure Portal</small>
+                </div>
+
+                <button type="submit" class="btn btn-primary">Save Microsoft OAuth Settings</button>
+
+                {{if .MicrosoftOAuthEnabled}}
+                <span class="oauth-status oauth-status-active">Active</span>
+                {{end}}
+            </form>
+        </div>
         {{end}}
 
         <!-- Danger Zone -->
@@ -155,6 +215,11 @@ function confirmDeleteAccount() {
 
 function toggleOAuthInstructions() {
     var el = document.getElementById('oauth-instructions');
+    el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+function toggleMicrosoftOAuthInstructions() {
+    var el = document.getElementById('microsoft-oauth-instructions');
     el.style.display = el.style.display === 'none' ? 'block' : 'none';
 }
 </script>

@@ -38,8 +38,9 @@ type DashboardData struct {
 
 type AccountsData struct {
 	PageData
-	Accounts           []*models.Account
-	GoogleOAuthEnabled bool
+	Accounts              []*models.Account
+	GoogleOAuthEnabled    bool
+	MicrosoftOAuthEnabled bool
 }
 
 type InboxData struct {
@@ -236,7 +237,8 @@ func (s *Server) HandleAccountsPage(w http.ResponseWriter, r *http.Request) {
 			Title: "Email Accounts",
 			User:  user,
 		},
-		GoogleOAuthEnabled: s.googleOAuth != nil,
+		GoogleOAuthEnabled:    s.googleOAuth != nil,
+		MicrosoftOAuthEnabled: s.microsoftOAuth != nil,
 	}
 
 	s.renderTemplate(w, "accounts.html", data)
@@ -572,35 +574,54 @@ func (s *Server) HandleSettingsPage(w http.ResponseWriter, r *http.Request) {
 
 	// Get OAuth settings for admin
 	var oauthSettings *db.GoogleOAuthSettings
-	var redirectURI string
+	var microsoftOAuthSettings *db.MicrosoftOAuthSettings
+	var redirectURI, microsoftRedirectURI string
 	if user.IsAdmin() {
 		oauthSettings, _ = s.database.GetGoogleOAuthSettings()
 		if oauthSettings == nil {
 			oauthSettings = &db.GoogleOAuthSettings{}
 		}
-		// Build default redirect URI from request
+		microsoftOAuthSettings, _ = s.database.GetMicrosoftOAuthSettings()
+		if microsoftOAuthSettings == nil {
+			microsoftOAuthSettings = &db.MicrosoftOAuthSettings{}
+		}
+		// Build default redirect URIs from request
 		scheme := "https"
-		if r.TLS == nil && (r.Host == "localhost" || strings.HasPrefix(r.Host, "127.0.0.1") || strings.HasPrefix(r.Host, "localhost:")) {
+		host := r.Host
+		// Check for reverse proxy headers
+		if fwdHost := r.Header.Get("X-Forwarded-Host"); fwdHost != "" {
+			host = fwdHost
+		}
+		if fwdProto := r.Header.Get("X-Forwarded-Proto"); fwdProto != "" {
+			scheme = fwdProto
+		} else if r.TLS == nil && (strings.HasPrefix(host, "localhost") || strings.HasPrefix(host, "127.0.0.1")) {
 			scheme = "http"
 		}
-		redirectURI = fmt.Sprintf("%s://%s/oauth/google/callback", scheme, r.Host)
+		redirectURI = fmt.Sprintf("%s://%s/oauth/google/callback", scheme, host)
+		microsoftRedirectURI = fmt.Sprintf("%s://%s/oauth/microsoft/callback", scheme, host)
 	}
 
 	data := struct {
 		PageData
-		Language           string
-		OAuthSettings      *db.GoogleOAuthSettings
-		RedirectURI        string
-		GoogleOAuthEnabled bool
+		Language               string
+		OAuthSettings          *db.GoogleOAuthSettings
+		MicrosoftOAuthSettings *db.MicrosoftOAuthSettings
+		RedirectURI            string
+		MicrosoftRedirectURI   string
+		GoogleOAuthEnabled     bool
+		MicrosoftOAuthEnabled  bool
 	}{
 		PageData: PageData{
 			Title: "Settings",
 			User:  user,
 		},
-		Language:           language,
-		OAuthSettings:      oauthSettings,
-		RedirectURI:        redirectURI,
-		GoogleOAuthEnabled: s.googleOAuth != nil,
+		Language:               language,
+		OAuthSettings:          oauthSettings,
+		MicrosoftOAuthSettings: microsoftOAuthSettings,
+		RedirectURI:            redirectURI,
+		MicrosoftRedirectURI:   microsoftRedirectURI,
+		GoogleOAuthEnabled:     s.googleOAuth != nil,
+		MicrosoftOAuthEnabled:  s.microsoftOAuth != nil,
 	}
 
 	s.renderTemplate(w, "settings.html", data)
