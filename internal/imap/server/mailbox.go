@@ -16,7 +16,7 @@ type Mailbox struct {
 	name     string
 	user     *User
 	database *db.DB
-	folderID int64 // 0 means unified inbox
+	folderID int64 // Local folder ID
 }
 
 // Name returns the mailbox name
@@ -39,21 +39,12 @@ func (m *Mailbox) Info() (*imap.MailboxInfo, error) {
 
 // Status returns mailbox status
 func (m *Mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error) {
-	log.Printf("Getting status for mailbox %s", m.name)
+	log.Printf("Getting status for mailbox %s (folder %d)", m.name, m.folderID)
 
 	status := imap.NewMailboxStatus(m.name, items)
 
-	// Get messages count
-	var messages []*models.Message
-	var err error
-
-	if m.folderID == 0 {
-		// Unified inbox - get all messages for user
-		messages, err = m.database.GetMessagesByUser(m.user.userID, 10000, 0)
-	} else {
-		// Specific folder
-		messages, err = m.database.GetMessagesByFolder(m.folderID, 10000, 0)
-	}
+	// Get messages from folder
+	messages, err := m.database.GetMessagesByFolder(m.folderID, 10000, 0)
 
 	if err != nil {
 		log.Printf("Failed to get messages: %v", err)
@@ -107,24 +98,14 @@ func (m *Mailbox) ListMessages(uid bool, seqSet *imap.SeqSet, items []imap.Fetch
 
 	log.Printf("Listing messages for mailbox %s (uid: %v, seqset: %v)", m.name, uid, seqSet)
 
-	// Get messages from database
-	var messages []*models.Message
-	var err error
-
-	if m.folderID == 0 {
-		// Unified inbox
-		messages, err = m.database.GetMessagesByUser(m.user.userID, 10000, 0)
-	} else {
-		// Specific folder
-		messages, err = m.database.GetMessagesByFolder(m.folderID, 10000, 0)
-	}
-
+	// Get messages from folder
+	messages, err := m.database.GetMessagesByFolder(m.folderID, 10000, 0)
 	if err != nil {
 		log.Printf("Failed to get messages: %v", err)
 		return err
 	}
 
-	log.Printf("Found %d messages in mailbox %s", len(messages), m.name)
+	log.Printf("Found %d messages in mailbox %s (folder %d)", len(messages), m.name, m.folderID)
 
 	// Convert to IMAP messages and send to channel
 	for seqNum, msg := range messages {
@@ -149,16 +130,8 @@ func (m *Mailbox) ListMessages(uid bool, seqSet *imap.SeqSet, items []imap.Fetch
 func (m *Mailbox) SearchMessages(uid bool, criteria *imap.SearchCriteria) ([]uint32, error) {
 	log.Printf("Searching messages in mailbox %s (uid: %v)", m.name, uid)
 
-	// Get all messages
-	var messages []*models.Message
-	var err error
-
-	if m.folderID == 0 {
-		messages, err = m.database.GetMessagesByUser(m.user.userID, 10000, 0)
-	} else {
-		messages, err = m.database.GetMessagesByFolder(m.folderID, 10000, 0)
-	}
-
+	// Get messages from folder
+	messages, err := m.database.GetMessagesByFolder(m.folderID, 10000, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -191,16 +164,8 @@ func (m *Mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, operation i
 	log.Printf("UpdateMessagesFlags called: mailbox=%s, uid=%v, seqSet=%v, operation=%v, flags=%v",
 		m.name, uid, seqSet, operation, flags)
 
-	// Get messages
-	var messages []*models.Message
-	var err error
-
-	if m.folderID == 0 {
-		messages, err = m.database.GetMessagesByUser(m.user.userID, 10000, 0)
-	} else {
-		messages, err = m.database.GetMessagesByFolder(m.folderID, 10000, 0)
-	}
-
+	// Get messages from folder
+	messages, err := m.database.GetMessagesByFolder(m.folderID, 10000, 0)
 	if err != nil {
 		return err
 	}
@@ -259,16 +224,8 @@ func (m *Mailbox) CopyMessages(uid bool, seqSet *imap.SeqSet, destName string) e
 func (m *Mailbox) Expunge() error {
 	log.Printf("Expunge called for mailbox %s", m.name)
 
-	// Get messages
-	var messages []*models.Message
-	var err error
-
-	if m.folderID == 0 {
-		messages, err = m.database.GetMessagesByUser(m.user.userID, 10000, 0)
-	} else {
-		messages, err = m.database.GetMessagesByFolder(m.folderID, 10000, 0)
-	}
-
+	// Get messages from folder
+	messages, err := m.database.GetMessagesByFolder(m.folderID, 10000, 0)
 	if err != nil {
 		return err
 	}
@@ -307,11 +264,44 @@ func (m *Mailbox) convertToIMAPMessage(msg *models.Message, seqNum uint32, items
 			}
 
 		case imap.FetchBody, imap.FetchBodyStructure:
-			imapMsg.BodyStructure = &imap.BodyStructure{
-				MIMEType:    "text",
-				MIMESubType: "plain",
-				Params:      map[string]string{"charset": "utf-8"},
-				Size:        uint32(len(msg.Body)),
+			hasPlain := msg.Body != ""
+			hasHTML := msg.BodyHTML != ""
+
+			if hasPlain && hasHTML {
+				// Multipart/alternative structure
+				imapMsg.BodyStructure = &imap.BodyStructure{
+					MIMEType:    "multipart",
+					MIMESubType: "alternative",
+					Params:      map[string]string{"boundary": fmt.Sprintf("----=_Part_%d", msg.ID)},
+					Parts: []*imap.BodyStructure{
+						{
+							MIMEType:    "text",
+							MIMESubType: "plain",
+							Params:      map[string]string{"charset": "utf-8"},
+							Size:        uint32(len(msg.Body)),
+						},
+						{
+							MIMEType:    "text",
+							MIMESubType: "html",
+							Params:      map[string]string{"charset": "utf-8"},
+							Size:        uint32(len(msg.BodyHTML)),
+						},
+					},
+				}
+			} else if hasHTML {
+				imapMsg.BodyStructure = &imap.BodyStructure{
+					MIMEType:    "text",
+					MIMESubType: "html",
+					Params:      map[string]string{"charset": "utf-8"},
+					Size:        uint32(len(msg.BodyHTML)),
+				}
+			} else {
+				imapMsg.BodyStructure = &imap.BodyStructure{
+					MIMEType:    "text",
+					MIMESubType: "plain",
+					Params:      map[string]string{"charset": "utf-8"},
+					Size:        uint32(len(msg.Body)),
+				}
 			}
 
 		case imap.FetchFlags:
@@ -378,13 +368,53 @@ func (m *Mailbox) buildMessageLiteral(msg *models.Message, section *imap.BodySec
 	buf.WriteString(fmt.Sprintf("Date: %s\r\n", msg.Date.Format("Mon, 02 Jan 2006 15:04:05 -0700")))
 	buf.WriteString(fmt.Sprintf("Message-ID: %s\r\n", msg.MessageID))
 	buf.WriteString("MIME-Version: 1.0\r\n")
-	buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
-	buf.WriteString("\r\n")
 
 	// Write body (unless only headers requested)
 	specifier := section.Specifier
 	if specifier != imap.HeaderSpecifier {
-		buf.WriteString(msg.Body)
+		// Determine content type and body based on what's available
+		hasPlain := msg.Body != ""
+		hasHTML := msg.BodyHTML != ""
+
+		if hasPlain && hasHTML {
+			// Multipart message with both text and HTML
+			boundary := fmt.Sprintf("----=_Part_%d", msg.ID)
+			buf.WriteString(fmt.Sprintf("Content-Type: multipart/alternative; boundary=\"%s\"\r\n", boundary))
+			buf.WriteString("\r\n")
+
+			// Plain text part
+			buf.WriteString(fmt.Sprintf("--%s\r\n", boundary))
+			buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+			buf.WriteString("Content-Transfer-Encoding: 8bit\r\n")
+			buf.WriteString("\r\n")
+			buf.WriteString(msg.Body)
+			buf.WriteString("\r\n")
+
+			// HTML part
+			buf.WriteString(fmt.Sprintf("--%s\r\n", boundary))
+			buf.WriteString("Content-Type: text/html; charset=utf-8\r\n")
+			buf.WriteString("Content-Transfer-Encoding: 8bit\r\n")
+			buf.WriteString("\r\n")
+			buf.WriteString(msg.BodyHTML)
+			buf.WriteString("\r\n")
+
+			// End boundary
+			buf.WriteString(fmt.Sprintf("--%s--\r\n", boundary))
+		} else if hasHTML {
+			// Only HTML available
+			buf.WriteString("Content-Type: text/html; charset=utf-8\r\n")
+			buf.WriteString("\r\n")
+			buf.WriteString(msg.BodyHTML)
+		} else {
+			// Only plain text (or empty)
+			buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+			buf.WriteString("\r\n")
+			buf.WriteString(msg.Body)
+		}
+	} else {
+		// Headers only - just add content-type header and end headers
+		buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+		buf.WriteString("\r\n")
 	}
 
 	return bytes.NewReader(buf.Bytes())

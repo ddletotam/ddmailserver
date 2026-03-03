@@ -253,3 +253,33 @@ func (db *DB) GetMessageCountByFolder(folderID int64) (uint32, error) {
 
 	return uint32(count), nil
 }
+
+// MessageExistsByMessageID checks if a message with given message_id exists for user
+func (db *DB) MessageExistsByMessageID(userID int64, messageID string) (bool, error) {
+	if messageID == "" {
+		return false, nil
+	}
+
+	var exists bool
+	query := `SELECT EXISTS(SELECT 1 FROM messages WHERE user_id = $1 AND message_id = $2)`
+
+	err := db.QueryRow(query, userID, messageID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("failed to check message existence: %w", err)
+	}
+
+	return exists, nil
+}
+
+// GetNextUIDForFolder returns the next UID for a folder and increments it atomically
+func (db *DB) GetNextUIDForFolder(folderID int64) (uint32, error) {
+	var uid uint32
+	query := `UPDATE folders SET uid_next = uid_next + 1 WHERE id = $1 RETURNING uid_next - 1`
+
+	err := db.QueryRow(query, folderID).Scan(&uid)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get next UID: %w", err)
+	}
+
+	return uid, nil
+}
