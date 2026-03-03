@@ -13,7 +13,7 @@ const { chromium } = require('playwright');
 
     // 1. Test Registration
     console.log('1. Testing Registration...');
-    await page.goto('https://ddm.logdoc.ru/login');
+    await page.goto('https://mail.letotam.ru/login');
     await page.waitForLoadState('networkidle');
 
     await page.click('button:has-text("Register")');
@@ -41,7 +41,7 @@ const { chromium } = require('playwright');
 
     // 3. Test Accounts page
     console.log('\n3. Testing Accounts page...');
-    await page.goto('https://ddm.logdoc.ru/accounts');
+    await page.goto('https://mail.letotam.ru/accounts');
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(1000);
 
@@ -52,7 +52,7 @@ const { chromium } = require('playwright');
 
     // 4. Test Account Form page
     console.log('\n4. Testing Account Form...');
-    await page.goto('https://ddm.logdoc.ru/accounts/new');
+    await page.goto('https://mail.letotam.ru/accounts/new');
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(1000);
 
@@ -68,7 +68,7 @@ const { chromium } = require('playwright');
 
     // 5. Test Inbox page
     console.log('\n5. Testing Inbox...');
-    await page.goto('https://ddm.logdoc.ru/inbox');
+    await page.goto('https://mail.letotam.ru/inbox');
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(1000);
 
@@ -79,7 +79,7 @@ const { chromium } = require('playwright');
 
     // 6. Test Compose page
     console.log('\n6. Testing Compose...');
-    await page.goto('https://ddm.logdoc.ru/compose');
+    await page.goto('https://mail.letotam.ru/compose');
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(1000);
 
@@ -90,7 +90,7 @@ const { chromium } = require('playwright');
 
     // 7. Test Settings page
     console.log('\n7. Testing Settings...');
-    await page.goto('https://ddm.logdoc.ru/settings');
+    await page.goto('https://mail.letotam.ru/settings');
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(1000);
 
@@ -101,7 +101,7 @@ const { chromium } = require('playwright');
 
     // 8. Test Logout
     console.log('\n8. Testing Logout...');
-    await page.goto('https://ddm.logdoc.ru/logout');
+    await page.goto('https://mail.letotam.ru/logout');
     await page.waitForURL('**/login', { timeout: 5000 });
     console.log('   ✓ Logout works');
 

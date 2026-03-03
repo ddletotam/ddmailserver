@@ -8,7 +8,7 @@ const { chromium } = require('playwright');
   try {
     console.log('=== Testing Registration Without Email ===\n');
 
-    await page.goto('https://ddm.logdoc.ru/login');
+    await page.goto('https://mail.letotam.ru/login');
 
     // Switch to register tab
     await page.click('button:has-text("Register")');
