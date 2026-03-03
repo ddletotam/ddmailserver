@@ -49,7 +49,7 @@ sudo journalctl -u mailserver -f  # view logs
 ```
 
 ## Server Info
-- Production URL: https://ddm.logdoc.ru/ (proxied via nginx)
+- Production URL: https://mail.letotam.ru/ (proxied via nginx)
 - IMAP: mail.letotam.ru:993 (TLS) - redirected 993→10993
 - SMTP: mail.letotam.ru:465 (TLS) - redirected 465→10465
 - MX: port 25 (redirected 25→2525)

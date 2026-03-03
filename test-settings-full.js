@@ -15,7 +15,7 @@ const { chromium } = require('playwright');
 
     // 1. Register new user
     console.log('1. Registering new user...');
-    await page.goto('https://ddm.logdoc.ru/login');
+    await page.goto('https://mail.letotam.ru/login');
     await page.waitForLoadState('networkidle');
 
     await page.click('button:has-text("Register")');
@@ -38,7 +38,7 @@ const { chromium } = require('playwright');
 
     // 2. Navigate to settings
     console.log('\n2. Opening settings page...');
-    await page.goto('https://ddm.logdoc.ru/settings');
+    await page.goto('https://mail.letotam.ru/settings');
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(1000);
 
@@ -82,7 +82,7 @@ const { chromium } = require('playwright');
 
     // 5. Verify new password works - logout and login
     console.log('\n5. Verifying new password works...');
-    await page.goto('https://ddm.logdoc.ru/logout');
+    await page.goto('https://mail.letotam.ru/logout');
     await page.waitForURL('**/login', { timeout: 5000 });
     console.log('   ✓ Logged out');
 
@@ -95,7 +95,7 @@ const { chromium } = require('playwright');
 
     // 6. Check language persistence
     console.log('\n6. Checking language persistence...');
-    await page.goto('https://ddm.logdoc.ru/settings');
+    await page.goto('https://mail.letotam.ru/settings');
     await page.waitForLoadState('networkidle');
 
     const selectedLanguage = await page.locator('#language').inputValue();

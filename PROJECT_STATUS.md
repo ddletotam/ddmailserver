@@ -1,7 +1,7 @@
 # DDMailServer - Project Status
 
 **Last Updated:** 2026-02-28
-**Server:** https://ddm.logdoc.ru/
+**Server:** https://mail.letotam.ru/
 **Repository:** https://github.com/ddletotam/ddmailserver.git
 
 ## ✅ Completed Features
@@ -75,7 +75,7 @@
 
 ### Infrastructure
 - ✅ PostgreSQL database (hosted on separate server "database")
-- ✅ Nginx reverse proxy (https://ddm.logdoc.ru → jwebhelp.ru:8080)
+- ✅ Nginx reverse proxy (https://mail.letotam.ru → jwebhelp.ru:8080)
 - ✅ Systemd service (mailserver.service)
 - ✅ Worker pool for IMAP/SMTP tasks
 - ✅ Task scheduler
@@ -114,7 +114,7 @@ All tests use Playwright for browser automation:
 - `test-check-messages.js` - Inbox message display
 - `test-send-email.js` - Compose and send email
 - `test-view-message-direct.js` - Message view page
-- All tests run against production: https://ddm.logdoc.ru/
+- All tests run against production: https://mail.letotam.ru/
 
 ## 🚀 Deployment
 

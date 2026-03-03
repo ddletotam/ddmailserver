@@ -9,7 +9,7 @@ const { chromium } = require('playwright');
     console.log('=== Testing Message View ===\n');
 
     // Login
-    await page.goto('https://ddm.logdoc.ru/login');
+    await page.goto('https://mail.letotam.ru/login');
     await page.fill('#login-username', 'testuser_1772288309706');
     await page.fill('#login-password', 'TestPass123!');
     await page.locator('#login-form button[type="submit"]').click();
@@ -17,7 +17,7 @@ const { chromium } = require('playwright');
     console.log('✓ Logged in');
 
     // Go to inbox
-    await page.goto('https://ddm.logdoc.ru/inbox');
+    await page.goto('https://mail.letotam.ru/inbox');
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(2000);
 

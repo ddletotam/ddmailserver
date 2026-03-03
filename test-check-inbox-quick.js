@@ -6,13 +6,13 @@ const { chromium } = require('playwright');
   const page = await context.newPage();
 
   try {
-    await page.goto('https://ddm.logdoc.ru/login');
+    await page.goto('https://mail.letotam.ru/login');
     await page.fill('#login-username', 'testuser_1772288309706');
     await page.fill('#login-password', 'TestPass123!');
     await page.locator('#login-form button[type="submit"]').click();
     await page.waitForURL('**/dashboard', { timeout: 10000 });
 
-    await page.goto('https://ddm.logdoc.ru/inbox');
+    await page.goto('https://mail.letotam.ru/inbox');
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(2000);
 

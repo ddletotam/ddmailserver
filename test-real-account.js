@@ -13,7 +13,7 @@ const { chromium } = require('playwright');
 
     // 1. Register new user
     console.log('1. Registering user...');
-    await page.goto('https://ddm.logdoc.ru/login');
+    await page.goto('https://mail.letotam.ru/login');
     await page.waitForLoadState('networkidle');
 
     await page.click('button:has-text("Register")');
@@ -34,7 +34,7 @@ const { chromium } = require('playwright');
 
     // 2. Add real email account
     console.log('\n2. Adding email account...');
-    await page.goto('https://ddm.logdoc.ru/accounts/new');
+    await page.goto('https://mail.letotam.ru/accounts/new');
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(1000);
 
@@ -66,7 +66,7 @@ const { chromium } = require('playwright');
 
     // 3. Check accounts page
     console.log('\n3. Checking accounts page...');
-    await page.goto('https://ddm.logdoc.ru/accounts');
+    await page.goto('https://mail.letotam.ru/accounts');
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(2000);
 
@@ -77,7 +77,7 @@ const { chromium } = require('playwright');
 
     // 4. Check inbox
     console.log('\n4. Checking inbox...');
-    await page.goto('https://ddm.logdoc.ru/inbox');
+    await page.goto('https://mail.letotam.ru/inbox');
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(3000); // Give time for sync
 

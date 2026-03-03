@@ -9,7 +9,7 @@ const { chromium } = require('playwright');
     console.log('=== Testing Message View (Direct) ===\n');
 
     // Login
-    await page.goto('https://ddm.logdoc.ru/login');
+    await page.goto('https://mail.letotam.ru/login');
     await page.fill('#login-username', 'testuser_1772288309706');
     await page.fill('#login-password', 'TestPass123!');
     await page.locator('#login-form button[type="submit"]').click();
@@ -18,7 +18,7 @@ const { chromium } = require('playwright');
 
     // Go directly to message view (using known message ID)
     console.log('\nOpening message 55288...');
-    await page.goto('https://ddm.logdoc.ru/messages/55288');
+    await page.goto('https://mail.letotam.ru/messages/55288');
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(1000);
 

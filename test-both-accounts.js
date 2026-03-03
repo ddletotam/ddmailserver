@@ -13,7 +13,7 @@ const { chromium } = require('playwright');
 
     // 1. Register
     console.log('1. Registering user...');
-    await page.goto('https://ddm.logdoc.ru/login');
+    await page.goto('https://mail.letotam.ru/login');
     await page.click('button:has-text("Register")');
     await page.waitForTimeout(500);
     await page.fill('#register-username', username);
@@ -30,7 +30,7 @@ const { chromium } = require('playwright');
 
     // 2. Add first account (i2lab)
     console.log('\n2. Adding i2lab account...');
-    await page.goto('https://ddm.logdoc.ru/accounts/new');
+    await page.goto('https://mail.letotam.ru/accounts/new');
     await page.waitForLoadState('networkidle');
 
     await page.fill('#name', 'i2lab Mail');
@@ -50,7 +50,7 @@ const { chromium } = require('playwright');
 
     // 3. Add second account (Yandex)
     console.log('\n3. Adding Yandex account...');
-    await page.goto('https://ddm.logdoc.ru/accounts/new');
+    await page.goto('https://mail.letotam.ru/accounts/new');
     await page.waitForLoadState('networkidle');
 
     await page.fill('#name', 'Yandex Mail');
@@ -70,7 +70,7 @@ const { chromium } = require('playwright');
 
     // 4. Check accounts page
     console.log('\n4. Checking accounts list...');
-    await page.goto('https://ddm.logdoc.ru/accounts');
+    await page.goto('https://mail.letotam.ru/accounts');
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(2000);
 
@@ -84,7 +84,7 @@ const { chromium } = require('playwright');
 
     // 5. Check inbox
     console.log('\n5. Checking inbox...');
-    await page.goto('https://ddm.logdoc.ru/inbox');
+    await page.goto('https://mail.letotam.ru/inbox');
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(5000); // Give time for sync
 

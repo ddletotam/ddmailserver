@@ -7,14 +7,14 @@ const { chromium } = require('playwright');
 
   try {
     // Login with existing user
-    await page.goto('https://ddm.logdoc.ru/login');
+    await page.goto('https://mail.letotam.ru/login');
     await page.fill('#login-username', 'testuser_1772287430415');
     await page.fill('#login-password', 'TestPass123!');
     await page.locator('#login-form button[type="submit"]').click();
     await page.waitForURL('**/dashboard', { timeout: 10000 });
 
     // Go to compose
-    await page.goto('https://ddm.logdoc.ru/compose');
+    await page.goto('https://mail.letotam.ru/compose');
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(1000);
 
