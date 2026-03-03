@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"mime"
+	"strings"
 	"time"
 
 	"github.com/emersion/go-imap"
@@ -353,18 +355,51 @@ func (m *Mailbox) convertToIMAPMessage(msg *models.Message, seqNum uint32, items
 	return imapMsg
 }
 
+// encodeHeader encodes a header value using RFC 2047 if it contains non-ASCII
+func encodeHeader(s string) string {
+	// Check if encoding is needed
+	needsEncoding := false
+	for _, r := range s {
+		if r > 127 {
+			needsEncoding = true
+			break
+		}
+	}
+	if !needsEncoding {
+		return s
+	}
+	return mime.BEncoding.Encode("UTF-8", s)
+}
+
+// encodeAddressHeader encodes an address header like "Name <email@example.com>"
+func encodeAddressHeader(addr string) string {
+	// Find the angle brackets
+	ltIdx := strings.LastIndex(addr, "<")
+	if ltIdx <= 0 {
+		// No name part, just email
+		return addr
+	}
+
+	name := strings.TrimSpace(addr[:ltIdx])
+	email := addr[ltIdx:] // includes < and >
+
+	// Encode the name part if needed
+	encodedName := encodeHeader(name)
+	return encodedName + " " + email
+}
+
 // buildMessageLiteral creates a literal for body section requests
 func (m *Mailbox) buildMessageLiteral(msg *models.Message, section *imap.BodySectionName) imap.Literal {
 	// Build RFC822 formatted message
 	var buf bytes.Buffer
 
-	// Write headers
-	buf.WriteString(fmt.Sprintf("From: %s\r\n", msg.From))
-	buf.WriteString(fmt.Sprintf("To: %s\r\n", msg.To))
+	// Write headers with proper RFC 2047 encoding
+	buf.WriteString(fmt.Sprintf("From: %s\r\n", encodeAddressHeader(msg.From)))
+	buf.WriteString(fmt.Sprintf("To: %s\r\n", encodeAddressHeader(msg.To)))
 	if msg.Cc != "" {
-		buf.WriteString(fmt.Sprintf("Cc: %s\r\n", msg.Cc))
+		buf.WriteString(fmt.Sprintf("Cc: %s\r\n", encodeAddressHeader(msg.Cc)))
 	}
-	buf.WriteString(fmt.Sprintf("Subject: %s\r\n", msg.Subject))
+	buf.WriteString(fmt.Sprintf("Subject: %s\r\n", encodeHeader(msg.Subject)))
 	buf.WriteString(fmt.Sprintf("Date: %s\r\n", msg.Date.Format("Mon, 02 Jan 2006 15:04:05 -0700")))
 	buf.WriteString(fmt.Sprintf("Message-ID: %s\r\n", msg.MessageID))
 	buf.WriteString("MIME-Version: 1.0\r\n")

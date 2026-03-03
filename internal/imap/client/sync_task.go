@@ -2,6 +2,8 @@ package client
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -147,16 +149,26 @@ func (t *SyncTask) syncRemoteInbox(ctx context.Context, client *Client, localInb
 
 // saveMessageToInbox saves a message to user's local INBOX with deduplication
 func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folder) (bool, error) {
-	// Check if message already exists by message_id
+	// Get or generate message_id for deduplication
 	messageID := imapMsg.Envelope.MessageId
-	if messageID != "" {
-		exists, err := t.database.MessageExistsByMessageID(t.account.UserID, messageID)
-		if err != nil {
-			return false, err
-		}
-		if exists {
-			return false, nil // Skip duplicate
-		}
+	if messageID == "" {
+		// Generate synthetic message_id from content hash
+		// This ensures deduplication even for messages without Message-ID header
+		h := sha256.New()
+		h.Write([]byte(imapMsg.Envelope.Subject))
+		h.Write([]byte(formatAddressList(imapMsg.Envelope.From)))
+		h.Write([]byte(imapMsg.Envelope.Date.Format(time.RFC3339)))
+		h.Write([]byte(fmt.Sprintf("%d", imapMsg.Uid)))
+		messageID = fmt.Sprintf("<%s@generated.local>", hex.EncodeToString(h.Sum(nil))[:32])
+	}
+
+	// Check if message already exists by message_id
+	exists, err := t.database.MessageExistsByMessageID(t.account.UserID, messageID)
+	if err != nil {
+		return false, err
+	}
+	if exists {
+		return false, nil // Skip duplicate
 	}
 
 	// Parse message body
