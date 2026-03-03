@@ -31,8 +31,15 @@ func (s *Server) HandleDomainsPage(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Failed to get mailboxes: %v", err)
 	}
 
+	// Get user's language for title translation
+	userLang := user.Language
+	if userLang == "" {
+		userLang = "en"
+	}
+	i18n := s.i18nManager.Get(userLang)
+
 	s.renderTemplate(w, "domains.html", map[string]interface{}{
-		"Title":     s.i18n.T("domains.title"),
+		"Title":     i18n.T("domains.title"),
 		"User":      user,
 		"Domains":   domains,
 		"Mailboxes": mailboxes,
