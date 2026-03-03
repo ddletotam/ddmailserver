@@ -14,6 +14,17 @@ type Config struct {
 	Sync     SyncConfig     `yaml:"sync"`
 	Workers  WorkersConfig  `yaml:"workers"`
 	Logging  LoggingConfig  `yaml:"logging"`
+	OAuth    OAuthConfig    `yaml:"oauth"`
+}
+
+type OAuthConfig struct {
+	Google GoogleOAuthConfig `yaml:"google"`
+}
+
+type GoogleOAuthConfig struct {
+	ClientID     string `yaml:"client_id"`
+	ClientSecret string `yaml:"client_secret"`
+	RedirectURI  string `yaml:"redirect_uri"`
 }
 
 type ServerConfig struct {
@@ -119,4 +130,9 @@ func (c *DatabaseConfig) GetDSN() string {
 		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		c.Host, c.Port, c.User, c.Password, c.DBName, c.SSLMode,
 	)
+}
+
+// IsGoogleOAuthConfigured returns true if Google OAuth is configured
+func (c *OAuthConfig) IsGoogleOAuthConfigured() bool {
+	return c.Google.ClientID != "" && c.Google.ClientSecret != ""
 }

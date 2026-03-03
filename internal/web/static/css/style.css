@@ -304,6 +304,22 @@ textarea:focus {
     background: #dc2626;
 }
 
+.btn-gmail {
+    background: #ea4335;
+    color: white;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.btn-gmail:hover {
+    background: #d93025;
+}
+
+.gmail-icon {
+    flex-shrink: 0;
+}
+
 .btn-sm {
     padding: 0.5rem 1rem;
     font-size: 0.875rem;
@@ -770,6 +786,12 @@ textarea:focus {
     font-size: 2rem;
 }
 
+.page-actions {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+}
+
 /* Error message */
 .error-message {
     color: var(--danger);
@@ -845,6 +867,59 @@ textarea:focus {
     text-align: center;
     color: var(--text-muted);
     font-size: 0.875rem;
+}
+
+/* OAuth Settings */
+.oauth-instructions {
+    background: #f0f9ff;
+    border: 1px solid #0ea5e9;
+    border-radius: 0.5rem;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+
+.oauth-instructions h4 {
+    margin-bottom: 0.5rem;
+    color: #0369a1;
+}
+
+.oauth-instructions ol {
+    margin-left: 1.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.oauth-instructions li {
+    margin-bottom: 0.25rem;
+}
+
+.oauth-instructions code {
+    background: #e0f2fe;
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+    font-size: 0.875rem;
+    word-break: break-all;
+}
+
+.oauth-status {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    border-radius: 1rem;
+    font-size: 0.875rem;
+    margin-left: 1rem;
+}
+
+.oauth-status-active {
+    background: #d1fae5;
+    color: #065f46;
+}
+
+.section-description {
+    color: var(--text-muted);
+    margin-bottom: 1rem;
+}
+
+.section-description a {
+    color: var(--primary);
 }
 
 /* Responsive */

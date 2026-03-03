@@ -15,6 +15,11 @@ func (db *DB) CreateAccount(account *models.Account) error {
 	account.CreatedAt = time.Now()
 	account.UpdatedAt = time.Now()
 
+	// Set default auth type if not specified
+	if account.AuthType == "" {
+		account.AuthType = "password"
+	}
+
 	// Encrypt passwords before storing
 	encryptedIMAPPassword, err := crypto.EncryptPassword(account.IMAPPassword, db.encryptionKey)
 	if err != nil {
@@ -26,20 +31,43 @@ func (db *DB) CreateAccount(account *models.Account) error {
 		return fmt.Errorf("failed to encrypt SMTP password: %w", err)
 	}
 
+	// Encrypt OAuth tokens if present
+	var encryptedAccessToken, encryptedRefreshToken string
+	if account.OAuthAccessToken != "" {
+		encryptedAccessToken, err = crypto.EncryptPassword(account.OAuthAccessToken, db.encryptionKey)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt OAuth access token: %w", err)
+		}
+	}
+	if account.OAuthRefreshToken != "" {
+		encryptedRefreshToken, err = crypto.EncryptPassword(account.OAuthRefreshToken, db.encryptionKey)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt OAuth refresh token: %w", err)
+		}
+	}
+
 	query := `
 		INSERT INTO accounts (
 			user_id, name, email, imap_host, imap_port, imap_username, imap_password, imap_tls,
-			smtp_host, smtp_port, smtp_username, smtp_password, smtp_tls, enabled, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			smtp_host, smtp_port, smtp_username, smtp_password, smtp_tls, enabled,
+			auth_type, oauth_access_token, oauth_refresh_token, oauth_token_expiry,
+			created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 		RETURNING id
 	`
+
+	var tokenExpiry sql.NullTime
+	if !account.OAuthTokenExpiry.IsZero() {
+		tokenExpiry = sql.NullTime{Time: account.OAuthTokenExpiry, Valid: true}
+	}
 
 	err = db.QueryRow(
 		query,
 		account.UserID, account.Name, account.Email,
 		account.IMAPHost, account.IMAPPort, account.IMAPUsername, encryptedIMAPPassword, account.IMAPTLS,
 		account.SMTPHost, account.SMTPPort, account.SMTPUsername, encryptedSMTPPassword, account.SMTPTLS,
-		account.Enabled, account.CreatedAt, account.UpdatedAt,
+		account.Enabled, account.AuthType, encryptedAccessToken, encryptedRefreshToken, tokenExpiry,
+		account.CreatedAt, account.UpdatedAt,
 	).Scan(&account.ID)
 
 	if err != nil {
@@ -53,7 +81,9 @@ func (db *DB) CreateAccount(account *models.Account) error {
 func (db *DB) GetAccountsByUserID(userID int64) ([]*models.Account, error) {
 	query := `
 		SELECT id, user_id, name, email, imap_host, imap_port, imap_username, imap_password, imap_tls,
-		       smtp_host, smtp_port, smtp_username, smtp_password, smtp_tls, enabled, last_sync, created_at, updated_at
+		       smtp_host, smtp_port, smtp_username, smtp_password, smtp_tls, enabled, last_sync,
+		       COALESCE(auth_type, 'password'), COALESCE(oauth_access_token, ''), COALESCE(oauth_refresh_token, ''), oauth_token_expiry,
+		       created_at, updated_at
 		FROM accounts
 		WHERE user_id = $1
 		ORDER BY created_at DESC
@@ -68,13 +98,15 @@ func (db *DB) GetAccountsByUserID(userID int64) ([]*models.Account, error) {
 	var accounts []*models.Account
 	for rows.Next() {
 		account := &models.Account{}
-		var lastSync sql.NullTime
+		var lastSync, tokenExpiry sql.NullTime
 
 		err := rows.Scan(
 			&account.ID, &account.UserID, &account.Name, &account.Email,
 			&account.IMAPHost, &account.IMAPPort, &account.IMAPUsername, &account.IMAPPassword, &account.IMAPTLS,
 			&account.SMTPHost, &account.SMTPPort, &account.SMTPUsername, &account.SMTPPassword, &account.SMTPTLS,
-			&account.Enabled, &lastSync, &account.CreatedAt, &account.UpdatedAt,
+			&account.Enabled, &lastSync,
+			&account.AuthType, &account.OAuthAccessToken, &account.OAuthRefreshToken, &tokenExpiry,
+			&account.CreatedAt, &account.UpdatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan account: %w", err)
@@ -83,10 +115,13 @@ func (db *DB) GetAccountsByUserID(userID int64) ([]*models.Account, error) {
 		if lastSync.Valid {
 			account.LastSync = lastSync.Time
 		}
+		if tokenExpiry.Valid {
+			account.OAuthTokenExpiry = tokenExpiry.Time
+		}
 
-		// Decrypt passwords
-		if err := db.decryptAccountPasswords(account); err != nil {
-			return nil, fmt.Errorf("failed to decrypt passwords for account %d: %w", account.ID, err)
+		// Decrypt passwords and tokens
+		if err := db.decryptAccountSecrets(account); err != nil {
+			return nil, fmt.Errorf("failed to decrypt secrets for account %d: %w", account.ID, err)
 		}
 
 		accounts = append(accounts, account)
@@ -98,11 +133,13 @@ func (db *DB) GetAccountsByUserID(userID int64) ([]*models.Account, error) {
 // GetAccountByID retrieves an account by ID
 func (db *DB) GetAccountByID(id int64) (*models.Account, error) {
 	account := &models.Account{}
-	var lastSync sql.NullTime
+	var lastSync, tokenExpiry sql.NullTime
 
 	query := `
 		SELECT id, user_id, name, email, imap_host, imap_port, imap_username, imap_password, imap_tls,
-		       smtp_host, smtp_port, smtp_username, smtp_password, smtp_tls, enabled, last_sync, created_at, updated_at
+		       smtp_host, smtp_port, smtp_username, smtp_password, smtp_tls, enabled, last_sync,
+		       COALESCE(auth_type, 'password'), COALESCE(oauth_access_token, ''), COALESCE(oauth_refresh_token, ''), oauth_token_expiry,
+		       created_at, updated_at
 		FROM accounts
 		WHERE id = $1
 	`
@@ -111,7 +148,9 @@ func (db *DB) GetAccountByID(id int64) (*models.Account, error) {
 		&account.ID, &account.UserID, &account.Name, &account.Email,
 		&account.IMAPHost, &account.IMAPPort, &account.IMAPUsername, &account.IMAPPassword, &account.IMAPTLS,
 		&account.SMTPHost, &account.SMTPPort, &account.SMTPUsername, &account.SMTPPassword, &account.SMTPTLS,
-		&account.Enabled, &lastSync, &account.CreatedAt, &account.UpdatedAt,
+		&account.Enabled, &lastSync,
+		&account.AuthType, &account.OAuthAccessToken, &account.OAuthRefreshToken, &tokenExpiry,
+		&account.CreatedAt, &account.UpdatedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -124,10 +163,13 @@ func (db *DB) GetAccountByID(id int64) (*models.Account, error) {
 	if lastSync.Valid {
 		account.LastSync = lastSync.Time
 	}
+	if tokenExpiry.Valid {
+		account.OAuthTokenExpiry = tokenExpiry.Time
+	}
 
-	// Decrypt passwords
-	if err := db.decryptAccountPasswords(account); err != nil {
-		return nil, fmt.Errorf("failed to decrypt passwords: %w", err)
+	// Decrypt passwords and tokens
+	if err := db.decryptAccountSecrets(account); err != nil {
+		return nil, fmt.Errorf("failed to decrypt secrets: %w", err)
 	}
 
 	return account, nil
@@ -195,7 +237,9 @@ func (db *DB) UpdateAccountLastSync(accountID int64, lastSync time.Time) error {
 func (db *DB) GetAllEnabledAccounts() ([]*models.Account, error) {
 	query := `
 		SELECT id, user_id, name, email, imap_host, imap_port, imap_username, imap_password, imap_tls,
-		       smtp_host, smtp_port, smtp_username, smtp_password, smtp_tls, enabled, last_sync, created_at, updated_at
+		       smtp_host, smtp_port, smtp_username, smtp_password, smtp_tls, enabled, last_sync,
+		       COALESCE(auth_type, 'password'), COALESCE(oauth_access_token, ''), COALESCE(oauth_refresh_token, ''), oauth_token_expiry,
+		       created_at, updated_at
 		FROM accounts
 		WHERE enabled = true
 		ORDER BY last_sync ASC NULLS FIRST
@@ -210,13 +254,15 @@ func (db *DB) GetAllEnabledAccounts() ([]*models.Account, error) {
 	var accounts []*models.Account
 	for rows.Next() {
 		account := &models.Account{}
-		var lastSync sql.NullTime
+		var lastSync, tokenExpiry sql.NullTime
 
 		err := rows.Scan(
 			&account.ID, &account.UserID, &account.Name, &account.Email,
 			&account.IMAPHost, &account.IMAPPort, &account.IMAPUsername, &account.IMAPPassword, &account.IMAPTLS,
 			&account.SMTPHost, &account.SMTPPort, &account.SMTPUsername, &account.SMTPPassword, &account.SMTPTLS,
-			&account.Enabled, &lastSync, &account.CreatedAt, &account.UpdatedAt,
+			&account.Enabled, &lastSync,
+			&account.AuthType, &account.OAuthAccessToken, &account.OAuthRefreshToken, &tokenExpiry,
+			&account.CreatedAt, &account.UpdatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan account: %w", err)
@@ -225,10 +271,13 @@ func (db *DB) GetAllEnabledAccounts() ([]*models.Account, error) {
 		if lastSync.Valid {
 			account.LastSync = lastSync.Time
 		}
+		if tokenExpiry.Valid {
+			account.OAuthTokenExpiry = tokenExpiry.Time
+		}
 
-		// Decrypt passwords
-		if err := db.decryptAccountPasswords(account); err != nil {
-			return nil, fmt.Errorf("failed to decrypt passwords for account %d: %w", account.ID, err)
+		// Decrypt passwords and tokens
+		if err := db.decryptAccountSecrets(account); err != nil {
+			return nil, fmt.Errorf("failed to decrypt secrets for account %d: %w", account.ID, err)
 		}
 
 		accounts = append(accounts, account)
@@ -237,21 +286,79 @@ func (db *DB) GetAllEnabledAccounts() ([]*models.Account, error) {
 	return accounts, nil
 }
 
-// decryptAccountPasswords decrypts IMAP and SMTP passwords in the account
-func (db *DB) decryptAccountPasswords(account *models.Account) error {
-	// Decrypt IMAP password
-	decryptedIMAP, err := crypto.DecryptPassword(account.IMAPPassword, db.encryptionKey)
-	if err != nil {
-		return fmt.Errorf("failed to decrypt IMAP password: %w", err)
+// decryptAccountSecrets decrypts passwords and OAuth tokens in the account
+func (db *DB) decryptAccountSecrets(account *models.Account) error {
+	// Decrypt IMAP password (if not OAuth)
+	if account.IMAPPassword != "" {
+		decryptedIMAP, err := crypto.DecryptPassword(account.IMAPPassword, db.encryptionKey)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt IMAP password: %w", err)
+		}
+		account.IMAPPassword = decryptedIMAP
 	}
-	account.IMAPPassword = decryptedIMAP
 
-	// Decrypt SMTP password
-	decryptedSMTP, err := crypto.DecryptPassword(account.SMTPPassword, db.encryptionKey)
-	if err != nil {
-		return fmt.Errorf("failed to decrypt SMTP password: %w", err)
+	// Decrypt SMTP password (if not OAuth)
+	if account.SMTPPassword != "" {
+		decryptedSMTP, err := crypto.DecryptPassword(account.SMTPPassword, db.encryptionKey)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt SMTP password: %w", err)
+		}
+		account.SMTPPassword = decryptedSMTP
 	}
-	account.SMTPPassword = decryptedSMTP
+
+	// Decrypt OAuth access token
+	if account.OAuthAccessToken != "" {
+		decrypted, err := crypto.DecryptPassword(account.OAuthAccessToken, db.encryptionKey)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt OAuth access token: %w", err)
+		}
+		account.OAuthAccessToken = decrypted
+	}
+
+	// Decrypt OAuth refresh token
+	if account.OAuthRefreshToken != "" {
+		decrypted, err := crypto.DecryptPassword(account.OAuthRefreshToken, db.encryptionKey)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt OAuth refresh token: %w", err)
+		}
+		account.OAuthRefreshToken = decrypted
+	}
+
+	return nil
+}
+
+// decryptAccountPasswords is kept for backwards compatibility
+func (db *DB) decryptAccountPasswords(account *models.Account) error {
+	return db.decryptAccountSecrets(account)
+}
+
+// UpdateAccountOAuthTokens updates OAuth tokens for an account
+func (db *DB) UpdateAccountOAuthTokens(accountID int64, accessToken, refreshToken string, expiry time.Time) error {
+	// Encrypt tokens before storing
+	encryptedAccessToken, err := crypto.EncryptPassword(accessToken, db.encryptionKey)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt access token: %w", err)
+	}
+
+	var encryptedRefreshToken string
+	if refreshToken != "" {
+		encryptedRefreshToken, err = crypto.EncryptPassword(refreshToken, db.encryptionKey)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt refresh token: %w", err)
+		}
+	}
+
+	query := `
+		UPDATE accounts
+		SET oauth_access_token = $1, oauth_refresh_token = COALESCE(NULLIF($2, ''), oauth_refresh_token),
+		    oauth_token_expiry = $3, updated_at = $4
+		WHERE id = $5
+	`
+
+	_, err = db.Exec(query, encryptedAccessToken, encryptedRefreshToken, expiry, time.Now(), accountID)
+	if err != nil {
+		return fmt.Errorf("failed to update OAuth tokens: %w", err)
+	}
 
 	return nil
 }

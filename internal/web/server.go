@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/yourusername/mailserver/internal/config"
 	"github.com/yourusername/mailserver/internal/db"
+	"github.com/yourusername/mailserver/internal/oauth"
 )
 
 // Server represents the web server
@@ -20,10 +22,12 @@ type Server struct {
 	server          *http.Server
 	i18n            *I18n
 	authRateLimiter *RateLimiter
+	oauthConfig     *config.OAuthConfig
+	googleOAuth     *oauth.GoogleOAuth
 }
 
 // New creates a new web server
-func New(database *db.DB, jwtSecret string, host string, port int, locale string) *Server {
+func New(database *db.DB, jwtSecret string, host string, port int, locale string, oauthConfig *config.OAuthConfig) *Server {
 	addr := fmt.Sprintf("%s:%d", host, port)
 
 	// Initialize i18n
@@ -43,6 +47,16 @@ func New(database *db.DB, jwtSecret string, host string, port int, locale string
 		addr:            addr,
 		i18n:            i18n,
 		authRateLimiter: NewRateLimiter(5, time.Minute), // 5 attempts per minute
+		oauthConfig:     oauthConfig,
+	}
+
+	// Initialize Google OAuth - check config.yaml first, then database
+	if oauthConfig != nil && oauthConfig.IsGoogleOAuthConfigured() {
+		s.googleOAuth = oauth.NewGoogleOAuth(&oauthConfig.Google)
+		log.Printf("Google OAuth configured from config file with redirect URI: %s", oauthConfig.Google.RedirectURI)
+	} else {
+		// Try to load from database
+		s.initGoogleOAuthFromDB()
 	}
 
 	s.setupRoutes()
@@ -84,12 +98,20 @@ func (s *Server) setupRoutes() {
 	authRouter.HandleFunc("/login", s.HandleLogin).Methods("POST")
 	authRouter.HandleFunc("/forgot-password", s.HandleForgotPassword).Methods("POST")
 
+	// OAuth routes (requires auth - user must be logged in to add accounts)
+	// Always register routes - they check if OAuth is configured internally
+	oauthRouter := s.router.PathPrefix("/oauth").Subrouter()
+	oauthRouter.Use(s.WebAuthMiddleware)
+	oauthRouter.HandleFunc("/google/start", s.HandleGoogleOAuthStart).Methods("GET")
+	oauthRouter.HandleFunc("/google/callback", s.HandleGoogleOAuthCallback).Methods("GET")
+
 	// Settings API (uses session cookie auth, must be registered before general API routes)
 	settingsAPI := s.router.PathPrefix("/api/settings").Subrouter()
 	settingsAPI.Use(s.APIAuthMiddleware) // Returns JSON error instead of redirect
 	settingsAPI.HandleFunc("/password", s.HandleChangePassword).Methods("POST")
 	settingsAPI.HandleFunc("/language", s.HandleChangeLanguage).Methods("POST")
 	settingsAPI.HandleFunc("/account", s.HandleDeleteUserAccount).Methods("DELETE")
+	settingsAPI.HandleFunc("/oauth/google", s.HandleSaveGoogleOAuthSettings).Methods("POST")
 
 	// Accounts API (uses session cookie auth, must be registered before general API routes)
 	accountsAPI := s.router.PathPrefix("/api/accounts").Subrouter()
@@ -118,6 +140,7 @@ func (s *Server) setupRoutes() {
 	web.HandleFunc("/accounts", s.HandleAccountsPage).Methods("GET")
 	web.HandleFunc("/accounts/list", s.HandleAccountsList).Methods("GET")
 	web.HandleFunc("/accounts/new", s.HandleAccountFormPage).Methods("GET")
+	web.HandleFunc("/accounts/save", s.HandleSaveAccount).Methods("POST")
 	web.HandleFunc("/accounts/{id}/edit", s.HandleAccountFormPage).Methods("GET")
 
 	// Inbox
@@ -166,4 +189,24 @@ func (s *Server) Start() error {
 func (s *Server) Stop() error {
 	log.Printf("Stopping web server")
 	return s.server.Close()
+}
+
+// initGoogleOAuthFromDB loads Google OAuth settings from database
+func (s *Server) initGoogleOAuthFromDB() {
+	settings, err := s.database.GetGoogleOAuthSettings()
+	if err != nil {
+		log.Printf("Failed to load OAuth settings from DB: %v", err)
+		return
+	}
+
+	if settings.ClientID == "" || settings.ClientSecret == "" {
+		return
+	}
+
+	s.googleOAuth = oauth.NewGoogleOAuth(&config.GoogleOAuthConfig{
+		ClientID:     settings.ClientID,
+		ClientSecret: settings.ClientSecret,
+		RedirectURI:  settings.RedirectURI,
+	})
+	log.Printf("Google OAuth configured from database with redirect URI: %s", settings.RedirectURI)
 }

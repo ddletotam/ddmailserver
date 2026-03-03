@@ -14,6 +14,11 @@ type User struct {
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
+// IsAdmin returns true if user is an administrator (first registered user)
+func (u *User) IsAdmin() bool {
+	return u.ID == 1
+}
+
 // Account represents an external email account (Gmail, Outlook, etc.)
 type Account struct {
 	ID           int64     `json:"id"`
@@ -34,6 +39,26 @@ type Account struct {
 	LastSync     time.Time `json:"last_sync"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+
+	// OAuth2 fields
+	AuthType          string    `json:"auth_type"` // "password" or "oauth2_google"
+	OAuthAccessToken  string    `json:"-"`         // Encrypted in DB
+	OAuthRefreshToken string    `json:"-"`         // Encrypted in DB
+	OAuthTokenExpiry  time.Time `json:"oauth_token_expiry"`
+}
+
+// IsOAuth returns true if this account uses OAuth2 authentication
+func (a *Account) IsOAuth() bool {
+	return a.AuthType == "oauth2_google"
+}
+
+// NeedsTokenRefresh returns true if OAuth token needs to be refreshed
+func (a *Account) NeedsTokenRefresh() bool {
+	if !a.IsOAuth() {
+		return false
+	}
+	// Refresh 5 minutes before expiry
+	return time.Now().Add(5 * time.Minute).After(a.OAuthTokenExpiry)
 }
 
 // Message represents an email message
