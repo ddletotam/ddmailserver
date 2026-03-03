@@ -7,8 +7,10 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gorilla/mux"
+	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 )
 
@@ -35,7 +37,8 @@ type DashboardData struct {
 
 type AccountsData struct {
 	PageData
-	Accounts []*models.Account
+	Accounts           []*models.Account
+	GoogleOAuthEnabled bool
 }
 
 type InboxData struct {
@@ -153,9 +156,12 @@ func (s *Server) HandleAccountsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data := PageData{
-		Title: "Email Accounts",
-		User:  user,
+	data := AccountsData{
+		PageData: PageData{
+			Title: "Email Accounts",
+			User:  user,
+		},
+		GoogleOAuthEnabled: s.googleOAuth != nil,
 	}
 
 	s.renderTemplate(w, "accounts.html", data)
@@ -226,6 +232,97 @@ func (s *Server) HandleAccountFormPage(w http.ResponseWriter, r *http.Request) {
 
 	// Use the standard renderTemplate method to get full layout with styles
 	s.renderTemplate(w, "account_form.html", data)
+}
+
+// HandleSaveAccount handles the account form submission (HTMX endpoint)
+func (s *Server) HandleSaveAccount(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Invalid form data", http.StatusBadRequest)
+		return
+	}
+
+	var account models.Account
+
+	// Check if editing existing account
+	if idStr := r.FormValue("id"); idStr != "" {
+		id, _ := strconv.ParseInt(idStr, 10, 64)
+		existing, err := s.database.GetAccountByID(id)
+		if err != nil || existing.UserID != user.ID {
+			http.Error(w, "Account not found", http.StatusNotFound)
+			return
+		}
+		account = *existing
+	}
+
+	// Parse form values
+	account.UserID = user.ID
+	account.Name = r.FormValue("name")
+	account.Email = r.FormValue("email")
+	account.IMAPHost = r.FormValue("imap_host")
+	account.IMAPUsername = r.FormValue("imap_username")
+	if pwd := r.FormValue("imap_password"); pwd != "" {
+		account.IMAPPassword = pwd
+	}
+	account.IMAPTLS = r.FormValue("imap_tls") == "true"
+	account.SMTPHost = r.FormValue("smtp_host")
+	account.SMTPUsername = r.FormValue("smtp_username")
+	if pwd := r.FormValue("smtp_password"); pwd != "" {
+		account.SMTPPassword = pwd
+	}
+	account.SMTPTLS = r.FormValue("smtp_tls") == "true"
+	account.Enabled = true
+
+	// Parse ports
+	if imapPort := r.FormValue("imap_port"); imapPort != "" {
+		if port, err := strconv.Atoi(imapPort); err == nil {
+			account.IMAPPort = port
+		}
+	}
+	if smtpPort := r.FormValue("smtp_port"); smtpPort != "" {
+		if port, err := strconv.Atoi(smtpPort); err == nil {
+			account.SMTPPort = port
+		}
+	}
+
+	// Validate
+	if account.Name == "" || account.Email == "" {
+		http.Error(w, "Name and email are required", http.StatusBadRequest)
+		return
+	}
+	if account.IMAPHost == "" || account.IMAPPort == 0 {
+		http.Error(w, "IMAP server and port are required", http.StatusBadRequest)
+		return
+	}
+	if account.SMTPHost == "" || account.SMTPPort == 0 {
+		http.Error(w, "SMTP server and port are required", http.StatusBadRequest)
+		return
+	}
+
+	// Save account
+	var err error
+	if account.ID > 0 {
+		err = s.database.UpdateAccount(&account)
+	} else {
+		err = s.database.CreateAccount(&account)
+	}
+
+	if err != nil {
+		log.Printf("Failed to save account: %v", err)
+		http.Error(w, "Failed to save account", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("Account saved: %s for user %d", account.Email, user.ID)
+
+	// Redirect to accounts page
+	w.Header().Set("HX-Redirect", "/accounts")
+	w.WriteHeader(http.StatusOK)
 }
 
 // HandleInboxPage shows the inbox
@@ -398,15 +495,37 @@ func (s *Server) HandleSettingsPage(w http.ResponseWriter, r *http.Request) {
 		language = "en"
 	}
 
+	// Get OAuth settings for admin
+	var oauthSettings *db.GoogleOAuthSettings
+	var redirectURI string
+	if user.IsAdmin() {
+		oauthSettings, _ = s.database.GetGoogleOAuthSettings()
+		if oauthSettings == nil {
+			oauthSettings = &db.GoogleOAuthSettings{}
+		}
+		// Build default redirect URI from request
+		scheme := "https"
+		if r.TLS == nil && (r.Host == "localhost" || strings.HasPrefix(r.Host, "127.0.0.1") || strings.HasPrefix(r.Host, "localhost:")) {
+			scheme = "http"
+		}
+		redirectURI = fmt.Sprintf("%s://%s/oauth/google/callback", scheme, r.Host)
+	}
+
 	data := struct {
 		PageData
-		Language string
+		Language           string
+		OAuthSettings      *db.GoogleOAuthSettings
+		RedirectURI        string
+		GoogleOAuthEnabled bool
 	}{
 		PageData: PageData{
 			Title: "Settings",
 			User:  user,
 		},
-		Language: language,
+		Language:           language,
+		OAuthSettings:      oauthSettings,
+		RedirectURI:        redirectURI,
+		GoogleOAuthEnabled: s.googleOAuth != nil,
 	}
 
 	s.renderTemplate(w, "settings.html", data)

@@ -7,8 +7,36 @@ import (
 
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/client"
+	"github.com/emersion/go-sasl"
 	"github.com/yourusername/mailserver/internal/models"
 )
+
+// xoauth2Client implements XOAUTH2 SASL authentication for Gmail
+type xoauth2Client struct {
+	username string
+	token    string
+}
+
+// Start begins XOAUTH2 authentication
+func (c *xoauth2Client) Start() (mech string, ir []byte, err error) {
+	// XOAUTH2 format: "user=" + email + "\x01auth=Bearer " + token + "\x01\x01"
+	authString := fmt.Sprintf("user=%s\x01auth=Bearer %s\x01\x01", c.username, c.token)
+	return "XOAUTH2", []byte(authString), nil
+}
+
+// Next handles server challenges (not expected for XOAUTH2)
+func (c *xoauth2Client) Next(challenge []byte) (response []byte, err error) {
+	// If server sends a challenge, it's an error message
+	return nil, fmt.Errorf("XOAUTH2 error from server: %s", string(challenge))
+}
+
+// newXOAuth2Client creates a new XOAUTH2 SASL client
+func newXOAuth2Client(username, token string) sasl.Client {
+	return &xoauth2Client{
+		username: username,
+		token:    token,
+	}
+}
 
 // Client wraps the IMAP client for external mail servers
 type Client struct {
@@ -48,11 +76,33 @@ func (c *Client) Connect() error {
 
 	c.conn = conn
 
-	// Login
-	log.Printf("Authenticating as %s", c.account.IMAPUsername)
-	if err := c.conn.Login(c.account.IMAPUsername, c.account.IMAPPassword); err != nil {
-		c.conn.Logout()
-		return fmt.Errorf("failed to login: %w", err)
+	// Authenticate based on auth type
+	if c.account.IsOAuth() {
+		// Try XOAUTH2 first (Gmail uses this)
+		log.Printf("Authenticating with XOAUTH2 as %s", c.account.IMAPUsername)
+		xoauth2 := newXOAuth2Client(c.account.IMAPUsername, c.account.OAuthAccessToken)
+		err := c.conn.Authenticate(xoauth2)
+		if err != nil {
+			// Fall back to OAUTHBEARER (RFC 7628)
+			log.Printf("XOAUTH2 failed, trying OAUTHBEARER: %v", err)
+			oauthbearer := sasl.NewOAuthBearerClient(&sasl.OAuthBearerOptions{
+				Username: c.account.IMAPUsername,
+				Token:    c.account.OAuthAccessToken,
+				Host:     c.account.IMAPHost,
+				Port:     c.account.IMAPPort,
+			})
+			if err := c.conn.Authenticate(oauthbearer); err != nil {
+				c.conn.Logout()
+				return fmt.Errorf("failed to authenticate with OAuth: %w", err)
+			}
+		}
+	} else {
+		// Use plain LOGIN for password-based auth
+		log.Printf("Authenticating as %s", c.account.IMAPUsername)
+		if err := c.conn.Login(c.account.IMAPUsername, c.account.IMAPPassword); err != nil {
+			c.conn.Logout()
+			return fmt.Errorf("failed to login: %w", err)
+		}
 	}
 
 	log.Printf("Successfully connected to %s", c.account.Email)

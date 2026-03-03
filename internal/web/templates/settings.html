@@ -69,6 +69,67 @@
             </form>
         </div>
 
+        {{if .User.IsAdmin}}
+        <!-- Google OAuth Settings (Admin only) -->
+        <div class="settings-section">
+            <h2>Google OAuth Settings</h2>
+            <p class="section-description">
+                Configure Google OAuth to allow users to add Gmail accounts.
+                <a href="#" onclick="toggleOAuthInstructions(); return false;">Show setup instructions</a>
+            </p>
+
+            <div id="oauth-instructions" class="oauth-instructions" style="display: none;">
+                <h4>Setup Instructions:</h4>
+                <ol>
+                    <li>Go to <a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a></li>
+                    <li>Create a new project or select existing one</li>
+                    <li>Go to "APIs & Services" → "OAuth consent screen"</li>
+                    <li>Configure consent screen (External type for personal use)</li>
+                    <li>Go to "APIs & Services" → "Credentials"</li>
+                    <li>Click "Create Credentials" → "OAuth client ID"</li>
+                    <li>Select "Web application"</li>
+                    <li>Add authorized redirect URI: <code>{{.RedirectURI}}</code></li>
+                    <li>Copy Client ID and Client Secret below</li>
+                </ol>
+                <p><strong>Note:</strong> For testing, add your email to "Test users" in OAuth consent screen.</p>
+            </div>
+
+            <form hx-post="/api/settings/oauth/google"
+                  hx-target="#oauth-message"
+                  hx-swap="innerHTML"
+                  class="settings-form">
+                <div id="oauth-message" class="message"></div>
+
+                <div class="form-group">
+                    <label for="oauth_client_id">Client ID</label>
+                    <input type="text" id="oauth_client_id" name="client_id"
+                           value="{{.OAuthSettings.ClientID}}"
+                           placeholder="xxxxx.apps.googleusercontent.com">
+                </div>
+
+                <div class="form-group">
+                    <label for="oauth_client_secret">Client Secret</label>
+                    <input type="password" id="oauth_client_secret" name="client_secret"
+                           placeholder="{{if .OAuthSettings.ClientSecret}}(configured - leave blank to keep){{else}}Enter client secret{{end}}">
+                </div>
+
+                <div class="form-group">
+                    <label for="oauth_redirect_uri">Redirect URI</label>
+                    <input type="text" id="oauth_redirect_uri" name="redirect_uri"
+                           value="{{if .OAuthSettings.RedirectURI}}{{.OAuthSettings.RedirectURI}}{{else}}{{.RedirectURI}}{{end}}"
+                           placeholder="{{.RedirectURI}}">
+                    <small>Must match exactly what you entered in Google Cloud Console</small>
+                </div>
+
+                <button type="submit" class="btn btn-primary">Save OAuth Settings</button>
+
+                {{if .GoogleOAuthEnabled}}
+                <span class="oauth-status oauth-status-active">Active</span>
+                {{end}}
+            </form>
+        </div>
+        {{end}}
+
         <!-- Danger Zone -->
         <div class="settings-section danger-zone">
             <h2>{{t "settings.danger_zone"}}</h2>
@@ -90,6 +151,11 @@ function confirmDeleteAccount() {
             });
         }
     }
+}
+
+function toggleOAuthInstructions() {
+    var el = document.getElementById('oauth-instructions');
+    el.style.display = el.style.display === 'none' ? 'block' : 'none';
 }
 </script>
 {{end}}
