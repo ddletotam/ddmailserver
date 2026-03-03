@@ -214,7 +214,7 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 		Cc:        formatAddressList(imapMsg.Envelope.Cc),
 		Bcc:       formatAddressList(imapMsg.Envelope.Bcc),
 		ReplyTo:   formatAddressList(imapMsg.Envelope.ReplyTo),
-		Date:      imapMsg.Envelope.Date,
+		Date:      imapMsg.Envelope.Date.UTC(),
 		Body:      body,
 		BodyHTML:  bodyHTML,
 		UID:       localUID,

@@ -162,9 +162,11 @@ func (s *Session) Data(r io.Reader) error {
 		fromAddr = s.from
 	}
 
-	// Use current time if date not parsed
+	// Use current time if date not parsed, always store in UTC
 	if messageDate.IsZero() {
-		messageDate = time.Now()
+		messageDate = time.Now().UTC()
+	} else {
+		messageDate = messageDate.UTC()
 	}
 
 	// Generate message ID if missing
