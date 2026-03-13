@@ -183,3 +183,39 @@ func (c *Client) GetConnection() *client.Client {
 func (c *Client) IsConnected() bool {
 	return c.conn != nil && c.conn.State() == imap.AuthenticatedState
 }
+
+// StoreFlags updates flags on a message on the remote IMAP server
+// This is used for bidirectional sync - pushing local flag changes to source
+func (c *Client) StoreFlags(folder string, uid uint32, seen, flagged, answered, deleted bool) error {
+	// Select folder
+	if _, err := c.conn.Select(folder, false); err != nil {
+		return fmt.Errorf("failed to select folder %s: %w", folder, err)
+	}
+
+	// Build flags list
+	var flags []interface{}
+	if seen {
+		flags = append(flags, imap.SeenFlag)
+	}
+	if flagged {
+		flags = append(flags, imap.FlaggedFlag)
+	}
+	if answered {
+		flags = append(flags, imap.AnsweredFlag)
+	}
+	if deleted {
+		flags = append(flags, imap.DeletedFlag)
+	}
+
+	// Create UID set for single message
+	seqSet := new(imap.SeqSet)
+	seqSet.AddNum(uid)
+
+	// Use SetFlags to replace all flags (not add/remove)
+	item := imap.FormatFlagsOp(imap.SetFlags, true)
+	if err := c.conn.UidStore(seqSet, item, flags, nil); err != nil {
+		return fmt.Errorf("failed to store flags for UID %d: %w", uid, err)
+	}
+
+	return nil
+}

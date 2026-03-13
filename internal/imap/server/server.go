@@ -8,11 +8,13 @@ import (
 	"github.com/emersion/go-imap/server"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/notify"
+	"github.com/yourusername/mailserver/internal/search"
 )
 
 // Server wraps the IMAP server
 type Server struct {
 	imapServer *server.Server
+	backend    *Backend
 	addr       string
 	tlsConfig  *tls.Config
 }
@@ -31,6 +33,7 @@ func New(database *db.DB, addr string) *Server {
 
 	return &Server{
 		imapServer: s,
+		backend:    be,
 		addr:       addr,
 	}
 }
@@ -49,6 +52,7 @@ func NewWithHub(database *db.DB, addr string, hub *notify.Hub) *Server {
 
 	return &Server{
 		imapServer: s,
+		backend:    be,
 		addr:       addr,
 	}
 }
@@ -64,6 +68,7 @@ func NewWithBackend(be *Backend, addr string) *Server {
 
 	return &Server{
 		imapServer: s,
+		backend:    be,
 		addr:       addr,
 	}
 }
@@ -91,6 +96,7 @@ func NewWithBackendTLS(be *Backend, addr string, certFile, keyFile string) (*Ser
 
 	return &Server{
 		imapServer: s,
+		backend:    be,
 		addr:       addr,
 		tlsConfig:  tlsConfig,
 	}, nil
@@ -122,6 +128,7 @@ func NewWithTLS(database *db.DB, addr string, certFile, keyFile string) (*Server
 
 	return &Server{
 		imapServer: s,
+		backend:    be,
 		addr:       addr,
 		tlsConfig:  tlsConfig,
 	}, nil
@@ -155,6 +162,7 @@ func NewWithTLSAndHub(database *db.DB, addr string, certFile, keyFile string, hu
 
 	return &Server{
 		imapServer: s,
+		backend:    be,
 		addr:       addr,
 		tlsConfig:  tlsConfig,
 	}, nil
@@ -186,4 +194,11 @@ func (s *Server) StartTLS() error {
 func (s *Server) Stop() error {
 	log.Printf("Stopping IMAP server")
 	return s.imapServer.Close()
+}
+
+// SetSearchIndexer sets the Meilisearch indexer for full-text search
+func (s *Server) SetSearchIndexer(indexer *search.Indexer) {
+	if s.backend != nil {
+		s.backend.SetSearchIndexer(indexer)
+	}
 }

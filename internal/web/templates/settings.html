@@ -1,226 +1,171 @@
 {{define "content"}}
-<div class="settings-page">
-    <div class="page-header">
-        <h1>{{t "settings.title"}}</h1>
+<div class="row row-cards">
+    <!-- User Information -->
+    <div class="col-lg-6">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">{{t "settings.user_info"}}</h3>
+            </div>
+            <div class="card-body">
+                <div class="datagrid">
+                    <div class="datagrid-item">
+                        <div class="datagrid-title">{{t "settings.username"}}</div>
+                        <div class="datagrid-content">{{.User.Username}}</div>
+                    </div>
+                    <div class="datagrid-item">
+                        <div class="datagrid-title">{{t "settings.email"}}</div>
+                        <div class="datagrid-content">{{if .User.Email}}{{.User.Email}}{{else}}<span class="text-muted">{{t "settings.not_set"}}</span>{{end}}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
-    <div class="settings-sections">
-        <!-- User Information -->
-        <div class="settings-section">
-            <h2>{{t "settings.user_info"}}</h2>
-            <div class="info-grid">
-                <div class="info-item">
-                    <label>{{t "settings.username"}}</label>
-                    <p>{{.User.Username}}</p>
-                </div>
-                <div class="info-item">
-                    <label>{{t "settings.email"}}</label>
-                    <p>{{if .User.Email}}{{.User.Email}}{{else}}{{t "settings.not_set"}}{{end}}</p>
-                </div>
+    <!-- Language -->
+    <div class="col-lg-6">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">{{t "settings.language"}}</h3>
+            </div>
+            <div class="card-body">
+                <form hx-post="/api/settings/language" hx-target="#language-message" hx-swap="innerHTML">
+                    <div id="language-message"></div>
+                    <div class="row g-2 align-items-end">
+                        <div class="col">
+                            <select name="language" class="form-select">
+                                <option value="en" {{if eq .Language "en"}}selected{{end}}>English</option>
+                                <option value="ru" {{if eq .Language "ru"}}selected{{end}}>Русский</option>
+                            </select>
+                        </div>
+                        <div class="col-auto">
+                            <button type="submit" class="btn btn-primary">{{t "settings.update_language"}}</button>
+                        </div>
+                    </div>
+                </form>
             </div>
         </div>
+    </div>
 
-        <!-- Change Password -->
-        <div class="settings-section">
-            <h2>{{t "settings.change_password"}}</h2>
-            <form hx-post="/api/settings/password"
-                  hx-target="#password-message"
-                  hx-swap="innerHTML"
-                  class="settings-form">
-                <div id="password-message" class="message"></div>
-
-                <div class="form-group">
-                    <label for="current_password">{{t "settings.current_password"}}</label>
-                    <input type="password" id="current_password" name="current_password" required>
-                </div>
-
-                <div class="form-group">
-                    <label for="new_password">{{t "settings.new_password"}}</label>
-                    <input type="password" id="new_password" name="new_password" required minlength="8">
-                </div>
-
-                <div class="form-group">
-                    <label for="confirm_password">{{t "settings.confirm_password"}}</label>
-                    <input type="password" id="confirm_password" name="confirm_password" required>
-                </div>
-
-                <button type="submit" class="btn btn-primary">{{t "settings.update_password"}}</button>
-            </form>
-        </div>
-
-        <!-- Language Preference -->
-        <div class="settings-section">
-            <h2>{{t "settings.language"}}</h2>
-            <form hx-post="/api/settings/language"
-                  hx-target="#language-message"
-                  hx-swap="innerHTML"
-                  class="settings-form">
-                <div id="language-message" class="message"></div>
-
-                <div class="form-group">
-                    <label for="language">{{t "settings.preferred_language"}}</label>
-                    <select id="language" name="language" class="form-control">
-                        <option value="en" {{if eq .Language "en"}}selected{{end}}>English</option>
-                        <option value="ru" {{if eq .Language "ru"}}selected{{end}}>Русский</option>
-                    </select>
-                </div>
-
-                <button type="submit" class="btn btn-primary">{{t "settings.update_language"}}</button>
-            </form>
-        </div>
-
-        {{if .User.IsAdmin}}
-        <!-- Google OAuth Settings (Admin only) -->
-        <div class="settings-section">
-            <h2>Google OAuth Settings</h2>
-            <p class="section-description">
-                Configure Google OAuth to allow users to add Gmail accounts.
-                <a href="#" onclick="toggleOAuthInstructions(); return false;">Show setup instructions</a>
-            </p>
-
-            <div id="oauth-instructions" class="oauth-instructions" style="display: none;">
-                <h4>Setup Instructions:</h4>
-                <ol>
-                    <li>Go to <a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a></li>
-                    <li>Create a new project or select existing one</li>
-                    <li>Go to "APIs & Services" → "OAuth consent screen"</li>
-                    <li>Configure consent screen (External type for personal use)</li>
-                    <li>Go to "APIs & Services" → "Credentials"</li>
-                    <li>Click "Create Credentials" → "OAuth client ID"</li>
-                    <li>Select "Web application"</li>
-                    <li>Add authorized redirect URI: <code>{{.RedirectURI}}</code></li>
-                    <li>Copy Client ID and Client Secret below</li>
-                </ol>
-                <p><strong>Note:</strong> For testing, add your email to "Test users" in OAuth consent screen.</p>
+    <!-- Change Password -->
+    <div class="col-lg-6">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">{{t "settings.change_password"}}</h3>
             </div>
-
-            <form hx-post="/api/settings/oauth/google"
-                  hx-target="#oauth-message"
-                  hx-swap="innerHTML"
-                  class="settings-form">
-                <div id="oauth-message" class="message"></div>
-
-                <div class="form-group">
-                    <label for="oauth_client_id">Client ID</label>
-                    <input type="text" id="oauth_client_id" name="client_id"
-                           value="{{.OAuthSettings.ClientID}}"
-                           placeholder="xxxxx.apps.googleusercontent.com">
-                </div>
-
-                <div class="form-group">
-                    <label for="oauth_client_secret">Client Secret</label>
-                    <input type="password" id="oauth_client_secret" name="client_secret"
-                           placeholder="{{if .OAuthSettings.ClientSecret}}(configured - leave blank to keep){{else}}Enter client secret{{end}}">
-                </div>
-
-                <div class="form-group">
-                    <label for="oauth_redirect_uri">Redirect URI</label>
-                    <input type="text" id="oauth_redirect_uri" name="redirect_uri"
-                           value="{{if .OAuthSettings.RedirectURI}}{{.OAuthSettings.RedirectURI}}{{else}}{{.RedirectURI}}{{end}}"
-                           placeholder="{{.RedirectURI}}">
-                    <small>Must match exactly what you entered in Google Cloud Console</small>
-                </div>
-
-                <button type="submit" class="btn btn-primary">Save OAuth Settings</button>
-
-                {{if .GoogleOAuthEnabled}}
-                <span class="oauth-status oauth-status-active">Active</span>
-                {{end}}
-            </form>
-        </div>
-
-        <!-- Microsoft OAuth Settings (Admin only) -->
-        <div class="settings-section">
-            <h2>Microsoft OAuth Settings</h2>
-            <p class="section-description">
-                Configure Microsoft OAuth to allow users to add Outlook/Hotmail/Office 365 accounts.
-                <a href="#" onclick="toggleMicrosoftOAuthInstructions(); return false;">Show setup instructions</a>
-            </p>
-
-            <div id="microsoft-oauth-instructions" class="oauth-instructions" style="display: none;">
-                <h4>Setup Instructions:</h4>
-                <ol>
-                    <li>Go to <a href="https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank">Azure Portal - App registrations</a></li>
-                    <li>Click "New registration"</li>
-                    <li>Name: "DDMailServer" (or your choice)</li>
-                    <li>Supported account types: "Accounts in any organizational directory and personal Microsoft accounts"</li>
-                    <li>Redirect URI: Web → <code>{{.MicrosoftRedirectURI}}</code></li>
-                    <li>After creation, copy "Application (client) ID" below</li>
-                    <li>Go to "Certificates & secrets" → "New client secret"</li>
-                    <li>Copy the secret value (not ID) below</li>
-                    <li>Go to "API permissions" → "Add a permission"</li>
-                    <li>Select "Microsoft Graph" → Delegated permissions → add: openid, email, offline_access</li>
-                    <li>Add "APIs my organization uses" → search "Office 365 Exchange Online" → Delegated → add: IMAP.AccessAsUser.All, SMTP.Send</li>
-                </ol>
+            <div class="card-body">
+                <form hx-post="/api/settings/password" hx-target="#password-message" hx-swap="innerHTML">
+                    <div id="password-message"></div>
+                    <div class="mb-3">
+                        <label class="form-label">{{t "settings.current_password"}}</label>
+                        <input type="password" name="current_password" class="form-control" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">{{t "settings.new_password"}}</label>
+                        <input type="password" name="new_password" class="form-control" required minlength="8">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">{{t "settings.confirm_password"}}</label>
+                        <input type="password" name="confirm_password" class="form-control" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">{{t "settings.update_password"}}</button>
+                </form>
             </div>
-
-            <form hx-post="/api/settings/oauth/microsoft"
-                  hx-target="#microsoft-oauth-message"
-                  hx-swap="innerHTML"
-                  class="settings-form">
-                <div id="microsoft-oauth-message" class="message"></div>
-
-                <div class="form-group">
-                    <label for="microsoft_client_id">Application (Client) ID</label>
-                    <input type="text" id="microsoft_client_id" name="client_id"
-                           value="{{.MicrosoftOAuthSettings.ClientID}}"
-                           placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
-                </div>
-
-                <div class="form-group">
-                    <label for="microsoft_client_secret">Client Secret Value</label>
-                    <input type="password" id="microsoft_client_secret" name="client_secret"
-                           placeholder="{{if .MicrosoftOAuthSettings.ClientSecret}}(configured - leave blank to keep){{else}}Enter client secret{{end}}">
-                </div>
-
-                <div class="form-group">
-                    <label for="microsoft_redirect_uri">Redirect URI</label>
-                    <input type="text" id="microsoft_redirect_uri" name="redirect_uri"
-                           value="{{if .MicrosoftOAuthSettings.RedirectURI}}{{.MicrosoftOAuthSettings.RedirectURI}}{{else}}{{.MicrosoftRedirectURI}}{{end}}"
-                           placeholder="{{.MicrosoftRedirectURI}}">
-                    <small>Must match exactly what you entered in Azure Portal</small>
-                </div>
-
-                <button type="submit" class="btn btn-primary">Save Microsoft OAuth Settings</button>
-
-                {{if .MicrosoftOAuthEnabled}}
-                <span class="oauth-status oauth-status-active">Active</span>
-                {{end}}
-            </form>
         </div>
-        {{end}}
+    </div>
 
-        <!-- Danger Zone -->
-        <div class="settings-section danger-zone">
-            <h2>{{t "settings.danger_zone"}}</h2>
-            <p>{{t "settings.danger_zone_description"}}</p>
-            <button class="btn btn-danger" onclick="confirmDeleteAccount()">
-                {{t "settings.delete_account"}}
-            </button>
+    {{if .User.IsAdmin}}
+    <!-- Google OAuth -->
+    <div class="col-lg-6">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">Google OAuth</h3>
+                {{if .GoogleOAuthEnabled}}<span class="badge bg-success ms-2">Active</span>{{end}}
+            </div>
+            <div class="card-body">
+                <p class="text-muted mb-3">
+                    Configure Google OAuth to allow users to add Gmail accounts.
+                    <a href="#" onclick="document.getElementById('google-instructions').classList.toggle('d-none'); return false;">Show instructions</a>
+                </p>
+                <div id="google-instructions" class="alert alert-info d-none mb-3">
+                    <ol class="mb-0 ps-3">
+                        <li>Go to <a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a></li>
+                        <li>Create OAuth credentials</li>
+                        <li>Set redirect URI: <code>{{.RedirectURI}}</code></li>
+                    </ol>
+                </div>
+                <form hx-post="/api/settings/oauth/google" hx-target="#oauth-message" hx-swap="innerHTML">
+                    <div id="oauth-message"></div>
+                    <div class="mb-3">
+                        <label class="form-label">Client ID</label>
+                        <input type="text" name="client_id" class="form-control" value="{{.OAuthSettings.ClientID}}" placeholder="xxxxx.apps.googleusercontent.com">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Client Secret</label>
+                        <input type="password" name="client_secret" class="form-control" placeholder="{{if .OAuthSettings.ClientSecret}}(configured){{end}}">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Redirect URI</label>
+                        <input type="text" name="redirect_uri" class="form-control" value="{{if .OAuthSettings.RedirectURI}}{{.OAuthSettings.RedirectURI}}{{else}}{{.RedirectURI}}{{end}}">
+                    </div>
+                    <button type="submit" class="btn btn-primary">Save</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Microsoft OAuth -->
+    <div class="col-lg-6">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">Microsoft OAuth</h3>
+                {{if .MicrosoftOAuthEnabled}}<span class="badge bg-success ms-2">Active</span>{{end}}
+            </div>
+            <div class="card-body">
+                <p class="text-muted mb-3">
+                    Configure Microsoft OAuth for Outlook/Office 365 accounts.
+                    <a href="#" onclick="document.getElementById('ms-instructions').classList.toggle('d-none'); return false;">Show instructions</a>
+                </p>
+                <div id="ms-instructions" class="alert alert-info d-none mb-3">
+                    <ol class="mb-0 ps-3">
+                        <li>Go to <a href="https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank">Azure Portal</a></li>
+                        <li>Create app registration</li>
+                        <li>Set redirect URI: <code>{{.MicrosoftRedirectURI}}</code></li>
+                    </ol>
+                </div>
+                <form hx-post="/api/settings/oauth/microsoft" hx-target="#ms-oauth-message" hx-swap="innerHTML">
+                    <div id="ms-oauth-message"></div>
+                    <div class="mb-3">
+                        <label class="form-label">Application (Client) ID</label>
+                        <input type="text" name="client_id" class="form-control" value="{{.MicrosoftOAuthSettings.ClientID}}">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Client Secret</label>
+                        <input type="password" name="client_secret" class="form-control" placeholder="{{if .MicrosoftOAuthSettings.ClientSecret}}(configured){{end}}">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Redirect URI</label>
+                        <input type="text" name="redirect_uri" class="form-control" value="{{if .MicrosoftOAuthSettings.RedirectURI}}{{.MicrosoftOAuthSettings.RedirectURI}}{{else}}{{.MicrosoftRedirectURI}}{{end}}">
+                    </div>
+                    <button type="submit" class="btn btn-primary">Save</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    {{end}}
+
+    <!-- Danger Zone -->
+    <div class="col-12">
+        <div class="card border-danger">
+            <div class="card-header bg-danger-lt">
+                <h3 class="card-title text-danger">{{t "settings.danger_zone"}}</h3>
+            </div>
+            <div class="card-body">
+                <p class="text-muted">{{t "settings.danger_zone_description"}}</p>
+                <button class="btn btn-danger" onclick="if(confirm('{{t "settings.delete_confirm"}}') && confirm('{{t "settings.delete_confirm_final"}}')) htmx.ajax('DELETE', '/api/settings/account', {target: 'body', swap: 'outerHTML'})">
+                    <i class="ti ti-trash me-2"></i>{{t "settings.delete_account"}}
+                </button>
+            </div>
         </div>
     </div>
 </div>
-
-<script>
-function confirmDeleteAccount() {
-    if (confirm('{{t "settings.delete_confirm"}}')) {
-        if (confirm('{{t "settings.delete_confirm_final"}}')) {
-            htmx.ajax('DELETE', '/api/settings/account', {
-                target: 'body',
-                swap: 'outerHTML'
-            });
-        }
-    }
-}
-
-function toggleOAuthInstructions() {
-    var el = document.getElementById('oauth-instructions');
-    el.style.display = el.style.display === 'none' ? 'block' : 'none';
-}
-
-function toggleMicrosoftOAuthInstructions() {
-    var el = document.getElementById('microsoft-oauth-instructions');
-    el.style.display = el.style.display === 'none' ? 'block' : 'none';
-}
-</script>
 {{end}}

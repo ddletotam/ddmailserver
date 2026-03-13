@@ -1,53 +1,108 @@
 {{define "content"}}
-<div class="dashboard">
-    <h1>Welcome, {{.User.Username}}!</h1>
-
-    <div class="dashboard-stats">
-        <div class="stat-card">
-            <h3>Email Accounts</h3>
-            <p class="stat-number">{{.AccountCount}}</p>
-        </div>
-        <div class="stat-card">
-            <h3>Total Messages</h3>
-            <p class="stat-number">{{.MessageCount}}</p>
-        </div>
-        <div class="stat-card">
-            <h3>Unread</h3>
-            <p class="stat-number">{{.UnreadCount}}</p>
+<!-- Stats row -->
+<div class="row row-deck row-cards mb-4">
+    <div class="col-sm-6 col-lg-3">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex align-items-center">
+                    <div class="subheader">{{t "dashboard.email_accounts"}}</div>
+                </div>
+                <div class="h1 mb-0">{{.AccountCount}}</div>
+            </div>
         </div>
     </div>
-
-    <div class="dashboard-section">
-        <div class="section-header">
-            <h2>Your Email Accounts</h2>
-            <a href="/accounts/new" class="btn btn-primary">+ Add Account</a>
-        </div>
-
-        <div id="accounts-list"
-             hx-get="/accounts/list"
-             hx-trigger="load"
-             hx-swap="innerHTML">
-            <p>Loading accounts...</p>
+    <div class="col-sm-6 col-lg-3">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex align-items-center">
+                    <div class="subheader">{{t "dashboard.total_messages"}}</div>
+                </div>
+                <div class="h1 mb-0">{{.MessageCount}}</div>
+            </div>
         </div>
     </div>
-
-    <div class="dashboard-section">
-        <div class="section-header">
-            <h2>Quick Actions</h2>
+    <div class="col-sm-6 col-lg-3">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex align-items-center">
+                    <div class="subheader">{{t "dashboard.unread"}}</div>
+                </div>
+                <div class="h1 mb-0 text-primary">{{.UnreadCount}}</div>
+            </div>
         </div>
-        <div class="quick-actions">
-            <a href="/inbox" class="action-card">
-                <h3>📥 Inbox</h3>
-                <p>Read your emails</p>
-            </a>
-            <a href="/compose" class="action-card">
-                <h3>✉️ Compose</h3>
-                <p>Write new email</p>
-            </a>
-            <a href="/accounts" class="action-card">
-                <h3>⚙️ Accounts</h3>
-                <p>Manage email accounts</p>
-            </a>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex align-items-center">
+                    <div class="subheader">{{t "nav.calendars"}}</div>
+                </div>
+                <div class="h1 mb-0">{{.CalendarCount}}</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Quick actions -->
+<div class="row row-deck row-cards mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">{{t "dashboard.quick_actions"}}</h3>
+            </div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-6 col-md-3">
+                        <a href="/accounts" class="btn btn-outline-primary w-100 py-3">
+                            <i class="ti ti-mail fs-2 d-block mb-1"></i>
+                            {{t "nav.accounts"}}
+                        </a>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <a href="/calendars" class="btn btn-outline-success w-100 py-3">
+                            <i class="ti ti-calendar fs-2 d-block mb-1"></i>
+                            {{t "nav.calendars"}}
+                        </a>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <a href="/domains" class="btn btn-outline-info w-100 py-3">
+                            <i class="ti ti-world fs-2 d-block mb-1"></i>
+                            {{t "nav.domains"}}
+                        </a>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <a href="/settings" class="btn btn-outline-warning w-100 py-3">
+                            <i class="ti ti-settings fs-2 d-block mb-1"></i>
+                            {{t "nav.settings"}}
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Email accounts list -->
+<div class="row row-deck row-cards">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">{{t "dashboard.your_accounts"}}</h3>
+                <div class="card-actions">
+                    <a href="/accounts/new" class="btn btn-primary">
+                        <i class="ti ti-plus me-2"></i>{{t "dashboard.add_account"}}
+                    </a>
+                </div>
+            </div>
+            <div class="card-body" id="accounts-list"
+                 hx-get="/accounts/list"
+                 hx-trigger="load"
+                 hx-swap="innerHTML">
+                <div class="text-center text-muted py-4">
+                    <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+                    {{t "dashboard.loading_accounts"}}
+                </div>
+            </div>
         </div>
     </div>
 </div>

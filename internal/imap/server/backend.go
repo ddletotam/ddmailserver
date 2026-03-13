@@ -9,14 +9,16 @@ import (
 	"github.com/emersion/go-imap/backend"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/notify"
+	"github.com/yourusername/mailserver/internal/search"
 	"golang.org/x/crypto/bcrypt"
 )
 
 // Backend implements IMAP backend with BackendUpdater support for IDLE
 type Backend struct {
-	database *db.DB
-	hub      *notify.Hub
-	updates  chan backend.Update
+	database      *db.DB
+	hub           *notify.Hub
+	updates       chan backend.Update
+	searchIndexer *search.Indexer
 }
 
 // NewBackend creates a new IMAP backend
@@ -92,6 +94,11 @@ func (b *Backend) listenNotifications() {
 	}
 }
 
+// SetSearchIndexer sets the Meilisearch indexer for full-text search
+func (b *Backend) SetSearchIndexer(indexer *search.Indexer) {
+	b.searchIndexer = indexer
+}
+
 // Login authenticates a user
 func (b *Backend) Login(connInfo *imap.ConnInfo, username, password string) (backend.User, error) {
 	log.Printf("IMAP login attempt for user: %s", username)
@@ -112,8 +119,9 @@ func (b *Backend) Login(connInfo *imap.ConnInfo, username, password string) (bac
 	log.Printf("User %s logged in successfully", username)
 
 	return &User{
-		username: username,
-		userID:   user.ID,
-		database: b.database,
+		username:      username,
+		userID:        user.ID,
+		database:      b.database,
+		searchIndexer: b.searchIndexer,
 	}, nil
 }

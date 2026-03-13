@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/emersion/go-imap"
-	"github.com/emersion/go-message/mail"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/parser"
 	"github.com/yourusername/mailserver/internal/task"
 )
 
@@ -108,8 +108,8 @@ func (t *SyncTask) syncRemoteInbox(ctx context.Context, client *Client, localInb
 	uidSet := new(imap.SeqSet)
 	uidSet.AddRange(1, 0) // Fetch all
 
-	// Fetch messages by UID
-	section := &imap.BodySectionName{}
+	// PEEK to avoid marking messages as seen on source server
+	section := &imap.BodySectionName{Peek: true}
 	items := []imap.FetchItem{
 		imap.FetchEnvelope,
 		imap.FetchFlags,
@@ -149,6 +149,19 @@ func (t *SyncTask) syncRemoteInbox(ctx context.Context, client *Client, localInb
 
 // saveMessageToInbox saves a message to user's local INBOX with deduplication
 func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folder) (bool, error) {
+	// Skip messages with no envelope data (corrupted or incomplete fetch)
+	if imapMsg.Envelope == nil {
+		log.Printf("IMAP sync: Skipping message UID %d - no envelope data", imapMsg.Uid)
+		return false, nil
+	}
+
+	// Validate that we have at least some basic envelope data
+	// A message without From and Subject is likely corrupted
+	if len(imapMsg.Envelope.From) == 0 && imapMsg.Envelope.Subject == "" {
+		log.Printf("IMAP sync: Skipping message UID %d - empty envelope (no from, no subject)", imapMsg.Uid)
+		return false, nil
+	}
+
 	// Get or generate message_id for deduplication
 	messageID := imapMsg.Envelope.MessageId
 	if messageID == "" {
@@ -168,12 +181,22 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 		return false, err
 	}
 	if exists {
-		return false, nil // Skip duplicate
+		// Message exists - try to update remote_uid if missing (for bidirectional sync)
+		if imapMsg.Uid > 0 {
+			updated, err := t.database.UpdateMessageRemoteUID(t.account.UserID, messageID, imapMsg.Uid, "INBOX")
+			if err != nil {
+				log.Printf("IMAP sync: Failed to update remote_uid for %s: %v", messageID, err)
+			} else if updated {
+				log.Printf("IMAP sync: Updated remote_uid=%d for existing message %s", imapMsg.Uid, messageID)
+			}
+		}
+		return false, nil // Skip duplicate (content already exists)
 	}
 
-	// Parse message body
+	// Parse message body using new parser
 	var body string
 	var bodyHTML string
+	var attachments []parser.ParsedAttachment
 
 	var rfc822Body io.Reader
 	for _, literal := range imapMsg.Body {
@@ -182,29 +205,19 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 	}
 
 	if rfc822Body != nil {
-		mr, err := mail.CreateReader(rfc822Body)
+		p := parser.New()
+		parsed, err := p.Parse(rfc822Body)
 		if err == nil {
-			for {
-				p, err := mr.NextPart()
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					break
-				}
+			body = parsed.Body
+			bodyHTML = parsed.BodyHTML
+			attachments = parsed.Attachments
 
-				switch h := p.Header.(type) {
-				case *mail.InlineHeader:
-					contentType, _, _ := h.ContentType()
-					bodyBytes, _ := io.ReadAll(p.Body)
-
-					if contentType == "text/plain" {
-						body = string(bodyBytes)
-					} else if contentType == "text/html" {
-						bodyHTML = string(bodyBytes)
-					}
-				}
+			// Log embedded messages if any
+			if len(parsed.EmbeddedMessages) > 0 {
+				log.Printf("IMAP sync: Message contains %d embedded message(s)", len(parsed.EmbeddedMessages))
 			}
+		} else {
+			log.Printf("IMAP sync: Failed to parse message body: %v", err)
 		}
 	}
 
@@ -214,32 +227,56 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 		return false, fmt.Errorf("failed to get next UID: %w", err)
 	}
 
-	// Create message
+	// Use envelope date, fall back to current time if zero/invalid
+	msgDate := imapMsg.Envelope.Date.UTC()
+	if msgDate.Year() < 1970 {
+		// Date is likely corrupted (e.g., 0001-01-01), use current time
+		msgDate = time.Now().UTC()
+		log.Printf("IMAP sync: Message UID %d has invalid date, using current time", imapMsg.Uid)
+	}
+
+	// Create message with sanitized UTF-8 strings
 	msg := &models.Message{
-		AccountID: t.account.ID,
-		UserID:    t.account.UserID,
-		FolderID:  inbox.ID,
-		MessageID: messageID,
-		Subject:   imapMsg.Envelope.Subject,
-		From:      formatAddressList(imapMsg.Envelope.From),
-		To:        formatAddressList(imapMsg.Envelope.To),
-		Cc:        formatAddressList(imapMsg.Envelope.Cc),
-		Bcc:       formatAddressList(imapMsg.Envelope.Bcc),
-		ReplyTo:   formatAddressList(imapMsg.Envelope.ReplyTo),
-		Date:      imapMsg.Envelope.Date.UTC(),
-		Body:      body,
-		BodyHTML:  bodyHTML,
-		UID:       localUID,
-		Seen:      hasFlag(imapMsg.Flags, imap.SeenFlag),
-		Flagged:   hasFlag(imapMsg.Flags, imap.FlaggedFlag),
-		Answered:  hasFlag(imapMsg.Flags, imap.AnsweredFlag),
-		Draft:     hasFlag(imapMsg.Flags, imap.DraftFlag),
-		Deleted:   hasFlag(imapMsg.Flags, imap.DeletedFlag),
-		InReplyTo: imapMsg.Envelope.InReplyTo,
+		AccountID:    t.account.ID,
+		UserID:       t.account.UserID,
+		FolderID:     inbox.ID,
+		MessageID:    messageID,
+		Subject:      parser.SanitizeUTF8(imapMsg.Envelope.Subject),
+		From:         parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.From)),
+		To:           parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.To)),
+		Cc:           parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.Cc)),
+		Bcc:          parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.Bcc)),
+		ReplyTo:      parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.ReplyTo)),
+		Date:         msgDate,
+		Body:         parser.SanitizeUTF8(body),
+		BodyHTML:     parser.SanitizeUTF8(bodyHTML),
+		UID:          localUID,
+		Seen:         hasFlag(imapMsg.Flags, imap.SeenFlag),
+		Flagged:      hasFlag(imapMsg.Flags, imap.FlaggedFlag),
+		Answered:     hasFlag(imapMsg.Flags, imap.AnsweredFlag),
+		Draft:        hasFlag(imapMsg.Flags, imap.DraftFlag),
+		Deleted:      hasFlag(imapMsg.Flags, imap.DeletedFlag),
+		InReplyTo:    parser.SanitizeUTF8(imapMsg.Envelope.InReplyTo),
+		RemoteUID:    imapMsg.Uid, // Store remote UID for bidirectional sync
+		RemoteFolder: "INBOX",     // Currently we only sync INBOX
 	}
 
 	if err := t.database.CreateMessage(msg); err != nil {
 		return false, err
+	}
+
+	// Save attachments
+	for _, att := range attachments {
+		attachment := &models.Attachment{
+			MessageID:   msg.ID,
+			Filename:    att.Filename,
+			ContentType: att.ContentType,
+			Size:        att.Size,
+			Data:        att.Data,
+		}
+		if err := t.database.CreateAttachment(attachment); err != nil {
+			log.Printf("IMAP sync: Failed to save attachment %s: %v", att.Filename, err)
+		}
 	}
 
 	return true, nil

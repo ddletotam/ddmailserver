@@ -56,6 +56,27 @@ func NewWithHub(database *db.DB, addr string, hostname string, hub *notify.Hub) 
 	}
 }
 
+// NewWithHubAndCalendarSync creates a new MX SMTP server with notification hub and calendar sync trigger
+func NewWithHubAndCalendarSync(database *db.DB, addr string, hostname string, hub *notify.Hub, calendarSyncTrigger CalendarSyncTrigger) *Server {
+	// Create backend with hub and calendar sync trigger
+	be := NewBackendWithCalendarSync(database, hub, calendarSyncTrigger)
+
+	// Create SMTP server
+	s := smtp.NewServer(be)
+	s.Addr = addr
+	s.Domain = hostname
+	s.AllowInsecureAuth = true           // No auth required for MX
+	s.MaxMessageBytes = 25 * 1024 * 1024 // 25MB max message size
+	s.MaxRecipients = 100
+
+	log.Printf("MX server with IDLE notifications and calendar sync created, will listen on %s", addr)
+
+	return &Server{
+		smtpServer: s,
+		addr:       addr,
+	}
+}
+
 // Start starts the MX SMTP server
 func (s *Server) Start() error {
 	log.Printf("Starting MX server on %s", s.addr)

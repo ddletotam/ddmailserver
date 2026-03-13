@@ -1,160 +1,225 @@
 {{define "content"}}
-<div class="domains-page">
-    <div class="page-header">
-        <h1>{{t "domains.title"}}</h1>
-    </div>
-
-    <!-- Add Domain Form -->
-    <div class="card" style="margin-bottom: 2rem;">
-        <h2>{{t "domains.add_domain"}}</h2>
-        <form hx-post="/api/domains" hx-target="#domain-error" hx-swap="innerHTML">
-            <div id="domain-error" class="error-message"></div>
-            <div class="form-row">
-                <div class="form-group" style="flex: 1;">
-                    <label for="domain">{{t "domains.domain_name"}}</label>
-                    <input type="text" id="domain" name="domain" placeholder="example.com" required>
-                </div>
-                <div class="form-group" style="align-self: flex-end;">
-                    <button type="submit" class="btn btn-primary">{{t "domains.add"}}</button>
-                </div>
+<div class="row row-deck row-cards">
+    <!-- Add Domain -->
+    <div class="col-lg-6">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">{{t "domains.add_domain"}}</h3>
             </div>
-        </form>
+            <div class="card-body">
+                <form hx-post="/api/domains" hx-target="#domain-error" hx-swap="innerHTML">
+                    <div id="domain-error" class="alert alert-danger" style="display: none;"></div>
+                    <div class="row g-2">
+                        <div class="col">
+                            <input type="text" name="domain" class="form-control" placeholder="example.com" required>
+                        </div>
+                        <div class="col-auto">
+                            <button type="submit" class="btn btn-primary">
+                                <i class="ti ti-plus me-1"></i>{{t "domains.add"}}
+                            </button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
     </div>
 
-    <!-- Domains List -->
-    <div class="card">
-        <h2>{{t "domains.your_domains"}}</h2>
-        {{if .Domains}}
-        <table class="table">
+    <!-- Add Mailbox -->
+    {{if .Domains}}
+    <div class="col-lg-6">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">{{t "domains.add_mailbox"}}</h3>
+            </div>
+            <div class="card-body">
+                <form hx-post="/api/mailboxes" hx-target="#mailbox-error" hx-swap="innerHTML">
+                    <div id="mailbox-error" class="alert alert-danger" style="display: none;"></div>
+                    <div class="row g-2">
+                        <div class="col">
+                            <input type="text" name="local_part" class="form-control" placeholder="info" required>
+                        </div>
+                        <div class="col">
+                            <select name="domain_id" class="form-select" required>
+                                {{range .Domains}}
+                                <option value="{{.ID}}">@{{.Domain}}</option>
+                                {{end}}
+                            </select>
+                        </div>
+                        <div class="col-auto">
+                            <button type="submit" class="btn btn-primary">
+                                <i class="ti ti-plus me-1"></i>{{t "domains.add"}}
+                            </button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    {{end}}
+</div>
+
+<!-- Domains List -->
+<div class="card mt-4">
+    <div class="card-header">
+        <h3 class="card-title">{{t "domains.your_domains"}}</h3>
+    </div>
+    {{if .Domains}}
+    <div class="table-responsive">
+        <table class="table table-vcenter card-table">
             <thead>
                 <tr>
                     <th>{{t "domains.domain"}}</th>
                     <th>{{t "domains.status"}}</th>
                     <th>{{t "domains.created"}}</th>
-                    <th>{{t "domains.actions"}}</th>
+                    <th class="w-1"></th>
                 </tr>
             </thead>
             <tbody>
                 {{range .Domains}}
                 <tr>
-                    <td><strong>{{.Domain}}</strong></td>
+                    <td>
+                        <div class="d-flex align-items-center">
+                            <i class="ti ti-world text-muted me-2"></i>
+                            <span class="fw-medium">{{.Domain}}</span>
+                        </div>
+                    </td>
                     <td>
                         {{if .Enabled}}
-                        <span class="badge badge-success">{{t "domains.active"}}</span>
+                        <span class="badge bg-success-lt">{{t "domains.active"}}</span>
                         {{else}}
-                        <span class="badge badge-secondary">{{t "domains.disabled"}}</span>
+                        <span class="badge bg-secondary-lt">{{t "domains.disabled"}}</span>
                         {{end}}
                     </td>
-                    <td>{{.CreatedAt.Format "2006-01-02"}}</td>
+                    <td class="text-muted">{{.CreatedAt.Format "2006-01-02"}}</td>
                     <td>
-                        <button hx-delete="/api/domains/{{.ID}}"
-                                hx-confirm="{{t "domains.delete_confirm"}} {{.Domain}}?"
-                                class="btn btn-sm btn-danger">
-                            {{t "domains.delete"}}
-                        </button>
+                        <div class="btn-list flex-nowrap">
+                            <button hx-post="/api/domains/{{.ID}}/toggle"
+                                    hx-target="closest tr"
+                                    hx-swap="outerHTML"
+                                    class="btn btn-sm btn-ghost-secondary">
+                                {{if .Enabled}}{{t "domains.disable"}}{{else}}{{t "domains.enable"}}{{end}}
+                            </button>
+                            <button hx-delete="/api/domains/{{.ID}}"
+                                    hx-confirm="{{t "domains.delete_confirm"}} {{.Domain}}?"
+                                    hx-target="closest tr"
+                                    hx-swap="outerHTML swap:0.3s"
+                                    class="btn btn-sm btn-ghost-danger">
+                                <i class="ti ti-trash"></i>
+                            </button>
+                        </div>
                     </td>
                 </tr>
                 {{end}}
             </tbody>
         </table>
-        {{else}}
-        <div class="empty-state">
-            <p>{{t "domains.no_domains"}}</p>
-        </div>
-        {{end}}
     </div>
-
-    <!-- Add Mailbox Form -->
-    {{if .Domains}}
-    <div class="card" style="margin-top: 2rem;">
-        <h2>{{t "domains.add_mailbox"}}</h2>
-        <form hx-post="/api/mailboxes" hx-target="#mailbox-error" hx-swap="innerHTML">
-            <div id="mailbox-error" class="error-message"></div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="local_part">{{t "domains.local_part"}}</label>
-                    <input type="text" id="local_part" name="local_part" placeholder="info" required>
-                </div>
-                <div class="form-group">
-                    <label for="domain_id">{{t "domains.domain"}}</label>
-                    <select id="domain_id" name="domain_id" required>
-                        {{range .Domains}}
-                        <option value="{{.ID}}">@{{.Domain}}</option>
-                        {{end}}
-                    </select>
-                </div>
-                <div class="form-group" style="align-self: flex-end;">
-                    <button type="submit" class="btn btn-primary">{{t "domains.add"}}</button>
-                </div>
+    {{else}}
+    <div class="card-body">
+        <div class="empty">
+            <div class="empty-icon">
+                <i class="ti ti-world-off"></i>
             </div>
-        </form>
+            <p class="empty-title">{{t "domains.no_domains"}}</p>
+            <p class="empty-subtitle text-muted">{{t "domains.no_domains_hint"}}</p>
+        </div>
     </div>
     {{end}}
+</div>
 
-    <!-- Mailboxes List -->
-    <div class="card" style="margin-top: 2rem;">
-        <h2>{{t "domains.your_mailboxes"}}</h2>
-        {{if .Mailboxes}}
-        <table class="table">
+<!-- Mailboxes List -->
+<div class="card mt-4">
+    <div class="card-header">
+        <h3 class="card-title">{{t "domains.your_mailboxes"}}</h3>
+    </div>
+    {{if .Mailboxes}}
+    <div class="table-responsive">
+        <table class="table table-vcenter card-table">
             <thead>
                 <tr>
                     <th>{{t "domains.email"}}</th>
                     <th>{{t "domains.status"}}</th>
                     <th>{{t "domains.created"}}</th>
-                    <th>{{t "domains.actions"}}</th>
+                    <th class="w-1"></th>
                 </tr>
             </thead>
             <tbody>
                 {{range .Mailboxes}}
                 <tr>
-                    <td><strong>{{.LocalPart}}@{{.DomainName}}</strong></td>
+                    <td>
+                        <div class="d-flex align-items-center">
+                            <i class="ti ti-mail text-muted me-2"></i>
+                            <span class="fw-medium">{{.LocalPart}}@{{.DomainName}}</span>
+                        </div>
+                    </td>
                     <td>
                         {{if .Enabled}}
-                        <span class="badge badge-success">{{t "domains.active"}}</span>
+                        <span class="badge bg-success-lt">{{t "domains.active"}}</span>
                         {{else}}
-                        <span class="badge badge-secondary">{{t "domains.disabled"}}</span>
+                        <span class="badge bg-secondary-lt">{{t "domains.disabled"}}</span>
                         {{end}}
                     </td>
-                    <td>{{.CreatedAt.Format "2006-01-02"}}</td>
+                    <td class="text-muted">{{.CreatedAt.Format "2006-01-02"}}</td>
                     <td>
-                        <button hx-delete="/api/mailboxes/{{.ID}}"
-                                hx-confirm="{{t "domains.delete_confirm"}} {{.LocalPart}}@{{.DomainName}}?"
-                                class="btn btn-sm btn-danger">
-                            {{t "domains.delete"}}
-                        </button>
+                        <div class="btn-list flex-nowrap">
+                            <button hx-post="/api/mailboxes/{{.ID}}/toggle"
+                                    hx-target="closest tr"
+                                    hx-swap="outerHTML"
+                                    class="btn btn-sm btn-ghost-secondary">
+                                {{if .Enabled}}{{t "domains.disable"}}{{else}}{{t "domains.enable"}}{{end}}
+                            </button>
+                            <button hx-delete="/api/mailboxes/{{.ID}}"
+                                    hx-confirm="{{t "domains.delete_confirm"}} {{.LocalPart}}@{{.DomainName}}?"
+                                    hx-target="closest tr"
+                                    hx-swap="outerHTML swap:0.3s"
+                                    class="btn btn-sm btn-ghost-danger">
+                                <i class="ti ti-trash"></i>
+                            </button>
+                        </div>
                     </td>
                 </tr>
                 {{end}}
             </tbody>
         </table>
-        {{else}}
-        <div class="empty-state">
-            <p>{{t "domains.no_mailboxes"}}</p>
-        </div>
-        {{end}}
     </div>
-
-    <!-- DNS Instructions -->
-    {{if .Domains}}
-    <div class="card" style="margin-top: 2rem;">
-        <h2>{{t "domains.dns_setup"}}</h2>
-        <p>{{t "domains.dns_instructions"}}</p>
-        <pre style="background: #f5f5f5; padding: 1rem; border-radius: 4px; overflow-x: auto;">
-{{range .Domains}}
-# DNS records for {{.Domain}}
-{{.Domain}}.    MX    10    mail.{{.Domain}}.
-mail.{{.Domain}}.    A    YOUR_SERVER_IP
-{{end}}</pre>
+    {{else}}
+    <div class="card-body">
+        <div class="empty">
+            <div class="empty-icon">
+                <i class="ti ti-mailbox-off"></i>
+            </div>
+            <p class="empty-title">{{t "domains.no_mailboxes"}}</p>
+            <p class="empty-subtitle text-muted">{{t "domains.no_mailboxes_hint"}}</p>
+        </div>
     </div>
     {{end}}
 </div>
 
+<!-- DNS Instructions -->
+{{if .Domains}}
+<div class="card mt-4">
+    <div class="card-header">
+        <h3 class="card-title">
+            <i class="ti ti-info-circle me-2"></i>{{t "domains.dns_setup"}}
+        </h3>
+    </div>
+    <div class="card-body">
+        <p class="text-muted">{{t "domains.dns_instructions"}}</p>
+        <pre class="bg-dark text-light p-3 rounded"><code>{{range .Domains}}# DNS records for {{.Domain}}
+{{.Domain}}.    MX    10    mail.{{.Domain}}.
+mail.{{.Domain}}.    A    YOUR_SERVER_IP
+{{end}}</code></pre>
+    </div>
+</div>
+{{end}}
+
 <script>
-// Handle HTMX error responses
 document.body.addEventListener('htmx:beforeSwap', function(evt) {
     if (evt.detail.xhr.status >= 400 && evt.detail.xhr.status < 600) {
         evt.detail.shouldSwap = true;
         evt.detail.isError = false;
+        if (evt.detail.target.classList.contains('alert')) {
+            evt.detail.target.style.display = 'block';
+        }
     }
 });
 </script>

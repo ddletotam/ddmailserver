@@ -8,9 +8,12 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	caldavserver "github.com/yourusername/mailserver/internal/caldav/server"
+	carddavserver "github.com/yourusername/mailserver/internal/carddav/server"
 	"github.com/yourusername/mailserver/internal/config"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/oauth"
+	"github.com/yourusername/mailserver/internal/search"
 )
 
 // Server represents the web server
@@ -26,6 +29,9 @@ type Server struct {
 	oauthConfig     *config.OAuthConfig
 	googleOAuth     *oauth.GoogleOAuth
 	microsoftOAuth  *oauth.MicrosoftOAuth
+	caldavServer    *caldavserver.Server
+	carddavServer   *carddavserver.Server
+	searchIndexer   *search.Indexer
 }
 
 // New creates a new web server
@@ -49,6 +55,8 @@ func New(database *db.DB, jwtSecret string, host string, port int, locale string
 		i18nManager:     i18nManager,
 		authRateLimiter: NewRateLimiter(5, time.Minute), // 5 attempts per minute
 		oauthConfig:     oauthConfig,
+		caldavServer:    caldavserver.New(database, "/caldav/"),
+		carddavServer:   carddavserver.New(database, "/carddav/"),
 	}
 
 	// Initialize Google OAuth - check config.yaml first, then database
@@ -114,6 +122,8 @@ func (s *Server) setupRoutes() {
 	oauthRouter.Use(s.WebAuthMiddleware)
 	oauthRouter.HandleFunc("/google/start", s.HandleGoogleOAuthStart).Methods("GET")
 	oauthRouter.HandleFunc("/google/callback", s.HandleGoogleOAuthCallback).Methods("GET")
+	oauthRouter.HandleFunc("/google/calendar/start", s.HandleGoogleCalendarOAuthStart).Methods("GET")
+	oauthRouter.HandleFunc("/google/calendar/callback", s.HandleGoogleCalendarOAuthCallback).Methods("GET")
 	oauthRouter.HandleFunc("/microsoft/start", s.HandleMicrosoftOAuthStart).Methods("GET")
 	oauthRouter.HandleFunc("/microsoft/callback", s.HandleMicrosoftOAuthCallback).Methods("GET")
 
@@ -138,6 +148,19 @@ func (s *Server) setupRoutes() {
 	// Protected API routes (uses JWT token auth)
 	api := s.router.PathPrefix("/api").Subrouter()
 	api.Use(s.AuthMiddleware)
+
+	// CalDAV server (uses Basic Auth, handles its own authentication)
+	// MUST be registered BEFORE the catch-all "/" web routes
+	s.router.HandleFunc("/.well-known/caldav", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/caldav/", http.StatusMovedPermanently)
+	}).Methods("GET", "OPTIONS")
+	s.router.PathPrefix("/caldav/").Handler(s.caldavServer)
+
+	// CardDAV server (uses Basic Auth, handles its own authentication)
+	s.router.HandleFunc("/.well-known/carddav", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/carddav/", http.StatusMovedPermanently)
+	}).Methods("GET", "OPTIONS")
+	s.router.PathPrefix("/carddav/").Handler(s.carddavServer)
 
 	// Protected web routes
 	web := s.router.PathPrefix("/").Subrouter()
@@ -172,6 +195,37 @@ func (s *Server) setupRoutes() {
 	// Domains (for MX server)
 	web.HandleFunc("/domains", s.HandleDomainsPage).Methods("GET")
 
+	// Calendars web pages
+	web.HandleFunc("/calendars", s.HandleCalendarsPage).Methods("GET")
+	web.HandleFunc("/calendars/sources/list", s.HandleCalendarSourcesList).Methods("GET")
+	web.HandleFunc("/calendars/list", s.HandleCalendarsList).Methods("GET")
+	web.HandleFunc("/calendars/sources/create", s.HandleCreateCalendarSourceWeb).Methods("POST")
+	web.HandleFunc("/calendars/sources/create-ics-url", s.HandleCreateICSURLSource).Methods("POST")
+	web.HandleFunc("/calendars/create", s.HandleCreateLocalCalendar).Methods("POST")
+	web.HandleFunc("/calendars/sources/{id}/sync", s.HandleSyncCalendarSource).Methods("POST")
+	web.HandleFunc("/calendars/sources/{id}", s.HandleDeleteCalendarSourceWeb).Methods("DELETE")
+	web.HandleFunc("/calendars/{id}", s.HandleDeleteCalendarWeb).Methods("DELETE")
+	web.HandleFunc("/calendars/import", s.HandleImportICSWeb).Methods("POST")
+
+	// Contacts web pages
+	web.HandleFunc("/contacts", s.HandleContactsPage).Methods("GET")
+	web.HandleFunc("/contacts/sources/list", s.HandleContactSourcesList).Methods("GET")
+	web.HandleFunc("/contacts/addressbooks/list", s.HandleAddressBooksList).Methods("GET")
+	web.HandleFunc("/contacts/search", s.HandleContactsList).Methods("GET")
+	web.HandleFunc("/contacts/sources/create", s.HandleCreateContactSourceWeb).Methods("POST")
+	web.HandleFunc("/contacts/addressbooks/create", s.HandleCreateLocalAddressBook).Methods("POST")
+	web.HandleFunc("/contacts/sources/{id}/sync", s.HandleSyncContactSource).Methods("POST")
+	web.HandleFunc("/contacts/sources/{id}", s.HandleDeleteContactSourceWeb).Methods("DELETE")
+	web.HandleFunc("/contacts/addressbooks/{id}", s.HandleDeleteAddressBookWeb).Methods("DELETE")
+
+	// Vault (soft-deleted messages)
+	web.HandleFunc("/vault", s.HandleVaultPage).Methods("GET")
+	web.HandleFunc("/vault/restore/{id}", s.HandleRestoreMessage).Methods("POST")
+	web.HandleFunc("/vault/delete/{id}", s.HandlePermanentDelete).Methods("DELETE")
+
+	// Search
+	web.HandleFunc("/search", s.HandleSearchPage).Methods("GET")
+
 	// Domains API
 	domainsAPI := s.router.PathPrefix("/api/domains").Subrouter()
 	domainsAPI.Use(s.APIAuthMiddleware)
@@ -183,6 +237,39 @@ func (s *Server) setupRoutes() {
 	mailboxesAPI.Use(s.APIAuthMiddleware)
 	mailboxesAPI.HandleFunc("", s.HandleCreateMailbox).Methods("POST")
 	mailboxesAPI.HandleFunc("/{id}", s.HandleDeleteMailbox).Methods("DELETE")
+
+	// Calendar Sources API
+	calSourcesAPI := s.router.PathPrefix("/api/calendar-sources").Subrouter()
+	calSourcesAPI.Use(s.APIAuthMiddleware)
+	calSourcesAPI.HandleFunc("", s.HandleGetCalendarSources).Methods("GET")
+	calSourcesAPI.HandleFunc("", s.HandleCreateCalendarSource).Methods("POST")
+	calSourcesAPI.HandleFunc("/{id}", s.HandleGetCalendarSource).Methods("GET")
+	calSourcesAPI.HandleFunc("/{id}", s.HandleUpdateCalendarSource).Methods("PUT")
+	calSourcesAPI.HandleFunc("/{id}", s.HandleDeleteCalendarSource).Methods("DELETE")
+
+	// Calendars API
+	calendarsAPI := s.router.PathPrefix("/api/calendars").Subrouter()
+	calendarsAPI.Use(s.APIAuthMiddleware)
+	calendarsAPI.HandleFunc("", s.HandleGetCalendars).Methods("GET")
+	calendarsAPI.HandleFunc("/{id}", s.HandleGetCalendar).Methods("GET")
+	calendarsAPI.HandleFunc("/{id}", s.HandleUpdateCalendar).Methods("PUT")
+	calendarsAPI.HandleFunc("/{id}", s.HandleDeleteCalendar).Methods("DELETE")
+	calendarsAPI.HandleFunc("/{id}/events", s.HandleGetEvents).Methods("GET")
+	calendarsAPI.HandleFunc("/{id}/events", s.HandleCreateEvent).Methods("POST")
+	calendarsAPI.HandleFunc("/{id}/events/with-attendees", s.HandleCreateEventWithAttendees).Methods("POST")
+	calendarsAPI.HandleFunc("/{id}/import", s.HandleImportICS).Methods("POST")
+
+	// Events API
+	eventsAPI := s.router.PathPrefix("/api/events").Subrouter()
+	eventsAPI.Use(s.APIAuthMiddleware)
+	eventsAPI.HandleFunc("/{id}", s.HandleGetEvent).Methods("GET")
+	eventsAPI.HandleFunc("/{id}", s.HandleUpdateEvent).Methods("PUT")
+	eventsAPI.HandleFunc("/{id}", s.HandleDeleteEvent).Methods("DELETE")
+	eventsAPI.HandleFunc("/{id}/attendees", s.HandleGetEventAttendees).Methods("GET")
+	eventsAPI.HandleFunc("/{id}/attendees", s.HandleUpdateEventAttendees).Methods("PUT")
+	eventsAPI.HandleFunc("/{id}/respond", s.HandleRespondToInvite).Methods("POST")
+	eventsAPI.HandleFunc("/{id}/send-invites", s.HandleSendInvites).Methods("POST")
+	eventsAPI.HandleFunc("/{id}/cancel", s.HandleCancelEvent).Methods("POST")
 
 	log.Printf("Routes configured")
 }
@@ -196,6 +283,11 @@ func (s *Server) Start() error {
 	}
 
 	return nil
+}
+
+// SetSearchIndexer sets the Meilisearch indexer for full-text search
+func (s *Server) SetSearchIndexer(indexer *search.Indexer) {
+	s.searchIndexer = indexer
 }
 
 // Stop stops the web server

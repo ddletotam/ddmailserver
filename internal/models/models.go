@@ -100,6 +100,23 @@ type Message struct {
 	MessageReferences string    `json:"message_references"` // Thread references
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
+
+	// Spam filtering fields
+	SpamScore   float64 `json:"spam_score"`
+	SpamStatus  string  `json:"spam_status"`  // clean, suspicious, spam
+	SpamReasons string  `json:"spam_reasons"` // JSON array of reasons
+
+	// Soft delete (vault)
+	SoftDeleted      bool       `json:"soft_deleted"`
+	SoftDeletedAt    *time.Time `json:"soft_deleted_at,omitempty"`
+	OriginalFolderID *int64     `json:"original_folder_id,omitempty"`
+
+	// Calendar event link (for fake emails)
+	CalendarEventID *int64 `json:"calendar_event_id,omitempty"`
+
+	// Remote IMAP tracking (for bidirectional sync)
+	RemoteUID    uint32 `json:"remote_uid"`    // UID on source IMAP server
+	RemoteFolder string `json:"remote_folder"` // Folder path on source server (e.g., "INBOX")
 }
 
 // Folder represents a mail folder (INBOX, Sent, Drafts, etc.)
@@ -176,4 +193,18 @@ type Mailbox struct {
 	LocalPart string    `json:"local_part"` // Part before @ (e.g. "info" for info@example.com)
 	Enabled   bool      `json:"enabled"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// FlagSyncEntry represents a pending flag change to sync to remote IMAP server
+type FlagSyncEntry struct {
+	ID           int64     `json:"id"`
+	MessageID    int64     `json:"message_id"`
+	AccountID    int64     `json:"account_id"`
+	RemoteFolder string    `json:"remote_folder"`
+	RemoteUID    uint32    `json:"remote_uid"`
+	Seen         bool      `json:"seen"`
+	Flagged      bool      `json:"flagged"`
+	Answered     bool      `json:"answered"`
+	Deleted      bool      `json:"deleted"`
+	CreatedAt    time.Time `json:"created_at"`
 }

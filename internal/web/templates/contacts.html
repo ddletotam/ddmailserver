@@ -1,0 +1,355 @@
+{{define "content"}}
+<div class="row row-deck row-cards">
+    <!-- Add Contact Actions -->
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">{{t "contacts.title"}}</h3>
+                <div class="card-actions">
+                    {{if .GoogleOAuthEnabled}}
+                    <a href="/oauth/google/contacts/start" class="btn btn-gmail">
+                        <i class="ti ti-brand-google me-2"></i>Google Contacts
+                    </a>
+                    {{end}}
+                    {{if .MicrosoftOAuthEnabled}}
+                    <a href="/oauth/microsoft/contacts/start" class="btn btn-microsoft">
+                        <i class="ti ti-brand-windows me-2"></i>Microsoft
+                    </a>
+                    {{end}}
+                    <button class="btn btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#add-carddav-modal">
+                        <i class="ti ti-plus me-1"></i>CardDAV
+                    </button>
+                    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#add-local-modal">
+                        <i class="ti ti-plus me-1"></i>{{t "contacts.new_local"}}
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Contact Sources -->
+<div class="card mt-4">
+    <div class="card-header">
+        <h3 class="card-title">{{t "contacts.sources"}}</h3>
+    </div>
+    <div class="card-body" id="contact-sources-list"
+         hx-get="/contacts/sources/list"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+        <div class="text-center text-muted py-4">
+            <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+            {{t "common.loading"}}
+        </div>
+    </div>
+</div>
+
+<!-- Address Books -->
+<div class="card mt-4">
+    <div class="card-header">
+        <h3 class="card-title">{{t "contacts.address_books"}}</h3>
+    </div>
+    <div class="card-body" id="address-books-list"
+         hx-get="/contacts/addressbooks/list"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+        <div class="text-center text-muted py-4">
+            <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+            {{t "common.loading"}}
+        </div>
+    </div>
+</div>
+
+<!-- Contact Search -->
+<div class="card mt-4">
+    <div class="card-header">
+        <h3 class="card-title">{{t "contacts.search"}}</h3>
+    </div>
+    <div class="card-body">
+        <div class="mb-3">
+            <input type="text" class="form-control" placeholder="{{t "contacts.search_placeholder"}}"
+                   hx-get="/contacts/search"
+                   hx-trigger="keyup changed delay:300ms"
+                   hx-target="#contacts-list"
+                   name="q">
+        </div>
+        <div id="contacts-list"
+             hx-get="/contacts/search"
+             hx-trigger="load"
+             hx-swap="innerHTML">
+            <div class="text-center text-muted py-4">
+                <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+                {{t "common.loading"}}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- CardDAV Connection Info -->
+<div class="card mt-4">
+    <div class="card-header">
+        <h3 class="card-title">
+            <i class="ti ti-info-circle me-2"></i>{{t "contacts.carddav_info"}}
+        </h3>
+    </div>
+    <div class="card-body">
+        <p class="text-muted">{{t "contacts.carddav_connect"}}:</p>
+        <pre class="bg-dark text-light p-3 rounded"><code>https://{{.Host}}/carddav/</code></pre>
+        <p class="text-muted small">{{t "contacts.carddav_hint"}}</p>
+    </div>
+</div>
+
+<!-- Add CardDAV Source Modal -->
+<div class="modal modal-blur fade" id="add-carddav-modal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">{{t "contacts.add_carddav"}}</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form hx-post="/contacts/sources/create"
+                  hx-target="#contact-sources-list"
+                  hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('add-carddav-modal')).hide()">
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label">{{t "contacts.source_name"}}</label>
+                        <input type="text" name="name" class="form-control" required placeholder="iCloud Contacts">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">CardDAV URL</label>
+                        <input type="url" name="carddav_url" class="form-control" required
+                               placeholder="https://contacts.icloud.com/">
+                        <small class="form-hint">
+                            iCloud: https://contacts.icloud.com/<br>
+                            Fastmail: https://carddav.fastmail.com/dav/addressbooks/<br>
+                            Yandex: https://carddav.yandex.ru/
+                        </small>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">{{t "contacts.username"}}</label>
+                            <input type="text" name="carddav_username" class="form-control" required>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">{{t "contacts.password"}}</label>
+                            <input type="password" name="carddav_password" class="form-control" required>
+                            <small class="form-hint">{{t "contacts.app_password_hint"}}</small>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-link link-secondary" data-bs-dismiss="modal">{{t "common.cancel"}}</button>
+                    <button type="submit" class="btn btn-primary">{{t "common.add"}}</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Add Local Address Book Modal -->
+<div class="modal modal-blur fade" id="add-local-modal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">{{t "contacts.new_local"}}</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form hx-post="/contacts/addressbooks/create"
+                  hx-target="#address-books-list"
+                  hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('add-local-modal')).hide()">
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label">{{t "contacts.name"}}</label>
+                        <input type="text" name="name" class="form-control" required placeholder="Personal">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-link link-secondary" data-bs-dismiss="modal">{{t "common.cancel"}}</button>
+                    <button type="submit" class="btn btn-primary">{{t "common.create"}}</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{{end}}
+
+{{define "contact-sources-list"}}
+{{if .Sources}}
+<div class="row row-cards">
+    {{range .Sources}}
+    <div class="col-md-6 col-lg-4">
+        <div class="card">
+            <div class="card-status-top {{if .SyncEnabled}}bg-success{{else}}bg-secondary{{end}}"></div>
+            <div class="card-body">
+                <div class="d-flex align-items-center mb-3">
+                    <div class="me-3">
+                        <span class="avatar rounded bg-primary">
+                            <i class="ti ti-address-book text-white"></i>
+                        </span>
+                    </div>
+                    <div>
+                        <h3 class="card-title mb-0">{{.Name}}</h3>
+                        <div class="text-muted small">{{.SourceType}}</div>
+                    </div>
+                </div>
+
+                {{if .CardDAVURL}}
+                <div class="mb-3">
+                    <div class="text-muted small mb-1">URL:</div>
+                    <div class="text-truncate small">{{.CardDAVURL}}</div>
+                </div>
+                {{end}}
+
+                {{if not .LastSync.IsZero}}
+                <div class="text-muted small">
+                    <i class="ti ti-refresh me-1"></i>{{.LastSync.Format "2006-01-02 15:04"}}
+                </div>
+                {{end}}
+
+                {{if .LastError}}
+                <div class="alert alert-danger mt-2 mb-0 py-1 px-2 small">
+                    {{.LastError}}
+                </div>
+                {{end}}
+            </div>
+            <div class="card-footer">
+                <div class="d-flex gap-2">
+                    <button hx-post="/contacts/sources/{{.ID}}/sync"
+                            hx-target="#sync-status-source-{{.ID}}"
+                            class="btn btn-sm btn-outline-primary">
+                        <i class="ti ti-refresh me-1"></i>Sync
+                    </button>
+                    <button hx-delete="/contacts/sources/{{.ID}}"
+                            hx-confirm="Delete source '{{.Name}}' and all its contacts?"
+                            hx-target="closest .col-md-6"
+                            hx-swap="outerHTML swap:0.3s"
+                            class="btn btn-sm btn-outline-danger ms-auto">
+                        <i class="ti ti-trash"></i>
+                    </button>
+                </div>
+                <div id="sync-status-source-{{.ID}}" class="sync-status text-success small mt-2"></div>
+            </div>
+        </div>
+    </div>
+    {{end}}
+</div>
+{{else}}
+<div class="empty">
+    <div class="empty-icon">
+        <i class="ti ti-address-book-off"></i>
+    </div>
+    <p class="empty-title">{{t "contacts.no_sources"}}</p>
+    <p class="empty-subtitle text-muted">{{t "contacts.no_sources_hint"}}</p>
+</div>
+{{end}}
+{{end}}
+
+{{define "address-books-list"}}
+{{if .AddressBooks}}
+<div class="row row-cards">
+    {{range .AddressBooks}}
+    <div class="col-md-6 col-lg-4">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex align-items-center mb-3">
+                    <div class="me-3">
+                        <span class="avatar rounded bg-azure">
+                            <i class="ti ti-users text-white"></i>
+                        </span>
+                    </div>
+                    <div>
+                        <h3 class="card-title mb-0">{{.Name}}</h3>
+                        {{if .Description}}
+                        <div class="text-muted small">{{.Description}}</div>
+                        {{end}}
+                    </div>
+                </div>
+
+                <div class="row g-2 text-muted small">
+                    <div class="col-6">
+                        <i class="ti ti-user me-1"></i>{{.ContactCount}} {{t "contacts.contacts"}}
+                    </div>
+                    {{if .SourceName}}
+                    <div class="col-6">
+                        <i class="ti ti-link me-1"></i>{{.SourceName}}
+                    </div>
+                    {{end}}
+                </div>
+            </div>
+            <div class="card-footer">
+                <div class="d-flex gap-2">
+                    <button hx-delete="/contacts/addressbooks/{{.ID}}"
+                            hx-confirm="Delete address book '{{.Name}}'?"
+                            hx-target="closest .col-md-6"
+                            hx-swap="outerHTML swap:0.3s"
+                            class="btn btn-sm btn-outline-danger ms-auto">
+                        <i class="ti ti-trash"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    {{end}}
+</div>
+{{else}}
+<div class="empty">
+    <div class="empty-icon">
+        <i class="ti ti-address-book-off"></i>
+    </div>
+    <p class="empty-title">{{t "contacts.no_address_books"}}</p>
+    <p class="empty-subtitle text-muted">{{t "contacts.no_address_books_hint"}}</p>
+</div>
+{{end}}
+{{end}}
+
+{{define "contacts-list"}}
+{{if .Contacts}}
+<div class="table-responsive">
+    <table class="table table-vcenter card-table">
+        <thead>
+            <tr>
+                <th>{{t "contacts.name"}}</th>
+                <th>{{t "contacts.email"}}</th>
+                <th>{{t "contacts.phone"}}</th>
+                <th>{{t "contacts.organization"}}</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Contacts}}
+            <tr>
+                <td>
+                    <div class="d-flex align-items-center">
+                        <span class="avatar avatar-sm me-2 bg-primary-lt">
+                            {{if .FullName}}{{substr .FullName 0 1}}{{else}}<i class="ti ti-user"></i>{{end}}
+                        </span>
+                        <div>
+                            <div class="font-weight-medium">{{if .FullName}}{{.FullName}}{{else}}{{.Email}}{{end}}</div>
+                            {{if .Nickname}}<div class="text-muted small">{{.Nickname}}</div>{{end}}
+                        </div>
+                    </div>
+                </td>
+                <td>
+                    {{if .Email}}<a href="mailto:{{.Email}}">{{.Email}}</a>{{end}}
+                </td>
+                <td>
+                    {{if .Phone}}{{.Phone}}{{end}}
+                </td>
+                <td>
+                    {{if .Organization}}{{.Organization}}{{end}}
+                    {{if .Title}}<div class="text-muted small">{{.Title}}</div>{{end}}
+                </td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</div>
+{{else}}
+<div class="empty py-4">
+    <div class="empty-icon">
+        <i class="ti ti-users-group"></i>
+    </div>
+    <p class="empty-title">{{t "contacts.no_contacts"}}</p>
+    <p class="empty-subtitle text-muted">{{t "contacts.no_contacts_hint"}}</p>
+</div>
+{{end}}
+{{end}}

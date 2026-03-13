@@ -630,6 +630,9 @@ textarea:focus {
     border-bottom: 1px solid var(--border);
     align-items: center;
     transition: background 0.2s;
+    text-decoration: none;
+    color: inherit;
+    cursor: pointer;
 }
 
 .message-item:hover {
@@ -836,8 +839,65 @@ textarea:focus {
     display: none;
 }
 
-/* Modal */
-.modal {
+/* Modal (dialog element) */
+dialog.modal {
+    border: none;
+    border-radius: 0.75rem;
+    padding: 0;
+    max-width: 500px;
+    width: 90%;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+}
+
+dialog.modal::backdrop {
+    background: rgba(0, 0, 0, 0.5);
+}
+
+dialog.modal .modal-content {
+    background: var(--surface);
+    padding: 2rem;
+    max-height: 90vh;
+    overflow-y: auto;
+}
+
+dialog.modal h2 {
+    margin-top: 0;
+    margin-bottom: 1.5rem;
+}
+
+dialog.modal .form-group {
+    margin-bottom: 1rem;
+}
+
+dialog.modal .form-group label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: 500;
+}
+
+dialog.modal .form-group input {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+}
+
+dialog.modal .form-group small {
+    display: block;
+    margin-top: 0.25rem;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+}
+
+dialog.modal .form-actions {
+    display: flex;
+    gap: 1rem;
+    margin-top: 1.5rem;
+    justify-content: flex-end;
+}
+
+/* Legacy modal (non-dialog) */
+.modal:not(dialog) {
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.5);
@@ -847,7 +907,7 @@ textarea:focus {
     z-index: 100;
 }
 
-.modal-content {
+.modal:not(dialog) .modal-content {
     background: var(--surface);
     border-radius: 0.75rem;
     padding: 2rem;
@@ -938,6 +998,470 @@ textarea:focus {
     color: var(--primary);
 }
 
+/* Domains page */
+.domains-page .section {
+    margin-bottom: 2.5rem;
+}
+
+.domains-page .section > h2 {
+    font-size: 1.25rem;
+    margin-bottom: 1rem;
+    color: var(--text);
+}
+
+.domains-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 1.5rem;
+}
+
+.domain-card {
+    background: var(--surface);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    box-shadow: var(--shadow);
+    transition: box-shadow 0.2s;
+}
+
+.domain-card:hover {
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+}
+
+.domain-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: start;
+    margin-bottom: 1rem;
+}
+
+.domain-info h3 {
+    font-size: 1.25rem;
+    margin-bottom: 0.25rem;
+}
+
+.domain-info .domain-created {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+}
+
+.domain-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+}
+
+.mailboxes-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1rem;
+}
+
+.mailbox-card {
+    background: var(--surface);
+    border-radius: 0.75rem;
+    padding: 1.25rem;
+    box-shadow: var(--shadow);
+    transition: box-shadow 0.2s;
+}
+
+.mailbox-card:hover {
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+}
+
+.mailbox-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.mailbox-email {
+    font-weight: 600;
+    font-size: 1rem;
+    word-break: break-all;
+}
+
+.mailbox-created {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    margin-bottom: 0.75rem;
+}
+
+.mailbox-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+/* Add form card */
+.add-form-card {
+    background: var(--surface);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    box-shadow: var(--shadow);
+    margin-bottom: 2rem;
+}
+
+.add-form-card h2 {
+    font-size: 1.25rem;
+    margin-bottom: 1.25rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.add-form-card .form-inline {
+    display: flex;
+    gap: 1rem;
+    align-items: flex-end;
+    flex-wrap: wrap;
+}
+
+.add-form-card .form-inline .form-group {
+    margin-bottom: 0;
+    flex: 1;
+    min-width: 200px;
+}
+
+.add-form-card .form-inline .btn {
+    flex-shrink: 0;
+}
+
+/* DNS info box */
+.dns-info-card {
+    background: var(--surface);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    box-shadow: var(--shadow);
+    border-left: 4px solid var(--primary);
+}
+
+.dns-info-card h2 {
+    font-size: 1.25rem;
+    margin-bottom: 0.75rem;
+}
+
+.dns-info-card p {
+    color: var(--text-muted);
+    margin-bottom: 1rem;
+}
+
+.dns-info-card pre {
+    background: var(--bg);
+    padding: 1rem;
+    border-radius: 0.5rem;
+    overflow-x: auto;
+    font-size: 0.875rem;
+    line-height: 1.6;
+}
+
+/* Settings page */
+.settings-page .settings-sections {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+.settings-card {
+    background: var(--surface);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    box-shadow: var(--shadow);
+}
+
+.settings-card h2 {
+    font-size: 1.25rem;
+    margin-bottom: 1.25rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.settings-card.danger-zone {
+    border: 1px solid var(--danger);
+    background: #fef2f2;
+}
+
+.settings-card.danger-zone h2 {
+    color: var(--danger);
+}
+
+.settings-card.danger-zone p {
+    color: var(--text-muted);
+    margin-bottom: 1rem;
+}
+
+.info-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+}
+
+.info-item {
+    background: var(--bg);
+    padding: 1rem;
+    border-radius: 0.5rem;
+}
+
+.info-item label {
+    display: block;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 0.25rem;
+}
+
+.info-item p {
+    font-size: 1rem;
+    color: var(--text);
+}
+
+.settings-form {
+    max-width: 400px;
+}
+
+.settings-form .form-group {
+    margin-bottom: 1rem;
+}
+
+.settings-form .btn {
+    margin-top: 0.5rem;
+}
+
+/* Calendars page */
+.calendars-page .section {
+    margin-bottom: 2.5rem;
+}
+
+.calendars-page .section > h2 {
+    font-size: 1.25rem;
+    margin-bottom: 1rem;
+    color: var(--text);
+}
+
+.sources-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+    gap: 1.5rem;
+}
+
+.source-card {
+    background: var(--surface);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    box-shadow: var(--shadow);
+    transition: box-shadow 0.2s;
+}
+
+.source-card:hover {
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+}
+
+.source-header {
+    display: flex;
+    align-items: start;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.source-color {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    margin-top: 0.5rem;
+    flex-shrink: 0;
+}
+
+.source-info {
+    flex: 1;
+}
+
+.source-info h3 {
+    font-size: 1.1rem;
+    margin-bottom: 0.125rem;
+}
+
+.source-type {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+}
+
+.source-details {
+    background: var(--bg);
+    padding: 0.75rem 1rem;
+    border-radius: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+.source-details .detail-row {
+    font-size: 0.8rem;
+}
+
+.source-details .detail-row.error {
+    color: var(--danger);
+}
+
+.source-details .truncate {
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: inline-block;
+}
+
+.source-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.calendars-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1.5rem;
+}
+
+.calendar-card {
+    background: var(--surface);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    box-shadow: var(--shadow);
+    transition: box-shadow 0.2s;
+}
+
+.calendar-card:hover {
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+}
+
+.calendar-header {
+    display: flex;
+    align-items: start;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.calendar-color {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    margin-top: 0.5rem;
+    flex-shrink: 0;
+}
+
+.calendar-info {
+    flex: 1;
+}
+
+.calendar-info h3 {
+    font-size: 1.1rem;
+    margin-bottom: 0.125rem;
+}
+
+.calendar-desc {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+}
+
+.calendar-details {
+    background: var(--bg);
+    padding: 0.75rem 1rem;
+    border-radius: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+.calendar-details .detail-row {
+    font-size: 0.875rem;
+}
+
+.calendar-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+/* Info box */
+.info-box {
+    background: var(--surface);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    box-shadow: var(--shadow);
+    border-left: 4px solid var(--primary);
+}
+
+.info-box h3 {
+    font-size: 1rem;
+    margin-bottom: 0.5rem;
+}
+
+.info-box p {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    margin-bottom: 0.5rem;
+}
+
+.info-box code {
+    display: inline-block;
+    background: var(--bg);
+    padding: 0.5rem 1rem;
+    border-radius: 0.25rem;
+    font-family: monospace;
+    font-size: 0.875rem;
+    margin-bottom: 0.5rem;
+}
+
+.info-box .hint {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-bottom: 0;
+}
+
+/* Card (generic) - improved */
+.card {
+    background: var(--surface);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    box-shadow: var(--shadow);
+}
+
+.card h2 {
+    font-size: 1.25rem;
+    margin-bottom: 1.25rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border);
+}
+
+/* Table improvements */
+.table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.table th,
+.table td {
+    padding: 0.75rem 1rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+}
+
+.table th {
+    background: var(--bg);
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.table tr:last-child td {
+    border-bottom: none;
+}
+
+.table tr:hover td {
+    background: var(--bg);
+}
+
 /* Responsive */
 @media (max-width: 768px) {
     .inbox-layout {
@@ -956,7 +1480,26 @@ textarea:focus {
         grid-template-columns: 1fr;
     }
 
+    .domains-grid,
+    .mailboxes-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .sources-grid,
+    .calendars-grid {
+        grid-template-columns: 1fr;
+    }
+
     .form-row {
         grid-template-columns: 1fr;
+    }
+
+    .add-form-card .form-inline {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .add-form-card .form-inline .form-group {
+        min-width: auto;
     }
 }

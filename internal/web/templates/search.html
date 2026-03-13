@@ -1,0 +1,96 @@
+{{define "content"}}
+<div class="card">
+    <div class="card-header">
+        <h3 class="card-title">
+            <i class="ti ti-search me-2"></i>{{t "search.title"}}
+        </h3>
+    </div>
+    <div class="card-body">
+        <form action="/search" method="GET" class="mb-4">
+            <div class="row g-3">
+                <div class="col-md-8">
+                    <div class="input-icon">
+                        <span class="input-icon-addon">
+                            <i class="ti ti-search"></i>
+                        </span>
+                        <input type="text" name="q" value="{{.Query}}"
+                               class="form-control form-control-lg"
+                               placeholder="{{t "search.placeholder"}}"
+                               autofocus>
+                    </div>
+                </div>
+                <div class="col-md-2">
+                    <select name="type" class="form-select form-select-lg">
+                        <option value="all" {{if eq .SearchType "all"}}selected{{end}}>{{t "search.type_all"}}</option>
+                        <option value="mail" {{if eq .SearchType "mail"}}selected{{end}}>{{t "search.type_mail"}}</option>
+                        <option value="calendar" {{if eq .SearchType "calendar"}}selected{{end}}>{{t "search.type_calendar"}}</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <button type="submit" class="btn btn-primary btn-lg w-100">
+                        {{t "search.button"}}
+                    </button>
+                </div>
+            </div>
+        </form>
+
+        {{if .Query}}
+        <div class="mb-3">
+            <span class="text-muted">
+                {{t "search.results_for"}} <strong>"{{.Query}}"</strong>: {{.TotalHits}} {{t "search.results_found"}}
+            </span>
+        </div>
+        {{end}}
+
+        {{if .Results}}
+        <div class="list-group list-group-flush">
+            {{range .Results}}
+            <a href="/messages/{{.ID}}" class="list-group-item list-group-item-action">
+                <div class="d-flex w-100 justify-content-between">
+                    <div>
+                        <div class="fw-bold mb-1">
+                            {{if gt .CalendarEventID 0}}
+                            <span class="badge bg-blue me-1">
+                                <i class="ti ti-calendar"></i>
+                            </span>
+                            {{end}}
+                            {{.Subject}}
+                        </div>
+                        <div class="text-muted small">
+                            {{t "messages.from"}}: {{.From}}
+                        </div>
+                    </div>
+                    <small class="text-muted">{{.DateFormatted}}</small>
+                </div>
+                {{if .Body}}
+                <p class="text-muted small mb-0 text-truncate" style="max-width: 600px;">
+                    {{.Body}}
+                </p>
+                {{end}}
+            </a>
+            {{end}}
+        </div>
+        {{else if .Query}}
+        <div class="empty">
+            <div class="empty-icon">
+                <i class="ti ti-search-off" style="font-size: 3rem;"></i>
+            </div>
+            <p class="empty-title">{{t "search.no_results"}}</p>
+            <p class="empty-subtitle text-muted">
+                {{t "search.try_different"}}
+            </p>
+        </div>
+        {{else}}
+        <div class="empty">
+            <div class="empty-icon">
+                <i class="ti ti-search" style="font-size: 3rem;"></i>
+            </div>
+            <p class="empty-title">{{t "search.start_title"}}</p>
+            <p class="empty-subtitle text-muted">
+                {{t "search.start_description"}}
+            </p>
+        </div>
+        {{end}}
+    </div>
+</div>
+{{end}}
