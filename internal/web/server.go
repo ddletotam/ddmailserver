@@ -152,14 +152,26 @@ func (s *Server) setupRoutes() {
 	// CalDAV server (uses Basic Auth, handles its own authentication)
 	// MUST be registered BEFORE the catch-all "/" web routes
 	s.router.HandleFunc("/.well-known/caldav", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PROPFIND" || r.Method == "REPORT" {
+			// For WebDAV methods, rewrite path and proxy to CalDAV server
+			r.URL.Path = "/caldav/"
+			s.caldavServer.ServeHTTP(w, r)
+			return
+		}
 		http.Redirect(w, r, "/caldav/", http.StatusMovedPermanently)
-	}).Methods("GET", "OPTIONS")
+	})
 	s.router.PathPrefix("/caldav/").Handler(s.caldavServer)
 
 	// CardDAV server (uses Basic Auth, handles its own authentication)
 	s.router.HandleFunc("/.well-known/carddav", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PROPFIND" || r.Method == "REPORT" {
+			// For WebDAV methods, rewrite path and proxy to CardDAV server
+			r.URL.Path = "/carddav/"
+			s.carddavServer.ServeHTTP(w, r)
+			return
+		}
 		http.Redirect(w, r, "/carddav/", http.StatusMovedPermanently)
-	}).Methods("GET", "OPTIONS")
+	})
 	s.router.PathPrefix("/carddav/").Handler(s.carddavServer)
 
 	// Protected web routes
