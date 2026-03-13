@@ -1,55 +1,192 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="{{if .User}}{{.User.Language}}{{else}}en{{end}}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{.Title}} - {{t "app.name"}}</title>
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23206bc4'><path d='M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5zm2 0v2.5l7 4.5 7-4.5V5H5zm0 5v9h14v-9l-7 4.5L5 10z'/></svg>">
+    <!-- Tabler CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.0.0-beta20/dist/css/tabler.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.44.0/tabler-icons.min.css">
+    <!-- Custom overrides -->
+    <link rel="stylesheet" href="/static/css/custom.css">
     <!-- htmx for AJAX interactions -->
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
-    <!-- Alpine.js for interactive components -->
-    <script defer src="https://unpkg.com/alpinejs@3.13.5/dist/cdn.min.js"></script>
 </head>
-<body>
+<body class="{{if not .User}}border-top-wide border-primary d-flex flex-column{{end}}">
     {{if .User}}
-    <!-- Navigation for logged-in users -->
-    <nav class="navbar">
-        <div class="nav-brand">
-            <a href="/dashboard">{{t "app.name"}}</a>
-        </div>
-        <div class="nav-links">
-            <a href="/inbox" class="nav-link">{{t "nav.inbox"}}</a>
-            <a href="/compose" class="nav-link">{{t "nav.compose"}}</a>
-            <a href="/accounts" class="nav-link">{{t "nav.accounts"}}</a>
-            <a href="/domains" class="nav-link">{{t "nav.domains"}}</a>
-            <div x-data="{ open: false }" class="dropdown">
-                <button @click="open = !open" class="nav-link">
-                    {{.User.Username}} ▾
+    <div class="page">
+        <!-- Sidebar -->
+        <aside class="navbar navbar-vertical navbar-expand-lg navbar-dark bg-dark">
+            <div class="container-fluid">
+                <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#sidebar-menu">
+                    <span class="navbar-toggler-icon"></span>
                 </button>
-                <div x-show="open" @click.away="open = false" class="dropdown-menu">
-                    <a href="/settings" class="dropdown-item">{{t "nav.settings"}}</a>
-                    <a href="/logout" class="dropdown-item">{{t "auth.logout"}}</a>
+                <h1 class="navbar-brand navbar-brand-autodark">
+                    <a href="/dashboard">
+                        <span class="text-white">{{t "app.name"}}</span>
+                    </a>
+                </h1>
+                <div class="collapse navbar-collapse" id="sidebar-menu">
+                    <ul class="navbar-nav pt-lg-3">
+                        <li class="nav-item">
+                            <a class="nav-link" href="/dashboard">
+                                <span class="nav-link-icon d-md-none d-lg-inline-block">
+                                    <i class="ti ti-home"></i>
+                                </span>
+                                <span class="nav-link-title">{{t "nav.dashboard"}}</span>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="/accounts">
+                                <span class="nav-link-icon d-md-none d-lg-inline-block">
+                                    <i class="ti ti-mail"></i>
+                                </span>
+                                <span class="nav-link-title">{{t "nav.accounts"}}</span>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="/calendars">
+                                <span class="nav-link-icon d-md-none d-lg-inline-block">
+                                    <i class="ti ti-calendar"></i>
+                                </span>
+                                <span class="nav-link-title">{{t "nav.calendars"}}</span>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="/contacts">
+                                <span class="nav-link-icon d-md-none d-lg-inline-block">
+                                    <i class="ti ti-address-book"></i>
+                                </span>
+                                <span class="nav-link-title">{{t "nav.contacts"}}</span>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="/search">
+                                <span class="nav-link-icon d-md-none d-lg-inline-block">
+                                    <i class="ti ti-search"></i>
+                                </span>
+                                <span class="nav-link-title">{{t "nav.search"}}</span>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="/vault">
+                                <span class="nav-link-icon d-md-none d-lg-inline-block">
+                                    <i class="ti ti-trash"></i>
+                                </span>
+                                <span class="nav-link-title">{{t "nav.vault"}}</span>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="/domains">
+                                <span class="nav-link-icon d-md-none d-lg-inline-block">
+                                    <i class="ti ti-world"></i>
+                                </span>
+                                <span class="nav-link-title">{{t "nav.domains"}}</span>
+                            </a>
+                        </li>
+                        <li class="nav-item mt-auto">
+                            <a class="nav-link" href="/settings">
+                                <span class="nav-link-icon d-md-none d-lg-inline-block">
+                                    <i class="ti ti-settings"></i>
+                                </span>
+                                <span class="nav-link-title">{{t "nav.settings"}}</span>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link text-muted" href="/logout">
+                                <span class="nav-link-icon d-md-none d-lg-inline-block">
+                                    <i class="ti ti-logout"></i>
+                                </span>
+                                <span class="nav-link-title">{{t "auth.logout"}}</span>
+                            </a>
+                        </li>
+                    </ul>
                 </div>
             </div>
+        </aside>
+
+        <!-- Page wrapper -->
+        <div class="page-wrapper">
+            <!-- Page header -->
+            <div class="page-header d-print-none">
+                <div class="container-xl">
+                    <div class="row g-2 align-items-center">
+                        <div class="col">
+                            <h2 class="page-title">
+                                {{.Title}}
+                            </h2>
+                        </div>
+                        <div class="col-auto ms-auto">
+                            <div class="dropdown">
+                                <a href="#" class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown">
+                                    <i class="ti ti-user me-1"></i>
+                                    {{.User.Username}}
+                                </a>
+                                <div class="dropdown-menu dropdown-menu-end">
+                                    <a class="dropdown-item" href="/settings">
+                                        <i class="ti ti-settings me-2"></i>{{t "nav.settings"}}
+                                    </a>
+                                    <div class="dropdown-divider"></div>
+                                    <a class="dropdown-item" href="/logout">
+                                        <i class="ti ti-logout me-2"></i>{{t "auth.logout"}}
+                                    </a>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Page body -->
+            <div class="page-body">
+                <div class="container-xl">
+                    {{if .FlashSuccess}}
+                    <div class="alert alert-success alert-dismissible" role="alert">
+                        <div class="d-flex">
+                            <div><i class="ti ti-check me-2"></i></div>
+                            <div>{{.FlashSuccess}}</div>
+                        </div>
+                        <a class="btn-close" data-bs-dismiss="alert" aria-label="close"></a>
+                    </div>
+                    {{end}}
+                    {{if .FlashError}}
+                    <div class="alert alert-danger alert-dismissible" role="alert">
+                        <div class="d-flex">
+                            <div><i class="ti ti-alert-circle me-2"></i></div>
+                            <div>{{.FlashError}}</div>
+                        </div>
+                        <a class="btn-close" data-bs-dismiss="alert" aria-label="close"></a>
+                    </div>
+                    {{end}}
+                    {{template "content" .}}
+                </div>
+            </div>
+
+            <!-- Footer -->
+            <footer class="footer footer-transparent d-print-none">
+                <div class="container-xl">
+                    <div class="row text-center align-items-center">
+                        <div class="col-12">
+                            <ul class="list-inline list-inline-dots mb-0">
+                                <li class="list-inline-item">
+                                    &copy; 2024 {{t "app.footer"}}
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </footer>
         </div>
-    </nav>
-    {{end}}
-
-    <!-- Flash messages -->
-    {{if .FlashSuccess}}
-    <div class="alert alert-success">{{.FlashSuccess}}</div>
-    {{end}}
-    {{if .FlashError}}
-    <div class="alert alert-error">{{.FlashError}}</div>
-    {{end}}
-
-    <!-- Main content -->
-    <main class="container">
+    </div>
+    {{else}}
+    <!-- Auth pages (no sidebar) -->
+    <div class="page page-center">
         {{template "content" .}}
-    </main>
+    </div>
+    {{end}}
 
-    <footer class="footer">
-        <p>&copy; 2024 {{t "app.footer"}}</p>
-    </footer>
+    <!-- Tabler JS -->
+    <script src="https://cdn.jsdelivr.net/npm/@tabler/core@1.0.0-beta20/dist/js/tabler.min.js"></script>
 </body>
 </html>

@@ -22,6 +22,8 @@ const (
 	GmailScope = "https://mail.google.com/"
 	// Email scope to get user's email address
 	EmailScope = "email"
+	// Google Calendar scope (full access)
+	CalendarScope = "https://www.googleapis.com/auth/calendar"
 )
 
 // TokenResponse represents the response from Google's token endpoint
@@ -62,7 +64,7 @@ func GenerateState() (string, error) {
 	return base64.URLEncoding.EncodeToString(b), nil
 }
 
-// GetAuthURL returns the URL to redirect users for Google OAuth consent
+// GetAuthURL returns the URL to redirect users for Google OAuth consent (Gmail)
 func (g *GoogleOAuth) GetAuthURL(state string) string {
 	params := url.Values{
 		"client_id":     {g.config.ClientID},
@@ -74,6 +76,55 @@ func (g *GoogleOAuth) GetAuthURL(state string) string {
 		"state":         {state},
 	}
 	return GoogleAuthURL + "?" + params.Encode()
+}
+
+// GetCalendarAuthURL returns the URL to redirect users for Google Calendar OAuth consent
+func (g *GoogleOAuth) GetCalendarAuthURL(state, redirectURI string) string {
+	params := url.Values{
+		"client_id":     {g.config.ClientID},
+		"redirect_uri":  {redirectURI},
+		"response_type": {"code"},
+		"scope":         {CalendarScope + " " + EmailScope},
+		"access_type":   {"offline"}, // Request refresh token
+		"prompt":        {"consent"}, // Force consent to get refresh token
+		"state":         {state},
+	}
+	return GoogleAuthURL + "?" + params.Encode()
+}
+
+// ExchangeCodeWithRedirectURI exchanges an authorization code for tokens using a custom redirect URI
+func (g *GoogleOAuth) ExchangeCodeWithRedirectURI(code, redirectURI string) (*TokenResponse, error) {
+	data := url.Values{
+		"client_id":     {g.config.ClientID},
+		"client_secret": {g.config.ClientSecret},
+		"code":          {code},
+		"grant_type":    {"authorization_code"},
+		"redirect_uri":  {redirectURI},
+	}
+
+	resp, err := http.PostForm(GoogleTokenURL, data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to exchange code: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		return nil, fmt.Errorf("token exchange failed: %v", errResp)
+	}
+
+	var tokenResp TokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return nil, fmt.Errorf("failed to decode token response: %w", err)
+	}
+
+	return &tokenResp, nil
+}
+
+// GoogleCalDAVURL returns the CalDAV URL for Google Calendar
+func GoogleCalDAVURL(email string) string {
+	return fmt.Sprintf("https://apidata.googleusercontent.com/caldav/v2/%s/events", email)
 }
 
 // ExchangeCode exchanges an authorization code for tokens

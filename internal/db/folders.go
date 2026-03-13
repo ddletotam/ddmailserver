@@ -312,3 +312,56 @@ func scanFolders(rows *sql.Rows) ([]*models.Folder, error) {
 
 	return folders, nil
 }
+
+// GetFolderByNameAndUser retrieves a folder by name for a user (local folders without account)
+func (db *DB) GetFolderByNameAndUser(userID int64, name string) (*models.Folder, error) {
+	folder := &models.Folder{}
+	query := `
+		SELECT id, user_id, COALESCE(account_id, 0), name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
+		FROM folders
+		WHERE user_id = $1 AND account_id IS NULL AND UPPER(name) = UPPER($2)
+	`
+
+	err := db.QueryRow(query, userID, name).Scan(
+		&folder.ID, &folder.UserID, &folder.AccountID, &folder.Name, &folder.Path,
+		&folder.Type, &folder.ParentID, &folder.UIDNext, &folder.UIDValidity, &folder.CreatedAt, &folder.UpdatedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, nil // Not found is not an error
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get folder by name: %w", err)
+	}
+
+	return folder, nil
+}
+
+// GetOrCreateFolderByNameAndUser gets or creates a folder by name for a user
+func (db *DB) GetOrCreateFolderByNameAndUser(userID int64, name, folderType string) (*models.Folder, error) {
+	// Try to find existing folder
+	folder, err := db.GetFolderByNameAndUser(userID, name)
+	if err != nil {
+		return nil, err
+	}
+	if folder != nil {
+		return folder, nil
+	}
+
+	// Create new folder
+	folder = &models.Folder{
+		UserID:      userID,
+		AccountID:   0, // Will be converted to NULL
+		Name:        name,
+		Path:        name,
+		Type:        folderType,
+		UIDNext:     1,
+		UIDValidity: uint32(time.Now().Unix()),
+	}
+
+	if err := db.CreateFolder(folder); err != nil {
+		return nil, err
+	}
+
+	return folder, nil
+}

@@ -1,0 +1,365 @@
+{{define "content"}}
+<div class="row row-deck row-cards">
+    <!-- Add Calendar Actions -->
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">{{t "calendars.title"}}</h3>
+                <div class="card-actions">
+                    {{if .GoogleOAuthEnabled}}
+                    <a href="/oauth/google/calendar/start" class="btn btn-gmail">
+                        <i class="ti ti-brand-google me-2"></i>Google Calendar
+                    </a>
+                    {{end}}
+                    <button class="btn btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#add-ics-url-modal">
+                        <i class="ti ti-link me-1"></i>ICS URL
+                    </button>
+                    <button class="btn btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#add-caldav-modal">
+                        <i class="ti ti-plus me-1"></i>CalDAV
+                    </button>
+                    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#add-local-modal">
+                        <i class="ti ti-plus me-1"></i>{{t "calendars.new_local"}}
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Calendar Sources -->
+<div class="card mt-4">
+    <div class="card-header">
+        <h3 class="card-title">{{t "calendars.sources"}}</h3>
+    </div>
+    <div class="card-body" id="calendar-sources-list"
+         hx-get="/calendars/sources/list"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+        <div class="text-center text-muted py-4">
+            <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+            {{t "common.loading"}}
+        </div>
+    </div>
+</div>
+
+<!-- Calendars -->
+<div class="card mt-4">
+    <div class="card-header">
+        <h3 class="card-title">{{t "calendars.all"}}</h3>
+    </div>
+    <div class="card-body" id="calendars-list"
+         hx-get="/calendars/list"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+        <div class="text-center text-muted py-4">
+            <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+            {{t "common.loading"}}
+        </div>
+    </div>
+</div>
+
+<!-- CalDAV Connection Info -->
+<div class="card mt-4">
+    <div class="card-header">
+        <h3 class="card-title">
+            <i class="ti ti-info-circle me-2"></i>{{t "calendars.caldav_info"}}
+        </h3>
+    </div>
+    <div class="card-body">
+        <p class="text-muted">{{t "calendars.caldav_connect"}}:</p>
+        <pre class="bg-dark text-light p-3 rounded"><code>https://{{.Host}}/caldav/</code></pre>
+        <p class="text-muted small">{{t "calendars.caldav_hint"}}</p>
+    </div>
+</div>
+
+<!-- Add CalDAV Source Modal -->
+<div class="modal modal-blur fade" id="add-caldav-modal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">{{t "calendars.add_caldav"}}</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form hx-post="/calendars/sources/create"
+                  hx-target="#calendar-sources-list"
+                  hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('add-caldav-modal')).hide()">
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label">{{t "calendars.source_name"}}</label>
+                        <input type="text" name="name" class="form-control" required placeholder="Google Calendar">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">CalDAV URL</label>
+                        <input type="url" name="caldav_url" class="form-control" required
+                               placeholder="https://caldav.example.com/calendars/">
+                        <small class="form-hint">
+                            Google: https://apidata.googleusercontent.com/caldav/v2/EMAIL/events<br>
+                            iCloud: https://caldav.icloud.com/<br>
+                            Fastmail: https://caldav.fastmail.com/dav/calendars/
+                        </small>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">{{t "calendars.username"}}</label>
+                            <input type="text" name="caldav_username" class="form-control" required>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">{{t "calendars.password"}}</label>
+                            <input type="password" name="caldav_password" class="form-control" required>
+                            <small class="form-hint">{{t "calendars.app_password_hint"}}</small>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">{{t "calendars.color"}}</label>
+                        <input type="color" name="color" class="form-control form-control-color" value="#3788d8">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-link link-secondary" data-bs-dismiss="modal">{{t "common.cancel"}}</button>
+                    <button type="submit" class="btn btn-primary">{{t "common.add"}}</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Add Local Calendar Modal -->
+<div class="modal modal-blur fade" id="add-local-modal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">{{t "calendars.new_local"}}</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form hx-post="/calendars/create"
+                  hx-target="#calendars-list"
+                  hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('add-local-modal')).hide()">
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label">{{t "calendars.name"}}</label>
+                        <input type="text" name="name" class="form-control" required placeholder="Personal">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">{{t "calendars.color"}}</label>
+                        <input type="color" name="color" class="form-control form-control-color" value="#3788d8">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-link link-secondary" data-bs-dismiss="modal">{{t "common.cancel"}}</button>
+                    <button type="submit" class="btn btn-primary">{{t "common.create"}}</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Add ICS URL Source Modal -->
+<div class="modal modal-blur fade" id="add-ics-url-modal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Subscribe to ICS Calendar</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form hx-post="/calendars/sources/create-ics-url"
+                  hx-target="#calendar-sources-list"
+                  hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('add-ics-url-modal')).hide()">
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label">Calendar Name</label>
+                        <input type="text" name="name" class="form-control" required placeholder="Holidays">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">ICS URL</label>
+                        <input type="url" name="ics_url" class="form-control" required
+                               placeholder="https://example.com/calendar.ics">
+                        <small class="form-hint">
+                            Public URL to an ICS calendar file. The calendar will sync automatically.
+                        </small>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Sync Interval (seconds)</label>
+                        <input type="number" name="sync_interval" class="form-control" value="3600" min="300">
+                        <small class="form-hint">Minimum 300 seconds (5 minutes). Default: 3600 (1 hour).</small>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">{{t "calendars.color"}}</label>
+                        <input type="color" name="color" class="form-control form-control-color" value="#3788d8">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-link link-secondary" data-bs-dismiss="modal">{{t "common.cancel"}}</button>
+                    <button type="submit" class="btn btn-primary">Subscribe</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Import ICS Modal -->
+<div class="modal modal-blur fade" id="import-ics-modal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">{{t "calendars.import_ics"}}</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form hx-post="/calendars/import"
+                  hx-encoding="multipart/form-data"
+                  hx-target="#calendars-list"
+                  hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('import-ics-modal')).hide()">
+                <div class="modal-body">
+                    <input type="hidden" id="import-calendar-id" name="calendar_id">
+                    <div class="mb-3">
+                        <label class="form-label">{{t "calendars.ics_file"}}</label>
+                        <input type="file" name="file" class="form-control" accept=".ics" required>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-link link-secondary" data-bs-dismiss="modal">{{t "common.cancel"}}</button>
+                    <button type="submit" class="btn btn-primary">{{t "calendars.import"}}</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{{end}}
+
+{{define "calendar-sources-list"}}
+{{if .Sources}}
+<div class="row row-cards">
+    {{range .Sources}}
+    <div class="col-md-6 col-lg-4">
+        <div class="card">
+            <div class="card-status-top {{if .SyncEnabled}}bg-success{{else}}bg-secondary{{end}}"></div>
+            <div class="card-body">
+                <div class="d-flex align-items-center mb-3">
+                    <div class="me-3">
+                        <span class="avatar rounded" style="background-color: {{.Color}}">
+                            <i class="ti ti-calendar text-white"></i>
+                        </span>
+                    </div>
+                    <div>
+                        <h3 class="card-title mb-0">{{.Name}}</h3>
+                        <div class="text-muted small">{{.SourceType}}</div>
+                    </div>
+                </div>
+
+                {{if .CalDAVURL}}
+                <div class="mb-3">
+                    <div class="text-muted small mb-1">URL:</div>
+                    <div class="text-truncate small">{{.CalDAVURL}}</div>
+                </div>
+                {{end}}
+
+                {{if not .LastSync.IsZero}}
+                <div class="text-muted small">
+                    <i class="ti ti-refresh me-1"></i>{{.LastSync.Format "2006-01-02 15:04"}}
+                </div>
+                {{end}}
+
+                {{if .LastError}}
+                <div class="alert alert-danger mt-2 mb-0 py-1 px-2 small">
+                    {{.LastError}}
+                </div>
+                {{end}}
+            </div>
+            <div class="card-footer">
+                <div class="d-flex gap-2">
+                    <button hx-post="/calendars/sources/{{.ID}}/sync"
+                            hx-target="#sync-status-source-{{.ID}}"
+                            class="btn btn-sm btn-outline-primary">
+                        <i class="ti ti-refresh me-1"></i>Sync
+                    </button>
+                    <button hx-delete="/calendars/sources/{{.ID}}"
+                            hx-confirm="Delete source '{{.Name}}' and all its calendars?"
+                            hx-target="closest .col-md-6"
+                            hx-swap="outerHTML swap:0.3s"
+                            class="btn btn-sm btn-outline-danger ms-auto">
+                        <i class="ti ti-trash"></i>
+                    </button>
+                </div>
+                <div id="sync-status-source-{{.ID}}" class="sync-status text-success small mt-2"></div>
+            </div>
+        </div>
+    </div>
+    {{end}}
+</div>
+{{else}}
+<div class="empty">
+    <div class="empty-icon">
+        <i class="ti ti-calendar-off"></i>
+    </div>
+    <p class="empty-title">No calendar sources configured</p>
+    <p class="empty-subtitle text-muted">Add a CalDAV source to sync calendars from Google, iCloud, or other services</p>
+</div>
+{{end}}
+{{end}}
+
+{{define "calendars-list"}}
+{{if .Calendars}}
+<div class="row row-cards">
+    {{range .Calendars}}
+    <div class="col-md-6 col-lg-4">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex align-items-center mb-3">
+                    <div class="me-3">
+                        <span class="avatar rounded" style="background-color: {{if .Color}}{{.Color}}{{else}}#3788d8{{end}}">
+                            <i class="ti ti-calendar-event text-white"></i>
+                        </span>
+                    </div>
+                    <div>
+                        <h3 class="card-title mb-0">{{.Name}}</h3>
+                        {{if .Description}}
+                        <div class="text-muted small">{{.Description}}</div>
+                        {{end}}
+                    </div>
+                </div>
+
+                <div class="row g-2 text-muted small">
+                    <div class="col-6">
+                        <i class="ti ti-calendar-event me-1"></i>{{.EventCount}} events
+                    </div>
+                    {{if .SourceName}}
+                    <div class="col-6">
+                        <i class="ti ti-link me-1"></i>{{.SourceName}}
+                    </div>
+                    {{end}}
+                </div>
+            </div>
+            <div class="card-footer">
+                <div class="d-flex gap-2">
+                    <button onclick="openImportModal({{.ID}})" class="btn btn-sm btn-outline-secondary">
+                        <i class="ti ti-upload me-1"></i>Import ICS
+                    </button>
+                    <button hx-delete="/calendars/{{.ID}}"
+                            hx-confirm="Delete calendar '{{.Name}}'?"
+                            hx-target="closest .col-md-6"
+                            hx-swap="outerHTML swap:0.3s"
+                            class="btn btn-sm btn-outline-danger ms-auto">
+                        <i class="ti ti-trash"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    {{end}}
+</div>
+
+<script>
+function openImportModal(calendarId) {
+    document.getElementById('import-calendar-id').value = calendarId;
+    new bootstrap.Modal(document.getElementById('import-ics-modal')).show();
+}
+</script>
+{{else}}
+<div class="empty">
+    <div class="empty-icon">
+        <i class="ti ti-calendar-off"></i>
+    </div>
+    <p class="empty-title">No calendars yet</p>
+    <p class="empty-subtitle text-muted">Create a local calendar or add a CalDAV source to sync calendars</p>
+</div>
+{{end}}
+{{end}}

@@ -7,13 +7,12 @@ import (
 	"io"
 	"log"
 	"strings"
-	"time"
 
-	"github.com/emersion/go-message/mail"
 	"github.com/emersion/go-smtp"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/notify"
+	"github.com/yourusername/mailserver/internal/parser"
 )
 
 // Recipient holds info about a validated recipient
@@ -26,11 +25,15 @@ type Recipient struct {
 
 // Session represents an MX SMTP session
 type Session struct {
-	database   *db.DB
-	hub        *notify.Hub
-	conn       *smtp.Conn
-	from       string
-	recipients []*Recipient
+	database            *db.DB
+	hub                 *notify.Hub
+	conn                *smtp.Conn
+	analyzer            *parser.Analyzer
+	calendarSyncTrigger func(userID int64)
+	from                string
+	fromDomain          string
+	senderIP            string
+	recipients          []*Recipient
 }
 
 // AuthPlain - MX server does not require authentication
@@ -43,6 +46,12 @@ func (s *Session) AuthPlain(username, password string) error {
 func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	log.Printf("MX: MAIL FROM: %s", from)
 	s.from = from
+
+	// Extract domain for SPF check
+	email := s.extractEmail(from)
+	_, domain := s.splitEmail(email)
+	s.fromDomain = domain
+
 	return nil
 }
 
@@ -120,83 +129,61 @@ func (s *Session) Data(r io.Reader) error {
 	messageData := buf.Bytes()
 	messageSize := int64(len(messageData))
 
-	// Parse the message to extract headers
-	mr, err := mail.CreateReader(bytes.NewReader(messageData))
+	// Parse the message using the new parser
+	p := parser.New()
+	parsed, err := p.ParseBytes(messageData)
 	if err != nil {
 		log.Printf("MX: Failed to parse message: %v", err)
-		// Still try to save raw message
-	}
-
-	var subject, fromAddr, toAddr, ccAddr, replyTo, messageID, inReplyTo, references string
-	var messageDate time.Time
-
-	if mr != nil {
-		header := mr.Header
-
-		subject, _ = header.Subject()
-		messageDate, _ = header.Date()
-		messageID, _ = header.MessageID()
-		inReplyToList, _ := header.MsgIDList("In-Reply-To")
-		if len(inReplyToList) > 0 {
-			inReplyTo = inReplyToList[0]
-		}
-		refs, _ := header.MsgIDList("References")
-		references = strings.Join(refs, " ")
-
-		if fromList, err := header.AddressList("From"); err == nil && len(fromList) > 0 {
-			fromAddr = s.formatAddress(fromList[0])
-		}
-		if toList, err := header.AddressList("To"); err == nil {
-			toAddr = s.formatAddressList(toList)
-		}
-		if ccList, err := header.AddressList("Cc"); err == nil {
-			ccAddr = s.formatAddressList(ccList)
-		}
-		if replyToList, err := header.AddressList("Reply-To"); err == nil && len(replyToList) > 0 {
-			replyTo = s.formatAddress(replyToList[0])
+		// Still try to save with minimal info
+		parsed = &parser.ParsedMessage{
+			RawData: messageData,
+			RawSize: messageSize,
 		}
 	}
+
+	// Extract values from parsed message
+	subject := parsed.Subject
+	messageID := parsed.GetMessageID()
+	messageDate := parsed.GetDate()
+	inReplyTo := parsed.InReplyTo
+	references := strings.Join(parsed.References, " ")
+
+	fromAddr := parser.FormatAddress(parsed.From)
+	toAddr := parser.FormatAddressList(parsed.To)
+	ccAddr := parser.FormatAddressList(parsed.Cc)
+	replyTo := parser.FormatAddress(parsed.ReplyTo)
 
 	// Use envelope from if header from is empty
 	if fromAddr == "" {
 		fromAddr = s.from
 	}
 
-	// Use current time if date not parsed, always store in UTC
-	if messageDate.IsZero() {
-		messageDate = time.Now().UTC()
-	} else {
-		messageDate = messageDate.UTC()
+	body := parsed.Body
+	bodyHTML := parsed.BodyHTML
+
+	// Run spam analysis with sender context
+	if s.analyzer != nil {
+		s.analyzer.AnalyzeWithContext(parsed, s.senderIP, s.fromDomain)
+		if parsed.SpamScore > 0 {
+			log.Printf("MX: Spam analysis - score=%.1f status=%s reasons=%v",
+				parsed.SpamScore, parsed.SpamStatus, parsed.SpamReasons)
+		}
+		// Log auth results if available
+		if parsed.AuthResults != nil {
+			log.Printf("MX: Auth results - SPF=%s DKIM=%s",
+				parsed.AuthResults.SPF, parsed.AuthResults.DKIM)
+		}
 	}
 
-	// Generate message ID if missing
-	if messageID == "" {
-		messageID = fmt.Sprintf("<%d.%d@local>", time.Now().UnixNano(), len(s.recipients))
+	// Log if we found embedded messages or attachments
+	if len(parsed.EmbeddedMessages) > 0 {
+		log.Printf("MX: Message contains %d embedded message(s)", len(parsed.EmbeddedMessages))
 	}
-
-	// Extract body
-	var body, bodyHTML string
-	if mr != nil {
-		for {
-			p, err := mr.NextPart()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				log.Printf("MX: Error reading part: %v", err)
-				break
-			}
-
-			switch h := p.Header.(type) {
-			case *mail.InlineHeader:
-				contentType, _, _ := h.ContentType()
-				bodyBytes, _ := io.ReadAll(p.Body)
-
-				if contentType == "text/plain" && body == "" {
-					body = string(bodyBytes)
-				} else if contentType == "text/html" && bodyHTML == "" {
-					bodyHTML = string(bodyBytes)
-				}
+	if len(parsed.Attachments) > 0 {
+		log.Printf("MX: Message contains %d attachment(s)", len(parsed.Attachments))
+		for _, att := range parsed.Attachments {
+			if att.IsDangerous {
+				log.Printf("MX: WARNING - Dangerous attachment detected: %s (%s)", att.Filename, att.ContentType)
 			}
 		}
 	}
@@ -211,13 +198,12 @@ func (s *Session) Data(r io.Reader) error {
 			continue
 		}
 
-		// Get next UID for this folder
-		maxUID, err := s.database.GetMaxUIDForFolder(folderID)
+		// Get next UID atomically for this folder
+		nextUID, err := s.database.GetNextUIDForFolder(folderID)
 		if err != nil {
-			log.Printf("MX: Failed to get max UID for folder %d: %v", folderID, err)
-			maxUID = 0
+			log.Printf("MX: Failed to get next UID for folder %d: %v", folderID, err)
+			continue
 		}
-		nextUID := maxUID + 1
 
 		// Create message
 		msg := &models.Message{
@@ -242,12 +228,29 @@ func (s *Session) Data(r io.Reader) error {
 			Deleted:           false,
 			InReplyTo:         inReplyTo,
 			MessageReferences: references,
+			SpamScore:         parsed.SpamScore,
+			SpamStatus:        string(parsed.SpamStatus),
+			SpamReasons:       parser.GetSpamReasonsJSON(parsed.SpamReasons),
 		}
 
 		// Save to database
 		if err := s.database.CreateMessage(msg); err != nil {
 			log.Printf("MX: Failed to save message for %s: %v", recipient.Email, err)
 			continue
+		}
+
+		// Save attachments
+		for _, att := range parsed.Attachments {
+			attachment := &models.Attachment{
+				MessageID:   msg.ID,
+				Filename:    att.Filename,
+				ContentType: att.ContentType,
+				Size:        att.Size,
+				Data:        att.Data,
+			}
+			if err := s.database.CreateAttachment(attachment); err != nil {
+				log.Printf("MX: Failed to save attachment %s: %v", att.Filename, err)
+			}
 		}
 
 		savedCount++
@@ -272,6 +275,12 @@ func (s *Session) Data(r io.Reader) error {
 				Username: username,
 				Mailbox:  "INBOX",
 			})
+		}
+
+		// Trigger calendar sync if message contains calendar invite (.ics)
+		if s.calendarSyncTrigger != nil && s.hasCalendarInvite(parsed) {
+			log.Printf("MX: Calendar invite detected, triggering sync for user %d", recipient.Mailbox.UserID)
+			go s.calendarSyncTrigger(recipient.Mailbox.UserID)
 		}
 	}
 
@@ -333,25 +342,26 @@ func (s *Session) splitEmail(email string) (string, string) {
 	return parts[0], parts[1]
 }
 
-// formatAddress formats a mail address
-func (s *Session) formatAddress(addr *mail.Address) string {
-	if addr == nil {
-		return ""
+// hasCalendarInvite checks if the message contains a calendar invite (.ics attachment)
+func (s *Session) hasCalendarInvite(parsed *parser.ParsedMessage) bool {
+	if parsed == nil {
+		return false
 	}
-	if addr.Name != "" {
-		return fmt.Sprintf("%s <%s>", addr.Name, addr.Address)
-	}
-	return addr.Address
-}
 
-// formatAddressList formats a list of mail addresses
-func (s *Session) formatAddressList(addrs []*mail.Address) string {
-	if len(addrs) == 0 {
-		return ""
+	for _, att := range parsed.Attachments {
+		// Check content type
+		contentType := strings.ToLower(att.ContentType)
+		if strings.Contains(contentType, "text/calendar") ||
+			strings.Contains(contentType, "application/ics") {
+			return true
+		}
+
+		// Check filename extension
+		filename := strings.ToLower(att.Filename)
+		if strings.HasSuffix(filename, ".ics") {
+			return true
+		}
 	}
-	var result []string
-	for _, addr := range addrs {
-		result = append(result, s.formatAddress(addr))
-	}
-	return strings.Join(result, ", ")
+
+	return false
 }

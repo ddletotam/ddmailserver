@@ -1,125 +1,103 @@
 {{define "content"}}
-<div class="auth-container">
-    <div class="auth-box">
-        <h1 class="auth-title">{{t "app.name"}}</h1>
-        <p class="auth-subtitle">{{t "app.subtitle"}}</p>
+<div class="container container-tight py-4">
+    <div class="card card-md">
+        <div class="card-body">
+            <h2 class="h2 text-center mb-4">{{t "app.name"}}</h2>
+            <p class="text-muted text-center mb-4">{{t "app.subtitle"}}</p>
 
-        <!-- Tab buttons -->
-        <div class="tabs">
-            <button onclick="switchTab('login')" id="login-tab" class="tab active">
-                {{t "auth.login"}}
-            </button>
-            <button onclick="switchTab('register')" id="register-tab" class="tab">
-                {{t "auth.register"}}
-            </button>
+            <!-- Tabs -->
+            <ul class="nav nav-tabs nav-fill mb-3" role="tablist">
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link active" id="login-tab" data-bs-toggle="tab" data-bs-target="#login-pane" type="button">
+                        {{t "auth.login"}}
+                    </button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" id="register-tab" data-bs-toggle="tab" data-bs-target="#register-pane" type="button">
+                        {{t "auth.register"}}
+                    </button>
+                </li>
+            </ul>
+
+            <div class="tab-content">
+                <!-- Login form -->
+                <div class="tab-pane fade show active" id="login-pane" role="tabpanel">
+                    <form hx-post="/api/login"
+                          hx-target="#login-error"
+                          hx-swap="innerHTML">
+                        <div id="login-error" class="alert alert-danger" style="display: none;"></div>
+
+                        <div class="mb-3">
+                            <label class="form-label" for="login-username">{{t "auth.username"}}</label>
+                            <input type="text" id="login-username" name="username" class="form-control" required autofocus>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label" for="login-password">
+                                {{t "auth.password"}}
+                                <span class="form-label-description">
+                                    <a href="/forgot-password">{{t "forgot.title"}}?</a>
+                                </span>
+                            </label>
+                            <input type="password" id="login-password" name="password" class="form-control" required>
+                        </div>
+
+                        <div class="form-footer">
+                            <button type="submit" class="btn btn-primary w-100">
+                                <i class="ti ti-login me-2"></i>{{t "auth.login"}}
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- Register form -->
+                <div class="tab-pane fade" id="register-pane" role="tabpanel">
+                    <form hx-post="/api/register"
+                          hx-target="#register-error"
+                          hx-swap="innerHTML">
+                        <div id="register-error" class="alert alert-danger" style="display: none;"></div>
+
+                        <div class="mb-3">
+                            <label class="form-label" for="register-username">{{t "auth.username"}}</label>
+                            <input type="text" id="register-username" name="username" class="form-control" required>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label" for="register-password">{{t "auth.password"}}</label>
+                            <input type="password" id="register-password" name="password" class="form-control" required minlength="6">
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label" for="register-password-confirm">{{t "auth.password_confirm"}}</label>
+                            <input type="password" id="register-password-confirm" name="password_confirm" class="form-control" required minlength="6">
+                        </div>
+
+                        <div class="form-footer">
+                            <button type="submit" class="btn btn-primary w-100">
+                                <i class="ti ti-user-plus me-2"></i>{{t "auth.register"}}
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
         </div>
-
-        <!-- Login form -->
-        <form id="login-form"
-              hx-post="/api/login"
-              hx-target="#login-error"
-              hx-swap="innerHTML"
-              class="auth-form">
-            <div id="login-error" class="error-message"></div>
-
-            <div class="form-group">
-                <label for="login-username">{{t "auth.username"}}</label>
-                <input type="text" id="login-username" name="username" required autofocus>
-            </div>
-
-            <div class="form-group">
-                <label for="login-password">{{t "auth.password"}}</label>
-                <input type="password" id="login-password" name="password" required>
-            </div>
-
-            <button type="submit" class="btn btn-primary btn-block">
-                {{t "auth.login"}}
-            </button>
-
-            <div style="text-align: center; margin-top: 1rem;">
-                <a href="/forgot-password" class="btn-link">{{t "forgot.title"}}?</a>
-            </div>
-        </form>
-
-        <!-- Register form -->
-        <form id="register-form"
-              hx-post="/api/register"
-              hx-target="#register-error"
-              hx-swap="innerHTML"
-              class="auth-form hidden">
-            <div id="register-error" class="error-message"></div>
-
-            <div class="form-group">
-                <label for="register-username">{{t "auth.username"}}</label>
-                <input type="text" id="register-username" name="username" required>
-            </div>
-
-            <div class="form-group">
-                <label for="register-password">{{t "auth.password"}}</label>
-                <input type="password" id="register-password" name="password" required minlength="6">
-            </div>
-
-            <div class="form-group">
-                <label for="register-password-confirm">{{t "auth.password_confirm"}}</label>
-                <input type="password" id="register-password-confirm" name="password_confirm" required minlength="6">
-            </div>
-
-            <button type="submit" class="btn btn-primary btn-block">
-                {{t "auth.register"}}
-            </button>
-        </form>
     </div>
 </div>
 
 <script>
-// Initialize htmx on forms after page load
-document.addEventListener('DOMContentLoaded', function() {
-    if (typeof htmx !== 'undefined') {
-        htmx.process(document.body);
-    }
-});
-
-// Simple tab switching without Alpine
-function switchTab(tab) {
-    const loginForm = document.getElementById('login-form');
-    const registerForm = document.getElementById('register-form');
-    const loginTab = document.getElementById('login-tab');
-    const registerTab = document.getElementById('register-tab');
-
-    if (tab === 'login') {
-        loginForm.classList.remove('hidden');
-        registerForm.classList.add('hidden');
-        loginTab.classList.add('active');
-        registerTab.classList.remove('active');
-    } else {
-        loginForm.classList.add('hidden');
-        registerForm.classList.remove('hidden');
-        loginTab.classList.remove('active');
-        registerTab.classList.add('active');
-    }
-}
-
-// Clear error message before sending new request
-document.body.addEventListener('htmx:beforeRequest', function(evt) {
-    var target = evt.detail.target;
-    if (target && target.classList.contains('error-message')) {
-        target.textContent = '';
-    }
-});
-
-// Handle HTMX error responses - swap content even on error status codes
+// Show error messages
 document.body.addEventListener('htmx:beforeSwap', function(evt) {
-    // Allow swapping content for 4xx and 5xx error responses
     if (evt.detail.xhr.status >= 400 && evt.detail.xhr.status < 600) {
         evt.detail.shouldSwap = true;
         evt.detail.isError = false;
+        // Show the alert container
+        evt.detail.target.style.display = 'block';
     }
 });
 
-// Handle successful registration/login - redirect only on 2xx status
+// Handle successful login/register
 document.body.addEventListener('htmx:afterRequest', function(evt) {
     var status = evt.detail.xhr.status;
-    // Only redirect on actual HTTP success (2xx status codes)
     if (status >= 200 && status < 300) {
         if (evt.detail.xhr.responseURL.includes('/api/register')) {
             window.location.href = '/recovery-key';
@@ -129,15 +107,13 @@ document.body.addEventListener('htmx:afterRequest', function(evt) {
     }
 });
 
-// Prevent default form submission - HTMX handles it
-document.querySelectorAll('form[hx-post]').forEach(function(form) {
-    form.addEventListener('submit', function(e) {
-        // Let HTMX handle it, but prevent double-submit
-        if (!window.htmx) {
-            e.preventDefault();
-            console.error('HTMX not loaded');
-        }
-    });
+// Clear error on new request
+document.body.addEventListener('htmx:beforeRequest', function(evt) {
+    var target = evt.detail.target;
+    if (target && target.classList.contains('alert')) {
+        target.style.display = 'none';
+        target.textContent = '';
+    }
 });
 </script>
 {{end}}

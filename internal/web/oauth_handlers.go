@@ -524,6 +524,162 @@ func (s *Server) HandleSaveMicrosoftOAuthSettings(w http.ResponseWriter, r *http
 	w.Write([]byte(`<div class="success-message">Microsoft OAuth settings saved successfully! Outlook integration is now active.</div>`))
 }
 
+// ============================================================================
+// Google Calendar OAuth Handlers
+// ============================================================================
+
+// HandleGoogleCalendarOAuthStart initiates the Google OAuth2 flow for Calendar
+func (s *Server) HandleGoogleCalendarOAuthStart(w http.ResponseWriter, r *http.Request) {
+	if s.googleOAuth == nil {
+		http.Error(w, "Google OAuth not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	userID := getUserID(r)
+	if userID == 0 {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+
+	// Generate state for CSRF protection
+	state, err := oauth.GenerateState()
+	if err != nil {
+		log.Printf("Failed to generate OAuth state: %v", err)
+		http.Error(w, "Failed to start OAuth flow", http.StatusInternalServerError)
+		return
+	}
+
+	// Store state in session cookie (will be verified in callback)
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oauth_state",
+		Value:    state,
+		Path:     "/",
+		MaxAge:   600, // 10 minutes
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   r.TLS != nil,
+	})
+
+	// Build redirect URI for calendar callback
+	scheme := getSchemeFromRequest(r)
+	host := getHostFromRequest(r)
+	redirectURI := scheme + "://" + host + "/oauth/google/calendar/callback"
+
+	// Store redirect URI in cookie for callback
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oauth_redirect_uri",
+		Value:    redirectURI,
+		Path:     "/",
+		MaxAge:   600,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   r.TLS != nil,
+	})
+
+	// Redirect to Google
+	authURL := s.googleOAuth.GetCalendarAuthURL(state, redirectURI)
+	log.Printf("Redirecting to Google Calendar OAuth: %s", authURL)
+	http.Redirect(w, r, authURL, http.StatusTemporaryRedirect)
+}
+
+// HandleGoogleCalendarOAuthCallback handles the OAuth2 callback from Google for Calendar
+func (s *Server) HandleGoogleCalendarOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	if s.googleOAuth == nil {
+		http.Error(w, "Google OAuth not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	userID := getUserID(r)
+	if userID == 0 {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+
+	// Verify state parameter
+	state := r.URL.Query().Get("state")
+	stateCookie, err := r.Cookie("oauth_state")
+	if err != nil || stateCookie.Value != state {
+		log.Printf("OAuth state mismatch: expected %s, got %s", stateCookie.Value, state)
+		http.Error(w, "Invalid OAuth state - possible CSRF attack", http.StatusBadRequest)
+		return
+	}
+
+	// Get redirect URI from cookie
+	redirectURICookie, err := r.Cookie("oauth_redirect_uri")
+	if err != nil {
+		log.Printf("No redirect URI cookie found")
+		http.Error(w, "OAuth session expired", http.StatusBadRequest)
+		return
+	}
+	redirectURI := redirectURICookie.Value
+
+	// Clear cookies
+	http.SetCookie(w, &http.Cookie{Name: "oauth_state", Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: "oauth_redirect_uri", Value: "", Path: "/", MaxAge: -1})
+
+	// Check for error from Google
+	if errParam := r.URL.Query().Get("error"); errParam != "" {
+		errDesc := r.URL.Query().Get("error_description")
+		log.Printf("OAuth error from Google: %s - %s", errParam, errDesc)
+		http.Redirect(w, r, "/calendars?error=oauth_denied", http.StatusSeeOther)
+		return
+	}
+
+	// Get authorization code
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		log.Printf("No authorization code in callback")
+		http.Error(w, "No authorization code received", http.StatusBadRequest)
+		return
+	}
+
+	// Exchange code for tokens
+	tokenResp, err := s.googleOAuth.ExchangeCodeWithRedirectURI(code, redirectURI)
+	if err != nil {
+		log.Printf("Failed to exchange OAuth code: %v", err)
+		http.Redirect(w, r, "/calendars?error=oauth_failed", http.StatusSeeOther)
+		return
+	}
+
+	// Get user info (email)
+	userInfo, err := s.googleOAuth.GetUserInfo(tokenResp.AccessToken)
+	if err != nil {
+		log.Printf("Failed to get user info: %v", err)
+		http.Redirect(w, r, "/calendars?error=oauth_failed", http.StatusSeeOther)
+		return
+	}
+
+	log.Printf("Google Calendar OAuth successful for email: %s", userInfo.Email)
+
+	// Create calendar source with OAuth credentials
+	source := &models.CalendarSource{
+		UserID:            userID,
+		Name:              "Google Calendar (" + userInfo.Email + ")",
+		SourceType:        "caldav",
+		CalDAVURL:         oauth.GoogleCalDAVURL(userInfo.Email),
+		CalDAVUsername:    userInfo.Email,
+		AuthType:          "oauth2_google",
+		OAuthAccessToken:  tokenResp.AccessToken,
+		OAuthRefreshToken: tokenResp.RefreshToken,
+		OAuthTokenExpiry:  oauth.TokenExpiry(tokenResp.ExpiresIn),
+		SyncEnabled:       true,
+		SyncInterval:      60,        // 1 minute - sync as often as possible
+		Color:             "#4285f4", // Google blue
+	}
+
+	// Create source in database
+	if err := s.database.CreateCalendarSource(source); err != nil {
+		log.Printf("Failed to create Google Calendar source: %v", err)
+		http.Redirect(w, r, "/calendars?error=source_create_failed", http.StatusSeeOther)
+		return
+	}
+
+	log.Printf("Google Calendar source created for user %d", userID)
+
+	// Redirect to calendars page with success message
+	http.Redirect(w, r, "/calendars?success=google_calendar_added", http.StatusSeeOther)
+}
+
 // getHostFromRequest extracts the host from the request (considering X-Forwarded-Host)
 func getHostFromRequest(r *http.Request) string {
 	// Check for reverse proxy header first

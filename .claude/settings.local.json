@@ -7,7 +7,6 @@
       "Bash(npm test)",
       "Bash(git commit -m \"$\\(cat <<''EOF''\nfix\\(security\\): address critical vulnerabilities from code review\n\n- Fix IMAP/SMTP auth: use bcrypt instead of direct hash comparison\n- Fix CORS: validate Origin instead of allowing wildcard\n- Fix recovery key: pass via HttpOnly cookie instead of URL parameter\n- Add message ownership check to prevent reading other users'' messages\n- Add rate limiting middleware \\(5 req/min\\) for auth endpoints\n- Enable Secure cookie flag in production\n- Add crypto module for future password encryption\n- Update CLAUDE.md with project conventions\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
       "Bash(git push)",
-      "Bash(ssh ddm.logdoc.ru \"cd /home/mailserver/ddmailserver && ./deployments/update.sh\")",
       "Skill(playwright-cli)",
       "Bash(ssh lucky@jwebhelp.ru \"cd /home/mailserver/ddmailserver && git pull origin main && make build && sudo systemctl stop mailserver && sudo cp build/mailserver /usr/local/bin/mailserver && sudo systemctl start mailserver && echo ''Deploy complete!''\")",
       "Bash(ssh lucky@jwebhelp.ru \"find /home -name ''ddmailserver'' -type d 2>/dev/null || find / -name ''mailserver'' -type d 2>/dev/null | head -5\")",

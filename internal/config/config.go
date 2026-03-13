@@ -8,13 +8,37 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Database DatabaseConfig `yaml:"database"`
-	Security SecurityConfig `yaml:"security"`
-	Sync     SyncConfig     `yaml:"sync"`
-	Workers  WorkersConfig  `yaml:"workers"`
-	Logging  LoggingConfig  `yaml:"logging"`
-	OAuth    OAuthConfig    `yaml:"oauth"`
+	Server      ServerConfig      `yaml:"server"`
+	Database    DatabaseConfig    `yaml:"database"`
+	Security    SecurityConfig    `yaml:"security"`
+	Sync        SyncConfig        `yaml:"sync"`
+	Workers     WorkersConfig     `yaml:"workers"`
+	Logging     LoggingConfig     `yaml:"logging"`
+	OAuth       OAuthConfig       `yaml:"oauth"`
+	Spam        SpamConfig        `yaml:"spam"`
+	Meilisearch MeilisearchConfig `yaml:"meilisearch"`
+}
+
+type MeilisearchConfig struct {
+	Host   string `yaml:"host"` // e.g., http://127.0.0.1:7700
+	APIKey string `yaml:"api_key"`
+}
+
+type SpamConfig struct {
+	Enabled             bool     `yaml:"enabled"`
+	SuspiciousThreshold float64  `yaml:"suspicious_threshold"`
+	SpamThreshold       float64  `yaml:"spam_threshold"`
+	Action              string   `yaml:"action"` // "tag", "quarantine", "reject"
+	CheckHeaders        bool     `yaml:"check_headers"`
+	CheckContent        bool     `yaml:"check_content"`
+	CheckAttachments    bool     `yaml:"check_attachments"`
+	CheckLinks          bool     `yaml:"check_links"`
+	CheckSPF            bool     `yaml:"check_spf"`
+	CheckDKIM           bool     `yaml:"check_dkim"`
+	CheckRBL            bool     `yaml:"check_rbl"`
+	DangerousExtensions []string `yaml:"dangerous_extensions"`
+	MaxAttachmentSize   int64    `yaml:"max_attachment_size"`
+	MaxMessageSize      int64    `yaml:"max_message_size"`
 }
 
 type OAuthConfig struct {
@@ -39,7 +63,8 @@ type ServerConfig struct {
 	IMAPTLSPort int    `yaml:"imap_tls_port"`
 	SMTPPort    int    `yaml:"smtp_port"`
 	SMTPTLSPort int    `yaml:"smtp_tls_port"`
-	SMTPMXPort  int    `yaml:"smtp_mx_port"` // MX server port for incoming mail (default 25)
+	SMTPMXPort  int    `yaml:"smtp_mx_port"` // incoming mail (default 25)
+	LDAPPort    int    `yaml:"ldap_port"`    // address book lookups (default 10389)
 	WebPort     int    `yaml:"web_port"`
 	WebHost     string `yaml:"web_host"`
 	Domain      string `yaml:"domain"` // Mail server hostname (e.g., mail.example.com)
@@ -147,4 +172,36 @@ func (c *OAuthConfig) IsGoogleOAuthConfigured() bool {
 // IsMicrosoftOAuthConfigured returns true if Microsoft OAuth is configured
 func (c *OAuthConfig) IsMicrosoftOAuthConfigured() bool {
 	return c.Microsoft.ClientID != "" && c.Microsoft.ClientSecret != ""
+}
+
+// GetSpamConfigWithDefaults returns spam config with sensible defaults
+func (c *SpamConfig) GetSpamConfigWithDefaults() SpamConfig {
+	cfg := *c
+
+	// Set defaults if not configured
+	if cfg.SuspiciousThreshold == 0 {
+		cfg.SuspiciousThreshold = 3.0
+	}
+	if cfg.SpamThreshold == 0 {
+		cfg.SpamThreshold = 6.0
+	}
+	if cfg.Action == "" {
+		cfg.Action = "tag"
+	}
+	if len(cfg.DangerousExtensions) == 0 {
+		cfg.DangerousExtensions = []string{
+			".exe", ".com", ".bat", ".cmd", ".scr", ".pif",
+			".js", ".jse", ".vbs", ".vbe", ".wsf", ".wsh",
+			".msi", ".msp", ".dll", ".cpl", ".hta",
+			".ps1", ".psm1", ".psd1",
+		}
+	}
+	if cfg.MaxAttachmentSize == 0 {
+		cfg.MaxAttachmentSize = 25 * 1024 * 1024 // 25MB
+	}
+	if cfg.MaxMessageSize == 0 {
+		cfg.MaxMessageSize = 50 * 1024 * 1024 // 50MB
+	}
+
+	return cfg
 }

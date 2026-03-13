@@ -112,10 +112,19 @@ func (p *Pool) imapWorker(id int) {
 				return
 			}
 
-			// Execute task
+			// Execute task with panic recovery
 			log.Printf("IMAP worker %d executing: %s", id, task.String())
 
-			err := task.Execute(p.ctx)
+			var err error
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						err = fmt.Errorf("panic: %v", r)
+						log.Printf("IMAP worker %d recovered from panic: %v", id, r)
+					}
+				}()
+				err = task.Execute(p.ctx)
+			}()
 
 			p.mu.Lock()
 			if err != nil {
@@ -148,10 +157,19 @@ func (p *Pool) smtpWorker(id int) {
 				return
 			}
 
-			// Execute task
+			// Execute task with panic recovery
 			log.Printf("SMTP worker %d executing: %s", id, task.String())
 
-			err := task.Execute(p.ctx)
+			var err error
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						err = fmt.Errorf("panic: %v", r)
+						log.Printf("SMTP worker %d recovered from panic: %v", id, r)
+					}
+				}()
+				err = task.Execute(p.ctx)
+			}()
 
 			p.mu.Lock()
 			if err != nil {

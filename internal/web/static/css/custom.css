@@ -1,0 +1,135 @@
+/* Custom overrides for Tabler */
+
+/* Fix dark sidebar text visibility */
+.navbar-vertical.navbar-dark .nav-link {
+    color: rgba(255, 255, 255, 0.7);
+}
+
+.navbar-vertical.navbar-dark .nav-link:hover {
+    color: #ffffff;
+}
+
+.navbar-vertical.navbar-dark .nav-link .nav-link-icon {
+    color: rgba(255, 255, 255, 0.5);
+}
+
+.navbar-vertical.navbar-dark .nav-link:hover .nav-link-icon {
+    color: #ffffff;
+}
+
+/* HTMX loading states */
+.htmx-request {
+    opacity: 0.7;
+    pointer-events: none;
+}
+
+.htmx-request::after {
+    content: "";
+    display: inline-block;
+    width: 1rem;
+    height: 1rem;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: spinner 0.75s linear infinite;
+    margin-left: 0.5rem;
+    vertical-align: middle;
+}
+
+@keyframes spinner {
+    to { transform: rotate(360deg); }
+}
+
+/* Error message styling for HTMX responses */
+.error-message:empty {
+    display: none;
+}
+
+.success-message:empty {
+    display: none;
+}
+
+/* Message list improvements */
+.message-item {
+    cursor: pointer;
+    transition: background-color 0.15s;
+}
+
+.message-item:hover {
+    background-color: var(--tblr-bg-surface-secondary);
+}
+
+.message-item.unread {
+    background-color: rgba(var(--tblr-primary-rgb), 0.05);
+    font-weight: 600;
+}
+
+/* Sync status indicator */
+.sync-status {
+    font-size: 0.875rem;
+}
+
+.sync-status:empty {
+    display: none;
+}
+
+/* Calendar color indicators */
+.calendar-color,
+.source-color {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+/* Truncate long text */
+.truncate {
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: inline-block;
+}
+
+/* Gmail/Microsoft buttons */
+.btn-gmail {
+    background-color: #ea4335;
+    border-color: #ea4335;
+    color: #fff;
+}
+
+.btn-gmail:hover {
+    background-color: #d93025;
+    border-color: #d93025;
+    color: #fff;
+}
+
+.btn-microsoft {
+    background-color: #00a4ef;
+    border-color: #00a4ef;
+    color: #fff;
+}
+
+.btn-microsoft:hover {
+    background-color: #0078d4;
+    border-color: #0078d4;
+    color: #fff;
+}
+
+/* OAuth instructions */
+.oauth-instructions {
+    background: var(--tblr-bg-surface-secondary);
+    border: 1px solid var(--tblr-border-color);
+    border-radius: var(--tblr-border-radius);
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+
+.oauth-instructions ol {
+    margin-bottom: 0.5rem;
+    padding-left: 1.25rem;
+}
+
+.oauth-instructions li {
+    margin-bottom: 0.25rem;
+}

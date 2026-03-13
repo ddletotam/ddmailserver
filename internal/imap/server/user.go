@@ -7,15 +7,17 @@ import (
 	"github.com/emersion/go-imap/backend"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/search"
 )
 
 var errNotImplemented = errors.New("not implemented")
 
 // User represents an authenticated IMAP user
 type User struct {
-	username string
-	userID   int64
-	database *db.DB
+	username      string
+	userID        int64
+	database      *db.DB
+	searchIndexer *search.Indexer
 }
 
 // Username returns the username
@@ -42,18 +44,20 @@ func (u *User) ListMailboxes(subscribed bool) ([]backend.Mailbox, error) {
 		if folder.Name == "INBOX" {
 			// Add INBOX first
 			mailboxes = append([]backend.Mailbox{&Mailbox{
-				name:     "INBOX",
-				user:     u,
-				database: u.database,
-				folderID: folder.ID,
+				name:          "INBOX",
+				user:          u,
+				database:      u.database,
+				folderID:      folder.ID,
+				searchIndexer: u.searchIndexer,
 			}}, mailboxes...)
 			inboxFound = true
 		} else {
 			mailboxes = append(mailboxes, &Mailbox{
-				name:     folder.Name,
-				user:     u,
-				database: u.database,
-				folderID: folder.ID,
+				name:          folder.Name,
+				user:          u,
+				database:      u.database,
+				folderID:      folder.ID,
+				searchIndexer: u.searchIndexer,
 			})
 		}
 	}
@@ -65,10 +69,11 @@ func (u *User) ListMailboxes(subscribed bool) ([]backend.Mailbox, error) {
 			log.Printf("Failed to create INBOX: %v", err)
 		} else {
 			mailboxes = append([]backend.Mailbox{&Mailbox{
-				name:     "INBOX",
-				user:     u,
-				database: u.database,
-				folderID: inbox.ID,
+				name:          "INBOX",
+				user:          u,
+				database:      u.database,
+				folderID:      inbox.ID,
+				searchIndexer: u.searchIndexer,
 			}}, mailboxes...)
 		}
 	}
@@ -86,10 +91,11 @@ func (u *User) GetMailbox(name string) (backend.Mailbox, error) {
 	if err == nil {
 		log.Printf("Found mailbox %s (folder ID: %d)", name, folder.ID)
 		return &Mailbox{
-			name:     folder.Name,
-			user:     u,
-			database: u.database,
-			folderID: folder.ID,
+			name:          folder.Name,
+			user:          u,
+			database:      u.database,
+			folderID:      folder.ID,
+			searchIndexer: u.searchIndexer,
 		}, nil
 	}
 
@@ -101,10 +107,11 @@ func (u *User) GetMailbox(name string) (backend.Mailbox, error) {
 		}
 		log.Printf("Created INBOX for user %s (folder ID: %d)", u.username, inbox.ID)
 		return &Mailbox{
-			name:     "INBOX",
-			user:     u,
-			database: u.database,
-			folderID: inbox.ID,
+			name:          "INBOX",
+			user:          u,
+			database:      u.database,
+			folderID:      inbox.ID,
+			searchIndexer: u.searchIndexer,
 		}, nil
 	}
 

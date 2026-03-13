@@ -1,0 +1,76 @@
+{{define "content"}}
+<div class="card">
+    <div class="card-header">
+        <h3 class="card-title">
+            <i class="ti ti-trash me-2"></i>{{t "vault.title"}}
+        </h3>
+        <div class="card-actions">
+            <span class="text-muted">{{.MessageCount}} {{t "vault.messages"}}</span>
+        </div>
+    </div>
+    <div class="card-body">
+        {{if .Messages}}
+        <div class="table-responsive">
+            <table class="table table-vcenter card-table table-hover">
+                <thead>
+                    <tr>
+                        <th>{{t "messages.from"}}</th>
+                        <th>{{t "messages.subject"}}</th>
+                        <th>{{t "messages.date"}}</th>
+                        <th class="w-1"></th>
+                    </tr>
+                </thead>
+                <tbody id="vault-messages">
+                    {{range .Messages}}
+                    <tr id="msg-{{.ID}}">
+                        <td>
+                            <div class="text-truncate" style="max-width: 200px;">
+                                {{.FromAddr}}
+                            </div>
+                        </td>
+                        <td>
+                            <div class="text-truncate" style="max-width: 300px;">
+                                {{.Subject}}
+                            </div>
+                        </td>
+                        <td class="text-muted">
+                            {{.Date.Format "02.01.2006 15:04"}}
+                        </td>
+                        <td>
+                            <div class="btn-list flex-nowrap">
+                                <button type="button" class="btn btn-sm btn-success"
+                                        hx-post="/vault/restore/{{.ID}}"
+                                        hx-target="#msg-{{.ID}}"
+                                        hx-swap="outerHTML"
+                                        title="{{t "vault.restore"}}">
+                                    <i class="ti ti-refresh"></i>
+                                </button>
+                                <button type="button" class="btn btn-sm btn-danger"
+                                        hx-delete="/vault/delete/{{.ID}}"
+                                        hx-target="#msg-{{.ID}}"
+                                        hx-swap="outerHTML"
+                                        hx-confirm="{{t "vault.confirm_delete"}}"
+                                        title="{{t "vault.delete_permanently"}}">
+                                    <i class="ti ti-trash"></i>
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+        {{else}}
+        <div class="empty">
+            <div class="empty-icon">
+                <i class="ti ti-trash" style="font-size: 3rem;"></i>
+            </div>
+            <p class="empty-title">{{t "vault.empty"}}</p>
+            <p class="empty-subtitle text-muted">
+                {{t "vault.empty_description"}}
+            </p>
+        </div>
+        {{end}}
+    </div>
+</div>
+{{end}}
