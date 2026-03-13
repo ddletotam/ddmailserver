@@ -140,12 +140,13 @@ func (s *Server) propfindPrincipal(user *models.User, depth string) string {
       <D:prop>
         <D:resourcetype><D:principal/></D:resourcetype>
         <D:displayname>%s</D:displayname>
+        <D:current-user-principal><D:href>%s</D:href></D:current-user-principal>
         <C:calendar-home-set><D:href>%s</D:href></C:calendar-home-set>
       </D:prop>
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
   </D:response>
-</D:multistatus>`, principalURL, user.Username, calendarHomeURL)
+</D:multistatus>`, principalURL, user.Username, principalURL, calendarHomeURL)
 }
 
 func (s *Server) propfindCalendarHome(user *models.User, depth string) string {
