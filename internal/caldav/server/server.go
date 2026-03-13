@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/emersion/go-ical"
 	"github.com/yourusername/mailserver/internal/db"
@@ -161,6 +162,10 @@ func (s *Server) propfindCalendarHome(user *models.User, depth string) string {
 	var calendarResponses strings.Builder
 	for _, cal := range calendars {
 		calURL := fmt.Sprintf("%s%d/calendars/%d/", s.prefix, user.ID, cal.ID)
+		ctag := cal.CTag
+		if ctag == "" {
+			ctag = fmt.Sprintf("%d", cal.UpdatedAt.Unix())
+		}
 		calendarResponses.WriteString(fmt.Sprintf(`
   <D:response>
     <D:href>%s</D:href>
@@ -168,17 +173,18 @@ func (s *Server) propfindCalendarHome(user *models.User, depth string) string {
       <D:prop>
         <D:resourcetype><D:collection/><C:calendar/></D:resourcetype>
         <D:displayname>%s</D:displayname>
+        <CS:getctag>%s</CS:getctag>
         <C:supported-calendar-component-set>
           <C:comp name="VEVENT"/>
         </C:supported-calendar-component-set>
       </D:prop>
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
-  </D:response>`, calURL, xmlEscape(cal.Name)))
+  </D:response>`, calURL, xmlEscape(cal.Name), ctag))
 	}
 
 	return fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
-<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:CS="http://calendarserver.org/ns/">
   <D:response>
     <D:href>%s</D:href>
     <D:propstat>
@@ -200,6 +206,10 @@ func (s *Server) propfindCalendar(user *models.User, calID int64, depth string) 
 	}
 
 	calURL := fmt.Sprintf("%s%d/calendars/%d/", s.prefix, user.ID, cal.ID)
+	ctag := cal.CTag
+	if ctag == "" {
+		ctag = fmt.Sprintf("%d", cal.UpdatedAt.Unix())
+	}
 
 	var eventResponses strings.Builder
 	if depth != "0" {
@@ -221,13 +231,14 @@ func (s *Server) propfindCalendar(user *models.User, calID int64, depth string) 
 	}
 
 	return fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
-<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:CS="http://calendarserver.org/ns/">
   <D:response>
     <D:href>%s</D:href>
     <D:propstat>
       <D:prop>
         <D:resourcetype><D:collection/><C:calendar/></D:resourcetype>
         <D:displayname>%s</D:displayname>
+        <CS:getctag>%s</CS:getctag>
         <C:supported-calendar-component-set>
           <C:comp name="VEVENT"/>
         </C:supported-calendar-component-set>
@@ -235,7 +246,7 @@ func (s *Server) propfindCalendar(user *models.User, calID int64, depth string) 
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
   </D:response>%s
-</D:multistatus>`, calURL, xmlEscape(cal.Name), eventResponses.String())
+</D:multistatus>`, calURL, xmlEscape(cal.Name), ctag, eventResponses.String())
 }
 
 func (s *Server) handleReport(w http.ResponseWriter, r *http.Request, user *models.User) {
@@ -458,6 +469,9 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 			return
 		}
 
+		// Update calendar ctag
+		s.updateCalendarCTag(calID)
+
 		w.Header().Set("ETag", event.ETag)
 		w.WriteHeader(http.StatusNoContent)
 	} else {
@@ -471,6 +485,9 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 			http.Error(w, "Failed to create event", http.StatusInternalServerError)
 			return
 		}
+
+		// Update calendar ctag
+		s.updateCalendarCTag(calID)
 
 		w.Header().Set("ETag", event.ETag)
 		w.WriteHeader(http.StatusCreated)
@@ -515,6 +532,9 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, user *mode
 		http.Error(w, "Failed to delete event", http.StatusInternalServerError)
 		return
 	}
+
+	// Update calendar ctag
+	s.updateCalendarCTag(calID)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -572,4 +592,12 @@ func xmlEscape(s string) string {
 	var buf strings.Builder
 	xml.EscapeText(&buf, []byte(s))
 	return buf.String()
+}
+
+// updateCalendarCTag updates the ctag when calendar content changes
+func (s *Server) updateCalendarCTag(calendarID int64) {
+	ctag := fmt.Sprintf("%d", time.Now().UnixNano())
+	if err := s.database.UpdateCalendarCTag(calendarID, ctag); err != nil {
+		log.Printf("Failed to update calendar ctag: %v", err)
+	}
 }
