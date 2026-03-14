@@ -519,6 +519,11 @@ func (s *Server) HandleMessagePage(w http.ResponseWriter, r *http.Request) {
 		// Continue without attachments
 	}
 
+	// Replace cid: URLs with actual attachment URLs
+	if message.BodyHTML != "" {
+		message.BodyHTML = replaceCIDURLs(message.BodyHTML, message.ID)
+	}
+
 	// Mark as read
 	message.Seen = true
 	if err := s.database.UpdateMessage(message); err != nil {

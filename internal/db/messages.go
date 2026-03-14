@@ -176,6 +176,16 @@ func (db *DB) UpdateMessage(msg *models.Message) error {
 	return nil
 }
 
+// UpdateMessageAttachmentCount updates the attachment count for a message
+func (db *DB) UpdateMessageAttachmentCount(id int64, count int) error {
+	query := `UPDATE messages SET attachments = $1 WHERE id = $2`
+	_, err := db.Exec(query, count, id)
+	if err != nil {
+		return fmt.Errorf("failed to update attachment count: %w", err)
+	}
+	return nil
+}
+
 // DeleteMessage deletes a message
 func (db *DB) DeleteMessage(id int64) error {
 	query := `DELETE FROM messages WHERE id = $1`

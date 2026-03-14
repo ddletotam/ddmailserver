@@ -138,10 +138,12 @@ type Folder struct {
 type Attachment struct {
 	ID          int64     `json:"id"`
 	MessageID   int64     `json:"message_id"`
+	ContentID   string    `json:"content_id,omitempty"` // For inline images (cid:xxx)
 	Filename    string    `json:"filename"`
 	ContentType string    `json:"content_type"`
-	Size        int64     `json:"size"`
-	Data        []byte    `json:"-"` // Store in DB or filesystem
+	Size        int       `json:"size"`
+	IsInline    bool      `json:"is_inline"` // Embedded in HTML
+	Data        []byte    `json:"-"`         // Binary content
 	CreatedAt   time.Time `json:"created_at"`
 }
 

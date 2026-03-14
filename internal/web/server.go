@@ -198,6 +198,10 @@ func (s *Server) setupRoutes() {
 	web.HandleFunc("/messages/send", s.HandleSendMessage).Methods("POST")
 	web.HandleFunc("/message/{id}", s.HandleMessagePage).Methods("GET")
 
+	// Attachments
+	web.HandleFunc("/attachments/{id}", s.HandleAttachment).Methods("GET")
+	web.HandleFunc("/messages/{messageId}/attachments/cid/{cid}", s.HandleAttachmentByCID).Methods("GET")
+
 	// Compose
 	web.HandleFunc("/compose", s.HandleComposePage).Methods("GET")
 

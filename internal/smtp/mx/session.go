@@ -243,9 +243,11 @@ func (s *Session) Data(r io.Reader) error {
 		for _, att := range parsed.Attachments {
 			attachment := &models.Attachment{
 				MessageID:   msg.ID,
+				ContentID:   att.ContentID,
 				Filename:    att.Filename,
 				ContentType: att.ContentType,
-				Size:        att.Size,
+				Size:        int(att.Size),
+				IsInline:    att.IsInline,
 				Data:        att.Data,
 			}
 			if err := s.database.CreateAttachment(attachment); err != nil {

@@ -158,7 +158,7 @@ func (p *Parser) handlePart(part *gomail.Part, msg *ParsedMessage, depth int) er
 	}
 }
 
-// handleInlinePart handles inline parts (body text, html, embedded messages)
+// handleInlinePart handles inline parts (body text, html, embedded messages, inline images)
 func (p *Parser) handleInlinePart(h *gomail.InlineHeader, body io.Reader, msg *ParsedMessage, depth int) error {
 	contentType, params, err := h.ContentType()
 	if err != nil {
@@ -168,6 +168,49 @@ func (p *Parser) handleInlinePart(h *gomail.InlineHeader, body io.Reader, msg *P
 	// Handle message/rfc822 - embedded email
 	if strings.HasPrefix(contentType, "message/rfc822") {
 		return p.handleEmbeddedMessage(body, msg, depth)
+	}
+
+	// Check for Content-ID - if present, treat as inline attachment (e.g., embedded image)
+	contentID := h.Get("Content-ID")
+	if contentID != "" && !strings.HasPrefix(contentType, "text/") {
+		// This is an inline image or other embedded content
+		contentID = strings.TrimPrefix(contentID, "<")
+		contentID = strings.TrimSuffix(contentID, ">")
+
+		data, err := io.ReadAll(body)
+		if err != nil {
+			return fmt.Errorf("failed to read inline content: %w", err)
+		}
+
+		// Get filename from Content-Disposition or Content-Type name param
+		filename := params["name"]
+		if filename == "" {
+			// Generate filename based on content-id
+			ext := ".bin"
+			switch {
+			case strings.HasPrefix(contentType, "image/jpeg"):
+				ext = ".jpg"
+			case strings.HasPrefix(contentType, "image/png"):
+				ext = ".png"
+			case strings.HasPrefix(contentType, "image/gif"):
+				ext = ".gif"
+			case strings.HasPrefix(contentType, "image/webp"):
+				ext = ".webp"
+			}
+			filename = contentID + ext
+		}
+
+		attachment := ParsedAttachment{
+			Filename:    filename,
+			ContentType: contentType,
+			Size:        int64(len(data)),
+			Data:        data,
+			ContentID:   contentID,
+			IsInline:    true,
+			IsDangerous: false,
+		}
+		msg.Attachments = append(msg.Attachments, attachment)
+		return nil
 	}
 
 	// Read body content
