@@ -13,7 +13,7 @@ func (db *DB) CreateAttachment(att *models.Attachment) error {
 	att.CreatedAt = time.Now()
 
 	query := `
-		INSERT INTO attachments (message_id, content_id, filename, content_type, size, is_inline, content, created_at)
+		INSERT INTO attachments (message_id, content_id, filename, content_type, size, is_inline, data, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id
 	`
@@ -72,7 +72,7 @@ func (db *DB) GetAttachmentsByMessageID(messageID int64) ([]*models.Attachment, 
 func (db *DB) GetAttachmentByID(id int64) (*models.Attachment, error) {
 	query := `
 		SELECT id, message_id, COALESCE(content_id, ''), COALESCE(filename, ''),
-		       content_type, size, is_inline, content, created_at
+		       content_type, size, is_inline, data, created_at
 		FROM attachments
 		WHERE id = $1
 	`
@@ -97,7 +97,7 @@ func (db *DB) GetAttachmentByID(id int64) (*models.Attachment, error) {
 func (db *DB) GetAttachmentByContentID(messageID int64, contentID string) (*models.Attachment, error) {
 	query := `
 		SELECT id, message_id, COALESCE(content_id, ''), COALESCE(filename, ''),
-		       content_type, size, is_inline, content, created_at
+		       content_type, size, is_inline, data, created_at
 		FROM attachments
 		WHERE message_id = $1 AND content_id = $2
 	`
