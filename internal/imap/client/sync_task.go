@@ -266,17 +266,28 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 	}
 
 	// Save attachments
+	attachmentCount := 0
 	for _, att := range attachments {
 		attachment := &models.Attachment{
 			MessageID:   msg.ID,
+			ContentID:   att.ContentID,
 			Filename:    att.Filename,
 			ContentType: att.ContentType,
-			Size:        att.Size,
+			Size:        int(att.Size),
+			IsInline:    att.IsInline,
 			Data:        att.Data,
 		}
 		if err := t.database.CreateAttachment(attachment); err != nil {
 			log.Printf("IMAP sync: Failed to save attachment %s: %v", att.Filename, err)
+		} else {
+			attachmentCount++
 		}
+	}
+
+	// Update attachment count if any were saved
+	if attachmentCount > 0 {
+		msg.Attachments = attachmentCount
+		t.database.UpdateMessageAttachmentCount(msg.ID, attachmentCount)
 	}
 
 	return true, nil
