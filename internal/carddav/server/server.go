@@ -29,6 +29,9 @@ func New(database *db.DB, prefix string) *Server {
 
 // ServeHTTP handles CardDAV requests
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Set DAV header on all responses - required by iOS
+	w.Header().Set("DAV", "1, 2, addressbook")
+
 	// Authenticate user
 	user, err := s.authenticate(r)
 	if err != nil {
