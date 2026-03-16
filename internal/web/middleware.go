@@ -155,10 +155,20 @@ func (s *Server) CORSMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, HX-Request, HX-Current-URL")
+		// Skip CORS headers for CalDAV/CardDAV - they handle their own headers
+		if !strings.HasPrefix(r.URL.Path, "/caldav/") && !strings.HasPrefix(r.URL.Path, "/carddav/") &&
+			r.URL.Path != "/.well-known/caldav" && r.URL.Path != "/.well-known/carddav" {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, HX-Request, HX-Current-URL")
+		}
 
 		if r.Method == "OPTIONS" {
+			// Let CalDAV/CardDAV handle their own OPTIONS (for DAV header)
+			if strings.HasPrefix(r.URL.Path, "/caldav/") || strings.HasPrefix(r.URL.Path, "/carddav/") ||
+				r.URL.Path == "/.well-known/caldav" || r.URL.Path == "/.well-known/carddav" {
+				next.ServeHTTP(w, r)
+				return
+			}
 			w.WriteHeader(http.StatusOK)
 			return
 		}

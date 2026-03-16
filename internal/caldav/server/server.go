@@ -86,8 +86,8 @@ func (s *Server) authenticate(r *http.Request) (*models.User, error) {
 }
 
 func (s *Server) handleOptions(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Allow", "OPTIONS, GET, PUT, DELETE, PROPFIND, REPORT, MKCALENDAR")
-	w.Header().Set("DAV", "1, 2, calendar-access")
+	w.Header().Set("Allow", "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, REPORT, MKCALENDAR")
+	w.Header().Set("DAV", "1, 3, access-control, calendar-access")
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -101,25 +101,40 @@ func (s *Server) handlePropfind(w http.ResponseWriter, r *http.Request, user *mo
 		depth = "1"
 	}
 
-	// Determine what we're querying
-	parts := strings.Split(path, "/")
-
 	var response string
-	if path == "" || path == fmt.Sprintf("%d", user.ID) {
-		// Principal URL
-		response = s.propfindPrincipal(user, depth)
-	} else if len(parts) == 2 && parts[1] == "calendars" {
-		// Calendar home set
+
+	// iOS CalDAV discovery flow:
+	// 1. PROPFIND / → return current-user-principal pointing to /principals/users/username/
+	// 2. PROPFIND /principals/users/username/ → return calendar-home-set, calendar-user-address-set
+	// 3. PROPFIND /calendars/username/ Depth:1 → return list of calendars
+
+	switch {
+	case path == "":
+		// Root - return current-user-principal (step 1)
+		response = s.propfindRoot(user)
+
+	case path == "principals" || path == "principals/users" ||
+		path == fmt.Sprintf("principals/users/%s", user.Username) ||
+		path == fmt.Sprintf("calendar/dav/%s/user", user.Username):
+		// Principal URL - return calendar-home-set (step 2)
+		response = s.propfindPrincipal(user)
+
+	case path == fmt.Sprintf("calendars/%s", user.Username):
+		// Calendar home - return list of calendars (step 3)
 		response = s.propfindCalendarHome(user, depth)
-	} else if len(parts) == 3 && parts[1] == "calendars" {
+
+	case strings.HasPrefix(path, fmt.Sprintf("calendars/%s/", user.Username)):
 		// Specific calendar
-		calID, err := strconv.ParseInt(parts[2], 10, 64)
+		rest := strings.TrimPrefix(path, fmt.Sprintf("calendars/%s/", user.Username))
+		parts := strings.Split(rest, "/")
+		calID, err := strconv.ParseInt(parts[0], 10, 64)
 		if err != nil {
 			http.Error(w, "Invalid calendar ID", http.StatusBadRequest)
 			return
 		}
 		response = s.propfindCalendar(user, calID, depth)
-	} else {
+
+	default:
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
@@ -129,9 +144,9 @@ func (s *Server) handlePropfind(w http.ResponseWriter, r *http.Request, user *mo
 	w.Write([]byte(response))
 }
 
-func (s *Server) propfindPrincipal(user *models.User, depth string) string {
-	principalURL := fmt.Sprintf("%s%d/", s.prefix, user.ID)
-	calendarHomeURL := fmt.Sprintf("%s%d/calendars/", s.prefix, user.ID)
+// propfindRoot handles PROPFIND on / - returns current-user-principal
+func (s *Server) propfindRoot(user *models.User) string {
+	principalURL := fmt.Sprintf("%sprincipals/users/%s/", s.prefix, user.Username)
 
 	return fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
 <D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
@@ -139,19 +154,60 @@ func (s *Server) propfindPrincipal(user *models.User, depth string) string {
     <D:href>%s</D:href>
     <D:propstat>
       <D:prop>
-        <D:resourcetype><D:principal/></D:resourcetype>
-        <D:displayname>%s</D:displayname>
-        <D:current-user-principal><D:href>%s</D:href></D:current-user-principal>
-        <C:calendar-home-set><D:href>%s</D:href></C:calendar-home-set>
+        <D:current-user-principal>
+          <D:href>%s</D:href>
+        </D:current-user-principal>
+        <D:resourcetype>
+          <D:collection/>
+        </D:resourcetype>
       </D:prop>
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
   </D:response>
-</D:multistatus>`, principalURL, user.Username, principalURL, calendarHomeURL)
+</D:multistatus>`, s.prefix, principalURL)
+}
+
+// propfindPrincipal handles PROPFIND on principal URL - returns calendar-home-set
+func (s *Server) propfindPrincipal(user *models.User) string {
+	principalURL := fmt.Sprintf("%sprincipals/users/%s/", s.prefix, user.Username)
+	calendarHomeURL := fmt.Sprintf("%scalendars/%s/", s.prefix, user.Username)
+
+	// Get user email for calendar-user-address-set
+	userEmail := user.Username + "@localhost"
+	if user.Email != "" {
+		userEmail = user.Email
+	}
+
+	return fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:response>
+    <D:href>%s</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:current-user-principal>
+          <D:href>%s</D:href>
+        </D:current-user-principal>
+        <D:resourcetype>
+          <D:collection/>
+          <D:principal/>
+        </D:resourcetype>
+        <D:displayname>%s</D:displayname>
+        <C:calendar-home-set>
+          <D:href>%s</D:href>
+        </C:calendar-home-set>
+        <C:calendar-user-address-set>
+          <D:href>mailto:%s</D:href>
+          <D:href>%s</D:href>
+        </C:calendar-user-address-set>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>`, principalURL, principalURL, user.Username, calendarHomeURL, userEmail, principalURL)
 }
 
 func (s *Server) propfindCalendarHome(user *models.User, depth string) string {
-	calendarHomeURL := fmt.Sprintf("%s%d/calendars/", s.prefix, user.ID)
+	calendarHomeURL := fmt.Sprintf("%scalendars/%s/", s.prefix, user.Username)
 
 	calendars, err := s.database.GetCalendarsByUserID(user.ID)
 	if err != nil {
@@ -160,36 +216,39 @@ func (s *Server) propfindCalendarHome(user *models.User, depth string) string {
 	}
 
 	var calendarResponses strings.Builder
-	for _, cal := range calendars {
-		calURL := fmt.Sprintf("%s%d/calendars/%d/", s.prefix, user.ID, cal.ID)
-		ctag := cal.CTag
-		if ctag == "" {
-			ctag = fmt.Sprintf("%d", cal.UpdatedAt.Unix())
-		}
-		calendarResponses.WriteString(fmt.Sprintf(`
+	if depth != "0" {
+		for _, cal := range calendars {
+			calURL := fmt.Sprintf("%scalendars/%s/%d/", s.prefix, user.Username, cal.ID)
+			calendarResponses.WriteString(fmt.Sprintf(`
   <D:response>
     <D:href>%s</D:href>
     <D:propstat>
       <D:prop>
-        <D:resourcetype><D:collection/><C:calendar/></D:resourcetype>
+        <D:resourcetype>
+          <D:collection/>
+          <C:calendar/>
+        </D:resourcetype>
         <D:displayname>%s</D:displayname>
-        <CS:getctag>%s</CS:getctag>
         <C:supported-calendar-component-set>
           <C:comp name="VEVENT"/>
+          <C:comp name="VTODO"/>
         </C:supported-calendar-component-set>
       </D:prop>
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
-  </D:response>`, calURL, xmlEscape(cal.Name), ctag))
+  </D:response>`, calURL, xmlEscape(cal.Name)))
+		}
 	}
 
 	return fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
-<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:CS="http://calendarserver.org/ns/">
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
   <D:response>
     <D:href>%s</D:href>
     <D:propstat>
       <D:prop>
-        <D:resourcetype><D:collection/></D:resourcetype>
+        <D:resourcetype>
+          <D:collection/>
+        </D:resourcetype>
         <D:displayname>Calendars</D:displayname>
       </D:prop>
       <D:status>HTTP/1.1 200 OK</D:status>
@@ -205,17 +264,13 @@ func (s *Server) propfindCalendar(user *models.User, calID int64, depth string) 
 <D:multistatus xmlns:D="DAV:"><D:response><D:status>HTTP/1.1 404 Not Found</D:status></D:response></D:multistatus>`
 	}
 
-	calURL := fmt.Sprintf("%s%d/calendars/%d/", s.prefix, user.ID, cal.ID)
-	ctag := cal.CTag
-	if ctag == "" {
-		ctag = fmt.Sprintf("%d", cal.UpdatedAt.Unix())
-	}
+	calURL := fmt.Sprintf("%scalendars/%s/%d/", s.prefix, user.Username, cal.ID)
 
 	var eventResponses strings.Builder
 	if depth != "0" {
 		events, _ := s.database.GetEventsByCalendarID(calID)
 		for _, event := range events {
-			eventURL := fmt.Sprintf("%s%d/calendars/%d/%s.ics", s.prefix, user.ID, cal.ID, event.UID)
+			eventURL := fmt.Sprintf("%scalendars/%s/%d/%s.ics", s.prefix, user.Username, cal.ID, event.UID)
 			eventResponses.WriteString(fmt.Sprintf(`
   <D:response>
     <D:href>%s</D:href>
@@ -231,34 +286,174 @@ func (s *Server) propfindCalendar(user *models.User, calID int64, depth string) 
 	}
 
 	return fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
-<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:CS="http://calendarserver.org/ns/">
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
   <D:response>
     <D:href>%s</D:href>
     <D:propstat>
       <D:prop>
-        <D:resourcetype><D:collection/><C:calendar/></D:resourcetype>
+        <D:resourcetype>
+          <D:collection/>
+          <C:calendar/>
+        </D:resourcetype>
         <D:displayname>%s</D:displayname>
-        <CS:getctag>%s</CS:getctag>
         <C:supported-calendar-component-set>
           <C:comp name="VEVENT"/>
+          <C:comp name="VTODO"/>
         </C:supported-calendar-component-set>
       </D:prop>
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
   </D:response>%s
-</D:multistatus>`, calURL, xmlEscape(cal.Name), ctag, eventResponses.String())
+</D:multistatus>`, calURL, xmlEscape(cal.Name), eventResponses.String())
+}
+
+// reportRequest represents a parsed REPORT request body
+type reportRequest struct {
+	reportType string // "calendar-multiget", "calendar-query", or ""
+	hrefs      []string
+	timeRange  *timeRange
+	wantData   bool // whether calendar-data was requested in <prop>
+}
+
+type timeRange struct {
+	start time.Time
+	end   time.Time
+}
+
+func parseReportBody(body []byte) *reportRequest {
+	req := &reportRequest{wantData: true} // default: include data
+
+	bodyStr := string(body)
+
+	// Determine report type
+	if strings.Contains(bodyStr, "calendar-multiget") {
+		req.reportType = "calendar-multiget"
+	} else if strings.Contains(bodyStr, "calendar-query") {
+		req.reportType = "calendar-query"
+	}
+
+	// Extract hrefs for calendar-multiget
+	if req.reportType == "calendar-multiget" {
+		// Parse <D:href>...</D:href> or <href>...</href> entries
+		type hrefDoc struct {
+			Hrefs []string `xml:"href"`
+		}
+		// Simple extraction: find all <href> or <D:href> values
+		var doc struct {
+			XMLName xml.Name
+			Hrefs   []string `xml:"href"`
+		}
+		// Try to parse, but use regex fallback for namespace issues
+		if err := xml.Unmarshal(body, &doc); err == nil && len(doc.Hrefs) > 0 {
+			req.hrefs = doc.Hrefs
+		}
+		// Fallback: extract hrefs with simple string parsing
+		if len(req.hrefs) == 0 {
+			remaining := bodyStr
+			for {
+				// Look for <href> or <D:href>
+				idx := strings.Index(remaining, "<href>")
+				endTag := "</href>"
+				if idx == -1 {
+					idx = strings.Index(remaining, "<D:href>")
+					endTag = "</D:href>"
+				}
+				if idx == -1 {
+					break
+				}
+				start := idx + len("<href>")
+				if strings.HasPrefix(remaining[idx:], "<D:href>") {
+					start = idx + len("<D:href>")
+				}
+				remaining = remaining[start:]
+				end := strings.Index(remaining, endTag)
+				if end == -1 {
+					break
+				}
+				href := strings.TrimSpace(remaining[:end])
+				if href != "" {
+					req.hrefs = append(req.hrefs, href)
+				}
+				remaining = remaining[end+len(endTag):]
+			}
+		}
+	}
+
+	// Extract time-range for calendar-query
+	if req.reportType == "calendar-query" {
+		// Look for <C:time-range start="..." end="..."/> or <time-range .../>
+		for _, prefix := range []string{"<C:time-range", "<time-range"} {
+			idx := strings.Index(bodyStr, prefix)
+			if idx == -1 {
+				continue
+			}
+			tagEnd := strings.Index(bodyStr[idx:], "/>")
+			if tagEnd == -1 {
+				tagEnd = strings.Index(bodyStr[idx:], ">")
+			}
+			if tagEnd == -1 {
+				continue
+			}
+			tag := bodyStr[idx : idx+tagEnd]
+
+			var tr timeRange
+			if s := extractAttr(tag, "start"); s != "" {
+				if t, err := time.Parse("20060102T150405Z", s); err == nil {
+					tr.start = t
+				}
+			}
+			if e := extractAttr(tag, "end"); e != "" {
+				if t, err := time.Parse("20060102T150405Z", e); err == nil {
+					tr.end = t
+				}
+			}
+			if !tr.start.IsZero() || !tr.end.IsZero() {
+				req.timeRange = &tr
+			}
+			break
+		}
+	}
+
+	// Check if calendar-data is requested in props
+	if !strings.Contains(bodyStr, "calendar-data") {
+		req.wantData = false
+	}
+
+	return req
+}
+
+func extractAttr(tag, attr string) string {
+	key := attr + `="`
+	idx := strings.Index(tag, key)
+	if idx == -1 {
+		return ""
+	}
+	start := idx + len(key)
+	end := strings.Index(tag[start:], `"`)
+	if end == -1 {
+		return ""
+	}
+	return tag[start : start+end]
 }
 
 func (s *Server) handleReport(w http.ResponseWriter, r *http.Request, user *models.User) {
 	path := strings.TrimPrefix(r.URL.Path, s.prefix)
-	parts := strings.Split(strings.TrimSuffix(path, "/"), "/")
+	path = strings.TrimSuffix(path, "/")
 
-	if len(parts) < 3 || parts[1] != "calendars" {
+	// Expect: calendars/username/calendarID
+	if !strings.HasPrefix(path, fmt.Sprintf("calendars/%s/", user.Username)) {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
 
-	calID, err := strconv.ParseInt(parts[2], 10, 64)
+	rest := strings.TrimPrefix(path, fmt.Sprintf("calendars/%s/", user.Username))
+	parts := strings.Split(rest, "/")
+	if len(parts) < 1 {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
+	calID, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
 		http.Error(w, "Invalid calendar ID", http.StatusBadRequest)
 		return
@@ -270,17 +465,57 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request, user *mode
 		return
 	}
 
-	// Get all events for the calendar
-	events, err := s.database.GetEventsByCalendarID(calID)
+	// Parse REPORT body
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "Failed to get events", http.StatusInternalServerError)
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
+	}
+
+	report := parseReportBody(body)
+	log.Printf("REPORT type=%s hrefs=%d timeRange=%v wantData=%v on calendar %d",
+		report.reportType, len(report.hrefs), report.timeRange != nil, report.wantData, calID)
+
+	var events []*models.CalendarEvent
+
+	if report.reportType == "calendar-multiget" && len(report.hrefs) > 0 {
+		// Only fetch requested events by UID extracted from hrefs
+		for _, href := range report.hrefs {
+			uid := uidFromHref(href)
+			if uid == "" {
+				continue
+			}
+			event, err := s.database.GetEventByUID(calID, uid)
+			if err != nil || event == nil {
+				continue
+			}
+			events = append(events, event)
+		}
+	} else {
+		// calendar-query or unknown: return all events
+		events, err = s.database.GetEventsByCalendarID(calID)
+		if err != nil {
+			http.Error(w, "Failed to get events", http.StatusInternalServerError)
+			return
+		}
+
+		// Apply time-range filter if specified
+		if report.timeRange != nil {
+			filtered := make([]*models.CalendarEvent, 0, len(events))
+			for _, event := range events {
+				if eventMatchesTimeRange(event, report.timeRange) {
+					filtered = append(filtered, event)
+				}
+			}
+			events = filtered
+		}
 	}
 
 	var responses strings.Builder
 	for _, event := range events {
-		eventURL := fmt.Sprintf("%s%d/calendars/%d/%s.ics", s.prefix, user.ID, cal.ID, event.UID)
-		responses.WriteString(fmt.Sprintf(`
+		eventURL := fmt.Sprintf("%scalendars/%s/%d/%s.ics", s.prefix, user.Username, cal.ID, event.UID)
+		if report.wantData {
+			responses.WriteString(fmt.Sprintf(`
   <D:response>
     <D:href>%s</D:href>
     <D:propstat>
@@ -291,6 +526,18 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request, user *mode
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
   </D:response>`, eventURL, event.ETag, xmlEscape(event.ICalData)))
+		} else {
+			responses.WriteString(fmt.Sprintf(`
+  <D:response>
+    <D:href>%s</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:getetag>%s</D:getetag>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>`, eventURL, event.ETag))
+		}
 	}
 
 	response := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
@@ -302,16 +549,66 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request, user *mode
 	w.Write([]byte(response))
 }
 
+// uidFromHref extracts the UID from a CalDAV href like /caldav/calendars/user/13/some-uid.ics
+func uidFromHref(href string) string {
+	href = strings.TrimSuffix(href, "/")
+	if !strings.HasSuffix(href, ".ics") {
+		return ""
+	}
+	idx := strings.LastIndex(href, "/")
+	if idx == -1 {
+		return ""
+	}
+	return strings.TrimSuffix(href[idx+1:], ".ics")
+}
+
+// eventMatchesTimeRange checks if an event overlaps with the given time range
+func eventMatchesTimeRange(event *models.CalendarEvent, tr *timeRange) bool {
+	// If no DTStart, include the event (can't filter)
+	if event.DTStart.IsZero() {
+		return true
+	}
+
+	eventEnd := event.DTStart // default: instant event
+	if event.DTEnd.Valid && !event.DTEnd.Time.IsZero() {
+		eventEnd = event.DTEnd.Time
+	} else if event.AllDay {
+		eventEnd = event.DTStart.AddDate(0, 0, 1)
+	}
+
+	// Recurring events: always include (proper RRULE expansion is complex)
+	if event.RRule != "" {
+		return true
+	}
+
+	// Check overlap: event starts before range ends AND event ends after range starts
+	if !tr.end.IsZero() && event.DTStart.After(tr.end) {
+		return false
+	}
+	if !tr.start.IsZero() && eventEnd.Before(tr.start) {
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, user *models.User) {
 	path := strings.TrimPrefix(r.URL.Path, s.prefix)
-	parts := strings.Split(strings.TrimSuffix(path, "/"), "/")
+	path = strings.TrimSuffix(path, "/")
 
-	if len(parts) < 4 || parts[1] != "calendars" {
+	// Expect: calendars/username/calendarID/event.ics
+	if !strings.HasPrefix(path, fmt.Sprintf("calendars/%s/", user.Username)) {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
 
-	calID, err := strconv.ParseInt(parts[2], 10, 64)
+	rest := strings.TrimPrefix(path, fmt.Sprintf("calendars/%s/", user.Username))
+	parts := strings.Split(rest, "/")
+	if len(parts) < 2 {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
+	calID, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
 		http.Error(w, "Invalid calendar ID", http.StatusBadRequest)
 		return
@@ -324,7 +621,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, user *models.
 	}
 
 	// Extract UID from filename
-	filename := parts[3]
+	filename := parts[1]
 	if !strings.HasSuffix(filename, ".ics") {
 		http.Error(w, "Invalid event path", http.StatusBadRequest)
 		return
@@ -344,14 +641,22 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, user *models.
 
 func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.User) {
 	path := strings.TrimPrefix(r.URL.Path, s.prefix)
-	parts := strings.Split(strings.TrimSuffix(path, "/"), "/")
+	path = strings.TrimSuffix(path, "/")
 
-	if len(parts) < 4 || parts[1] != "calendars" {
+	// Expect: calendars/username/calendarID/event.ics
+	if !strings.HasPrefix(path, fmt.Sprintf("calendars/%s/", user.Username)) {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
 
-	calID, err := strconv.ParseInt(parts[2], 10, 64)
+	rest := strings.TrimPrefix(path, fmt.Sprintf("calendars/%s/", user.Username))
+	parts := strings.Split(rest, "/")
+	if len(parts) < 2 {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
+	calID, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
 		http.Error(w, "Invalid calendar ID", http.StatusBadRequest)
 		return
@@ -369,7 +674,7 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 	}
 
 	// Extract UID from filename
-	filename := parts[3]
+	filename := parts[1]
 	if !strings.HasSuffix(filename, ".ics") {
 		http.Error(w, "Invalid event path", http.StatusBadRequest)
 		return
@@ -469,9 +774,6 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 			return
 		}
 
-		// Update calendar ctag
-		s.updateCalendarCTag(calID)
-
 		w.Header().Set("ETag", event.ETag)
 		w.WriteHeader(http.StatusNoContent)
 	} else {
@@ -486,9 +788,6 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 			return
 		}
 
-		// Update calendar ctag
-		s.updateCalendarCTag(calID)
-
 		w.Header().Set("ETag", event.ETag)
 		w.WriteHeader(http.StatusCreated)
 	}
@@ -496,14 +795,22 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, user *models.User) {
 	path := strings.TrimPrefix(r.URL.Path, s.prefix)
-	parts := strings.Split(strings.TrimSuffix(path, "/"), "/")
+	path = strings.TrimSuffix(path, "/")
 
-	if len(parts) < 4 || parts[1] != "calendars" {
+	// Expect: calendars/username/calendarID/event.ics
+	if !strings.HasPrefix(path, fmt.Sprintf("calendars/%s/", user.Username)) {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
 
-	calID, err := strconv.ParseInt(parts[2], 10, 64)
+	rest := strings.TrimPrefix(path, fmt.Sprintf("calendars/%s/", user.Username))
+	parts := strings.Split(rest, "/")
+	if len(parts) < 2 {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
+	calID, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
 		http.Error(w, "Invalid calendar ID", http.StatusBadRequest)
 		return
@@ -521,7 +828,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, user *mode
 	}
 
 	// Extract UID from filename
-	filename := parts[3]
+	filename := parts[1]
 	if !strings.HasSuffix(filename, ".ics") {
 		http.Error(w, "Invalid event path", http.StatusBadRequest)
 		return
@@ -533,22 +840,26 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, user *mode
 		return
 	}
 
-	// Update calendar ctag
-	s.updateCalendarCTag(calID)
-
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleMkcalendar(w http.ResponseWriter, r *http.Request, user *models.User) {
 	path := strings.TrimPrefix(r.URL.Path, s.prefix)
-	parts := strings.Split(strings.TrimSuffix(path, "/"), "/")
+	path = strings.TrimSuffix(path, "/")
 
-	if len(parts) < 3 || parts[1] != "calendars" {
+	// Expect: calendars/username/newCalendarName
+	if !strings.HasPrefix(path, fmt.Sprintf("calendars/%s/", user.Username)) {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
 		return
 	}
 
-	calendarName := parts[2]
+	rest := strings.TrimPrefix(path, fmt.Sprintf("calendars/%s/", user.Username))
+	if rest == "" {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	calendarName := rest
 
 	// Create a local source for this calendar
 	source := &models.CalendarSource{
@@ -592,12 +903,4 @@ func xmlEscape(s string) string {
 	var buf strings.Builder
 	xml.EscapeText(&buf, []byte(s))
 	return buf.String()
-}
-
-// updateCalendarCTag updates the ctag when calendar content changes
-func (s *Server) updateCalendarCTag(calendarID int64) {
-	ctag := fmt.Sprintf("%d", time.Now().UnixNano())
-	if err := s.database.UpdateCalendarCTag(calendarID, ctag); err != nil {
-		log.Printf("Failed to update calendar ctag: %v", err)
-	}
 }
