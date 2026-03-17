@@ -328,6 +328,16 @@ func (db *DB) MarkEventSynced(eventID int64, etag string) error {
 	return nil
 }
 
+// UpdateEventRemoteID updates the remote_id of an event after pushing to remote server
+func (db *DB) UpdateEventRemoteID(eventID int64, remoteID string) error {
+	query := `UPDATE calendar_events SET remote_id = $1, updated_at = $2 WHERE id = $3`
+	_, err := db.Exec(query, remoteID, time.Now(), eventID)
+	if err != nil {
+		return fmt.Errorf("failed to update event remote ID: %w", err)
+	}
+	return nil
+}
+
 // GetAllEventUIDsForCalendar returns all UIDs for a calendar (for sync comparison)
 func (db *DB) GetAllEventUIDsForCalendar(calendarID int64) (map[string]string, error) {
 	query := `SELECT uid, COALESCE(etag, '') FROM calendar_events WHERE calendar_id = $1`
