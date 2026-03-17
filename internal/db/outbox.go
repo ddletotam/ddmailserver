@@ -21,9 +21,15 @@ func (db *DB) CreateOutboxMessage(msg *models.OutboxMessage) error {
 		RETURNING id
 	`
 
+	// Use NULL for accountID=0 (direct delivery from local domain)
+	var accountID interface{} = msg.AccountID
+	if msg.AccountID == 0 {
+		accountID = nil
+	}
+
 	err := db.QueryRow(
 		query,
-		msg.UserID, msg.AccountID, msg.From, msg.To, msg.Cc, msg.Bcc,
+		msg.UserID, accountID, msg.From, msg.To, msg.Cc, msg.Bcc,
 		msg.Subject, msg.Body, msg.BodyHTML, msg.RawEmail,
 		msg.Status, msg.Retries, msg.CreatedAt, msg.UpdatedAt,
 	).Scan(&msg.ID)
@@ -38,7 +44,7 @@ func (db *DB) CreateOutboxMessage(msg *models.OutboxMessage) error {
 // GetPendingOutboxMessages retrieves all pending messages
 func (db *DB) GetPendingOutboxMessages(limit int) ([]*models.OutboxMessage, error) {
 	query := `
-		SELECT id, user_id, account_id, from_addr, to_addr, cc, bcc, subject, body, body_html,
+		SELECT id, user_id, COALESCE(account_id, 0), from_addr, to_addr, cc, bcc, subject, body, body_html,
 		       raw_email, status, retries, last_error, created_at, updated_at, sent_at
 		FROM outbox_messages
 		WHERE status = 'pending'
@@ -61,7 +67,7 @@ func (db *DB) GetOutboxMessageByID(id int64) (*models.OutboxMessage, error) {
 	var sentAt sql.NullTime
 
 	query := `
-		SELECT id, user_id, account_id, from_addr, to_addr, cc, bcc, subject, body, body_html,
+		SELECT id, user_id, COALESCE(account_id, 0), from_addr, to_addr, cc, bcc, subject, body, body_html,
 		       raw_email, status, retries, last_error, created_at, updated_at, sent_at
 		FROM outbox_messages
 		WHERE id = $1

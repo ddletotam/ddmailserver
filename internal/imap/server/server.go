@@ -155,7 +155,6 @@ func NewWithTLSAndHub(database *db.DB, addr string, certFile, keyFile string, hu
 	s.Addr = addr
 	s.AllowInsecureAuth = true
 	s.TLSConfig = tlsConfig
-
 	// Enable IDLE extension for push notifications
 	s.Enable(idle.NewExtension())
 	log.Printf("IMAP server with TLS and IDLE extension enabled, will listen on %s", addr)

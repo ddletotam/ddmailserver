@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"net"
 	"net/smtp"
+	"strings"
 
 	"github.com/yourusername/mailserver/internal/models"
 )
@@ -171,5 +173,91 @@ func (c *Client) sendTLS(addr string, auth smtp.Auth, from string, to []string, 
 	}
 
 	// Quit
+	return client.Quit()
+}
+
+// SendDirect sends email directly via MX lookup (for local domain senders)
+func SendDirect(from string, to []string, message []byte, hostname string) error {
+	// Group recipients by domain
+	byDomain := make(map[string][]string)
+	for _, rcpt := range to {
+		parts := strings.SplitN(rcpt, "@", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		byDomain[parts[1]] = append(byDomain[parts[1]], rcpt)
+	}
+
+	for domain, rcpts := range byDomain {
+		// MX lookup
+		mxRecords, err := net.LookupMX(domain)
+		if err != nil || len(mxRecords) == 0 {
+			// Fallback to A record
+			mxRecords = []*net.MX{{Host: domain, Pref: 10}}
+		}
+
+		// Try each MX in priority order
+		var lastErr error
+		for _, mx := range mxRecords {
+			host := strings.TrimSuffix(mx.Host, ".")
+			addr := fmt.Sprintf("%s:25", host)
+			log.Printf("Direct delivery to %s via MX %s", domain, addr)
+
+			lastErr = sendDirectToHost(addr, hostname, from, rcpts, message)
+			if lastErr == nil {
+				log.Printf("Direct delivery to %s successful via %s", domain, host)
+				break
+			}
+			log.Printf("Direct delivery to %s via %s failed: %v", domain, host, lastErr)
+		}
+		if lastErr != nil {
+			return fmt.Errorf("failed to deliver to %s: %w", domain, lastErr)
+		}
+	}
+
+	return nil
+}
+
+func sendDirectToHost(addr, hostname, from string, to []string, msg []byte) error {
+	client, err := smtp.Dial(addr)
+	if err != nil {
+		return fmt.Errorf("dial failed: %w", err)
+	}
+	defer client.Close()
+
+	if err := client.Hello(hostname); err != nil {
+		return fmt.Errorf("EHLO failed: %w", err)
+	}
+
+	// Try STARTTLS if available
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		host := strings.Split(addr, ":")[0]
+		tlsConfig := &tls.Config{ServerName: host}
+		if err := client.StartTLS(tlsConfig); err != nil {
+			log.Printf("STARTTLS failed for %s, continuing without TLS: %v", addr, err)
+		}
+	}
+
+	if err := client.Mail(from); err != nil {
+		return fmt.Errorf("MAIL FROM failed: %w", err)
+	}
+
+	for _, rcpt := range to {
+		if err := client.Rcpt(rcpt); err != nil {
+			return fmt.Errorf("RCPT TO %s failed: %w", rcpt, err)
+		}
+	}
+
+	w, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("DATA failed: %w", err)
+	}
+	if _, err := w.Write(msg); err != nil {
+		return fmt.Errorf("write failed: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("data close failed: %w", err)
+	}
+
 	return client.Quit()
 }

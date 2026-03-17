@@ -67,15 +67,16 @@ func (b *Backend) listenNotifications() {
 		switch event.Type {
 		case notify.EventNewMessage:
 			// Create MailboxUpdate with new message count
-			// Use empty username and mailbox to broadcast to ALL connections
 			// IMPORTANT: Must set Items[StatusMessages] for EXISTS to be written!
 			status := &imap.MailboxStatus{
 				Name:     event.Mailbox,
 				Messages: event.Count,
 				Items:    map[imap.StatusItem]interface{}{imap.StatusMessages: nil},
 			}
+			// Try both: targeted update for the specific user, and broadcast
+			// go-imap routes updates by matching username to authenticated connections
 			update := &backend.MailboxUpdate{
-				Update:        backend.NewUpdate("", ""),
+				Update:        backend.NewUpdate(event.Username, ""),
 				MailboxStatus: status,
 			}
 
