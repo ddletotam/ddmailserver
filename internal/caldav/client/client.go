@@ -312,6 +312,10 @@ func (c *Client) SyncCalendar(ctx context.Context, cal *models.Calendar) error {
 		}
 
 		if existing != nil {
+			// Skip locally modified events — they will be pushed to remote by reverse sync
+			if existing.LocalModified {
+				continue
+			}
 			// Check if ETag changed
 			if existing.ETag != event.ETag {
 				// Queue update
@@ -544,6 +548,57 @@ func supportsCalendarComponent(cal caldav.Calendar, component string) bool {
 		}
 	}
 	return false
+}
+
+// PutEventRaw uploads raw iCal data to a remote CalDAV path
+func (c *Client) PutEventRaw(ctx context.Context, remotePath string, icalData string) error {
+	if c.httpClient == nil {
+		return fmt.Errorf("client not connected")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "PUT", remotePath, strings.NewReader(icalData))
+	if err != nil {
+		return fmt.Errorf("failed to create PUT request: %w", err)
+	}
+	req.Header.Set("Content-Type", "text/calendar; charset=utf-8")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("PUT request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("PUT failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// DeleteEvent deletes an event from a remote CalDAV server
+func (c *Client) DeleteEvent(ctx context.Context, remotePath string) error {
+	if c.httpClient == nil {
+		return fmt.Errorf("client not connected")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "DELETE", remotePath, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create DELETE request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("DELETE request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 && resp.StatusCode != 404 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("DELETE failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
 }
 
 // generateETag generates an ETag from content

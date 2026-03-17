@@ -19,8 +19,9 @@ import (
 
 // Server is a CalDAV server
 type Server struct {
-	database *db.DB
-	prefix   string
+	database       *db.DB
+	prefix         string
+	subdomainHosts map[string]bool // hosts where CalDAV is at root (nginx proxies / → /caldav/)
 }
 
 // New creates a new CalDAV server
@@ -28,11 +29,34 @@ func New(database *db.DB, prefix string) *Server {
 	return &Server{
 		database: database,
 		prefix:   prefix,
+		subdomainHosts: map[string]bool{
+			"caldav.letotam.ru": true,
+		},
 	}
+}
+
+// effectivePrefix returns "/" for subdomain hosts (where nginx maps / → /caldav/),
+// or the configured prefix for direct access (e.g. mail.letotam.ru/caldav/)
+func (s *Server) effectivePrefix(r *http.Request) string {
+	host := r.Host
+	if h := r.Header.Get("X-Forwarded-Host"); h != "" {
+		host = h
+	}
+	// Strip port if present
+	if i := strings.Index(host, ":"); i != -1 {
+		host = host[:i]
+	}
+	if s.subdomainHosts[host] {
+		return "/"
+	}
+	return s.prefix
 }
 
 // ServeHTTP handles CalDAV requests
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Set DAV header on all responses - required by iOS
+	w.Header().Set("DAV", "1, 3, access-control, calendar-access")
+
 	// Authenticate user
 	user, err := s.authenticate(r)
 	if err != nil {
@@ -86,14 +110,21 @@ func (s *Server) authenticate(r *http.Request) (*models.User, error) {
 }
 
 func (s *Server) handleOptions(w http.ResponseWriter, r *http.Request) {
+	log.Printf("OPTIONS %s headers: %v", r.URL.Path, r.Header)
 	w.Header().Set("Allow", "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, REPORT, MKCALENDAR")
-	w.Header().Set("DAV", "1, 3, access-control, calendar-access")
+	w.Header().Set("DAV", "1, 2, 3, access-control, calendar-access")
 	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) handlePropfind(w http.ResponseWriter, r *http.Request, user *models.User) {
 	path := strings.TrimPrefix(r.URL.Path, s.prefix)
 	path = strings.TrimSuffix(path, "/")
+
+	// Log request body for debugging
+	body, _ := io.ReadAll(r.Body)
+	if len(body) > 0 {
+		log.Printf("PROPFIND %s body: %s", r.URL.Path, string(body))
+	}
 
 	// Parse depth header
 	depth := r.Header.Get("Depth")
@@ -108,20 +139,22 @@ func (s *Server) handlePropfind(w http.ResponseWriter, r *http.Request, user *mo
 	// 2. PROPFIND /principals/users/username/ → return calendar-home-set, calendar-user-address-set
 	// 3. PROPFIND /calendars/username/ Depth:1 → return list of calendars
 
+	pfx := s.effectivePrefix(r)
+
 	switch {
 	case path == "":
 		// Root - return current-user-principal (step 1)
-		response = s.propfindRoot(user)
+		response = s.propfindRoot(user, pfx)
 
 	case path == "principals" || path == "principals/users" ||
 		path == fmt.Sprintf("principals/users/%s", user.Username) ||
 		path == fmt.Sprintf("calendar/dav/%s/user", user.Username):
 		// Principal URL - return calendar-home-set (step 2)
-		response = s.propfindPrincipal(user)
+		response = s.propfindPrincipal(user, pfx)
 
 	case path == fmt.Sprintf("calendars/%s", user.Username):
 		// Calendar home - return list of calendars (step 3)
-		response = s.propfindCalendarHome(user, depth)
+		response = s.propfindCalendarHome(user, depth, pfx)
 
 	case strings.HasPrefix(path, fmt.Sprintf("calendars/%s/", user.Username)):
 		// Specific calendar
@@ -132,7 +165,7 @@ func (s *Server) handlePropfind(w http.ResponseWriter, r *http.Request, user *mo
 			http.Error(w, "Invalid calendar ID", http.StatusBadRequest)
 			return
 		}
-		response = s.propfindCalendar(user, calID, depth)
+		response = s.propfindCalendar(user, calID, depth, pfx)
 
 	default:
 		http.Error(w, "Not found", http.StatusNotFound)
@@ -144,9 +177,10 @@ func (s *Server) handlePropfind(w http.ResponseWriter, r *http.Request, user *mo
 	w.Write([]byte(response))
 }
 
-// propfindRoot handles PROPFIND on / - returns current-user-principal
-func (s *Server) propfindRoot(user *models.User) string {
-	principalURL := fmt.Sprintf("%sprincipals/users/%s/", s.prefix, user.Username)
+// propfindRoot handles PROPFIND on / - returns current-user-principal and calendar-home-set
+func (s *Server) propfindRoot(user *models.User, prefix string) string {
+	principalURL := fmt.Sprintf("%sprincipals/users/%s/", prefix, user.Username)
+	calendarHomeURL := fmt.Sprintf("%scalendars/%s/", prefix, user.Username)
 
 	return fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
 <D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
@@ -157,20 +191,26 @@ func (s *Server) propfindRoot(user *models.User) string {
         <D:current-user-principal>
           <D:href>%s</D:href>
         </D:current-user-principal>
+        <D:principal-URL>
+          <D:href>%s</D:href>
+        </D:principal-URL>
         <D:resourcetype>
           <D:collection/>
         </D:resourcetype>
+        <C:calendar-home-set>
+          <D:href>%s</D:href>
+        </C:calendar-home-set>
       </D:prop>
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
   </D:response>
-</D:multistatus>`, s.prefix, principalURL)
+</D:multistatus>`, prefix, principalURL, principalURL, calendarHomeURL)
 }
 
 // propfindPrincipal handles PROPFIND on principal URL - returns calendar-home-set
-func (s *Server) propfindPrincipal(user *models.User) string {
-	principalURL := fmt.Sprintf("%sprincipals/users/%s/", s.prefix, user.Username)
-	calendarHomeURL := fmt.Sprintf("%scalendars/%s/", s.prefix, user.Username)
+func (s *Server) propfindPrincipal(user *models.User, prefix string) string {
+	principalURL := fmt.Sprintf("%sprincipals/users/%s/", prefix, user.Username)
+	calendarHomeURL := fmt.Sprintf("%scalendars/%s/", prefix, user.Username)
 
 	// Get user email for calendar-user-address-set
 	userEmail := user.Username + "@localhost"
@@ -187,6 +227,9 @@ func (s *Server) propfindPrincipal(user *models.User) string {
         <D:current-user-principal>
           <D:href>%s</D:href>
         </D:current-user-principal>
+        <D:principal-URL>
+          <D:href>%s</D:href>
+        </D:principal-URL>
         <D:resourcetype>
           <D:collection/>
           <D:principal/>
@@ -203,11 +246,12 @@ func (s *Server) propfindPrincipal(user *models.User) string {
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
   </D:response>
-</D:multistatus>`, principalURL, principalURL, user.Username, calendarHomeURL, userEmail, principalURL)
+</D:multistatus>`, principalURL, principalURL, principalURL, user.Username, calendarHomeURL, userEmail, principalURL)
 }
 
-func (s *Server) propfindCalendarHome(user *models.User, depth string) string {
-	calendarHomeURL := fmt.Sprintf("%scalendars/%s/", s.prefix, user.Username)
+func (s *Server) propfindCalendarHome(user *models.User, depth string, prefix string) string {
+	principalURL := fmt.Sprintf("%sprincipals/users/%s/", prefix, user.Username)
+	calendarHomeURL := fmt.Sprintf("%scalendars/%s/", prefix, user.Username)
 
 	calendars, err := s.database.GetCalendarsByUserID(user.ID)
 	if err != nil {
@@ -218,7 +262,7 @@ func (s *Server) propfindCalendarHome(user *models.User, depth string) string {
 	var calendarResponses strings.Builder
 	if depth != "0" {
 		for _, cal := range calendars {
-			calURL := fmt.Sprintf("%scalendars/%s/%d/", s.prefix, user.Username, cal.ID)
+			calURL := fmt.Sprintf("%scalendars/%s/%d/", prefix, user.Username, cal.ID)
 			calendarResponses.WriteString(fmt.Sprintf(`
   <D:response>
     <D:href>%s</D:href>
@@ -246,31 +290,37 @@ func (s *Server) propfindCalendarHome(user *models.User, depth string) string {
     <D:href>%s</D:href>
     <D:propstat>
       <D:prop>
+        <D:current-user-principal>
+          <D:href>%s</D:href>
+        </D:current-user-principal>
         <D:resourcetype>
           <D:collection/>
         </D:resourcetype>
         <D:displayname>Calendars</D:displayname>
+        <D:owner>
+          <D:href>%s</D:href>
+        </D:owner>
       </D:prop>
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
   </D:response>%s
-</D:multistatus>`, calendarHomeURL, calendarResponses.String())
+</D:multistatus>`, calendarHomeURL, principalURL, principalURL, calendarResponses.String())
 }
 
-func (s *Server) propfindCalendar(user *models.User, calID int64, depth string) string {
+func (s *Server) propfindCalendar(user *models.User, calID int64, depth string, prefix string) string {
 	cal, err := s.database.GetCalendarByID(calID)
 	if err != nil || cal.UserID != user.ID {
 		return `<?xml version="1.0" encoding="utf-8"?>
 <D:multistatus xmlns:D="DAV:"><D:response><D:status>HTTP/1.1 404 Not Found</D:status></D:response></D:multistatus>`
 	}
 
-	calURL := fmt.Sprintf("%scalendars/%s/%d/", s.prefix, user.Username, cal.ID)
+	calURL := fmt.Sprintf("%scalendars/%s/%d/", prefix, user.Username, cal.ID)
 
 	var eventResponses strings.Builder
 	if depth != "0" {
 		events, _ := s.database.GetEventsByCalendarID(calID)
 		for _, event := range events {
-			eventURL := fmt.Sprintf("%scalendars/%s/%d/%s.ics", s.prefix, user.Username, cal.ID, event.UID)
+			eventURL := fmt.Sprintf("%scalendars/%s/%d/%s.ics", prefix, user.Username, cal.ID, event.UID)
 			eventResponses.WriteString(fmt.Sprintf(`
   <D:response>
     <D:href>%s</D:href>
@@ -437,6 +487,7 @@ func extractAttr(tag, attr string) string {
 }
 
 func (s *Server) handleReport(w http.ResponseWriter, r *http.Request, user *models.User) {
+	pfx := s.effectivePrefix(r)
 	path := strings.TrimPrefix(r.URL.Path, s.prefix)
 	path = strings.TrimSuffix(path, "/")
 
@@ -513,7 +564,7 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request, user *mode
 
 	var responses strings.Builder
 	for _, event := range events {
-		eventURL := fmt.Sprintf("%scalendars/%s/%d/%s.ics", s.prefix, user.Username, cal.ID, event.UID)
+		eventURL := fmt.Sprintf("%scalendars/%s/%d/%s.ics", pfx, user.Username, cal.ID, event.UID)
 		if report.wantData {
 			responses.WriteString(fmt.Sprintf(`
   <D:response>
@@ -774,6 +825,9 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 			return
 		}
 
+		// Queue reverse sync for external calendars
+		s.queueEventSync(cal, existing.ID, uid, existing.RemoteID, event.ICalData, "update")
+
 		w.Header().Set("ETag", event.ETag)
 		w.WriteHeader(http.StatusNoContent)
 	} else {
@@ -787,6 +841,9 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 			http.Error(w, "Failed to create event", http.StatusInternalServerError)
 			return
 		}
+
+		// Queue reverse sync for external calendars
+		s.queueEventSync(cal, event.ID, uid, "", event.ICalData, "create")
 
 		w.Header().Set("ETag", event.ETag)
 		w.WriteHeader(http.StatusCreated)
@@ -835,9 +892,17 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, user *mode
 	}
 	uid := strings.TrimSuffix(filename, ".ics")
 
+	// Get event before deletion for reverse sync
+	existingEvent, _ := s.database.GetEventByUID(calID, uid)
+
 	if err := s.database.DeleteCalendarEventByUID(calID, uid); err != nil {
 		http.Error(w, "Failed to delete event", http.StatusInternalServerError)
 		return
+	}
+
+	// Queue reverse sync for external calendars
+	if existingEvent != nil {
+		s.queueEventSync(cal, existingEvent.ID, uid, existingEvent.RemoteID, "", "delete")
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -892,6 +957,17 @@ func (s *Server) handleMkcalendar(w http.ResponseWriter, r *http.Request, user *
 	}
 
 	w.WriteHeader(http.StatusCreated)
+}
+
+// queueEventSync queues an event change for reverse sync to external CalDAV server
+func (s *Server) queueEventSync(cal *models.Calendar, eventID int64, uid, remoteID, icalData, operation string) {
+	// Only queue for external CalDAV sources
+	if cal.SourceType != "caldav" {
+		return
+	}
+	if err := s.database.QueueCalendarEventSync(eventID, cal.ID, cal.SourceID, uid, remoteID, icalData, operation); err != nil {
+		log.Printf("Failed to queue calendar event sync: %v", err)
+	}
 }
 
 func generateETag(content string) string {

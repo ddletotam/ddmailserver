@@ -210,3 +210,16 @@ type FlagSyncEntry struct {
 	Deleted      bool      `json:"deleted"`
 	CreatedAt    time.Time `json:"created_at"`
 }
+
+// CalendarEventSyncEntry represents a pending event change to sync to remote CalDAV server
+type CalendarEventSyncEntry struct {
+	ID         int64     `json:"id"`
+	EventID    int64     `json:"event_id"`
+	CalendarID int64     `json:"calendar_id"`
+	SourceID   int64     `json:"source_id"`
+	UID        string    `json:"uid"`
+	RemoteID   string    `json:"remote_id"`
+	ICalData   string    `json:"-"`
+	Operation  string    `json:"operation"` // create, update, delete
+	CreatedAt  time.Time `json:"created_at"`
+}

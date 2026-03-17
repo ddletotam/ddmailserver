@@ -90,6 +90,9 @@ func (s *Scheduler) scheduleAllAccounts() {
 	// Schedule flag sync tasks (reverse proxy for external accounts)
 	s.scheduleFlagSync()
 
+	// Schedule calendar event reverse sync tasks
+	s.scheduleCalendarEventSync()
+
 	imapQueueLen, smtpQueueLen := s.pool.QueueLength()
 	log.Printf("Current queue lengths - IMAP: %d, SMTP: %d", imapQueueLen, smtpQueueLen)
 }
@@ -256,6 +259,42 @@ func (s *Scheduler) scheduleContactSync() {
 			log.Printf("Failed to submit contact sync task for %s: %v", source.Name, err)
 		} else {
 			log.Printf("Submitted contact sync task for %s (%s)", source.Name, source.SourceType)
+		}
+	}
+}
+
+// scheduleCalendarEventSync schedules calendar event reverse sync tasks
+// Pushes local event changes back to external CalDAV servers
+func (s *Scheduler) scheduleCalendarEventSync() {
+	sourceIDs, err := s.database.GetSourcesWithPendingCalendarEventSync()
+	if err != nil {
+		log.Printf("Failed to get sources with pending calendar event sync: %v", err)
+		return
+	}
+
+	if len(sourceIDs) == 0 {
+		return
+	}
+
+	log.Printf("Found %d calendar sources with pending event sync", len(sourceIDs))
+
+	for _, sourceID := range sourceIDs {
+		source, err := s.database.GetCalendarSourceByID(sourceID)
+		if err != nil {
+			log.Printf("Failed to get calendar source %d for event sync: %v", sourceID, err)
+			continue
+		}
+
+		if !source.SyncEnabled {
+			continue
+		}
+
+		task := NewCalendarEventSyncTask(source, s.database)
+
+		if err := s.pool.Submit(task); err != nil {
+			log.Printf("Failed to submit calendar event sync task for %s: %v", source.Name, err)
+		} else {
+			log.Printf("Submitted calendar event sync task for %s", source.Name)
 		}
 	}
 }
