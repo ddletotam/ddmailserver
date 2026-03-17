@@ -286,6 +286,16 @@ func (db *DB) MarkContactSynced(id int64, etag string) error {
 	return nil
 }
 
+// UpdateContactRemoteID updates the remote_id of a contact after pushing to remote server
+func (db *DB) UpdateContactRemoteID(contactID int64, remoteID string) error {
+	query := `UPDATE contacts SET remote_id = $1, updated_at = $2 WHERE id = $3`
+	_, err := db.Exec(query, remoteID, time.Now(), contactID)
+	if err != nil {
+		return fmt.Errorf("failed to update contact remote ID: %w", err)
+	}
+	return nil
+}
+
 // CountContactsByUserID returns the total number of contacts for a user
 func (db *DB) CountContactsByUserID(userID int64) (int, error) {
 	var count int

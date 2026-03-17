@@ -108,6 +108,9 @@ func (s *Scheduler) scheduleAllAccounts() {
 	// Schedule CardDAV contact sync tasks
 	s.scheduleContactSync()
 
+	// Schedule contact sync push tasks (reverse sync to remote CardDAV)
+	s.scheduleContactSyncPush()
+
 	// Schedule flag sync tasks (reverse proxy for external accounts)
 	s.scheduleFlagSync()
 
@@ -298,6 +301,42 @@ func (s *Scheduler) scheduleContactSync() {
 			log.Printf("Failed to submit contact sync task for %s: %v", source.Name, err)
 		} else {
 			log.Printf("Submitted contact sync task for %s (%s)", source.Name, source.SourceType)
+		}
+	}
+}
+
+// scheduleContactSyncPush schedules contact sync push tasks
+// Pushes local contact changes back to external CardDAV servers
+func (s *Scheduler) scheduleContactSyncPush() {
+	sourceIDs, err := s.database.GetSourcesWithPendingContactSync()
+	if err != nil {
+		log.Printf("Failed to get sources with pending contact sync push: %v", err)
+		return
+	}
+
+	if len(sourceIDs) == 0 {
+		return
+	}
+
+	log.Printf("Found %d contact sources with pending sync push", len(sourceIDs))
+
+	for _, sourceID := range sourceIDs {
+		source, err := s.database.GetContactSourceByID(sourceID)
+		if err != nil {
+			log.Printf("Failed to get contact source %d for sync push: %v", sourceID, err)
+			continue
+		}
+
+		if !source.SyncEnabled {
+			continue
+		}
+
+		task := NewContactSyncPushTask(source, s.database)
+
+		if err := s.pool.Submit(task); err != nil {
+			log.Printf("Failed to submit contact sync push task for %s: %v", source.Name, err)
+		} else {
+			log.Printf("Submitted contact sync push task for %s", source.Name)
 		}
 	}
 }

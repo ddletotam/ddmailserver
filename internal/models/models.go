@@ -211,6 +211,19 @@ type FlagSyncEntry struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+// ContactSyncEntry represents a pending contact change to sync to remote CardDAV server
+type ContactSyncEntry struct {
+	ID            int64     `json:"id"`
+	ContactID     int64     `json:"contact_id"`
+	AddressBookID int64     `json:"address_book_id"`
+	SourceID      int64     `json:"source_id"`
+	UID           string    `json:"uid"`
+	RemoteID      string    `json:"remote_id"`
+	VCardData     string    `json:"-"`
+	Operation     string    `json:"operation"` // create, update, delete
+	CreatedAt     time.Time `json:"created_at"`
+}
+
 // CalendarEventSyncEntry represents a pending event change to sync to remote CalDAV server
 type CalendarEventSyncEntry struct {
 	ID         int64     `json:"id"`

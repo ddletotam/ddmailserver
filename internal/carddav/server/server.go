@@ -105,6 +105,8 @@ func (s *Server) handlePropfind(w http.ResponseWriter, r *http.Request, user *mo
 
 	var response string
 	if path == "" || path == fmt.Sprintf("%d", user.ID) {
+		// Ensure user has a local address book
+		s.ensureLocalAddressBook(user)
 		// Principal URL
 		response = s.propfindPrincipal(user, depth)
 	} else if len(parts) == 2 && parts[1] == "addressbooks" {
@@ -415,6 +417,7 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 			http.Error(w, "Failed to create contact", http.StatusInternalServerError)
 			return
 		}
+		s.queueContactSync(book, contact.ID, uid, "", contact.VCardData, "create")
 		w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
 		w.WriteHeader(http.StatusCreated)
 	} else {
@@ -424,6 +427,7 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 			http.Error(w, "Failed to update contact", http.StatusInternalServerError)
 			return
 		}
+		s.queueContactSync(book, existing.ID, uid, existing.RemoteID, contact.VCardData, "update")
 		w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -452,9 +456,20 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, user *mode
 
 	uid := strings.TrimSuffix(parts[3], ".vcf")
 
+	// Get contact before deletion to preserve RemoteID for sync
+	existingContact, err := s.database.GetContactByUID(bookID, uid)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
 	if err := s.database.DeleteContactByUID(bookID, uid); err != nil {
 		http.Error(w, "Failed to delete contact", http.StatusInternalServerError)
 		return
+	}
+
+	if existingContact != nil {
+		s.queueContactSync(book, existingContact.ID, uid, existingContact.RemoteID, "", "delete")
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -519,6 +534,52 @@ func (s *Server) handleMkcol(w http.ResponseWriter, r *http.Request, user *model
 	}
 
 	w.WriteHeader(http.StatusCreated)
+}
+
+// queueContactSync queues a contact change for push to remote CardDAV server
+func (s *Server) queueContactSync(book *models.AddressBook, contactID int64, uid, remoteID, vcardData, operation string) {
+	if book.SourceType != "carddav" {
+		return
+	}
+	if err := s.database.QueueContactSync(contactID, book.ID, book.SourceID, uid, remoteID, vcardData, operation); err != nil {
+		log.Printf("Failed to queue contact sync: %v", err)
+	}
+}
+
+// ensureLocalAddressBook creates a local address book for the user if one doesn't exist
+func (s *Server) ensureLocalAddressBook(user *models.User) {
+	// Check if user already has a local contact source
+	sources, err := s.database.GetContactSourcesByUserID(user.ID)
+	if err != nil {
+		return
+	}
+	for _, src := range sources {
+		if src.SourceType == "local" {
+			return // Already has local source
+		}
+	}
+
+	// Create local source
+	source := &models.ContactSource{
+		UserID:     user.ID,
+		Name:       "Local",
+		SourceType: "local",
+	}
+	if err := s.database.CreateContactSource(source); err != nil {
+		log.Printf("Failed to create local contact source: %v", err)
+		return
+	}
+
+	// Create address book
+	book := &models.AddressBook{
+		UserID:   user.ID,
+		SourceID: source.ID,
+		Name:     "Contacts",
+		CanWrite: true,
+	}
+	if err := s.database.CreateAddressBook(book); err != nil {
+		log.Printf("Failed to create local address book: %v", err)
+	}
 }
 
 // Helper functions
