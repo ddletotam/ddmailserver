@@ -8,8 +8,10 @@ import (
 	"github.com/yourusername/mailserver/internal/db"
 	imapclient "github.com/yourusername/mailserver/internal/imap/client"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/notify"
 	"github.com/yourusername/mailserver/internal/oauth"
 	smtpclient "github.com/yourusername/mailserver/internal/smtp/client"
+	taskpkg "github.com/yourusername/mailserver/internal/task"
 )
 
 // Scheduler schedules periodic tasks for mail synchronization
@@ -21,6 +23,8 @@ type Scheduler struct {
 	cancel         context.CancelFunc
 	googleOAuth    *oauth.GoogleOAuth
 	microsoftOAuth *oauth.MicrosoftOAuth
+	notifyHub      *notify.Hub
+	hostname       string
 }
 
 // NewScheduler creates a new task scheduler
@@ -40,6 +44,23 @@ func NewScheduler(pool *Pool, database *db.DB, intervalSeconds int) *Scheduler {
 func (s *Scheduler) SetOAuthClients(google *oauth.GoogleOAuth, microsoft *oauth.MicrosoftOAuth) {
 	s.googleOAuth = google
 	s.microsoftOAuth = microsoft
+}
+
+// SetNotifyHub sets the notification hub for IMAP IDLE push notifications
+func (s *Scheduler) SetNotifyHub(hub *notify.Hub) {
+	s.notifyHub = hub
+}
+
+// SetHostname sets the hostname for direct SMTP delivery
+func (s *Scheduler) SetHostname(hostname string) {
+	s.hostname = hostname
+}
+
+func (s *Scheduler) getHostname() string {
+	if s.hostname != "" {
+		return s.hostname
+	}
+	return "localhost"
 }
 
 // Start starts the scheduler
@@ -109,6 +130,16 @@ func (s *Scheduler) scheduleIMAPSync() {
 
 	for _, account := range accounts {
 		task := imapclient.NewSyncTask(account, s.database)
+		if s.notifyHub != nil {
+			task.SetNotifyFunc(func(username, mailbox string, count uint32) {
+				s.notifyHub.Publish(notify.Event{
+					Type:     notify.EventNewMessage,
+					Username: username,
+					Mailbox:  mailbox,
+					Count:    count,
+				})
+			})
+		}
 
 		if err := s.pool.Submit(task); err != nil {
 			log.Printf("Failed to submit sync task for %s: %v", account.Email, err)
@@ -134,14 +165,22 @@ func (s *Scheduler) scheduleSMTPSend() {
 	log.Printf("Found %d pending messages to send", len(messages))
 
 	for _, msg := range messages {
-		// Get account for this message
-		account, err := s.database.GetAccountByID(msg.AccountID)
-		if err != nil {
-			log.Printf("Failed to get account %d for message %d: %v", msg.AccountID, msg.ID, err)
-			continue
+		var sendTask taskpkg.Task
+
+		if msg.AccountID == 0 {
+			// Direct delivery for local domain senders
+			sendTask = smtpclient.NewDirectSendTask(msg, s.database, s.getHostname())
+		} else {
+			// Relay through external SMTP account
+			account, err := s.database.GetAccountByID(msg.AccountID)
+			if err != nil {
+				log.Printf("Failed to get account %d for message %d: %v", msg.AccountID, msg.ID, err)
+				continue
+			}
+			sendTask = smtpclient.NewSendTask(msg, account, s.database)
 		}
 
-		task := smtpclient.NewSendTask(msg, account, s.database)
+		task := sendTask
 
 		if err := s.pool.Submit(task); err != nil {
 			log.Printf("Failed to submit send task for message %d: %v", msg.ID, err)

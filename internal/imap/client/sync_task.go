@@ -18,9 +18,15 @@ import (
 
 // SyncTask represents an IMAP synchronization task
 type SyncTask struct {
-	account  *models.Account
-	database *db.DB
-	priority int
+	account    *models.Account
+	database   *db.DB
+	notifyFunc func(username, mailbox string, count uint32) // optional IDLE notification callback
+	priority   int
+}
+
+// SetNotifyFunc sets the callback for IDLE push notifications
+func (t *SyncTask) SetNotifyFunc(fn func(username, mailbox string, count uint32)) {
+	t.notifyFunc = fn
 }
 
 // NewSyncTask creates a new IMAP sync task
@@ -144,6 +150,16 @@ func (t *SyncTask) syncRemoteInbox(ctx context.Context, client *Client, localInb
 	}
 
 	log.Printf("Synced %d new messages from %s (skipped %d duplicates)", messageCount, t.account.Email, skippedCount)
+
+	// Notify IMAP IDLE clients about new messages
+	if messageCount > 0 && t.notifyFunc != nil {
+		totalMessages, _ := t.database.GetMessageCountByFolder(localInbox.ID)
+		// Get username for IDLE notification
+		if user, err := t.database.GetUserByID(t.account.UserID); err == nil {
+			t.notifyFunc(user.Username, "INBOX", totalMessages)
+		}
+	}
+
 	return nil
 }
 

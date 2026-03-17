@@ -118,6 +118,38 @@ func (db *DB) GetAttachmentByContentID(messageID int64, contentID string) (*mode
 	return att, nil
 }
 
+// GetInlineAttachmentsByMessageID retrieves inline attachments with data for a message
+func (db *DB) GetInlineAttachmentsByMessageID(messageID int64) ([]*models.Attachment, error) {
+	query := `
+		SELECT id, message_id, COALESCE(content_id, ''), COALESCE(filename, ''),
+		       content_type, size, is_inline, data, created_at
+		FROM attachments
+		WHERE message_id = $1 AND is_inline = true AND content_id IS NOT NULL
+		ORDER BY id
+	`
+
+	rows, err := db.Query(query, messageID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get inline attachments: %w", err)
+	}
+	defer rows.Close()
+
+	var attachments []*models.Attachment
+	for rows.Next() {
+		att := &models.Attachment{}
+		err := rows.Scan(
+			&att.ID, &att.MessageID, &att.ContentID, &att.Filename,
+			&att.ContentType, &att.Size, &att.IsInline, &att.Data, &att.CreatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan inline attachment: %w", err)
+		}
+		attachments = append(attachments, att)
+	}
+
+	return attachments, nil
+}
+
 // DeleteAttachment deletes an attachment
 func (db *DB) DeleteAttachment(id int64) error {
 	query := `DELETE FROM attachments WHERE id = $1`

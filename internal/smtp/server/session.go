@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/emersion/go-message/mail"
+	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
@@ -23,6 +24,23 @@ type Session struct {
 	userID   int64
 	from     string
 	to       []string
+}
+
+// AuthMechanisms returns available auth mechanisms (advertised in EHLO)
+func (s *Session) AuthMechanisms() []string {
+	return []string{"PLAIN"}
+}
+
+// Auth handles SASL authentication for the AUTH extension
+func (s *Session) Auth(mech string) (sasl.Server, error) {
+	switch mech {
+	case "PLAIN":
+		return sasl.NewPlainServer(func(identity, username, password string) error {
+			return s.AuthPlain(username, password)
+		}), nil
+	default:
+		return nil, fmt.Errorf("unsupported auth mechanism: %s", mech)
+	}
 }
 
 // AuthPlain implements PLAIN authentication
@@ -182,6 +200,15 @@ func (s *Session) determineAccount(fromAddr string) (int64, error) {
 	for _, account := range accounts {
 		if strings.EqualFold(account.Email, email) {
 			return account.ID, nil
+		}
+	}
+
+	// Check if sender is from a local domain — use direct delivery (accountID=0)
+	parts := strings.SplitN(email, "@", 2)
+	if len(parts) == 2 {
+		if _, err := s.database.GetDomainByName(parts[1]); err == nil {
+			log.Printf("Local domain sender %s, using direct delivery", email)
+			return 0, nil
 		}
 	}
 

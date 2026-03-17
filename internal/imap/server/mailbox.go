@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
@@ -595,8 +596,8 @@ func (m *Mailbox) convertToIMAPMessage(msg *models.Message, seqNum uint32, items
 			hasHTML := msg.BodyHTML != ""
 
 			if hasPlain && hasHTML {
-				// Multipart/alternative structure
-				imapMsg.BodyStructure = &imap.BodyStructure{
+				// Build multipart/alternative structure
+				altStructure := &imap.BodyStructure{
 					MIMEType:    "multipart",
 					MIMESubType: "alternative",
 					Params:      map[string]string{"boundary": fmt.Sprintf("----=_Part_%d", msg.ID)},
@@ -614,6 +615,46 @@ func (m *Mailbox) convertToIMAPMessage(msg *models.Message, seqNum uint32, items
 							Size:        uint32(len(msg.BodyHTML)),
 						},
 					},
+				}
+
+				// Check for inline attachments
+				allAtts, attErr := m.database.GetAttachmentsByMessageID(msg.ID)
+				var inlineAtts []*models.Attachment
+				if attErr == nil {
+					for _, att := range allAtts {
+						if att.IsInline && att.ContentID != "" {
+							inlineAtts = append(inlineAtts, att)
+						}
+					}
+				}
+
+				if len(inlineAtts) > 0 {
+					// Wrap in multipart/related with inline attachments
+					relatedParts := []*imap.BodyStructure{altStructure}
+					for _, att := range inlineAtts {
+						mimeType := "application"
+						mimeSubType := "octet-stream"
+						if parts := strings.SplitN(att.ContentType, "/", 2); len(parts) == 2 {
+							mimeType = parts[0]
+							mimeSubType = parts[1]
+						}
+						relatedParts = append(relatedParts, &imap.BodyStructure{
+							MIMEType:          mimeType,
+							MIMESubType:       mimeSubType,
+							Size:              uint32(att.Size),
+							Disposition:       "inline",
+							DispositionParams: map[string]string{"filename": att.Filename},
+							Id:                att.ContentID,
+						})
+					}
+					imapMsg.BodyStructure = &imap.BodyStructure{
+						MIMEType:    "multipart",
+						MIMESubType: "related",
+						Params:      map[string]string{"boundary": fmt.Sprintf("----=_Related_%d", msg.ID)},
+						Parts:       relatedParts,
+					}
+				} else {
+					imapMsg.BodyStructure = altStructure
 				}
 			} else if hasHTML {
 				imapMsg.BodyStructure = &imap.BodyStructure{
@@ -737,29 +778,82 @@ func (m *Mailbox) buildMessageLiteral(msg *models.Message, section *imap.BodySec
 		hasHTML := msg.BodyHTML != ""
 
 		if hasPlain && hasHTML {
-			// Multipart message with both text and HTML
-			boundary := fmt.Sprintf("----=_Part_%d", msg.ID)
-			buf.WriteString(fmt.Sprintf("Content-Type: multipart/alternative; boundary=\"%s\"\r\n", boundary))
-			buf.WriteString("\r\n")
+			// Check for inline attachments
+			inlineAtts, attErr := m.database.GetInlineAttachmentsByMessageID(msg.ID)
+			if attErr != nil {
+				inlineAtts = nil
+			}
 
-			// Plain text part
-			buf.WriteString(fmt.Sprintf("--%s\r\n", boundary))
-			buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
-			buf.WriteString("Content-Transfer-Encoding: 8bit\r\n")
-			buf.WriteString("\r\n")
-			buf.WriteString(msg.Body)
-			buf.WriteString("\r\n")
+			altBoundary := fmt.Sprintf("----=_Part_%d", msg.ID)
 
-			// HTML part
-			buf.WriteString(fmt.Sprintf("--%s\r\n", boundary))
-			buf.WriteString("Content-Type: text/html; charset=utf-8\r\n")
-			buf.WriteString("Content-Transfer-Encoding: 8bit\r\n")
-			buf.WriteString("\r\n")
-			buf.WriteString(msg.BodyHTML)
-			buf.WriteString("\r\n")
+			if len(inlineAtts) > 0 {
+				// Wrap in multipart/related
+				relatedBoundary := fmt.Sprintf("----=_Related_%d", msg.ID)
+				buf.WriteString(fmt.Sprintf("Content-Type: multipart/related; boundary=\"%s\"\r\n", relatedBoundary))
+				buf.WriteString("\r\n")
 
-			// End boundary
-			buf.WriteString(fmt.Sprintf("--%s--\r\n", boundary))
+				// First part: multipart/alternative
+				buf.WriteString(fmt.Sprintf("--%s\r\n", relatedBoundary))
+				buf.WriteString(fmt.Sprintf("Content-Type: multipart/alternative; boundary=\"%s\"\r\n", altBoundary))
+				buf.WriteString("\r\n")
+
+				// Plain text part
+				buf.WriteString(fmt.Sprintf("--%s\r\n", altBoundary))
+				buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+				buf.WriteString("Content-Transfer-Encoding: 8bit\r\n")
+				buf.WriteString("\r\n")
+				buf.WriteString(msg.Body)
+				buf.WriteString("\r\n")
+
+				// HTML part
+				buf.WriteString(fmt.Sprintf("--%s\r\n", altBoundary))
+				buf.WriteString("Content-Type: text/html; charset=utf-8\r\n")
+				buf.WriteString("Content-Transfer-Encoding: 8bit\r\n")
+				buf.WriteString("\r\n")
+				buf.WriteString(msg.BodyHTML)
+				buf.WriteString("\r\n")
+
+				// End alternative boundary
+				buf.WriteString(fmt.Sprintf("--%s--\r\n", altBoundary))
+
+				// Inline attachment parts
+				for _, att := range inlineAtts {
+					buf.WriteString(fmt.Sprintf("--%s\r\n", relatedBoundary))
+					buf.WriteString(fmt.Sprintf("Content-Type: %s\r\n", att.ContentType))
+					buf.WriteString("Content-Transfer-Encoding: base64\r\n")
+					buf.WriteString(fmt.Sprintf("Content-ID: <%s>\r\n", att.ContentID))
+					buf.WriteString(fmt.Sprintf("Content-Disposition: inline; filename=\"%s\"\r\n", att.Filename))
+					buf.WriteString("\r\n")
+					buf.WriteString(base64.StdEncoding.EncodeToString(att.Data))
+					buf.WriteString("\r\n")
+				}
+
+				// End related boundary
+				buf.WriteString(fmt.Sprintf("--%s--\r\n", relatedBoundary))
+			} else {
+				// No inline attachments - standard multipart/alternative
+				buf.WriteString(fmt.Sprintf("Content-Type: multipart/alternative; boundary=\"%s\"\r\n", altBoundary))
+				buf.WriteString("\r\n")
+
+				// Plain text part
+				buf.WriteString(fmt.Sprintf("--%s\r\n", altBoundary))
+				buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+				buf.WriteString("Content-Transfer-Encoding: 8bit\r\n")
+				buf.WriteString("\r\n")
+				buf.WriteString(msg.Body)
+				buf.WriteString("\r\n")
+
+				// HTML part
+				buf.WriteString(fmt.Sprintf("--%s\r\n", altBoundary))
+				buf.WriteString("Content-Type: text/html; charset=utf-8\r\n")
+				buf.WriteString("Content-Transfer-Encoding: 8bit\r\n")
+				buf.WriteString("\r\n")
+				buf.WriteString(msg.BodyHTML)
+				buf.WriteString("\r\n")
+
+				// End boundary
+				buf.WriteString(fmt.Sprintf("--%s--\r\n", altBoundary))
+			}
 		} else if hasHTML {
 			// Only HTML available
 			buf.WriteString("Content-Type: text/html; charset=utf-8\r\n")

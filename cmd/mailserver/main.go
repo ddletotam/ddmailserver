@@ -136,6 +136,8 @@ func main() {
 	// Initialize notification hub for IMAP IDLE support
 	log.Printf("Initializing notification hub for IMAP IDLE...")
 	notifyHub := notify.NewHub()
+	scheduler.SetNotifyHub(notifyHub)
+	scheduler.SetHostname(hostname)
 
 	// Initialize IMAP server (plain) WITHOUT IDLE support
 	log.Printf("Initializing IMAP server (plain, no IDLE)...")
