@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -255,6 +256,9 @@ func (c *Client) SyncAddressBook(ctx context.Context, book *models.AddressBook) 
 		if !exists {
 			// New contact
 			changes.Creates = append(changes.Creates, contact)
+		} else if existing.LocalModified {
+			// Skip - will be pushed by reverse sync
+			continue
 		} else if existing.ETag != obj.ETag {
 			// Updated contact
 			contact.ID = existing.ID
@@ -381,6 +385,57 @@ func (c *Client) parseVCard(card vcard.Card, book *models.AddressBook) (*models.
 	return contact, nil
 }
 
+// PutContactRaw uploads raw vCard data to a remote CardDAV path
+func (c *Client) PutContactRaw(ctx context.Context, remotePath string, vcardData string) error {
+	if c.httpClient == nil {
+		return fmt.Errorf("client not connected")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "PUT", remotePath, strings.NewReader(vcardData))
+	if err != nil {
+		return fmt.Errorf("failed to create PUT request: %w", err)
+	}
+	req.Header.Set("Content-Type", "text/vcard; charset=utf-8")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("PUT request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("PUT failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// DeleteContact deletes a contact from a remote CardDAV server
+func (c *Client) DeleteContact(ctx context.Context, remotePath string) error {
+	if c.httpClient == nil {
+		return fmt.Errorf("client not connected")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "DELETE", remotePath, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create DELETE request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("DELETE request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 && resp.StatusCode != 404 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("DELETE failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
 // syncGoogleContacts syncs contacts from Google People API
 func (c *Client) syncGoogleContacts(ctx context.Context, book *models.AddressBook) error {
 	log.Printf("Syncing Google Contacts for %s", c.source.Name)
@@ -489,7 +544,7 @@ func (c *Client) PushChanges(ctx context.Context, book *models.AddressBook) erro
 			log.Printf("Failed to mark contact synced: %v", err)
 		}
 
-		log.Printf("Pushed contact %s to %s", contact.UID, newPath)
+		log.Printf("Pushed contact %s to %v", contact.UID, newPath)
 	}
 
 	return nil
