@@ -24,6 +24,8 @@ const (
 	EmailScope = "email"
 	// Google Calendar scope (full access)
 	CalendarScope = "https://www.googleapis.com/auth/calendar"
+	// Google Contacts scope (People API)
+	ContactsScope = "https://www.googleapis.com/auth/contacts"
 )
 
 // TokenResponse represents the response from Google's token endpoint
@@ -122,9 +124,28 @@ func (g *GoogleOAuth) ExchangeCodeWithRedirectURI(code, redirectURI string) (*To
 	return &tokenResp, nil
 }
 
+// GetContactsAuthURL returns the URL to redirect users for Google Contacts OAuth consent
+func (g *GoogleOAuth) GetContactsAuthURL(state, redirectURI string) string {
+	params := url.Values{
+		"client_id":     {g.config.ClientID},
+		"redirect_uri":  {redirectURI},
+		"response_type": {"code"},
+		"scope":         {ContactsScope + " " + EmailScope},
+		"access_type":   {"offline"},
+		"prompt":        {"consent"},
+		"state":         {state},
+	}
+	return GoogleAuthURL + "?" + params.Encode()
+}
+
 // GoogleCalDAVURL returns the CalDAV URL for Google Calendar
 func GoogleCalDAVURL(email string) string {
 	return fmt.Sprintf("https://apidata.googleusercontent.com/caldav/v2/%s/events", email)
+}
+
+// GoogleCardDAVURL returns the CardDAV URL for Google Contacts
+func GoogleCardDAVURL(email string) string {
+	return "https://www.googleapis.com/.well-known/carddav"
 }
 
 // ExchangeCode exchanges an authorization code for tokens
