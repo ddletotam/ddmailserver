@@ -2,7 +2,10 @@ package server
 
 import (
 	"crypto/tls"
+	"fmt"
 	"log"
+	"net"
+	"time"
 
 	"github.com/emersion/go-imap-idle"
 	"github.com/emersion/go-imap/server"
@@ -155,6 +158,7 @@ func NewWithTLSAndHub(database *db.DB, addr string, certFile, keyFile string, hu
 	s.Addr = addr
 	s.AllowInsecureAuth = true
 	s.TLSConfig = tlsConfig
+	s.AutoLogout = 30 * time.Minute // Disconnect idle clients after 30 min (RFC 3501 minimum)
 	// Enable IDLE extension for push notifications
 	s.Enable(idle.NewExtension())
 	log.Printf("IMAP server with TLS and IDLE extension enabled, will listen on %s", addr)
@@ -178,15 +182,39 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// StartTLS starts the IMAP server with TLS
+// StartTLS starts the IMAP server with TLS and TCP keepalive
 func (s *Server) StartTLS() error {
 	log.Printf("Starting IMAP server with TLS on %s", s.addr)
 
-	if err := s.imapServer.ListenAndServeTLS(); err != nil {
-		return err
+	// Create TCP listener with keepalive to detect dead connections (VPN drops etc.)
+	tcpListener, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return fmt.Errorf("failed to listen: %w", err)
 	}
 
-	return nil
+	// Wrap with keepalive
+	keepaliveListener := &tcpKeepAliveListener{tcpListener.(*net.TCPListener)}
+
+	// Wrap with TLS
+	tlsListener := tls.NewListener(keepaliveListener, s.tlsConfig)
+
+	log.Printf("IMAP TLS server with TCP keepalive (30s) listening on %s", s.addr)
+	return s.imapServer.Serve(tlsListener)
+}
+
+// tcpKeepAliveListener wraps a TCP listener to enable keepalive on accepted connections
+type tcpKeepAliveListener struct {
+	*net.TCPListener
+}
+
+func (ln *tcpKeepAliveListener) Accept() (net.Conn, error) {
+	tc, err := ln.TCPListener.AcceptTCP()
+	if err != nil {
+		return nil, err
+	}
+	tc.SetKeepAlive(true)
+	tc.SetKeepAlivePeriod(30 * time.Second)
+	return tc, nil
 }
 
 // Stop stops the IMAP server
