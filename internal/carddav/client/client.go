@@ -2,10 +2,12 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -86,12 +88,9 @@ func (c *Client) DiscoverAddressBooks(ctx context.Context) ([]*models.AddressBoo
 		return nil, fmt.Errorf("client not connected")
 	}
 
-	// Google and Microsoft use different APIs, not CardDAV
+	// Google uses People API - CardDAV has limited support
 	if c.source.AuthType == "oauth2_google" {
 		return c.discoverGoogleAddressBooks(ctx)
-	}
-	if c.source.AuthType == "oauth2_microsoft" {
-		return c.discoverMicrosoftAddressBooks(ctx)
 	}
 
 	// Try standard CardDAV discovery
@@ -184,12 +183,9 @@ func (c *Client) SyncAddressBook(ctx context.Context, book *models.AddressBook) 
 		return fmt.Errorf("client not connected")
 	}
 
-	// Google and Microsoft use different APIs
+	// Google uses People API
 	if c.source.AuthType == "oauth2_google" {
 		return c.syncGoogleContacts(ctx, book)
-	}
-	if c.source.AuthType == "oauth2_microsoft" {
-		return c.syncMicrosoftContacts(ctx, book)
 	}
 
 	log.Printf("Syncing address book %s (%s)", book.Name, book.RemoteID)
@@ -301,10 +297,9 @@ func (c *Client) syncViaMultiGet(ctx context.Context, addressBookPath string) ([
 		},
 	}
 
-	// Get all contact paths via PROPFIND Depth:1 on address book
-	// go-webdav library supports this via FindAddressBookHomeSet or we can use httpClient
-	// Simplest: use the httpClient to do PROPFIND, parse hrefs, then multiget
-	req, err := http.NewRequestWithContext(ctx, "PROPFIND", c.source.CardDAVURL+addressBookPath, nil)
+	// Build full URL for PROPFIND
+	propfindURL := c.buildFullURL(addressBookPath)
+	req, err := http.NewRequestWithContext(ctx, "PROPFIND", propfindURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create PROPFIND request: %w", err)
 	}
@@ -377,7 +372,7 @@ func (c *Client) fetchContactsIndividually(ctx context.Context, paths []string) 
 	var objects []carddav.AddressObject
 
 	for _, path := range paths {
-		req, err := http.NewRequestWithContext(ctx, "GET", c.source.CardDAVURL+path, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", c.buildFullURL(path), nil)
 		if err != nil {
 			continue
 		}
@@ -415,6 +410,22 @@ func (c *Client) fetchContactsIndividually(ctx context.Context, paths []string) 
 }
 
 // parseVCard parses a vCard into a Contact model
+// buildFullURL constructs a full URL from a path, using the source's CardDAV URL as base
+func (c *Client) buildFullURL(path string) string {
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		return path
+	}
+	// Extract base URL (scheme + host) from source URL
+	u, err := url.Parse(c.source.CardDAVURL)
+	if err != nil {
+		return c.source.CardDAVURL + path
+	}
+	if strings.HasPrefix(path, "/") {
+		return u.Scheme + "://" + u.Host + path
+	}
+	return c.source.CardDAVURL + path
+}
+
 func (c *Client) parseVCard(card vcard.Card, book *models.AddressBook) (*models.Contact, error) {
 	contact := &models.Contact{
 		UserID:        c.source.UserID,
@@ -567,14 +578,13 @@ func (c *Client) DeleteContact(ctx context.Context, remotePath string) error {
 func (c *Client) syncGoogleContacts(ctx context.Context, book *models.AddressBook) error {
 	log.Printf("Syncing Google Contacts for %s", c.source.Name)
 
-	// Google People API endpoint
-	url := "https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers,organizations,addresses,biographies,photos,nicknames&pageSize=1000"
+	// Google People API - use listDirectoryPeople for all contacts, or connections for personal
+	apiURL := "https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers,organizations,addresses,biographies,photos,nicknames&pageSize=1000&sortOrder=LAST_MODIFIED_DESCENDING"
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
-
 	req.Header.Set("Authorization", "Bearer "+c.source.OAuthAccessToken)
 
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -585,13 +595,173 @@ func (c *Client) syncGoogleContacts(ctx context.Context, book *models.AddressBoo
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Google API error: %s", resp.Status)
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Google API error: %s: %s", resp.Status, string(body)[:min(200, len(body))])
 	}
 
-	// Parse response and create contacts
-	// This is a simplified implementation - full implementation would parse the JSON response
-	log.Printf("Google Contacts sync completed for %s", c.source.Name)
+	var result struct {
+		Connections []googlePerson `json:"connections"`
+		TotalItems  int            `json:"totalItems"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("failed to decode Google response: %w", err)
+	}
+
+	log.Printf("Google People API returned %d contacts", len(result.Connections))
+
+	// Build contacts from Google response
+	existingContacts, err := c.database.GetContactsByAddressBookID(book.ID)
+	if err != nil {
+		return fmt.Errorf("failed to get existing contacts: %w", err)
+	}
+	existingByUID := make(map[string]*models.Contact)
+	for _, contact := range existingContacts {
+		existingByUID[contact.UID] = contact
+	}
+
+	changes := &db.SyncContactChanges{}
+	seenUIDs := make(map[string]bool)
+
+	for _, person := range result.Connections {
+		contact := person.toContact(c.source.UserID, book.ID)
+		if contact.UID == "" || contact.FullName == "" {
+			continue
+		}
+		seenUIDs[contact.UID] = true
+
+		if existing, ok := existingByUID[contact.UID]; ok {
+			if existing.LocalModified {
+				continue
+			}
+			if existing.ETag != contact.ETag {
+				existing.FullName = contact.FullName
+				existing.GivenName = contact.GivenName
+				existing.FamilyName = contact.FamilyName
+				existing.Email = contact.Email
+				existing.Email2 = contact.Email2
+				existing.Phone = contact.Phone
+				existing.Phone2 = contact.Phone2
+				existing.Organization = contact.Organization
+				existing.Title = contact.Title
+				existing.Notes = contact.Notes
+				existing.PhotoURL = contact.PhotoURL
+				existing.VCardData = contact.VCardData
+				existing.ETag = contact.ETag
+				changes.Updates = append(changes.Updates, existing)
+			}
+		} else {
+			changes.Creates = append(changes.Creates, contact)
+		}
+	}
+
+	// Detect deletes
+	for uid := range existingByUID {
+		if !seenUIDs[uid] {
+			changes.DeleteUIDs = append(changes.DeleteUIDs, uid)
+		}
+	}
+
+	if len(changes.Creates) > 0 || len(changes.Updates) > 0 || len(changes.DeleteUIDs) > 0 {
+		log.Printf("Google Contacts: %d creates, %d updates, %d deletes",
+			len(changes.Creates), len(changes.Updates), len(changes.DeleteUIDs))
+		if err := c.database.ApplyContactSyncChanges(book.ID, changes); err != nil {
+			return fmt.Errorf("failed to apply changes: %w", err)
+		}
+	}
+
+	log.Printf("Google Contacts sync completed for %s (%d contacts)", c.source.Name, len(result.Connections))
 	return nil
+}
+
+type googlePerson struct {
+	ResourceName string `json:"resourceName"` // "people/c123456"
+	Etag         string `json:"etag"`
+	Names        []struct {
+		DisplayName string `json:"displayName"`
+		GivenName   string `json:"givenName"`
+		FamilyName  string `json:"familyName"`
+	} `json:"names"`
+	EmailAddresses []struct {
+		Value string `json:"value"`
+	} `json:"emailAddresses"`
+	PhoneNumbers []struct {
+		Value string `json:"value"`
+	} `json:"phoneNumbers"`
+	Organizations []struct {
+		Name  string `json:"name"`
+		Title string `json:"title"`
+	} `json:"organizations"`
+	Biographies []struct {
+		Value string `json:"value"`
+	} `json:"biographies"`
+	Photos []struct {
+		URL string `json:"url"`
+	} `json:"photos"`
+	Nicknames []struct {
+		Value string `json:"value"`
+	} `json:"nicknames"`
+}
+
+func (p *googlePerson) toContact(userID, addressBookID int64) *models.Contact {
+	c := &models.Contact{
+		UserID:        userID,
+		AddressBookID: addressBookID,
+		UID:           p.ResourceName, // "people/c123456"
+		RemoteID:      p.ResourceName,
+		ETag:          p.Etag,
+	}
+	if len(p.Names) > 0 {
+		c.FullName = p.Names[0].DisplayName
+		c.GivenName = p.Names[0].GivenName
+		c.FamilyName = p.Names[0].FamilyName
+	}
+	if len(p.EmailAddresses) > 0 {
+		c.Email = p.EmailAddresses[0].Value
+	}
+	if len(p.EmailAddresses) > 1 {
+		c.Email2 = p.EmailAddresses[1].Value
+	}
+	if len(p.PhoneNumbers) > 0 {
+		c.Phone = p.PhoneNumbers[0].Value
+	}
+	if len(p.PhoneNumbers) > 1 {
+		c.Phone2 = p.PhoneNumbers[1].Value
+	}
+	if len(p.Organizations) > 0 {
+		c.Organization = p.Organizations[0].Name
+		c.Title = p.Organizations[0].Title
+	}
+	if len(p.Biographies) > 0 {
+		c.Notes = p.Biographies[0].Value
+	}
+	if len(p.Photos) > 0 {
+		c.PhotoURL = p.Photos[0].URL
+	}
+	if len(p.Nicknames) > 0 {
+		c.Nickname = p.Nicknames[0].Value
+	}
+
+	// Generate vCard
+	c.VCardData = fmt.Sprintf("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:%s\r\nFN:%s\r\nN:%s;%s;;;\r\n",
+		c.UID, c.FullName, c.FamilyName, c.GivenName)
+	if c.Email != "" {
+		c.VCardData += fmt.Sprintf("EMAIL:%s\r\n", c.Email)
+	}
+	if c.Email2 != "" {
+		c.VCardData += fmt.Sprintf("EMAIL:%s\r\n", c.Email2)
+	}
+	if c.Phone != "" {
+		c.VCardData += fmt.Sprintf("TEL:%s\r\n", c.Phone)
+	}
+	if c.Organization != "" {
+		c.VCardData += fmt.Sprintf("ORG:%s\r\n", c.Organization)
+	}
+	if c.Title != "" {
+		c.VCardData += fmt.Sprintf("TITLE:%s\r\n", c.Title)
+	}
+	c.VCardData += "END:VCARD\r\n"
+
+	return c
 }
 
 // syncMicrosoftContacts syncs contacts from Microsoft Graph API
