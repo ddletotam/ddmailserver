@@ -341,7 +341,7 @@
                     </div>
                     <form hx-post="/calendars/sources/{{.ID}}/update"
                           hx-target="#calendar-sources-list"
-                          hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('edit-source-modal-{{.ID}}')).hide()">
+                          hx-on::after-request="document.querySelectorAll('.modal-backdrop').forEach(e => e.remove()); document.body.classList.remove('modal-open'); document.body.style.removeProperty('overflow'); document.body.style.removeProperty('padding-right')">
                         <div class="modal-body">
                             <div class="mb-3">
                                 <label class="form-label">Name</label>
