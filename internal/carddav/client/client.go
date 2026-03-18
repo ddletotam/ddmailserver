@@ -201,6 +201,7 @@ func (c *Client) SyncAddressBook(ctx context.Context, book *models.AddressBook) 
 	}
 
 	// Query all contacts from the server
+	// Try addressbook-query first, fallback to multiget if server doesn't support it (Yandex returns 400)
 	query := &carddav.AddressBookQuery{
 		DataRequest: carddav.AddressDataRequest{
 			AllProp: true,
@@ -209,7 +210,11 @@ func (c *Client) SyncAddressBook(ctx context.Context, book *models.AddressBook) 
 
 	objects, err := c.client.QueryAddressBook(ctx, addressBookPath, query)
 	if err != nil {
-		return fmt.Errorf("failed to query address book: %w", err)
+		log.Printf("CardDAV addressbook-query failed for %s, trying multiget fallback: %v", book.Name, err)
+		objects, err = c.syncViaMultiGet(ctx, addressBookPath)
+		if err != nil {
+			return fmt.Errorf("failed to query address book: %w", err)
+		}
 	}
 
 	log.Printf("CardDAV query returned %d contacts for address book %s", len(objects), book.Name)
@@ -285,6 +290,128 @@ func (c *Client) SyncAddressBook(ctx context.Context, book *models.AddressBook) 
 
 	log.Printf("Synced address book: %s", book.Name)
 	return nil
+}
+
+// syncViaMultiGet fetches contacts using PROPFIND + addressbook-multiget as fallback
+func (c *Client) syncViaMultiGet(ctx context.Context, addressBookPath string) ([]carddav.AddressObject, error) {
+	// First PROPFIND to get list of contact paths and ETags
+	multiGet := &carddav.AddressBookMultiGet{
+		DataRequest: carddav.AddressDataRequest{
+			AllProp: true,
+		},
+	}
+
+	// Get all contact paths via PROPFIND Depth:1 on address book
+	// go-webdav library supports this via FindAddressBookHomeSet or we can use httpClient
+	// Simplest: use the httpClient to do PROPFIND, parse hrefs, then multiget
+	req, err := http.NewRequestWithContext(ctx, "PROPFIND", c.source.CardDAVURL+addressBookPath, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create PROPFIND request: %w", err)
+	}
+	req.Header.Set("Depth", "1")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("PROPFIND failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 207 {
+		return nil, fmt.Errorf("PROPFIND returned %d", resp.StatusCode)
+	}
+
+	// Parse hrefs from PROPFIND response (simple extraction)
+	var paths []string
+	bodyStr := string(body)
+	remaining := bodyStr
+	for {
+		idx := strings.Index(remaining, "<href")
+		if idx == -1 {
+			idx = strings.Index(remaining, "<D:href")
+		}
+		if idx == -1 {
+			break
+		}
+		// Find the closing >
+		start := strings.Index(remaining[idx:], ">")
+		if start == -1 {
+			break
+		}
+		remaining = remaining[idx+start+1:]
+		// Find closing tag
+		end := strings.Index(remaining, "</")
+		if end == -1 {
+			break
+		}
+		href := strings.TrimSpace(remaining[:end])
+		remaining = remaining[end:]
+
+		// Only include .vcf files or paths that look like contacts (not the collection itself)
+		if href != addressBookPath && href != "" && !strings.HasSuffix(href, "/") {
+			paths = append(paths, href)
+		}
+	}
+
+	if len(paths) == 0 {
+		log.Printf("No contact paths found in PROPFIND response for %s", addressBookPath)
+		return nil, nil
+	}
+
+	log.Printf("Found %d contact paths via PROPFIND, fetching via multiget", len(paths))
+
+	// Now use addressbook-multiget to fetch all contacts with data
+	multiGet.Paths = paths
+	objects, err := c.client.MultiGetAddressBook(ctx, addressBookPath, multiGet)
+	if err != nil {
+		// If multiget also fails, fetch contacts one by one via GET
+		log.Printf("MultiGet failed, fetching contacts individually: %v", err)
+		return c.fetchContactsIndividually(ctx, paths)
+	}
+
+	return objects, nil
+}
+
+// fetchContactsIndividually fetches each contact via GET as last resort fallback
+func (c *Client) fetchContactsIndividually(ctx context.Context, paths []string) ([]carddav.AddressObject, error) {
+	var objects []carddav.AddressObject
+
+	for _, path := range paths {
+		req, err := http.NewRequestWithContext(ctx, "GET", c.source.CardDAVURL+path, nil)
+		if err != nil {
+			continue
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			log.Printf("GET %s failed: %v", path, err)
+			continue
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != 200 {
+			continue
+		}
+
+		// Parse vCard
+		decoder := vcard.NewDecoder(strings.NewReader(string(body)))
+		card, err := decoder.Decode()
+		if err != nil {
+			log.Printf("Failed to parse vCard from %s: %v", path, err)
+			continue
+		}
+
+		objects = append(objects, carddav.AddressObject{
+			Path: path,
+			ETag: resp.Header.Get("ETag"),
+			Card: card,
+		})
+	}
+
+	log.Printf("Fetched %d contacts individually", len(objects))
+	return objects, nil
 }
 
 // parseVCard parses a vCard into a Contact model
