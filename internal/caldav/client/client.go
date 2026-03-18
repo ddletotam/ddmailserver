@@ -14,6 +14,7 @@ import (
 	"github.com/emersion/go-ical"
 	"github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/caldav"
+	caldavutil "github.com/yourusername/mailserver/internal/caldav"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 )
@@ -437,6 +438,11 @@ func (c *Client) parseCalendarObject(obj *caldav.CalendarObject, calendarID int6
 		return nil, fmt.Errorf("failed to serialize iCal: %w", err)
 	}
 	event.ICalData = icalData.String()
+
+	// Inject default alarm if source has it enabled and event has no VALARM
+	if c.source.DefaultAlarmEnabled {
+		event.ICalData = caldavutil.InjectDefaultAlarm(event.ICalData, c.source.DefaultAlarmBefore, c.source.DefaultAlarmUnit)
+	}
 
 	// If no ETag, generate one
 	if event.ETag == "" {
