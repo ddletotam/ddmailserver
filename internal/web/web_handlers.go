@@ -31,9 +31,10 @@ type PageData struct {
 
 type DashboardData struct {
 	PageData
-	AccountCount int
-	MessageCount int
-	UnreadCount  int
+	AccountCount  int
+	MessageCount  int
+	UnreadCount   int
+	CalendarCount int
 }
 
 type AccountsData struct {
@@ -210,15 +211,17 @@ func (s *Server) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 	// TODO: Get actual message counts
 	messageCount := 0
 	unreadCount := 0
+	calendars, _ := s.database.GetCalendarsByUserID(user.ID)
 
 	data := DashboardData{
 		PageData: PageData{
 			Title: "Dashboard",
 			User:  user,
 		},
-		AccountCount: len(accounts),
-		MessageCount: messageCount,
-		UnreadCount:  unreadCount,
+		AccountCount:  len(accounts),
+		MessageCount:  messageCount,
+		UnreadCount:   unreadCount,
+		CalendarCount: len(calendars),
 	}
 
 	s.renderTemplate(w, "dashboard.html", data)
