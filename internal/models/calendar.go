@@ -40,6 +40,11 @@ type CalendarSource struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 
+	// Default alarm settings (add VALARM if missing in events)
+	DefaultAlarmEnabled bool   `json:"default_alarm_enabled"`
+	DefaultAlarmBefore  int    `json:"default_alarm_before"` // number of units before event
+	DefaultAlarmUnit    string `json:"default_alarm_unit"`   // "minutes", "hours", "days"
+
 	// Joined field (not stored in DB)
 	AccountEmail string `json:"account_email,omitempty"`
 }

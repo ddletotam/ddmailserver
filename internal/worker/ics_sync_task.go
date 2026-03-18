@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	caldavutil "github.com/yourusername/mailserver/internal/caldav"
 	"github.com/yourusername/mailserver/internal/caldav/importer"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
@@ -92,6 +93,13 @@ func (t *ICSSyncTask) doSync(ctx context.Context) error {
 	}
 
 	log.Printf("Parsed %d events from ICS URL", len(events))
+
+	// Inject default alarm if source has it enabled
+	if t.source.DefaultAlarmEnabled {
+		for _, event := range events {
+			event.ICalData = caldavutil.InjectDefaultAlarm(event.ICalData, t.source.DefaultAlarmBefore, t.source.DefaultAlarmUnit)
+		}
+	}
 
 	// Get existing events for comparison
 	existingUIDs, err := t.database.GetAllEventUIDsForCalendar(calendar.ID)

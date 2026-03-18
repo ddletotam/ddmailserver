@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	caldavutil "github.com/yourusername/mailserver/internal/caldav"
 	caldavclient "github.com/yourusername/mailserver/internal/caldav/client"
 	"github.com/yourusername/mailserver/internal/caldav/importer"
 	"github.com/yourusername/mailserver/internal/db"
@@ -153,17 +154,29 @@ func (s *Server) HandleCreateCalendarSourceWeb(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	defaultAlarmBefore := 15
+	if v, err := strconv.Atoi(r.FormValue("default_alarm_before")); err == nil && v > 0 {
+		defaultAlarmBefore = v
+	}
+	defaultAlarmUnit := r.FormValue("default_alarm_unit")
+	if defaultAlarmUnit == "" {
+		defaultAlarmUnit = "minutes"
+	}
+
 	source := &models.CalendarSource{
-		UserID:         user.ID,
-		Name:           r.FormValue("name"),
-		SourceType:     "caldav",
-		CalDAVURL:      r.FormValue("caldav_url"),
-		CalDAVUsername: r.FormValue("caldav_username"),
-		CalDAVPassword: r.FormValue("caldav_password"),
-		AuthType:       "password",
-		Color:          r.FormValue("color"),
-		SyncEnabled:    true,
-		SyncInterval:   60, // 1 minute - sync as often as possible
+		UserID:              user.ID,
+		Name:                r.FormValue("name"),
+		SourceType:          "caldav",
+		CalDAVURL:           r.FormValue("caldav_url"),
+		CalDAVUsername:      r.FormValue("caldav_username"),
+		CalDAVPassword:      r.FormValue("caldav_password"),
+		AuthType:            "password",
+		Color:               r.FormValue("color"),
+		SyncEnabled:         true,
+		SyncInterval:        60, // 1 minute - sync as often as possible
+		DefaultAlarmEnabled: r.FormValue("default_alarm_enabled") == "true",
+		DefaultAlarmBefore:  defaultAlarmBefore,
+		DefaultAlarmUnit:    defaultAlarmUnit,
 	}
 
 	if source.Name == "" || source.CalDAVURL == "" {
@@ -212,14 +225,26 @@ func (s *Server) HandleCreateICSURLSource(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	defaultAlarmBeforeICS := 15
+	if v, err := strconv.Atoi(r.FormValue("default_alarm_before")); err == nil && v > 0 {
+		defaultAlarmBeforeICS = v
+	}
+	defaultAlarmUnitICS := r.FormValue("default_alarm_unit")
+	if defaultAlarmUnitICS == "" {
+		defaultAlarmUnitICS = "minutes"
+	}
+
 	source := &models.CalendarSource{
-		UserID:       user.ID,
-		Name:         name,
-		SourceType:   "ics_url",
-		IcsURL:       icsURL,
-		Color:        color,
-		SyncEnabled:  true,
-		SyncInterval: syncInterval,
+		UserID:              user.ID,
+		Name:                name,
+		SourceType:          "ics_url",
+		IcsURL:              icsURL,
+		Color:               color,
+		SyncEnabled:         true,
+		SyncInterval:        syncInterval,
+		DefaultAlarmEnabled: r.FormValue("default_alarm_enabled") == "true",
+		DefaultAlarmBefore:  defaultAlarmBeforeICS,
+		DefaultAlarmUnit:    defaultAlarmUnitICS,
 	}
 
 	if err := s.database.CreateCalendarSource(source); err != nil {
@@ -552,6 +577,13 @@ func (s *Server) syncICSURLSource(ctx context.Context, source *models.CalendarSo
 	}
 
 	log.Printf("Parsed %d events from ICS URL", len(events))
+
+	// Inject default alarm if source has it enabled
+	if source.DefaultAlarmEnabled {
+		for _, event := range events {
+			event.ICalData = caldavutil.InjectDefaultAlarm(event.ICalData, source.DefaultAlarmBefore, source.DefaultAlarmUnit)
+		}
+	}
 
 	// Get existing events for comparison
 	existingUIDs, err := s.database.GetAllEventUIDsForCalendar(calendar.ID)

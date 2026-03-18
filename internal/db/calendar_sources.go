@@ -52,8 +52,9 @@ func (db *DB) CreateCalendarSource(source *models.CalendarSource) error {
 		INSERT INTO calendar_sources (
 			user_id, name, source_type, caldav_url, caldav_username, caldav_password,
 			auth_type, oauth_access_token, oauth_refresh_token, oauth_token_expiry,
-			sync_enabled, sync_interval, color, created_at, updated_at, ics_url, account_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+			sync_enabled, sync_interval, color, created_at, updated_at, ics_url, account_id,
+			default_alarm_enabled, default_alarm_before, default_alarm_unit
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 		RETURNING id
 	`
 
@@ -64,6 +65,7 @@ func (db *DB) CreateCalendarSource(source *models.CalendarSource) error {
 		source.AuthType, encryptedAccessToken, encryptedRefreshToken, tokenExpiry,
 		source.SyncEnabled, source.SyncInterval, source.Color,
 		source.CreatedAt, source.UpdatedAt, source.IcsURL, source.AccountID,
+		source.DefaultAlarmEnabled, source.DefaultAlarmBefore, source.DefaultAlarmUnit,
 	).Scan(&source.ID)
 
 	if err != nil {
@@ -81,7 +83,8 @@ func (db *DB) GetCalendarSourcesByUserID(userID int64) ([]*models.CalendarSource
 		       COALESCE(cs.auth_type, 'password'), COALESCE(cs.oauth_access_token, ''), COALESCE(cs.oauth_refresh_token, ''), cs.oauth_token_expiry,
 		       cs.sync_enabled, cs.sync_interval, cs.last_sync, COALESCE(cs.last_error, ''), COALESCE(cs.sync_token, ''),
 		       cs.color, cs.created_at, cs.updated_at, COALESCE(cs.ics_url, ''), cs.account_id,
-		       COALESCE(a.email, '')
+		       COALESCE(a.email, ''),
+		       COALESCE(cs.default_alarm_enabled, false), COALESCE(cs.default_alarm_before, 15), COALESCE(cs.default_alarm_unit, 'minutes')
 		FROM calendar_sources cs
 		LEFT JOIN accounts a ON cs.account_id = a.id
 		WHERE cs.user_id = $1
@@ -107,6 +110,7 @@ func (db *DB) GetCalendarSourcesByUserID(userID int64) ([]*models.CalendarSource
 			&source.SyncEnabled, &source.SyncInterval, &lastSync, &source.LastError, &source.SyncToken,
 			&source.Color, &source.CreatedAt, &source.UpdatedAt, &source.IcsURL, &accountID,
 			&source.AccountEmail,
+			&source.DefaultAlarmEnabled, &source.DefaultAlarmBefore, &source.DefaultAlarmUnit,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan calendar source: %w", err)
@@ -145,7 +149,8 @@ func (db *DB) GetCalendarSourceByID(id int64) (*models.CalendarSource, error) {
 		       COALESCE(cs.auth_type, 'password'), COALESCE(cs.oauth_access_token, ''), COALESCE(cs.oauth_refresh_token, ''), cs.oauth_token_expiry,
 		       cs.sync_enabled, cs.sync_interval, cs.last_sync, COALESCE(cs.last_error, ''), COALESCE(cs.sync_token, ''),
 		       cs.color, cs.created_at, cs.updated_at, COALESCE(cs.ics_url, ''), cs.account_id,
-		       COALESCE(a.email, '')
+		       COALESCE(a.email, ''),
+		       COALESCE(cs.default_alarm_enabled, false), COALESCE(cs.default_alarm_before, 15), COALESCE(cs.default_alarm_unit, 'minutes')
 		FROM calendar_sources cs
 		LEFT JOIN accounts a ON cs.account_id = a.id
 		WHERE cs.id = $1
@@ -158,6 +163,7 @@ func (db *DB) GetCalendarSourceByID(id int64) (*models.CalendarSource, error) {
 		&source.SyncEnabled, &source.SyncInterval, &lastSync, &source.LastError, &source.SyncToken,
 		&source.Color, &source.CreatedAt, &source.UpdatedAt, &source.IcsURL, &accountID,
 		&source.AccountEmail,
+		&source.DefaultAlarmEnabled, &source.DefaultAlarmBefore, &source.DefaultAlarmUnit,
 	)
 
 	if err == sql.ErrNoRows {
@@ -202,14 +208,16 @@ func (db *DB) UpdateCalendarSource(source *models.CalendarSource) error {
 	query := `
 		UPDATE calendar_sources
 		SET name = $1, caldav_url = $2, caldav_username = $3, caldav_password = $4,
-		    sync_enabled = $5, sync_interval = $6, color = $7, updated_at = $8, account_id = $9
-		WHERE id = $10
+		    sync_enabled = $5, sync_interval = $6, color = $7, updated_at = $8, account_id = $9,
+		    default_alarm_enabled = $10, default_alarm_before = $11, default_alarm_unit = $12
+		WHERE id = $13
 	`
 
 	_, err = db.Exec(
 		query,
 		source.Name, source.CalDAVURL, source.CalDAVUsername, encryptedPassword,
-		source.SyncEnabled, source.SyncInterval, source.Color, source.UpdatedAt, source.AccountID, source.ID,
+		source.SyncEnabled, source.SyncInterval, source.Color, source.UpdatedAt, source.AccountID,
+		source.DefaultAlarmEnabled, source.DefaultAlarmBefore, source.DefaultAlarmUnit, source.ID,
 	)
 
 	if err != nil {
@@ -256,7 +264,8 @@ func (db *DB) GetAllEnabledCalendarSources() ([]*models.CalendarSource, error) {
 		       COALESCE(cs.caldav_url, ''), COALESCE(cs.caldav_username, ''), COALESCE(cs.caldav_password, ''),
 		       COALESCE(cs.auth_type, 'password'), COALESCE(cs.oauth_access_token, ''), COALESCE(cs.oauth_refresh_token, ''), cs.oauth_token_expiry,
 		       cs.sync_enabled, cs.sync_interval, cs.last_sync, COALESCE(cs.last_error, ''), COALESCE(cs.sync_token, ''),
-		       cs.color, cs.created_at, cs.updated_at, COALESCE(cs.ics_url, ''), cs.account_id
+		       cs.color, cs.created_at, cs.updated_at, COALESCE(cs.ics_url, ''), cs.account_id,
+		       COALESCE(cs.default_alarm_enabled, false), COALESCE(cs.default_alarm_before, 15), COALESCE(cs.default_alarm_unit, 'minutes')
 		FROM calendar_sources cs
 		WHERE cs.sync_enabled = true AND cs.source_type IN ('caldav', 'ics_url')
 		ORDER BY cs.last_sync ASC NULLS FIRST
@@ -280,6 +289,7 @@ func (db *DB) GetAllEnabledCalendarSources() ([]*models.CalendarSource, error) {
 			&source.AuthType, &source.OAuthAccessToken, &source.OAuthRefreshToken, &tokenExpiry,
 			&source.SyncEnabled, &source.SyncInterval, &lastSync, &source.LastError, &source.SyncToken,
 			&source.Color, &source.CreatedAt, &source.UpdatedAt, &source.IcsURL, &accountID,
+			&source.DefaultAlarmEnabled, &source.DefaultAlarmBefore, &source.DefaultAlarmUnit,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan calendar source: %w", err)
