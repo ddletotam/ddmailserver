@@ -650,6 +650,64 @@ func (s *Server) syncICSURLSource(ctx context.Context, source *models.CalendarSo
 	return nil
 }
 
+// HandleUpdateCalendarSourceWeb updates a calendar source (web form handler)
+func (s *Server) HandleUpdateCalendarSourceWeb(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	vars := mux.Vars(r)
+	sourceID, err := strconv.ParseInt(vars["id"], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid source ID", http.StatusBadRequest)
+		return
+	}
+
+	existing, err := s.database.GetCalendarSourceByID(sourceID)
+	if err != nil || existing == nil || existing.UserID != user.ID {
+		http.Error(w, "Source not found", http.StatusNotFound)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Invalid form data", http.StatusBadRequest)
+		return
+	}
+
+	// Update fields
+	if name := r.FormValue("name"); name != "" {
+		existing.Name = name
+	}
+	if color := r.FormValue("color"); color != "" {
+		existing.Color = color
+	}
+	if intervalStr := r.FormValue("sync_interval"); intervalStr != "" {
+		if v, err := strconv.Atoi(intervalStr); err == nil && v >= 15 {
+			existing.SyncInterval = v
+		}
+	}
+
+	existing.DefaultAlarmEnabled = r.FormValue("default_alarm_enabled") == "true"
+
+	if v, err := strconv.Atoi(r.FormValue("default_alarm_before")); err == nil && v > 0 {
+		existing.DefaultAlarmBefore = v
+	}
+	if unit := r.FormValue("default_alarm_unit"); unit == "minutes" || unit == "hours" || unit == "days" {
+		existing.DefaultAlarmUnit = unit
+	}
+
+	if err := s.database.UpdateCalendarSource(existing); err != nil {
+		log.Printf("Failed to update calendar source: %v", err)
+		http.Error(w, "Failed to update source", http.StatusInternalServerError)
+		return
+	}
+
+	// Return updated sources list
+	s.HandleCalendarSourcesList(w, r)
+}
+
 // HandleDeleteCalendarSourceWeb deletes a calendar source (web UI)
 func (s *Server) HandleDeleteCalendarSourceWeb(w http.ResponseWriter, r *http.Request) {
 	user := s.GetUserFromContext(r.Context())

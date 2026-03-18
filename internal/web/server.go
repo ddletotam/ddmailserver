@@ -124,6 +124,8 @@ func (s *Server) setupRoutes() {
 	oauthRouter.HandleFunc("/google/callback", s.HandleGoogleOAuthCallback).Methods("GET")
 	oauthRouter.HandleFunc("/google/calendar/start", s.HandleGoogleCalendarOAuthStart).Methods("GET")
 	oauthRouter.HandleFunc("/google/calendar/callback", s.HandleGoogleCalendarOAuthCallback).Methods("GET")
+	oauthRouter.HandleFunc("/google/contacts/start", s.HandleGoogleContactsOAuthStart).Methods("GET")
+	oauthRouter.HandleFunc("/google/contacts/callback", s.HandleGoogleContactsOAuthCallback).Methods("GET")
 	oauthRouter.HandleFunc("/microsoft/start", s.HandleMicrosoftOAuthStart).Methods("GET")
 	oauthRouter.HandleFunc("/microsoft/callback", s.HandleMicrosoftOAuthCallback).Methods("GET")
 
@@ -218,6 +220,7 @@ func (s *Server) setupRoutes() {
 	web.HandleFunc("/calendars/sources/create-ics-url", s.HandleCreateICSURLSource).Methods("POST")
 	web.HandleFunc("/calendars/create", s.HandleCreateLocalCalendar).Methods("POST")
 	web.HandleFunc("/calendars/sources/{id}/sync", s.HandleSyncCalendarSource).Methods("POST")
+	web.HandleFunc("/calendars/sources/{id}/update", s.HandleUpdateCalendarSourceWeb).Methods("POST")
 	web.HandleFunc("/calendars/sources/{id}", s.HandleDeleteCalendarSourceWeb).Methods("DELETE")
 	web.HandleFunc("/calendars/{id}", s.HandleDeleteCalendarWeb).Methods("DELETE")
 	web.HandleFunc("/calendars/import", s.HandleImportICSWeb).Methods("POST")
