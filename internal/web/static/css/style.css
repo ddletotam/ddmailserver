@@ -770,7 +770,8 @@ textarea:focus {
 
 .message-html-frame {
     width: 100%;
-    min-height: 400px;
+    min-height: 600px;
+    height: 80vh;
     border: none;
 }
 
