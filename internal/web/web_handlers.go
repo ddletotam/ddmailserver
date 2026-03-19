@@ -504,8 +504,8 @@ func (s *Server) HandleMessagePage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	message, err := s.database.GetMessageByID(id)
-	if err != nil {
-		http.Error(w, "Message not found", http.StatusNotFound)
+	if err != nil || message.UserID != user.ID {
+		http.Redirect(w, r, "/inbox?error=message_not_found", http.StatusSeeOther)
 		return
 	}
 

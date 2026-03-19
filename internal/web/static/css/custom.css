@@ -133,3 +133,21 @@
 .oauth-instructions li {
     margin-bottom: 0.25rem;
 }
+
+/* Message view */
+.message-body {
+    padding: 2rem;
+}
+
+.message-html-frame {
+    width: 100%;
+    min-height: 600px;
+    height: 80vh;
+    border: none;
+}
+
+.message-text {
+    white-space: pre-wrap;
+    font-family: 'Courier New', monospace;
+    font-size: 0.875rem;
+}
