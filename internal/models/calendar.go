@@ -73,6 +73,8 @@ type Calendar struct {
 	Timezone    string `json:"timezone"`
 	CTag        string `json:"-"` // for sync
 	CanWrite    bool   `json:"can_write"`
+	ReverseSync bool   `json:"reverse_sync"` // Sync changes back to external CalDAV
+	Enabled     bool   `json:"enabled"`      // Calendar is active (synced, shown in CalDAV)
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

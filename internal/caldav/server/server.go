@@ -253,7 +253,7 @@ func (s *Server) propfindCalendarHome(user *models.User, depth string, prefix st
 	principalURL := fmt.Sprintf("%sprincipals/users/%s/", prefix, user.Username)
 	calendarHomeURL := fmt.Sprintf("%scalendars/%s/", prefix, user.Username)
 
-	calendars, err := s.database.GetCalendarsByUserID(user.ID)
+	calendars, err := s.database.GetEnabledCalendarsByUserID(user.ID)
 	if err != nil {
 		log.Printf("Failed to get calendars: %v", err)
 		calendars = []*models.Calendar{}
@@ -797,13 +797,16 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 	// Check if event exists
 	existing, err := s.database.GetEventByUID(calID, uid)
 	if err != nil {
+		log.Printf("CalDAV PUT: GetEventByUID error for cal=%d uid=%s: %v", calID, uid, err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
+	log.Printf("CalDAV PUT: cal=%d uid=%s existing=%v", calID, uid, existing != nil)
 
 	if existing != nil {
 		// Check ETag
 		if ifMatch != "" && ifMatch != existing.ETag {
+			log.Printf("CalDAV PUT: ETag mismatch cal=%d uid=%s ifMatch=%s existing.ETag=%s", calID, uid, ifMatch, existing.ETag)
 			http.Error(w, "Precondition failed", http.StatusPreconditionFailed)
 			return
 		}
@@ -821,9 +824,11 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 		existing.LocalModified = true
 
 		if err := s.database.UpdateCalendarEvent(existing); err != nil {
+			log.Printf("CalDAV PUT: UpdateCalendarEvent error for cal=%d uid=%s: %v", calID, uid, err)
 			http.Error(w, "Failed to update event", http.StatusInternalServerError)
 			return
 		}
+		log.Printf("CalDAV PUT: updated event id=%d cal=%d uid=%s summary=%s", existing.ID, calID, uid, event.Summary)
 
 		// Queue reverse sync for external calendars
 		s.queueEventSync(cal, existing.ID, uid, existing.RemoteID, event.ICalData, "update")
@@ -838,9 +843,11 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 
 		// Create new event
 		if err := s.database.CreateCalendarEvent(event); err != nil {
+			log.Printf("CalDAV PUT: CreateCalendarEvent error for cal=%d uid=%s: %v", calID, uid, err)
 			http.Error(w, "Failed to create event", http.StatusInternalServerError)
 			return
 		}
+		log.Printf("CalDAV PUT: created event id=%d cal=%d uid=%s summary=%s", event.ID, calID, uid, event.Summary)
 
 		// Queue reverse sync for external calendars
 		s.queueEventSync(cal, event.ID, uid, "", event.ICalData, "create")
@@ -895,14 +902,14 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, user *mode
 	// Get event before deletion for reverse sync
 	existingEvent, _ := s.database.GetEventByUID(calID, uid)
 
+	// Queue reverse sync BEFORE deletion (FK constraint on event_id)
+	if existingEvent != nil {
+		s.queueEventSync(cal, existingEvent.ID, uid, existingEvent.RemoteID, "", "delete")
+	}
+
 	if err := s.database.DeleteCalendarEventByUID(calID, uid); err != nil {
 		http.Error(w, "Failed to delete event", http.StatusInternalServerError)
 		return
-	}
-
-	// Queue reverse sync for external calendars
-	if existingEvent != nil {
-		s.queueEventSync(cal, existingEvent.ID, uid, existingEvent.RemoteID, "", "delete")
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -961,12 +968,20 @@ func (s *Server) handleMkcalendar(w http.ResponseWriter, r *http.Request, user *
 
 // queueEventSync queues an event change for reverse sync to external CalDAV server
 func (s *Server) queueEventSync(cal *models.Calendar, eventID int64, uid, remoteID, icalData, operation string) {
-	// Only queue for external CalDAV sources
+	// Only queue for enabled external CalDAV sources with reverse sync enabled
 	if cal.SourceType != "caldav" {
+		return
+	}
+	if !cal.Enabled {
+		return
+	}
+	if !cal.ReverseSync {
 		return
 	}
 	if err := s.database.QueueCalendarEventSync(eventID, cal.ID, cal.SourceID, uid, remoteID, icalData, operation); err != nil {
 		log.Printf("Failed to queue calendar event sync: %v", err)
+	} else {
+		log.Printf("queueEventSync: queued eventID=%d for sync to source=%d", eventID, cal.SourceID)
 	}
 }
 

@@ -71,7 +71,9 @@ type AddressBook struct {
 	Description string `json:"description"`
 	CTag        string `json:"-"` // for sync
 
-	CanWrite bool `json:"can_write"`
+	CanWrite    bool `json:"can_write"`
+	ReverseSync bool `json:"reverse_sync"` // Sync changes back to external CardDAV
+	Enabled     bool `json:"enabled"`      // Address book is active (synced, shown in CardDAV)
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

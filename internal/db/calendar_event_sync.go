@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
@@ -19,10 +20,13 @@ func (db *DB) QueueCalendarEventSync(eventID, calendarID, sourceID int64, uid, r
 			created_at = EXCLUDED.created_at
 	`
 
-	_, err := db.Exec(query, eventID, calendarID, sourceID, uid, remoteID, icalData, operation, time.Now())
+	result, err := db.Exec(query, eventID, calendarID, sourceID, uid, remoteID, icalData, operation, time.Now())
 	if err != nil {
 		return fmt.Errorf("failed to queue calendar event sync: %w", err)
 	}
+
+	rowsAffected, _ := result.RowsAffected()
+	log.Printf("QueueCalendarEventSync: eventID=%d sourceID=%d operation=%s rowsAffected=%d", eventID, sourceID, operation, rowsAffected)
 
 	return nil
 }

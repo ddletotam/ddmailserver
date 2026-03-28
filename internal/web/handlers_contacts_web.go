@@ -422,6 +422,8 @@ func (s *Server) syncContactSource(ctx context.Context, source *models.ContactSo
 		if existingBook == nil {
 			remoteBook.SourceID = source.ID
 			remoteBook.UserID = source.UserID
+			remoteBook.ReverseSync = true // Enable bidirectional sync by default for CardDAV
+			remoteBook.Enabled = true
 			if err := s.database.CreateAddressBook(remoteBook); err != nil {
 				syncErrors = append(syncErrors, fmt.Sprintf("create %s: %v", remoteBook.Name, err))
 				continue
