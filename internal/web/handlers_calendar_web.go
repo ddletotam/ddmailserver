@@ -468,6 +468,8 @@ func (s *Server) syncCalendarSource(ctx context.Context, source *models.Calendar
 		if existingCal == nil {
 			remoteCal.SourceID = source.ID
 			remoteCal.UserID = source.UserID
+			remoteCal.ReverseSync = true // Enable bidirectional sync by default for CalDAV
+			remoteCal.Enabled = true
 			if err := s.database.CreateCalendar(remoteCal); err != nil {
 				syncErrors = append(syncErrors, fmt.Sprintf("create %s: %v", remoteCal.Name, err))
 				continue

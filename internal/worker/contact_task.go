@@ -92,6 +92,8 @@ func (t *ContactSyncTask) doSync(ctx context.Context) error {
 			// Create new address book in DB
 			remoteBook.SourceID = t.source.ID
 			remoteBook.UserID = t.source.UserID
+			remoteBook.ReverseSync = true // Enable bidirectional sync by default for CardDAV
+			remoteBook.Enabled = true
 			if err := t.database.CreateAddressBook(remoteBook); err != nil {
 				log.Printf("Failed to create address book %s: %v", remoteBook.Name, err)
 				syncErrors = append(syncErrors, fmt.Sprintf("create address book %s: %v", remoteBook.Name, err))

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -33,6 +34,24 @@ func New(source *models.CalendarSource, database *db.DB) *Client {
 		source:   source,
 		database: database,
 	}
+}
+
+// buildFullURL constructs a full URL from the source's CalDAV URL and a remote path
+func (c *Client) buildFullURL(remotePath string) string {
+	// If remotePath is already a full URL, return it as-is
+	if strings.HasPrefix(remotePath, "http://") || strings.HasPrefix(remotePath, "https://") {
+		return remotePath
+	}
+
+	// Parse the source's CalDAV URL to get the base (scheme + host)
+	parsed, err := url.Parse(c.source.CalDAVURL)
+	if err != nil {
+		// Fallback: just return the path (will fail, but with a clearer error)
+		return remotePath
+	}
+
+	// Construct full URL: scheme://host + remotePath
+	return fmt.Sprintf("%s://%s%s", parsed.Scheme, parsed.Host, remotePath)
 }
 
 // Connect establishes a connection to the CalDAV server
@@ -562,7 +581,10 @@ func (c *Client) PutEventRaw(ctx context.Context, remotePath string, icalData st
 		return fmt.Errorf("client not connected")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "PUT", remotePath, strings.NewReader(icalData))
+	// Build full URL from source's CalDAV URL and remote path
+	fullURL := c.buildFullURL(remotePath)
+
+	req, err := http.NewRequestWithContext(ctx, "PUT", fullURL, strings.NewReader(icalData))
 	if err != nil {
 		return fmt.Errorf("failed to create PUT request: %w", err)
 	}
@@ -588,7 +610,10 @@ func (c *Client) DeleteEvent(ctx context.Context, remotePath string) error {
 		return fmt.Errorf("client not connected")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "DELETE", remotePath, nil)
+	// Build full URL from source's CalDAV URL and remote path
+	fullURL := c.buildFullURL(remotePath)
+
+	req, err := http.NewRequestWithContext(ctx, "DELETE", fullURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create DELETE request: %w", err)
 	}

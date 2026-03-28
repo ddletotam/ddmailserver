@@ -21,8 +21,8 @@ func (db *DB) CreateCalendar(cal *models.Calendar) error {
 	query := `
 		INSERT INTO calendars (
 			source_id, user_id, remote_id, name, description, color, timezone, ctag, can_write,
-			created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			reverse_sync, enabled, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		RETURNING id
 	`
 
@@ -30,7 +30,7 @@ func (db *DB) CreateCalendar(cal *models.Calendar) error {
 		query,
 		cal.SourceID, cal.UserID, remoteID, cal.Name, cal.Description,
 		cal.Color, cal.Timezone, cal.CTag, cal.CanWrite,
-		cal.CreatedAt, cal.UpdatedAt,
+		cal.ReverseSync, cal.Enabled, cal.CreatedAt, cal.UpdatedAt,
 	).Scan(&cal.ID)
 
 	if err != nil {
@@ -42,16 +42,29 @@ func (db *DB) CreateCalendar(cal *models.Calendar) error {
 
 // GetCalendarsByUserID retrieves all calendars for a user
 func (db *DB) GetCalendarsByUserID(userID int64) ([]*models.Calendar, error) {
+	return db.GetCalendarsByUserIDFiltered(userID, false)
+}
+
+// GetEnabledCalendarsByUserID retrieves only enabled calendars for a user
+func (db *DB) GetEnabledCalendarsByUserID(userID int64) ([]*models.Calendar, error) {
+	return db.GetCalendarsByUserIDFiltered(userID, true)
+}
+
+// GetCalendarsByUserIDFiltered retrieves calendars for a user with optional enabled filter
+func (db *DB) GetCalendarsByUserIDFiltered(userID int64, enabledOnly bool) ([]*models.Calendar, error) {
 	query := `
 		SELECT c.id, c.source_id, c.user_id, COALESCE(c.remote_id, ''), c.name,
 		       COALESCE(c.description, ''), COALESCE(c.color, s.color), c.timezone,
-		       COALESCE(c.ctag, ''), c.can_write, c.created_at, c.updated_at,
-		       s.source_type
+		       COALESCE(c.ctag, ''), c.can_write, COALESCE(c.reverse_sync, false),
+		       COALESCE(c.enabled, true), c.created_at, c.updated_at, s.source_type
 		FROM calendars c
 		JOIN calendar_sources s ON c.source_id = s.id
 		WHERE c.user_id = $1
-		ORDER BY c.created_at DESC
 	`
+	if enabledOnly {
+		query += " AND COALESCE(c.enabled, true) = true"
+	}
+	query += " ORDER BY c.created_at DESC"
 
 	rows, err := db.Query(query, userID)
 	if err != nil {
@@ -66,8 +79,8 @@ func (db *DB) GetCalendarsByUserID(userID int64) ([]*models.Calendar, error) {
 		err := rows.Scan(
 			&cal.ID, &cal.SourceID, &cal.UserID, &cal.RemoteID, &cal.Name,
 			&cal.Description, &cal.Color, &cal.Timezone,
-			&cal.CTag, &cal.CanWrite, &cal.CreatedAt, &cal.UpdatedAt,
-			&cal.SourceType,
+			&cal.CTag, &cal.CanWrite, &cal.ReverseSync,
+			&cal.Enabled, &cal.CreatedAt, &cal.UpdatedAt, &cal.SourceType,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan calendar: %w", err)
@@ -86,8 +99,8 @@ func (db *DB) GetCalendarByID(id int64) (*models.Calendar, error) {
 	query := `
 		SELECT c.id, c.source_id, c.user_id, COALESCE(c.remote_id, ''), c.name,
 		       COALESCE(c.description, ''), COALESCE(c.color, s.color), c.timezone,
-		       COALESCE(c.ctag, ''), c.can_write, c.created_at, c.updated_at,
-		       s.source_type
+		       COALESCE(c.ctag, ''), c.can_write, COALESCE(c.reverse_sync, false),
+		       COALESCE(c.enabled, true), c.created_at, c.updated_at, s.source_type
 		FROM calendars c
 		JOIN calendar_sources s ON c.source_id = s.id
 		WHERE c.id = $1
@@ -96,8 +109,8 @@ func (db *DB) GetCalendarByID(id int64) (*models.Calendar, error) {
 	err := db.QueryRow(query, id).Scan(
 		&cal.ID, &cal.SourceID, &cal.UserID, &cal.RemoteID, &cal.Name,
 		&cal.Description, &cal.Color, &cal.Timezone,
-		&cal.CTag, &cal.CanWrite, &cal.CreatedAt, &cal.UpdatedAt,
-		&cal.SourceType,
+		&cal.CTag, &cal.CanWrite, &cal.ReverseSync,
+		&cal.Enabled, &cal.CreatedAt, &cal.UpdatedAt, &cal.SourceType,
 	)
 
 	if err == sql.ErrNoRows {
@@ -115,8 +128,8 @@ func (db *DB) GetCalendarsBySourceID(sourceID int64) ([]*models.Calendar, error)
 	query := `
 		SELECT c.id, c.source_id, c.user_id, COALESCE(c.remote_id, ''), c.name,
 		       COALESCE(c.description, ''), COALESCE(c.color, s.color), c.timezone,
-		       COALESCE(c.ctag, ''), c.can_write, c.created_at, c.updated_at,
-		       s.source_type
+		       COALESCE(c.ctag, ''), c.can_write, COALESCE(c.reverse_sync, false),
+		       COALESCE(c.enabled, true), c.created_at, c.updated_at, s.source_type
 		FROM calendars c
 		JOIN calendar_sources s ON c.source_id = s.id
 		WHERE c.source_id = $1
@@ -136,8 +149,8 @@ func (db *DB) GetCalendarsBySourceID(sourceID int64) ([]*models.Calendar, error)
 		err := rows.Scan(
 			&cal.ID, &cal.SourceID, &cal.UserID, &cal.RemoteID, &cal.Name,
 			&cal.Description, &cal.Color, &cal.Timezone,
-			&cal.CTag, &cal.CanWrite, &cal.CreatedAt, &cal.UpdatedAt,
-			&cal.SourceType,
+			&cal.CTag, &cal.CanWrite, &cal.ReverseSync,
+			&cal.Enabled, &cal.CreatedAt, &cal.UpdatedAt, &cal.SourceType,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan calendar: %w", err)

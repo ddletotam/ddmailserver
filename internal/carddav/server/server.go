@@ -463,13 +463,14 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, user *mode
 		return
 	}
 
+	// Queue sync BEFORE delete (FK constraint would fail after delete)
+	if existingContact != nil {
+		s.queueContactSync(book, existingContact.ID, uid, existingContact.RemoteID, "", "delete")
+	}
+
 	if err := s.database.DeleteContactByUID(bookID, uid); err != nil {
 		http.Error(w, "Failed to delete contact", http.StatusInternalServerError)
 		return
-	}
-
-	if existingContact != nil {
-		s.queueContactSync(book, existingContact.ID, uid, existingContact.RemoteID, "", "delete")
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -538,7 +539,14 @@ func (s *Server) handleMkcol(w http.ResponseWriter, r *http.Request, user *model
 
 // queueContactSync queues a contact change for push to remote CardDAV server
 func (s *Server) queueContactSync(book *models.AddressBook, contactID int64, uid, remoteID, vcardData, operation string) {
+	// Only queue for enabled external CardDAV sources with reverse sync enabled
 	if book.SourceType != "carddav" {
+		return
+	}
+	if !book.Enabled {
+		return
+	}
+	if !book.ReverseSync {
 		return
 	}
 	if err := s.database.QueueContactSync(contactID, book.ID, book.SourceID, uid, remoteID, vcardData, operation); err != nil {

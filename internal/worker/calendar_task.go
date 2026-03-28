@@ -92,6 +92,8 @@ func (t *CalendarSyncTask) doSync(ctx context.Context) error {
 			// Create new calendar in DB
 			remoteCal.SourceID = t.source.ID
 			remoteCal.UserID = t.source.UserID
+			remoteCal.ReverseSync = true // Enable bidirectional sync by default for CalDAV
+			remoteCal.Enabled = true
 			if err := t.database.CreateCalendar(remoteCal); err != nil {
 				log.Printf("Failed to create calendar %s: %v", remoteCal.Name, err)
 				syncErrors = append(syncErrors, fmt.Sprintf("create calendar %s: %v", remoteCal.Name, err))

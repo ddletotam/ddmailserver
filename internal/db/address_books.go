@@ -15,8 +15,9 @@ func (db *DB) CreateAddressBook(book *models.AddressBook) error {
 
 	query := `
 		INSERT INTO address_books (
-			user_id, source_id, remote_id, name, description, ctag, can_write, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			user_id, source_id, remote_id, name, description, ctag, can_write,
+			reverse_sync, enabled, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING id
 	`
 
@@ -24,6 +25,7 @@ func (db *DB) CreateAddressBook(book *models.AddressBook) error {
 		query,
 		book.UserID, book.SourceID, book.RemoteID,
 		book.Name, book.Description, book.CTag, book.CanWrite,
+		book.ReverseSync, book.Enabled,
 		book.CreatedAt, book.UpdatedAt,
 	).Scan(&book.ID)
 
@@ -36,16 +38,29 @@ func (db *DB) CreateAddressBook(book *models.AddressBook) error {
 
 // GetAddressBooksByUserID retrieves all address books for a user
 func (db *DB) GetAddressBooksByUserID(userID int64) ([]*models.AddressBook, error) {
+	return db.GetAddressBooksByUserIDFiltered(userID, false)
+}
+
+// GetEnabledAddressBooksByUserID retrieves only enabled address books for a user
+func (db *DB) GetEnabledAddressBooksByUserID(userID int64) ([]*models.AddressBook, error) {
+	return db.GetAddressBooksByUserIDFiltered(userID, true)
+}
+
+// GetAddressBooksByUserIDFiltered retrieves address books for a user with optional enabled filter
+func (db *DB) GetAddressBooksByUserIDFiltered(userID int64, enabledOnly bool) ([]*models.AddressBook, error) {
 	query := `
 		SELECT ab.id, ab.user_id, ab.source_id, COALESCE(ab.remote_id, ''),
 		       ab.name, COALESCE(ab.description, ''), COALESCE(ab.ctag, ''),
-		       ab.can_write, ab.created_at, ab.updated_at,
-		       cs.source_type
+		       ab.can_write, COALESCE(ab.reverse_sync, false), COALESCE(ab.enabled, true),
+		       ab.created_at, ab.updated_at, cs.source_type
 		FROM address_books ab
 		JOIN contact_sources cs ON ab.source_id = cs.id
 		WHERE ab.user_id = $1
-		ORDER BY ab.name ASC
 	`
+	if enabledOnly {
+		query += " AND COALESCE(ab.enabled, true) = true"
+	}
+	query += " ORDER BY ab.name ASC"
 
 	rows, err := db.Query(query, userID)
 	if err != nil {
@@ -61,8 +76,8 @@ func (db *DB) GetAddressBooksBySourceID(sourceID int64) ([]*models.AddressBook, 
 	query := `
 		SELECT ab.id, ab.user_id, ab.source_id, COALESCE(ab.remote_id, ''),
 		       ab.name, COALESCE(ab.description, ''), COALESCE(ab.ctag, ''),
-		       ab.can_write, ab.created_at, ab.updated_at,
-		       cs.source_type
+		       ab.can_write, COALESCE(ab.reverse_sync, false), COALESCE(ab.enabled, true),
+		       ab.created_at, ab.updated_at, cs.source_type
 		FROM address_books ab
 		JOIN contact_sources cs ON ab.source_id = cs.id
 		WHERE ab.source_id = $1
@@ -83,8 +98,8 @@ func (db *DB) GetAddressBookByID(id int64) (*models.AddressBook, error) {
 	query := `
 		SELECT ab.id, ab.user_id, ab.source_id, COALESCE(ab.remote_id, ''),
 		       ab.name, COALESCE(ab.description, ''), COALESCE(ab.ctag, ''),
-		       ab.can_write, ab.created_at, ab.updated_at,
-		       cs.source_type
+		       ab.can_write, COALESCE(ab.reverse_sync, false), COALESCE(ab.enabled, true),
+		       ab.created_at, ab.updated_at, cs.source_type
 		FROM address_books ab
 		JOIN contact_sources cs ON ab.source_id = cs.id
 		WHERE ab.id = $1
@@ -94,8 +109,8 @@ func (db *DB) GetAddressBookByID(id int64) (*models.AddressBook, error) {
 	err := db.QueryRow(query, id).Scan(
 		&book.ID, &book.UserID, &book.SourceID, &book.RemoteID,
 		&book.Name, &book.Description, &book.CTag,
-		&book.CanWrite, &book.CreatedAt, &book.UpdatedAt,
-		&book.SourceType,
+		&book.CanWrite, &book.ReverseSync, &book.Enabled,
+		&book.CreatedAt, &book.UpdatedAt, &book.SourceType,
 	)
 
 	if err == sql.ErrNoRows {
@@ -113,8 +128,8 @@ func (db *DB) GetAddressBookByRemoteID(sourceID int64, remoteID string) (*models
 	query := `
 		SELECT ab.id, ab.user_id, ab.source_id, COALESCE(ab.remote_id, ''),
 		       ab.name, COALESCE(ab.description, ''), COALESCE(ab.ctag, ''),
-		       ab.can_write, ab.created_at, ab.updated_at,
-		       cs.source_type
+		       ab.can_write, COALESCE(ab.reverse_sync, false), COALESCE(ab.enabled, true),
+		       ab.created_at, ab.updated_at, cs.source_type
 		FROM address_books ab
 		JOIN contact_sources cs ON ab.source_id = cs.id
 		WHERE ab.source_id = $1 AND ab.remote_id = $2
@@ -124,8 +139,8 @@ func (db *DB) GetAddressBookByRemoteID(sourceID int64, remoteID string) (*models
 	err := db.QueryRow(query, sourceID, remoteID).Scan(
 		&book.ID, &book.UserID, &book.SourceID, &book.RemoteID,
 		&book.Name, &book.Description, &book.CTag,
-		&book.CanWrite, &book.CreatedAt, &book.UpdatedAt,
-		&book.SourceType,
+		&book.CanWrite, &book.ReverseSync, &book.Enabled,
+		&book.CreatedAt, &book.UpdatedAt, &book.SourceType,
 	)
 
 	if err == sql.ErrNoRows {
@@ -189,8 +204,8 @@ func scanAddressBooks(rows *sql.Rows) ([]*models.AddressBook, error) {
 		err := rows.Scan(
 			&book.ID, &book.UserID, &book.SourceID, &book.RemoteID,
 			&book.Name, &book.Description, &book.CTag,
-			&book.CanWrite, &book.CreatedAt, &book.UpdatedAt,
-			&book.SourceType,
+			&book.CanWrite, &book.ReverseSync, &book.Enabled,
+			&book.CreatedAt, &book.UpdatedAt, &book.SourceType,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan address book: %w", err)
@@ -218,6 +233,7 @@ func (db *DB) GetOrCreateLocalAddressBook(userID int64, sourceID int64) (*models
 		SourceID: sourceID,
 		Name:     "Contacts",
 		CanWrite: true,
+		Enabled:  true,
 	}
 
 	if err := db.CreateAddressBook(book); err != nil {

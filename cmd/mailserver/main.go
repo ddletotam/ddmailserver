@@ -109,15 +109,36 @@ func main() {
 	scheduler := worker.NewScheduler(pool, database, cfg.Sync.Interval)
 
 	// Set OAuth clients for token refresh in calendar sync
+	// Try config first, then fall back to database
 	var googleOAuth *oauth.GoogleOAuth
 	var microsoftOAuth *oauth.MicrosoftOAuth
 	if cfg.OAuth.Google.ClientID != "" && cfg.OAuth.Google.ClientSecret != "" {
 		googleOAuth = oauth.NewGoogleOAuth(&cfg.OAuth.Google)
-		log.Printf("Google OAuth configured for scheduler")
+		log.Printf("Google OAuth configured for scheduler (from config)")
+	} else {
+		// Try loading from database
+		if settings, err := database.GetGoogleOAuthSettings(); err == nil && settings.ClientID != "" && settings.ClientSecret != "" {
+			googleOAuth = oauth.NewGoogleOAuth(&config.GoogleOAuthConfig{
+				ClientID:     settings.ClientID,
+				ClientSecret: settings.ClientSecret,
+				RedirectURI:  settings.RedirectURI,
+			})
+			log.Printf("Google OAuth configured for scheduler (from database)")
+		}
 	}
 	if cfg.OAuth.Microsoft.ClientID != "" && cfg.OAuth.Microsoft.ClientSecret != "" {
 		microsoftOAuth = oauth.NewMicrosoftOAuth(&cfg.OAuth.Microsoft)
-		log.Printf("Microsoft OAuth configured for scheduler")
+		log.Printf("Microsoft OAuth configured for scheduler (from config)")
+	} else {
+		// Try loading from database
+		if settings, err := database.GetMicrosoftOAuthSettings(); err == nil && settings.ClientID != "" && settings.ClientSecret != "" {
+			microsoftOAuth = oauth.NewMicrosoftOAuth(&config.MicrosoftOAuthConfig{
+				ClientID:     settings.ClientID,
+				ClientSecret: settings.ClientSecret,
+				RedirectURI:  settings.RedirectURI,
+			})
+			log.Printf("Microsoft OAuth configured for scheduler (from database)")
+		}
 	}
 	scheduler.SetOAuthClients(googleOAuth, microsoftOAuth)
 
