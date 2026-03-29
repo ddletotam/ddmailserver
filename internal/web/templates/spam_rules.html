@@ -1,0 +1,191 @@
+{{define "content"}}
+<!-- Analyze Message for Spam -->
+<div class="card mb-3">
+    <div class="card-header">
+        <h3 class="card-title">
+            <i class="ti ti-scan me-2"></i>{{t "spam.analyze.title"}}
+        </h3>
+    </div>
+    <div class="card-body">
+        <p class="text-muted mb-3">{{t "spam.analyze.hint"}}</p>
+        <form hx-post="/spam/analyze-by-message-id" hx-target="#analyze-result" hx-swap="innerHTML">
+            <div class="row g-3 align-items-end">
+                <div class="col">
+                    <label class="form-label">Message-ID</label>
+                    <input type="text" name="message_id" class="form-control"
+                           placeholder="&lt;CAExample123@mail.example.com&gt;" required>
+                </div>
+                <div class="col-auto">
+                    <button type="submit" class="btn btn-primary">
+                        <i class="ti ti-scan me-1"></i>{{t "spam.analyze.button"}}
+                    </button>
+                </div>
+            </div>
+        </form>
+        <div id="analyze-result" class="mt-3"></div>
+    </div>
+</div>
+
+<!-- Mark Message as Spam by Message-ID -->
+<div class="card mb-3">
+    <div class="card-header">
+        <h3 class="card-title">
+            <i class="ti ti-mail-x me-2"></i>{{t "spam.rules.mark_message"}}
+        </h3>
+    </div>
+    <div class="card-body">
+        <p class="text-muted mb-3">{{t "spam.rules.mark_message_hint"}}</p>
+        <form hx-post="/spam/mark-by-message-id" hx-target="#mark-result" hx-swap="innerHTML">
+            <div class="row g-3 align-items-end">
+                <div class="col">
+                    <label class="form-label">Message-ID</label>
+                    <input type="text" name="message_id" class="form-control"
+                           placeholder="&lt;CAExample123@mail.example.com&gt;" required>
+                </div>
+                <div class="col-auto">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" name="create_rule" id="create_rule" value="1">
+                        <label class="form-check-label" for="create_rule">
+                            {{t "spam.rules.create_rule_from_sender"}}
+                        </label>
+                    </div>
+                </div>
+                <div class="col-auto">
+                    <button type="submit" class="btn btn-warning">
+                        <i class="ti ti-shield-x me-1"></i>{{t "spam.mark_as_spam"}}
+                    </button>
+                </div>
+            </div>
+        </form>
+        <div id="mark-result" class="mt-2"></div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h3 class="card-title">
+            <i class="ti ti-list-check me-2"></i>{{t "spam.rules.title"}}
+        </h3>
+        <div class="card-actions">
+            <a href="/spam" class="btn btn-sm btn-outline-secondary">
+                <i class="ti ti-arrow-left me-1"></i>{{t "spam.back"}}
+            </a>
+        </div>
+    </div>
+    <div class="card-body">
+        <!-- Add Rule Form -->
+        <form action="/spam/rules" method="POST" class="mb-4">
+            <div class="row g-3 align-items-end">
+                <div class="col-auto">
+                    <label class="form-label">{{t "spam.rules.type"}}</label>
+                    <select name="rule_type" class="form-select" required>
+                        <option value="address">{{t "spam.rules.type_address"}}</option>
+                        <option value="domain">{{t "spam.rules.type_domain"}}</option>
+                    </select>
+                </div>
+                <div class="col">
+                    <label class="form-label">{{t "spam.rules.value"}}</label>
+                    <input type="text" name="rule_value" class="form-control"
+                           placeholder="spam@example.com {{t "spam.rules.or"}} example.com" required>
+                </div>
+                <div class="col-auto">
+                    <label class="form-label">{{t "spam.rules.action"}}</label>
+                    <select name="action" class="form-select" required>
+                        <option value="spam">{{t "spam.rules.action_spam"}}</option>
+                        <option value="allow">{{t "spam.rules.action_allow"}}</option>
+                    </select>
+                </div>
+                <div class="col-auto">
+                    <button type="submit" class="btn btn-primary">
+                        <i class="ti ti-plus me-1"></i>{{t "spam.rules.add"}}
+                    </button>
+                </div>
+            </div>
+        </form>
+
+        <!-- Rules List -->
+        {{if .Rules}}
+        <div class="table-responsive">
+            <table class="table table-vcenter card-table">
+                <thead>
+                    <tr>
+                        <th>{{t "spam.rules.type"}}</th>
+                        <th>{{t "spam.rules.value"}}</th>
+                        <th>{{t "spam.rules.action"}}</th>
+                        <th>{{t "spam.rules.created"}}</th>
+                        <th class="w-1"></th>
+                    </tr>
+                </thead>
+                <tbody id="rules-list">
+                    {{range .Rules}}
+                    <tr id="rule-{{.ID}}">
+                        <td>
+                            {{if eq .RuleType "address"}}
+                            <span class="badge bg-blue">{{t "spam.rules.type_address"}}</span>
+                            {{else}}
+                            <span class="badge bg-purple">{{t "spam.rules.type_domain"}}</span>
+                            {{end}}
+                        </td>
+                        <td>
+                            <code>{{.RuleValue}}</code>
+                        </td>
+                        <td>
+                            {{if eq .Action "spam"}}
+                            <span class="badge bg-red">{{t "spam.rules.action_spam"}}</span>
+                            {{else}}
+                            <span class="badge bg-green">{{t "spam.rules.action_allow"}}</span>
+                            {{end}}
+                        </td>
+                        <td class="text-muted">
+                            {{.CreatedAt.Format "02.01.2006"}}
+                        </td>
+                        <td>
+                            <button type="button" class="btn btn-sm btn-ghost-danger"
+                                    hx-delete="/spam/rules/{{.ID}}"
+                                    hx-target="#rule-{{.ID}}"
+                                    hx-swap="outerHTML"
+                                    hx-confirm="{{t "spam.rules.confirm_delete"}}"
+                                    title="{{t "delete"}}">
+                                <i class="ti ti-trash"></i>
+                            </button>
+                        </td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+        {{else}}
+        <div class="empty">
+            <div class="empty-icon">
+                <i class="ti ti-list" style="font-size: 3rem;"></i>
+            </div>
+            <p class="empty-title">{{t "spam.rules.empty"}}</p>
+            <p class="empty-subtitle text-muted">
+                {{t "spam.rules.empty_description"}}
+            </p>
+        </div>
+        {{end}}
+    </div>
+</div>
+
+<div class="card mt-3">
+    <div class="card-header">
+        <h4 class="card-title">{{t "spam.rules.help_title"}}</h4>
+    </div>
+    <div class="card-body">
+        <dl class="row">
+            <dt class="col-sm-3">{{t "spam.rules.type_address"}}</dt>
+            <dd class="col-sm-9">{{t "spam.rules.help_address"}}</dd>
+
+            <dt class="col-sm-3">{{t "spam.rules.type_domain"}}</dt>
+            <dd class="col-sm-9">{{t "spam.rules.help_domain"}}</dd>
+
+            <dt class="col-sm-3">{{t "spam.rules.action_spam"}}</dt>
+            <dd class="col-sm-9">{{t "spam.rules.help_spam"}}</dd>
+
+            <dt class="col-sm-3">{{t "spam.rules.action_allow"}}</dt>
+            <dd class="col-sm-9">{{t "spam.rules.help_allow"}}</dd>
+        </dl>
+    </div>
+</div>
+{{end}}

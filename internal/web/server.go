@@ -241,6 +241,20 @@ func (s *Server) setupRoutes() {
 	web.HandleFunc("/vault/restore/{id}", s.HandleRestoreMessage).Methods("POST")
 	web.HandleFunc("/vault/delete/{id}", s.HandlePermanentDelete).Methods("DELETE")
 
+	// Spam section
+	web.HandleFunc("/spam", s.HandleSpamPage).Methods("GET")
+	web.HandleFunc("/spam/restore/{id}", s.HandleRestoreFromSpam).Methods("POST")
+	web.HandleFunc("/spam/delete/{id}", s.HandleDeleteSpamMessage).Methods("DELETE")
+	web.HandleFunc("/spam/analyze/{id}", s.HandleAnalyzeSpam).Methods("GET")
+	web.HandleFunc("/spam/mark/{id}", s.HandleMarkAsSpam).Methods("POST")
+	web.HandleFunc("/spam/mark-by-message-id", s.HandleMarkAsSpamByMessageID).Methods("POST")
+	web.HandleFunc("/spam/analyze-by-message-id", s.HandleAnalyzeByMessageID).Methods("POST")
+	web.HandleFunc("/spam/rules", s.HandleSpamRulesPage).Methods("GET")
+	web.HandleFunc("/spam/rules", s.HandleCreateSpamRule).Methods("POST")
+	web.HandleFunc("/spam/rules/{id}", s.HandleDeleteSpamRule).Methods("DELETE")
+	web.HandleFunc("/spam/settings", s.HandleSpamSettingsPage).Methods("GET")
+	web.HandleFunc("/spam/settings/{name}", s.HandleToggleSpamCheck).Methods("POST")
+
 	// Search
 	web.HandleFunc("/search", s.HandleSearchPage).Methods("GET")
 

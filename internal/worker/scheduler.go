@@ -117,6 +117,9 @@ func (s *Scheduler) scheduleAllAccounts() {
 	// Schedule calendar event reverse sync tasks
 	s.scheduleCalendarEventSync()
 
+	// Run spam cleanup (periodically delete old spam)
+	s.runSpamCleanup()
+
 	imapQueueLen, smtpQueueLen := s.pool.QueueLength()
 	log.Printf("Current queue lengths - IMAP: %d, SMTP: %d", imapQueueLen, smtpQueueLen)
 }
@@ -413,4 +416,29 @@ func (s *Scheduler) scheduleFlagSync() {
 			log.Printf("Submitted flag sync task for %s", account.Email)
 		}
 	}
+}
+
+// spamCleanupLastRun tracks when spam cleanup last ran (to avoid running too often)
+var spamCleanupLastRun time.Time
+
+// runSpamCleanup deletes spam messages older than 1 year
+// Only runs once per day to avoid excessive database operations
+func (s *Scheduler) runSpamCleanup() {
+	// Only run once per day
+	if time.Since(spamCleanupLastRun) < 24*time.Hour {
+		return
+	}
+
+	// Delete spam older than 365 days
+	deleted, err := s.database.DeleteOldSpamMessages(365)
+	if err != nil {
+		log.Printf("Failed to cleanup old spam: %v", err)
+		return
+	}
+
+	if deleted > 0 {
+		log.Printf("Spam cleanup: deleted %d messages older than 1 year", deleted)
+	}
+
+	spamCleanupLastRun = time.Now()
 }

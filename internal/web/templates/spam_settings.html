@@ -1,0 +1,90 @@
+{{define "content"}}
+<div class="card">
+    <div class="card-header">
+        <h3 class="card-title">
+            <i class="ti ti-settings me-2"></i>{{t "spam.settings.title"}}
+        </h3>
+        <div class="card-actions">
+            <a href="/spam" class="btn btn-sm btn-outline-secondary">
+                <i class="ti ti-arrow-left me-1"></i>{{t "spam.back"}}
+            </a>
+        </div>
+    </div>
+    <div class="card-body">
+        <p class="text-muted mb-4">{{t "spam.settings.description"}}</p>
+
+        <div class="table-responsive">
+            <table class="table table-vcenter">
+                <thead>
+                    <tr>
+                        <th>{{t "spam.settings.check"}}</th>
+                        <th>{{t "spam.settings.status"}}</th>
+                        <th class="w-1"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{range .AvailableChecks}}
+                    <tr id="check-{{.Name}}">
+                        <td>
+                            <div class="fw-medium">{{.Description}}</div>
+                        </td>
+                        <td>
+                            {{if .Enabled}}
+                            <span class="badge bg-green">{{t "spam.settings.enabled"}}</span>
+                            {{else}}
+                            <span class="badge bg-secondary">{{t "spam.settings.disabled"}}</span>
+                            {{end}}
+                        </td>
+                        <td>
+                            <label class="form-check form-switch m-0">
+                                <input class="form-check-input" type="checkbox"
+                                       {{if .Enabled}}checked{{end}}
+                                       hx-post="/spam/settings/{{.Name}}"
+                                       hx-swap="none"
+                                       hx-on::after-request="toggleBadge(this, '{{.Name}}')"
+                                       >
+                            </label>
+                        </td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="card mt-3">
+    <div class="card-header">
+        <h4 class="card-title">{{t "spam.settings.help_title"}}</h4>
+    </div>
+    <div class="card-body">
+        <dl class="row">
+            <dt class="col-sm-3">SPF</dt>
+            <dd class="col-sm-9">{{t "spam.settings.help_spf"}}</dd>
+
+            <dt class="col-sm-3">DKIM</dt>
+            <dd class="col-sm-9">{{t "spam.settings.help_dkim"}}</dd>
+
+            <dt class="col-sm-3">RBL</dt>
+            <dd class="col-sm-9">{{t "spam.settings.help_rbl"}}</dd>
+
+            <dt class="col-sm-3">{{t "spam.check.url_shortener"}}</dt>
+            <dd class="col-sm-9">{{t "spam.settings.help_url_shortener"}}</dd>
+        </dl>
+    </div>
+</div>
+
+<script>
+function toggleBadge(checkbox, name) {
+    const row = document.getElementById('check-' + name);
+    const badge = row.querySelector('.badge');
+    if (checkbox.checked) {
+        badge.className = 'badge bg-green';
+        badge.textContent = '{{t "spam.settings.enabled"}}';
+    } else {
+        badge.className = 'badge bg-secondary';
+        badge.textContent = '{{t "spam.settings.disabled"}}';
+    }
+}
+</script>
+{{end}}
