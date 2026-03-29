@@ -105,6 +105,8 @@ type Message struct {
 	SpamScore   float64 `json:"spam_score"`
 	SpamStatus  string  `json:"spam_status"`  // clean, suspicious, spam
 	SpamReasons string  `json:"spam_reasons"` // JSON array of reasons
+	IsSpam      bool    `json:"is_spam"`      // Message is in spam section
+	SpamRuleID  *int64  `json:"spam_rule_id"` // Which user rule triggered spam
 
 	// Soft delete (vault)
 	SoftDeleted      bool       `json:"soft_deleted"`

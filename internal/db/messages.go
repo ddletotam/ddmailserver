@@ -24,8 +24,8 @@ func (db *DB) CreateMessage(msg *models.Message) error {
 			account_id, user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 			date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 			in_reply_to, message_references, spam_score, spam_status, spam_reasons,
-			remote_uid, remote_folder, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
+			is_spam, spam_rule_id, remote_uid, remote_folder, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
 		RETURNING id
 	`
 
@@ -43,6 +43,13 @@ func (db *DB) CreateMessage(msg *models.Message) error {
 		remoteUID.Valid = true
 	}
 
+	// Use NULL for spam_rule_id if not set
+	var spamRuleID sql.NullInt64
+	if msg.SpamRuleID != nil {
+		spamRuleID.Int64 = *msg.SpamRuleID
+		spamRuleID.Valid = true
+	}
+
 	// Default remote_folder to INBOX if not set
 	remoteFolder := msg.RemoteFolder
 	if remoteFolder == "" {
@@ -56,7 +63,7 @@ func (db *DB) CreateMessage(msg *models.Message) error {
 		msg.Date, msg.Body, msg.BodyHTML, msg.Attachments, msg.Size,
 		msg.UID, msg.Seen, msg.Flagged, msg.Answered, msg.Draft, msg.Deleted,
 		msg.InReplyTo, msg.MessageReferences, msg.SpamScore, msg.SpamStatus, msg.SpamReasons,
-		remoteUID, remoteFolder, msg.CreatedAt, msg.UpdatedAt,
+		msg.IsSpam, spamRuleID, remoteUID, remoteFolder, msg.CreatedAt, msg.UpdatedAt,
 	).Scan(&msg.ID)
 
 	if err != nil {
@@ -66,7 +73,7 @@ func (db *DB) CreateMessage(msg *models.Message) error {
 	return nil
 }
 
-// GetMessagesByFolder retrieves messages in a folder (excludes soft deleted)
+// GetMessagesByFolder retrieves messages in a folder (excludes soft deleted and spam)
 // IMPORTANT: Order by UID ASC for correct IMAP sequence number mapping
 func (db *DB) GetMessagesByFolder(folderID int64, limit, offset int) ([]*models.Message, error) {
 	query := `
@@ -76,6 +83,7 @@ func (db *DB) GetMessagesByFolder(folderID int64, limit, offset int) ([]*models.
 		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at
 		FROM messages
 		WHERE folder_id = $1 AND deleted = false AND (soft_deleted = false OR soft_deleted IS NULL)
+		      AND (is_spam = false OR is_spam IS NULL)
 		ORDER BY uid ASC
 		LIMIT $2 OFFSET $3
 	`
@@ -89,7 +97,7 @@ func (db *DB) GetMessagesByFolder(folderID int64, limit, offset int) ([]*models.
 	return scanMessages(rows)
 }
 
-// GetMessagesByUser retrieves all messages for a user
+// GetMessagesByUser retrieves all messages for a user (excludes spam)
 func (db *DB) GetMessagesByUser(userID int64, limit, offset int) ([]*models.Message, error) {
 	query := `
 		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
@@ -98,6 +106,7 @@ func (db *DB) GetMessagesByUser(userID int64, limit, offset int) ([]*models.Mess
 		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at
 		FROM messages
 		WHERE user_id = $1 AND deleted = false AND (soft_deleted = false OR soft_deleted IS NULL)
+		      AND (is_spam = false OR is_spam IS NULL)
 		ORDER BY date DESC
 		LIMIT $2 OFFSET $3
 	`
@@ -205,6 +214,7 @@ func (db *DB) SearchMessages(userID int64, query string, limit, offset int) ([]*
 		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at
 		FROM messages
 		WHERE user_id = $1 AND deleted = false AND (soft_deleted = false OR soft_deleted IS NULL)
+		AND (is_spam = false OR is_spam IS NULL)
 		AND (subject ILIKE $2 OR from_addr ILIKE $2 OR to_addr ILIKE $2 OR body ILIKE $2)
 		ORDER BY date DESC
 		LIMIT $3 OFFSET $4
@@ -278,10 +288,10 @@ func (db *DB) DeleteMessagesByFolder(folderID int64) (int64, error) {
 	return count, nil
 }
 
-// GetMessageCountByFolder returns the count of non-deleted messages in a folder
+// GetMessageCountByFolder returns the count of non-deleted, non-spam messages in a folder
 func (db *DB) GetMessageCountByFolder(folderID int64) (uint32, error) {
 	var count int64
-	query := `SELECT COUNT(*) FROM messages WHERE folder_id = $1 AND deleted = false AND (soft_deleted = false OR soft_deleted IS NULL)`
+	query := `SELECT COUNT(*) FROM messages WHERE folder_id = $1 AND deleted = false AND (soft_deleted = false OR soft_deleted IS NULL) AND (is_spam = false OR is_spam IS NULL)`
 
 	err := db.QueryRow(query, folderID).Scan(&count)
 	if err != nil {
@@ -306,6 +316,42 @@ func (db *DB) MessageExistsByMessageID(userID int64, messageID string) (bool, er
 	}
 
 	return exists, nil
+}
+
+// GetMessageByMessageID retrieves a message by RFC 5322 Message-ID header for a user
+func (db *DB) GetMessageByMessageID(userID int64, messageID string) (*models.Message, error) {
+	if messageID == "" {
+		return nil, fmt.Errorf("message_id is empty")
+	}
+
+	msg := &models.Message{}
+	query := `
+		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
+		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
+		       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
+		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at
+		FROM messages
+		WHERE user_id = $1 AND message_id = $2
+		LIMIT 1
+	`
+
+	err := db.QueryRow(query, userID, messageID).Scan(
+		&msg.ID, &msg.AccountID, &msg.UserID, &msg.FolderID, &msg.MessageID, &msg.Subject,
+		&msg.From, &msg.To, &msg.Cc, &msg.Bcc, &msg.ReplyTo,
+		&msg.Date, &msg.Body, &msg.BodyHTML, &msg.Attachments, &msg.Size,
+		&msg.UID, &msg.Seen, &msg.Flagged, &msg.Answered, &msg.Draft, &msg.Deleted,
+		&msg.InReplyTo, &msg.MessageReferences, &msg.SpamScore, &msg.SpamStatus, &msg.SpamReasons,
+		&msg.RemoteUID, &msg.RemoteFolder, &msg.CreatedAt, &msg.UpdatedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get message by message_id: %w", err)
+	}
+
+	return msg, nil
 }
 
 // UpdateMessageRemoteUID updates the remote_uid and remote_folder for a message that doesn't have them set

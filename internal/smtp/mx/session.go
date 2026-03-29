@@ -161,20 +161,6 @@ func (s *Session) Data(r io.Reader) error {
 	body := parsed.Body
 	bodyHTML := parsed.BodyHTML
 
-	// Run spam analysis with sender context
-	if s.analyzer != nil {
-		s.analyzer.AnalyzeWithContext(parsed, s.senderIP, s.fromDomain)
-		if parsed.SpamScore > 0 {
-			log.Printf("MX: Spam analysis - score=%.1f status=%s reasons=%v",
-				parsed.SpamScore, parsed.SpamStatus, parsed.SpamReasons)
-		}
-		// Log auth results if available
-		if parsed.AuthResults != nil {
-			log.Printf("MX: Auth results - SPF=%s DKIM=%s",
-				parsed.AuthResults.SPF, parsed.AuthResults.DKIM)
-		}
-	}
-
 	// Log if we found embedded messages or attachments
 	if len(parsed.EmbeddedMessages) > 0 {
 		log.Printf("MX: Message contains %d embedded message(s)", len(parsed.EmbeddedMessages))
@@ -191,7 +177,55 @@ func (s *Session) Data(r io.Reader) error {
 	// Save message for each recipient
 	savedCount := 0
 	for _, recipient := range s.recipients {
-		// Find or create INBOX folder for the user
+		// Check user spam rules (whitelist/blacklist)
+		isSpam := false
+		var spamRuleID *int64
+
+		action, matchedRule, err := s.database.CheckSpamRules(recipient.Mailbox.UserID, fromAddr)
+		if err != nil {
+			log.Printf("MX: Failed to check spam rules: %v", err)
+		}
+
+		if action == "allow" {
+			// Whitelist - never spam
+			isSpam = false
+			log.Printf("MX: Message whitelisted by rule %d for user %d", matchedRule.ID, recipient.Mailbox.UserID)
+		} else if action == "spam" {
+			// Blacklist - always spam
+			isSpam = true
+			spamRuleID = &matchedRule.ID
+			log.Printf("MX: Message blacklisted by rule %d for user %d", matchedRule.ID, recipient.Mailbox.UserID)
+		} else {
+			// No user rule matched - run spam analysis with user's disabled checks
+			if s.analyzer != nil {
+				// Get user's disabled spam checks
+				disabledChecks, err := s.database.GetDisabledSpamChecksMap(recipient.Mailbox.UserID)
+				if err != nil {
+					log.Printf("MX: Failed to get disabled spam checks: %v", err)
+					disabledChecks = nil
+				}
+
+				// Run analysis with user-specific disabled checks
+				s.analyzer.AnalyzeWithDisabledChecks(parsed, s.senderIP, s.fromDomain, disabledChecks)
+				if parsed.SpamScore > 0 {
+					log.Printf("MX: Spam analysis for user %d - score=%.1f status=%s reasons=%v",
+						recipient.Mailbox.UserID, parsed.SpamScore, parsed.SpamStatus, parsed.SpamReasons)
+				}
+				// Log auth results if available
+				if parsed.AuthResults != nil {
+					log.Printf("MX: Auth results - SPF=%s DKIM=%s",
+						parsed.AuthResults.SPF, parsed.AuthResults.DKIM)
+				}
+
+				if parsed.SpamStatus == parser.SpamStatusSpam {
+					isSpam = true
+					log.Printf("MX: Message marked as spam by system (score=%.1f) for user %d",
+						parsed.SpamScore, recipient.Mailbox.UserID)
+				}
+			}
+		}
+
+		// Find or create INBOX folder for the user (spam still needs a folder reference)
 		folderID, err := s.getOrCreateInbox(recipient.Mailbox.UserID)
 		if err != nil {
 			log.Printf("MX: Failed to get inbox for user %d: %v", recipient.Mailbox.UserID, err)
@@ -231,6 +265,8 @@ func (s *Session) Data(r io.Reader) error {
 			SpamScore:         parsed.SpamScore,
 			SpamStatus:        string(parsed.SpamStatus),
 			SpamReasons:       parser.GetSpamReasonsJSON(parsed.SpamReasons),
+			IsSpam:            isSpam,
+			SpamRuleID:        spamRuleID,
 		}
 
 		// Save to database
@@ -256,33 +292,38 @@ func (s *Session) Data(r io.Reader) error {
 		}
 
 		savedCount++
-		log.Printf("MX: Message %d saved for %s (user_id=%d, folder_id=%d)",
-			msg.ID, recipient.Email, recipient.Mailbox.UserID, folderID)
+		if isSpam {
+			log.Printf("MX: Message %d saved as SPAM for %s (user_id=%d)",
+				msg.ID, recipient.Email, recipient.Mailbox.UserID)
+		} else {
+			log.Printf("MX: Message %d saved for %s (user_id=%d, folder_id=%d)",
+				msg.ID, recipient.Email, recipient.Mailbox.UserID, folderID)
 
-		// Publish notification for IMAP IDLE clients
-		if s.hub != nil {
-			// Get message count and username for IMAP update
-			count, _ := s.database.GetMessageCountByFolder(folderID)
-			user, _ := s.database.GetUserByID(recipient.Mailbox.UserID)
-			username := ""
-			if user != nil {
-				username = user.Username
+			// Publish notification for IMAP IDLE clients (NOT for spam)
+			if s.hub != nil {
+				// Get message count and username for IMAP update
+				count, _ := s.database.GetMessageCountByFolder(folderID)
+				user, _ := s.database.GetUserByID(recipient.Mailbox.UserID)
+				username := ""
+				if user != nil {
+					username = user.Username
+				}
+
+				s.hub.Publish(notify.Event{
+					UserID:   recipient.Mailbox.UserID,
+					FolderID: folderID,
+					Type:     notify.EventNewMessage,
+					Count:    count,
+					Username: username,
+					Mailbox:  "INBOX",
+				})
 			}
 
-			s.hub.Publish(notify.Event{
-				UserID:   recipient.Mailbox.UserID,
-				FolderID: folderID,
-				Type:     notify.EventNewMessage,
-				Count:    count,
-				Username: username,
-				Mailbox:  "INBOX",
-			})
-		}
-
-		// Trigger calendar sync if message contains calendar invite (.ics)
-		if s.calendarSyncTrigger != nil && s.hasCalendarInvite(parsed) {
-			log.Printf("MX: Calendar invite detected, triggering sync for user %d", recipient.Mailbox.UserID)
-			go s.calendarSyncTrigger(recipient.Mailbox.UserID)
+			// Trigger calendar sync if message contains calendar invite (.ics)
+			if s.calendarSyncTrigger != nil && s.hasCalendarInvite(parsed) {
+				log.Printf("MX: Calendar invite detected, triggering sync for user %d", recipient.Mailbox.UserID)
+				go s.calendarSyncTrigger(recipient.Mailbox.UserID)
+			}
 		}
 	}
 

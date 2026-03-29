@@ -1,0 +1,142 @@
+{{define "content"}}
+<div class="card">
+    <div class="card-header">
+        <h3 class="card-title">
+            <i class="ti ti-shield-x me-2"></i>{{t "spam.title"}}
+        </h3>
+        <div class="card-actions">
+            <span class="text-muted">{{.TotalCount}} {{t "spam.messages"}}</span>
+            <a href="/spam/rules" class="btn btn-sm btn-outline-primary ms-2">
+                <i class="ti ti-list-check me-1"></i>{{t "spam.rules"}}
+            </a>
+            <a href="/spam/settings" class="btn btn-sm btn-outline-secondary ms-2">
+                <i class="ti ti-settings me-1"></i>{{t "spam.settings"}}
+            </a>
+        </div>
+    </div>
+    <div class="card-body">
+        {{if .Messages}}
+        <div class="table-responsive">
+            <table class="table table-vcenter card-table table-hover">
+                <thead>
+                    <tr>
+                        <th>{{t "messages.from"}}</th>
+                        <th>{{t "messages.subject"}}</th>
+                        <th>{{t "spam.score"}}</th>
+                        <th>{{t "messages.date"}}</th>
+                        <th class="w-1"></th>
+                    </tr>
+                </thead>
+                <tbody id="spam-messages">
+                    {{range .Messages}}
+                    <tr id="msg-{{.ID}}">
+                        <td>
+                            <div class="text-truncate" style="max-width: 200px;">
+                                {{.From}}
+                            </div>
+                        </td>
+                        <td>
+                            <div class="text-truncate" style="max-width: 300px;">
+                                {{.Subject}}
+                            </div>
+                        </td>
+                        <td>
+                            <span class="badge {{if ge .SpamScore 6.0}}bg-red{{else if ge .SpamScore 3.0}}bg-orange{{else}}bg-yellow{{end}}">
+                                {{printf "%.1f" .SpamScore}}
+                            </span>
+                            <button type="button" class="btn btn-sm btn-ghost-secondary"
+                                    hx-get="/spam/analyze/{{.ID}}"
+                                    hx-target="#analysis-{{.ID}}"
+                                    hx-swap="innerHTML"
+                                    title="{{t "spam.analyze"}}">
+                                <i class="ti ti-info-circle"></i>
+                            </button>
+                            <div id="analysis-{{.ID}}" class="small text-muted"></div>
+                        </td>
+                        <td class="text-muted">
+                            {{.Date.Format "02.01.2006 15:04"}}
+                        </td>
+                        <td>
+                            <div class="btn-list flex-nowrap">
+                                <button type="button" class="btn btn-sm btn-success"
+                                        hx-post="/spam/restore/{{.ID}}"
+                                        hx-target="#msg-{{.ID}}"
+                                        hx-swap="outerHTML"
+                                        title="{{t "spam.restore"}}">
+                                    <i class="ti ti-inbox"></i>
+                                </button>
+                                <button type="button" class="btn btn-sm btn-danger"
+                                        hx-delete="/spam/delete/{{.ID}}"
+                                        hx-target="#msg-{{.ID}}"
+                                        hx-swap="outerHTML"
+                                        hx-confirm="{{t "spam.confirm_delete"}}"
+                                        title="{{t "spam.delete"}}">
+                                    <i class="ti ti-trash"></i>
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+        {{if gt .TotalCount .PageSize}}
+        <div class="card-footer d-flex align-items-center">
+            <p class="m-0 text-muted">
+                {{t "pagination.showing"}} <span>{{.MessageCount}}</span> {{t "pagination.of"}} <span>{{.TotalCount}}</span>
+            </p>
+            <ul class="pagination m-0 ms-auto">
+                {{if gt .Page 1}}
+                <li class="page-item">
+                    <a class="page-link" href="/spam?page={{.PrevPage}}">
+                        <i class="ti ti-chevron-left"></i>
+                    </a>
+                </li>
+                {{end}}
+                {{if .HasNextPage}}
+                <li class="page-item">
+                    <a class="page-link" href="/spam?page={{.NextPage}}">
+                        <i class="ti ti-chevron-right"></i>
+                    </a>
+                </li>
+                {{end}}
+            </ul>
+        </div>
+        {{end}}
+        {{else}}
+        <div class="empty">
+            <div class="empty-icon">
+                <i class="ti ti-shield-check" style="font-size: 3rem; color: var(--tblr-success);"></i>
+            </div>
+            <p class="empty-title">{{t "spam.empty"}}</p>
+            <p class="empty-subtitle text-muted">
+                {{t "spam.empty_description"}}
+            </p>
+        </div>
+        {{end}}
+    </div>
+</div>
+
+<script>
+// Handle spam analysis response
+htmx.on("htmx:afterSwap", function(evt) {
+    if (evt.detail.target.id.startsWith("analysis-")) {
+        try {
+            const data = JSON.parse(evt.detail.target.innerHTML);
+            let html = '<div class="mt-1">';
+            if (data.spam_reasons && data.spam_reasons.length > 0) {
+                html += '<ul class="list-unstyled mb-0">';
+                data.spam_reasons.forEach(reason => {
+                    html += '<li><i class="ti ti-alert-triangle text-warning"></i> ' + reason + '</li>';
+                });
+                html += '</ul>';
+            }
+            html += '</div>';
+            evt.detail.target.innerHTML = html;
+        } catch(e) {
+            // Not JSON, leave as is
+        }
+    }
+});
+</script>
+{{end}}

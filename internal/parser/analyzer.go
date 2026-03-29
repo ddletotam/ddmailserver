@@ -35,6 +35,9 @@ func DefaultAnalyzerConfig() *AnalyzerConfig {
 		CheckContent:        true,
 		CheckAttachments:    true,
 		CheckLinks:          true,
+		CheckSPF:            true,
+		CheckDKIM:           true,
+		CheckRBL:            true,
 		DangerousExtensions: DangerousExtensions,
 		SpamWords: []string{
 			// English
@@ -42,9 +45,19 @@ func DefaultAnalyzerConfig() *AnalyzerConfig {
 			"free money", "act now", "limited time", "click here",
 			"unsubscribe", "you have been selected", "congratulations",
 			"100% free", "no cost", "risk free", "guaranteed",
-			// Russian
-			"выигрыш", "бесплатно", "срочно", "акция", "скидка",
-			"заработок", "без вложений", "пассивный доход",
+			// Russian - sales/marketing
+			"распродажа", "купон", "скидка", "акция", "бесплатн", "выигр", "подарок",
+			"персональн", "эксклюзив", "только для вас", "только сегодня", "последний шанс",
+			"активир", "получи", "забери", "успей", "торопись", "не упусти",
+			// Russian - financial scams
+			"заработ", "доход", "инвести", "прибыль", "без вложений", "пассивн",
+			"кредит", "займ", "одобрен", "микрозайм", "долг", "избавиться от",
+			"финансов", "капитал", "бонус на баланс", "приветственный бонус",
+			"приглашение в клуб", "закрытый клуб", "vip", "элитн",
+			// Russian - crypto/trading scams
+			"криптовалют", "биткоин", "трейдинг", "торговл", "сигнал",
+			"стратеги", "робот", "автоматическ",
+			// Generic spam
 			"работа на дому", "казино", "ставки",
 		},
 		URLShorteners: []string{
@@ -96,6 +109,13 @@ func (a *Analyzer) Analyze(msg *ParsedMessage) {
 // AnalyzeWithContext performs full spam analysis including network checks
 // senderIP is the connecting client IP, fromDomain is extracted from MAIL FROM
 func (a *Analyzer) AnalyzeWithContext(msg *ParsedMessage, senderIP, fromDomain string) {
+	a.AnalyzeWithDisabledChecks(msg, senderIP, fromDomain, nil)
+}
+
+// AnalyzeWithDisabledChecks performs spam analysis with user-disabled checks
+// disabledChecks is a map of check names that should be skipped for this user
+// Check names: "spf", "dkim", "rbl", "url_shortener", "spam_word:xxx"
+func (a *Analyzer) AnalyzeWithDisabledChecks(msg *ParsedMessage, senderIP, fromDomain string, disabledChecks map[string]bool) {
 	if !a.config.Enabled {
 		msg.SpamStatus = SpamStatusClean
 		return
@@ -109,22 +129,22 @@ func (a *Analyzer) AnalyzeWithContext(msg *ParsedMessage, senderIP, fromDomain s
 		msg.AuthResults = &AuthResults{SenderIP: senderIP}
 	}
 
-	// Check SPF (if sender IP provided)
-	if a.spfChecker != nil && senderIP != "" && fromDomain != "" && !IsPrivateIP(senderIP) {
+	// Check SPF (if sender IP provided and not disabled)
+	if a.spfChecker != nil && senderIP != "" && fromDomain != "" && !IsPrivateIP(senderIP) && !disabledChecks["spf"] {
 		score, spfReasons := a.analyzeSPF(senderIP, fromDomain, msg)
 		totalScore += score
 		reasons = append(reasons, spfReasons...)
 	}
 
-	// Check RBL (if sender IP provided)
-	if a.rblChecker != nil && senderIP != "" && !IsPrivateIP(senderIP) {
+	// Check RBL (if sender IP provided and not disabled)
+	if a.rblChecker != nil && senderIP != "" && !IsPrivateIP(senderIP) && !disabledChecks["rbl"] {
 		score, rblReasons := a.analyzeRBL(senderIP, msg)
 		totalScore += score
 		reasons = append(reasons, rblReasons...)
 	}
 
-	// Check DKIM (if raw message data available)
-	if a.dkimChecker != nil && len(msg.RawData) > 0 {
+	// Check DKIM (if raw message data available and not disabled)
+	if a.dkimChecker != nil && len(msg.RawData) > 0 && !disabledChecks["dkim"] {
 		score, dkimReasons := a.analyzeDKIM(msg)
 		totalScore += score
 		reasons = append(reasons, dkimReasons...)
@@ -139,7 +159,7 @@ func (a *Analyzer) AnalyzeWithContext(msg *ParsedMessage, senderIP, fromDomain s
 
 	// Check content
 	if a.config.CheckContent {
-		score, contentReasons := a.analyzeContent(msg)
+		score, contentReasons := a.analyzeContent(msg, disabledChecks)
 		totalScore += score
 		reasons = append(reasons, contentReasons...)
 	}
@@ -153,7 +173,7 @@ func (a *Analyzer) AnalyzeWithContext(msg *ParsedMessage, senderIP, fromDomain s
 
 	// Check links
 	if a.config.CheckLinks {
-		score, linkReasons := a.analyzeLinks(msg)
+		score, linkReasons := a.analyzeLinks(msg, disabledChecks)
 		totalScore += score
 		reasons = append(reasons, linkReasons...)
 	}
@@ -163,6 +183,18 @@ func (a *Analyzer) AnalyzeWithContext(msg *ParsedMessage, senderIP, fromDomain s
 		totalScore += 2.0
 		reasons = append(reasons, "contains embedded message (message/rfc822)")
 	}
+
+	// Check for brand impersonation and scam sender names
+	if msg.From != nil {
+		score, senderReasons := a.analyzeSenderBrand(msg)
+		totalScore += score
+		reasons = append(reasons, senderReasons...)
+	}
+
+	// Check for emojis in subject (common spam indicator)
+	emojiScore, emojiReasons := a.analyzeEmojis(msg)
+	totalScore += emojiScore
+	reasons = append(reasons, emojiReasons...)
 
 	// Set final score and status
 	msg.SpamScore = totalScore
@@ -292,15 +324,23 @@ func (a *Analyzer) analyzeHeaders(msg *ParsedMessage) (float64, []string) {
 }
 
 // analyzeContent checks for spam words and patterns in content
-func (a *Analyzer) analyzeContent(msg *ParsedMessage) (float64, []string) {
+func (a *Analyzer) analyzeContent(msg *ParsedMessage, disabledChecks map[string]bool) (float64, []string) {
 	var score float64
 	var reasons []string
 
-	// Combine subject and body for analysis
-	content := strings.ToLower(msg.Subject + " " + msg.Body)
+	// Combine subject, body and HTML body for analysis
+	htmlText := ""
+	if msg.BodyHTML != "" {
+		htmlText = stripHTML(msg.BodyHTML)
+	}
+	content := strings.ToLower(msg.Subject + " " + msg.Body + " " + htmlText)
 
-	// Check for spam words
+	// Check for spam words (can be individually disabled as "spam_word:xxx")
 	for _, word := range a.config.SpamWords {
+		checkName := "spam_word:" + strings.ToLower(word)
+		if disabledChecks[checkName] {
+			continue
+		}
 		if strings.Contains(content, strings.ToLower(word)) {
 			score += 0.5
 			reasons = append(reasons, "spam word: "+word)
@@ -372,7 +412,7 @@ func (a *Analyzer) analyzeAttachments(msg *ParsedMessage) (float64, []string) {
 }
 
 // analyzeLinks checks for suspicious URLs
-func (a *Analyzer) analyzeLinks(msg *ParsedMessage) (float64, []string) {
+func (a *Analyzer) analyzeLinks(msg *ParsedMessage, disabledChecks map[string]bool) (float64, []string) {
 	var score float64
 	var reasons []string
 
@@ -391,11 +431,13 @@ func (a *Analyzer) analyzeLinks(msg *ParsedMessage) (float64, []string) {
 		host := strings.ToLower(parsed.Host)
 		domains[host] = true
 
-		// Check for URL shorteners
-		for _, shortener := range a.config.URLShorteners {
-			if strings.Contains(host, shortener) {
-				shortenerCount++
-				break
+		// Check for URL shorteners (can be disabled as "url_shortener")
+		if !disabledChecks["url_shortener"] {
+			for _, shortener := range a.config.URLShorteners {
+				if strings.Contains(host, shortener) {
+					shortenerCount++
+					break
+				}
 			}
 		}
 
@@ -489,4 +531,137 @@ func isSuspiciousDomain(domain string) bool {
 	}
 
 	return false
+}
+
+// Known brands with their legitimate domains
+var knownBrands = map[string][]string{
+	// Russian retail
+	"dns":         {"dns-shop.ru", "dns.ru"},
+	"ozon":        {"ozon.ru"},
+	"wildberries": {"wildberries.ru", "wb.ru"},
+	"mvideo":      {"mvideo.ru", "m-video.ru"},
+	"мвидео":      {"mvideo.ru", "m-video.ru"},
+	"м.видео":     {"mvideo.ru", "m-video.ru"},
+	"eldorado":    {"eldorado.ru"},
+	"эльдорадо":   {"eldorado.ru"},
+	"citilink":    {"citilink.ru"},
+	"ситилинк":    {"citilink.ru"},
+	"lamoda":      {"lamoda.ru"},
+	"ламода":      {"lamoda.ru"},
+	"aliexpress":  {"aliexpress.ru", "aliexpress.com"},
+	// Russian banks
+	"sberbank":   {"sberbank.ru", "sber.ru"},
+	"сбербанк":   {"sberbank.ru", "sber.ru"},
+	"сбер":       {"sberbank.ru", "sber.ru"},
+	"tinkoff":    {"tinkoff.ru", "tbank.ru"},
+	"тинькофф":   {"tinkoff.ru", "tbank.ru"},
+	"т-банк":     {"tinkoff.ru", "tbank.ru"},
+	"vtb":        {"vtb.ru"},
+	"втб":        {"vtb.ru"},
+	"alfa":       {"alfabank.ru", "alfa.ru"},
+	"альфа":      {"alfabank.ru", "alfa.ru"},
+	"альфа-банк": {"alfabank.ru", "alfa.ru"},
+	"gazprom":    {"gazprombank.ru", "gazprom.ru"},
+	"газпром":    {"gazprombank.ru", "gazprom.ru"},
+	// International
+	"paypal":     {"paypal.com", "paypal.ru"},
+	"amazon":     {"amazon.com", "amazon.ru"},
+	"apple":      {"apple.com", "apple.ru"},
+	"microsoft":  {"microsoft.com", "microsoft.ru", "outlook.com"},
+	"google":     {"google.com", "google.ru", "gmail.com"},
+	"facebook":   {"facebook.com", "fb.com"},
+	"meta":       {"meta.com", "facebook.com"},
+	"instagram":  {"instagram.com"},
+	"netflix":    {"netflix.com"},
+	"whatsapp":   {"whatsapp.com"},
+	"telegram":   {"telegram.org", "t.me"},
+	"visa":       {"visa.com", "visa.ru"},
+	"mastercard": {"mastercard.com", "mastercard.ru"},
+	"dhl":        {"dhl.com", "dhl.ru"},
+	"fedex":      {"fedex.com"},
+	"ups":        {"ups.com"},
+}
+
+// analyzeSenderBrand checks for brand impersonation and scam sender names
+func (a *Analyzer) analyzeSenderBrand(msg *ParsedMessage) (float64, []string) {
+	var score float64
+	var reasons []string
+
+	if msg.From == nil {
+		return 0, nil
+	}
+
+	fromName := strings.ToLower(msg.From.Name)
+	fromDomain := strings.ToLower(extractDomain(msg.From.Address))
+
+	// Check for brand impersonation
+	for brand, legitDomains := range knownBrands {
+		if strings.Contains(fromName, brand) {
+			// Display name contains a known brand - check if domain is legitimate
+			isLegit := false
+			for _, legitDomain := range legitDomains {
+				if fromDomain == legitDomain || strings.HasSuffix(fromDomain, "."+legitDomain) {
+					isLegit = true
+					break
+				}
+			}
+			if !isLegit {
+				score += 5.0
+				reasons = append(reasons, "brand impersonation: \""+msg.From.Name+"\" from "+fromDomain)
+				break
+			}
+		}
+	}
+
+	// Check for scam-like sender names (e.g., "Лаборатория дохода")
+	scamNamePatterns := []string{
+		"лаборатория", "академия", "институт", "центр", "школа", "клуб",
+		"система", "платформа", "проект", "команда", "сообщество",
+	}
+	scamNameKeywords := []string{
+		"доход", "заработ", "прибыл", "инвест", "капитал", "финанс",
+		"крипт", "трейд", "торгов", "бизнес", "успех", "богат",
+	}
+	for _, pattern := range scamNamePatterns {
+		if strings.Contains(fromName, pattern) {
+			for _, keyword := range scamNameKeywords {
+				if strings.Contains(fromName, keyword) {
+					score += 3.0
+					reasons = append(reasons, "scam-like sender: \""+msg.From.Name+"\"")
+					break
+				}
+			}
+			break
+		}
+	}
+
+	return score, reasons
+}
+
+// analyzeEmojis checks for emojis in subject (common spam indicator)
+func (a *Analyzer) analyzeEmojis(msg *ParsedMessage) (float64, []string) {
+	var score float64
+	var reasons []string
+
+	emojiCount := 0
+	for _, r := range msg.Subject {
+		if (r >= 0x1F300 && r <= 0x1F9FF) || // Misc Symbols, Emoticons
+			(r >= 0x2600 && r <= 0x26FF) || // Misc symbols
+			(r >= 0x2700 && r <= 0x27BF) || // Dingbats
+			(r >= 0x1F600 && r <= 0x1F64F) || // Emoticons
+			(r >= 0x1F680 && r <= 0x1F6FF) || // Transport
+			(r >= 0x1F1E0 && r <= 0x1F1FF) { // Flags
+			emojiCount++
+		}
+	}
+
+	if emojiCount > 0 {
+		score = float64(emojiCount) * 0.5
+		if score > 2.0 {
+			score = 2.0
+		}
+		reasons = append(reasons, "emojis in subject")
+	}
+
+	return score, reasons
 }
