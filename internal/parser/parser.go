@@ -219,17 +219,15 @@ func (p *Parser) handleInlinePart(h *gomail.InlineHeader, body io.Reader, msg *P
 		return fmt.Errorf("failed to read body: %w", err)
 	}
 
-	// Get charset and decode if needed
+	// NOTE: go-message library already converts charset to UTF-8 via message.CharsetReader
+	// (registered in main.go). We only need to sanitize for valid UTF-8.
 	charset := params["charset"]
 	if charset == "" {
 		charset = "utf-8"
 	}
 
-	decodedBody, err := DecodeCharset(charset, bodyBytes)
-	if err != nil {
-		// Use raw bytes if decoding fails
-		decodedBody = string(bodyBytes)
-	}
+	// Just sanitize to ensure valid UTF-8 (go-message already decoded charset)
+	decodedBody := SanitizeUTF8(string(bodyBytes))
 
 	// Store body based on content type
 	switch {
