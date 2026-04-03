@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/mail"
 	"strings"
 
 	"github.com/emersion/go-smtp"
@@ -156,6 +157,16 @@ func (s *Session) Data(r io.Reader) error {
 	// Use envelope from if header from is empty
 	if fromAddr == "" {
 		fromAddr = s.from
+	}
+
+	// Reject messages with empty To header or where no To address matches our mailboxes
+	if len(parsed.To) == 0 {
+		log.Printf("MX: Rejecting message from %s - empty To header", fromAddr)
+		return errors.New("550 Message rejected - no recipients in To header")
+	}
+	if !s.hasLocalRecipientInHeaders(parsed.To, parsed.Cc) {
+		log.Printf("MX: Rejecting message from %s - no valid local address in To/Cc headers (To: %s)", fromAddr, toAddr)
+		return errors.New("550 Message rejected - recipient not in To/Cc headers")
 	}
 
 	body := parsed.Body
@@ -383,6 +394,27 @@ func (s *Session) splitEmail(email string) (string, string) {
 		return "", ""
 	}
 	return parts[0], parts[1]
+}
+
+// hasLocalRecipientInHeaders checks if any envelope recipient appears in the To or Cc headers
+func (s *Session) hasLocalRecipientInHeaders(to []*mail.Address, cc []*mail.Address) bool {
+	headerAddrs := make(map[string]bool)
+	for _, addr := range to {
+		if addr != nil {
+			headerAddrs[strings.ToLower(addr.Address)] = true
+		}
+	}
+	for _, addr := range cc {
+		if addr != nil {
+			headerAddrs[strings.ToLower(addr.Address)] = true
+		}
+	}
+	for _, rcpt := range s.recipients {
+		if headerAddrs[strings.ToLower(rcpt.Email)] {
+			return true
+		}
+	}
+	return false
 }
 
 // hasCalendarInvite checks if the message contains a calendar invite (.ics attachment)
