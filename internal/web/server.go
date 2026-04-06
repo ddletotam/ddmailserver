@@ -93,6 +93,7 @@ func New(database *db.DB, jwtSecret string, host string, port int, locale string
 func (s *Server) setupRoutes() {
 	// Apply global middleware
 	s.router.Use(s.LoggingMiddleware)
+	s.router.Use(s.BodyLimitMiddleware)
 	s.router.Use(s.CORSMiddleware)
 	s.router.Use(s.SessionMiddleware)
 
@@ -325,6 +326,7 @@ func (s *Server) SetSearchIndexer(indexer *search.Indexer) {
 // Stop stops the web server
 func (s *Server) Stop() error {
 	log.Printf("Stopping web server")
+	s.authRateLimiter.Stop()
 	return s.server.Close()
 }
 
