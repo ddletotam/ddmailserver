@@ -15,6 +15,7 @@ import (
 	imapserver "github.com/yourusername/mailserver/internal/imap/server"
 	"github.com/yourusername/mailserver/internal/ldap"
 	"github.com/yourusername/mailserver/internal/notify"
+	"github.com/yourusername/mailserver/internal/parser"
 	"github.com/yourusername/mailserver/internal/oauth"
 	"github.com/yourusername/mailserver/internal/search"
 	smtpmx "github.com/yourusername/mailserver/internal/smtp/mx"
@@ -159,6 +160,11 @@ func main() {
 	notifyHub := notify.NewHub()
 	scheduler.SetNotifyHub(notifyHub)
 	scheduler.SetHostname(hostname)
+
+	// Initialize spam analyzer for IMAP sync tasks
+	log.Printf("Initializing spam analyzer for IMAP sync...")
+	spamAnalyzer := parser.NewAnalyzer(nil)
+	scheduler.SetAnalyzer(spamAnalyzer)
 
 	// Initialize IMAP server (plain) WITHOUT IDLE support
 	log.Printf("Initializing IMAP server (plain, no IDLE)...")

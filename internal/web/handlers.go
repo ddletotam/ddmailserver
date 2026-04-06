@@ -77,6 +77,16 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate field lengths
+	if len(req.Username) > MaxUsernameLength {
+		respondHTMXError(w, r, http.StatusBadRequest, "Username is too long")
+		return
+	}
+	if len(req.Password) > MaxPasswordLength {
+		respondHTMXError(w, r, http.StatusBadRequest, "Password is too long")
+		return
+	}
+
 	// Check passwords match
 	if req.Password != req.PasswordConfirm {
 		respondHTMXError(w, r, http.StatusBadRequest, "Passwords do not match")

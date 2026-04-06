@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"log"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -11,12 +12,23 @@ import (
 	"github.com/yourusername/mailserver/internal/models"
 )
 
+// Input size limits
+const (
+	MaxRequestBodySize   = 10 << 20 // 10 MB for general requests
+	MaxFormFieldLength   = 10000    // 10KB per form field
+	MaxUsernameLength    = 255
+	MaxPasswordLength    = 1000
+	MaxEmailLength       = 320      // RFC 5321
+	MaxSubjectLength     = 1000
+)
+
 // RateLimiter provides IP-based rate limiting
 type RateLimiter struct {
 	requests map[string][]time.Time
 	mu       sync.RWMutex
 	limit    int           // max requests
 	window   time.Duration // time window
+	stopCh   chan struct{}
 }
 
 // NewRateLimiter creates a new rate limiter
@@ -25,6 +37,7 @@ func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 		requests: make(map[string][]time.Time),
 		limit:    limit,
 		window:   window,
+		stopCh:   make(chan struct{}),
 	}
 	// Cleanup old entries periodically
 	go rl.cleanup()
@@ -59,25 +72,36 @@ func (rl *RateLimiter) Allow(ip string) bool {
 // cleanup removes old entries periodically
 func (rl *RateLimiter) cleanup() {
 	ticker := time.NewTicker(rl.window)
-	for range ticker.C {
-		rl.mu.Lock()
-		now := time.Now()
-		windowStart := now.Add(-rl.window)
-		for ip, times := range rl.requests {
-			var recent []time.Time
-			for _, t := range times {
-				if t.After(windowStart) {
-					recent = append(recent, t)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-rl.stopCh:
+			return
+		case <-ticker.C:
+			rl.mu.Lock()
+			now := time.Now()
+			windowStart := now.Add(-rl.window)
+			for ip, times := range rl.requests {
+				var recent []time.Time
+				for _, t := range times {
+					if t.After(windowStart) {
+						recent = append(recent, t)
+					}
+				}
+				if len(recent) == 0 {
+					delete(rl.requests, ip)
+				} else {
+					rl.requests[ip] = recent
 				}
 			}
-			if len(recent) == 0 {
-				delete(rl.requests, ip)
-			} else {
-				rl.requests[ip] = recent
-			}
+			rl.mu.Unlock()
 		}
-		rl.mu.Unlock()
 	}
+}
+
+// Stop stops the rate limiter cleanup goroutine
+func (rl *RateLimiter) Stop() {
+	close(rl.stopCh)
 }
 
 type contextKey string
@@ -183,6 +207,24 @@ func (s *Server) LoggingMiddleware(next http.Handler) http.Handler {
 		log.Printf("%s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// BodyLimitMiddleware limits request body size to prevent DoS
+func (s *Server) BodyLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodySize)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// ValidateFieldLength checks if a form field exceeds the maximum allowed length
+func ValidateFieldLength(value string, maxLen int, fieldName string) error {
+	if len(value) > maxLen {
+		return fmt.Errorf("%s exceeds maximum length of %d characters", fieldName, maxLen)
+	}
+	return nil
 }
 
 // RateLimitMiddleware applies rate limiting to a handler

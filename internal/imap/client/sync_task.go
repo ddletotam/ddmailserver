@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,173 +17,71 @@ import (
 	"github.com/yourusername/mailserver/internal/task"
 )
 
-// SyncTask represents an IMAP synchronization task
 type SyncTask struct {
 	account    *models.Account
 	database   *db.DB
-	notifyFunc func(username, mailbox string, count uint32) // optional IDLE notification callback
+	analyzer   *parser.Analyzer
+	notifyFunc func(username, mailbox string, count uint32)
 	priority   int
 }
 
-// SetNotifyFunc sets the callback for IDLE push notifications
-func (t *SyncTask) SetNotifyFunc(fn func(username, mailbox string, count uint32)) {
-	t.notifyFunc = fn
-}
+func (t *SyncTask) SetNotifyFunc(fn func(username, mailbox string, count uint32)) { t.notifyFunc = fn }
+func (t *SyncTask) SetAnalyzer(analyzer *parser.Analyzer) { t.analyzer = analyzer }
 
-// NewSyncTask creates a new IMAP sync task
 func NewSyncTask(account *models.Account, database *db.DB) *SyncTask {
-	return &SyncTask{
-		account:  account,
-		database: database,
-		priority: 1,
-	}
+	return &SyncTask{account: account, database: database, priority: 1}
 }
 
-// Type returns the task type
-func (t *SyncTask) Type() task.Type {
-	return task.TypeIMAP
-}
-
-// Priority returns task priority
-func (t *SyncTask) Priority() int {
-	return t.priority
-}
-
-// String returns a human-readable description
+func (t *SyncTask) Type() task.Type { return task.TypeIMAP }
+func (t *SyncTask) Priority() int { return t.priority }
 func (t *SyncTask) String() string {
 	return fmt.Sprintf("IMAP sync for %s (account %d)", t.account.Email, t.account.ID)
 }
-
-// Execute runs the synchronization
 func (t *SyncTask) Execute(ctx context.Context) error {
 	log.Printf("Starting sync for account %s", t.account.Email)
-
-	// Create IMAP client
 	client := &Client{account: t.account}
-
-	// Connect to IMAP server
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
-	}
+	if err := client.Connect(); err != nil { return fmt.Errorf("failed to connect: %w", err) }
 	defer client.Disconnect()
-
-	// Check context cancellation
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-
-	// Get user's local INBOX (all messages go here)
+	if ctx.Err() != nil { return ctx.Err() }
 	localInbox, err := t.database.GetOrCreateLocalInbox(t.account.UserID)
-	if err != nil {
-		return fmt.Errorf("failed to get local inbox: %w", err)
-	}
-
-	// Sync only INBOX from remote server
-	// All messages go to user's local INBOX
-	if err := t.syncRemoteInbox(ctx, client, localInbox); err != nil {
-		log.Printf("Failed to sync INBOX: %v", err)
-	}
-
-	// Update last sync time
-	if err := t.database.UpdateAccountLastSync(t.account.ID, time.Now()); err != nil {
-		log.Printf("Failed to update last sync time: %v", err)
-	}
-
+	if err != nil { return fmt.Errorf("failed to get local inbox: %w", err) }
+	if err := t.syncRemoteInbox(ctx, client, localInbox); err != nil { log.Printf("Failed to sync INBOX: %v", err) }
+	if err := t.database.UpdateAccountLastSync(t.account.ID, time.Now()); err != nil { log.Printf("Failed to update last sync time: %v", err) }
 	log.Printf("Completed sync for account %s", t.account.Email)
 	return nil
 }
 
-// syncRemoteInbox syncs INBOX from remote server to user's local INBOX
 func (t *SyncTask) syncRemoteInbox(ctx context.Context, client *Client, localInbox *models.Folder) error {
 	log.Printf("Syncing remote INBOX for %s to local inbox (folder %d)", t.account.Email, localInbox.ID)
-
-	// Select INBOX on remote server
 	mbox, err := client.SelectFolder("INBOX")
-	if err != nil {
-		return err
-	}
-
-	// If mailbox is empty, nothing to do
-	if mbox.Messages == 0 {
-		log.Printf("Remote INBOX is empty for %s", t.account.Email)
-		return nil
-	}
-
-	// Fetch all messages (we use message_id for deduplication, not UIDs)
-	// For simplicity, fetch last 100 messages on each sync
-	// TODO: implement proper incremental sync tracking per account
+	if err != nil { return err }
+	if mbox.Messages == 0 { log.Printf("Remote INBOX is empty for %s", t.account.Email); return nil }
 	uidSet := new(imap.SeqSet)
-	uidSet.AddRange(1, 0) // Fetch all
-
-	// PEEK to avoid marking messages as seen on source server
+	uidSet.AddRange(1, 0)
 	section := &imap.BodySectionName{Peek: true}
-	items := []imap.FetchItem{
-		imap.FetchEnvelope,
-		imap.FetchFlags,
-		imap.FetchUid,
-		section.FetchItem(),
-	}
-
+	items := []imap.FetchItem{imap.FetchEnvelope, imap.FetchFlags, imap.FetchUid, section.FetchItem()}
 	messages, fetchDone := client.FetchMessagesByUID(uidSet, items)
-
-	messageCount := 0
-	skippedCount := 0
+	messageCount, skippedCount, spamCount := 0, 0, 0
 	for msg := range messages {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
-		saved, err := t.saveMessageToInbox(msg, localInbox)
-		if err != nil {
-			log.Printf("Failed to save message: %v", err)
-			continue
-		}
-		if saved {
-			messageCount++
-		} else {
-			skippedCount++
-		}
+		if ctx.Err() != nil { return ctx.Err() }
+		saved, isSpam, err := t.saveMessageToInbox(msg, localInbox)
+		if err != nil { log.Printf("Failed to save message: %v", err); continue }
+		if saved { messageCount++; if isSpam { spamCount++ } } else { skippedCount++ }
 	}
-
-	// Check for fetch errors
-	if err := <-fetchDone; err != nil {
-		return fmt.Errorf("IMAP fetch failed: %w", err)
-	}
-
-	log.Printf("Synced %d new messages from %s (skipped %d duplicates)", messageCount, t.account.Email, skippedCount)
-
-	// Notify IMAP IDLE clients about new messages
-	if messageCount > 0 && t.notifyFunc != nil {
+	if err := <-fetchDone; err != nil { return fmt.Errorf("IMAP fetch failed: %w", err) }
+	log.Printf("Synced %d new messages from %s (skipped %d duplicates, %d spam)", messageCount, t.account.Email, skippedCount, spamCount)
+	if messageCount > spamCount && t.notifyFunc != nil {
 		totalMessages, _ := t.database.GetMessageCountByFolder(localInbox.ID)
-		// Get username for IDLE notification
-		if user, err := t.database.GetUserByID(t.account.UserID); err == nil {
-			t.notifyFunc(user.Username, "INBOX", totalMessages)
-		}
+		if user, err := t.database.GetUserByID(t.account.UserID); err == nil { t.notifyFunc(user.Username, "INBOX", totalMessages) }
 	}
-
 	return nil
 }
 
-// saveMessageToInbox saves a message to user's local INBOX with deduplication
-func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folder) (bool, error) {
-	// Skip messages with no envelope data (corrupted or incomplete fetch)
-	if imapMsg.Envelope == nil {
-		log.Printf("IMAP sync: Skipping message UID %d - no envelope data", imapMsg.Uid)
-		return false, nil
-	}
-
-	// Validate that we have at least some basic envelope data
-	// A message without From and Subject is likely corrupted
-	if len(imapMsg.Envelope.From) == 0 && imapMsg.Envelope.Subject == "" {
-		log.Printf("IMAP sync: Skipping message UID %d - empty envelope (no from, no subject)", imapMsg.Uid)
-		return false, nil
-	}
-
-	// Get or generate message_id for deduplication
+func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folder) (bool, bool, error) {
+	if imapMsg.Envelope == nil { log.Printf("IMAP sync: Skipping message UID %d - no envelope data", imapMsg.Uid); return false, false, nil }
+	if len(imapMsg.Envelope.From) == 0 && imapMsg.Envelope.Subject == "" { log.Printf("IMAP sync: Skipping message UID %d - empty envelope", imapMsg.Uid); return false, false, nil }
 	messageID := imapMsg.Envelope.MessageId
 	if messageID == "" {
-		// Generate synthetic message_id from content hash
-		// This ensures deduplication even for messages without Message-ID header
 		h := sha256.New()
 		h.Write([]byte(imapMsg.Envelope.Subject))
 		h.Write([]byte(formatAddressList(imapMsg.Envelope.From)))
@@ -190,150 +89,104 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 		h.Write([]byte(fmt.Sprintf("%d", imapMsg.Uid)))
 		messageID = fmt.Sprintf("<%s@generated.local>", hex.EncodeToString(h.Sum(nil))[:32])
 	}
-
-	// Check if message already exists by message_id
 	exists, err := t.database.MessageExistsByMessageID(t.account.UserID, messageID)
-	if err != nil {
-		return false, err
-	}
+	if err != nil { return false, false, err }
 	if exists {
-		// Message exists - try to update remote_uid if missing (for bidirectional sync)
-		if imapMsg.Uid > 0 {
-			updated, err := t.database.UpdateMessageRemoteUID(t.account.UserID, messageID, imapMsg.Uid, "INBOX")
-			if err != nil {
-				log.Printf("IMAP sync: Failed to update remote_uid for %s: %v", messageID, err)
-			} else if updated {
-				log.Printf("IMAP sync: Updated remote_uid=%d for existing message %s", imapMsg.Uid, messageID)
-			}
-		}
-		return false, nil // Skip duplicate (content already exists)
+		if imapMsg.Uid > 0 { t.database.UpdateMessageRemoteUID(t.account.UserID, messageID, imapMsg.Uid, "INBOX") }
+		return false, false, nil
 	}
-
-	// Parse message body using new parser
-	var body string
-	var bodyHTML string
+	var body, bodyHTML string
 	var attachments []parser.ParsedAttachment
-
+	var parsed *parser.ParsedMessage
+	var rawData []byte
 	var rfc822Body io.Reader
-	for _, literal := range imapMsg.Body {
-		rfc822Body = literal
-		break
-	}
-
+	for _, literal := range imapMsg.Body { rfc822Body = literal; break }
 	if rfc822Body != nil {
+		var buf bytes.Buffer
+		teeReader := io.TeeReader(rfc822Body, &buf)
 		p := parser.New()
-		parsed, err := p.Parse(rfc822Body)
-		if err == nil {
-			body = parsed.Body
-			bodyHTML = parsed.BodyHTML
-			attachments = parsed.Attachments
-
-			// Log embedded messages if any
-			if len(parsed.EmbeddedMessages) > 0 {
-				log.Printf("IMAP sync: Message contains %d embedded message(s)", len(parsed.EmbeddedMessages))
-			}
-		} else {
-			log.Printf("IMAP sync: Failed to parse message body: %v", err)
+		var parseErr error
+		parsed, parseErr = p.Parse(teeReader)
+		rawData = buf.Bytes()
+		if parseErr == nil { body = parsed.Body; bodyHTML = parsed.BodyHTML; attachments = parsed.Attachments } else { log.Printf("IMAP sync: Failed to parse message body: %v", parseErr) }
+	}
+	localUID, err := t.database.GetNextUIDForFolder(inbox.ID)
+	if err != nil { return false, false, fmt.Errorf("failed to get next UID: %w", err) }
+	msgDate := imapMsg.Envelope.Date.UTC()
+	if msgDate.Year() < 1970 { msgDate = time.Now().UTC() }
+	fromAddr := parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.From))
+	isSpam := false
+	var spamScore float64
+	var spamStatus, spamReasons string
+	var spamRuleID *int64
+	action, matchedRule, ruleErr := t.database.CheckSpamRules(t.account.UserID, fromAddr)
+	if ruleErr != nil { log.Printf("IMAP sync: Failed to check spam rules: %v", ruleErr) }
+	if action == "allow" {
+		isSpam = false
+		log.Printf("IMAP sync: Message whitelisted by rule %d for user %d", matchedRule.ID, t.account.UserID)
+	} else if action == "spam" {
+		isSpam = true
+		spamRuleID = &matchedRule.ID
+		log.Printf("IMAP sync: Message blacklisted by rule %d for user %d", matchedRule.ID, t.account.UserID)
+	} else if t.analyzer != nil && parsed != nil {
+		disabledChecks, err := t.database.GetDisabledSpamChecksMap(t.account.UserID)
+		if err != nil { log.Printf("IMAP sync: Failed to get disabled spam checks: %v", err); disabledChecks = nil }
+		if len(rawData) > 0 { p := parser.New(); parsed, _ = p.ParseBytes(rawData) }
+		t.analyzer.AnalyzeWithDisabledChecks(parsed, "", "", disabledChecks)
+		spamScore = parsed.SpamScore
+		spamStatus = string(parsed.SpamStatus)
+		spamReasons = parser.GetSpamReasonsJSON(parsed.SpamReasons)
+		if parsed.SpamStatus == parser.SpamStatusSpam {
+			isSpam = true
+			log.Printf("IMAP sync: Message marked as spam (score=%.1f, reasons=%v) for user %d", parsed.SpamScore, parsed.SpamReasons, t.account.UserID)
 		}
 	}
 
-	// Get next local UID
-	localUID, err := t.database.GetNextUIDForFolder(inbox.ID)
-	if err != nil {
-		return false, fmt.Errorf("failed to get next UID: %w", err)
-	}
-
-	// Use envelope date, fall back to current time if zero/invalid
-	msgDate := imapMsg.Envelope.Date.UTC()
-	if msgDate.Year() < 1970 {
-		// Date is likely corrupted (e.g., 0001-01-01), use current time
-		msgDate = time.Now().UTC()
-		log.Printf("IMAP sync: Message UID %d has invalid date, using current time", imapMsg.Uid)
-	}
-
-	// Create message with sanitized UTF-8 strings
 	msg := &models.Message{
-		AccountID:    t.account.ID,
-		UserID:       t.account.UserID,
-		FolderID:     inbox.ID,
-		MessageID:    messageID,
-		Subject:      parser.SanitizeUTF8(imapMsg.Envelope.Subject),
-		From:         parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.From)),
-		To:           parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.To)),
-		Cc:           parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.Cc)),
-		Bcc:          parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.Bcc)),
-		ReplyTo:      parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.ReplyTo)),
-		Date:         msgDate,
-		Body:         parser.SanitizeUTF8(body),
-		BodyHTML:     parser.SanitizeUTF8(bodyHTML),
-		UID:          localUID,
-		Seen:         hasFlag(imapMsg.Flags, imap.SeenFlag),
-		Flagged:      hasFlag(imapMsg.Flags, imap.FlaggedFlag),
-		Answered:     hasFlag(imapMsg.Flags, imap.AnsweredFlag),
-		Draft:        hasFlag(imapMsg.Flags, imap.DraftFlag),
-		Deleted:      hasFlag(imapMsg.Flags, imap.DeletedFlag),
-		InReplyTo:    parser.SanitizeUTF8(imapMsg.Envelope.InReplyTo),
-		RemoteUID:    imapMsg.Uid, // Store remote UID for bidirectional sync
-		RemoteFolder: "INBOX",     // Currently we only sync INBOX
+		AccountID: t.account.ID, UserID: t.account.UserID, FolderID: inbox.ID, MessageID: messageID,
+		Subject: parser.SanitizeUTF8(imapMsg.Envelope.Subject), From: fromAddr,
+		To: parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.To)),
+		Cc: parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.Cc)),
+		Bcc: parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.Bcc)),
+		ReplyTo: parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.ReplyTo)),
+		Date: msgDate, Body: parser.SanitizeUTF8(body), BodyHTML: parser.SanitizeUTF8(bodyHTML),
+		UID: localUID, Seen: hasFlag(imapMsg.Flags, imap.SeenFlag),
+		Flagged: hasFlag(imapMsg.Flags, imap.FlaggedFlag),
+		Answered: hasFlag(imapMsg.Flags, imap.AnsweredFlag),
+		Draft: hasFlag(imapMsg.Flags, imap.DraftFlag),
+		Deleted: hasFlag(imapMsg.Flags, imap.DeletedFlag),
+		InReplyTo: parser.SanitizeUTF8(imapMsg.Envelope.InReplyTo),
+		RemoteUID: imapMsg.Uid, RemoteFolder: "INBOX",
+		SpamScore: spamScore, SpamStatus: spamStatus, SpamReasons: spamReasons,
+		IsSpam: isSpam, SpamRuleID: spamRuleID,
 	}
-
-	if err := t.database.CreateMessage(msg); err != nil {
-		return false, err
-	}
-
-	// Save attachments
+	if err := t.database.CreateMessage(msg); err != nil { return false, false, err }
 	attachmentCount := 0
 	for _, att := range attachments {
 		attachment := &models.Attachment{
-			MessageID:   msg.ID,
-			ContentID:   att.ContentID,
-			Filename:    att.Filename,
-			ContentType: att.ContentType,
-			Size:        int(att.Size),
-			IsInline:    att.IsInline,
-			Data:        att.Data,
+			MessageID: msg.ID, ContentID: att.ContentID, Filename: att.Filename,
+			ContentType: att.ContentType, Size: int(att.Size), IsInline: att.IsInline, Data: att.Data,
 		}
 		if err := t.database.CreateAttachment(attachment); err != nil {
 			log.Printf("IMAP sync: Failed to save attachment %s: %v", att.Filename, err)
-		} else {
-			attachmentCount++
-		}
+		} else { attachmentCount++ }
 	}
-
-	// Update attachment count if any were saved
-	if attachmentCount > 0 {
-		msg.Attachments = attachmentCount
-		t.database.UpdateMessageAttachmentCount(msg.ID, attachmentCount)
-	}
-
-	return true, nil
+	if attachmentCount > 0 { msg.Attachments = attachmentCount; t.database.UpdateMessageAttachmentCount(msg.ID, attachmentCount) }
+	return true, isSpam, nil
 }
 
-// Helper functions
-
 func formatAddressList(addresses []*imap.Address) string {
-	if len(addresses) == 0 {
-		return ""
-	}
-
+	if len(addresses) == 0 { return "" }
 	result := ""
 	for i, addr := range addresses {
-		if i > 0 {
-			result += ", "
-		}
-		if addr.PersonalName != "" {
-			result += addr.PersonalName + " "
-		}
+		if i > 0 { result += ", " }
+		if addr.PersonalName != "" { result += addr.PersonalName + " " }
 		result += fmt.Sprintf("<%s@%s>", addr.MailboxName, addr.HostName)
 	}
 	return result
 }
 
 func hasFlag(flags []string, flag string) bool {
-	for _, f := range flags {
-		if f == flag {
-			return true
-		}
-	}
+	for _, f := range flags { if f == flag { return true } }
 	return false
 }

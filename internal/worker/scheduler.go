@@ -11,6 +11,7 @@ import (
 	"github.com/yourusername/mailserver/internal/notify"
 	"github.com/yourusername/mailserver/internal/oauth"
 	smtpclient "github.com/yourusername/mailserver/internal/smtp/client"
+	"github.com/yourusername/mailserver/internal/parser"
 	taskpkg "github.com/yourusername/mailserver/internal/task"
 )
 
@@ -25,6 +26,8 @@ type Scheduler struct {
 	microsoftOAuth *oauth.MicrosoftOAuth
 	notifyHub      *notify.Hub
 	hostname       string
+	analyzer            *parser.Analyzer
+	spamCleanupLastRun time.Time
 }
 
 // NewScheduler creates a new task scheduler
@@ -54,6 +57,11 @@ func (s *Scheduler) SetNotifyHub(hub *notify.Hub) {
 // SetHostname sets the hostname for direct SMTP delivery
 func (s *Scheduler) SetHostname(hostname string) {
 	s.hostname = hostname
+}
+
+// SetAnalyzer sets the spam analyzer for IMAP sync tasks
+func (s *Scheduler) SetAnalyzer(analyzer *parser.Analyzer) {
+	s.analyzer = analyzer
 }
 
 func (s *Scheduler) getHostname() string {
@@ -145,6 +153,9 @@ func (s *Scheduler) scheduleIMAPSync() {
 					Count:    count,
 				})
 			})
+		}
+		if s.analyzer != nil {
+			task.SetAnalyzer(s.analyzer)
 		}
 
 		if err := s.pool.Submit(task); err != nil {
@@ -418,14 +429,11 @@ func (s *Scheduler) scheduleFlagSync() {
 	}
 }
 
-// spamCleanupLastRun tracks when spam cleanup last ran (to avoid running too often)
-var spamCleanupLastRun time.Time
-
 // runSpamCleanup deletes spam messages older than 1 year
 // Only runs once per day to avoid excessive database operations
 func (s *Scheduler) runSpamCleanup() {
 	// Only run once per day
-	if time.Since(spamCleanupLastRun) < 24*time.Hour {
+	if time.Since(s.spamCleanupLastRun) < 24*time.Hour {
 		return
 	}
 
@@ -440,5 +448,5 @@ func (s *Scheduler) runSpamCleanup() {
 		log.Printf("Spam cleanup: deleted %d messages older than 1 year", deleted)
 	}
 
-	spamCleanupLastRun = time.Now()
+	s.spamCleanupLastRun = time.Now()
 }
