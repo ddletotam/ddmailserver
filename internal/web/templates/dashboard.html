@@ -1,4 +1,15 @@
 {{define "content"}}
+{{if .ErrorAccountCount}}
+<div class="alert alert-danger mb-4">
+    <div class="d-flex align-items-center">
+        <i class="ti ti-alert-triangle me-2 fs-2"></i>
+        <div>
+            <h4 class="alert-title">Sync errors detected</h4>
+            <div class="text-muted">{{.ErrorAccountCount}} account{{if gt .ErrorAccountCount 1}}s have{{else}} has{{end}} sync errors. <a href="/accounts" class="alert-link">Check accounts</a></div>
+        </div>
+    </div>
+</div>
+{{end}}
 <!-- Stats row -->
 <div class="row row-deck row-cards mb-4">
     <div class="col-sm-6 col-lg-3">

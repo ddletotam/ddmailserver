@@ -529,7 +529,7 @@ func (c *Client) PutContactRaw(ctx context.Context, remotePath string, vcardData
 		return fmt.Errorf("client not connected")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "PUT", remotePath, strings.NewReader(vcardData))
+	req, err := http.NewRequestWithContext(ctx, "PUT", c.buildFullURL(remotePath), strings.NewReader(vcardData))
 	if err != nil {
 		return fmt.Errorf("failed to create PUT request: %w", err)
 	}
@@ -555,7 +555,7 @@ func (c *Client) DeleteContact(ctx context.Context, remotePath string) error {
 		return fmt.Errorf("client not connected")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "DELETE", remotePath, nil)
+	req, err := http.NewRequestWithContext(ctx, "DELETE", c.buildFullURL(remotePath), nil)
 	if err != nil {
 		return fmt.Errorf("failed to create DELETE request: %w", err)
 	}

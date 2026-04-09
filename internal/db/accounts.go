@@ -83,7 +83,8 @@ func (db *DB) GetAccountsByUserID(userID int64) ([]*models.Account, error) {
 		SELECT id, user_id, name, email, imap_host, imap_port, imap_username, imap_password, imap_tls,
 		       smtp_host, smtp_port, smtp_username, smtp_password, smtp_tls, enabled, last_sync,
 		       COALESCE(auth_type, 'password'), COALESCE(oauth_access_token, ''), COALESCE(oauth_refresh_token, ''), oauth_token_expiry,
-		       created_at, updated_at
+		       created_at, updated_at,
+		       COALESCE(last_sync_error, ''), COALESCE(consecutive_errors, 0)
 		FROM accounts
 		WHERE user_id = $1
 		ORDER BY created_at DESC
@@ -107,6 +108,7 @@ func (db *DB) GetAccountsByUserID(userID int64) ([]*models.Account, error) {
 			&account.Enabled, &lastSync,
 			&account.AuthType, &account.OAuthAccessToken, &account.OAuthRefreshToken, &tokenExpiry,
 			&account.CreatedAt, &account.UpdatedAt,
+			&account.LastSyncError, &account.ConsecutiveErrors,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan account: %w", err)
@@ -139,7 +141,8 @@ func (db *DB) GetAccountByID(id int64) (*models.Account, error) {
 		SELECT id, user_id, name, email, imap_host, imap_port, imap_username, imap_password, imap_tls,
 		       smtp_host, smtp_port, smtp_username, smtp_password, smtp_tls, enabled, last_sync,
 		       COALESCE(auth_type, 'password'), COALESCE(oauth_access_token, ''), COALESCE(oauth_refresh_token, ''), oauth_token_expiry,
-		       created_at, updated_at
+		       created_at, updated_at,
+		       COALESCE(last_sync_error, ''), COALESCE(consecutive_errors, 0)
 		FROM accounts
 		WHERE id = $1
 	`
@@ -151,6 +154,7 @@ func (db *DB) GetAccountByID(id int64) (*models.Account, error) {
 		&account.Enabled, &lastSync,
 		&account.AuthType, &account.OAuthAccessToken, &account.OAuthRefreshToken, &tokenExpiry,
 		&account.CreatedAt, &account.UpdatedAt,
+		&account.LastSyncError, &account.ConsecutiveErrors,
 	)
 
 	if err == sql.ErrNoRows {
@@ -239,7 +243,8 @@ func (db *DB) GetAllEnabledAccounts() ([]*models.Account, error) {
 		SELECT id, user_id, name, email, imap_host, imap_port, imap_username, imap_password, imap_tls,
 		       smtp_host, smtp_port, smtp_username, smtp_password, smtp_tls, enabled, last_sync,
 		       COALESCE(auth_type, 'password'), COALESCE(oauth_access_token, ''), COALESCE(oauth_refresh_token, ''), oauth_token_expiry,
-		       created_at, updated_at
+		       created_at, updated_at,
+		       COALESCE(last_sync_error, ''), COALESCE(consecutive_errors, 0)
 		FROM accounts
 		WHERE enabled = true
 		ORDER BY last_sync ASC NULLS FIRST
@@ -263,6 +268,7 @@ func (db *DB) GetAllEnabledAccounts() ([]*models.Account, error) {
 			&account.Enabled, &lastSync,
 			&account.AuthType, &account.OAuthAccessToken, &account.OAuthRefreshToken, &tokenExpiry,
 			&account.CreatedAt, &account.UpdatedAt,
+			&account.LastSyncError, &account.ConsecutiveErrors,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan account: %w", err)
@@ -360,6 +366,26 @@ func (db *DB) UpdateAccountOAuthTokens(accountID int64, accessToken, refreshToke
 		return fmt.Errorf("failed to update OAuth tokens: %w", err)
 	}
 
+	return nil
+}
+
+// SetAccountSyncError records a sync failure for the account
+func (db *DB) SetAccountSyncError(accountID int64, errMsg string) error {
+	query := `UPDATE accounts SET last_sync_error = $1, consecutive_errors = COALESCE(consecutive_errors, 0) + 1, updated_at = $2 WHERE id = $3`
+	_, err := db.Exec(query, errMsg, time.Now(), accountID)
+	if err != nil {
+		return fmt.Errorf("failed to set sync error: %w", err)
+	}
+	return nil
+}
+
+// ClearAccountSyncError clears sync error on successful sync
+func (db *DB) ClearAccountSyncError(accountID int64) error {
+	query := `UPDATE accounts SET last_sync_error = '', consecutive_errors = 0, updated_at = $1 WHERE id = $2`
+	_, err := db.Exec(query, time.Now(), accountID)
+	if err != nil {
+		return fmt.Errorf("failed to clear sync error: %w", err)
+	}
 	return nil
 }
 

@@ -32,6 +32,7 @@ type Server struct {
 	caldavServer    *caldavserver.Server
 	carddavServer   *carddavserver.Server
 	searchIndexer   *search.Indexer
+	syncIntervalSec int
 }
 
 // New creates a new web server
@@ -192,6 +193,9 @@ func (s *Server) setupRoutes() {
 	web.HandleFunc("/accounts/new", s.HandleAccountFormPage).Methods("GET")
 	web.HandleFunc("/accounts/save", s.HandleSaveAccount).Methods("POST")
 	web.HandleFunc("/accounts/{id}/edit", s.HandleAccountFormPage).Methods("GET")
+	web.HandleFunc("/accounts/{id}/sync", s.HandleSyncAccountWeb).Methods("POST")
+	web.HandleFunc("/accounts/{id}/toggle", s.HandleToggleAccountWeb).Methods("POST")
+	web.HandleFunc("/accounts/{id}", s.HandleDeleteAccountWeb).Methods("DELETE")
 
 	// Inbox
 	web.HandleFunc("/inbox", s.HandleInboxPage).Methods("GET")
@@ -263,12 +267,14 @@ func (s *Server) setupRoutes() {
 	domainsAPI := s.router.PathPrefix("/api/domains").Subrouter()
 	domainsAPI.Use(s.APIAuthMiddleware)
 	domainsAPI.HandleFunc("", s.HandleCreateDomain).Methods("POST")
+	domainsAPI.HandleFunc("/{id}/toggle", s.HandleToggleDomain).Methods("POST")
 	domainsAPI.HandleFunc("/{id}", s.HandleDeleteDomain).Methods("DELETE")
 
 	// Mailboxes API
 	mailboxesAPI := s.router.PathPrefix("/api/mailboxes").Subrouter()
 	mailboxesAPI.Use(s.APIAuthMiddleware)
 	mailboxesAPI.HandleFunc("", s.HandleCreateMailbox).Methods("POST")
+	mailboxesAPI.HandleFunc("/{id}/toggle", s.HandleToggleMailbox).Methods("POST")
 	mailboxesAPI.HandleFunc("/{id}", s.HandleDeleteMailbox).Methods("DELETE")
 
 	// Calendar Sources API
@@ -321,6 +327,11 @@ func (s *Server) Start() error {
 // SetSearchIndexer sets the Meilisearch indexer for full-text search
 func (s *Server) SetSearchIndexer(indexer *search.Indexer) {
 	s.searchIndexer = indexer
+}
+
+// SetSyncIntervalSec sets the sync interval for display in the UI
+func (s *Server) SetSyncIntervalSec(sec int) {
+	s.syncIntervalSec = sec
 }
 
 // Stop stops the web server

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"html/template"
@@ -9,9 +10,11 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/yourusername/mailserver/internal/db"
+	imapclient "github.com/yourusername/mailserver/internal/imap/client"
 	"github.com/yourusername/mailserver/internal/models"
 )
 
@@ -31,10 +34,11 @@ type PageData struct {
 
 type DashboardData struct {
 	PageData
-	AccountCount  int
-	MessageCount  int
-	UnreadCount   int
-	CalendarCount int
+	AccountCount      int
+	MessageCount      int
+	UnreadCount       int
+	CalendarCount     int
+	ErrorAccountCount int
 }
 
 type AccountsData struct {
@@ -42,6 +46,7 @@ type AccountsData struct {
 	Accounts              []*models.Account
 	GoogleOAuthEnabled    bool
 	MicrosoftOAuthEnabled bool
+	SyncIntervalSec       int
 }
 
 type InboxData struct {
@@ -213,15 +218,23 @@ func (s *Server) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 	unreadCount := 0
 	calendars, _ := s.database.GetCalendarsByUserID(user.ID)
 
+	errorCount := 0
+	for _, acc := range accounts {
+		if acc.HasSyncError() {
+			errorCount++
+		}
+	}
+
 	data := DashboardData{
 		PageData: PageData{
 			Title: "Dashboard",
 			User:  user,
 		},
-		AccountCount:  len(accounts),
-		MessageCount:  messageCount,
-		UnreadCount:   unreadCount,
-		CalendarCount: len(calendars),
+		AccountCount:      len(accounts),
+		MessageCount:      messageCount,
+		UnreadCount:       unreadCount,
+		CalendarCount:     len(calendars),
+		ErrorAccountCount: errorCount,
 	}
 
 	s.renderTemplate(w, "dashboard.html", data)
@@ -242,6 +255,7 @@ func (s *Server) HandleAccountsPage(w http.ResponseWriter, r *http.Request) {
 		},
 		GoogleOAuthEnabled:    s.googleOAuth != nil,
 		MicrosoftOAuthEnabled: s.microsoftOAuth != nil,
+		SyncIntervalSec:       s.syncIntervalSec,
 	}
 
 	s.renderTemplate(w, "accounts.html", data)
@@ -296,7 +310,12 @@ func (s *Server) HandleAccountFormPage(w http.ResponseWriter, r *http.Request) {
 	var account *models.Account
 	if idStr != "" {
 		id, _ := strconv.ParseInt(idStr, 10, 64)
-		account, _ = s.database.GetAccountByID(id)
+		acc, err := s.database.GetAccountByID(id)
+		if err != nil || acc.UserID != user.ID {
+			http.Redirect(w, r, "/accounts", http.StatusSeeOther)
+			return
+		}
+		account = acc
 	}
 
 	data := struct {
@@ -356,7 +375,11 @@ func (s *Server) HandleSaveAccount(w http.ResponseWriter, r *http.Request) {
 		account.SMTPPassword = pwd
 	}
 	account.SMTPTLS = r.FormValue("smtp_tls") == "true"
-	account.Enabled = true
+	if account.ID == 0 {
+		// New accounts start enabled
+		account.Enabled = true
+	}
+	// else: preserve existing Enabled state for edits
 
 	// Parse ports
 	if imapPort := r.FormValue("imap_port"); imapPort != "" {
@@ -400,8 +423,124 @@ func (s *Server) HandleSaveAccount(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Account saved: %s for user %d", account.Email, user.ID)
 
+	// Clear sync errors on edit — credentials may have changed
+	if account.ID > 0 {
+		_ = s.database.ClearAccountSyncError(account.ID)
+	}
+
 	// Redirect to accounts page
 	w.Header().Set("HX-Redirect", "/accounts")
+	w.WriteHeader(http.StatusOK)
+}
+
+// HandleSyncAccountWeb triggers immediate IMAP sync for an account
+func (s *Server) HandleSyncAccountWeb(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	vars := mux.Vars(r)
+	id, err := strconv.ParseInt(vars["id"], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
+	}
+
+	account, err := s.database.GetAccountByID(id)
+	if err != nil || account == nil || account.UserID != user.ID {
+		http.Error(w, "Account not found", http.StatusNotFound)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+
+	task := imapclient.NewSyncTask(account, s.database)
+	syncErr := task.Execute(ctx)
+
+	w.Header().Set("Content-Type", "text/html")
+	if syncErr != nil {
+		log.Printf("Manual IMAP sync failed for %s: %v", account.Email, syncErr)
+		fmt.Fprintf(w, `<span class="badge bg-danger" title="%s">Sync failed</span>`,
+			template.HTMLEscapeString(syncErr.Error()))
+	} else {
+		fmt.Fprintf(w, `<span class="badge bg-success">Synced</span>`)
+	}
+}
+
+// HandleToggleAccountWeb enables/disables an account
+func (s *Server) HandleToggleAccountWeb(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	vars := mux.Vars(r)
+	id, err := strconv.ParseInt(vars["id"], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
+	}
+
+	account, err := s.database.GetAccountByID(id)
+	if err != nil || account == nil || account.UserID != user.ID {
+		http.Error(w, "Account not found", http.StatusNotFound)
+		return
+	}
+
+	account.Enabled = !account.Enabled
+	if err := s.database.UpdateAccount(account); err != nil {
+		http.Error(w, "Failed to update account", http.StatusInternalServerError)
+		return
+	}
+
+	// Return updated list via HTMX
+	accounts, err := s.database.GetAccountsByUserID(user.ID)
+	if err != nil {
+		http.Error(w, "Failed to load accounts", http.StatusInternalServerError)
+		return
+	}
+
+	data := AccountsData{Accounts: accounts}
+	funcMap := template.FuncMap{"t": s.i18n.T}
+	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templatesFS, "templates/accounts.html")
+	if err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html")
+	tmpl.ExecuteTemplate(w, "accounts-list", data)
+}
+
+// HandleDeleteAccountWeb deletes an account
+func (s *Server) HandleDeleteAccountWeb(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	vars := mux.Vars(r)
+	id, err := strconv.ParseInt(vars["id"], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
+	}
+
+	account, err := s.database.GetAccountByID(id)
+	if err != nil || account == nil || account.UserID != user.ID {
+		http.Error(w, "Account not found", http.StatusNotFound)
+		return
+	}
+
+	if err := s.database.DeleteAccount(id); err != nil {
+		http.Error(w, "Failed to delete account", http.StatusInternalServerError)
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 

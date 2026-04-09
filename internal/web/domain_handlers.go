@@ -111,6 +111,48 @@ func (s *Server) HandleCreateDomain(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusCreated, domain)
 }
 
+// HandleToggleDomain enables/disables a domain and returns the updated table row
+func (s *Server) HandleToggleDomain(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r)
+	vars := mux.Vars(r)
+
+	domainID, err := strconv.ParseInt(vars["id"], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid domain ID", http.StatusBadRequest)
+		return
+	}
+
+	domain, err := s.database.GetDomainByID(domainID)
+	if err != nil || domain.UserID != userID {
+		http.Error(w, "Domain not found", http.StatusNotFound)
+		return
+	}
+
+	domain.Enabled = !domain.Enabled
+	if err := s.database.UpdateDomain(domain); err != nil {
+		http.Error(w, "Failed to update domain", http.StatusInternalServerError)
+		return
+	}
+
+	statusBadge := `<span class="badge bg-secondary-lt">Disabled</span>`
+	toggleLabel := "Enable"
+	if domain.Enabled {
+		statusBadge = `<span class="badge bg-success-lt">Active</span>`
+		toggleLabel = "Disable"
+	}
+
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(`<tr>
+		<td><div class="d-flex align-items-center"><i class="ti ti-world text-muted me-2"></i><span class="fw-medium">` + domain.Domain + `</span></div></td>
+		<td>` + statusBadge + `</td>
+		<td class="text-muted">` + domain.CreatedAt.Format("2006-01-02") + `</td>
+		<td><div class="btn-list flex-nowrap">
+			<button hx-post="/api/domains/` + strconv.FormatInt(domain.ID, 10) + `/toggle" hx-target="closest tr" hx-swap="outerHTML" class="btn btn-sm btn-ghost-secondary">` + toggleLabel + `</button>
+			<button hx-delete="/api/domains/` + strconv.FormatInt(domain.ID, 10) + `" hx-confirm="Delete domain ` + domain.Domain + `?" hx-target="closest tr" hx-swap="outerHTML swap:0.3s" class="btn btn-sm btn-ghost-danger"><i class="ti ti-trash"></i></button>
+		</div></td>
+	</tr>`))
+}
+
 // HandleDeleteDomain deletes a domain
 func (s *Server) HandleDeleteDomain(w http.ResponseWriter, r *http.Request) {
 	userID := getUserID(r)
@@ -214,6 +256,60 @@ func (s *Server) HandleCreateMailbox(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusCreated, mailbox)
+}
+
+// HandleToggleMailbox enables/disables a mailbox and returns the updated table row
+func (s *Server) HandleToggleMailbox(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r)
+	vars := mux.Vars(r)
+
+	mailboxID, err := strconv.ParseInt(vars["id"], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid mailbox ID", http.StatusBadRequest)
+		return
+	}
+
+	mailbox, err := s.database.GetMailboxByID(mailboxID)
+	if err != nil || mailbox.UserID != userID {
+		http.Error(w, "Mailbox not found", http.StatusNotFound)
+		return
+	}
+
+	mailbox.Enabled = !mailbox.Enabled
+	if err := s.database.UpdateMailbox(mailbox); err != nil {
+		http.Error(w, "Failed to update mailbox", http.StatusInternalServerError)
+		return
+	}
+
+	// Need domain name for display — get from GetMailboxesWithDomain
+	domainName := ""
+	if mboxes, err := s.database.GetMailboxesWithDomainByUserID(userID); err == nil {
+		for _, m := range mboxes {
+			if m.ID == mailboxID {
+				domainName = m.DomainName
+				break
+			}
+		}
+	}
+
+	statusBadge := `<span class="badge bg-secondary-lt">Disabled</span>`
+	toggleLabel := "Enable"
+	if mailbox.Enabled {
+		statusBadge = `<span class="badge bg-success-lt">Active</span>`
+		toggleLabel = "Disable"
+	}
+
+	idStr := strconv.FormatInt(mailbox.ID, 10)
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(`<tr>
+		<td><div class="d-flex align-items-center"><i class="ti ti-mail text-muted me-2"></i><span class="fw-medium">` + mailbox.LocalPart + `@` + domainName + `</span></div></td>
+		<td>` + statusBadge + `</td>
+		<td class="text-muted">` + mailbox.CreatedAt.Format("2006-01-02") + `</td>
+		<td><div class="btn-list flex-nowrap">
+			<button hx-post="/api/mailboxes/` + idStr + `/toggle" hx-target="closest tr" hx-swap="outerHTML" class="btn btn-sm btn-ghost-secondary">` + toggleLabel + `</button>
+			<button hx-delete="/api/mailboxes/` + idStr + `" hx-confirm="Delete mailbox ` + mailbox.LocalPart + `@` + domainName + `?" hx-target="closest tr" hx-swap="outerHTML swap:0.3s" class="btn btn-sm btn-ghost-danger"><i class="ti ti-trash"></i></button>
+		</div></td>
+	</tr>`))
 }
 
 // HandleDeleteMailbox deletes a mailbox

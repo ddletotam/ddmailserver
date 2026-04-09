@@ -2,6 +2,11 @@
 <div class="card">
     <div class="card-header">
         <h3 class="card-title">{{t "accounts.title"}}</h3>
+        {{if .SyncIntervalSec}}
+        <div class="card-subtitle text-muted">
+            <i class="ti ti-refresh me-1"></i>Auto-sync every {{.SyncIntervalSec}}s
+        </div>
+        {{end}}
         <div class="card-actions">
             {{if .GoogleOAuthEnabled}}
             <a href="/oauth/google/start" class="btn btn-gmail">
@@ -34,51 +39,71 @@
 {{if .Accounts}}
 <div class="row row-cards">
     {{range .Accounts}}
-    <div class="col-md-6 col-lg-4">
+    <div class="col-md-6 col-lg-4" id="account-card-{{.ID}}">
         <div class="card">
-            <div class="card-status-top {{if .Enabled}}bg-success{{else}}bg-secondary{{end}}"></div>
+            <div class="card-status-top {{if .HasSyncError}}bg-danger{{else if .Enabled}}bg-success{{else}}bg-secondary{{end}}"></div>
             <div class="card-body">
-                <h3 class="card-title">{{.Name}}</h3>
-                <p class="text-muted">{{.Email}}</p>
-
-                <div class="mb-3">
-                    <div class="row g-2 text-muted small">
-                        <div class="col-6">
-                            <i class="ti ti-download me-1"></i>{{.IMAPHost}}:{{.IMAPPort}}
-                        </div>
-                        <div class="col-6">
-                            <i class="ti ti-upload me-1"></i>{{.SMTPHost}}:{{.SMTPPort}}
-                        </div>
-                    </div>
-                    {{if .LastSync}}
-                    <div class="text-muted small mt-1">
-                        <i class="ti ti-refresh me-1"></i>{{.LastSync.Format "2006-01-02 15:04"}}
-                    </div>
+                <div class="d-flex justify-content-between align-items-start mb-1">
+                    <h3 class="card-title mb-0">{{.Name}}</h3>
+                    {{if .HasSyncError}}
+                    <span class="badge bg-danger-lt">Error</span>
+                    {{else if .Enabled}}
+                    <span class="badge bg-success-lt">Active</span>
+                    {{else}}
+                    <span class="badge bg-secondary-lt">Disabled</span>
                     {{end}}
                 </div>
+                <p class="text-muted mb-2">{{.Email}}</p>
+
+                <div class="row g-2 text-muted small mb-2">
+                    <div class="col-6">
+                        <i class="ti ti-download me-1"></i>{{.IMAPHost}}:{{.IMAPPort}}
+                    </div>
+                    <div class="col-6">
+                        <i class="ti ti-upload me-1"></i>{{.SMTPHost}}:{{.SMTPPort}}
+                    </div>
+                </div>
+                <div class="text-muted small">
+                    {{if .HasSynced}}
+                    <i class="ti ti-clock me-1"></i>Last sync: {{.LastSync.Format "02 Jan 15:04"}}
+                    {{else}}
+                    <i class="ti ti-clock me-1"></i>Never synced
+                    {{end}}
+                </div>
+                {{if .HasSyncError}}
+                <div class="alert alert-danger mt-2 mb-0 py-1 px-2 small">
+                    <i class="ti ti-alert-triangle me-1"></i>{{.LastSyncError}}
+                    {{if gt .ConsecutiveErrors 1}}
+                    <span class="text-muted">({{.ConsecutiveErrors}}x)</span>
+                    {{end}}
+                </div>
+                {{end}}
+                <div id="sync-status-{{.ID}}" class="small mt-1"></div>
             </div>
             <div class="card-footer">
                 <div class="d-flex gap-2">
                     <button hx-post="/accounts/{{.ID}}/sync"
                             hx-target="#sync-status-{{.ID}}"
+                            hx-indicator="#sync-status-{{.ID}}"
                             class="btn btn-sm btn-outline-primary">
-                        <i class="ti ti-refresh me-1"></i>Sync
+                        <i class="ti ti-refresh me-1"></i>Sync now
                     </button>
+                    <a href="/accounts/{{.ID}}/edit" class="btn btn-sm btn-outline-secondary">
+                        <i class="ti ti-edit me-1"></i>Edit
+                    </a>
                     <button hx-post="/accounts/{{.ID}}/toggle"
-                            hx-target="closest .col-md-6"
-                            hx-swap="outerHTML"
+                            hx-target="#accounts-list"
                             class="btn btn-sm btn-outline-secondary">
-                        {{if .Enabled}}Disable{{else}}Enable{{end}}
+                        {{if .Enabled}}<i class="ti ti-player-pause me-1"></i>Disable{{else}}<i class="ti ti-player-play me-1"></i>Enable{{end}}
                     </button>
                     <button hx-delete="/accounts/{{.ID}}"
-                            hx-confirm="{{t "accounts.delete_confirm"}} '{{.Name}}'?"
-                            hx-target="closest .col-md-6"
+                            hx-confirm="Delete account '{{.Name}}'?"
+                            hx-target="#account-card-{{.ID}}"
                             hx-swap="outerHTML swap:0.3s"
                             class="btn btn-sm btn-outline-danger ms-auto">
                         <i class="ti ti-trash"></i>
                     </button>
                 </div>
-                <div id="sync-status-{{.ID}}" class="sync-status text-success small mt-2"></div>
             </div>
         </div>
     </div>
@@ -98,131 +123,4 @@
     </div>
 </div>
 {{end}}
-{{end}}
-
-{{define "account-form"}}
-<div class="row justify-content-center">
-    <div class="col-lg-8">
-        <form hx-post="/accounts/save"
-              hx-target="#form-error"
-              class="card">
-            <div class="card-header">
-                <h3 class="card-title">
-                    {{if .Account}}{{t "accounts.form.title_edit"}}{{else}}{{t "accounts.form.title_add"}}{{end}}
-                </h3>
-            </div>
-            <div class="card-body">
-                <div id="form-error" class="alert alert-danger" style="display: none;"></div>
-
-                {{if .Account}}
-                <input type="hidden" name="id" value="{{.Account.ID}}">
-                {{end}}
-
-                <h4 class="subheader mb-3">{{t "accounts.form.account_info"}}</h4>
-                <div class="row mb-4">
-                    <div class="col-md-6">
-                        <label class="form-label" for="name">{{t "accounts.form.name"}}</label>
-                        <input type="text" id="name" name="name" class="form-control" required
-                               value="{{if .Account}}{{.Account.Name}}{{end}}"
-                               placeholder="{{t "accounts.form.name_placeholder"}}">
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label" for="email">{{t "accounts.form.email"}}</label>
-                        <input type="email" id="email" name="email" class="form-control" required
-                               value="{{if .Account}}{{.Account.Email}}{{end}}"
-                               placeholder="{{t "accounts.form.email_placeholder"}}">
-                    </div>
-                </div>
-
-                <h4 class="subheader mb-3">{{t "accounts.form.imap_settings"}}</h4>
-                <div class="row mb-3">
-                    <div class="col-md-8">
-                        <label class="form-label" for="imap_host">{{t "accounts.form.imap_host"}}</label>
-                        <input type="text" id="imap_host" name="imap_host" class="form-control" required
-                               value="{{if .Account}}{{.Account.IMAPHost}}{{end}}"
-                               placeholder="{{t "accounts.form.imap_host_placeholder"}}">
-                    </div>
-                    <div class="col-md-4">
-                        <label class="form-label" for="imap_port">{{t "accounts.form.port"}}</label>
-                        <input type="number" id="imap_port" name="imap_port" class="form-control" required
-                               value="{{if .Account}}{{.Account.IMAPPort}}{{else}}993{{end}}">
-                    </div>
-                </div>
-                <div class="row mb-3">
-                    <div class="col-md-6">
-                        <label class="form-label" for="imap_username">{{t "accounts.form.username"}}</label>
-                        <input type="text" id="imap_username" name="imap_username" class="form-control" required
-                               value="{{if .Account}}{{.Account.IMAPUsername}}{{end}}"
-                               placeholder="{{t "accounts.form.username_placeholder"}}">
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label" for="imap_password">{{t "accounts.form.password"}}</label>
-                        <input type="password" id="imap_password" name="imap_password" class="form-control"
-                               {{if not .Account}}required{{end}}
-                               placeholder="{{if .Account}}{{t "accounts.form.password_placeholder_edit"}}{{else}}{{t "accounts.form.password_placeholder"}}{{end}}">
-                    </div>
-                </div>
-                <div class="mb-4">
-                    <label class="form-check">
-                        <input type="checkbox" name="imap_tls" value="true" class="form-check-input"
-                               {{if .Account}}{{if .Account.IMAPTLS}}checked{{end}}{{else}}checked{{end}}>
-                        <span class="form-check-label">{{t "accounts.form.use_tls"}}</span>
-                    </label>
-                </div>
-
-                <h4 class="subheader mb-3">{{t "accounts.form.smtp_settings"}}</h4>
-                <div class="row mb-3">
-                    <div class="col-md-8">
-                        <label class="form-label" for="smtp_host">{{t "accounts.form.smtp_host"}}</label>
-                        <input type="text" id="smtp_host" name="smtp_host" class="form-control" required
-                               value="{{if .Account}}{{.Account.SMTPHost}}{{end}}"
-                               placeholder="{{t "accounts.form.smtp_host_placeholder"}}">
-                    </div>
-                    <div class="col-md-4">
-                        <label class="form-label" for="smtp_port">{{t "accounts.form.port"}}</label>
-                        <input type="number" id="smtp_port" name="smtp_port" class="form-control" required
-                               value="{{if .Account}}{{.Account.SMTPPort}}{{else}}587{{end}}">
-                    </div>
-                </div>
-                <div class="row mb-3">
-                    <div class="col-md-6">
-                        <label class="form-label" for="smtp_username">{{t "accounts.form.username"}}</label>
-                        <input type="text" id="smtp_username" name="smtp_username" class="form-control" required
-                               value="{{if .Account}}{{.Account.SMTPUsername}}{{end}}"
-                               placeholder="{{t "accounts.form.username_placeholder"}}">
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label" for="smtp_password">{{t "accounts.form.password"}}</label>
-                        <input type="password" id="smtp_password" name="smtp_password" class="form-control"
-                               {{if not .Account}}required{{end}}
-                               placeholder="{{if .Account}}{{t "accounts.form.password_placeholder_edit"}}{{else}}{{t "accounts.form.password_placeholder"}}{{end}}">
-                    </div>
-                </div>
-                <div class="mb-3">
-                    <label class="form-check">
-                        <input type="checkbox" name="smtp_tls" value="true" class="form-check-input"
-                               {{if .Account}}{{if .Account.SMTPTLS}}checked{{end}}{{else}}checked{{end}}>
-                        <span class="form-check-label">{{t "accounts.form.use_tls"}}</span>
-                    </label>
-                </div>
-            </div>
-            <div class="card-footer text-end">
-                <a href="/accounts" class="btn btn-link">{{t "accounts.form.cancel"}}</a>
-                <button type="submit" class="btn btn-primary">
-                    {{if .Account}}{{t "accounts.form.update"}}{{else}}{{t "accounts.form.add"}}{{end}}
-                </button>
-            </div>
-        </form>
-    </div>
-</div>
-
-<script>
-document.body.addEventListener('htmx:beforeSwap', function(evt) {
-    if (evt.detail.xhr.status >= 400 && evt.detail.xhr.status < 600) {
-        evt.detail.shouldSwap = true;
-        evt.detail.isError = false;
-        evt.detail.target.style.display = 'block';
-    }
-});
-</script>
 {{end}}

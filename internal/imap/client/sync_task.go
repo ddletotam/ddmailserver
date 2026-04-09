@@ -37,7 +37,24 @@ func (t *SyncTask) Priority() int { return t.priority }
 func (t *SyncTask) String() string {
 	return fmt.Sprintf("IMAP sync for %s (account %d)", t.account.Email, t.account.ID)
 }
+
+// Execute runs the synchronization and records the result in the DB
 func (t *SyncTask) Execute(ctx context.Context) error {
+	err := t.doExecute(ctx)
+	if err != nil {
+		if dbErr := t.database.SetAccountSyncError(t.account.ID, err.Error()); dbErr != nil {
+			log.Printf("Failed to record sync error for %s: %v", t.account.Email, dbErr)
+		}
+	} else {
+		if dbErr := t.database.ClearAccountSyncError(t.account.ID); dbErr != nil {
+			log.Printf("Failed to clear sync error for %s: %v", t.account.Email, dbErr)
+		}
+	}
+	return err
+}
+
+// doExecute performs the actual sync work
+func (t *SyncTask) doExecute(ctx context.Context) error {
 	log.Printf("Starting sync for account %s", t.account.Email)
 	client := &Client{account: t.account}
 	if err := client.Connect(); err != nil { return fmt.Errorf("failed to connect: %w", err) }

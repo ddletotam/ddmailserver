@@ -41,11 +41,25 @@ type Account struct {
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 
+	// Sync status
+	LastSyncError    string `json:"last_sync_error,omitempty"`
+	ConsecutiveErrors int   `json:"consecutive_errors"`
+
 	// OAuth2 fields
 	AuthType          string    `json:"auth_type"` // "password" or "oauth2_google"
 	OAuthAccessToken  string    `json:"-"`         // Encrypted in DB
 	OAuthRefreshToken string    `json:"-"`         // Encrypted in DB
 	OAuthTokenExpiry  time.Time `json:"oauth_token_expiry"`
+}
+
+// HasSynced returns true if the account has been synced at least once
+func (a *Account) HasSynced() bool {
+	return !a.LastSync.IsZero()
+}
+
+// HasSyncError returns true if the last sync failed
+func (a *Account) HasSyncError() bool {
+	return a.LastSyncError != ""
 }
 
 // IsOAuth returns true if this account uses OAuth2 authentication

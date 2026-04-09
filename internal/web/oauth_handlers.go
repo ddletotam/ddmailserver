@@ -680,6 +680,126 @@ func (s *Server) HandleGoogleCalendarOAuthCallback(w http.ResponseWriter, r *htt
 	http.Redirect(w, r, "/calendars?success=google_calendar_added", http.StatusSeeOther)
 }
 
+// HandleGoogleContactsOAuthStart initiates the Google OAuth2 flow for Contacts
+func (s *Server) HandleGoogleContactsOAuthStart(w http.ResponseWriter, r *http.Request) {
+	if s.googleOAuth == nil {
+		http.Error(w, "Google OAuth not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	userID := getUserID(r)
+	if userID == 0 {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+
+	state, err := oauth.GenerateState()
+	if err != nil {
+		http.Error(w, "Failed to start OAuth flow", http.StatusInternalServerError)
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name: "oauth_state", Value: state, Path: "/",
+		MaxAge: 600, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil,
+	})
+
+	scheme := getSchemeFromRequest(r)
+	host := getHostFromRequest(r)
+	redirectURI := scheme + "://" + host + "/oauth/google/contacts/callback"
+
+	http.SetCookie(w, &http.Cookie{
+		Name: "oauth_redirect_uri", Value: redirectURI, Path: "/",
+		MaxAge: 600, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil,
+	})
+
+	authURL := s.googleOAuth.GetContactsAuthURL(state, redirectURI)
+	log.Printf("Redirecting to Google Contacts OAuth: %s", authURL)
+	http.Redirect(w, r, authURL, http.StatusTemporaryRedirect)
+}
+
+// HandleGoogleContactsOAuthCallback handles the OAuth2 callback from Google for Contacts
+func (s *Server) HandleGoogleContactsOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	if s.googleOAuth == nil {
+		http.Error(w, "Google OAuth not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	userID := getUserID(r)
+	if userID == 0 {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+
+	state := r.URL.Query().Get("state")
+	stateCookie, err := r.Cookie("oauth_state")
+	if err != nil || stateCookie.Value != state {
+		http.Error(w, "Invalid OAuth state", http.StatusBadRequest)
+		return
+	}
+
+	redirectURICookie, err := r.Cookie("oauth_redirect_uri")
+	if err != nil {
+		http.Error(w, "OAuth session expired", http.StatusBadRequest)
+		return
+	}
+	redirectURI := redirectURICookie.Value
+
+	http.SetCookie(w, &http.Cookie{Name: "oauth_state", Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: "oauth_redirect_uri", Value: "", Path: "/", MaxAge: -1})
+
+	if errParam := r.URL.Query().Get("error"); errParam != "" {
+		log.Printf("OAuth error from Google: %s", errParam)
+		http.Redirect(w, r, "/contacts?error=oauth_denied", http.StatusSeeOther)
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		http.Error(w, "No authorization code received", http.StatusBadRequest)
+		return
+	}
+
+	tokenResp, err := s.googleOAuth.ExchangeCodeWithRedirectURI(code, redirectURI)
+	if err != nil {
+		log.Printf("Failed to exchange OAuth code: %v", err)
+		http.Redirect(w, r, "/contacts?error=oauth_failed", http.StatusSeeOther)
+		return
+	}
+
+	userInfo, err := s.googleOAuth.GetUserInfo(tokenResp.AccessToken)
+	if err != nil {
+		log.Printf("Failed to get user info: %v", err)
+		http.Redirect(w, r, "/contacts?error=oauth_failed", http.StatusSeeOther)
+		return
+	}
+
+	log.Printf("Google Contacts OAuth successful for email: %s", userInfo.Email)
+
+	source := &models.ContactSource{
+		UserID:            userID,
+		Name:              "Google (" + userInfo.Email + ")",
+		SourceType:        "carddav",
+		CardDAVURL:        oauth.GoogleCardDAVURL(userInfo.Email),
+		CardDAVUsername:    userInfo.Email,
+		AuthType:          "oauth2_google",
+		OAuthAccessToken:  tokenResp.AccessToken,
+		OAuthRefreshToken: tokenResp.RefreshToken,
+		OAuthTokenExpiry:  oauth.TokenExpiry(tokenResp.ExpiresIn),
+		SyncEnabled:       true,
+		SyncInterval:      300,
+	}
+
+	if err := s.database.CreateContactSource(source); err != nil {
+		log.Printf("Failed to create Google Contacts source: %v", err)
+		http.Redirect(w, r, "/contacts?error=source_create_failed", http.StatusSeeOther)
+		return
+	}
+
+	log.Printf("Google Contacts source created for user %d", userID)
+	http.Redirect(w, r, "/contacts?success=google_contacts_added", http.StatusSeeOther)
+}
+
 // getHostFromRequest extracts the host from the request (considering X-Forwarded-Host)
 func getHostFromRequest(r *http.Request) string {
 	// Check for reverse proxy header first
@@ -705,157 +825,3 @@ func getSchemeFromRequest(r *http.Request) string {
 	return "https"
 }
 
-// ============================================================================
-// Google Contacts OAuth Handlers
-// ============================================================================
-
-// HandleGoogleContactsOAuthStart initiates the Google OAuth2 flow for Contacts
-func (s *Server) HandleGoogleContactsOAuthStart(w http.ResponseWriter, r *http.Request) {
-	if s.googleOAuth == nil {
-		http.Error(w, "Google OAuth not configured", http.StatusServiceUnavailable)
-		return
-	}
-
-	userID := getUserID(r)
-	if userID == 0 {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
-		return
-	}
-
-	// Generate state for CSRF protection
-	state, err := oauth.GenerateState()
-	if err != nil {
-		log.Printf("Failed to generate OAuth state: %v", err)
-		http.Error(w, "Failed to start OAuth flow", http.StatusInternalServerError)
-		return
-	}
-
-	// Store state in session cookie (will be verified in callback)
-	http.SetCookie(w, &http.Cookie{
-		Name:     "oauth_state",
-		Value:    state,
-		Path:     "/",
-		MaxAge:   600, // 10 minutes
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil,
-	})
-
-	// Build redirect URI for contacts callback
-	scheme := getSchemeFromRequest(r)
-	host := getHostFromRequest(r)
-	redirectURI := scheme + "://" + host + "/oauth/google/contacts/callback"
-
-	// Store redirect URI in cookie for callback
-	http.SetCookie(w, &http.Cookie{
-		Name:     "oauth_redirect_uri",
-		Value:    redirectURI,
-		Path:     "/",
-		MaxAge:   600,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil,
-	})
-
-	// Redirect to Google
-	authURL := s.googleOAuth.GetContactsAuthURL(state, redirectURI)
-	log.Printf("Redirecting to Google Contacts OAuth: %s", authURL)
-	http.Redirect(w, r, authURL, http.StatusTemporaryRedirect)
-}
-
-// HandleGoogleContactsOAuthCallback handles the OAuth2 callback from Google for Contacts
-func (s *Server) HandleGoogleContactsOAuthCallback(w http.ResponseWriter, r *http.Request) {
-	if s.googleOAuth == nil {
-		http.Error(w, "Google OAuth not configured", http.StatusServiceUnavailable)
-		return
-	}
-
-	userID := getUserID(r)
-	if userID == 0 {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
-		return
-	}
-
-	// Verify state parameter
-	state := r.URL.Query().Get("state")
-	stateCookie, err := r.Cookie("oauth_state")
-	if err != nil || stateCookie.Value != state {
-		log.Printf("OAuth state mismatch: expected %s, got %s", stateCookie.Value, state)
-		http.Error(w, "Invalid OAuth state - possible CSRF attack", http.StatusBadRequest)
-		return
-	}
-
-	// Get redirect URI from cookie
-	redirectURICookie, err := r.Cookie("oauth_redirect_uri")
-	if err != nil {
-		log.Printf("No redirect URI cookie found")
-		http.Error(w, "OAuth session expired", http.StatusBadRequest)
-		return
-	}
-	redirectURI := redirectURICookie.Value
-
-	// Clear cookies
-	http.SetCookie(w, &http.Cookie{Name: "oauth_state", Value: "", Path: "/", MaxAge: -1})
-	http.SetCookie(w, &http.Cookie{Name: "oauth_redirect_uri", Value: "", Path: "/", MaxAge: -1})
-
-	// Check for error from Google
-	if errParam := r.URL.Query().Get("error"); errParam != "" {
-		errDesc := r.URL.Query().Get("error_description")
-		log.Printf("OAuth error from Google: %s - %s", errParam, errDesc)
-		http.Redirect(w, r, "/contacts?error=oauth_denied", http.StatusSeeOther)
-		return
-	}
-
-	// Get authorization code
-	code := r.URL.Query().Get("code")
-	if code == "" {
-		log.Printf("No authorization code in callback")
-		http.Error(w, "No authorization code received", http.StatusBadRequest)
-		return
-	}
-
-	// Exchange code for tokens
-	tokenResp, err := s.googleOAuth.ExchangeCodeWithRedirectURI(code, redirectURI)
-	if err != nil {
-		log.Printf("Failed to exchange OAuth code: %v", err)
-		http.Redirect(w, r, "/contacts?error=oauth_failed", http.StatusSeeOther)
-		return
-	}
-
-	// Get user info (email)
-	userInfo, err := s.googleOAuth.GetUserInfo(tokenResp.AccessToken)
-	if err != nil {
-		log.Printf("Failed to get user info: %v", err)
-		http.Redirect(w, r, "/contacts?error=oauth_failed", http.StatusSeeOther)
-		return
-	}
-
-	log.Printf("Google Contacts OAuth successful for email: %s", userInfo.Email)
-
-	// Create contact source with OAuth credentials
-	source := &models.ContactSource{
-		UserID:            userID,
-		Name:              "Google (" + userInfo.Email + ")",
-		SourceType:        "carddav",
-		CardDAVURL:        oauth.GoogleCardDAVURL(userInfo.Email),
-		CardDAVUsername:   userInfo.Email,
-		AuthType:          "oauth2_google",
-		OAuthAccessToken:  tokenResp.AccessToken,
-		OAuthRefreshToken: tokenResp.RefreshToken,
-		OAuthTokenExpiry:  oauth.TokenExpiry(tokenResp.ExpiresIn),
-		SyncEnabled:       true,
-		SyncInterval:      300, // 5 minutes
-	}
-
-	// Create source in database
-	if err := s.database.CreateContactSource(source); err != nil {
-		log.Printf("Failed to create Google Contacts source: %v", err)
-		http.Redirect(w, r, "/contacts?error=source_create_failed", http.StatusSeeOther)
-		return
-	}
-
-	log.Printf("Google Contacts source created for user %d", userID)
-
-	// Redirect to contacts page with success message
-	http.Redirect(w, r, "/contacts?success=google_contacts_added", http.StatusSeeOther)
-}
