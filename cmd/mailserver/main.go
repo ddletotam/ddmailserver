@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -174,7 +176,7 @@ func main() {
 		imapSrv.SetSearchIndexer(searchIndexer)
 	}
 	go func() {
-		if err := imapSrv.Start(); err != nil {
+		if err := imapSrv.Start(); err != nil && !errors.Is(err, net.ErrClosed) {
 			log.Fatalf("IMAP server error: %v", err)
 		}
 	}()
@@ -205,7 +207,7 @@ func main() {
 	smtpAddr := fmt.Sprintf("%s:%d", cfg.Server.WebHost, cfg.Server.SMTPPort)
 	smtpSrv := smtpserver.New(database, smtpAddr, hostname)
 	go func() {
-		if err := smtpSrv.Start(); err != nil {
+		if err := smtpSrv.Start(); err != nil && !errors.Is(err, net.ErrClosed) {
 			log.Fatalf("SMTP server error: %v", err)
 		}
 	}()
@@ -267,11 +269,12 @@ func main() {
 	// Initialize web server
 	log.Printf("Initializing web server...")
 	webSrv := web.New(database, cfg.Security.JWTSecret, cfg.Server.WebHost, cfg.Server.WebPort, cfg.Server.Locale, &cfg.OAuth)
+	webSrv.SetSyncIntervalSec(cfg.Sync.Interval)
 	if searchIndexer != nil {
 		webSrv.SetSearchIndexer(searchIndexer)
 	}
 	go func() {
-		if err := webSrv.Start(); err != nil {
+		if err := webSrv.Start(); err != nil && !errors.Is(err, net.ErrClosed) {
 			log.Fatalf("Web server error: %v", err)
 		}
 	}()

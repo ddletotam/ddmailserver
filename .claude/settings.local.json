@@ -24,7 +24,16 @@
       "Bash(ssh lucky@jwebhelp.ru \"sudo systemctl stop mailserver; sudo cp /tmp/mailserver /usr/local/bin/mailserver; sudo chmod +x /usr/local/bin/mailserver; sudo systemctl start mailserver; sleep 3; sudo systemctl status mailserver --no-pager -l | head -20\")",
       "Bash(ssh lucky@jwebhelp.ru \"sudo journalctl -u mailserver --since ''1 minute ago'' --no-pager | grep -i cors\")",
       "Bash(ssh:*)",
-      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix\\(cors\\): support reverse proxy with X-Forwarded-Host\n\nCORS middleware now checks X-Forwarded-Host header for proper origin\nvalidation behind nginx/reverse proxy setups.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix\\(cors\\): support reverse proxy with X-Forwarded-Host\n\nCORS middleware now checks X-Forwarded-Host header for proper origin\nvalidation behind nginx/reverse proxy setups.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git status:*)",
+      "Bash(git push:*)",
+      "Bash(git remote:*)",
+      "Bash(chmod 600 ~/.ssh/config)",
+      "Bash(git pull:*)",
+      "Bash(git stash:*)",
+      "Bash(git add:*)",
+      "Bash(git rebase:*)",
+      "Bash(GIT_EDITOR=true git rebase:*)"
     ]
   }
 }

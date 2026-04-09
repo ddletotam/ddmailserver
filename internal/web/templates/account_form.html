@@ -1,118 +1,141 @@
 {{define "content"}}
-<div class="account-form-page">
-    <div class="page-header">
-        <h1>{{if .Account}}{{t "accounts.form.title_edit"}}{{else}}{{t "accounts.form.title_add"}}{{end}}</h1>
+<div class="row justify-content-center">
+    <div class="col-lg-8">
+        <form hx-post="/accounts/save" hx-target="#form-error">
+            {{if .Account}}
+            <input type="hidden" name="id" value="{{.Account.ID}}">
+            {{end}}
+
+            <div class="card mb-3">
+                <div class="card-header">
+                    <h3 class="card-title">
+                        {{if .Account}}{{t "accounts.form.title_edit"}}{{else}}{{t "accounts.form.title_add"}}{{end}}
+                    </h3>
+                </div>
+                <div class="card-body">
+                    <div id="form-error" class="alert alert-danger d-none"></div>
+
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label required">{{t "accounts.form.name"}}</label>
+                            <input type="text" name="name" class="form-control" required
+                                   value="{{if .Account}}{{.Account.Name}}{{end}}"
+                                   placeholder="{{t "accounts.form.name_placeholder"}}">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label required">{{t "accounts.form.email"}}</label>
+                            <input type="email" name="email" class="form-control" required
+                                   value="{{if .Account}}{{.Account.Email}}{{end}}"
+                                   placeholder="{{t "accounts.form.email_placeholder"}}">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card mb-3">
+                <div class="card-header">
+                    <h3 class="card-title">
+                        <i class="ti ti-download me-2 text-primary"></i>{{t "accounts.form.imap_settings"}}
+                    </h3>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-8">
+                            <label class="form-label required">{{t "accounts.form.imap_host"}}</label>
+                            <input type="text" name="imap_host" class="form-control" required
+                                   value="{{if .Account}}{{.Account.IMAPHost}}{{end}}"
+                                   placeholder="imap.gmail.com">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label required">{{t "accounts.form.port"}}</label>
+                            <input type="number" name="imap_port" class="form-control" required
+                                   value="{{if .Account}}{{.Account.IMAPPort}}{{else}}993{{end}}">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label required">{{t "accounts.form.username"}}</label>
+                            <input type="text" name="imap_username" class="form-control" required
+                                   value="{{if .Account}}{{.Account.IMAPUsername}}{{end}}"
+                                   placeholder="user@example.com">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label {{if not .Account}}required{{end}}">{{t "accounts.form.password"}}</label>
+                            <input type="password" name="imap_password" class="form-control"
+                                   {{if not .Account}}required{{end}}
+                                   placeholder="{{if .Account}}{{t "accounts.form.password_placeholder_edit"}}{{else}}{{t "accounts.form.password_placeholder"}}{{end}}">
+                        </div>
+                        <div class="col-12">
+                            <label class="form-check">
+                                <input type="checkbox" name="imap_tls" value="true" class="form-check-input"
+                                       {{if .Account}}{{if .Account.IMAPTLS}}checked{{end}}{{else}}checked{{end}}>
+                                <span class="form-check-label">{{t "accounts.form.use_tls"}}</span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card mb-3">
+                <div class="card-header">
+                    <h3 class="card-title">
+                        <i class="ti ti-upload me-2 text-green"></i>{{t "accounts.form.smtp_settings"}}
+                    </h3>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-8">
+                            <label class="form-label required">{{t "accounts.form.smtp_host"}}</label>
+                            <input type="text" name="smtp_host" class="form-control" required
+                                   value="{{if .Account}}{{.Account.SMTPHost}}{{end}}"
+                                   placeholder="smtp.gmail.com">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label required">{{t "accounts.form.port"}}</label>
+                            <input type="number" name="smtp_port" class="form-control" required
+                                   value="{{if .Account}}{{.Account.SMTPPort}}{{else}}587{{end}}">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label required">{{t "accounts.form.username"}}</label>
+                            <input type="text" name="smtp_username" class="form-control" required
+                                   value="{{if .Account}}{{.Account.SMTPUsername}}{{end}}"
+                                   placeholder="user@example.com">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label {{if not .Account}}required{{end}}">{{t "accounts.form.password"}}</label>
+                            <input type="password" name="smtp_password" class="form-control"
+                                   {{if not .Account}}required{{end}}
+                                   placeholder="{{if .Account}}{{t "accounts.form.password_placeholder_edit"}}{{else}}{{t "accounts.form.password_placeholder"}}{{end}}">
+                        </div>
+                        <div class="col-12">
+                            <label class="form-check">
+                                <input type="checkbox" name="smtp_tls" value="true" class="form-check-input"
+                                       {{if .Account}}{{if .Account.SMTPTLS}}checked{{end}}{{else}}checked{{end}}>
+                                <span class="form-check-label">{{t "accounts.form.use_tls"}}</span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="d-flex gap-2 justify-content-end">
+                <a href="/accounts" class="btn btn-link">{{t "accounts.form.cancel"}}</a>
+                <button type="submit" class="btn btn-primary">
+                    <i class="ti ti-device-floppy me-1"></i>
+                    {{if .Account}}{{t "accounts.form.update"}}{{else}}{{t "accounts.form.add"}}{{end}}
+                </button>
+            </div>
+        </form>
     </div>
-
-    <form hx-post="{{if .Account}}/api/accounts/{{.Account.ID}}{{else}}/api/accounts{{end}}"
-          hx-target="#form-error"
-          class="account-form">
-        <div id="form-error" class="error-message"></div>
-
-        <div class="form-section">
-            <h3>{{t "accounts.form.account_info"}}</h3>
-
-            <div class="form-group">
-                <label for="name">{{t "accounts.form.name"}}</label>
-                <input type="text" id="name" name="name" required
-                       value="{{if .Account}}{{.Account.Name}}{{end}}"
-                       placeholder="{{t "accounts.form.name_placeholder"}}">
-            </div>
-
-            <div class="form-group">
-                <label for="email">{{t "accounts.form.email"}}</label>
-                <input type="email" id="email" name="email" required
-                       value="{{if .Account}}{{.Account.Email}}{{end}}"
-                       placeholder="{{t "accounts.form.email_placeholder"}}">
-            </div>
-        </div>
-
-        <div class="form-section">
-            <h3>{{t "accounts.form.imap_settings"}}</h3>
-
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="imap_host">{{t "accounts.form.imap_host"}}</label>
-                    <input type="text" id="imap_host" name="imap_host" required
-                           value="{{if .Account}}{{.Account.IMAPHost}}{{end}}"
-                           placeholder="{{t "accounts.form.imap_host_placeholder"}}">
-                </div>
-
-                <div class="form-group">
-                    <label for="imap_port">{{t "accounts.form.port"}}</label>
-                    <input type="number" id="imap_port" name="imap_port" required
-                           value="{{if .Account}}{{.Account.IMAPPort}}{{else}}993{{end}}">
-                </div>
-            </div>
-
-            <div class="form-group">
-                <label for="imap_username">{{t "accounts.form.username"}}</label>
-                <input type="text" id="imap_username" name="imap_username" required
-                       value="{{if .Account}}{{.Account.IMAPUsername}}{{end}}"
-                       placeholder="{{t "accounts.form.username_placeholder"}}">
-            </div>
-
-            <div class="form-group">
-                <label for="imap_password">{{t "accounts.form.password"}}</label>
-                <input type="password" id="imap_password" name="imap_password" {{if not .Account}}required{{end}}
-                       placeholder="{{if .Account}}{{t "accounts.form.password_placeholder_edit"}}{{else}}{{t "accounts.form.password_placeholder"}}{{end}}">
-            </div>
-
-            <div class="form-group">
-                <label>
-                    <input type="checkbox" name="imap_tls" value="true"
-                           {{if .Account}}{{if .Account.IMAPTLS}}checked{{end}}{{else}}checked{{end}}>
-                    {{t "accounts.form.use_tls"}}
-                </label>
-            </div>
-        </div>
-
-        <div class="form-section">
-            <h3>{{t "accounts.form.smtp_settings"}}</h3>
-
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="smtp_host">{{t "accounts.form.smtp_host"}}</label>
-                    <input type="text" id="smtp_host" name="smtp_host" required
-                           value="{{if .Account}}{{.Account.SMTPHost}}{{end}}"
-                           placeholder="{{t "accounts.form.smtp_host_placeholder"}}">
-                </div>
-
-                <div class="form-group">
-                    <label for="smtp_port">{{t "accounts.form.port"}}</label>
-                    <input type="number" id="smtp_port" name="smtp_port" required
-                           value="{{if .Account}}{{.Account.SMTPPort}}{{else}}587{{end}}">
-                </div>
-            </div>
-
-            <div class="form-group">
-                <label for="smtp_username">{{t "accounts.form.username"}}</label>
-                <input type="text" id="smtp_username" name="smtp_username" required
-                       value="{{if .Account}}{{.Account.SMTPUsername}}{{end}}"
-                       placeholder="{{t "accounts.form.username_placeholder"}}">
-            </div>
-
-            <div class="form-group">
-                <label for="smtp_password">{{t "accounts.form.password"}}</label>
-                <input type="password" id="smtp_password" name="smtp_password" {{if not .Account}}required{{end}}
-                       placeholder="{{if .Account}}{{t "accounts.form.password_placeholder_edit"}}{{else}}{{t "accounts.form.password_placeholder"}}{{end}}">
-            </div>
-
-            <div class="form-group">
-                <label>
-                    <input type="checkbox" name="smtp_tls" value="true"
-                           {{if .Account}}{{if .Account.SMTPTLS}}checked{{end}}{{else}}checked{{end}}>
-                    {{t "accounts.form.use_tls"}}
-                </label>
-            </div>
-        </div>
-
-        <div class="form-actions">
-            <button type="submit" class="btn btn-primary">
-                {{if .Account}}{{t "accounts.form.update"}}{{else}}{{t "accounts.form.add"}}{{end}}
-            </button>
-            <a href="/accounts" class="btn btn-secondary">{{t "accounts.form.cancel"}}</a>
-        </div>
-    </form>
 </div>
+
+<script>
+document.body.addEventListener('htmx:beforeSwap', function(evt) {
+    if (evt.detail.xhr.status >= 400) {
+        evt.detail.shouldSwap = true;
+        evt.detail.isError = false;
+        var el = evt.detail.target;
+        el.classList.remove('d-none');
+        el.textContent = evt.detail.xhr.responseText;
+    }
+});
+</script>
 {{end}}
