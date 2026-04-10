@@ -904,15 +904,18 @@ func (m *Mailbox) buildMessageLiteral(msg *models.Message, section *imap.BodySec
 			buf.Write(bodyBuf.Bytes())
 			buf.WriteString("\r\n")
 
-			// Attachment parts
-			for _, att := range regularAtts {
+			// Attachment parts — load data individually
+			for _, attMeta := range regularAtts {
+				fullAtt, err := m.database.GetAttachmentByID(attMeta.ID)
+				if err != nil {
+					continue
+				}
 				buf.WriteString(fmt.Sprintf("--%s\r\n", mixedBoundary))
-				buf.WriteString(fmt.Sprintf("Content-Type: %s; name=\"%s\"\r\n", att.ContentType, encodeHeader(att.Filename)))
+				buf.WriteString(fmt.Sprintf("Content-Type: %s; name=\"%s\"\r\n", fullAtt.ContentType, encodeHeader(fullAtt.Filename)))
 				buf.WriteString("Content-Transfer-Encoding: base64\r\n")
-				buf.WriteString(fmt.Sprintf("Content-Disposition: attachment; filename=\"%s\"\r\n", encodeHeader(att.Filename)))
+				buf.WriteString(fmt.Sprintf("Content-Disposition: attachment; filename=\"%s\"\r\n", encodeHeader(fullAtt.Filename)))
 				buf.WriteString("\r\n")
-				// Write base64 in 76-char lines per RFC 2045
-				encoded := base64.StdEncoding.EncodeToString(att.Data)
+				encoded := base64.StdEncoding.EncodeToString(fullAtt.Data)
 				for i := 0; i < len(encoded); i += 76 {
 					end := i + 76
 					if end > len(encoded) {
@@ -953,7 +956,11 @@ func (m *Mailbox) buildSectionLiteral(msg *models.Message, section *imap.BodySec
 	hasHTML := msg.BodyHTML != ""
 
 	// Fetch attachments to determine structure
-	allAtts, _ := m.database.GetAttachmentsByMessageID(msg.ID)
+	allAtts, attErr := m.database.GetAttachmentsByMessageID(msg.ID)
+	if attErr != nil {
+		log.Printf("buildSectionLiteral: failed to get attachments for msg %d: %v", msg.ID, attErr)
+		allAtts = nil
+	}
 	var regularAtts []*models.Attachment
 	for _, att := range allAtts {
 		if !att.IsInline || att.ContentID == "" {
@@ -962,6 +969,8 @@ func (m *Mailbox) buildSectionLiteral(msg *models.Message, section *imap.BodySec
 	}
 
 	hasRegularAtts := len(regularAtts) > 0
+	log.Printf("buildSectionLiteral: msg=%d path=%v hasPlain=%v hasHTML=%v allAtts=%d regularAtts=%d",
+		msg.ID, path, hasPlain, hasHTML, len(allAtts), len(regularAtts))
 
 	// Structure when we have regular attachments:
 	//   multipart/mixed
@@ -1007,8 +1016,14 @@ func (m *Mailbox) buildSectionLiteral(msg *models.Message, section *imap.BodySec
 				return strings.NewReader(msg.BodyHTML)
 			}
 		} else if partNum >= 2 && partNum-2 < len(regularAtts) {
-			// File attachment
-			att := regularAtts[partNum-2]
+			// File attachment — need to load data from DB
+			attMeta := regularAtts[partNum-2]
+			att, err := m.database.GetAttachmentByID(attMeta.ID)
+			if err != nil || len(att.Data) == 0 {
+				log.Printf("buildSectionLiteral: failed to load attachment %d data: %v", attMeta.ID, err)
+				return strings.NewReader("")
+			}
+			log.Printf("buildSectionLiteral: returning attachment %s (%d bytes)", att.Filename, len(att.Data))
 			encoded := base64.StdEncoding.EncodeToString(att.Data)
 			// Format in 76-char lines
 			var buf bytes.Buffer
