@@ -595,8 +595,24 @@ func (m *Mailbox) convertToIMAPMessage(msg *models.Message, seqNum uint32, items
 			hasPlain := msg.Body != ""
 			hasHTML := msg.BodyHTML != ""
 
+			// Fetch all attachments
+			allAtts, attErr := m.database.GetAttachmentsByMessageID(msg.ID)
+			if attErr != nil {
+				allAtts = nil
+			}
+			var inlineAtts, regularAtts []*models.Attachment
+			for _, att := range allAtts {
+				if att.IsInline && att.ContentID != "" {
+					inlineAtts = append(inlineAtts, att)
+				} else {
+					regularAtts = append(regularAtts, att)
+				}
+			}
+
+			// Build the text body structure
+			var textStructure *imap.BodyStructure
+
 			if hasPlain && hasHTML {
-				// Build multipart/alternative structure
 				altStructure := &imap.BodyStructure{
 					MIMEType:    "multipart",
 					MIMESubType: "alternative",
@@ -617,27 +633,10 @@ func (m *Mailbox) convertToIMAPMessage(msg *models.Message, seqNum uint32, items
 					},
 				}
 
-				// Check for inline attachments
-				allAtts, attErr := m.database.GetAttachmentsByMessageID(msg.ID)
-				var inlineAtts []*models.Attachment
-				if attErr == nil {
-					for _, att := range allAtts {
-						if att.IsInline && att.ContentID != "" {
-							inlineAtts = append(inlineAtts, att)
-						}
-					}
-				}
-
 				if len(inlineAtts) > 0 {
-					// Wrap in multipart/related with inline attachments
 					relatedParts := []*imap.BodyStructure{altStructure}
 					for _, att := range inlineAtts {
-						mimeType := "application"
-						mimeSubType := "octet-stream"
-						if parts := strings.SplitN(att.ContentType, "/", 2); len(parts) == 2 {
-							mimeType = parts[0]
-							mimeSubType = parts[1]
-						}
+						mimeType, mimeSubType := splitMIME(att.ContentType)
 						relatedParts = append(relatedParts, &imap.BodyStructure{
 							MIMEType:          mimeType,
 							MIMESubType:       mimeSubType,
@@ -647,29 +646,56 @@ func (m *Mailbox) convertToIMAPMessage(msg *models.Message, seqNum uint32, items
 							Id:                att.ContentID,
 						})
 					}
-					imapMsg.BodyStructure = &imap.BodyStructure{
+					textStructure = &imap.BodyStructure{
 						MIMEType:    "multipart",
 						MIMESubType: "related",
 						Params:      map[string]string{"boundary": fmt.Sprintf("----=_Related_%d", msg.ID)},
 						Parts:       relatedParts,
 					}
 				} else {
-					imapMsg.BodyStructure = altStructure
+					textStructure = altStructure
 				}
 			} else if hasHTML {
-				imapMsg.BodyStructure = &imap.BodyStructure{
+				textStructure = &imap.BodyStructure{
 					MIMEType:    "text",
 					MIMESubType: "html",
 					Params:      map[string]string{"charset": "utf-8"},
 					Size:        uint32(len(msg.BodyHTML)),
 				}
 			} else {
-				imapMsg.BodyStructure = &imap.BodyStructure{
+				textStructure = &imap.BodyStructure{
 					MIMEType:    "text",
 					MIMESubType: "plain",
 					Params:      map[string]string{"charset": "utf-8"},
 					Size:        uint32(len(msg.Body)),
 				}
+			}
+
+			if len(regularAtts) > 0 {
+				// Wrap in multipart/mixed with file attachments
+				mixedParts := []*imap.BodyStructure{textStructure}
+				for _, att := range regularAtts {
+					mimeType, mimeSubType := splitMIME(att.ContentType)
+					// base64 size is ~4/3 of original
+					b64Size := uint32((att.Size*4)/3 + att.Size/76 + 4)
+					mixedParts = append(mixedParts, &imap.BodyStructure{
+						MIMEType:          mimeType,
+						MIMESubType:       mimeSubType,
+						Params:            map[string]string{"name": att.Filename},
+						Size:              b64Size,
+						Encoding:          "base64",
+						Disposition:       "attachment",
+						DispositionParams: map[string]string{"filename": att.Filename},
+					})
+				}
+				imapMsg.BodyStructure = &imap.BodyStructure{
+					MIMEType:    "multipart",
+					MIMESubType: "mixed",
+					Params:      map[string]string{"boundary": fmt.Sprintf("----=_Mixed_%d", msg.ID)},
+					Parts:       mixedParts,
+				}
+			} else {
+				imapMsg.BodyStructure = textStructure
 			}
 
 		case imap.FetchFlags:
@@ -754,9 +780,23 @@ func encodeAddressHeader(addr string) string {
 	return encodedName + " " + email
 }
 
-// buildMessageLiteral creates a literal for body section requests
+// splitMIME splits "type/subtype" into parts, defaulting to application/octet-stream
+func splitMIME(ct string) (string, string) {
+	if parts := strings.SplitN(ct, "/", 2); len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return "application", "octet-stream"
+}
+
+// buildMessageLiteral creates a literal for body section requests.
+// Handles section paths like BODY[2] to return individual MIME parts.
 func (m *Mailbox) buildMessageLiteral(msg *models.Message, section *imap.BodySectionName) imap.Literal {
-	// Build RFC822 formatted message
+	// Handle section path requests (e.g. BODY[2] for attachment)
+	if len(section.Path) > 0 {
+		return m.buildSectionLiteral(msg, section)
+	}
+
+	// Full message — build RFC822
 	var buf bytes.Buffer
 
 	// Write headers with proper RFC 2047 encoding
@@ -895,6 +935,108 @@ func (m *Mailbox) buildMessageLiteral(msg *models.Message, section *imap.BodySec
 	}
 
 	return bytes.NewReader(buf.Bytes())
+}
+
+// buildSectionLiteral returns a specific MIME part for section path requests.
+// For a multipart/mixed message with attachments:
+//
+//	BODY[1]   → text body part (alternative/related/plain/html)
+//	BODY[1.1] → text/plain
+//	BODY[1.2] → text/html
+//	BODY[2]   → first file attachment
+//	BODY[3]   → second file attachment, etc.
+//
+// For a message without regular attachments, BODY[1] → text/plain, BODY[2] → text/html
+func (m *Mailbox) buildSectionLiteral(msg *models.Message, section *imap.BodySectionName) imap.Literal {
+	path := section.Path
+	hasPlain := msg.Body != ""
+	hasHTML := msg.BodyHTML != ""
+
+	// Fetch attachments to determine structure
+	allAtts, _ := m.database.GetAttachmentsByMessageID(msg.ID)
+	var regularAtts []*models.Attachment
+	for _, att := range allAtts {
+		if !att.IsInline || att.ContentID == "" {
+			regularAtts = append(regularAtts, att)
+		}
+	}
+
+	hasRegularAtts := len(regularAtts) > 0
+
+	// Structure when we have regular attachments:
+	//   multipart/mixed
+	//     [1] → text part (alternative or single)
+	//     [2] → first attachment
+	//     [3] → second attachment ...
+	//
+	// Structure without regular attachments (plain+html):
+	//   multipart/alternative
+	//     [1] → text/plain
+	//     [2] → text/html
+
+	if hasRegularAtts {
+		partNum := path[0]
+		if partNum == 1 {
+			// Text body part
+			if len(path) == 1 {
+				// Return the whole text part
+				var buf bytes.Buffer
+				if hasPlain && hasHTML {
+					altBoundary := fmt.Sprintf("----=_Part_%d", msg.ID)
+					buf.WriteString(fmt.Sprintf("--%s\r\n", altBoundary))
+					buf.WriteString("Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n")
+					buf.WriteString(msg.Body)
+					buf.WriteString("\r\n")
+					buf.WriteString(fmt.Sprintf("--%s\r\n", altBoundary))
+					buf.WriteString("Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n")
+					buf.WriteString(msg.BodyHTML)
+					buf.WriteString("\r\n")
+					buf.WriteString(fmt.Sprintf("--%s--\r\n", altBoundary))
+				} else if hasHTML {
+					buf.WriteString(msg.BodyHTML)
+				} else {
+					buf.WriteString(msg.Body)
+				}
+				return bytes.NewReader(buf.Bytes())
+			}
+			// Sub-part of text, e.g. BODY[1.1] or BODY[1.2]
+			subPart := path[1]
+			if subPart == 1 && hasPlain {
+				return strings.NewReader(msg.Body)
+			} else if subPart == 2 && hasHTML {
+				return strings.NewReader(msg.BodyHTML)
+			}
+		} else if partNum >= 2 && partNum-2 < len(regularAtts) {
+			// File attachment
+			att := regularAtts[partNum-2]
+			encoded := base64.StdEncoding.EncodeToString(att.Data)
+			// Format in 76-char lines
+			var buf bytes.Buffer
+			for i := 0; i < len(encoded); i += 76 {
+				end := i + 76
+				if end > len(encoded) {
+					end = len(encoded)
+				}
+				buf.WriteString(encoded[i:end])
+				buf.WriteString("\r\n")
+			}
+			return bytes.NewReader(buf.Bytes())
+		}
+	} else {
+		// No regular attachments: multipart/alternative [1]=plain [2]=html
+		// or single part
+		partNum := path[0]
+		if hasPlain && hasHTML {
+			if partNum == 1 {
+				return strings.NewReader(msg.Body)
+			} else if partNum == 2 {
+				return strings.NewReader(msg.BodyHTML)
+			}
+		}
+	}
+
+	// Fallback: return empty
+	return strings.NewReader("")
 }
 
 // Helper function to match message against search criteria
