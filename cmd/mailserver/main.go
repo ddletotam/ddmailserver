@@ -169,6 +169,7 @@ func main() {
 	log.Printf("Initializing IMAP IDLE manager for instant mail sync...")
 	idleManager := imapclient.NewIdleManager(database)
 	idleManager.SetSyncCallback(scheduler.TriggerSyncForAccount)
+	idleManager.SetOAuthClients(googleOAuth, microsoftOAuth)
 	scheduler.SetIdleManager(idleManager)
 	go idleManager.Start()
 	defer idleManager.Stop()
