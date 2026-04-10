@@ -222,6 +222,54 @@ func (s *Server) HandleCreateContactSourceWeb(w http.ResponseWriter, r *http.Req
 	s.HandleContactSourcesList(w, r)
 }
 
+// HandleUpdateContactSourceWeb updates a contact source (web UI)
+func (s *Server) HandleUpdateContactSourceWeb(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	vars := mux.Vars(r)
+	sourceID, err := strconv.ParseInt(vars["id"], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid source ID", http.StatusBadRequest)
+		return
+	}
+
+	existing, err := s.database.GetContactSourceByID(sourceID)
+	if err != nil || existing == nil || existing.UserID != user.ID {
+		http.Error(w, "Source not found", http.StatusNotFound)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Invalid form data", http.StatusBadRequest)
+		return
+	}
+
+	if name := r.FormValue("name"); name != "" {
+		existing.Name = name
+	}
+	if url := r.FormValue("carddav_url"); url != "" {
+		existing.CardDAVURL = url
+	}
+	if username := r.FormValue("carddav_username"); username != "" {
+		existing.CardDAVUsername = username
+	}
+	if password := r.FormValue("carddav_password"); password != "" {
+		existing.CardDAVPassword = password
+	}
+
+	if err := s.database.UpdateContactSource(existing); err != nil {
+		log.Printf("Failed to update contact source: %v", err)
+		http.Error(w, "Failed to update source", http.StatusInternalServerError)
+		return
+	}
+
+	s.HandleContactSourcesList(w, r)
+}
+
 // HandleCreateLocalAddressBook creates a new local address book
 func (s *Server) HandleCreateLocalAddressBook(w http.ResponseWriter, r *http.Request) {
 	user := s.GetUserFromContext(r.Context())

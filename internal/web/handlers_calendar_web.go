@@ -682,6 +682,15 @@ func (s *Server) HandleUpdateCalendarSourceWeb(w http.ResponseWriter, r *http.Re
 	if name := r.FormValue("name"); name != "" {
 		existing.Name = name
 	}
+	if url := r.FormValue("caldav_url"); url != "" {
+		existing.CalDAVURL = url
+	}
+	if username := r.FormValue("caldav_username"); username != "" {
+		existing.CalDAVUsername = username
+	}
+	if password := r.FormValue("caldav_password"); password != "" {
+		existing.CalDAVPassword = password
+	}
 	if color := r.FormValue("color"); color != "" {
 		existing.Color = color
 	}

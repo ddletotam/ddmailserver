@@ -219,6 +219,12 @@
                             class="btn btn-sm btn-outline-primary">
                         <i class="ti ti-refresh me-1"></i>Sync
                     </button>
+                    {{if eq .SourceType "carddav"}}
+                    <button type="button" class="btn btn-sm btn-outline-secondary"
+                            data-bs-toggle="modal" data-bs-target="#edit-contact-source-modal-{{.ID}}">
+                        <i class="ti ti-edit me-1"></i>Edit
+                    </button>
+                    {{end}}
                     <button hx-delete="/contacts/sources/{{.ID}}"
                             hx-confirm="Delete source '{{.Name}}' and all its contacts?"
                             hx-target="closest .col-md-6"
@@ -230,6 +236,49 @@
                 <div id="sync-status-source-{{.ID}}" class="sync-status text-success small mt-2"></div>
             </div>
         </div>
+
+        {{if eq .SourceType "carddav"}}
+        <div class="modal modal-blur fade" id="edit-contact-source-modal-{{.ID}}" tabindex="-1">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Edit: {{.Name}}</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <form hx-post="/contacts/sources/{{.ID}}/update"
+                          hx-target="#contact-sources-list"
+                          hx-swap="innerHTML settle:100ms"
+                          hx-on::before-request="var m=bootstrap.Modal.getInstance(document.getElementById('edit-contact-source-modal-{{.ID}}')); if(m) m.hide();"
+                          hx-on::after-settle="document.querySelectorAll('.modal-backdrop').forEach(e=>e.remove()); document.body.classList.remove('modal-open'); document.body.style=''">
+                        <div class="modal-body">
+                            <div class="mb-3">
+                                <label class="form-label">{{t "contacts.source_name"}}</label>
+                                <input type="text" name="name" class="form-control" value="{{.Name}}" required>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">CardDAV URL</label>
+                                <input type="url" name="carddav_url" class="form-control" value="{{.CardDAVURL}}">
+                            </div>
+                            <div class="row mb-3">
+                                <div class="col-6">
+                                    <label class="form-label">{{t "contacts.username"}}</label>
+                                    <input type="text" name="carddav_username" class="form-control" value="{{.CardDAVUsername}}">
+                                </div>
+                                <div class="col-6">
+                                    <label class="form-label">{{t "contacts.password"}}</label>
+                                    <input type="password" name="carddav_password" class="form-control" placeholder="Leave blank to keep current">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-link link-secondary" data-bs-dismiss="modal">{{t "common.cancel"}}</button>
+                            <button type="submit" class="btn btn-primary">Save</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+        {{end}}
     </div>
     {{end}}
 </div>

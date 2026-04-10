@@ -238,6 +238,7 @@ func (s *Server) setupRoutes() {
 	web.HandleFunc("/contacts/search", s.HandleContactsList).Methods("GET")
 	web.HandleFunc("/contacts/sources/create", s.HandleCreateContactSourceWeb).Methods("POST")
 	web.HandleFunc("/contacts/addressbooks/create", s.HandleCreateLocalAddressBook).Methods("POST")
+	web.HandleFunc("/contacts/sources/{id}/update", s.HandleUpdateContactSourceWeb).Methods("POST")
 	web.HandleFunc("/contacts/sources/{id}/sync", s.HandleSyncContactSource).Methods("POST")
 	web.HandleFunc("/contacts/sources/{id}", s.HandleDeleteContactSourceWeb).Methods("DELETE")
 	web.HandleFunc("/contacts/addressbooks/{id}", s.HandleDeleteAddressBookWeb).Methods("DELETE")
