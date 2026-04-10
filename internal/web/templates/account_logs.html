@@ -1,0 +1,56 @@
+{{define "content"}}
+<div class="card">
+    <div class="card-header">
+        <h3 class="card-title">{{t "accounts.logs.title"}} — {{.Account.Name}}</h3>
+        <div class="card-actions">
+            <a href="/accounts/{{.Account.ID}}/logs" class="btn btn-sm {{if not .ErrorsOnly}}btn-primary{{else}}btn-outline-primary{{end}}">
+                {{t "accounts.logs.all"}}
+            </a>
+            <a href="/accounts/{{.Account.ID}}/logs?errors=1" class="btn btn-sm {{if .ErrorsOnly}}btn-primary{{else}}btn-outline-primary{{end}}">
+                {{t "accounts.logs.errors"}}
+            </a>
+            <a href="/accounts" class="btn btn-sm btn-outline-secondary ms-2">
+                {{t "accounts.logs.back"}}
+            </a>
+        </div>
+    </div>
+    <div class="card-body">
+        {{if .Logs}}
+        <div class="table-responsive">
+            <table class="table table-vcenter card-table">
+                <thead>
+                    <tr>
+                        <th style="width:160px">{{t "messages.date"}}</th>
+                        <th style="width:80px">Level</th>
+                        <th>Message</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{range .Logs}}
+                    <tr>
+                        <td class="text-muted small">{{.CreatedAt.Format "2006-01-02 15:04:05"}}</td>
+                        <td>
+                            {{if eq .Level "error"}}
+                            <span class="badge bg-danger">error</span>
+                            {{else}}
+                            <span class="badge bg-blue">info</span>
+                            {{end}}
+                        </td>
+                        <td><code>{{.Message}}</code></td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+        {{else}}
+        <div class="empty">
+            <div class="empty-icon">
+                <i class="ti ti-list"></i>
+            </div>
+            <p class="empty-title">{{t "accounts.logs.empty"}}</p>
+            <p class="empty-subtitle text-muted">{{t "accounts.logs.empty_description"}}</p>
+        </div>
+        {{end}}
+    </div>
+</div>
+{{end}}

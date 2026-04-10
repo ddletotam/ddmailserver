@@ -381,6 +381,22 @@ func (s *Server) HandleSaveAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	// else: preserve existing Enabled state for edits
 
+	// Parse sync settings
+	if syncMode := r.FormValue("sync_mode"); syncMode == "poll" {
+		account.SyncMode = "poll"
+	} else {
+		account.SyncMode = "idle"
+	}
+	if pi := r.FormValue("poll_interval"); pi != "" {
+		if v, err := strconv.Atoi(pi); err == nil && v >= 120 {
+			account.PollInterval = v
+		} else {
+			account.PollInterval = 300
+		}
+	} else if account.PollInterval < 120 {
+		account.PollInterval = 300
+	}
+
 	// Parse ports
 	if imapPort := r.FormValue("imap_port"); imapPort != "" {
 		if port, err := strconv.Atoi(imapPort); err == nil {
@@ -431,6 +447,46 @@ func (s *Server) HandleSaveAccount(w http.ResponseWriter, r *http.Request) {
 	// Redirect to accounts page
 	w.Header().Set("HX-Redirect", "/accounts")
 	w.WriteHeader(http.StatusOK)
+}
+
+// HandleAccountLogsPage shows logs for an account
+func (s *Server) HandleAccountLogsPage(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+
+	vars := mux.Vars(r)
+	id, _ := strconv.ParseInt(vars["id"], 10, 64)
+	account, err := s.database.GetAccountByID(id)
+	if err != nil || account.UserID != user.ID {
+		http.Error(w, "Account not found", http.StatusNotFound)
+		return
+	}
+
+	errorsOnly := r.URL.Query().Get("errors") == "1"
+	logs, err := s.database.GetAccountLogs(account.ID, errorsOnly, 500)
+	if err != nil {
+		log.Printf("Failed to get account logs: %v", err)
+	}
+
+	data := struct {
+		PageData
+		Account    *models.Account
+		Logs       []*models.AccountLog
+		ErrorsOnly bool
+	}{
+		PageData: PageData{
+			Title: "Account Logs",
+			User:  user,
+		},
+		Account:    account,
+		Logs:       logs,
+		ErrorsOnly: errorsOnly,
+	}
+
+	s.renderTemplate(w, "account_logs.html", data)
 }
 
 // HandleSyncAccountWeb triggers immediate IMAP sync for an account

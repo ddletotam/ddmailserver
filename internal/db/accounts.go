@@ -46,13 +46,22 @@ func (db *DB) CreateAccount(account *models.Account) error {
 		}
 	}
 
+	// Set defaults for sync settings
+	if account.SyncMode == "" {
+		account.SyncMode = "idle"
+	}
+	if account.PollInterval < 120 {
+		account.PollInterval = 300
+	}
+
 	query := `
 		INSERT INTO accounts (
 			user_id, name, email, imap_host, imap_port, imap_username, imap_password, imap_tls,
 			smtp_host, smtp_port, smtp_username, smtp_password, smtp_tls, enabled,
 			auth_type, oauth_access_token, oauth_refresh_token, oauth_token_expiry,
+			sync_mode, poll_interval,
 			created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
 		RETURNING id
 	`
 
@@ -67,6 +76,7 @@ func (db *DB) CreateAccount(account *models.Account) error {
 		account.IMAPHost, account.IMAPPort, account.IMAPUsername, encryptedIMAPPassword, account.IMAPTLS,
 		account.SMTPHost, account.SMTPPort, account.SMTPUsername, encryptedSMTPPassword, account.SMTPTLS,
 		account.Enabled, account.AuthType, encryptedAccessToken, encryptedRefreshToken, tokenExpiry,
+		account.SyncMode, account.PollInterval,
 		account.CreatedAt, account.UpdatedAt,
 	).Scan(&account.ID)
 
@@ -83,6 +93,7 @@ func (db *DB) GetAccountsByUserID(userID int64) ([]*models.Account, error) {
 		SELECT id, user_id, name, email, imap_host, imap_port, imap_username, imap_password, imap_tls,
 		       smtp_host, smtp_port, smtp_username, smtp_password, smtp_tls, enabled, last_sync,
 		       COALESCE(auth_type, 'password'), COALESCE(oauth_access_token, ''), COALESCE(oauth_refresh_token, ''), oauth_token_expiry,
+		       COALESCE(sync_mode, 'idle'), COALESCE(poll_interval, 300),
 		       created_at, updated_at,
 		       COALESCE(last_sync_error, ''), COALESCE(consecutive_errors, 0)
 		FROM accounts
@@ -107,6 +118,7 @@ func (db *DB) GetAccountsByUserID(userID int64) ([]*models.Account, error) {
 			&account.SMTPHost, &account.SMTPPort, &account.SMTPUsername, &account.SMTPPassword, &account.SMTPTLS,
 			&account.Enabled, &lastSync,
 			&account.AuthType, &account.OAuthAccessToken, &account.OAuthRefreshToken, &tokenExpiry,
+			&account.SyncMode, &account.PollInterval,
 			&account.CreatedAt, &account.UpdatedAt,
 			&account.LastSyncError, &account.ConsecutiveErrors,
 		)
@@ -141,6 +153,7 @@ func (db *DB) GetAccountByID(id int64) (*models.Account, error) {
 		SELECT id, user_id, name, email, imap_host, imap_port, imap_username, imap_password, imap_tls,
 		       smtp_host, smtp_port, smtp_username, smtp_password, smtp_tls, enabled, last_sync,
 		       COALESCE(auth_type, 'password'), COALESCE(oauth_access_token, ''), COALESCE(oauth_refresh_token, ''), oauth_token_expiry,
+		       COALESCE(sync_mode, 'idle'), COALESCE(poll_interval, 300),
 		       created_at, updated_at,
 		       COALESCE(last_sync_error, ''), COALESCE(consecutive_errors, 0)
 		FROM accounts
@@ -153,6 +166,7 @@ func (db *DB) GetAccountByID(id int64) (*models.Account, error) {
 		&account.SMTPHost, &account.SMTPPort, &account.SMTPUsername, &account.SMTPPassword, &account.SMTPTLS,
 		&account.Enabled, &lastSync,
 		&account.AuthType, &account.OAuthAccessToken, &account.OAuthRefreshToken, &tokenExpiry,
+		&account.SyncMode, &account.PollInterval,
 		&account.CreatedAt, &account.UpdatedAt,
 		&account.LastSyncError, &account.ConsecutiveErrors,
 	)
@@ -194,12 +208,20 @@ func (db *DB) UpdateAccount(account *models.Account) error {
 		return fmt.Errorf("failed to encrypt SMTP password: %w", err)
 	}
 
+	// Enforce sync settings constraints
+	if account.SyncMode == "" {
+		account.SyncMode = "idle"
+	}
+	if account.PollInterval < 120 {
+		account.PollInterval = 300
+	}
+
 	query := `
 		UPDATE accounts
 		SET name = $1, email = $2, imap_host = $3, imap_port = $4, imap_username = $5, imap_password = $6, imap_tls = $7,
 		    smtp_host = $8, smtp_port = $9, smtp_username = $10, smtp_password = $11, smtp_tls = $12,
-		    enabled = $13, last_sync = $14, updated_at = $15
-		WHERE id = $16
+		    enabled = $13, last_sync = $14, sync_mode = $15, poll_interval = $16, updated_at = $17
+		WHERE id = $18
 	`
 
 	_, err = db.Exec(
@@ -207,7 +229,7 @@ func (db *DB) UpdateAccount(account *models.Account) error {
 		account.Name, account.Email,
 		account.IMAPHost, account.IMAPPort, account.IMAPUsername, encryptedIMAPPassword, account.IMAPTLS,
 		account.SMTPHost, account.SMTPPort, account.SMTPUsername, encryptedSMTPPassword, account.SMTPTLS,
-		account.Enabled, account.LastSync, account.UpdatedAt, account.ID,
+		account.Enabled, account.LastSync, account.SyncMode, account.PollInterval, account.UpdatedAt, account.ID,
 	)
 
 	if err != nil {
@@ -243,6 +265,7 @@ func (db *DB) GetAllEnabledAccounts() ([]*models.Account, error) {
 		SELECT id, user_id, name, email, imap_host, imap_port, imap_username, imap_password, imap_tls,
 		       smtp_host, smtp_port, smtp_username, smtp_password, smtp_tls, enabled, last_sync,
 		       COALESCE(auth_type, 'password'), COALESCE(oauth_access_token, ''), COALESCE(oauth_refresh_token, ''), oauth_token_expiry,
+		       COALESCE(sync_mode, 'idle'), COALESCE(poll_interval, 300),
 		       created_at, updated_at,
 		       COALESCE(last_sync_error, ''), COALESCE(consecutive_errors, 0)
 		FROM accounts
@@ -267,6 +290,7 @@ func (db *DB) GetAllEnabledAccounts() ([]*models.Account, error) {
 			&account.SMTPHost, &account.SMTPPort, &account.SMTPUsername, &account.SMTPPassword, &account.SMTPTLS,
 			&account.Enabled, &lastSync,
 			&account.AuthType, &account.OAuthAccessToken, &account.OAuthRefreshToken, &tokenExpiry,
+			&account.SyncMode, &account.PollInterval,
 			&account.CreatedAt, &account.UpdatedAt,
 			&account.LastSyncError, &account.ConsecutiveErrors,
 		)
