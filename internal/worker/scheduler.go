@@ -10,24 +10,26 @@ import (
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/notify"
 	"github.com/yourusername/mailserver/internal/oauth"
-	smtpclient "github.com/yourusername/mailserver/internal/smtp/client"
 	"github.com/yourusername/mailserver/internal/parser"
+	smtpclient "github.com/yourusername/mailserver/internal/smtp/client"
 	taskpkg "github.com/yourusername/mailserver/internal/task"
 )
 
 // Scheduler schedules periodic tasks for mail synchronization
 type Scheduler struct {
-	pool           *Pool
-	database       *db.DB
-	interval       time.Duration
-	ctx            context.Context
-	cancel         context.CancelFunc
-	googleOAuth    *oauth.GoogleOAuth
-	microsoftOAuth *oauth.MicrosoftOAuth
-	notifyHub      *notify.Hub
-	hostname       string
-	analyzer            *parser.Analyzer
-	spamCleanupLastRun time.Time
+	pool                     *Pool
+	database                 *db.DB
+	interval                 time.Duration
+	ctx                      context.Context
+	cancel                   context.CancelFunc
+	googleOAuth              *oauth.GoogleOAuth
+	microsoftOAuth           *oauth.MicrosoftOAuth
+	notifyHub                *notify.Hub
+	hostname                 string
+	analyzer                 *parser.Analyzer
+	spamCleanupLastRun       time.Time
+	accountLogCleanupLastRun time.Time
+	idleManager              *imapclient.IdleManager
 }
 
 // NewScheduler creates a new task scheduler
@@ -62,6 +64,36 @@ func (s *Scheduler) SetHostname(hostname string) {
 // SetAnalyzer sets the spam analyzer for IMAP sync tasks
 func (s *Scheduler) SetAnalyzer(analyzer *parser.Analyzer) {
 	s.analyzer = analyzer
+}
+
+// SetIdleManager sets the IDLE manager for persistent IMAP connections
+func (s *Scheduler) SetIdleManager(mgr *imapclient.IdleManager) {
+	s.idleManager = mgr
+}
+
+// TriggerSyncForAccount submits an immediate sync task for a single account.
+// This is called by the IDLE manager when new mail is detected.
+func (s *Scheduler) TriggerSyncForAccount(account *models.Account) {
+	task := imapclient.NewSyncTask(account, s.database)
+	if s.notifyHub != nil {
+		task.SetNotifyFunc(func(username, mailbox string, count uint32) {
+			s.notifyHub.Publish(notify.Event{
+				Type:     notify.EventNewMessage,
+				Username: username,
+				Mailbox:  mailbox,
+				Count:    count,
+			})
+		})
+	}
+	if s.analyzer != nil {
+		task.SetAnalyzer(s.analyzer)
+	}
+
+	if err := s.pool.Submit(task); err != nil {
+		log.Printf("IDLE trigger: failed to submit sync for %s: %v", account.Email, err)
+	} else {
+		log.Printf("IDLE trigger: submitted immediate sync for %s", account.Email)
+	}
 }
 
 func (s *Scheduler) getHostname() string {
@@ -128,11 +160,16 @@ func (s *Scheduler) scheduleAllAccounts() {
 	// Run spam cleanup (periodically delete old spam)
 	s.runSpamCleanup()
 
+	// Run account log cleanup (delete logs older than 5 days)
+	s.runAccountLogCleanup()
+
 	imapQueueLen, smtpQueueLen := s.pool.QueueLength()
 	log.Printf("Current queue lengths - IMAP: %d, SMTP: %d", imapQueueLen, smtpQueueLen)
 }
 
-// scheduleIMAPSync schedules IMAP synchronization tasks
+// scheduleIMAPSync schedules IMAP synchronization tasks.
+// For poll-mode accounts: syncs when the account's poll_interval has elapsed.
+// For idle-mode accounts: syncs as a safety-net fallback every 300s.
 func (s *Scheduler) scheduleIMAPSync() {
 	accounts, err := s.getAllEnabledAccounts()
 	if err != nil {
@@ -140,9 +177,19 @@ func (s *Scheduler) scheduleIMAPSync() {
 		return
 	}
 
-	log.Printf("Found %d enabled accounts to sync", len(accounts))
-
+	now := time.Now()
+	synced := 0
 	for _, account := range accounts {
+		interval := 300 // default fallback for idle-mode accounts
+		if account.SyncMode == "poll" && account.PollInterval >= 120 {
+			interval = account.PollInterval
+		}
+
+		// Skip if not enough time since last sync
+		if !account.LastSync.IsZero() && now.Sub(account.LastSync) < time.Duration(interval)*time.Second {
+			continue
+		}
+
 		task := imapclient.NewSyncTask(account, s.database)
 		if s.notifyHub != nil {
 			task.SetNotifyFunc(func(username, mailbox string, count uint32) {
@@ -161,8 +208,12 @@ func (s *Scheduler) scheduleIMAPSync() {
 		if err := s.pool.Submit(task); err != nil {
 			log.Printf("Failed to submit sync task for %s: %v", account.Email, err)
 		} else {
-			log.Printf("Submitted sync task for %s", account.Email)
+			synced++
 		}
+	}
+
+	if synced > 0 {
+		log.Printf("Submitted %d IMAP sync tasks", synced)
 	}
 }
 
@@ -449,4 +500,24 @@ func (s *Scheduler) runSpamCleanup() {
 	}
 
 	s.spamCleanupLastRun = time.Now()
+}
+
+// runAccountLogCleanup deletes account log entries older than 5 days.
+// Only runs once per day.
+func (s *Scheduler) runAccountLogCleanup() {
+	if time.Since(s.accountLogCleanupLastRun) < 24*time.Hour {
+		return
+	}
+
+	deleted, err := s.database.CleanupAccountLogs(5)
+	if err != nil {
+		log.Printf("Failed to cleanup account logs: %v", err)
+		return
+	}
+
+	if deleted > 0 {
+		log.Printf("Account log cleanup: deleted %d entries older than 5 days", deleted)
+	}
+
+	s.accountLogCleanupLastRun = time.Now()
 }

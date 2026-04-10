@@ -193,6 +193,7 @@ func (s *Server) setupRoutes() {
 	web.HandleFunc("/accounts/new", s.HandleAccountFormPage).Methods("GET")
 	web.HandleFunc("/accounts/save", s.HandleSaveAccount).Methods("POST")
 	web.HandleFunc("/accounts/{id}/edit", s.HandleAccountFormPage).Methods("GET")
+	web.HandleFunc("/accounts/{id}/logs", s.HandleAccountLogsPage).Methods("GET")
 	web.HandleFunc("/accounts/{id}/sync", s.HandleSyncAccountWeb).Methods("POST")
 	web.HandleFunc("/accounts/{id}/toggle", s.HandleToggleAccountWeb).Methods("POST")
 	web.HandleFunc("/accounts/{id}", s.HandleDeleteAccountWeb).Methods("DELETE")

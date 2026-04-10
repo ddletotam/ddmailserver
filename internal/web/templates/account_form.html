@@ -116,6 +116,37 @@
                 </div>
             </div>
 
+            <div class="card mb-3">
+                <div class="card-header">
+                    <h3 class="card-title">
+                        <i class="ti ti-refresh me-2 text-azure"></i>{{t "accounts.form.sync_settings"}}
+                    </h3>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">{{t "accounts.form.sync_mode"}}</label>
+                            <select name="sync_mode" class="form-select"
+                                    onchange="document.getElementById('poll_interval_group').style.display = this.value === 'poll' ? '' : 'none'">
+                                <option value="idle" {{if .Account}}{{if eq .Account.SyncMode "poll"}}{{else}}selected{{end}}{{end}}>
+                                    {{t "accounts.form.sync_mode_idle"}}
+                                </option>
+                                <option value="poll" {{if .Account}}{{if eq .Account.SyncMode "poll"}}selected{{end}}{{end}}>
+                                    {{t "accounts.form.sync_mode_poll"}}
+                                </option>
+                            </select>
+                        </div>
+                        <div class="col-md-6" id="poll_interval_group"
+                             style="{{if .Account}}{{if eq .Account.SyncMode "poll"}}{{else}}display:none{{end}}{{else}}display:none{{end}}">
+                            <label class="form-label">{{t "accounts.form.poll_interval"}}</label>
+                            <input type="number" name="poll_interval" class="form-control"
+                                   min="120" value="{{if .Account}}{{if .Account.PollInterval}}{{.Account.PollInterval}}{{else}}300{{end}}{{else}}300{{end}}">
+                            <small class="form-hint">{{t "accounts.form.poll_interval_hint"}}</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div class="d-flex gap-2 justify-content-end">
                 <a href="/accounts" class="btn btn-link">{{t "accounts.form.cancel"}}</a>
                 <button type="submit" class="btn btn-primary">

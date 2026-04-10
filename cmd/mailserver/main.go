@@ -17,8 +17,8 @@ import (
 	imapserver "github.com/yourusername/mailserver/internal/imap/server"
 	"github.com/yourusername/mailserver/internal/ldap"
 	"github.com/yourusername/mailserver/internal/notify"
-	"github.com/yourusername/mailserver/internal/parser"
 	"github.com/yourusername/mailserver/internal/oauth"
+	"github.com/yourusername/mailserver/internal/parser"
 	"github.com/yourusername/mailserver/internal/search"
 	smtpmx "github.com/yourusername/mailserver/internal/smtp/mx"
 	smtpserver "github.com/yourusername/mailserver/internal/smtp/server"
@@ -145,9 +145,6 @@ func main() {
 	}
 	scheduler.SetOAuthClients(googleOAuth, microsoftOAuth)
 
-	go scheduler.Start()
-	defer scheduler.Stop()
-
 	// Determine hostname for SMTP
 	hostname := "localhost"
 	if cfg.Server.Domain != "" {
@@ -167,6 +164,19 @@ func main() {
 	log.Printf("Initializing spam analyzer for IMAP sync...")
 	spamAnalyzer := parser.NewAnalyzer(nil)
 	scheduler.SetAnalyzer(spamAnalyzer)
+
+	// Initialize IDLE manager for persistent IMAP connections
+	log.Printf("Initializing IMAP IDLE manager for instant mail sync...")
+	idleManager := imapclient.NewIdleManager(database)
+	idleManager.SetSyncCallback(scheduler.TriggerSyncForAccount)
+	scheduler.SetIdleManager(idleManager)
+	go idleManager.Start()
+	defer idleManager.Stop()
+
+	// Start scheduler AFTER all dependencies are configured
+	// (analyzer, notifyHub, idleManager must be set before first sync cycle)
+	go scheduler.Start()
+	defer scheduler.Stop()
 
 	// Initialize IMAP server (plain) WITHOUT IDLE support
 	log.Printf("Initializing IMAP server (plain, no IDLE)...")

@@ -41,9 +41,13 @@ type Account struct {
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 
+	// Sync settings
+	SyncMode     string `json:"sync_mode"`     // "idle" or "poll"
+	PollInterval int    `json:"poll_interval"` // Polling interval in seconds (min 120, default 300)
+
 	// Sync status
-	LastSyncError    string `json:"last_sync_error,omitempty"`
-	ConsecutiveErrors int   `json:"consecutive_errors"`
+	LastSyncError     string `json:"last_sync_error,omitempty"`
+	ConsecutiveErrors int    `json:"consecutive_errors"`
 
 	// OAuth2 fields
 	AuthType          string    `json:"auth_type"` // "password" or "oauth2_google"
@@ -60,6 +64,15 @@ func (a *Account) HasSynced() bool {
 // HasSyncError returns true if the last sync failed
 func (a *Account) HasSyncError() bool {
 	return a.LastSyncError != ""
+}
+
+// AccountLog represents a log entry for an account
+type AccountLog struct {
+	ID        int64     `json:"id"`
+	AccountID int64     `json:"account_id"`
+	Level     string    `json:"level"` // "info" or "error"
+	Message   string    `json:"message"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // IsOAuth returns true if this account uses OAuth2 authentication
