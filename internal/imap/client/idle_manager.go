@@ -13,18 +13,21 @@ import (
 	"github.com/emersion/go-sasl"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/oauth"
 )
 
 // IdleManager maintains persistent IDLE connections to external IMAP servers.
 // When a server reports new mail, it triggers an immediate sync instead of
 // waiting for the next polling interval.
 type IdleManager struct {
-	database     *db.DB
-	syncCallback func(account *models.Account)
-	mu           sync.Mutex
-	watchers     map[int64]context.CancelFunc // account ID -> cancel
-	ctx          context.Context
-	cancel       context.CancelFunc
+	database       *db.DB
+	syncCallback   func(account *models.Account)
+	googleOAuth    *oauth.GoogleOAuth
+	microsoftOAuth *oauth.MicrosoftOAuth
+	mu             sync.Mutex
+	watchers       map[int64]context.CancelFunc // account ID -> cancel
+	ctx            context.Context
+	cancel         context.CancelFunc
 }
 
 // NewIdleManager creates a new IDLE manager.
@@ -41,6 +44,12 @@ func NewIdleManager(database *db.DB) *IdleManager {
 // SetSyncCallback sets the function called when new mail is detected.
 func (m *IdleManager) SetSyncCallback(fn func(account *models.Account)) {
 	m.syncCallback = fn
+}
+
+// SetOAuthClients sets OAuth clients for token refresh.
+func (m *IdleManager) SetOAuthClients(google *oauth.GoogleOAuth, microsoft *oauth.MicrosoftOAuth) {
+	m.googleOAuth = google
+	m.microsoftOAuth = microsoft
 }
 
 // Start runs the IDLE manager. It launches a watcher goroutine per account
@@ -154,9 +163,67 @@ func (m *IdleManager) watchAccount(ctx context.Context, account *models.Account)
 	}
 }
 
+// refreshOAuthToken refreshes the OAuth token for an account if needed.
+func (m *IdleManager) refreshOAuthToken(account *models.Account) error {
+	if !account.IsOAuth() {
+		return nil
+	}
+	if account.OAuthTokenExpiry.IsZero() || time.Until(account.OAuthTokenExpiry) > 5*time.Minute {
+		return nil
+	}
+	if account.OAuthRefreshToken == "" {
+		return fmt.Errorf("no refresh token available")
+	}
+
+	var tokenResp *oauth.TokenResponse
+	var err error
+
+	switch account.AuthType {
+	case "oauth2_google":
+		if m.googleOAuth == nil {
+			return fmt.Errorf("Google OAuth not configured")
+		}
+		tokenResp, err = m.googleOAuth.RefreshToken(account.OAuthRefreshToken)
+	case "oauth2_microsoft":
+		if m.microsoftOAuth == nil {
+			return fmt.Errorf("Microsoft OAuth not configured")
+		}
+		tokenResp, err = m.microsoftOAuth.RefreshToken(account.OAuthRefreshToken)
+	default:
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("token refresh failed: %w", err)
+	}
+
+	expiry := oauth.TokenExpiry(tokenResp.ExpiresIn)
+	newRefreshToken := tokenResp.RefreshToken
+	if newRefreshToken == "" {
+		newRefreshToken = account.OAuthRefreshToken
+	}
+
+	if err := m.database.UpdateAccountOAuthTokens(account.ID, tokenResp.AccessToken, newRefreshToken, expiry); err != nil {
+		return fmt.Errorf("failed to save tokens: %w", err)
+	}
+
+	account.OAuthAccessToken = tokenResp.AccessToken
+	account.OAuthRefreshToken = newRefreshToken
+	account.OAuthTokenExpiry = expiry
+
+	m.accountLog(account.ID, "info", "OAuth token refreshed, new expiry: %v", expiry)
+	return nil
+}
+
 // runIdleSession connects, authenticates, selects INBOX and enters an
 // IDLE loop. Returns on any error (caller will reconnect).
 func (m *IdleManager) runIdleSession(ctx context.Context, account *models.Account) error {
+	// Refresh OAuth token before connecting
+	if account.IsOAuth() {
+		if err := m.refreshOAuthToken(account); err != nil {
+			return fmt.Errorf("oauth refresh: %w", err)
+		}
+	}
+
 	addr := fmt.Sprintf("%s:%d", account.IMAPHost, account.IMAPPort)
 
 	var conn *imapClient.Client

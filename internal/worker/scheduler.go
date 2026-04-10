@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -74,6 +75,13 @@ func (s *Scheduler) SetIdleManager(mgr *imapclient.IdleManager) {
 // TriggerSyncForAccount submits an immediate sync task for a single account.
 // This is called by the IDLE manager when new mail is detected.
 func (s *Scheduler) TriggerSyncForAccount(account *models.Account) {
+	// Refresh OAuth token if needed
+	if account.IsOAuth() {
+		if err := s.refreshAccountOAuthToken(account); err != nil {
+			log.Printf("IDLE trigger: failed to refresh OAuth token for %s: %v", account.Email, err)
+		}
+	}
+
 	task := imapclient.NewSyncTask(account, s.database)
 	if s.notifyHub != nil {
 		task.SetNotifyFunc(func(username, mailbox string, count uint32) {
@@ -167,6 +175,60 @@ func (s *Scheduler) scheduleAllAccounts() {
 	log.Printf("Current queue lengths - IMAP: %d, SMTP: %d", imapQueueLen, smtpQueueLen)
 }
 
+// refreshAccountOAuthToken refreshes the OAuth token for an account if needed.
+// Updates both the database and the in-memory account struct.
+func (s *Scheduler) refreshAccountOAuthToken(account *models.Account) error {
+	if !account.IsOAuth() {
+		return nil
+	}
+	if account.OAuthTokenExpiry.IsZero() || time.Until(account.OAuthTokenExpiry) > 5*time.Minute {
+		return nil // still valid
+	}
+	if account.OAuthRefreshToken == "" {
+		return fmt.Errorf("no refresh token available, please re-authenticate")
+	}
+
+	log.Printf("Refreshing OAuth token for IMAP account %s (expires: %v)", account.Email, account.OAuthTokenExpiry)
+
+	var tokenResp *oauth.TokenResponse
+	var err error
+
+	switch account.AuthType {
+	case "oauth2_google":
+		if s.googleOAuth == nil {
+			return fmt.Errorf("Google OAuth not configured")
+		}
+		tokenResp, err = s.googleOAuth.RefreshToken(account.OAuthRefreshToken)
+	case "oauth2_microsoft":
+		if s.microsoftOAuth == nil {
+			return fmt.Errorf("Microsoft OAuth not configured")
+		}
+		tokenResp, err = s.microsoftOAuth.RefreshToken(account.OAuthRefreshToken)
+	default:
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("token refresh failed: %w", err)
+	}
+
+	expiry := oauth.TokenExpiry(tokenResp.ExpiresIn)
+	newRefreshToken := tokenResp.RefreshToken
+	if newRefreshToken == "" {
+		newRefreshToken = account.OAuthRefreshToken
+	}
+
+	if err := s.database.UpdateAccountOAuthTokens(account.ID, tokenResp.AccessToken, newRefreshToken, expiry); err != nil {
+		return fmt.Errorf("failed to save new tokens: %w", err)
+	}
+
+	account.OAuthAccessToken = tokenResp.AccessToken
+	account.OAuthRefreshToken = newRefreshToken
+	account.OAuthTokenExpiry = expiry
+
+	log.Printf("OAuth token refreshed for %s, new expiry: %v", account.Email, expiry)
+	return nil
+}
+
 // scheduleIMAPSync schedules IMAP synchronization tasks.
 // For poll-mode accounts: syncs when the account's poll_interval has elapsed.
 // For idle-mode accounts: syncs as a safety-net fallback every 300s.
@@ -188,6 +250,14 @@ func (s *Scheduler) scheduleIMAPSync() {
 		// Skip if not enough time since last sync
 		if !account.LastSync.IsZero() && now.Sub(account.LastSync) < time.Duration(interval)*time.Second {
 			continue
+		}
+
+		// Refresh OAuth token if needed
+		if account.IsOAuth() {
+			if err := s.refreshAccountOAuthToken(account); err != nil {
+				log.Printf("Failed to refresh OAuth token for %s: %v", account.Email, err)
+				continue
+			}
 		}
 
 		task := imapclient.NewSyncTask(account, s.database)
