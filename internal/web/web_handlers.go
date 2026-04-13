@@ -387,6 +387,9 @@ func (s *Server) HandleSaveAccount(w http.ResponseWriter, r *http.Request) {
 	} else {
 		account.SyncMode = "idle"
 	}
+
+	// Aliases (raw textarea content; parsed lazily by Account.GetAliases)
+	account.Aliases = strings.TrimSpace(r.FormValue("aliases"))
 	if pi := r.FormValue("poll_interval"); pi != "" {
 		if v, err := strconv.Atoi(pi); err == nil && v >= 120 {
 			account.PollInterval = v

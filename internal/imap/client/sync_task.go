@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -234,6 +235,31 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 		}
 	}
 
+	// Recipient validation: if To/Cc don't include the account's email or any alias,
+	// mark as spam (unless whitelisted by a user rule).
+	if action != "allow" && !recipientIncludesAccount(t.account, imapMsg.Envelope.To, imapMsg.Envelope.Cc) {
+		isSpam = true
+		log.Printf("IMAP sync: Message marked as spam — recipient mismatch (account=%s, To=%s, Cc=%s)",
+			t.account.Email,
+			formatAddressList(imapMsg.Envelope.To),
+			formatAddressList(imapMsg.Envelope.Cc))
+		// Add a reason if there isn't already a spam_reasons string
+		mismatchReason := "recipient mismatch: account address not in To/Cc"
+		if spamReasons == "" {
+			spamReasons = parser.GetSpamReasonsJSON([]string{mismatchReason})
+		} else {
+			// Try to merge into existing JSON array; if parsing fails just keep both
+			var existing []string
+			if err := json.Unmarshal([]byte(spamReasons), &existing); err == nil {
+				existing = append(existing, mismatchReason)
+				spamReasons = parser.GetSpamReasonsJSON(existing)
+			}
+		}
+		if spamStatus == "" {
+			spamStatus = string(parser.SpamStatusSpam)
+		}
+	}
+
 	msg := &models.Message{
 		AccountID: t.account.ID, UserID: t.account.UserID, FolderID: inbox.ID, MessageID: messageID,
 		Subject: parser.SanitizeUTF8(imapMsg.Envelope.Subject), From: fromAddr,
@@ -272,6 +298,24 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 		t.database.UpdateMessageAttachmentCount(msg.ID, attachmentCount)
 	}
 	return true, isSpam, nil
+}
+
+// recipientIncludesAccount returns true if any address in the To/Cc lists
+// matches the account's email or one of its aliases.
+func recipientIncludesAccount(account *models.Account, to, cc []*imap.Address) bool {
+	check := func(list []*imap.Address) bool {
+		for _, a := range list {
+			if a == nil {
+				continue
+			}
+			addr := fmt.Sprintf("%s@%s", a.MailboxName, a.HostName)
+			if account.IsKnownRecipient(addr) {
+				return true
+			}
+		}
+		return false
+	}
+	return check(to) || check(cc)
 }
 
 func formatAddressList(addresses []*imap.Address) string {

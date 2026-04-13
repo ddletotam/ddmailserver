@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // User represents a user of the mailserver
 type User struct {
@@ -44,6 +47,10 @@ type Account struct {
 	// Sync settings
 	SyncMode     string `json:"sync_mode"`     // "idle" or "poll"
 	PollInterval int    `json:"poll_interval"` // Polling interval in seconds (min 120, default 300)
+
+	// Recipient validation: addresses (one per line) considered valid
+	// recipients for this account in addition to Email itself.
+	Aliases string `json:"aliases"`
 
 	// Sync status
 	LastSyncError     string `json:"last_sync_error,omitempty"`
@@ -97,6 +104,44 @@ func (a *Account) NeedsTokenRefresh() bool {
 	}
 	// Refresh 5 minutes before expiry
 	return time.Now().Add(5 * time.Minute).After(a.OAuthTokenExpiry)
+}
+
+// GetAliases returns lowercased, trimmed alias addresses split from the Aliases
+// field (separated by newlines, commas, or whitespace).
+func (a *Account) GetAliases() []string {
+	if a.Aliases == "" {
+		return nil
+	}
+	// Split on common separators
+	raw := strings.FieldsFunc(a.Aliases, func(r rune) bool {
+		return r == '\n' || r == '\r' || r == ',' || r == ';' || r == ' ' || r == '\t'
+	})
+	var out []string
+	for _, s := range raw {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// IsKnownRecipient returns true if the given address matches the account's
+// primary email or any of its aliases (case-insensitive).
+func (a *Account) IsKnownRecipient(addr string) bool {
+	addr = strings.ToLower(strings.TrimSpace(addr))
+	if addr == "" {
+		return false
+	}
+	if addr == strings.ToLower(strings.TrimSpace(a.Email)) {
+		return true
+	}
+	for _, alias := range a.GetAliases() {
+		if addr == alias {
+			return true
+		}
+	}
+	return false
 }
 
 // Message represents an email message
