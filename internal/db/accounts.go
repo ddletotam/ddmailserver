@@ -59,9 +59,9 @@ func (db *DB) CreateAccount(account *models.Account) error {
 			user_id, name, email, imap_host, imap_port, imap_username, imap_password, imap_tls,
 			smtp_host, smtp_port, smtp_username, smtp_password, smtp_tls, enabled,
 			auth_type, oauth_access_token, oauth_refresh_token, oauth_token_expiry,
-			sync_mode, poll_interval,
+			sync_mode, poll_interval, aliases,
 			created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
 		RETURNING id
 	`
 
@@ -76,7 +76,7 @@ func (db *DB) CreateAccount(account *models.Account) error {
 		account.IMAPHost, account.IMAPPort, account.IMAPUsername, encryptedIMAPPassword, account.IMAPTLS,
 		account.SMTPHost, account.SMTPPort, account.SMTPUsername, encryptedSMTPPassword, account.SMTPTLS,
 		account.Enabled, account.AuthType, encryptedAccessToken, encryptedRefreshToken, tokenExpiry,
-		account.SyncMode, account.PollInterval,
+		account.SyncMode, account.PollInterval, account.Aliases,
 		account.CreatedAt, account.UpdatedAt,
 	).Scan(&account.ID)
 
@@ -95,7 +95,8 @@ func (db *DB) GetAccountsByUserID(userID int64) ([]*models.Account, error) {
 		       COALESCE(auth_type, 'password'), COALESCE(oauth_access_token, ''), COALESCE(oauth_refresh_token, ''), oauth_token_expiry,
 		       COALESCE(sync_mode, 'idle'), COALESCE(poll_interval, 300),
 		       created_at, updated_at,
-		       COALESCE(last_sync_error, ''), COALESCE(consecutive_errors, 0)
+		       COALESCE(last_sync_error, ''), COALESCE(consecutive_errors, 0),
+		       COALESCE(aliases, '')
 		FROM accounts
 		WHERE user_id = $1
 		ORDER BY created_at DESC
@@ -121,6 +122,7 @@ func (db *DB) GetAccountsByUserID(userID int64) ([]*models.Account, error) {
 			&account.SyncMode, &account.PollInterval,
 			&account.CreatedAt, &account.UpdatedAt,
 			&account.LastSyncError, &account.ConsecutiveErrors,
+			&account.Aliases,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan account: %w", err)
@@ -155,7 +157,8 @@ func (db *DB) GetAccountByID(id int64) (*models.Account, error) {
 		       COALESCE(auth_type, 'password'), COALESCE(oauth_access_token, ''), COALESCE(oauth_refresh_token, ''), oauth_token_expiry,
 		       COALESCE(sync_mode, 'idle'), COALESCE(poll_interval, 300),
 		       created_at, updated_at,
-		       COALESCE(last_sync_error, ''), COALESCE(consecutive_errors, 0)
+		       COALESCE(last_sync_error, ''), COALESCE(consecutive_errors, 0),
+		       COALESCE(aliases, '')
 		FROM accounts
 		WHERE id = $1
 	`
@@ -169,6 +172,7 @@ func (db *DB) GetAccountByID(id int64) (*models.Account, error) {
 		&account.SyncMode, &account.PollInterval,
 		&account.CreatedAt, &account.UpdatedAt,
 		&account.LastSyncError, &account.ConsecutiveErrors,
+		&account.Aliases,
 	)
 
 	if err == sql.ErrNoRows {
@@ -220,8 +224,8 @@ func (db *DB) UpdateAccount(account *models.Account) error {
 		UPDATE accounts
 		SET name = $1, email = $2, imap_host = $3, imap_port = $4, imap_username = $5, imap_password = $6, imap_tls = $7,
 		    smtp_host = $8, smtp_port = $9, smtp_username = $10, smtp_password = $11, smtp_tls = $12,
-		    enabled = $13, last_sync = $14, sync_mode = $15, poll_interval = $16, updated_at = $17
-		WHERE id = $18
+		    enabled = $13, last_sync = $14, sync_mode = $15, poll_interval = $16, aliases = $17, updated_at = $18
+		WHERE id = $19
 	`
 
 	_, err = db.Exec(
@@ -229,7 +233,7 @@ func (db *DB) UpdateAccount(account *models.Account) error {
 		account.Name, account.Email,
 		account.IMAPHost, account.IMAPPort, account.IMAPUsername, encryptedIMAPPassword, account.IMAPTLS,
 		account.SMTPHost, account.SMTPPort, account.SMTPUsername, encryptedSMTPPassword, account.SMTPTLS,
-		account.Enabled, account.LastSync, account.SyncMode, account.PollInterval, account.UpdatedAt, account.ID,
+		account.Enabled, account.LastSync, account.SyncMode, account.PollInterval, account.Aliases, account.UpdatedAt, account.ID,
 	)
 
 	if err != nil {
@@ -267,7 +271,8 @@ func (db *DB) GetAllEnabledAccounts() ([]*models.Account, error) {
 		       COALESCE(auth_type, 'password'), COALESCE(oauth_access_token, ''), COALESCE(oauth_refresh_token, ''), oauth_token_expiry,
 		       COALESCE(sync_mode, 'idle'), COALESCE(poll_interval, 300),
 		       created_at, updated_at,
-		       COALESCE(last_sync_error, ''), COALESCE(consecutive_errors, 0)
+		       COALESCE(last_sync_error, ''), COALESCE(consecutive_errors, 0),
+		       COALESCE(aliases, '')
 		FROM accounts
 		WHERE enabled = true
 		ORDER BY last_sync ASC NULLS FIRST
@@ -293,6 +298,7 @@ func (db *DB) GetAllEnabledAccounts() ([]*models.Account, error) {
 			&account.SyncMode, &account.PollInterval,
 			&account.CreatedAt, &account.UpdatedAt,
 			&account.LastSyncError, &account.ConsecutiveErrors,
+			&account.Aliases,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan account: %w", err)
