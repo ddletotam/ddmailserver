@@ -208,6 +208,7 @@ func (s *Server) setupRoutes() {
 	web.HandleFunc("/messages/{id}/reply", s.HandleReply).Methods("POST")
 	web.HandleFunc("/messages/{id}/forward", s.HandleForward).Methods("POST")
 	web.HandleFunc("/messages/{id}/body", s.HandleMessageBody).Methods("GET")
+	web.HandleFunc("/messages/{id}/source", s.HandleMessageSource).Methods("GET")
 	web.HandleFunc("/messages/{id}", s.HandleMessagePage).Methods("GET")
 	web.HandleFunc("/messages/{id}", s.HandleDeleteMessage).Methods("DELETE")
 	web.HandleFunc("/message/{id}", s.HandleMessagePage).Methods("GET")

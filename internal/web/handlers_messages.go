@@ -2,6 +2,7 @@ package web
 
 import (
 	"fmt"
+	"html/template"
 	"log"
 	"net/http"
 	"strconv"
@@ -269,6 +270,72 @@ func (s *Server) HandleInlineSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.renderMessageList(w, messages, 1, total, 50, "", 0, q)
+}
+
+// HandleMessageSource returns the message source (headers + body) for debugging
+func (s *Server) HandleMessageSource(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	id, err := strconv.ParseInt(mux.Vars(r)["id"], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
+	}
+
+	msg, err := s.database.GetMessageByID(id)
+	if err != nil || msg.UserID != user.ID {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
+	var src strings.Builder
+	src.WriteString(fmt.Sprintf("Message-ID: %s\n", msg.MessageID))
+	src.WriteString(fmt.Sprintf("From: %s\n", msg.From))
+	src.WriteString(fmt.Sprintf("To: %s\n", msg.To))
+	if msg.Cc != "" {
+		src.WriteString(fmt.Sprintf("Cc: %s\n", msg.Cc))
+	}
+	if msg.Bcc != "" {
+		src.WriteString(fmt.Sprintf("Bcc: %s\n", msg.Bcc))
+	}
+	if msg.ReplyTo != "" {
+		src.WriteString(fmt.Sprintf("Reply-To: %s\n", msg.ReplyTo))
+	}
+	src.WriteString(fmt.Sprintf("Date: %s\n", msg.Date.Format(time.RFC1123Z)))
+	src.WriteString(fmt.Sprintf("Subject: %s\n", msg.Subject))
+	if msg.InReplyTo != "" {
+		src.WriteString(fmt.Sprintf("In-Reply-To: %s\n", msg.InReplyTo))
+	}
+	src.WriteString(fmt.Sprintf("Account-ID: %d\n", msg.AccountID))
+	src.WriteString(fmt.Sprintf("Folder-ID: %d\n", msg.FolderID))
+	src.WriteString(fmt.Sprintf("UID: %d\n", msg.UID))
+	src.WriteString(fmt.Sprintf("Remote-UID: %d\n", msg.RemoteUID))
+	src.WriteString(fmt.Sprintf("Remote-Folder: %s\n", msg.RemoteFolder))
+	src.WriteString(fmt.Sprintf("Spam-Score: %.1f\n", msg.SpamScore))
+	src.WriteString(fmt.Sprintf("Spam-Status: %s\n", msg.SpamStatus))
+	if msg.SpamReasons != "" {
+		src.WriteString(fmt.Sprintf("Spam-Reasons: %s\n", msg.SpamReasons))
+	}
+	src.WriteString(fmt.Sprintf("Flags: seen=%v flagged=%v answered=%v draft=%v deleted=%v\n",
+		msg.Seen, msg.Flagged, msg.Answered, msg.Draft, msg.Deleted))
+	src.WriteString(fmt.Sprintf("Size: %d\n", msg.Size))
+	src.WriteString(fmt.Sprintf("Attachments: %d\n", msg.Attachments))
+	src.WriteString(fmt.Sprintf("Created: %s\n", msg.CreatedAt.Format(time.RFC1123Z)))
+
+	if msg.Body != "" {
+		src.WriteString(fmt.Sprintf("\n--- text/plain (%d bytes) ---\n%s\n", len(msg.Body), msg.Body))
+	}
+	if msg.BodyHTML != "" {
+		src.WriteString(fmt.Sprintf("\n--- text/html (%d bytes) ---\n%s\n", len(msg.BodyHTML), msg.BodyHTML))
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<div class="card"><div class="card-header"><h4 class="card-title">Message Source</h4></div><div class="card-body"><pre class="p-0" style="white-space:pre-wrap; word-break:break-all; max-height:600px; overflow:auto; font-size:12px;">%s</pre></div></div>`,
+		template.HTMLEscapeString(src.String()))
 }
 
 // HandleMessageBody serves the raw HTML body for iframe rendering.
