@@ -271,6 +271,36 @@ func (s *Server) HandleInlineSearch(w http.ResponseWriter, r *http.Request) {
 	s.renderMessageList(w, messages, 1, total, 50, "", 0, q)
 }
 
+// HandleMessageBody serves the raw HTML body for iframe rendering.
+// This avoids double-escaping from html/template's srcdoc attribute escaping.
+func (s *Server) HandleMessageBody(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	id, err := strconv.ParseInt(mux.Vars(r)["id"], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
+	}
+
+	msg, err := s.database.GetMessageByID(id)
+	if err != nil || msg.UserID != user.ID {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
+	html := msg.BodyHTML
+	if html != "" {
+		html = replaceCIDURLs(html, msg.ID)
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(html))
+}
+
 // renderMessageList renders the "message-list" template block with pagination state.
 func (s *Server) renderMessageList(w http.ResponseWriter, messages []*models.Message, page, total, pageSize int, folder string, accountID int64, query string) {
 	totalPages := (total + pageSize - 1) / pageSize

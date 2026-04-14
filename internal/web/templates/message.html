@@ -70,8 +70,8 @@
 
             <div class="message-body">
                 {{if .Message.BodyHTML}}
-                <iframe srcdoc="{{.Message.BodyHTML}}"
-                        sandbox="allow-same-origin"
+                <iframe src="/messages/{{.Message.ID}}/body"
+                        sandbox="allow-same-origin allow-popups"
                         style="width:100%; min-height:400px; border:1px solid #e6e7e9; border-radius:4px;"
                         onload="this.style.height = this.contentWindow.document.body.scrollHeight + 32 + 'px'">
                 </iframe>
