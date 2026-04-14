@@ -137,6 +137,10 @@
   "compose.send": "Отправить письмо",
   "compose.save_draft": "Сохранить черновик",
   "compose.cancel": "Отмена",
+  "compose.attachments": "Вложения",
+  "compose.reply": "Ответить",
+  "compose.forward": "Переслать",
+  "compose.draft_saved": "Черновик сохранён",
 
   "button.save": "Сохранить",
   "button.cancel": "Отмена",

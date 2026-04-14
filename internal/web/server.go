@@ -198,11 +198,17 @@ func (s *Server) setupRoutes() {
 	web.HandleFunc("/accounts/{id}/toggle", s.HandleToggleAccountWeb).Methods("POST")
 	web.HandleFunc("/accounts/{id}", s.HandleDeleteAccountWeb).Methods("DELETE")
 
-	// Inbox
+	// Inbox & messages
 	web.HandleFunc("/inbox", s.HandleInboxPage).Methods("GET")
 	web.HandleFunc("/messages/list", s.HandleMessagesList).Methods("GET")
-	web.HandleFunc("/messages/{id}", s.HandleMessagePage).Methods("GET")
+	web.HandleFunc("/messages/search", s.HandleInlineSearch).Methods("GET")
 	web.HandleFunc("/messages/send", s.HandleSendMessage).Methods("POST")
+	web.HandleFunc("/messages/draft", s.HandleSaveDraft).Methods("POST")
+	web.HandleFunc("/messages/refresh", s.HandleRefreshMessages).Methods("POST")
+	web.HandleFunc("/messages/{id}/reply", s.HandleReply).Methods("POST")
+	web.HandleFunc("/messages/{id}/forward", s.HandleForward).Methods("POST")
+	web.HandleFunc("/messages/{id}", s.HandleMessagePage).Methods("GET")
+	web.HandleFunc("/messages/{id}", s.HandleDeleteMessage).Methods("DELETE")
 	web.HandleFunc("/message/{id}", s.HandleMessagePage).Methods("GET")
 
 	// Attachments

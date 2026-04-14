@@ -65,12 +65,14 @@ type MessageData struct {
 
 type ComposeData struct {
 	PageData
-	Accounts []*models.Account
-	To       string
-	Subject  string
-	Body     string
-	ShowCc   bool
-	ShowBcc  bool
+	Accounts          []*models.Account
+	To                string
+	Cc                string
+	Bcc               string
+	Subject           string
+	Body              string
+	DraftID           int64
+	SelectedAccountID int64
 }
 
 // getUserLanguage extracts user's language preference from template data
@@ -214,8 +216,8 @@ func (s *Server) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 	// Get stats
 	accounts, _ := s.database.GetAccountsByUserID(user.ID)
 	// TODO: Get actual message counts
-	messageCount := 0
-	unreadCount := 0
+	messageCount, _ := s.database.GetMessageCountByUser(user.ID)
+	unreadCount, _ := s.database.GetUnreadCountByUser(user.ID)
 	calendars, _ := s.database.GetCalendarsByUserID(user.ID)
 
 	errorCount := 0
@@ -617,6 +619,8 @@ func (s *Server) HandleInboxPage(w http.ResponseWriter, r *http.Request) {
 		folder = "all"
 	}
 
+	unreadCount, _ := s.database.GetUnreadCountByUser(user.ID)
+
 	data := InboxData{
 		PageData: PageData{
 			Title: "Inbox",
@@ -624,13 +628,13 @@ func (s *Server) HandleInboxPage(w http.ResponseWriter, r *http.Request) {
 		},
 		Accounts:    accounts,
 		Folder:      folder,
-		UnreadCount: 0, // TODO: Get actual count
+		UnreadCount: unreadCount,
 	}
 
 	s.renderTemplate(w, "inbox.html", data)
 }
 
-// HandleMessagesList returns the messages list (htmx endpoint)
+// HandleMessagesList returns the messages list with filtering and pagination (htmx endpoint)
 func (s *Server) HandleMessagesList(w http.ResponseWriter, r *http.Request) {
 	user := s.GetUserFromContext(r.Context())
 	if user == nil {
@@ -638,51 +642,28 @@ func (s *Server) HandleMessagesList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get messages
-	messages, err := s.database.GetMessagesByUser(user.ID, 50, 0)
+	folder := r.URL.Query().Get("folder")
+	q := r.URL.Query().Get("q")
+	page := 1
+	if p, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && p > 0 {
+		page = p
+	}
+	var accountID int64
+	if v := r.URL.Query().Get("account"); v != "" {
+		accountID, _ = strconv.ParseInt(v, 10, 64)
+	}
+
+	const pageSize = 50
+	offset := (page - 1) * pageSize
+
+	messages, total, err := s.database.GetMessagesByUserFiltered(user.ID, folder, accountID, q, pageSize, offset)
 	if err != nil {
 		log.Printf("Error getting messages: %v", err)
 		http.Error(w, "Error loading messages", http.StatusInternalServerError)
 		return
 	}
 
-	data := struct {
-		Messages    []*models.Message
-		CurrentPage int
-		TotalPages  int
-		HasPrev     bool
-		HasNext     bool
-		PrevPage    int
-		NextPage    int
-	}{
-		Messages:    messages,
-		CurrentPage: 1,
-		TotalPages:  1,
-		HasPrev:     false,
-		HasNext:     false,
-	}
-
-	// Render just the message-list template
-	funcMap := template.FuncMap{
-		"t": s.i18n.T,
-		"substr": func(s string, start, end int) string {
-			if len(s) < end {
-				return s
-			}
-			return s[start:end]
-		},
-	}
-
-	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templatesFS, "templates/inbox.html")
-	if err != nil {
-		log.Printf("Error parsing template: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	if err := tmpl.ExecuteTemplate(w, "message-list", data); err != nil {
-		log.Printf("Error executing template: %v", err)
-	}
+	s.renderMessageList(w, messages, page, total, pageSize, folder, accountID, q)
 }
 
 // HandleMessagePage shows a single message
@@ -743,7 +724,7 @@ func (s *Server) HandleMessagePage(w http.ResponseWriter, r *http.Request) {
 	s.renderTemplate(w, "message.html", data)
 }
 
-// HandleComposePage shows the compose email page
+// HandleComposePage shows the compose email page, optionally loading a draft
 func (s *Server) HandleComposePage(w http.ResponseWriter, r *http.Request) {
 	user := s.GetUserFromContext(r.Context())
 	if user == nil {
@@ -759,6 +740,27 @@ func (s *Server) HandleComposePage(w http.ResponseWriter, r *http.Request) {
 			User:  user,
 		},
 		Accounts: accounts,
+	}
+
+	// Load draft if requested
+	if draftIDStr := r.URL.Query().Get("draft_id"); draftIDStr != "" {
+		draftID, _ := strconv.ParseInt(draftIDStr, 10, 64)
+		if draftID > 0 {
+			draft, err := s.database.GetMessageByID(draftID)
+			if err == nil && draft.UserID == user.ID && draft.Draft {
+				data.DraftID = draft.ID
+				data.To = draft.To
+				data.Cc = draft.Cc
+				data.Bcc = draft.Bcc
+				data.Subject = draft.Subject
+				data.SelectedAccountID = draft.AccountID
+				if draft.BodyHTML != "" {
+					data.Body = draft.BodyHTML
+				} else {
+					data.Body = draft.Body
+				}
+			}
+		}
 	}
 
 	s.renderTemplate(w, "compose.html", data)

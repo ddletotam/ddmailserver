@@ -137,6 +137,10 @@
   "compose.send": "Send Email",
   "compose.save_draft": "Save Draft",
   "compose.cancel": "Cancel",
+  "compose.attachments": "Attachments",
+  "compose.reply": "Reply",
+  "compose.forward": "Forward",
+  "compose.draft_saved": "Draft saved",
 
   "button.save": "Save",
   "button.cancel": "Cancel",

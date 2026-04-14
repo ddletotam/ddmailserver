@@ -2,6 +2,8 @@ package client
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"strings"
@@ -147,56 +149,85 @@ func (t *SendTask) splitEmails(emails string) []string {
 	return result
 }
 
-// constructEmail builds an RFC 5322 email from message fields
+// randomBoundary generates a random MIME boundary string.
+func randomBoundary() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return fmt.Sprintf("----=_Part_%x", b)
+}
+
+// constructEmail builds an RFC 5322 email from message fields.
+// If the database contains outbox_attachments for this message, they are
+// included as MIME parts inside a multipart/mixed envelope.
 func (t *SendTask) constructEmail() []byte {
+	// Load attachments from DB
+	var attachments []*models.OutboxAttachment
+	if t.database != nil {
+		atts, err := t.database.GetOutboxAttachmentsByMessageID(t.outboxMessage.ID)
+		if err == nil {
+			attachments = atts
+		}
+	}
+
 	var email strings.Builder
 
 	// Headers
 	email.WriteString(fmt.Sprintf("From: %s\r\n", t.outboxMessage.From))
 	email.WriteString(fmt.Sprintf("To: %s\r\n", t.outboxMessage.To))
-
 	if t.outboxMessage.Cc != "" {
 		email.WriteString(fmt.Sprintf("Cc: %s\r\n", t.outboxMessage.Cc))
 	}
-
 	if t.outboxMessage.Subject != "" {
 		email.WriteString(fmt.Sprintf("Subject: %s\r\n", t.outboxMessage.Subject))
 	}
-
 	email.WriteString("MIME-Version: 1.0\r\n")
 
-	// Body
-	if t.outboxMessage.BodyHTML != "" && t.outboxMessage.Body != "" {
-		// Multipart: both HTML and plain text
-		boundary := "boundary-mailserver-12345"
-		email.WriteString(fmt.Sprintf("Content-Type: multipart/alternative; boundary=\"%s\"\r\n", boundary))
-		email.WriteString("\r\n")
+	// Build body part
+	var bodyBuf strings.Builder
+	hasPlain := t.outboxMessage.Body != ""
+	hasHTML := t.outboxMessage.BodyHTML != ""
 
-		// Plain text part
-		email.WriteString(fmt.Sprintf("--%s\r\n", boundary))
-		email.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
-		email.WriteString("\r\n")
-		email.WriteString(t.outboxMessage.Body)
-		email.WriteString("\r\n\r\n")
-
-		// HTML part
-		email.WriteString(fmt.Sprintf("--%s\r\n", boundary))
-		email.WriteString("Content-Type: text/html; charset=utf-8\r\n")
-		email.WriteString("\r\n")
-		email.WriteString(t.outboxMessage.BodyHTML)
-		email.WriteString("\r\n\r\n")
-
-		email.WriteString(fmt.Sprintf("--%s--\r\n", boundary))
-	} else if t.outboxMessage.BodyHTML != "" {
-		// HTML only
-		email.WriteString("Content-Type: text/html; charset=utf-8\r\n")
-		email.WriteString("\r\n")
-		email.WriteString(t.outboxMessage.BodyHTML)
+	if hasPlain && hasHTML {
+		altBoundary := randomBoundary()
+		bodyBuf.WriteString(fmt.Sprintf("Content-Type: multipart/alternative; boundary=\"%s\"\r\n\r\n", altBoundary))
+		bodyBuf.WriteString(fmt.Sprintf("--%s\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n", altBoundary, t.outboxMessage.Body))
+		bodyBuf.WriteString(fmt.Sprintf("--%s\r\nContent-Type: text/html; charset=utf-8\r\n\r\n%s\r\n", altBoundary, t.outboxMessage.BodyHTML))
+		bodyBuf.WriteString(fmt.Sprintf("--%s--\r\n", altBoundary))
+	} else if hasHTML {
+		bodyBuf.WriteString("Content-Type: text/html; charset=utf-8\r\n\r\n")
+		bodyBuf.WriteString(t.outboxMessage.BodyHTML)
 	} else {
-		// Plain text only
-		email.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
-		email.WriteString("\r\n")
-		email.WriteString(t.outboxMessage.Body)
+		bodyBuf.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
+		bodyBuf.WriteString(t.outboxMessage.Body)
+	}
+
+	if len(attachments) > 0 {
+		mixedBoundary := randomBoundary()
+		email.WriteString(fmt.Sprintf("Content-Type: multipart/mixed; boundary=\"%s\"\r\n\r\n", mixedBoundary))
+
+		// Body part
+		email.WriteString(fmt.Sprintf("--%s\r\n%s\r\n", mixedBoundary, bodyBuf.String()))
+
+		// Attachment parts
+		for _, att := range attachments {
+			email.WriteString(fmt.Sprintf("--%s\r\n", mixedBoundary))
+			email.WriteString(fmt.Sprintf("Content-Type: %s; name=\"%s\"\r\n", att.ContentType, att.Filename))
+			email.WriteString("Content-Transfer-Encoding: base64\r\n")
+			email.WriteString(fmt.Sprintf("Content-Disposition: attachment; filename=\"%s\"\r\n\r\n", att.Filename))
+			encoded := base64.StdEncoding.EncodeToString(att.Data)
+			for i := 0; i < len(encoded); i += 76 {
+				end := i + 76
+				if end > len(encoded) {
+					end = len(encoded)
+				}
+				email.WriteString(encoded[i:end])
+				email.WriteString("\r\n")
+			}
+		}
+		email.WriteString(fmt.Sprintf("--%s--\r\n", mixedBoundary))
+	} else {
+		// No attachments — write body directly
+		email.WriteString(bodyBuf.String())
 	}
 
 	return []byte(email.String())
