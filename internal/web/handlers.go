@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -667,47 +668,44 @@ func (s *Server) HandleSendMessage(w http.ResponseWriter, r *http.Request) {
 	userID := getUserID(r)
 	log.Printf("HandleSendMessage: userID=%d", userID)
 
-	// Parse form data
-	if err := r.ParseForm(); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid form data")
-		return
+	// Parse multipart form (25 MB limit for attachments)
+	if err := r.ParseMultipartForm(25 << 20); err != nil {
+		// Fall back to regular form
+		if err2 := r.ParseForm(); err2 != nil {
+			respondError(w, http.StatusBadRequest, "invalid form data")
+			return
+		}
 	}
 
 	accountIDStr := r.FormValue("account_id")
 	to := r.FormValue("to")
 	subject := r.FormValue("subject")
 	body := r.FormValue("body")
-	format := r.FormValue("format") // "text" or "html"
+	format := r.FormValue("format")
 	cc := r.FormValue("cc")
 	bcc := r.FormValue("bcc")
 
-	// Validate required fields
-	if accountIDStr == "" || to == "" || body == "" {
-		respondError(w, http.StatusBadRequest, "account_id, to, and body are required")
+	if accountIDStr == "" || to == "" {
+		respondError(w, http.StatusBadRequest, "account_id and to are required")
 		return
 	}
 
-	// Parse account ID
 	accountID, err := strconv.ParseInt(accountIDStr, 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "invalid account_id")
 		return
 	}
 
-	// Get account
 	account, err := s.database.GetAccountByID(accountID)
 	if err != nil {
 		respondError(w, http.StatusNotFound, "account not found")
 		return
 	}
-
-	// Check ownership
 	if account.UserID != userID {
 		respondError(w, http.StatusForbidden, "access denied")
 		return
 	}
 
-	// Create outbox message
 	outboxMsg := &models.OutboxMessage{
 		UserID:    userID,
 		AccountID: accountID,
@@ -720,24 +718,57 @@ func (s *Server) HandleSendMessage(w http.ResponseWriter, r *http.Request) {
 		Retries:   0,
 	}
 
-	// Set body based on format
 	if format == "html" {
 		outboxMsg.BodyHTML = body
 	} else {
 		outboxMsg.Body = body
 	}
 
-	// Save to database
 	if err := s.database.CreateOutboxMessage(outboxMsg); err != nil {
 		log.Printf("Failed to create outbox message: %v", err)
 		respondError(w, http.StatusInternalServerError, "failed to queue message for sending")
 		return
 	}
 
+	// Save uploaded attachments
+	if r.MultipartForm != nil {
+		for _, fh := range r.MultipartForm.File["attachments"] {
+			file, err := fh.Open()
+			if err != nil {
+				continue
+			}
+			data, err := io.ReadAll(file)
+			file.Close()
+			if err != nil {
+				continue
+			}
+			ct := fh.Header.Get("Content-Type")
+			if ct == "" {
+				ct = "application/octet-stream"
+			}
+			att := &models.OutboxAttachment{
+				OutboxMessageID: outboxMsg.ID,
+				Filename:        fh.Filename,
+				ContentType:     ct,
+				Size:            len(data),
+				Data:            data,
+			}
+			if err := s.database.CreateOutboxAttachment(att); err != nil {
+				log.Printf("Failed to save outbox attachment %s: %v", fh.Filename, err)
+			}
+		}
+	}
+
+	// Delete draft if this was a draft being sent
+	if draftIDStr := r.FormValue("draft_id"); draftIDStr != "" {
+		if draftID, err := strconv.ParseInt(draftIDStr, 10, 64); err == nil && draftID > 0 {
+			s.database.DeleteMessage(draftID)
+		}
+	}
+
 	log.Printf("Outbox message created: %d (from %s to %s)", outboxMsg.ID, outboxMsg.From, outboxMsg.To)
 
-	// Return success with HTMX response
 	w.Header().Set("Content-Type", "text/html")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`<div class="alert alert-success">✅ Email queued for sending! <a href="/inbox">View Inbox</a></div>`))
+	w.Write([]byte(`<div class="alert alert-success alert-dismissible" role="alert"><i class="ti ti-check me-1"></i>Email queued for sending! <a href="/inbox">View Inbox</a><a href="#" class="btn-close" data-bs-dismiss="alert"></a></div>`))
 }

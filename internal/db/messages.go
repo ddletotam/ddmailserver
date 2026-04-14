@@ -704,3 +704,101 @@ func (db *DB) CopyMessageToFolder(msgID, destFolderID int64) (uint32, error) {
 
 	return newUID, nil
 }
+
+// selectColumns is the standard column list for message queries.
+const selectColumns = `id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
+       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
+       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
+       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at`
+
+// notDeletedCondition filters out deleted, soft-deleted, and spam messages.
+const notDeletedCondition = `deleted = false AND (soft_deleted = false OR soft_deleted IS NULL) AND (is_spam = false OR is_spam IS NULL)`
+
+// GetUnreadCountByUser returns the number of unread messages for a user.
+func (db *DB) GetUnreadCountByUser(userID int64) (int, error) {
+	var count int
+	err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE user_id = $1 AND seen = false AND `+notDeletedCondition, userID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get unread count: %w", err)
+	}
+	return count, nil
+}
+
+// GetMessageCountByUser returns the total number of messages for a user (excl. deleted/spam).
+func (db *DB) GetMessageCountByUser(userID int64) (int, error) {
+	var count int
+	err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE user_id = $1 AND `+notDeletedCondition, userID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get message count: %w", err)
+	}
+	return count, nil
+}
+
+// GetMessagesByUserFiltered retrieves messages with optional folder type, account, and search
+// filtering. Returns messages and total count for pagination.
+func (db *DB) GetMessagesByUserFiltered(userID int64, folderType string, accountID int64, query string, limit, offset int) ([]*models.Message, int, error) {
+	baseWhere := `m.user_id = $1 AND m.deleted = false AND (m.soft_deleted = false OR m.soft_deleted IS NULL) AND (m.is_spam = false OR m.is_spam IS NULL)`
+	args := []interface{}{userID}
+	argN := 2
+
+	join := ""
+
+	// Folder type filter
+	if folderType != "" && folderType != "all" {
+		if folderType == "drafts" {
+			baseWhere += fmt.Sprintf(` AND m.draft = true`)
+		} else if folderType == "trash" {
+			// For trash, show soft-deleted instead
+			baseWhere = fmt.Sprintf(`m.user_id = $1 AND m.soft_deleted = true AND (m.is_spam = false OR m.is_spam IS NULL)`)
+		} else {
+			join = ` JOIN folders f ON m.folder_id = f.id`
+			baseWhere += fmt.Sprintf(` AND f.type = $%d`, argN)
+			args = append(args, folderType)
+			argN++
+		}
+	}
+
+	// Account filter
+	if accountID > 0 {
+		baseWhere += fmt.Sprintf(` AND m.account_id = $%d`, argN)
+		args = append(args, accountID)
+		argN++
+	}
+
+	// Search filter
+	if query != "" {
+		pattern := "%" + query + "%"
+		baseWhere += fmt.Sprintf(` AND (m.subject ILIKE $%d OR m.from_addr ILIKE $%d OR m.to_addr ILIKE $%d OR m.body ILIKE $%d)`, argN, argN, argN, argN)
+		args = append(args, pattern)
+		argN++
+	}
+
+	// Count total
+	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM messages m%s WHERE %s`, join, baseWhere)
+	var total int
+	if err := db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("failed to count messages: %w", err)
+	}
+
+	// Fetch page
+	orderBy := `m.date DESC`
+	if folderType == "drafts" {
+		orderBy = `m.updated_at DESC`
+	}
+
+	dataQuery := fmt.Sprintf(`SELECT m.%s FROM messages m%s WHERE %s ORDER BY %s LIMIT $%d OFFSET $%d`,
+		selectColumns, join, baseWhere, orderBy, argN, argN+1)
+	args = append(args, limit, offset)
+
+	rows, err := db.Query(dataQuery, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get filtered messages: %w", err)
+	}
+	defer rows.Close()
+
+	msgs, err := scanMessages(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	return msgs, total, nil
+}

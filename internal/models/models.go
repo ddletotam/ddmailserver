@@ -73,6 +73,17 @@ func (a *Account) HasSyncError() bool {
 	return a.LastSyncError != ""
 }
 
+// OutboxAttachment represents a file attachment for an outbox message
+type OutboxAttachment struct {
+	ID              int64     `json:"id"`
+	OutboxMessageID int64     `json:"outbox_message_id"`
+	Filename        string    `json:"filename"`
+	ContentType     string    `json:"content_type"`
+	Size            int       `json:"size"`
+	Data            []byte    `json:"-"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
 // AccountLog represents a log entry for an account
 type AccountLog struct {
 	ID        int64     `json:"id"`

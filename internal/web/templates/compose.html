@@ -1,144 +1,155 @@
 {{define "content"}}
-<div class="compose-page">
-    <div class="page-header">
-        <h1>Compose Email</h1>
+<div class="container-xl">
+    <div class="page-header d-print-none mb-3">
+        <div class="row align-items-center">
+            <div class="col-auto">
+                <h2 class="page-title">{{t "compose.title"}}</h2>
+            </div>
+        </div>
     </div>
 
-    <form hx-post="/messages/send"
-          hx-target="#send-status"
-          class="compose-form"
-          x-data="{ showCc: false, showBcc: false }">
+    <div class="row justify-content-center">
+        <div class="col-lg-10">
+            <form hx-post="/messages/send"
+                  hx-target="#send-status"
+                  hx-encoding="multipart/form-data"
+                  x-data="{ showCc: {{if .Cc}}true{{else}}false{{end}}, showBcc: {{if .Bcc}}true{{else}}false{{end}} }">
 
-        <div id="send-status"></div>
-
-        <div class="form-group">
-            <label for="account_id">From Account:</label>
-            <select id="account_id" name="account_id" required class="form-select">
-                <option value="">Select account...</option>
-                {{range .Accounts}}
-                <option value="{{.ID}}">{{.Name}} ({{.Email}})</option>
+                {{if .DraftID}}
+                <input type="hidden" name="draft_id" value="{{.DraftID}}">
                 {{end}}
-            </select>
-        </div>
 
-        <div class="form-group">
-            <label for="to">To:</label>
-            <input type="text" id="to" name="to" required
-                   placeholder="recipient@example.com"
-                   class="form-input">
-        </div>
+                <div id="send-status" class="mb-2"></div>
 
-        <div class="form-group" x-show="showCc">
-            <label for="cc">Cc:</label>
-            <input type="text" id="cc" name="cc"
-                   placeholder="cc@example.com"
-                   class="form-input">
-        </div>
+                <div class="card mb-3">
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label class="form-label">{{t "compose.from_account"}}</label>
+                            <select name="account_id" class="form-select" required>
+                                <option value="">{{t "compose.select_account"}}</option>
+                                {{range .Accounts}}
+                                <option value="{{.ID}}" {{if eq .ID $.SelectedAccountID}}selected{{end}}>{{.Name}} ({{.Email}})</option>
+                                {{end}}
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">{{t "compose.to"}}</label>
+                            <input type="text" name="to" class="form-control" required
+                                   value="{{.To}}" placeholder="{{t "compose.to_placeholder"}}">
+                        </div>
+                        <div class="mb-1">
+                            <a href="#" @click.prevent="showCc = !showCc" class="small me-2">
+                                <span x-text="showCc ? '{{t "compose.hide_cc"}}' : '{{t "compose.add_cc"}}'"></span>
+                            </a>
+                            <a href="#" @click.prevent="showBcc = !showBcc" class="small">
+                                <span x-text="showBcc ? '{{t "compose.hide_bcc"}}' : '{{t "compose.add_bcc"}}'"></span>
+                            </a>
+                        </div>
+                        <div class="mb-3" x-show="showCc" x-cloak>
+                            <label class="form-label">{{t "compose.cc"}}</label>
+                            <input type="text" name="cc" class="form-control"
+                                   value="{{.Cc}}" placeholder="{{t "compose.cc_placeholder"}}">
+                        </div>
+                        <div class="mb-3" x-show="showBcc" x-cloak>
+                            <label class="form-label">{{t "compose.bcc"}}</label>
+                            <input type="text" name="bcc" class="form-control"
+                                   value="{{.Bcc}}" placeholder="{{t "compose.bcc_placeholder"}}">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">{{t "compose.subject"}}</label>
+                            <input type="text" name="subject" class="form-control"
+                                   value="{{.Subject}}" placeholder="{{t "compose.subject_placeholder"}}">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">{{t "compose.message"}}</label>
+                            <textarea name="body" class="form-control" rows="15"
+                                      placeholder="{{t "compose.message_placeholder"}}">{{.Body}}</textarea>
+                        </div>
+                        <div class="row mb-3">
+                            <div class="col-auto">
+                                <label class="form-check form-check-inline">
+                                    <input type="radio" name="format" value="text" class="form-check-input" checked>
+                                    <span class="form-check-label">{{t "compose.plain_text"}}</span>
+                                </label>
+                                <label class="form-check form-check-inline">
+                                    <input type="radio" name="format" value="html" class="form-check-input">
+                                    <span class="form-check-label">{{t "compose.html"}}</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label"><i class="ti ti-paperclip me-1"></i>{{t "compose.attachments"}}</label>
+                            <input type="file" name="attachments" multiple class="form-control">
+                        </div>
+                    </div>
+                </div>
 
-        <div class="form-group" x-show="showBcc">
-            <label for="bcc">Bcc:</label>
-            <input type="text" id="bcc" name="bcc"
-                   placeholder="bcc@example.com"
-                   class="form-input">
+                <div class="d-flex gap-2">
+                    <button type="submit" class="btn btn-primary">
+                        <i class="ti ti-send me-1"></i>{{t "compose.send"}}
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary"
+                            hx-post="/messages/draft" hx-include="closest form"
+                            hx-target="#send-status">
+                        <i class="ti ti-device-floppy me-1"></i>{{t "compose.save_draft"}}
+                    </button>
+                    <a href="/inbox" class="btn btn-link">{{t "compose.cancel"}}</a>
+                </div>
+            </form>
         </div>
-
-        <div class="form-actions-inline">
-            <button type="button" @click="showCc = !showCc" class="btn-link">
-                {{if .ShowCc}}Hide{{else}}Add{{end}} Cc
-            </button>
-            <button type="button" @click="showBcc = !showBcc" class="btn-link">
-                {{if .ShowBcc}}Hide{{else}}Add{{end}} Bcc
-            </button>
-        </div>
-
-        <div class="form-group">
-            <label for="subject">Subject:</label>
-            <input type="text" id="subject" name="subject" required
-                   placeholder="Email subject"
-                   value="{{.Subject}}"
-                   class="form-input">
-        </div>
-
-        <div class="form-group">
-            <label for="body">Message:</label>
-            <textarea id="body" name="body" rows="15" required
-                      placeholder="Write your message..."
-                      class="form-textarea">{{.Body}}</textarea>
-        </div>
-
-        <div class="form-group" x-data="{ format: 'text' }">
-            <label>
-                <input type="radio" name="format" value="text" x-model="format" checked>
-                Plain Text
-            </label>
-            <label>
-                <input type="radio" name="format" value="html" x-model="format">
-                HTML
-            </label>
-        </div>
-
-        <div class="form-actions">
-            <button type="submit" class="btn btn-primary">
-                📤 Send Email
-            </button>
-            <button type="button"
-                    hx-post="/messages/draft"
-                    hx-include="closest form"
-                    class="btn btn-secondary">
-                💾 Save Draft
-            </button>
-            <a href="/inbox" class="btn btn-secondary">Cancel</a>
-        </div>
-    </form>
+    </div>
 </div>
 {{end}}
 
 {{define "compose-modal"}}
-<div class="modal" x-data="{ open: true }" x-show="open" @click.away="open = false">
-    <div class="modal-content" @click.stop>
-        <div class="modal-header">
-            <h3>{{if .IsReply}}Reply{{else if .IsForward}}Forward{{else}}Compose{{end}} Email</h3>
-            <button @click="open = false" class="modal-close">×</button>
+<div class="modal modal-blur fade show" style="display:block" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    {{if .IsReply}}{{t "compose.reply"}}{{else if .IsForward}}{{t "compose.forward"}}{{else}}{{t "compose.title"}}{{end}}
+                </h5>
+                <button type="button" class="btn-close" onclick="document.getElementById('compose-modal').innerHTML=''"></button>
+            </div>
+            <form hx-post="/messages/send" hx-target="#modal-send-status" hx-encoding="multipart/form-data">
+                {{if .ReplyTo}}
+                <input type="hidden" name="in_reply_to" value="{{.ReplyTo}}">
+                {{end}}
+                <div class="modal-body">
+                    <div id="modal-send-status" class="mb-2"></div>
+                    <div class="mb-3">
+                        <label class="form-label">{{t "compose.from_account"}}</label>
+                        <select name="account_id" class="form-select" required>
+                            {{range .Accounts}}
+                            <option value="{{.ID}}">{{.Email}}</option>
+                            {{end}}
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">{{t "compose.to"}}</label>
+                        <input type="text" name="to" class="form-control" required value="{{.To}}">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">{{t "compose.subject"}}</label>
+                        <input type="text" name="subject" class="form-control" value="{{.Subject}}">
+                    </div>
+                    <div class="mb-3">
+                        <textarea name="body" class="form-control" rows="12">{{.Body}}</textarea>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label"><i class="ti ti-paperclip me-1"></i>{{t "compose.attachments"}}</label>
+                        <input type="file" name="attachments" multiple class="form-control">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-link" onclick="document.getElementById('compose-modal').innerHTML=''">{{t "compose.cancel"}}</button>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="ti ti-send me-1"></i>{{t "compose.send"}}
+                    </button>
+                </div>
+            </form>
         </div>
-
-        <form hx-post="/messages/send"
-              hx-target="#send-status"
-              class="compose-form-compact">
-
-            <div id="send-status"></div>
-
-            {{if .ReplyTo}}
-            <input type="hidden" name="in_reply_to" value="{{.ReplyTo}}">
-            {{end}}
-
-            <div class="form-group">
-                <label>From:</label>
-                <select name="account_id" required class="form-select">
-                    {{range .Accounts}}
-                    <option value="{{.ID}}">{{.Email}}</option>
-                    {{end}}
-                </select>
-            </div>
-
-            <div class="form-group">
-                <label>To:</label>
-                <input type="text" name="to" required value="{{.To}}" class="form-input">
-            </div>
-
-            <div class="form-group">
-                <label>Subject:</label>
-                <input type="text" name="subject" required value="{{.Subject}}" class="form-input">
-            </div>
-
-            <div class="form-group">
-                <textarea name="body" rows="10" required class="form-textarea">{{.Body}}</textarea>
-            </div>
-
-            <div class="form-actions">
-                <button type="submit" class="btn btn-primary">Send</button>
-                <button type="button" @click="open = false" class="btn btn-secondary">Cancel</button>
-            </div>
-        </form>
     </div>
 </div>
+<div class="modal-backdrop fade show"></div>
 {{end}}
