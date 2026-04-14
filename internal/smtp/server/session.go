@@ -47,6 +47,11 @@ func (s *Session) Auth(mech string) (sasl.Server, error) {
 func (s *Session) AuthPlain(username, password string) error {
 	log.Printf("SMTP AUTH PLAIN for user: %s", username)
 
+	// Strip @domain part if present (e.g. "lucky@letotam.ru" -> "lucky")
+	if idx := strings.IndexByte(username, '@'); idx != -1 {
+		username = username[:idx]
+	}
+
 	// Get user from database
 	user, err := s.database.GetUserByUsername(username)
 	if err != nil {
