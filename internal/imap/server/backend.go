@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/emersion/go-imap"
@@ -103,6 +104,12 @@ func (b *Backend) SetSearchIndexer(indexer *search.Indexer) {
 // Login authenticates a user
 func (b *Backend) Login(connInfo *imap.ConnInfo, username, password string) (backend.User, error) {
 	log.Printf("IMAP login attempt for user: %s", username)
+
+	// Strip @domain part if present (e.g. "lucky@letotam.ru" -> "lucky")
+	// New Outlook and some clients require email-format login
+	if idx := strings.IndexByte(username, '@'); idx != -1 {
+		username = username[:idx]
+	}
 
 	// Get user from database
 	user, err := b.database.GetUserByUsername(username)
