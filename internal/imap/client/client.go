@@ -38,6 +38,24 @@ func newXOAuth2Client(username, token string) sasl.Client {
 	}
 }
 
+// oauthAuthenticate runs XOAUTH2 (primary) with an OAUTHBEARER fallback.
+// Used by both Client.Connect and IdleManager.runIdleSession.
+func oauthAuthenticate(conn *client.Client, account *models.Account) error {
+	xoauth2 := newXOAuth2Client(account.IMAPUsername, account.OAuthAccessToken)
+	if err := conn.Authenticate(xoauth2); err == nil {
+		return nil
+	} else {
+		log.Printf("XOAUTH2 failed, trying OAUTHBEARER: %v", err)
+	}
+	oauthbearer := sasl.NewOAuthBearerClient(&sasl.OAuthBearerOptions{
+		Username: account.IMAPUsername,
+		Token:    account.OAuthAccessToken,
+		Host:     account.IMAPHost,
+		Port:     account.IMAPPort,
+	})
+	return conn.Authenticate(oauthbearer)
+}
+
 // Client wraps the IMAP client for external mail servers
 type Client struct {
 	account *models.Account
@@ -78,23 +96,10 @@ func (c *Client) Connect() error {
 
 	// Authenticate based on auth type
 	if c.account.IsOAuth() {
-		// Try XOAUTH2 first (Gmail uses this)
 		log.Printf("Authenticating with XOAUTH2 as %s", c.account.IMAPUsername)
-		xoauth2 := newXOAuth2Client(c.account.IMAPUsername, c.account.OAuthAccessToken)
-		err := c.conn.Authenticate(xoauth2)
-		if err != nil {
-			// Fall back to OAUTHBEARER (RFC 7628)
-			log.Printf("XOAUTH2 failed, trying OAUTHBEARER: %v", err)
-			oauthbearer := sasl.NewOAuthBearerClient(&sasl.OAuthBearerOptions{
-				Username: c.account.IMAPUsername,
-				Token:    c.account.OAuthAccessToken,
-				Host:     c.account.IMAPHost,
-				Port:     c.account.IMAPPort,
-			})
-			if err := c.conn.Authenticate(oauthbearer); err != nil {
-				c.conn.Logout()
-				return fmt.Errorf("failed to authenticate with OAuth: %w", err)
-			}
+		if err := oauthAuthenticate(c.conn, c.account); err != nil {
+			c.conn.Logout()
+			return fmt.Errorf("failed to authenticate with OAuth: %w", err)
 		}
 	} else {
 		// Use plain LOGIN for password-based auth

@@ -10,7 +10,6 @@ import (
 
 	idle "github.com/emersion/go-imap-idle"
 	imapClient "github.com/emersion/go-imap/client"
-	"github.com/emersion/go-sasl"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/oauth"
@@ -164,11 +163,12 @@ func (m *IdleManager) watchAccount(ctx context.Context, account *models.Account)
 }
 
 // refreshOAuthToken refreshes the OAuth token for an account if needed.
-func (m *IdleManager) refreshOAuthToken(account *models.Account) error {
+// If force is true, skips the expiry check and always refreshes.
+func (m *IdleManager) refreshOAuthToken(account *models.Account, force bool) error {
 	if !account.IsOAuth() {
 		return nil
 	}
-	if account.OAuthTokenExpiry.IsZero() || time.Until(account.OAuthTokenExpiry) > 5*time.Minute {
+	if !force && (account.OAuthTokenExpiry.IsZero() || time.Until(account.OAuthTokenExpiry) > 5*time.Minute) {
 		return nil
 	}
 	if account.OAuthRefreshToken == "" {
@@ -217,9 +217,9 @@ func (m *IdleManager) refreshOAuthToken(account *models.Account) error {
 // runIdleSession connects, authenticates, selects INBOX and enters an
 // IDLE loop. Returns on any error (caller will reconnect).
 func (m *IdleManager) runIdleSession(ctx context.Context, account *models.Account) error {
-	// Refresh OAuth token before connecting
+	// Refresh OAuth token before connecting (only if near expiry)
 	if account.IsOAuth() {
-		if err := m.refreshOAuthToken(account); err != nil {
+		if err := m.refreshOAuthToken(account, false); err != nil {
 			return fmt.Errorf("oauth refresh: %w", err)
 		}
 	}
@@ -239,18 +239,16 @@ func (m *IdleManager) runIdleSession(ctx context.Context, account *models.Accoun
 	}
 	defer conn.Logout()
 
-	// Authenticate
+	// Authenticate (with one forced-refresh retry on OAuth failure,
+	// since Google can silently invalidate tokens even before their stated expiry)
 	if account.IsOAuth() {
-		xoauth2 := newXOAuth2Client(account.IMAPUsername, account.OAuthAccessToken)
-		if authErr := conn.Authenticate(xoauth2); authErr != nil {
-			oauthbearer := sasl.NewOAuthBearerClient(&sasl.OAuthBearerOptions{
-				Username: account.IMAPUsername,
-				Token:    account.OAuthAccessToken,
-				Host:     account.IMAPHost,
-				Port:     account.IMAPPort,
-			})
-			if authErr2 := conn.Authenticate(oauthbearer); authErr2 != nil {
-				return fmt.Errorf("auth: %w", authErr2)
+		if authErr := oauthAuthenticate(conn, account); authErr != nil {
+			m.accountLog(account.ID, "info", "OAuth auth failed (%v), forcing token refresh and retrying", authErr)
+			if rerr := m.refreshOAuthToken(account, true); rerr != nil {
+				return fmt.Errorf("auth retry refresh: %w", rerr)
+			}
+			if authErr2 := oauthAuthenticate(conn, account); authErr2 != nil {
+				return fmt.Errorf("auth after refresh: %w", authErr2)
 			}
 		}
 	} else {
