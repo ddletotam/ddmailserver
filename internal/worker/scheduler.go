@@ -96,6 +96,9 @@ func (s *Scheduler) TriggerSyncForAccount(account *models.Account) {
 	if s.analyzer != nil {
 		task.SetAnalyzer(s.analyzer)
 	}
+	task.SetOAuthRefresher(func(a *models.Account) error {
+		return s.refreshAccountOAuthTokenForce(a, true)
+	})
 
 	if err := s.pool.Submit(task); err != nil {
 		log.Printf("IDLE trigger: failed to submit sync for %s: %v", account.Email, err)
@@ -178,17 +181,24 @@ func (s *Scheduler) scheduleAllAccounts() {
 // refreshAccountOAuthToken refreshes the OAuth token for an account if needed.
 // Updates both the database and the in-memory account struct.
 func (s *Scheduler) refreshAccountOAuthToken(account *models.Account) error {
+	return s.refreshAccountOAuthTokenForce(account, false)
+}
+
+// refreshAccountOAuthTokenForce refreshes the OAuth token. If force is true,
+// skips the expiry check and always refreshes (used when auth failed despite
+// the stored expiry being in the future — Google sometimes revokes tokens early).
+func (s *Scheduler) refreshAccountOAuthTokenForce(account *models.Account, force bool) error {
 	if !account.IsOAuth() {
 		return nil
 	}
-	if account.OAuthTokenExpiry.IsZero() || time.Until(account.OAuthTokenExpiry) > 5*time.Minute {
+	if !force && (account.OAuthTokenExpiry.IsZero() || time.Until(account.OAuthTokenExpiry) > 5*time.Minute) {
 		return nil // still valid
 	}
 	if account.OAuthRefreshToken == "" {
 		return fmt.Errorf("no refresh token available, please re-authenticate")
 	}
 
-	log.Printf("Refreshing OAuth token for IMAP account %s (expires: %v)", account.Email, account.OAuthTokenExpiry)
+	log.Printf("Refreshing OAuth token for IMAP account %s (force=%v, expires: %v)", account.Email, force, account.OAuthTokenExpiry)
 
 	var tokenResp *oauth.TokenResponse
 	var err error
@@ -274,6 +284,9 @@ func (s *Scheduler) scheduleIMAPSync() {
 		if s.analyzer != nil {
 			task.SetAnalyzer(s.analyzer)
 		}
+		task.SetOAuthRefresher(func(a *models.Account) error {
+			return s.refreshAccountOAuthTokenForce(a, true)
+		})
 
 		if err := s.pool.Submit(task); err != nil {
 			log.Printf("Failed to submit sync task for %s: %v", account.Email, err)

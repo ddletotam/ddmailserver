@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/emersion/go-imap"
@@ -24,10 +25,16 @@ type SyncTask struct {
 	analyzer   *parser.Analyzer
 	notifyFunc func(username, mailbox string, count uint32)
 	priority   int
+	// Called to force-refresh the OAuth token when auth fails. The callback
+	// is expected to update the account in place (access token, expiry).
+	refreshOAuth func(account *models.Account) error
 }
 
 func (t *SyncTask) SetNotifyFunc(fn func(username, mailbox string, count uint32)) { t.notifyFunc = fn }
 func (t *SyncTask) SetAnalyzer(analyzer *parser.Analyzer)                         { t.analyzer = analyzer }
+func (t *SyncTask) SetOAuthRefresher(fn func(account *models.Account) error) {
+	t.refreshOAuth = fn
+}
 
 func NewSyncTask(account *models.Account, database *db.DB) *SyncTask {
 	return &SyncTask{account: account, database: database, priority: 1}
@@ -69,9 +76,20 @@ func (t *SyncTask) Execute(ctx context.Context) error {
 func (t *SyncTask) doExecute(ctx context.Context) error {
 	t.accountLog("info", "starting sync")
 	client := &Client{account: t.account}
-	if err := client.Connect(); err != nil {
-		t.accountLog("error", "failed to connect: %v", err)
-		return fmt.Errorf("failed to connect: %w", err)
+	connectErr := client.Connect()
+	// On OAuth auth failure, force-refresh token and retry once
+	if connectErr != nil && t.account.IsOAuth() && t.refreshOAuth != nil && isAuthError(connectErr) {
+		t.accountLog("info", "OAuth auth failed (%v), forcing token refresh and retrying", connectErr)
+		if rerr := t.refreshOAuth(t.account); rerr != nil {
+			t.accountLog("error", "failed to refresh OAuth token: %v", rerr)
+			return fmt.Errorf("failed to connect: %w", connectErr)
+		}
+		client = &Client{account: t.account}
+		connectErr = client.Connect()
+	}
+	if connectErr != nil {
+		t.accountLog("error", "failed to connect: %v", connectErr)
+		return fmt.Errorf("failed to connect: %w", connectErr)
 	}
 	defer client.Disconnect()
 	if ctx.Err() != nil {
@@ -298,6 +316,19 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 		t.database.UpdateMessageAttachmentCount(msg.ID, attachmentCount)
 	}
 	return true, isSpam, nil
+}
+
+// isAuthError returns true if the error looks like an OAuth authentication failure
+// that may be fixed by refreshing the token.
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "auth") ||
+		strings.Contains(msg, "invalid_request") ||
+		strings.Contains(msg, "invalid_grant") ||
+		strings.Contains(msg, "unauthorized")
 }
 
 // recipientIncludesAccount returns true if any address in the To/Cc lists
