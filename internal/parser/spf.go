@@ -4,14 +4,27 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
+	"time"
 )
 
 // SPFChecker performs SPF (Sender Policy Framework) verification
-type SPFChecker struct{}
+type SPFChecker struct {
+	cache   map[string]spfCacheEntry // key: "ip|domain"
+	cacheMu sync.RWMutex
+}
+
+type spfCacheEntry struct {
+	result  AuthResult
+	detail  string
+	expires time.Time
+}
+
+const spfCacheTTL = 10 * time.Minute
 
 // NewSPFChecker creates a new SPF checker
 func NewSPFChecker() *SPFChecker {
-	return &SPFChecker{}
+	return &SPFChecker{cache: make(map[string]spfCacheEntry)}
 }
 
 // CheckSPF verifies if the sender IP is authorized to send mail for the domain
@@ -21,6 +34,14 @@ func (c *SPFChecker) CheckSPF(senderIP, fromDomain string) (AuthResult, string) 
 		return AuthResultNone, "missing sender IP or domain"
 	}
 
+	cacheKey := senderIP + "|" + strings.ToLower(fromDomain)
+	c.cacheMu.RLock()
+	if e, ok := c.cache[cacheKey]; ok && time.Now().Before(e.expires) {
+		c.cacheMu.RUnlock()
+		return e.result, e.detail
+	}
+	c.cacheMu.RUnlock()
+
 	ip := net.ParseIP(senderIP)
 	if ip == nil {
 		return AuthResultNone, "invalid sender IP"
@@ -29,7 +50,9 @@ func (c *SPFChecker) CheckSPF(senderIP, fromDomain string) (AuthResult, string) 
 	// Look up SPF record (TXT record)
 	records, err := net.LookupTXT(fromDomain)
 	if err != nil {
-		return AuthResultNone, fmt.Sprintf("DNS lookup failed: %v", err)
+		result, detail := AuthResultNone, fmt.Sprintf("DNS lookup failed: %v", err)
+		c.cacheStore(cacheKey, result, detail)
+		return result, detail
 	}
 
 	// Find SPF record
@@ -42,11 +65,20 @@ func (c *SPFChecker) CheckSPF(senderIP, fromDomain string) (AuthResult, string) 
 	}
 
 	if spfRecord == "" {
+		c.cacheStore(cacheKey, AuthResultNone, "no SPF record found")
 		return AuthResultNone, "no SPF record found"
 	}
 
 	// Parse and evaluate SPF record
-	return c.evaluateSPF(spfRecord, ip, fromDomain)
+	result, detail := c.evaluateSPF(spfRecord, ip, fromDomain)
+	c.cacheStore(cacheKey, result, detail)
+	return result, detail
+}
+
+func (c *SPFChecker) cacheStore(key string, result AuthResult, detail string) {
+	c.cacheMu.Lock()
+	c.cache[key] = spfCacheEntry{result: result, detail: detail, expires: time.Now().Add(spfCacheTTL)}
+	c.cacheMu.Unlock()
 }
 
 // evaluateSPF parses and evaluates an SPF record

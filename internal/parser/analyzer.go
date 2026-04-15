@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // AnalyzerConfig contains configuration for the spam analyzer
@@ -124,10 +125,28 @@ func (a *Analyzer) AnalyzeWithDisabledChecks(msg *ParsedMessage, senderIP, fromD
 	var totalScore float64
 	var reasons []string
 
+	// Fallback: derive sender IP from Received headers when caller didn't pass one.
+	// This makes IMAP-synced messages get the same checks as MX-delivered ones.
+	if senderIP == "" && msg.RawHeaders != nil {
+		hops := ParseReceivedChain(msg.RawHeaders)
+		senderIP = ExtractOriginSenderIP(hops)
+	}
+	// Fallback: derive From-domain from From: header
+	if fromDomain == "" && msg.From != nil {
+		fromDomain = extractDomain(msg.From.Address)
+	}
+
 	// Initialize auth results
 	if msg.AuthResults == nil {
 		msg.AuthResults = &AuthResults{SenderIP: senderIP}
+	} else if msg.AuthResults.SenderIP == "" {
+		msg.AuthResults.SenderIP = senderIP
 	}
+
+	// Analyze the Received chain itself (missing headers, time anomalies, suspicious MTA names)
+	chainScore, chainReasons := a.analyzeReceivedChain(msg)
+	totalScore += chainScore
+	reasons = append(reasons, chainReasons...)
 
 	// Check SPF (if sender IP provided and not disabled)
 	if a.spfChecker != nil && senderIP != "" && fromDomain != "" && !IsPrivateIP(senderIP) && !disabledChecks["spf"] {
@@ -664,4 +683,137 @@ func (a *Analyzer) analyzeEmojis(msg *ParsedMessage) (float64, []string) {
 	}
 
 	return score, reasons
+}
+
+// analyzeReceivedChain scrutinizes the Received header chain for red flags.
+// Self-verifying — does not trust any provider's Authentication-Results.
+func (a *Analyzer) analyzeReceivedChain(msg *ParsedMessage) (float64, []string) {
+	var score float64
+	var reasons []string
+
+	if msg.RawHeaders == nil {
+		return 0, nil
+	}
+
+	hops := ParseReceivedChain(msg.RawHeaders)
+
+	// 1. No Received headers at all — extremely suspicious for any real email
+	if len(hops) == 0 {
+		return 4.0, []string{"no Received headers"}
+	}
+
+	// 2. Single Received hop — usually means message was injected directly without traversing the network
+	if len(hops) == 1 {
+		score += 1.5
+		reasons = append(reasons, "only one Received hop")
+	}
+
+	// 3. Time progression: hops should be ordered newest→oldest, dates monotonically decreasing
+	var lastDate time.Time
+	for i, h := range hops {
+		if h.Date.IsZero() {
+			continue
+		}
+		if i > 0 && !lastDate.IsZero() {
+			// h is older than lastDate (or equal). It must NOT be after lastDate by more than a few minutes.
+			if h.Date.After(lastDate.Add(5 * time.Minute)) {
+				score += 1.5
+				reasons = append(reasons, "Received chain timestamps inconsistent")
+				break
+			}
+		}
+		lastDate = h.Date
+	}
+
+	// 4. Origin hop — examine the deepest/oldest non-private hop
+	origin := ExtractOriginHop(hops)
+	if origin != nil {
+		// HELO claims a name that looks nothing like its PTR
+		if origin.From != "" && origin.FromPTR != "" {
+			if !heloMatchesPTR(origin.From, origin.FromPTR) {
+				score += 1.0
+				reasons = append(reasons, "HELO doesn't match reverse DNS")
+			}
+		}
+		// PTR is "unknown" or absent on a public IP
+		if origin.FromPTR == "" || strings.EqualFold(origin.FromPTR, "unknown") {
+			score += 0.5
+			reasons = append(reasons, "no reverse DNS for sending IP")
+		}
+		// Suspicious MTA name (auth-XXXX-N.foo.bar pattern, random subdomains)
+		if isSuspiciousMTAName(origin.From) {
+			score += 2.0
+			reasons = append(reasons, "suspicious sending MTA name: "+origin.From)
+		}
+	}
+
+	return score, reasons
+}
+
+// heloMatchesPTR returns true if the HELO hostname and PTR hostname share
+// at least the registrable second-level domain.
+func heloMatchesPTR(helo, ptr string) bool {
+	helo = strings.ToLower(strings.TrimRight(helo, "."))
+	ptr = strings.ToLower(strings.TrimRight(ptr, "."))
+	if helo == ptr {
+		return true
+	}
+	heloParts := strings.Split(helo, ".")
+	ptrParts := strings.Split(ptr, ".")
+	if len(heloParts) < 2 || len(ptrParts) < 2 {
+		return false
+	}
+	heloRoot := heloParts[len(heloParts)-2] + "." + heloParts[len(heloParts)-1]
+	ptrRoot := ptrParts[len(ptrParts)-2] + "." + ptrParts[len(ptrParts)-1]
+	return heloRoot == ptrRoot
+}
+
+// isSuspiciousMTAName detects patterns typical of spam farms:
+// random alphanumeric subdomains like "auth-jxzq-7.vcp.example.com",
+// "mta-xkfg-3.relay.example.org", etc.
+func isSuspiciousMTAName(name string) bool {
+	name = strings.ToLower(name)
+	if name == "" {
+		return false
+	}
+	parts := strings.Split(name, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	first := parts[0]
+	if !strings.Contains(first, "-") {
+		return false
+	}
+	chunks := strings.Split(first, "-")
+	if len(chunks) < 3 {
+		return false
+	}
+	// Look for a chunk that looks random: 3-6 chars, mostly consonants or digits
+	for _, c := range chunks {
+		if len(c) >= 3 && len(c) <= 6 && looksRandom(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// looksRandom returns true for short strings with very few or very many vowels,
+// which is typical of generated identifiers rather than dictionary words.
+func looksRandom(s string) bool {
+	vowels := 0
+	letters := 0
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' {
+			letters++
+			if r == 'a' || r == 'e' || r == 'i' || r == 'o' || r == 'u' || r == 'y' {
+				vowels++
+			}
+		}
+	}
+	if letters == 0 {
+		return false
+	}
+	ratio := float64(vowels) / float64(letters)
+	// Real words tend to have 30-60% vowels. Random strings deviate.
+	return ratio < 0.15 || ratio > 0.75
 }

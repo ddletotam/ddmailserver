@@ -13,7 +13,17 @@ import (
 type RBLChecker struct {
 	lists   []RBLList
 	timeout time.Duration
+	cache   map[string]rblCacheEntry // key: IPv4 string
+	cacheMu sync.RWMutex
 }
+
+type rblCacheEntry struct {
+	score   float64
+	results []RBLResult
+	expires time.Time
+}
+
+const rblCacheTTL = 10 * time.Minute
 
 // RBLList represents a DNS blacklist
 type RBLList struct {
@@ -51,6 +61,7 @@ func NewRBLChecker() *RBLChecker {
 	return &RBLChecker{
 		lists:   DefaultRBLLists(),
 		timeout: 5 * time.Second,
+		cache:   make(map[string]rblCacheEntry),
 	}
 }
 
@@ -59,6 +70,7 @@ func NewRBLCheckerWithLists(lists []RBLList) *RBLChecker {
 	return &RBLChecker{
 		lists:   lists,
 		timeout: 5 * time.Second,
+		cache:   make(map[string]rblCacheEntry),
 	}
 }
 
@@ -75,6 +87,14 @@ func (c *RBLChecker) CheckIP(ipStr string) (float64, []RBLResult) {
 	if ip4 == nil {
 		return 0, nil
 	}
+
+	cacheKey := ip4.String()
+	c.cacheMu.RLock()
+	if e, ok := c.cache[cacheKey]; ok && time.Now().Before(e.expires) {
+		c.cacheMu.RUnlock()
+		return e.score, e.results
+	}
+	c.cacheMu.RUnlock()
 
 	// Reverse the IP for DNSBL lookup
 	reversed := c.reverseIP(ip4)
@@ -108,6 +128,10 @@ func (c *RBLChecker) CheckIP(ipStr string) (float64, []RBLResult) {
 			totalScore += result.Weight
 		}
 	}
+
+	c.cacheMu.Lock()
+	c.cache[cacheKey] = rblCacheEntry{score: totalScore, results: results, expires: time.Now().Add(rblCacheTTL)}
+	c.cacheMu.Unlock()
 
 	return totalScore, results
 }
