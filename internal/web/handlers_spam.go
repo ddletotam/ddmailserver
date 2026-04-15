@@ -129,9 +129,7 @@ func (s *Server) HandleRestoreFromSpam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify message belongs to user
-	msg, err := s.database.GetMessageByID(messageID)
-	if err != nil || msg == nil || msg.UserID != user.ID {
+	if _, err := s.database.GetMessageByIDForUser(messageID, user.ID); err != nil {
 		http.Error(w, "Message not found", http.StatusNotFound)
 		return
 	}
@@ -163,9 +161,7 @@ func (s *Server) HandleDeleteSpamMessage(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Verify message belongs to user
-	msg, err := s.database.GetMessageByID(messageID)
-	if err != nil || msg == nil || msg.UserID != user.ID {
+	if _, err := s.database.GetMessageByIDForUser(messageID, user.ID); err != nil {
 		http.Error(w, "Message not found", http.StatusNotFound)
 		return
 	}
@@ -412,9 +408,8 @@ func (s *Server) HandleAnalyzeSpam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get message
-	msg, err := s.database.GetMessageByID(messageID)
-	if err != nil || msg == nil || msg.UserID != user.ID {
+	msg, err := s.database.GetMessageByIDForUser(messageID, user.ID)
+	if err != nil {
 		http.Error(w, "Message not found", http.StatusNotFound)
 		return
 	}
@@ -475,9 +470,7 @@ func (s *Server) HandleMarkAsSpam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify message belongs to user
-	msg, err := s.database.GetMessageByID(messageID)
-	if err != nil || msg == nil || msg.UserID != user.ID {
+	if _, err := s.database.GetMessageByIDForUser(messageID, user.ID); err != nil {
 		http.Error(w, "Message not found", http.StatusNotFound)
 		return
 	}

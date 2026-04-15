@@ -107,43 +107,31 @@ func main() {
 	pool.Start()
 	defer pool.Stop()
 
-	// Initialize scheduler
-	log.Printf("Initializing task scheduler...")
-	scheduler := worker.NewScheduler(pool, database, cfg.Sync.Interval)
-
-	// Set OAuth clients for token refresh in calendar sync
-	// Try config first, then fall back to database
+	// Resolve OAuth clients (config takes precedence over DB)
 	var googleOAuth *oauth.GoogleOAuth
 	var microsoftOAuth *oauth.MicrosoftOAuth
 	if cfg.OAuth.Google.ClientID != "" && cfg.OAuth.Google.ClientSecret != "" {
 		googleOAuth = oauth.NewGoogleOAuth(&cfg.OAuth.Google)
-		log.Printf("Google OAuth configured for scheduler (from config)")
-	} else {
-		// Try loading from database
-		if settings, err := database.GetGoogleOAuthSettings(); err == nil && settings.ClientID != "" && settings.ClientSecret != "" {
-			googleOAuth = oauth.NewGoogleOAuth(&config.GoogleOAuthConfig{
-				ClientID:     settings.ClientID,
-				ClientSecret: settings.ClientSecret,
-				RedirectURI:  settings.RedirectURI,
-			})
-			log.Printf("Google OAuth configured for scheduler (from database)")
-		}
+		log.Printf("Google OAuth configured (from config)")
+	} else if settings, err := database.GetGoogleOAuthSettings(); err == nil && settings.ClientID != "" && settings.ClientSecret != "" {
+		googleOAuth = oauth.NewGoogleOAuth(&config.GoogleOAuthConfig{
+			ClientID:     settings.ClientID,
+			ClientSecret: settings.ClientSecret,
+			RedirectURI:  settings.RedirectURI,
+		})
+		log.Printf("Google OAuth configured (from database)")
 	}
 	if cfg.OAuth.Microsoft.ClientID != "" && cfg.OAuth.Microsoft.ClientSecret != "" {
 		microsoftOAuth = oauth.NewMicrosoftOAuth(&cfg.OAuth.Microsoft)
-		log.Printf("Microsoft OAuth configured for scheduler (from config)")
-	} else {
-		// Try loading from database
-		if settings, err := database.GetMicrosoftOAuthSettings(); err == nil && settings.ClientID != "" && settings.ClientSecret != "" {
-			microsoftOAuth = oauth.NewMicrosoftOAuth(&config.MicrosoftOAuthConfig{
-				ClientID:     settings.ClientID,
-				ClientSecret: settings.ClientSecret,
-				RedirectURI:  settings.RedirectURI,
-			})
-			log.Printf("Microsoft OAuth configured for scheduler (from database)")
-		}
+		log.Printf("Microsoft OAuth configured (from config)")
+	} else if settings, err := database.GetMicrosoftOAuthSettings(); err == nil && settings.ClientID != "" && settings.ClientSecret != "" {
+		microsoftOAuth = oauth.NewMicrosoftOAuth(&config.MicrosoftOAuthConfig{
+			ClientID:     settings.ClientID,
+			ClientSecret: settings.ClientSecret,
+			RedirectURI:  settings.RedirectURI,
+		})
+		log.Printf("Microsoft OAuth configured (from database)")
 	}
-	scheduler.SetOAuthClients(googleOAuth, microsoftOAuth)
 
 	// Determine hostname for SMTP
 	hostname := "localhost"
@@ -155,27 +143,35 @@ func main() {
 	hasTLS := cfg.Security.TLSCert != "" && cfg.Security.TLSKey != ""
 
 	// Initialize notification hub for IMAP IDLE support
-	log.Printf("Initializing notification hub for IMAP IDLE...")
+	log.Printf("Initializing notification hub...")
 	notifyHub := notify.NewHub()
-	scheduler.SetNotifyHub(notifyHub)
-	scheduler.SetHostname(hostname)
 
 	// Initialize spam analyzer for IMAP sync tasks
-	log.Printf("Initializing spam analyzer for IMAP sync...")
+	log.Printf("Initializing spam analyzer...")
 	spamAnalyzer := parser.NewAnalyzer(nil)
-	scheduler.SetAnalyzer(spamAnalyzer)
+
+	// Initialize scheduler with all dependencies wired up
+	log.Printf("Initializing task scheduler...")
+	scheduler := worker.NewScheduler(worker.SchedulerDeps{
+		Pool:            pool,
+		Database:        database,
+		IntervalSeconds: cfg.Sync.Interval,
+		GoogleOAuth:     googleOAuth,
+		MicrosoftOAuth:  microsoftOAuth,
+		NotifyHub:       notifyHub,
+		Hostname:        hostname,
+		Analyzer:        spamAnalyzer,
+	})
 
 	// Initialize IDLE manager for persistent IMAP connections
-	log.Printf("Initializing IMAP IDLE manager for instant mail sync...")
+	log.Printf("Initializing IMAP IDLE manager...")
 	idleManager := imapclient.NewIdleManager(database)
 	idleManager.SetSyncCallback(scheduler.TriggerSyncForAccount)
 	idleManager.SetOAuthClients(googleOAuth, microsoftOAuth)
-	scheduler.SetIdleManager(idleManager)
 	go idleManager.Start()
 	defer idleManager.Stop()
 
-	// Start scheduler AFTER all dependencies are configured
-	// (analyzer, notifyHub, idleManager must be set before first sync cycle)
+	// Start scheduler last — all dependencies must be ready before first sync cycle.
 	go scheduler.Start()
 	defer scheduler.Stop()
 

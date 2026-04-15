@@ -53,8 +53,7 @@ func (s *Server) HandleAttachment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify user owns this attachment (via message)
-	message, err := s.database.GetMessageByID(attachment.MessageID)
-	if err != nil || message.UserID != user.ID {
+	if _, err := s.database.GetMessageByIDForUser(attachment.MessageID, user.ID); err != nil {
 		http.Error(w, "Attachment not found", http.StatusNotFound)
 		return
 	}
@@ -92,8 +91,7 @@ func (s *Server) HandleAttachmentByCID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify user owns this message
-	message, err := s.database.GetMessageByID(messageID)
-	if err != nil || message.UserID != user.ID {
+	if _, err := s.database.GetMessageByIDForUser(messageID, user.ID); err != nil {
 		http.Error(w, "Message not found", http.StatusNotFound)
 		return
 	}

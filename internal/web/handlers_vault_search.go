@@ -75,9 +75,7 @@ func (s *Server) HandleRestoreMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify message belongs to user
-	msg, err := s.database.GetMessageByID(messageID)
-	if err != nil || msg == nil || msg.UserID != user.ID {
+	if _, err := s.database.GetMessageByIDForUser(messageID, user.ID); err != nil {
 		http.Error(w, "Message not found", http.StatusNotFound)
 		return
 	}
@@ -109,9 +107,7 @@ func (s *Server) HandlePermanentDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify message belongs to user and is soft-deleted
-	msg, err := s.database.GetMessageByID(messageID)
-	if err != nil || msg == nil || msg.UserID != user.ID {
+	if _, err := s.database.GetMessageByIDForUser(messageID, user.ID); err != nil {
 		http.Error(w, "Message not found", http.StatusNotFound)
 		return
 	}

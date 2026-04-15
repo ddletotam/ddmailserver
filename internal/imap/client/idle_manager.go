@@ -163,54 +163,17 @@ func (m *IdleManager) watchAccount(ctx context.Context, account *models.Account)
 }
 
 // refreshOAuthToken refreshes the OAuth token for an account if needed.
-// If force is true, skips the expiry check and always refreshes.
+// If force is true, skips the expiry check and always refreshes. Delegates
+// to the shared oauth.AccountTokenRefresher.
 func (m *IdleManager) refreshOAuthToken(account *models.Account, force bool) error {
-	if !account.IsOAuth() {
-		return nil
-	}
-	if !force && (account.OAuthTokenExpiry.IsZero() || time.Until(account.OAuthTokenExpiry) > 5*time.Minute) {
-		return nil
-	}
-	if account.OAuthRefreshToken == "" {
-		return fmt.Errorf("no refresh token available")
-	}
-
-	var tokenResp *oauth.TokenResponse
-	var err error
-
-	switch account.AuthType {
-	case "oauth2_google":
-		if m.googleOAuth == nil {
-			return fmt.Errorf("Google OAuth not configured")
-		}
-		tokenResp, err = m.googleOAuth.RefreshToken(account.OAuthRefreshToken)
-	case "oauth2_microsoft":
-		if m.microsoftOAuth == nil {
-			return fmt.Errorf("Microsoft OAuth not configured")
-		}
-		tokenResp, err = m.microsoftOAuth.RefreshToken(account.OAuthRefreshToken)
-	default:
-		return nil
-	}
+	refresher := oauth.NewAccountTokenRefresher(m.googleOAuth, m.microsoftOAuth, m.database)
+	refreshed, err := refresher.Refresh(account, force)
 	if err != nil {
-		return fmt.Errorf("token refresh failed: %w", err)
+		return err
 	}
-
-	expiry := oauth.TokenExpiry(tokenResp.ExpiresIn)
-	newRefreshToken := tokenResp.RefreshToken
-	if newRefreshToken == "" {
-		newRefreshToken = account.OAuthRefreshToken
+	if refreshed {
+		m.accountLog(account.ID, "info", "OAuth token refreshed, new expiry: %v", account.OAuthTokenExpiry)
 	}
-
-	if err := m.database.UpdateAccountOAuthTokens(account.ID, tokenResp.AccessToken, newRefreshToken, expiry); err != nil {
-		return fmt.Errorf("failed to save tokens: %w", err)
-	}
-
-	account.OAuthAccessToken = tokenResp.AccessToken
-	account.OAuthRefreshToken = newRefreshToken
-	account.OAuthTokenExpiry = expiry
-
-	m.accountLog(account.ID, "info", "OAuth token refreshed, new expiry: %v", expiry)
 	return nil
 }
 

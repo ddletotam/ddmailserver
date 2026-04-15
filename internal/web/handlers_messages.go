@@ -27,8 +27,7 @@ func (s *Server) HandleDeleteMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msg, err := s.database.GetMessageByID(id)
-	if err != nil || msg.UserID != user.ID {
+	if _, err := s.database.GetMessageByIDForUser(id, user.ID); err != nil {
 		http.Error(w, "Message not found", http.StatusNotFound)
 		return
 	}
@@ -57,8 +56,8 @@ func (s *Server) HandleReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msg, err := s.database.GetMessageByID(id)
-	if err != nil || msg.UserID != user.ID {
+	msg, err := s.database.GetMessageByIDForUser(id, user.ID)
+	if err != nil {
 		http.Error(w, "Message not found", http.StatusNotFound)
 		return
 	}
@@ -124,8 +123,8 @@ func (s *Server) HandleForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msg, err := s.database.GetMessageByID(id)
-	if err != nil || msg.UserID != user.ID {
+	msg, err := s.database.GetMessageByIDForUser(id, user.ID)
+	if err != nil {
 		http.Error(w, "Message not found", http.StatusNotFound)
 		return
 	}
@@ -286,8 +285,8 @@ func (s *Server) HandleMessageSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msg, err := s.database.GetMessageByID(id)
-	if err != nil || msg.UserID != user.ID {
+	msg, err := s.database.GetMessageByIDForUser(id, user.ID)
+	if err != nil {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
@@ -353,8 +352,8 @@ func (s *Server) HandleMessageBody(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msg, err := s.database.GetMessageByID(id)
-	if err != nil || msg.UserID != user.ID {
+	msg, err := s.database.GetMessageByIDForUser(id, user.ID)
+	if err != nil {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}

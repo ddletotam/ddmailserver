@@ -2,7 +2,6 @@ package worker
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"time"
 
@@ -15,6 +14,20 @@ import (
 	smtpclient "github.com/yourusername/mailserver/internal/smtp/client"
 	taskpkg "github.com/yourusername/mailserver/internal/task"
 )
+
+// SchedulerDeps bundles all dependencies the Scheduler needs.
+// Required fields are checked in NewScheduler; passing zero/nil for those
+// is a programming error.
+type SchedulerDeps struct {
+	Pool            *Pool  // required
+	Database        *db.DB // required
+	IntervalSeconds int    // required, must be > 0
+	GoogleOAuth     *oauth.GoogleOAuth
+	MicrosoftOAuth  *oauth.MicrosoftOAuth
+	NotifyHub       *notify.Hub
+	Hostname        string
+	Analyzer        *parser.Analyzer
+}
 
 // Scheduler schedules periodic tasks for mail synchronization
 type Scheduler struct {
@@ -30,46 +43,31 @@ type Scheduler struct {
 	analyzer                 *parser.Analyzer
 	spamCleanupLastRun       time.Time
 	accountLogCleanupLastRun time.Time
-	idleManager              *imapclient.IdleManager
 }
 
-// NewScheduler creates a new task scheduler
-func NewScheduler(pool *Pool, database *db.DB, intervalSeconds int) *Scheduler {
-	ctx, cancel := context.WithCancel(context.Background())
-
-	return &Scheduler{
-		pool:     pool,
-		database: database,
-		interval: time.Duration(intervalSeconds) * time.Second,
-		ctx:      ctx,
-		cancel:   cancel,
+// NewScheduler creates a new task scheduler with all dependencies wired up.
+// Pool, Database and IntervalSeconds are required; the remaining fields are
+// optional but several features are no-ops when their dependency is nil.
+func NewScheduler(deps SchedulerDeps) *Scheduler {
+	if deps.Pool == nil || deps.Database == nil {
+		panic("worker.NewScheduler: Pool and Database are required")
 	}
-}
-
-// SetOAuthClients sets the OAuth clients for token refresh
-func (s *Scheduler) SetOAuthClients(google *oauth.GoogleOAuth, microsoft *oauth.MicrosoftOAuth) {
-	s.googleOAuth = google
-	s.microsoftOAuth = microsoft
-}
-
-// SetNotifyHub sets the notification hub for IMAP IDLE push notifications
-func (s *Scheduler) SetNotifyHub(hub *notify.Hub) {
-	s.notifyHub = hub
-}
-
-// SetHostname sets the hostname for direct SMTP delivery
-func (s *Scheduler) SetHostname(hostname string) {
-	s.hostname = hostname
-}
-
-// SetAnalyzer sets the spam analyzer for IMAP sync tasks
-func (s *Scheduler) SetAnalyzer(analyzer *parser.Analyzer) {
-	s.analyzer = analyzer
-}
-
-// SetIdleManager sets the IDLE manager for persistent IMAP connections
-func (s *Scheduler) SetIdleManager(mgr *imapclient.IdleManager) {
-	s.idleManager = mgr
+	if deps.IntervalSeconds <= 0 {
+		panic("worker.NewScheduler: IntervalSeconds must be > 0")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Scheduler{
+		pool:           deps.Pool,
+		database:       deps.Database,
+		interval:       time.Duration(deps.IntervalSeconds) * time.Second,
+		ctx:            ctx,
+		cancel:         cancel,
+		googleOAuth:    deps.GoogleOAuth,
+		microsoftOAuth: deps.MicrosoftOAuth,
+		notifyHub:      deps.NotifyHub,
+		hostname:       deps.Hostname,
+		analyzer:       deps.Analyzer,
+	}
 }
 
 // TriggerSyncForAccount submits an immediate sync task for a single account.
@@ -178,64 +176,24 @@ func (s *Scheduler) scheduleAllAccounts() {
 	log.Printf("Current queue lengths - IMAP: %d, SMTP: %d", imapQueueLen, smtpQueueLen)
 }
 
-// refreshAccountOAuthToken refreshes the OAuth token for an account if needed.
-// Updates both the database and the in-memory account struct.
+// refreshAccountOAuthToken refreshes the OAuth token for an account if it's
+// near expiry. Delegates to the shared oauth.AccountTokenRefresher.
 func (s *Scheduler) refreshAccountOAuthToken(account *models.Account) error {
 	return s.refreshAccountOAuthTokenForce(account, false)
 }
 
 // refreshAccountOAuthTokenForce refreshes the OAuth token. If force is true,
-// skips the expiry check and always refreshes (used when auth failed despite
-// the stored expiry being in the future — Google sometimes revokes tokens early).
+// skips the expiry check (used when auth failed despite the stored expiry
+// being in the future — providers can revoke tokens early).
 func (s *Scheduler) refreshAccountOAuthTokenForce(account *models.Account, force bool) error {
-	if !account.IsOAuth() {
-		return nil
-	}
-	if !force && (account.OAuthTokenExpiry.IsZero() || time.Until(account.OAuthTokenExpiry) > 5*time.Minute) {
-		return nil // still valid
-	}
-	if account.OAuthRefreshToken == "" {
-		return fmt.Errorf("no refresh token available, please re-authenticate")
-	}
-
-	log.Printf("Refreshing OAuth token for IMAP account %s (force=%v, expires: %v)", account.Email, force, account.OAuthTokenExpiry)
-
-	var tokenResp *oauth.TokenResponse
-	var err error
-
-	switch account.AuthType {
-	case "oauth2_google":
-		if s.googleOAuth == nil {
-			return fmt.Errorf("Google OAuth not configured")
-		}
-		tokenResp, err = s.googleOAuth.RefreshToken(account.OAuthRefreshToken)
-	case "oauth2_microsoft":
-		if s.microsoftOAuth == nil {
-			return fmt.Errorf("Microsoft OAuth not configured")
-		}
-		tokenResp, err = s.microsoftOAuth.RefreshToken(account.OAuthRefreshToken)
-	default:
-		return nil
-	}
+	refresher := oauth.NewAccountTokenRefresher(s.googleOAuth, s.microsoftOAuth, s.database)
+	refreshed, err := refresher.Refresh(account, force)
 	if err != nil {
-		return fmt.Errorf("token refresh failed: %w", err)
+		return err
 	}
-
-	expiry := oauth.TokenExpiry(tokenResp.ExpiresIn)
-	newRefreshToken := tokenResp.RefreshToken
-	if newRefreshToken == "" {
-		newRefreshToken = account.OAuthRefreshToken
+	if refreshed {
+		log.Printf("OAuth token refreshed for IMAP account %s, new expiry: %v", account.Email, account.OAuthTokenExpiry)
 	}
-
-	if err := s.database.UpdateAccountOAuthTokens(account.ID, tokenResp.AccessToken, newRefreshToken, expiry); err != nil {
-		return fmt.Errorf("failed to save new tokens: %w", err)
-	}
-
-	account.OAuthAccessToken = tokenResp.AccessToken
-	account.OAuthRefreshToken = newRefreshToken
-	account.OAuthTokenExpiry = expiry
-
-	log.Printf("OAuth token refreshed for %s, new expiry: %v", account.Email, expiry)
 	return nil
 }
 
