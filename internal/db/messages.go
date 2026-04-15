@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -118,6 +119,25 @@ func (db *DB) GetMessagesByUser(userID int64, limit, offset int) ([]*models.Mess
 	defer rows.Close()
 
 	return scanMessages(rows)
+}
+
+// ErrNotFound is returned when a record is not found OR when the requested
+// record is not accessible to the user (we don't distinguish to avoid leaking
+// existence information).
+var ErrNotFound = errors.New("not found")
+
+// GetMessageByIDForUser retrieves a message by ID, but only if it belongs to
+// the given user. Returns ErrNotFound for both "no such message" and "exists
+// but belongs to someone else" — handlers should treat both identically.
+func (db *DB) GetMessageByIDForUser(id, userID int64) (*models.Message, error) {
+	msg, err := db.GetMessageByID(id)
+	if err != nil {
+		return nil, err
+	}
+	if msg == nil || msg.UserID != userID {
+		return nil, ErrNotFound
+	}
+	return msg, nil
 }
 
 // GetMessageByID retrieves a message by ID

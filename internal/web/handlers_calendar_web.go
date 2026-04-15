@@ -846,28 +846,12 @@ func (s *Server) HandleImportICSWeb(w http.ResponseWriter, r *http.Request) {
 
 // renderTemplatePartial renders a specific template block (for HTMX partials)
 func (s *Server) renderTemplatePartial(w http.ResponseWriter, templateName, blockName string, data interface{}) {
-	// Get user's language preference
-	userLang := s.getUserLanguage(data)
-	i18n := s.i18nManager.Get(userLang)
-
-	// Add template functions
-	funcMap := template.FuncMap{
-		"t": i18n.T,
-		"substr": func(str string, start, end int) string {
-			if len(str) < end {
-				return str
-			}
-			return str[start:end]
-		},
-	}
-
-	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templatesFS, "templates/"+templateName)
+	tmpl, err := template.New("").Funcs(s.buildFuncMap(data)).ParseFS(templatesFS, "templates/"+templateName)
 	if err != nil {
 		log.Printf("Error parsing template %s: %v", templateName, err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-
 	if err := tmpl.ExecuteTemplate(w, blockName, data); err != nil {
 		log.Printf("Error executing template block %s in %s: %v", blockName, templateName, err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)

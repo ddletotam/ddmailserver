@@ -7,7 +7,6 @@ import (
 	"html/template"
 	"log"
 	"net/http"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +29,21 @@ type PageData struct {
 	User         *models.User
 	FlashSuccess string
 	FlashError   string
+}
+
+// UserLanguage returns the user's preferred language code, or empty if unknown.
+// Implementing this on PageData makes it auto-available on any data struct that
+// embeds PageData (DashboardData, AccountsData, etc.).
+func (p PageData) UserLanguage() string {
+	if p.User != nil {
+		return p.User.Language
+	}
+	return ""
+}
+
+// userLanguageProvider is the optional interface checked by getUserLanguage.
+type userLanguageProvider interface {
+	UserLanguage() string
 }
 
 type DashboardData struct {
@@ -75,90 +89,37 @@ type ComposeData struct {
 	SelectedAccountID int64
 }
 
-// getUserLanguage extracts user's language preference from template data
+// getUserLanguage extracts the user's preferred language from template data.
+// Any data struct that embeds PageData satisfies userLanguageProvider via the
+// promoted UserLanguage() method, so a single type assertion handles them all.
 func (s *Server) getUserLanguage(data interface{}) string {
-	// Try to extract User from common data structures
-	switch d := data.(type) {
-	case PageData:
-		if d.User != nil && d.User.Language != "" {
-			return d.User.Language
-		}
-	case DashboardData:
-		if d.User != nil && d.User.Language != "" {
-			return d.User.Language
-		}
-	case AccountsData:
-		if d.User != nil && d.User.Language != "" {
-			return d.User.Language
-		}
-	case InboxData:
-		if d.User != nil && d.User.Language != "" {
-			return d.User.Language
-		}
-	case MessageData:
-		if d.User != nil && d.User.Language != "" {
-			return d.User.Language
-		}
-	case ComposeData:
-		if d.User != nil && d.User.Language != "" {
-			return d.User.Language
-		}
-	case map[string]interface{}:
-		if user, ok := d["User"].(*models.User); ok && user != nil && user.Language != "" {
-			return user.Language
-		}
-	default:
-		// Use reflection for anonymous structs
-		if lang := s.extractLanguageViaReflection(data); lang != "" {
+	if p, ok := data.(userLanguageProvider); ok {
+		if lang := p.UserLanguage(); lang != "" {
 			return lang
 		}
 	}
-	return "en" // default to English
-}
-
-// extractLanguageViaReflection extracts user language from anonymous structs using reflection
-func (s *Server) extractLanguageViaReflection(data interface{}) string {
-	v := reflect.ValueOf(data)
-	if v.Kind() == reflect.Ptr {
-		v = v.Elem()
-	}
-	if v.Kind() != reflect.Struct {
-		return ""
-	}
-
-	// Try to find User field
-	userField := v.FieldByName("User")
-	if !userField.IsValid() {
-		// Try PageData embedded struct
-		pageDataField := v.FieldByName("PageData")
-		if pageDataField.IsValid() && pageDataField.Kind() == reflect.Struct {
-			userField = pageDataField.FieldByName("User")
-		}
-	}
-
-	if userField.IsValid() && !userField.IsNil() {
-		if user, ok := userField.Interface().(*models.User); ok && user != nil && user.Language != "" {
+	if m, ok := data.(map[string]interface{}); ok {
+		if user, ok := m["User"].(*models.User); ok && user != nil && user.Language != "" {
 			return user.Language
 		}
 	}
-
-	return ""
+	return "en"
 }
 
 // Helper function to render templates
-func (s *Server) renderTemplate(w http.ResponseWriter, templateName string, data interface{}) {
-	// Get user's language preference
+// buildFuncMap returns the template function map (i18n + helpers) for a request.
+// Used by both renderTemplate and renderTemplatePartial so they share the same
+// available functions.
+func (s *Server) buildFuncMap(data interface{}) template.FuncMap {
 	userLang := s.getUserLanguage(data)
 	i18n := s.i18nManager.Get(userLang)
-
-	// Add template functions
-	funcMap := template.FuncMap{
-		"t": i18n.T, // Translation function using user's language
-		"substr": func(s string, start, end int) string {
-			if len(s) < end {
-				return s
+	return template.FuncMap{
+		"t": i18n.T,
+		"substr": func(str string, start, end int) string {
+			if len(str) < end {
+				return str
 			}
-			return s[start:end]
+			return str[start:end]
 		},
 		"formatSize": func(size int64) string {
 			const unit = 1024
@@ -173,14 +134,16 @@ func (s *Server) renderTemplate(w http.ResponseWriter, templateName string, data
 			return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
 		},
 	}
+}
 
-	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templatesFS, "templates/layout.html", "templates/"+templateName)
+// renderTemplate renders a full page (templateName wrapped in layout.html).
+func (s *Server) renderTemplate(w http.ResponseWriter, templateName string, data interface{}) {
+	tmpl, err := template.New("").Funcs(s.buildFuncMap(data)).ParseFS(templatesFS, "templates/layout.html", "templates/"+templateName)
 	if err != nil {
 		log.Printf("Error parsing template %s: %v", templateName, err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-
 	if err := tmpl.ExecuteTemplate(w, "layout.html", data); err != nil {
 		log.Printf("Error executing template %s: %v", templateName, err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -682,15 +645,9 @@ func (s *Server) HandleMessagePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	message, err := s.database.GetMessageByID(id)
-	if err != nil || message.UserID != user.ID {
+	message, err := s.database.GetMessageByIDForUser(id, user.ID)
+	if err != nil {
 		http.Redirect(w, r, "/inbox?error=message_not_found", http.StatusSeeOther)
-		return
-	}
-
-	// Check ownership - prevent reading other users' messages
-	if message.UserID != user.ID {
-		http.Error(w, "Access denied", http.StatusForbidden)
 		return
 	}
 
