@@ -161,6 +161,8 @@ func NewWithTLSAndHub(database *db.DB, addr string, certFile, keyFile string, hu
 	s.AutoLogout = 30 * time.Minute // Disconnect idle clients after 30 min (RFC 3501 minimum)
 	// Enable IDLE extension for push notifications
 	s.Enable(idle.NewExtension())
+	// Enable METADATA extension for DDMail client (identities, etc.)
+	s.Enable(NewMetadataExtension())
 	log.Printf("IMAP server with TLS and IDLE extension enabled, will listen on %s", addr)
 
 	return &Server{
