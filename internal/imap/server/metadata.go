@@ -8,7 +8,6 @@ import (
 
 	"github.com/emersion/go-imap"
 	imapserver "github.com/emersion/go-imap/server"
-	"github.com/yourusername/mailserver/internal/db"
 )
 
 // Identity represents a user's email identity
@@ -49,7 +48,7 @@ func (h *getMetadataHandler) Parse(fields []interface{}) error {
 		return fmt.Errorf("GETMETADATA requires at least 2 arguments")
 	}
 
-	h.mailbox = imap.ParseString(fields[0])
+	h.mailbox, _ = imap.ParseString(fields[0])
 
 	switch v := fields[1].(type) {
 	case string:
@@ -91,12 +90,11 @@ func (h *getMetadataHandler) Handle(conn imapserver.Conn) error {
 		}
 
 		// Send: * METADATA "" (/shared/vendor/ddmail/identities "json_value")
-		fields := []interface{}{
-			"METADATA",
+		resp := imap.NewUntaggedResp([]interface{}{
+			imap.RawString("METADATA"),
 			h.mailbox,
 			[]interface{}{entry, value},
-		}
-		resp := &imap.UntaggedResp{Fields: fields}
+		})
 		if err := conn.WriteResp(resp); err != nil {
 			return fmt.Errorf("failed to write METADATA response: %w", err)
 		}
