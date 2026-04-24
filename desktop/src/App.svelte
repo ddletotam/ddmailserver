@@ -1,0 +1,40 @@
+<script lang="ts">
+  import Sidebar from "./lib/components/Sidebar.svelte";
+  import ChatView from "./lib/components/ChatView.svelte";
+  import LoginScreen from "./lib/components/LoginScreen.svelte";
+  import { accountStore } from "./lib/stores/accounts.svelte";
+  import { mailStore } from "./lib/stores/mail.svelte";
+  import { identityStore } from "./lib/stores/identity.svelte";
+
+  let showLogin = $state(accountStore.accounts.length === 0);
+
+  $effect(() => {
+    const account = accountStore.activeAccount;
+    if (account) {
+      identityStore.load(account);
+      mailStore.loadConversations(account);
+    }
+  });
+
+  function handleAccountAdded() {
+    showLogin = false;
+  }
+</script>
+
+{#if showLogin}
+  <LoginScreen onSuccess={handleAccountAdded} />
+{:else}
+  <div class="app-layout">
+    <Sidebar />
+    <ChatView />
+  </div>
+{/if}
+
+<style>
+  .app-layout {
+    display: flex;
+    height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+  }
+</style>
