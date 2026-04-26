@@ -57,6 +57,7 @@
   // Quick-reply
   let quickReplyText = $state("");
   let quickReplySending = $state(false);
+  let identityDropdownOpen = $state(false);
 
   // Identity for this conversation — pre-select based on received_by
   const matchedIdentity = $derived(
@@ -130,13 +131,23 @@
   // Keyboard shortcuts
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
-      if (showComposer) { closeComposer(); e.preventDefault(); }
+      if (identityDropdownOpen) { identityDropdownOpen = false; e.preventDefault(); }
+      else if (showComposer) { closeComposer(); e.preventDefault(); }
       else if (conv) { mailStore.closeConversation(); e.preventDefault(); }
+    }
+  }
+
+  function handleGlobalClick(e: MouseEvent) {
+    if (identityDropdownOpen) {
+      const target = e.target as HTMLElement;
+      if (!target.closest('.identity-picker')) {
+        identityDropdownOpen = false;
+      }
     }
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} onclick={handleGlobalClick} />
 
 <main class="chat-view">
   {#if conv}
@@ -230,11 +241,38 @@
         <div class="reply-input-row">
           <!-- Identity selector (if multiple) -->
           {#if identityStore.hasMultiple}
-            <select class="identity-select-inline" bind:value={selectedFromEmail} title="Send from">
-              {#each identityStore.identities as id}
-                <option value={id.email}>{id.email}</option>
-              {/each}
-            </select>
+            <div class="identity-picker">
+              <button
+                class="identity-picker-btn"
+                onclick={() => identityDropdownOpen = !identityDropdownOpen}
+                title="Send from"
+              >
+                <span class="identity-dot" style:background={identityStore.findByEmail(selectedFromEmail)?.color ?? '#ccc'}></span>
+                <span class="identity-email">{selectedFromEmail}</span>
+                <svg class="identity-chevron" class:open={identityDropdownOpen} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </button>
+              {#if identityDropdownOpen}
+                <div class="identity-dropdown">
+                  {#each identityStore.identities as id}
+                    <button
+                      class="identity-option"
+                      class:selected={id.email === selectedFromEmail}
+                      onclick={() => { selectedFromEmail = id.email; identityDropdownOpen = false; }}
+                    >
+                      <span class="identity-dot" style:background={id.color}></span>
+                      <span class="identity-option-email">{id.email}</span>
+                      {#if id.email === selectedFromEmail}
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                      {/if}
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </div>
           {/if}
 
           <!-- Text input -->
@@ -406,19 +444,77 @@
     border-top: 1px solid var(--border-color);
     padding: 6px 12px;
   }
-  .identity-select-inline {
-    padding: 6px 8px;
-    border: 1px solid var(--border-color);
-    border-radius: 16px;
-    font-size: var(--font-size-xs);
-    font-family: var(--font-family);
-    color: var(--text-accent);
-    background: var(--bg-secondary);
-    outline: none;
-    max-width: 180px;
+  /* Identity picker */
+  .identity-picker {
+    position: relative;
     flex-shrink: 0;
   }
-  .identity-select-inline:focus { border-color: var(--text-accent); }
+  .identity-picker-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    background: var(--bg-secondary);
+    cursor: pointer;
+    font-family: var(--font-family);
+    font-size: var(--font-size-xs);
+    color: var(--text-primary);
+    max-width: 200px;
+    transition: border-color var(--transition);
+  }
+  .identity-picker-btn:hover { border-color: var(--text-accent); }
+  .identity-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .identity-email {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .identity-chevron {
+    flex-shrink: 0;
+    transition: transform 0.15s ease;
+  }
+  .identity-chevron.open { transform: rotate(180deg); }
+  .identity-dropdown {
+    position: absolute;
+    bottom: calc(100% + 4px);
+    left: 0;
+    min-width: 240px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+    overflow: hidden;
+    z-index: 50;
+  }
+  .identity-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 12px;
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-family: var(--font-family);
+    font-size: var(--font-size-sm);
+    color: var(--text-primary);
+    text-align: left;
+  }
+  .identity-option:hover { background: var(--bg-hover); }
+  .identity-option.selected { font-weight: 600; }
+  .identity-option-email {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .identity-option svg { color: var(--text-accent); flex-shrink: 0; }
 
   .reply-input-row {
     display: flex;
