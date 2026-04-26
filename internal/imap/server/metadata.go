@@ -138,7 +138,7 @@ func getIdentitiesJSON(user *User) (string, error) {
 		}
 	}
 
-	// 2. External accounts
+	// 2. External accounts + their aliases
 	accounts, err := user.database.GetAccountsByUserID(user.userID)
 	if err != nil {
 		log.Printf("METADATA identities: failed to get accounts: %v", err)
@@ -153,6 +153,14 @@ func getIdentitiesJSON(user *User) (string, error) {
 				Signature: "",
 				IsDefault: len(identities) == 0,
 			})
+			for _, alias := range acc.GetAliases() {
+				identities = append(identities, Identity{
+					Email:     alias,
+					Name:      acc.Name,
+					Signature: "",
+					IsDefault: false,
+				})
+			}
 		}
 	}
 

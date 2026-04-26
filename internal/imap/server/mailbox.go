@@ -1090,13 +1090,58 @@ func parseAddresses(addrStr string) []*imap.Address {
 		return nil
 	}
 
-	// Simple parsing - just return one address
-	// TODO: Implement proper address parsing
-	return []*imap.Address{
-		{
-			PersonalName: "",
-			MailboxName:  addrStr,
-			HostName:     "",
-		},
+	var result []*imap.Address
+	for _, part := range strings.Split(addrStr, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		result = append(result, parseSingleAddress(part))
 	}
+	return result
+}
+
+func parseSingleAddress(raw string) *imap.Address {
+	raw = strings.TrimSpace(raw)
+
+	// "Name <user@host>" or "<user@host>"
+	if lt := strings.LastIndex(raw, "<"); lt >= 0 {
+		if gt := strings.Index(raw[lt:], ">"); gt >= 0 {
+			email := raw[lt+1 : lt+gt]
+			name := strings.TrimSpace(raw[:lt])
+			// Strip surrounding quotes from name
+			name = strings.Trim(name, "\"'")
+			mailbox, host := splitEmail(email)
+			return &imap.Address{
+				PersonalName: name,
+				MailboxName:  mailbox,
+				HostName:     host,
+			}
+		}
+	}
+
+	// Bare email: user@host
+	if strings.Contains(raw, "@") {
+		mailbox, host := splitEmail(raw)
+		return &imap.Address{
+			PersonalName: "",
+			MailboxName:  mailbox,
+			HostName:     host,
+		}
+	}
+
+	// Fallback — unparseable
+	return &imap.Address{
+		PersonalName: "",
+		MailboxName:  raw,
+		HostName:     "",
+	}
+}
+
+func splitEmail(email string) (mailbox, host string) {
+	email = strings.TrimSpace(email)
+	if at := strings.LastIndex(email, "@"); at >= 0 {
+		return email[:at], email[at+1:]
+	}
+	return email, ""
 }

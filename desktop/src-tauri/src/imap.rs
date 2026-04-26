@@ -742,6 +742,42 @@ pub async fn set_flags(
     Ok(())
 }
 
+/// Fetch raw RFC-822 source of a single message.
+#[tauri::command]
+pub async fn fetch_message_source(
+    host: String, port: u16, username: String, password: String, use_tls: bool,
+    folder: String, uid: u32,
+) -> Result<String, String> {
+    if use_tls {
+        let mut session = connect_tls(&host, port, &username, &password).await?;
+        let r = fetch_source_impl(&mut session, &folder, uid).await;
+        session.logout().await.ok();
+        r
+    } else {
+        let mut session = connect_plain(&host, port, &username, &password).await?;
+        let r = fetch_source_impl(&mut session, &folder, uid).await;
+        session.logout().await.ok();
+        r
+    }
+}
+
+async fn fetch_source_impl<T>(
+    session: &mut async_imap::Session<T>,
+    folder: &str,
+    uid: u32,
+) -> Result<String, String>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + std::fmt::Debug,
+{
+    session.select(folder).await.map_err(|e| format!("SELECT {folder}: {e}"))?;
+    let fetched = session.uid_fetch(uid.to_string(), "BODY.PEEK[]")
+        .await.map_err(|e| format!("FETCH: {e}"))?;
+    let msgs: Vec<_> = fetched.try_collect().await.map_err(|e| format!("Collect: {e}"))?;
+    let msg = msgs.first().ok_or("Message not found")?;
+    let body = msg.body().ok_or("Empty body")?;
+    String::from_utf8(body.to_vec()).map_err(|_| "Non-UTF8 source".into())
+}
+
 // ── Cache commands ──
 
 /// Load conversations from local SQLite cache (instant).
@@ -775,17 +811,8 @@ pub async fn fetch_identities(
 ) -> Result<Vec<Identity>, String> {
     let key = account_key(&host, &username);
 
-    // Try cache first
-    let cached = cache.load_identities(&key);
-    if let Ok(ref ids) = cached {
-        if !ids.is_empty() {
-            // Return cached, but also refresh in background
-            // For now just return cached
-            return cached;
-        }
-    }
-
-    let identities = if use_tls {
+    // Always fetch fresh from server; fall back to cache on error
+    let result = if use_tls {
         let mut session = connect_tls(&host, port, &username, &password).await?;
         let ids = fetch_identities_impl(&mut session).await;
         session.logout().await.ok();
@@ -795,13 +822,20 @@ pub async fn fetch_identities(
         let ids = fetch_identities_impl(&mut session).await;
         session.logout().await.ok();
         ids
-    }?;
+    };
 
-    if !identities.is_empty() {
-        cache.save_identities(&key, &identities).ok();
+    match result {
+        Ok(identities) => {
+            if !identities.is_empty() {
+                cache.save_identities(&key, &identities).ok();
+            }
+            Ok(identities)
+        }
+        Err(_) => {
+            // Server failed — use cache as fallback
+            cache.load_identities(&key)
+        }
     }
-
-    Ok(identities)
 }
 
 async fn fetch_identities_impl<T>(

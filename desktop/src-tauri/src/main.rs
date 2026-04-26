@@ -35,6 +35,7 @@ fn main() {
             imap::fetch_conversation_messages,
             imap::search_messages,
             imap::set_flags,
+            imap::fetch_message_source,
             imap::fetch_identities,
             imap::fetch_avatar,
             imap::start_watching,
