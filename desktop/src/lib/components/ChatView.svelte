@@ -5,6 +5,7 @@
   import { identityStore } from "../stores/identity.svelte";
   import MessageBubble from "./MessageBubble.svelte";
   import Composer from "./Composer.svelte";
+  import { cleanName, sameDay, formatDateSeparator } from "../utils/format";
   import type { OutgoingMessage } from "../types/mail";
 
   let showComposer = $state(false);
@@ -50,6 +51,7 @@
     }
   }
 
+  function handleReply() { replyMode = "reply"; showComposer = true; }
   function handleForward() { replyMode = "forward"; showComposer = true; }
   function handleCompose() { replyMode = null; showComposer = true; }
   function closeComposer() { showComposer = false; replyMode = null; }
@@ -101,32 +103,12 @@
       // Refresh conversation
       mailStore.openConversation(account, conv.id);
     } catch (e) {
-      mailStore.error;
+      console.error("Send failed:", e);
     } finally {
       quickReplySending = false;
     }
   }
 
-  function cleanName(raw: string): string {
-    const stripped = raw.replace(/<[^>]*>/g, "").trim();
-    return stripped || raw;
-  }
-
-  // Date helpers
-  function sameDay(ts1: number, ts2: number): boolean {
-    const d1 = new Date(ts1 * 1000);
-    const d2 = new Date(ts2 * 1000);
-    return d1.getFullYear() === d2.getFullYear() && d1.getMonth() === d2.getMonth() && d1.getDate() === d2.getDate();
-  }
-
-  function formatDateSep(ts: number): string {
-    const date = new Date(ts * 1000);
-    const now = new Date();
-    const diff = now.getTime() - date.getTime();
-    if (diff < 86400000 && date.getDate() === now.getDate()) return "Today";
-    if (diff < 172800000) return "Yesterday";
-    return date.toLocaleDateString([], { day: "numeric", month: "long", year: "numeric" });
-  }
 
   // Keyboard shortcuts
   function handleKeydown(e: KeyboardEvent) {
@@ -212,7 +194,7 @@
           <!-- Date separator -->
           {#if i === 0 || !sameDay(msgs[i - 1].date_ts, msg.date_ts)}
             <div class="date-separator">
-              <span>{formatDateSep(msg.date_ts)}</span>
+              <span>{formatDateSeparator(msg.date_ts)}</span>
             </div>
           {/if}
           <MessageBubble

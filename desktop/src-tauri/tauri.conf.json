@@ -28,7 +28,7 @@
       "tooltip": "DDMail"
     },
     "security": {
-      "csp": null
+      "csp": "default-src 'self' http://localhost:* https://ipc.localhost; style-src 'self' 'unsafe-inline' http://localhost:*; img-src 'self' data: https://www.gravatar.com http://localhost:*; script-src 'self' 'unsafe-inline' http://localhost:*; connect-src 'self' http://localhost:* ws://localhost:* https://ipc.localhost"
     }
   },
   "bundle": {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { MessageEnvelope } from "../types/mail";
+  import { formatDateShort as formatDate } from "../utils/format";
 
   interface Props {
     results: MessageEnvelope[];
@@ -7,12 +8,6 @@
     onselect: (msg: MessageEnvelope) => void;
   }
   let { results, loading, onselect }: Props = $props();
-
-  function formatDate(ts: number): string {
-    if (!ts) return "";
-    const date = new Date(ts * 1000);
-    return date.toLocaleDateString([], { day: "numeric", month: "short" });
-  }
 </script>
 
 <div class="dropdown">
