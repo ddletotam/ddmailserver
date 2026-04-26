@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Conversation } from "../types/mail";
   import { identityStore } from "../stores/identity.svelte";
+  import { formatDate, hashColor, initials, cleanName } from "../utils/format";
 
   interface Props {
     conversation: Conversation;
@@ -12,58 +13,10 @@
   let { conversation, active, pinned, onclick, oncontextmenu }: Props = $props();
 
   const c = $derived(conversation);
-
-  /** Just strip angle-bracket email from name, nothing else */
-  function cleanName(raw: string): string {
-    // "Name <email@host>" → "Name"
-    const stripped = raw.replace(/<[^>]*>/g, "").trim();
-    return stripped || raw;
-  }
-
   const displayName = $derived(cleanName(c.label));
-
-  // Identity color for this conversation (based on which of our emails received it)
   const identityColor = $derived.by(() => {
     return identityStore.loaded ? identityStore.colorForEmail(c.received_by) : "transparent";
   });
-
-  function formatDate(ts: number): string {
-    if (!ts) return "";
-    const date = new Date(ts * 1000);
-    const now = new Date();
-    const diff = now.getTime() - date.getTime();
-    const dayMs = 86400000;
-    if (diff < dayMs && date.getDate() === now.getDate())
-      return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    if (diff < 7 * dayMs)
-      return date.toLocaleDateString([], { weekday: "short" });
-    return date.toLocaleDateString([], { day: "numeric", month: "short" });
-  }
-
-  function initials(label: string): string {
-    const parts = label.split(/[\s@]+/).filter(Boolean);
-    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-    return label.substring(0, 2).toUpperCase();
-  }
-
-  function avatarColor(id: string): string {
-    const colors = [
-      "#e17076", "#7bc862", "#e5ca77", "#65aadd",
-      "#a695e7", "#ee7aae", "#6ec9cb", "#faa774",
-    ];
-    let hash = 0;
-    for (let i = 0; i < id.length; i++)
-      hash = ((hash << 5) - hash + id.charCodeAt(i)) | 0;
-    return colors[Math.abs(hash) % colors.length];
-  }
-
-  // Gravatar: just use URL directly, browser handles caching
-  const gravatarUrl = $derived(
-    c.avatar_hash
-      ? `https://www.gravatar.com/avatar/${c.avatar_hash}?d=404&s=96`
-      : null
-  );
-  let imgFailed = $state(false);
 </script>
 
 <button
@@ -76,7 +29,7 @@
 >
   <!-- Avatar -->
   <div class="avatar-wrap">
-    <div class="avatar-initials" style:background={avatarColor(c.id)}>
+    <div class="avatar-initials" style:background={hashColor(c.id)}>
       {initials(displayName)}
     </div>
   </div>
