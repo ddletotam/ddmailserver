@@ -13,10 +13,11 @@ import (
 
 // User represents an authenticated IMAP user
 type User struct {
-	username      string
-	userID        int64
-	database      *db.DB
-	searchIndexer *search.Indexer
+	username        string
+	userID          int64
+	database        *db.DB
+	searchIndexer   *search.Indexer
+	foldersEnsured  bool
 }
 
 // Username returns the username
@@ -28,9 +29,12 @@ func (u *User) Username() string {
 func (u *User) ListMailboxes(subscribed bool) ([]backend.Mailbox, error) {
 	log.Printf("Listing mailboxes for user %s (subscribed: %v)", u.username, subscribed)
 
-	// Ensure default folders exist (Inbox, Sent, Trash)
-	if err := u.database.EnsureDefaultFolders(u.userID); err != nil {
-		log.Printf("Failed to ensure default folders: %v", err)
+	// Ensure default folders exist (once per session)
+	if !u.foldersEnsured {
+		if err := u.database.EnsureDefaultFolders(u.userID); err != nil {
+			log.Printf("Failed to ensure default folders: %v", err)
+		}
+		u.foldersEnsured = true
 	}
 
 	// Get all local folders
