@@ -294,6 +294,122 @@ func (db *DB) GetOrCreateInbox(userID, accountID int64) (*models.Folder, error) 
 	return inbox, nil
 }
 
+// GetLocalFolderByType retrieves a local folder by type for a user
+func (db *DB) GetLocalFolderByType(userID int64, folderType string) (*models.Folder, error) {
+	folder := &models.Folder{}
+	query := `
+		SELECT id, user_id, COALESCE(account_id, 0), name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
+		FROM folders
+		WHERE user_id = $1 AND account_id IS NULL AND type = $2
+		LIMIT 1
+	`
+	err := db.QueryRow(query, userID, folderType).Scan(
+		&folder.ID, &folder.UserID, &folder.AccountID, &folder.Name, &folder.Path,
+		&folder.Type, &folder.ParentID, &folder.UIDNext, &folder.UIDValidity, &folder.CreatedAt, &folder.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get folder by type: %w", err)
+	}
+	return folder, nil
+}
+
+// GetOrCreateLocalFolder gets or creates a local folder by type (concurrent-safe)
+func (db *DB) GetOrCreateLocalFolder(userID int64, name, folderType string) (*models.Folder, error) {
+	// Try by type first
+	folder, err := db.GetLocalFolderByType(userID, folderType)
+	if err != nil {
+		return nil, err
+	}
+	if folder != nil {
+		return folder, nil
+	}
+	// Upsert — safe under concurrent access (uses partial unique index on local folders)
+	now := time.Now()
+	folder = &models.Folder{}
+	err = db.QueryRow(`
+		INSERT INTO folders (user_id, account_id, name, path, type, uid_next, uid_validity, created_at, updated_at)
+		VALUES ($1, NULL, $2, $3, $4, 1, $5, $6, $7)
+		ON CONFLICT (user_id, type) WHERE account_id IS NULL AND type != 'custom'
+		DO UPDATE SET updated_at = EXCLUDED.updated_at
+		RETURNING id, user_id, COALESCE(account_id, 0), name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
+	`, userID, name, name, folderType, uint32(now.Unix()), now, now).Scan(
+		&folder.ID, &folder.UserID, &folder.AccountID, &folder.Name, &folder.Path,
+		&folder.Type, &folder.ParentID, &folder.UIDNext, &folder.UIDValidity, &folder.CreatedAt, &folder.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get or create folder: %w", err)
+	}
+	return folder, nil
+}
+
+// EnsureDefaultFolders creates Inbox, Sent, Trash if missing and subscribes to Inbox
+func (db *DB) EnsureDefaultFolders(userID int64) error {
+	inbox, err := db.GetOrCreateLocalFolder(userID, "INBOX", "inbox")
+	if err != nil {
+		return fmt.Errorf("ensure inbox: %w", err)
+	}
+	if _, err := db.GetOrCreateLocalFolder(userID, "Sent", "sent"); err != nil {
+		return fmt.Errorf("ensure sent: %w", err)
+	}
+	if _, err := db.GetOrCreateLocalFolder(userID, "Trash", "trash"); err != nil {
+		return fmt.Errorf("ensure trash: %w", err)
+	}
+	// Auto-subscribe to INBOX
+	if err := db.SubscribeFolder(userID, inbox.ID); err != nil {
+		return fmt.Errorf("subscribe inbox: %w", err)
+	}
+	return nil
+}
+
+// SubscribeFolder subscribes a user to a folder
+func (db *DB) SubscribeFolder(userID, folderID int64) error {
+	_, err := db.Exec(
+		`INSERT INTO folder_subscriptions (user_id, folder_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+		userID, folderID,
+	)
+	return err
+}
+
+// UnsubscribeFolder unsubscribes a user from a folder
+func (db *DB) UnsubscribeFolder(userID, folderID int64) error {
+	_, err := db.Exec(
+		`DELETE FROM folder_subscriptions WHERE user_id = $1 AND folder_id = $2`,
+		userID, folderID,
+	)
+	return err
+}
+
+// IsSubscribed checks if a user is subscribed to a folder
+func (db *DB) IsSubscribed(userID, folderID int64) bool {
+	var count int
+	db.QueryRow(
+		`SELECT COUNT(*) FROM folder_subscriptions WHERE user_id = $1 AND folder_id = $2`,
+		userID, folderID,
+	).Scan(&count)
+	return count > 0
+}
+
+// GetSubscribedFolderIDs returns set of subscribed folder IDs for a user
+func (db *DB) GetSubscribedFolderIDs(userID int64) (map[int64]bool, error) {
+	rows, err := db.Query(`SELECT folder_id FROM folder_subscriptions WHERE user_id = $1`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[int64]bool)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		result[id] = true
+	}
+	return result, nil
+}
+
 // Helper function to scan multiple folders
 func scanFolders(rows *sql.Rows) ([]*models.Folder, error) {
 	var folders []*models.Folder

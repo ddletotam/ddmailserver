@@ -678,6 +678,22 @@ func (db *DB) RestoreSoftDeletedMessage(id int64) error {
 	return db.RestoreFromVault(id)
 }
 
+// MessageExistsInFolder checks if a message with given Message-ID exists in a folder (for dedup)
+func (db *DB) MessageExistsInFolder(folderID int64, messageID string) (bool, error) {
+	if messageID == "" {
+		return false, nil
+	}
+	var count int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE folder_id = $1 AND message_id = $2 AND (soft_deleted = false OR soft_deleted IS NULL)`,
+		folderID, messageID,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // CopyMessageToFolder copies a message to another folder with a new UID
 func (db *DB) CopyMessageToFolder(msgID, destFolderID int64) (uint32, error) {
 	// Verify source message exists
