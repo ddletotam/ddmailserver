@@ -203,6 +203,8 @@ export const mailStore = {
     const conv = conversations.find((c) => c.id === conversationId);
     if (!conv) return;
 
+    // Clear previous messages immediately to avoid stale content
+    conversationMessages = [];
     loadingMessages = true;
     error = null;
     try {
@@ -212,9 +214,11 @@ export const mailStore = {
         username: account.username,
         messages: conv.messages,
       });
+      // Bail if user switched to another conversation while loading
+      if (activeConversationId !== conversationId) return;
       if (cached.length > 0) {
         conversationMessages = cached;
-        loadingMessages = false; // show cached immediately
+        loadingMessages = false;
       }
 
       // 2. Fetch fresh from server
@@ -226,13 +230,32 @@ export const mailStore = {
           messages: conv.messages,
         }
       );
+      if (activeConversationId !== conversationId) return;
       conversationMessages = fresh;
+
+      // 3. Mark as read (update local count immediately, server in background)
+      if (conv.unread_count > 0) {
+        conv.unread_count = 0;
+        conversations = [...conversations];
+        // Single background call per message — fire and forget
+        for (const msgRef of conv.messages) {
+          invoke("set_flags", {
+            ...imapArgs(account),
+            folder: msgRef.folder,
+            uid: msgRef.uid,
+            flags: "\\Seen",
+            add: true,
+          }).catch(() => {});
+        }
+      }
     } catch (e) {
-      if (conversationMessages.length === 0) {
+      if (activeConversationId === conversationId && conversationMessages.length === 0) {
         error = String(e);
       }
     } finally {
-      loadingMessages = false;
+      if (activeConversationId === conversationId) {
+        loadingMessages = false;
+      }
     }
   },
 

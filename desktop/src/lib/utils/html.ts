@@ -67,14 +67,18 @@ function extractDomain(url: string): string {
   }
 }
 
-function blockedPlaceholder(originalUrl: string): string {
-  const domain = extractDomain(originalUrl);
-  const label = domain || "external";
+function blockedPlaceholder(originalUrl: string, width?: string, height?: string, alt?: string): string {
+  const w = width || "";
+  const h = height || "";
+  const styleW = w ? `width:${w};` : "";
+  const styleH = h ? `height:${h};` : "";
+  const minStyle = (!w && !h) ? "min-width:8px;min-height:8px;" : "";
+  const label = alt ? alt.replace(/</g, "&lt;").replace(/>/g, "&gt;") : "";
   return `<span data-blocked-src="${originalUrl.replace(/"/g, "&quot;")}" `
-    + `style="display:inline-block;background:#e8e8e8;color:#888;border:1px dashed #ccc;`
-    + `border-radius:4px;padding:6px 10px;margin:2px 0;font-size:12px;cursor:pointer;`
-    + `font-family:sans-serif;" title="Click to load">`
-    + `&#128274; ${label}</span>`;
+    + `style="display:inline-block;${styleW}${styleH}${minStyle}max-width:100%;`
+    + `background:#eee;border-radius:2px;cursor:pointer;vertical-align:middle;`
+    + `font-size:11px;color:#999;overflow:hidden;" title="Click to load">`
+    + `${label}</span>`;
 }
 
 function isDomainInList(domain: string, allowedDomains: string[]): boolean {
@@ -96,10 +100,19 @@ function blockExternalResources(html: string, allowedDomains: string[]): string 
     }
   );
 
-  // Replace blocked <img> with placeholders
+  // Replace blocked <img> with placeholders preserving dimensions and alt
   result = result.replace(
-    /<img\b[^>]*?data-blocked-src\s*=\s*["']([^"']*?)["'][^>]*?\/?>/gi,
-    (_match, url) => blockedPlaceholder(url)
+    /<img\b([^>]*?)data-blocked-src\s*=\s*["']([^"']*?)["']([^>]*?)\/?>/gi,
+    (_match, before, url, after) => {
+      const allAttrs = before + after;
+      const wMatch = allAttrs.match(/\bwidth\s*=\s*["']?(\d+)/i);
+      const hMatch = allAttrs.match(/\bheight\s*=\s*["']?(\d+)/i);
+      const altMatch = allAttrs.match(/\balt\s*=\s*["']([^"']*?)["']/i);
+      const w = wMatch ? wMatch[1] + "px" : undefined;
+      const h = hMatch ? hMatch[1] + "px" : undefined;
+      const alt = altMatch ? altMatch[1] : undefined;
+      return blockedPlaceholder(url, w, h, alt);
+    }
   );
 
   // Block background= attributes
@@ -228,6 +241,52 @@ export function extractBlockedDomains(html: string): string[] {
   }
 
   return [...domains].sort();
+}
+
+/** Categorized domains found in email HTML */
+export interface EmailDomains {
+  imageDomains: string[];
+  scriptDomains: string[];
+  allDomains: string[];
+}
+
+/** Extract unique external domains from HTML, categorized by type */
+export function extractEmailDomains(html: string): EmailDomains {
+  const imageDomains = new Set<string>();
+  const scriptDomains = new Set<string>();
+  let m;
+
+  const mediaSrcRe = /<(?:img|video|audio|source|iframe|embed)\b[^>]*?\bsrc\s*=\s*["'](https?:\/\/[^"']*?)["']/gi;
+  while ((m = mediaSrcRe.exec(html)) !== null) {
+    const d = extractDomain(m[1]);
+    if (d) imageDomains.add(d);
+  }
+  const bgRe = /\bbackground\s*=\s*["'](https?:\/\/[^"']*?)["']/gi;
+  while ((m = bgRe.exec(html)) !== null) {
+    const d = extractDomain(m[1]);
+    if (d) imageDomains.add(d);
+  }
+  const urlRe = /url\(\s*["']?(https?:\/\/[^"')]+)["']?\s*\)/gi;
+  while ((m = urlRe.exec(html)) !== null) {
+    const d = extractDomain(m[1]);
+    if (d) imageDomains.add(d);
+  }
+  const linkRe = /<link\b[^>]*?href\s*=\s*["'](https?:\/\/[^"']*?)["']/gi;
+  while ((m = linkRe.exec(html)) !== null) {
+    const d = extractDomain(m[1]);
+    if (d) imageDomains.add(d);
+  }
+  const scriptRe = /<script\b[^>]*?\bsrc\s*=\s*["'](https?:\/\/[^"']*?)["']/gi;
+  while ((m = scriptRe.exec(html)) !== null) {
+    const d = extractDomain(m[1]);
+    if (d) scriptDomains.add(d);
+  }
+
+  return {
+    imageDomains: [...imageDomains].sort(),
+    scriptDomains: [...scriptDomains].sort(),
+    allDomains: [...new Set([...imageDomains, ...scriptDomains])].sort(),
+  };
 }
 
 // ── Display content resolution ──

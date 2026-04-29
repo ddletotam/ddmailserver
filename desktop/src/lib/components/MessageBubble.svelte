@@ -4,7 +4,8 @@
   import { themeStore } from "../stores/theme.svelte";
   import { fetchMessageSource } from "../api/imap";
   import { formatTime, formatSize, hashColor } from "../utils/format";
-  import { resolveDisplayContent, extractBlockedDomains, type DisplayMode, type ContentPermissions } from "../utils/html";
+  import { resolveDisplayContent, extractBlockedDomains, extractEmailDomains, type DisplayMode, type ContentPermissions } from "../utils/html";
+  import { t } from "../i18n/index.svelte";
   import SandboxedEmail from "./SandboxedEmail.svelte";
   import type { MessageBody } from "../types/mail";
 
@@ -22,6 +23,8 @@
   // Context menu
   let contextMenu = $state<{ x: number; y: number } | null>(null);
   let showMediaSubmenu = $state(false);
+  let showImagesSubmenu = $state(false);
+  let showScriptsSubmenu = $state(false);
   let showSource = $state(false);
   let sourceText = $state("");
   let sourceLoading = $state(false);
@@ -29,10 +32,11 @@
   // Permission state — read reactive values here so $derived tracks them
   // Domains referenced in this message's HTML
   const blockedDomains = $derived(message.html ? extractBlockedDomains(message.html) : []);
+  const emailDomains = $derived(message.html ? extractEmailDomains(message.html) : { imageDomains: [], scriptDomains: [], allDomains: [] });
 
   const contentPermissions: ContentPermissions = $derived({
-    mediaAllowed: permissionStore.isMediaAllowed(message.from_addr),
-    scriptsAllowed: permissionStore.isScriptsAllowed(message.from_addr),
+    mediaAllowed: loadAllOnce || permissionStore.isMediaAllowed(message.from_addr),
+    scriptsAllowed: loadAllOnce || permissionStore.isScriptsAllowed(message.from_addr),
     allowedDomains: permissionStore.allowedDomains,
   });
   const mediaAllowed = $derived(contentPermissions.mediaAllowed);
@@ -41,12 +45,17 @@
   function handleContextMenu(e: MouseEvent) {
     e.preventDefault();
     showMediaSubmenu = false;
-    contextMenu = { x: e.clientX, y: e.clientY };
+    const menuW = 280, menuH = 300;
+    const x = Math.min(e.clientX, window.innerWidth - menuW);
+    const y = Math.min(e.clientY, window.innerHeight - menuH);
+    contextMenu = { x, y };
   }
 
   function closeContextMenu() {
     contextMenu = null;
     showMediaSubmenu = false;
+    showImagesSubmenu = false;
+    showScriptsSubmenu = false;
   }
 
   async function viewSource() {
@@ -73,6 +82,13 @@
   function toggleDisplayMode() {
     contextMenu = null;
     displayMode = displayMode === "text" ? "html" : "text";
+  }
+
+  // "Load all" for this message — remembered per component instance
+  let loadAllOnce = $state(false);
+  function loadAllInMessage() {
+    loadAllOnce = true;
+    contextMenu = null;
   }
 
   function toggleMedia() {
@@ -118,7 +134,7 @@
     {:else if displayContent.type === "text"}
       <div class="text-body text-plain">{displayContent.content}</div>
     {:else}
-      <div class="text-body empty">(empty)</div>
+      <div class="text-body empty">{t("empty")}</div>
     {/if}
 
     {#if message.attachments.length > 0}
@@ -160,36 +176,76 @@
     onclick={(e) => e.stopPropagation()}>
     {#if hasMultipart}
       <button onclick={toggleDisplayMode}>
-        {displayMode === "text" ? "View as HTML" : "View as text"}
+        {displayMode === "text" ? t("menu.viewAsHtml") : t("menu.viewAsText")}
       </button>
     {/if}
 
-    {#if message.html}
-      <button onclick={() => showMediaSubmenu = !showMediaSubmenu}>
-        {showMediaSubmenu ? "\u25BE" : "\u25B8"} Media components
+    <button onclick={viewSource}>{t("menu.viewSource")}</button>
+
+    {#if message.html && emailDomains.allDomains.length > 0}
+      <button onclick={() => { showMediaSubmenu = !showMediaSubmenu; showImagesSubmenu = false; showScriptsSubmenu = false; }}>
+        {showMediaSubmenu ? "\u25BE" : "\u25B8"} {t("menu.mediaElements")}
       </button>
+
       {#if showMediaSubmenu}
-        <button class="ctx-sub-item" onclick={toggleMedia}>
-          {mediaAllowed ? "\u2611" : "\u2610"} Images from {message.from_addr}
+        <button class="ctx-sub-item" onclick={loadAllInMessage}>
+          {t("menu.loadAll")}
         </button>
-        <button class="ctx-sub-item" onclick={toggleScripts}>
-          {scriptsAllowed ? "\u2611" : "\u2610"} Scripts from {message.from_addr}
+        <button class="ctx-sub-item" onclick={() => {
+          if (!mediaAllowed) { toggleMedia(); closeContextMenu(); }
+          else { toggleMedia(); }
+        }}>
+          {mediaAllowed ? "\u2611" : "\u2610"} {t("menu.allowAllFrom", message.from_addr)}
         </button>
-        {#each blockedDomains as domain}
+        {#each emailDomains.allDomains as domain}
           <button class="ctx-sub-item" onclick={() => {
-            if (permissionStore.isDomainAllowed(domain)) {
-              permissionStore.removeDomain(domain);
-            } else {
-              permissionStore.addDomain(domain);
-            }
+            const wasAllowed = permissionStore.isDomainAllowed(domain);
+            if (wasAllowed) permissionStore.removeDomain(domain);
+            else { permissionStore.addDomain(domain); closeContextMenu(); }
           }}>
-            {permissionStore.isDomainAllowed(domain) ? "\u2611" : "\u2610"} {domain}
+            {permissionStore.isDomainAllowed(domain) ? "\u2611" : "\u2610"} {t("menu.allowAllFrom", domain)}
           </button>
         {/each}
+
+        {#if emailDomains.imageDomains.length > 0}
+          <button class="ctx-sub-item" onclick={() => { showImagesSubmenu = !showImagesSubmenu; showScriptsSubmenu = false; }}>
+            {showImagesSubmenu ? "\u25BE" : "\u25B8"} {t("menu.images")}
+          </button>
+          {#if showImagesSubmenu}
+            <button class="ctx-sub-item2" onclick={toggleMedia}>
+              {mediaAllowed ? "\u2611" : "\u2610"} {t("menu.from", message.from_addr)}
+            </button>
+            {#each emailDomains.imageDomains as domain}
+              <button class="ctx-sub-item2" onclick={() => {
+                if (permissionStore.isDomainAllowed(domain)) permissionStore.removeDomain(domain);
+                else permissionStore.addDomain(domain);
+              }}>
+                {permissionStore.isDomainAllowed(domain) ? "\u2611" : "\u2610"} {t("menu.from", domain)}
+              </button>
+            {/each}
+          {/if}
+        {/if}
+
+        {#if emailDomains.scriptDomains.length > 0}
+          <button class="ctx-sub-item" onclick={() => { showScriptsSubmenu = !showScriptsSubmenu; showImagesSubmenu = false; }}>
+            {showScriptsSubmenu ? "\u25BE" : "\u25B8"} {t("menu.scripts")}
+          </button>
+          {#if showScriptsSubmenu}
+            <button class="ctx-sub-item2" onclick={toggleScripts}>
+              {scriptsAllowed ? "\u2611" : "\u2610"} {t("menu.from", message.from_addr)}
+            </button>
+            {#each emailDomains.scriptDomains as domain}
+              <button class="ctx-sub-item2" onclick={() => {
+                if (permissionStore.isDomainAllowed(domain)) permissionStore.removeDomain(domain);
+                else permissionStore.addDomain(domain);
+              }}>
+                {permissionStore.isDomainAllowed(domain) ? "\u2611" : "\u2610"} {t("menu.from", domain)}
+              </button>
+            {/each}
+          {/if}
+        {/if}
       {/if}
     {/if}
-
-    <button onclick={viewSource}>View source</button>
   </div>
 {/if}
 
@@ -200,7 +256,7 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="source-modal" onclick={(e) => e.stopPropagation()}>
       <div class="source-header">
-        <span>Message source</span>
+        <span>{t("source.title")}</span>
         <button class="source-close" onclick={closeSource}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
@@ -322,6 +378,17 @@
     color: var(--text-secondary) !important;
   }
   .ctx-sub-item:hover { color: var(--text-primary) !important; }
+  .ctx-sub-item2 {
+    padding-left: 44px !important;
+    font-size: var(--font-size-xs) !important;
+    color: var(--text-secondary) !important;
+  }
+  .ctx-sub-item2:hover { color: var(--text-primary) !important; }
+  .ctx-separator {
+    height: 1px;
+    background: var(--border-color);
+    margin: 4px 8px;
+  }
 
   /* Source modal */
   .source-overlay {

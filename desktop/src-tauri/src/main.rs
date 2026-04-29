@@ -10,6 +10,23 @@ use cache::Cache;
 use session::SessionPool;
 use tauri::Manager;
 
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    // WSL2: explorer.exe opens URLs in Windows default browser
+    if std::process::Command::new("explorer.exe").arg(&url).spawn().is_ok() {
+        return Ok(());
+    }
+    // Linux native
+    if std::process::Command::new("xdg-open").arg(&url).spawn().is_ok() {
+        return Ok(());
+    }
+    // macOS
+    if std::process::Command::new("open").arg(&url).spawn().is_ok() {
+        return Ok(());
+    }
+    Err("Failed to open URL".into())
+}
+
 fn main() {
     env_logger::init();
 
@@ -40,6 +57,7 @@ fn main() {
             imap::fetch_avatar,
             imap::start_watching,
             smtp::send_message,
+            open_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DDMail");
