@@ -30,6 +30,7 @@ let folders = $state<Folder[]>([]);
 let conversations = $state<Conversation[]>([]);
 let activeConversationId = $state<string | null>(null);
 let conversationMessages = $state<MessageBody[]>([]);
+let draftMessage = $state<MessageBody | null>(null);
 let loading = $state(false);
 let loadingMessages = $state(false);
 let error = $state<string | null>(null);
@@ -96,6 +97,9 @@ export const mailStore = {
   },
   get conversationMessages() {
     return conversationMessages;
+  },
+  get draftMessage(): MessageBody | null {
+    return draftMessage;
   },
   get loading() {
     return loading;
@@ -205,6 +209,7 @@ export const mailStore = {
 
     // Clear previous messages immediately to avoid stale content
     conversationMessages = [];
+    draftMessage = null;
     loadingMessages = true;
     error = null;
     try {
@@ -233,7 +238,26 @@ export const mailStore = {
       if (activeConversationId !== conversationId) return;
       conversationMessages = fresh;
 
-      // 3. Mark as read (update local count immediately, server in background)
+      // 3. Load draft if exists
+      if (conv.draft) {
+        try {
+          const draftBodies = await invoke<MessageBody[]>(
+            "fetch_conversation_messages",
+            {
+              ...imapArgs(account),
+              userEmail: account.email,
+              messages: [conv.draft],
+            }
+          );
+          if (activeConversationId === conversationId && draftBodies.length > 0) {
+            draftMessage = draftBodies[0];
+          }
+        } catch {
+          // Draft loading failure is non-critical
+        }
+      }
+
+      // 4. Mark as read (update local count immediately, server in background)
       if (conv.unread_count > 0) {
         conv.unread_count = 0;
         conversations = [...conversations];
@@ -262,6 +286,7 @@ export const mailStore = {
   closeConversation() {
     activeConversationId = null;
     conversationMessages = [];
+    draftMessage = null;
   },
 
   async search(account: Account, query: string) {

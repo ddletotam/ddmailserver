@@ -39,6 +39,8 @@ pub struct Folder {
     pub delimiter: String,
     pub unread: u32,
     pub total: u32,
+    #[serde(default)]
+    pub special_use: String, // "\\Inbox", "\\Sent", "\\Drafts", "\\Trash", "\\Junk", "\\Archive", or ""
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +70,7 @@ pub struct Conversation {
     pub unread_count: u32,
     pub total_count: u32,
     pub messages: Vec<MessageRef>,
+    pub draft: Option<MessageRef>, // latest draft for this conversation
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +132,7 @@ struct RawEnvelope {
     seen: bool,
     flagged: bool,
     has_attachments: bool,
+    is_draft: bool,
 }
 
 fn parse_date_to_ts(date_str: &str) -> i64 {
@@ -230,10 +234,11 @@ fn extract_envelope(msg: &async_imap::types::Fetch, folder: &str) -> Option<RawE
     let flags: Vec<_> = msg.flags().collect();
     let seen = flags.iter().any(|f| matches!(f, async_imap::types::Flag::Seen));
     let flagged = flags.iter().any(|f| matches!(f, async_imap::types::Flag::Flagged));
+    let is_draft = flags.iter().any(|f| matches!(f, async_imap::types::Flag::Draft));
     let has_attachments = raw_headers.to_lowercase().contains("multipart/mixed");
 
     Some(RawEnvelope { uid, folder: folder.to_string(), subject, from_name, from_addr,
-        to_names, to_addrs, cc_addrs, date, date_ts, seen, flagged, has_attachments })
+        to_names, to_addrs, cc_addrs, date, date_ts, seen, flagged, has_attachments, is_draft })
 }
 
 fn clean_subject(subject: &str) -> String {
@@ -382,7 +387,22 @@ where
             Ok(s) => (s.exists, s.unseen.unwrap_or(0)),
             Err(_) => (0, 0),
         };
-        folders.push(Folder { name, delimiter, unread, total });
+        // Extract Special-Use attribute
+        let special_use = mailbox.attributes().iter()
+            .find_map(|attr| {
+                let s = format!("{:?}", attr);
+                // async-imap represents attributes as NameAttribute variants
+                if s.contains("Sent") { Some("\\Sent".to_string()) }
+                else if s.contains("Trash") { Some("\\Trash".to_string()) }
+                else if s.contains("Drafts") { Some("\\Drafts".to_string()) }
+                else if s.contains("Junk") { Some("\\Junk".to_string()) }
+                else if s.contains("Archive") { Some("\\Archive".to_string()) }
+                else { None }
+            })
+            .unwrap_or_default();
+        // INBOX is identified by name, not attribute
+        let special_use = if name.eq_ignore_ascii_case("INBOX") { "\\Inbox".to_string() } else { special_use };
+        folders.push(Folder { name, delimiter, unread, total, special_use });
     }
     Ok(folders)
 }
@@ -431,24 +451,54 @@ async fn fetch_conversations_impl<T>(
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + std::fmt::Debug,
 {
-    // Get folder list
+    // Get folder list and detect Special-Use folders by attributes
     let mailboxes = session.list(Some(""), Some("*"))
         .await.map_err(|e| format!("LIST: {e}"))?;
     let collected: Vec<_> = mailboxes.try_collect::<Vec<_>>()
         .await.map_err(|e| format!("Collect: {e}"))?;
-    let folder_list: Vec<Folder> = collected.iter().map(|m| Folder {
-        name: m.name().to_string(),
-        delimiter: m.delimiter().unwrap_or("/").to_string(),
-        unread: 0, total: 0,
-    }).collect();
+
+    let mut inbox_name = "INBOX".to_string();
+    let mut sent_name: Option<String> = None;
+    let mut drafts_name: Option<String> = None;
+
+    for m in &collected {
+        let name = m.name().to_string();
+        let attrs: Vec<String> = m.attributes().iter().map(|a| format!("{:?}", a)).collect();
+        let attrs_joined = attrs.join(" ");
+
+        if name.eq_ignore_ascii_case("INBOX") {
+            inbox_name = name;
+        } else if attrs_joined.contains("Sent") {
+            sent_name = Some(name);
+        } else if attrs_joined.contains("Drafts") {
+            drafts_name = Some(name);
+        }
+    }
+
+    // Fallback: find Sent by name if no attribute
+    if sent_name.is_none() {
+        let folder_list: Vec<Folder> = collected.iter().map(|m| Folder {
+            name: m.name().to_string(),
+            delimiter: m.delimiter().unwrap_or("/").to_string(),
+            unread: 0, total: 0, special_use: String::new(),
+        }).collect();
+        sent_name = find_sent_folder(&folder_list);
+    }
 
     // Fetch INBOX
-    let mut all_envelopes = fetch_folder_envelopes(session, "INBOX", limit).await?;
+    let mut all_envelopes = fetch_folder_envelopes(session, &inbox_name, limit).await?;
 
     // Fetch Sent
-    if let Some(sent_name) = find_sent_folder(&folder_list) {
-        if let Ok(sent_envs) = fetch_folder_envelopes(session, &sent_name, limit / 2).await {
+    if let Some(ref sname) = sent_name {
+        if let Ok(sent_envs) = fetch_folder_envelopes(session, sname, limit / 2).await {
             all_envelopes.extend(sent_envs);
+        }
+    }
+
+    // Fetch Drafts
+    if let Some(ref dname) = drafts_name {
+        if let Ok(draft_envs) = fetch_folder_envelopes(session, dname, limit / 4).await {
+            all_envelopes.extend(draft_envs);
         }
     }
 
@@ -504,11 +554,20 @@ where
             addr: cp_addr.clone(),
         }];
 
-        let last = msgs.last().unwrap();
+        // Separate drafts from regular messages
+        let draft = msgs.iter().rev().find(|m| m.is_draft)
+            .map(|m| MessageRef { folder: m.folder.clone(), uid: m.uid });
+        let regular_msgs: Vec<&RawEnvelope> = msgs.iter().filter(|m| !m.is_draft).collect();
+
+        if regular_msgs.is_empty() && draft.is_none() {
+            continue;
+        }
+
+        let last = regular_msgs.last().copied().unwrap_or(msgs.last().unwrap());
         let last_from = if last.from_addr == user_addr { "You".into() } else { last.from_name.clone() };
 
         // Which of our email addresses received this conversation?
-        let received_by = msgs.iter().rev()
+        let received_by = regular_msgs.iter().rev()
             .find(|m| m.from_addr != user_addr)
             .and_then(|m| {
                 m.to_addrs.iter().chain(m.cc_addrs.iter())
@@ -528,9 +587,10 @@ where
             last_date_ts: last.date_ts,
             last_preview: last.subject.clone(),
             last_from,
-            unread_count: msgs.iter().filter(|m| !m.seen).count() as u32,
-            total_count: msgs.len() as u32,
-            messages: msgs.iter().map(|m| MessageRef { folder: m.folder.clone(), uid: m.uid }).collect(),
+            unread_count: regular_msgs.iter().filter(|m| !m.seen).count() as u32,
+            total_count: regular_msgs.len() as u32,
+            messages: regular_msgs.iter().map(|m| MessageRef { folder: m.folder.clone(), uid: m.uid }).collect(),
+            draft,
         });
     }
 

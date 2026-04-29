@@ -61,6 +61,14 @@
   let quickReplySending = $state(false);
   let identityDropdownOpen = $state(false);
 
+  // Load draft into quick-reply input when conversation has a draft
+  $effect(() => {
+    const draft = mailStore.draftMessage;
+    if (draft && conv) {
+      quickReplyText = draft.text || "";
+    }
+  });
+
   // Identity for this conversation — pre-select based on received_by
   const matchedIdentity = $derived(
     conv ? identityStore.findByEmail(conv.received_by) : null
@@ -191,12 +199,6 @@
         <div class="center-status">No messages yet</div>
       {:else}
         {#each msgs as msg, i (msg.uid)}
-          <!-- Date separator -->
-          {#if i === 0 || !sameDay(msgs[i - 1].date_ts, msg.date_ts)}
-            <div class="date-separator">
-              <span>{formatDateSeparator(msg.date_ts)}</span>
-            </div>
-          {/if}
           <MessageBubble
             message={msg}
             isFirstInGroup={isFirstInGroup(i)}

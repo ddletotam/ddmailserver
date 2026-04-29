@@ -3,6 +3,7 @@ export interface Folder {
   delimiter: string;
   unread: number;
   total: number;
+  special_use: string; // "\\Inbox", "\\Sent", "\\Drafts", etc.
 }
 
 export interface ContactInfo {
@@ -29,6 +30,7 @@ export interface Conversation {
   unread_count: number;
   total_count: number;
   messages: MessageRef[];
+  draft: MessageRef | null;
 }
 
 export interface MessageEnvelope {
