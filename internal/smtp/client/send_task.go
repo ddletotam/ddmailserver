@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/parser"
 	"github.com/yourusername/mailserver/internal/task"
 )
 
@@ -21,6 +24,7 @@ type SendTask struct {
 	account       *models.Account
 	database      *db.DB
 	priority      int
+	messageID     string // Generated Message-ID for Sent dedup
 }
 
 // NewSendTask creates a new SMTP send task
@@ -110,6 +114,9 @@ func (t *SendTask) Execute(ctx context.Context) error {
 		return err
 	}
 
+	// Save to Sent folder
+	saveToSentFolder(t.database, t.outboxMessage.UserID, emailData, t.messageID)
+
 	log.Printf("Message %d sent successfully", t.outboxMessage.ID)
 	return nil
 }
@@ -171,7 +178,24 @@ func (t *SendTask) constructEmail() []byte {
 
 	var email strings.Builder
 
+	// Generate Message-ID
+	domain := "localhost"
+	if parts := strings.SplitN(t.outboxMessage.From, "@", 2); len(parts) == 2 {
+		// Extract domain from "Name <user@domain>" or "user@domain"
+		d := parts[1]
+		d = strings.TrimRight(d, ">")
+		d = strings.TrimSpace(d)
+		if d != "" {
+			domain = d
+		}
+	}
+	randBytes := make([]byte, 8)
+	rand.Read(randBytes)
+	t.messageID = fmt.Sprintf("<%d.%s@%s>", time.Now().UnixNano(), hex.EncodeToString(randBytes), domain)
+
 	// Headers
+	email.WriteString(fmt.Sprintf("Message-ID: %s\r\n", t.messageID))
+	email.WriteString(fmt.Sprintf("Date: %s\r\n", time.Now().Format("Mon, 02 Jan 2006 15:04:05 -0700")))
 	email.WriteString(fmt.Sprintf("From: %s\r\n", t.outboxMessage.From))
 	email.WriteString(fmt.Sprintf("To: %s\r\n", t.outboxMessage.To))
 	if t.outboxMessage.Cc != "" {
@@ -231,4 +255,74 @@ func (t *SendTask) constructEmail() []byte {
 	}
 
 	return []byte(email.String())
+}
+
+// saveToSentFolder saves a copy of a sent email to the user's Sent folder
+func saveToSentFolder(database *db.DB, userID int64, emailData []byte, messageID string) {
+	sentFolder, err := database.GetLocalFolderByType(userID, "sent")
+	if err != nil || sentFolder == nil {
+		log.Printf("saveToSentFolder: no Sent folder for user %d", userID)
+		return
+	}
+
+	// Check dedup
+	exists, err := database.MessageExistsInFolder(sentFolder.ID, messageID)
+	if err == nil && exists {
+		log.Printf("saveToSentFolder: message %s already in Sent, skipping", messageID)
+		return
+	}
+
+	// Parse the email
+	p := parser.New()
+	parsed, err := p.ParseBytes(emailData)
+	if err != nil {
+		log.Printf("saveToSentFolder: failed to parse email: %v", err)
+		return
+	}
+
+	// Get next UID
+	nextUID, err := database.GetNextUIDForFolder(sentFolder.ID)
+	if err != nil {
+		log.Printf("saveToSentFolder: failed to get UID: %v", err)
+		return
+	}
+
+	// Convert addresses to strings
+	fromStr := ""
+	if parsed.From != nil {
+		fromStr = parsed.From.String()
+	}
+	toStrs := make([]string, 0, len(parsed.To))
+	for _, a := range parsed.To {
+		toStrs = append(toStrs, a.String())
+	}
+	ccStrs := make([]string, 0, len(parsed.Cc))
+	for _, a := range parsed.Cc {
+		ccStrs = append(ccStrs, a.String())
+	}
+
+	msg := &models.Message{
+		UserID:    userID,
+		FolderID:  sentFolder.ID,
+		MessageID: parsed.GetMessageID(),
+		Subject:   parsed.Subject,
+		From:      fromStr,
+		To:        strings.Join(toStrs, ", "),
+		Cc:        strings.Join(ccStrs, ", "),
+		Date:      parsed.Date,
+		Body:      parsed.Body,
+		BodyHTML:  parsed.BodyHTML,
+		Size:      int64(len(emailData)),
+		UID:       nextUID,
+		Seen:      true, // Sent messages are always read
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	if err := database.CreateMessage(msg); err != nil {
+		log.Printf("saveToSentFolder: failed to save to Sent: %v", err)
+		return
+	}
+
+	log.Printf("saveToSentFolder: saved message %s to Sent folder", messageID)
 }

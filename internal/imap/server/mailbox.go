@@ -20,6 +20,7 @@ import (
 // Mailbox represents an IMAP mailbox
 type Mailbox struct {
 	name          string
+	folderType    string // inbox, sent, drafts, trash, junk, archive, custom
 	user          *User
 	database      *db.DB
 	folderID      int64 // Local folder ID
@@ -31,17 +32,29 @@ func (m *Mailbox) Name() string {
 	return m.name
 }
 
-// Info returns mailbox information
+// Info returns mailbox information with RFC 6154 Special-Use attributes
 func (m *Mailbox) Info() (*imap.MailboxInfo, error) {
-	log.Printf("Getting info for mailbox %s", m.name)
-
-	info := &imap.MailboxInfo{
-		Attributes: []string{},
-		Delimiter:  "/",
-		Name:       m.name,
+	var attrs []string
+	switch m.folderType {
+	case "inbox":
+		// INBOX is implied by name, but some clients check attribute
+	case "sent":
+		attrs = append(attrs, "\\Sent")
+	case "trash":
+		attrs = append(attrs, "\\Trash")
+	case "drafts":
+		attrs = append(attrs, "\\Drafts")
+	case "junk":
+		attrs = append(attrs, "\\Junk")
+	case "archive":
+		attrs = append(attrs, "\\Archive")
 	}
 
-	return info, nil
+	return &imap.MailboxInfo{
+		Attributes: attrs,
+		Delimiter:  "/",
+		Name:       m.name,
+	}, nil
 }
 
 // Status returns mailbox status
@@ -108,9 +121,11 @@ func (m *Mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error) {
 
 // SetSubscribed sets the mailbox subscription status
 func (m *Mailbox) SetSubscribed(subscribed bool) error {
-	log.Printf("SetSubscribed not implemented for mailbox %s", m.name)
-	// TODO: Implement subscription tracking if needed
-	return nil
+	log.Printf("SetSubscribed %s=%v for user %s", m.name, subscribed, m.user.username)
+	if subscribed {
+		return m.database.SubscribeFolder(m.user.userID, m.folderID)
+	}
+	return m.database.UnsubscribeFolder(m.user.userID, m.folderID)
 }
 
 // Check performs a checkpoint of the mailbox
@@ -243,7 +258,7 @@ func (m *Mailbox) extractTextQuery(criteria *imap.SearchCriteria) string {
 
 // CreateMessage creates a new message (APPEND command)
 func (m *Mailbox) CreateMessage(flags []string, date time.Time, body imap.Literal) error {
-	log.Printf("CreateMessage called for mailbox %s with %d flags", m.name, len(flags))
+	log.Printf("CreateMessage called for mailbox %s (type=%s) with %d flags", m.name, m.folderType, len(flags))
 
 	// Read the message body
 	data, err := io.ReadAll(body)
@@ -259,6 +274,15 @@ func (m *Mailbox) CreateMessage(flags []string, date time.Time, body imap.Litera
 		log.Printf("CreateMessage: failed to parse message: %v", err)
 		// Continue with minimal info even if parsing fails
 		parsed = &parser.ParsedMessage{}
+	}
+
+	// Dedup for Sent folder: if message with same Message-ID already exists, skip
+	if m.folderType == "sent" && parsed.GetMessageID() != "" {
+		exists, err := m.database.MessageExistsInFolder(m.folderID, parsed.GetMessageID())
+		if err == nil && exists {
+			log.Printf("CreateMessage: dedup — message %s already in Sent, skipping", parsed.GetMessageID())
+			return nil // Return OK to client
+		}
 	}
 
 	// Get next UID
