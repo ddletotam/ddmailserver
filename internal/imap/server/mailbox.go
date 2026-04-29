@@ -442,7 +442,7 @@ func (m *Mailbox) CopyMessages(uid bool, seqSet *imap.SeqSet, destName string) e
 	log.Printf("CopyMessages called: uid=%v, seqSet=%v, destName=%s", uid, seqSet, destName)
 
 	// Get or create destination folder
-	destFolder, err := m.database.GetOrCreateFolderByNameAndUser(m.user.userID, destName, "custom")
+	destFolder, err := m.database.GetOrCreateFolderByNameAndUser(m.user.userID, destName, inferFolderType(destName))
 	if err != nil {
 		log.Printf("CopyMessages: failed to get/create destination folder %s: %v", destName, err)
 		return fmt.Errorf("failed to get destination folder: %w", err)
@@ -489,7 +489,7 @@ func (m *Mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string) e
 	log.Printf("MoveMessages called: uid=%v, seqSet=%v, destName=%s", uid, seqSet, destName)
 
 	// Get or create destination folder
-	destFolder, err := m.database.GetOrCreateFolderByNameAndUser(m.user.userID, destName, "custom")
+	destFolder, err := m.database.GetOrCreateFolderByNameAndUser(m.user.userID, destName, inferFolderType(destName))
 	if err != nil {
 		log.Printf("MoveMessages: failed to get/create destination folder %s: %v", destName, err)
 		return fmt.Errorf("failed to get destination folder: %w", err)
@@ -554,8 +554,7 @@ func (m *Mailbox) Expunge() error {
 		return err
 	}
 
-	isTrash := folder.Type == "trash" || strings.ToLower(folder.Name) == "trash" ||
-		strings.ToLower(folder.Name) == "deleted" || strings.ToLower(folder.Name) == "deleted items"
+	isTrash := m.folderType == "trash" || folder.Type == "trash"
 
 	// Get messages marked as deleted (for expunge)
 	deletedMessages, err := m.database.GetDeletedMessagesByFolder(m.folderID)

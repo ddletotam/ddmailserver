@@ -79,6 +79,11 @@ func (t *SendTask) Execute(ctx context.Context) error {
 	var emailData []byte
 	if len(t.outboxMessage.RawEmail) > 0 {
 		emailData = t.outboxMessage.RawEmail
+		// Extract Message-ID from raw email for Sent dedup
+		p := parser.New()
+		if parsed, err := p.ParseBytes(emailData); err == nil {
+			t.messageID = parsed.GetMessageID()
+		}
 	} else {
 		emailData = t.constructEmail()
 	}
