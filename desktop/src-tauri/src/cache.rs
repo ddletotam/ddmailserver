@@ -191,6 +191,7 @@ impl Cache {
                 unread_count,
                 total_count,
                 messages,
+                draft: None, // Drafts not cached
             });
         }
 
