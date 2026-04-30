@@ -3,7 +3,7 @@
   import { permissionStore } from "../stores/permissions.svelte";
   import { themeStore } from "../stores/theme.svelte";
   import { fetchMessageSource } from "../api/imap";
-  import { formatTime, formatSize, hashColor } from "../utils/format";
+  import { formatDateTime, formatSize, hashColor } from "../utils/format";
   import { resolveDisplayContent, extractBlockedDomains, extractEmailDomains, type DisplayMode, type ContentPermissions } from "../utils/html";
   import { t } from "../i18n/index.svelte";
   import SandboxedEmail from "./SandboxedEmail.svelte";
@@ -114,14 +114,8 @@
   class:has-html={displayContent.type === "html"}
   oncontextmenu={handleContextMenu}
 >
-  {#if isFirstInGroup && !message.is_outgoing}
-    <div class="sender-name" style:color={hashColor(message.from_addr)}>
-      {message.from}
-    </div>
-  {/if}
-
   <div class="bubble" class:outgoing={message.is_outgoing} class:first={isFirstInGroup} class:last={isLastInGroup}>
-    {#if message.subject && isFirstInGroup}
+    {#if message.subject}
       <div class="subject">{message.subject}</div>
     {/if}
 
@@ -157,7 +151,7 @@
     {/if}
 
     <div class="meta-row">
-      <span class="time">{formatTime(message.date_ts)}</span>
+      <span class="time">{formatDateTime(message.date_ts)}</span>
       {#if message.is_outgoing}
         <span class="checkmark" title="Sent">
           <svg width="16" height="11" viewBox="0 0 16 11">
@@ -275,7 +269,7 @@
     align-items: flex-start;
     max-width: 85%;
     min-width: 25%;
-    margin-bottom: 1px;
+    margin-bottom: 6px;
   }
   /* HTML emails: stretch bubble to full available width */
   .bubble-wrap.has-html {
@@ -286,17 +280,6 @@
   .bubble-wrap.outgoing {
     align-items: flex-end;
     align-self: flex-end;
-  }
-
-  .bubble-wrap.first { margin-top: 6px; }
-  .bubble-wrap.last { margin-bottom: 6px; }
-  .bubble-wrap.single { margin-top: 6px; margin-bottom: 6px; }
-
-  .sender-name {
-    font-size: var(--font-size-xs);
-    font-weight: 600;
-    padding: 0 12px;
-    margin-bottom: 1px;
   }
 
   .bubble {

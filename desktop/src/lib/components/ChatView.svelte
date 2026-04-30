@@ -57,17 +57,93 @@
   function closeComposer() { showComposer = false; replyMode = null; }
 
   // Quick-reply
-  let quickReplyText = $state("");
   let quickReplySending = $state(false);
   let identityDropdownOpen = $state(false);
+  let replyEditorRef = $state<HTMLDivElement | null>(null);
+  let formatMenu = $state<{ x: number; y: number } | null>(null);
 
-  // Load draft into quick-reply input when conversation has a draft
+  // Load draft into editor when conversation has a draft
   $effect(() => {
     const draft = mailStore.draftMessage;
-    if (draft && conv) {
-      quickReplyText = draft.text || "";
+    if (draft && conv && replyEditorRef) {
+      replyEditorRef.innerText = draft.text || "";
     }
   });
+
+  function getEditorText(): string {
+    return replyEditorRef?.innerText?.trim() ?? "";
+  }
+
+  function getEditorHtml(): string {
+    if (!replyEditorRef) return "";
+    let html = replyEditorRef.innerHTML;
+    // Clean up contenteditable artifacts
+    html = html.replace(/<div><br><\/div>/gi, "<br>");
+    html = html.replace(/<div>/gi, "<br>");
+    html = html.replace(/<\/div>/gi, "");
+    if (html === "<br>") return "";
+    return html;
+  }
+
+  function clearEditor() {
+    if (replyEditorRef) replyEditorRef.innerHTML = "";
+  }
+
+  function handleEditorKeydown(e: KeyboardEvent) {
+    // Ctrl+B/I/U
+    if (e.ctrlKey || e.metaKey) {
+      if (e.key === "b") { e.preventDefault(); document.execCommand("bold"); }
+      else if (e.key === "i") { e.preventDefault(); document.execCommand("italic"); }
+      else if (e.key === "u") { e.preventDefault(); document.execCommand("underline"); }
+    }
+    // Enter to send, Shift+Enter for newline
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendQuickReply();
+    }
+  }
+
+  function handleEditorPaste(e: ClipboardEvent) {
+    // Auto-linkify pasted URLs
+    const text = e.clipboardData?.getData("text/plain");
+    if (text && /^https?:\/\/\S+$/.test(text.trim())) {
+      e.preventDefault();
+      const url = text.trim();
+      document.execCommand("insertHTML", false, `<a href="${url}">${url}</a>`);
+    }
+  }
+
+  function handleEditorInput() {
+    // Auto-linkify disabled — was causing input event loops
+  }
+
+  function showFormatMenu(e: MouseEvent) {
+    e.preventDefault();
+    const menuW = 160, menuH = 150;
+    const x = Math.min(e.clientX, window.innerWidth - menuW);
+    const y = Math.min(e.clientY, window.innerHeight - menuH);
+    formatMenu = { x, y };
+  }
+
+  function closeFormatMenu() {
+    formatMenu = null;
+  }
+
+  function execFormat(cmd: string) {
+    document.execCommand(cmd);
+    formatMenu = null;
+    replyEditorRef?.focus();
+  }
+
+  function insertLink() {
+    formatMenu = null;
+    const url = prompt("URL:");
+    if (!url) return;
+    const sel = window.getSelection();
+    const text = sel && sel.toString().trim() ? sel.toString() : url;
+    document.execCommand("insertHTML", false, `<a href="${url}">${text}</a>`);
+    replyEditorRef?.focus();
+  }
 
   // Identity for this conversation — pre-select based on received_by
   const matchedIdentity = $derived(
@@ -84,7 +160,8 @@
 
   async function sendQuickReply() {
     const account = accountStore.activeAccount;
-    if (!account || !quickReplyText.trim() || !conv || !lastMessage) return;
+    const text = getEditorText();
+    if (!account || !text || !conv || !lastMessage) return;
 
     quickReplySending = true;
     try {
@@ -92,14 +169,14 @@
       const subject = lastMessage.subject.startsWith("Re:")
         ? lastMessage.subject
         : `Re: ${lastMessage.subject}`;
-      const text = quickReplyText.trim();
+      const html = getEditorHtml();
       const msg: OutgoingMessage = {
         from: selectedFromEmail || account.email,
         to: [replyTo],
         cc: [],
         subject,
         text,
-        html: `<div style="font-family:sans-serif;font-size:14px">${text.replace(/\n/g, "<br>")}</div>`,
+        html: html ? `<div style="font-family:sans-serif;font-size:14px">${html}</div>` : `<div style="font-family:sans-serif;font-size:14px">${text.replace(/\n/g, "<br>")}</div>`,
         in_reply_to: null,
         references: null,
       };
@@ -107,7 +184,7 @@
         ...mailStore.smtpArgs(account),
         message: msg,
       });
-      quickReplyText = "";
+      clearEditor();
       // Refresh conversation
       mailStore.openConversation(account, conv.id);
     } catch (e) {
@@ -132,6 +209,12 @@
       const target = e.target as HTMLElement;
       if (!target.closest('.identity-picker')) {
         identityDropdownOpen = false;
+      }
+    }
+    if (formatMenu) {
+      const target = e.target as HTMLElement;
+      if (!target.closest('.format-menu')) {
+        formatMenu = null;
       }
     }
   }
@@ -259,21 +342,24 @@
             </div>
           {/if}
 
-          <!-- Text input -->
-          <input
-            class="reply-input"
-            type="text"
-            placeholder="Write a reply..."
-            bind:value={quickReplyText}
-            onkeydown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendQuickReply(); } }}
-            disabled={quickReplySending}
-          />
+          <!-- Rich text editor -->
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="reply-editor"
+            contenteditable={!quickReplySending}
+            bind:this={replyEditorRef}
+            onkeydown={handleEditorKeydown}
+            onpaste={handleEditorPaste}
+            oninput={handleEditorInput}
+            oncontextmenu={showFormatMenu}
+            data-placeholder="Write a reply..."
+          ></div>
 
           <!-- Send button -->
           <button
             class="btn-send"
             onclick={sendQuickReply}
-            disabled={quickReplySending || !quickReplyText.trim()}
+            disabled={quickReplySending}
             title="Send"
           >
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -312,6 +398,18 @@
     {/if}
   {/if}
 </main>
+
+<!-- Format context menu -->
+{#if formatMenu}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="format-menu" style:left="{formatMenu.x}px" style:top="{formatMenu.y}px"
+    onclick={(e) => e.stopPropagation()}>
+    <button onclick={() => execFormat("bold")}><b>Bold</b> <span class="shortcut">Ctrl+B</span></button>
+    <button onclick={() => execFormat("italic")}><i>Italic</i> <span class="shortcut">Ctrl+I</span></button>
+    <button onclick={() => execFormat("underline")}><u>Underline</u> <span class="shortcut">Ctrl+U</span></button>
+    <button onclick={insertLink}>Link...</button>
+  </div>
+{/if}
 
 <style>
   .chat-view {
@@ -505,19 +603,51 @@
     align-items: center;
     gap: 6px;
   }
-  .reply-input {
+  .reply-editor {
     flex: 1;
     padding: 8px 12px;
     border: 1px solid var(--border-color);
-    border-radius: 20px;
+    border-radius: 16px;
     font-size: var(--font-size);
     font-family: var(--font-family);
     color: var(--text-primary);
     background: var(--bg-secondary);
     outline: none;
+    min-height: 20px;
+    max-height: 120px;
+    overflow-y: auto;
+    line-height: 1.4;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
   }
-  .reply-input:focus { border-color: var(--text-accent); }
-  .reply-input::placeholder { color: var(--text-secondary); }
+  .reply-editor:focus { border-color: var(--text-accent); }
+  .reply-editor:empty::before {
+    content: attr(data-placeholder);
+    color: var(--text-secondary);
+    pointer-events: none;
+  }
+  .reply-editor :global(a) { color: var(--text-accent); text-decoration: underline; }
+
+  /* Format context menu */
+  .format-menu {
+    position: fixed;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 200;
+    overflow: hidden;
+    min-width: 160px;
+  }
+  .format-menu button {
+    display: flex; align-items: center; justify-content: space-between;
+    width: 100%; padding: 8px 14px;
+    border: none; background: none; cursor: pointer;
+    font-size: var(--font-size-sm); font-family: var(--font-family);
+    color: var(--text-primary); white-space: nowrap;
+  }
+  .format-menu button:hover { background: var(--bg-hover); }
+  .format-menu .shortcut { color: var(--text-secondary); font-size: var(--font-size-xs); margin-left: 16px; }
 
   .btn-action {
     width: 36px; height: 36px;
