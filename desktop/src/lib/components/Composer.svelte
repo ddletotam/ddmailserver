@@ -8,13 +8,16 @@
     mode: "reply" | "forward" | null;
     originalMessage: MessageBody | null;
     onclose: () => void;
+    prefillTo?: string;
+    focusField?: "to" | "subject" | "body";
   }
-  let { mode, originalMessage, onclose }: Props = $props();
+  let { mode, originalMessage, onclose, prefillTo = "", focusField = "to" }: Props = $props();
 
   const account = $derived(accountStore.activeAccount);
 
   // Pre-fill fields based on mode (computed once from props on mount)
   function initTo(): string {
+    if (prefillTo) return prefillTo;
     return mode === "reply" && originalMessage ? originalMessage.from_addr : "";
   }
   function initSubject(): string {
@@ -40,11 +43,32 @@
   let sending = $state(false);
   let error = $state("");
 
+  let toInputEl = $state<HTMLInputElement | null>(null);
+  let subjectInputEl = $state<HTMLInputElement | null>(null);
+  let bodyTextareaEl = $state<HTMLTextAreaElement | null>(null);
+
+  $effect(() => {
+    // Focus the requested field once on mount.
+    const target = focusField === "subject" ? subjectInputEl
+      : focusField === "body" ? bodyTextareaEl
+      : toInputEl;
+    target?.focus();
+  });
+
   async function handleSend() {
     if (!account || !to.trim()) return;
 
     sending = true;
     error = "";
+
+    // Threading headers when replying: In-Reply-To = parent Message-Id, References = chain + parent.
+    let inReplyTo: string | null = null;
+    let references: string | null = null;
+    if (mode === "reply" && originalMessage?.message_id) {
+      inReplyTo = `<${originalMessage.message_id}>`;
+      const chain = [...(originalMessage.references ?? []), originalMessage.message_id];
+      references = chain.map(id => `<${id}>`).join(" ");
+    }
 
     const msg: OutgoingMessage = {
       from: account.email,
@@ -53,8 +77,8 @@
       subject,
       text: bodyText,
       html: `<div style="font-family: sans-serif; font-size: 14px;">${bodyText.replace(/\n/g, "<br>")}</div>`,
-      in_reply_to: mode === "reply" && originalMessage ? null : null, // TODO: message-id
-      references: null,
+      in_reply_to: inReplyTo,
+      references,
     };
 
     try {
@@ -86,7 +110,7 @@
   <div class="fields">
     <div class="field-row">
       <label for="compose-to">To:</label>
-      <input id="compose-to" type="text" bind:value={to} placeholder="recipient@example.com" />
+      <input id="compose-to" type="text" bind:value={to} bind:this={toInputEl} placeholder="recipient@example.com" />
     </div>
     <div class="field-row">
       <label for="compose-cc">Cc:</label>
@@ -94,7 +118,7 @@
     </div>
     <div class="field-row">
       <label for="compose-subject">Subject:</label>
-      <input id="compose-subject" type="text" bind:value={subject} placeholder="Subject" />
+      <input id="compose-subject" type="text" bind:value={subject} bind:this={subjectInputEl} placeholder="Subject" />
     </div>
   </div>
 
@@ -102,6 +126,7 @@
   <textarea
     class="body-input"
     bind:value={bodyText}
+    bind:this={bodyTextareaEl}
     placeholder="Write a message..."
   ></textarea>
 

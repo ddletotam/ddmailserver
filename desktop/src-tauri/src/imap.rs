@@ -6,7 +6,7 @@ use futures::TryStreamExt;
 
 use md5::{Md5, Digest};
 
-use crate::cache::Cache;
+use crate::cache::{Cache, Contact};
 use crate::session::{Credentials, SessionPool};
 
 // ── Identity ──
@@ -65,8 +65,7 @@ pub struct Conversation {
     pub is_group: bool,
     pub last_date: String,
     pub last_date_ts: i64,
-    pub last_preview: String,
-    pub last_from: String,
+    pub last_subject: String,
     pub unread_count: u32,
     pub total_count: u32,
     pub messages: Vec<MessageRef>,
@@ -89,6 +88,9 @@ pub struct MessageEnvelope {
     pub flagged: bool,
     pub has_attachments: bool,
     pub is_outgoing: bool,
+    pub message_id: String,
+    pub in_reply_to: String,
+    pub references: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +108,9 @@ pub struct MessageBody {
     pub text: Option<String>,
     pub attachments: Vec<Attachment>,
     pub is_outgoing: bool,
+    pub message_id: String,
+    pub in_reply_to: String,
+    pub references: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +138,9 @@ struct RawEnvelope {
     flagged: bool,
     has_attachments: bool,
     is_draft: bool,
+    message_id: String,
+    in_reply_to: String,
+    references: Vec<String>,
 }
 
 fn parse_date_to_ts(date_str: &str) -> i64 {
@@ -237,8 +245,69 @@ fn extract_envelope(msg: &async_imap::types::Fetch, folder: &str) -> Option<RawE
     let is_draft = flags.iter().any(|f| matches!(f, async_imap::types::Flag::Draft));
     let has_attachments = raw_headers.to_lowercase().contains("multipart/mixed");
 
+    let message_id = env.message_id.as_ref()
+        .map(|b| String::from_utf8_lossy(b).to_string())
+        .map(|s| normalize_msg_id(&s))
+        .unwrap_or_default();
+    let in_reply_to = env.in_reply_to.as_ref()
+        .map(|b| String::from_utf8_lossy(b).to_string())
+        .map(|s| normalize_msg_id(&s))
+        .unwrap_or_default();
+    let references = parse_references(&raw_headers);
+
     Some(RawEnvelope { uid, folder: folder.to_string(), subject, from_name, from_addr,
-        to_names, to_addrs, cc_addrs, date, date_ts, seen, flagged, has_attachments, is_draft })
+        to_names, to_addrs, cc_addrs, date, date_ts, seen, flagged, has_attachments, is_draft,
+        message_id, in_reply_to, references })
+}
+
+/// Normalize a single Message-Id: strip surrounding `<>` and whitespace.
+fn normalize_msg_id(s: &str) -> String {
+    s.trim().trim_start_matches('<').trim_end_matches('>').trim().to_string()
+}
+
+/// Extract a list of Message-Ids (e.g. from a References header value).
+fn extract_msg_ids(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0i32;
+    for ch in value.chars() {
+        match ch {
+            '<' => { depth += 1; current.clear(); }
+            '>' => {
+                if depth > 0 {
+                    depth -= 1;
+                    let id = current.trim().to_string();
+                    if !id.is_empty() { out.push(id); }
+                    current.clear();
+                }
+            }
+            _ => { if depth > 0 { current.push(ch); } }
+        }
+    }
+    out
+}
+
+/// Parse the References header into a list of normalized Message-Ids.
+fn parse_references(raw_headers: &str) -> Vec<String> {
+    let mut in_ref = false;
+    let mut buf = String::new();
+    for line in raw_headers.lines() {
+        if line.to_ascii_lowercase().starts_with("references:") {
+            in_ref = true;
+            buf.push_str(line["references:".len()..].trim_start());
+            continue;
+        }
+        if in_ref {
+            // Continuation lines start with whitespace
+            if line.starts_with(' ') || line.starts_with('\t') {
+                buf.push(' ');
+                buf.push_str(line.trim());
+            } else {
+                break;
+            }
+        }
+    }
+    extract_msg_ids(&buf)
 }
 
 fn clean_subject(subject: &str) -> String {
@@ -315,7 +384,7 @@ where
     let start = total.saturating_sub(limit).max(1);
     let range = format!("{start}:{total}");
     let messages = session
-        .fetch(&range, "(UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (CONTENT-TYPE FROM)])")
+        .fetch(&range, "(UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (CONTENT-TYPE FROM REFERENCES)])")
         .await.map_err(|e| format!("FETCH {folder}: {e}"))?;
 
     let mut envelopes = Vec::new();
@@ -423,14 +492,22 @@ pub async fn fetch_conversations(
     let user_addr = user_email.to_lowercase();
     let key = account_key(&host, &username);
 
+    // Our identity addresses come from the cached identity list; fall back to user_addr only.
+    let mut our_addrs: Vec<String> = cache.load_identities(&key)
+        .map(|ids| ids.into_iter().map(|i| i.email.to_lowercase()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if !our_addrs.iter().any(|a| a == &user_addr) {
+        our_addrs.push(user_addr.clone());
+    }
+
     let result = if use_tls {
         let mut session = connect_tls(&host, port, &username, &password).await?;
-        let r = fetch_conversations_impl(&mut session, &user_addr, limit).await;
+        let r = fetch_conversations_impl(&mut session, &user_addr, &our_addrs, limit).await;
         session.logout().await.ok();
         r
     } else {
         let mut session = connect_plain(&host, port, &username, &password).await?;
-        let r = fetch_conversations_impl(&mut session, &user_addr, limit).await;
+        let r = fetch_conversations_impl(&mut session, &user_addr, &our_addrs, limit).await;
         session.logout().await.ok();
         r
     };
@@ -446,6 +523,7 @@ pub async fn fetch_conversations(
 async fn fetch_conversations_impl<T>(
     session: &mut async_imap::Session<T>,
     user_addr: &str,
+    our_addrs: &[String],
     limit: u32,
 ) -> Result<Vec<Conversation>, String>
 where
@@ -502,91 +580,83 @@ where
         }
     }
 
-    // Group into conversations.
-    // Telegram-like: counterpart = sender (for received) or first recipient (for sent).
-    // CC is ignored for grouping — every conversation is 1-on-1 with the primary counterpart.
-    let mut conv_map: HashMap<String, Vec<RawEnvelope>> = HashMap::new();
+    // Group into conversations by (counterpart, my_identity) pair.
+    // Same counterpart with two different identities = two separate conversation rows.
+    // Both sides of the key are lowercased so the conversation `id` is canonical and matches
+    // whatever the frontend constructs when synthesising a target id (search clicks, etc.).
+    let is_ours = |a: &str| {
+        let lc = a.to_lowercase();
+        our_addrs.iter().any(|o| *o == lc)
+    };
 
+    let mut conv_map: HashMap<(String, String), Vec<RawEnvelope>> = HashMap::new();
     for env in all_envelopes {
-        let key = if env.from_addr == user_addr {
-            // Outgoing: counterpart = first To recipient
-            env.to_addrs.first().cloned().unwrap_or_else(|| user_addr.to_string())
+        let from_lc = env.from_addr.to_lowercase();
+        let (my_id, cp) = if is_ours(&from_lc) {
+            // Outgoing: my_id = sender; counterpart = first non-self recipient (To then Cc).
+            let cp = env.to_addrs.iter().chain(env.cc_addrs.iter())
+                .map(|a| a.to_lowercase())
+                .find(|a| !is_ours(a))
+                .or_else(|| env.to_addrs.first().map(|a| a.to_lowercase()))
+                .unwrap_or_default();
+            (from_lc, cp)
         } else {
-            // Incoming: counterpart = sender
-            env.from_addr.clone()
+            // Incoming: my_id = first of our addresses found in To/Cc; counterpart = sender.
+            let my_id = env.to_addrs.iter().chain(env.cc_addrs.iter())
+                .map(|a| a.to_lowercase())
+                .find(|a| is_ours(a))
+                .unwrap_or_else(|| user_addr.to_string());
+            (my_id, from_lc)
         };
-        conv_map.entry(key).or_default().push(env);
+        if cp.is_empty() { continue; }
+        conv_map.entry((my_id, cp)).or_default().push(env);
     }
 
     let mut conversations: Vec<Conversation> = Vec::new();
 
-    for (key, mut msgs) in conv_map {
+    for ((my_id, cp_addr), mut msgs) in conv_map {
         msgs.sort_by_key(|m| m.date_ts);
 
-        // All conversations are 1-on-1 (grouped by single counterpart)
-        let is_group = false;
-
-        // Label = counterpart's display name, fallback to email
-        let cp_addr = &key;
-
-        // Try to find display name from FROM (when they sent us mail)
+        // Display name for the counterpart: try FROM names (when they wrote to us),
+        // then TO names (when we wrote to them). Drop names that look like raw addresses.
         let cp_name = msgs.iter()
-            .find(|m| m.from_addr == *cp_addr && !m.from_name.is_empty())
+            .find(|m| m.from_addr.eq_ignore_ascii_case(&cp_addr) && !m.from_name.is_empty())
             .map(|m| clean_display_name(&m.from_name))
             .filter(|n| !n.is_empty() && !n.contains('@'))
-            // Fallback: look in TO names (when we sent mail to them)
             .or_else(|| msgs.iter().flat_map(|m|
                 m.to_addrs.iter().zip(m.to_names.iter())
-                    .filter(|(a, _)| a.as_str() == cp_addr.as_str())
+                    .filter(|(a, _)| a.eq_ignore_ascii_case(&cp_addr))
                     .map(|(_, n)| clean_display_name(n))
             ).find(|n| !n.is_empty() && !n.contains('@')))
             .unwrap_or_default();
 
-        let label = if cp_name.is_empty() {
-            // No display name — show full email
-            cp_addr.clone()
-        } else {
-            cp_name.clone()
-        };
+        let label = if cp_name.is_empty() { cp_addr.clone() } else { cp_name.clone() };
 
         let counterparts = vec![ContactInfo {
             name: cp_name,
             addr: cp_addr.clone(),
         }];
 
-        // Separate drafts from regular messages
+        // Separate drafts from regular messages.
         let draft = msgs.iter().rev().find(|m| m.is_draft)
             .map(|m| MessageRef { folder: m.folder.clone(), uid: m.uid });
         let regular_msgs: Vec<&RawEnvelope> = msgs.iter().filter(|m| !m.is_draft).collect();
 
-        if regular_msgs.is_empty() && draft.is_none() {
-            continue;
-        }
+        if regular_msgs.is_empty() && draft.is_none() { continue; }
 
         let last = regular_msgs.last().copied().unwrap_or(msgs.last().unwrap());
-        let last_from = if last.from_addr == user_addr { "You".into() } else { last.from_name.clone() };
 
-        // Which of our email addresses received this conversation?
-        let received_by = regular_msgs.iter().rev()
-            .find(|m| m.from_addr != user_addr)
-            .and_then(|m| {
-                m.to_addrs.iter().chain(m.cc_addrs.iter())
-                    .find(|a| a.as_str() != cp_addr.as_str())
-                    .cloned()
-            })
-            .unwrap_or_else(|| user_addr.to_string());
-
+        let id = format!("{}|{}", my_id, cp_addr);
         conversations.push(Conversation {
-            id: key,
+            id,
             label,
             avatar_hash: gravatar_hash(&counterparts[0].addr),
-            received_by,
+            received_by: my_id,
             counterparts,
-            is_group,
+            is_group: false,
             last_date: last.date.clone(),
             last_date_ts: last.date_ts,
-            last_preview: last.subject.clone(),
-            last_from,
+            last_subject: last.subject.clone(),
             unread_count: regular_msgs.iter().filter(|m| !m.seen).count() as u32,
             total_count: regular_msgs.len() as u32,
             messages: regular_msgs.iter().map(|m| MessageRef { folder: m.folder.clone(), uid: m.uid }).collect(),
@@ -607,14 +677,21 @@ pub async fn fetch_conversation_messages(
     let user_addr = user_email.to_lowercase();
     let key = account_key(&host, &username);
 
+    let mut our_addrs: Vec<String> = cache.load_identities(&key)
+        .map(|ids| ids.into_iter().map(|i| i.email.to_lowercase()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if !our_addrs.iter().any(|a| a == &user_addr) {
+        our_addrs.push(user_addr.clone());
+    }
+
     let result = if use_tls {
         let mut session = connect_tls(&host, port, &username, &password).await?;
-        let r = fetch_bodies_impl(&mut session, &user_addr, &messages).await;
+        let r = fetch_bodies_impl(&mut session, &our_addrs, &messages).await;
         session.logout().await.ok();
         r
     } else {
         let mut session = connect_plain(&host, port, &username, &password).await?;
-        let r = fetch_bodies_impl(&mut session, &user_addr, &messages).await;
+        let r = fetch_bodies_impl(&mut session, &our_addrs, &messages).await;
         session.logout().await.ok();
         r
     };
@@ -629,7 +706,7 @@ pub async fn fetch_conversation_messages(
 
 async fn fetch_bodies_impl<T>(
     session: &mut async_imap::Session<T>,
-    user_addr: &str,
+    our_addrs: &[String],
     message_refs: &[MessageRef],
 ) -> Result<Vec<MessageBody>, String>
 where
@@ -676,15 +753,29 @@ where
                 .map(|h| h.get_value()).unwrap_or_default();
             let date_ts = parse_date_to_ts(&date);
 
+            let message_id = parsed.headers.iter()
+                .find(|h| h.get_key().eq_ignore_ascii_case("message-id"))
+                .map(|h| normalize_msg_id(&h.get_value())).unwrap_or_default();
+            let in_reply_to = parsed.headers.iter()
+                .find(|h| h.get_key().eq_ignore_ascii_case("in-reply-to"))
+                .map(|h| normalize_msg_id(&h.get_value())).unwrap_or_default();
+            let references = parsed.headers.iter()
+                .find(|h| h.get_key().eq_ignore_ascii_case("references"))
+                .map(|h| extract_msg_ids(&h.get_value())).unwrap_or_default();
+
             let mut html = None;
             let mut text = None;
             let mut attachments = Vec::new();
             walk_parts(&parsed, &mut html, &mut text, &mut attachments, &mut 0);
 
+            let from_addr_lc = from_addr.to_lowercase();
+            let is_outgoing = our_addrs.iter().any(|a| a == &from_addr_lc);
+
             bodies.push(MessageBody {
                 uid, folder: folder.clone(), subject, from, from_addr: from_addr.clone(),
                 to, cc, date, date_ts, html, text, attachments,
-                is_outgoing: from_addr == user_addr,
+                is_outgoing,
+                message_id, in_reply_to, references,
             });
         }
     }
@@ -737,35 +828,78 @@ async fn search_impl<T>(
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + std::fmt::Debug,
 {
-    session.select("INBOX").await.map_err(|e| format!("SELECT: {e}"))?;
-    let search_query = format!("TEXT \"{query}\"");
-    let uids = session.search(&search_query).await.map_err(|e| format!("SEARCH: {e}"))?;
-    if uids.is_empty() { return Ok(vec![]); }
-
-    let mut uid_vec: Vec<u32> = uids.into_iter().collect();
-    uid_vec.sort_unstable();
-    uid_vec.reverse();
-    let uid_list: Vec<String> = uid_vec.iter().take(30).map(|u| u.to_string()).collect();
-    let uid_set = uid_list.join(",");
-    let messages = session.uid_fetch(&uid_set, "(UID FLAGS ENVELOPE)")
-        .await.map_err(|e| format!("FETCH: {e}"))?;
-    let collected: Vec<_> = messages.try_collect::<Vec<_>>()
+    // Find INBOX and the Sent folder via LIST attributes; search both.
+    let mailboxes = session.list(Some(""), Some("*"))
+        .await.map_err(|e| format!("LIST: {e}"))?;
+    let collected: Vec<_> = mailboxes.try_collect::<Vec<_>>()
         .await.map_err(|e| format!("Collect: {e}"))?;
+    let mut sent_name: Option<String> = None;
+    for m in &collected {
+        let attrs: Vec<String> = m.attributes().iter().map(|a| format!("{:?}", a)).collect();
+        if attrs.join(" ").contains("Sent") { sent_name = Some(m.name().to_string()); break; }
+    }
+    let folder_list: Vec<Folder> = collected.iter().map(|m| Folder {
+        name: m.name().to_string(),
+        delimiter: m.delimiter().unwrap_or("/").to_string(),
+        unread: 0, total: 0, special_use: String::new(),
+    }).collect();
+    if sent_name.is_none() { sent_name = find_sent_folder(&folder_list); }
 
-    let mut envelopes = Vec::new();
-    for msg in &collected {
-        if let Some(raw) = extract_envelope(msg, "INBOX") {
-            let is_outgoing = raw.from_addr == user_addr;
-            envelopes.push(MessageEnvelope {
-                uid: raw.uid, folder: raw.folder, subject: raw.subject,
-                from: raw.from_name, from_addr: raw.from_addr,
-                to: raw.to_names, to_addrs: raw.to_addrs, cc_addrs: raw.cc_addrs,
-                date: raw.date, date_ts: raw.date_ts,
-                seen: raw.seen, flagged: raw.flagged,
-                has_attachments: raw.has_attachments, is_outgoing,
-            });
+    let mut envelopes: Vec<MessageEnvelope> = Vec::new();
+    let folders_to_search: Vec<String> = std::iter::once("INBOX".to_string())
+        .chain(sent_name.into_iter())
+        .collect();
+
+    let escaped: String = query.chars()
+        .map(|c| if c == '\\' || c == '"' { format!("\\{}", c) } else { c.to_string() })
+        .collect();
+
+    for folder in &folders_to_search {
+        if session.select(folder).await.is_err() { continue; }
+        // Server's Meilisearch index covers only subject+body. We pass both criteria;
+        // the server's `extractTextQuery` joins them into a single full-text query.
+        // CHARSET UTF-8 lets non-ASCII text match; fall back to a bare query for
+        // servers that reject the CHARSET argument.
+        let crit = format!("OR SUBJECT \"{}\" BODY \"{}\"", escaped, escaped);
+        let with_charset = format!("CHARSET UTF-8 {}", crit);
+        let uids = match session.search(&with_charset).await {
+            Ok(u) => u,
+            Err(_) => match session.search(&crit).await {
+                Ok(u) => u,
+                Err(_) => continue,
+            },
+        };
+
+        let mut uid_vec: Vec<u32> = uids.into_iter().collect();
+        uid_vec.sort_unstable();
+        uid_vec.reverse();
+        let uid_list: Vec<String> = uid_vec.iter().take(30).map(|u| u.to_string()).collect();
+        let uid_set = uid_list.join(",");
+        let messages = match session.uid_fetch(&uid_set, "(UID FLAGS ENVELOPE)").await {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let collected: Vec<_> = messages.try_collect::<Vec<_>>()
+            .await.unwrap_or_default();
+
+        for msg in &collected {
+            if let Some(raw) = extract_envelope(msg, folder) {
+                let is_outgoing = raw.from_addr == user_addr;
+                envelopes.push(MessageEnvelope {
+                    uid: raw.uid, folder: raw.folder, subject: raw.subject,
+                    from: raw.from_name, from_addr: raw.from_addr,
+                    to: raw.to_names, to_addrs: raw.to_addrs, cc_addrs: raw.cc_addrs,
+                    date: raw.date, date_ts: raw.date_ts,
+                    seen: raw.seen, flagged: raw.flagged,
+                    has_attachments: raw.has_attachments, is_outgoing,
+                    message_id: raw.message_id, in_reply_to: raw.in_reply_to, references: raw.references,
+                });
+            }
         }
     }
+
+    envelopes.sort_by(|a, b| b.date_ts.cmp(&a.date_ts));
+    envelopes.truncate(30);
     Ok(envelopes)
 }
 
@@ -836,6 +970,118 @@ where
     let msg = msgs.first().ok_or("Message not found")?;
     let body = msg.body().ok_or("Empty body")?;
     String::from_utf8(body.to_vec()).map_err(|_| "Non-UTF8 source".into())
+}
+
+// ── Attachment download ──
+
+#[tauri::command]
+pub async fn download_attachment(
+    app: tauri::AppHandle,
+    host: String, port: u16, username: String, password: String, use_tls: bool,
+    folder: String, uid: u32, index: usize, filename: String,
+) -> Result<String, String> {
+    use tauri::Manager;
+
+    let raw = if use_tls {
+        let mut session = connect_tls(&host, port, &username, &password).await?;
+        let r = fetch_raw_message(&mut session, &folder, uid).await;
+        session.logout().await.ok();
+        r?
+    } else {
+        let mut session = connect_plain(&host, port, &username, &password).await?;
+        let r = fetch_raw_message(&mut session, &folder, uid).await;
+        session.logout().await.ok();
+        r?
+    };
+
+    let parsed = mailparse::parse_mail(&raw).map_err(|e| format!("parse mail: {e}"))?;
+    let bytes = find_attachment_bytes(&parsed, index, &mut 0)
+        .ok_or_else(|| format!("attachment {index} not found"))?;
+
+    let dir = app.path().download_dir().map_err(|e| format!("download dir: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    let safe = sanitize_filename(&filename);
+    let target = unique_path(&dir, &safe);
+    std::fs::write(&target, &bytes).map_err(|e| format!("write: {e}"))?;
+
+    open_in_default_app(&target);
+
+    target.to_str().map(|s| s.to_string()).ok_or_else(|| "non-UTF8 path".into())
+}
+
+fn open_in_default_app(path: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    { let _ = std::process::Command::new("cmd").args(["/C", "start", "", &path.to_string_lossy()]).spawn(); }
+    #[cfg(target_os = "macos")]
+    { let _ = std::process::Command::new("open").arg(path).spawn(); }
+    #[cfg(target_os = "linux")]
+    { let _ = std::process::Command::new("xdg-open").arg(path).spawn(); }
+}
+
+async fn fetch_raw_message<T>(
+    session: &mut async_imap::Session<T>, folder: &str, uid: u32,
+) -> Result<Vec<u8>, String>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + std::fmt::Debug,
+{
+    session.select(folder).await.map_err(|e| format!("SELECT {folder}: {e}"))?;
+    let fetched = session.uid_fetch(uid.to_string(), "BODY.PEEK[]")
+        .await.map_err(|e| format!("FETCH: {e}"))?;
+    let msgs: Vec<_> = fetched.try_collect().await.map_err(|e| format!("Collect: {e}"))?;
+    let msg = msgs.first().ok_or("Message not found")?;
+    let body = msg.body().ok_or("Empty body")?;
+    Ok(body.to_vec())
+}
+
+fn find_attachment_bytes(part: &mailparse::ParsedMail, target: usize, idx: &mut usize) -> Option<Vec<u8>> {
+    if part.subparts.is_empty() {
+        let disp = part.get_content_disposition();
+        if matches!(disp.disposition, mailparse::DispositionType::Attachment) {
+            if *idx == target {
+                return part.get_body_raw().ok();
+            }
+            *idx += 1;
+        }
+        return None;
+    }
+    for sub in &part.subparts {
+        if let Some(b) = find_attachment_bytes(sub, target, idx) { return Some(b); }
+    }
+    None
+}
+
+fn sanitize_filename(name: &str) -> String {
+    let cleaned: String = name.chars()
+        .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0') { '_' } else { c })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.');
+    if trimmed.is_empty() { "attachment".into() } else { trimmed.to_string() }
+}
+
+fn unique_path(dir: &std::path::Path, filename: &str) -> std::path::PathBuf {
+    let candidate = dir.join(filename);
+    if !candidate.exists() { return candidate; }
+    let (stem, ext) = match filename.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (filename.to_string(), String::new()),
+    };
+    for n in 1..1000 {
+        let try_path = dir.join(format!("{stem} ({n}){ext}"));
+        if !try_path.exists() { return try_path; }
+    }
+    candidate
+}
+
+// ── Contacts ──
+
+#[tauri::command]
+pub async fn search_contacts(
+    cache: tauri::State<'_, Cache>,
+    host: String, username: String, query: String, limit: u32,
+) -> Result<Vec<Contact>, String> {
+    let key = account_key(&host, &username);
+    cache.search_contacts(&key, &query, limit)
 }
 
 // ── Cache commands ──

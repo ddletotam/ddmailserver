@@ -23,3 +23,20 @@ export async function fetchMessageSource(
     uid,
   });
 }
+
+/** Download an attachment to the user's Downloads folder; returns absolute file path. */
+export async function downloadAttachment(
+  account: Account,
+  folder: string,
+  uid: number,
+  index: number,
+  filename: string,
+): Promise<string> {
+  return invoke<string>("download_attachment", {
+    ...imapArgs(account),
+    folder,
+    uid,
+    index,
+    filename,
+  });
+}

@@ -5,6 +5,40 @@ use serde::{Serialize, Deserialize};
 
 use crate::imap::{Conversation, ContactInfo, MessageRef, MessageBody, Attachment, Identity};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Contact {
+    pub email: String,
+    pub name: String,
+    pub source: String, // "auto" | "carddav"
+}
+
+/// Parse a "Name <email>" header value into (name, addr). Returns ("", "") if no addr present.
+fn parse_addr_pair(value: &str) -> (String, String) {
+    let v = value.trim();
+    if let (Some(start), Some(end)) = (v.rfind('<'), v.rfind('>')) {
+        if start < end {
+            let addr = v[start + 1..end].trim().to_string();
+            let name = v[..start].trim().trim_matches('"').trim().to_string();
+            return (name, addr);
+        }
+    }
+    if v.contains('@') { return (String::new(), v.to_string()); }
+    (String::new(), String::new())
+}
+
+/// Pull (name, addr) entries from a MessageBody's From/To/Cc fields.
+fn collect_address_entries(body: &MessageBody) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let (fname, faddr) = parse_addr_pair(&body.from);
+    let final_addr = if !faddr.is_empty() { faddr } else { body.from_addr.clone() };
+    out.push((fname, final_addr));
+    for h in body.to.iter().chain(body.cc.iter()) {
+        let (n, a) = parse_addr_pair(h);
+        if !a.is_empty() { out.push((n, a)); }
+    }
+    out
+}
+
 pub struct Cache {
     conn: Mutex<Connection>,
 }
@@ -29,8 +63,7 @@ impl Cache {
                 is_group INTEGER NOT NULL DEFAULT 0,
                 last_date TEXT NOT NULL DEFAULT '',
                 last_date_ts INTEGER NOT NULL DEFAULT 0,
-                last_preview TEXT NOT NULL DEFAULT '',
-                last_from TEXT NOT NULL DEFAULT '',
+                last_subject TEXT NOT NULL DEFAULT '',
                 unread_count INTEGER NOT NULL DEFAULT 0,
                 total_count INTEGER NOT NULL DEFAULT 0,
                 updated_at INTEGER NOT NULL DEFAULT 0
@@ -51,6 +84,17 @@ impl Cache {
                 png_data BLOB,
                 cached_at INTEGER NOT NULL DEFAULT 0
             );
+
+            CREATE TABLE IF NOT EXISTS contacts (
+                account_key TEXT NOT NULL,
+                email TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT 'auto',
+                last_seen_ts INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(account_key, email, source)
+            );
+            CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(account_key, email);
+            CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(account_key, name);
 
             -- Migrate: add avatar_hash if missing
             -- SQLite doesn't support IF NOT EXISTS for ALTER TABLE, so we try and ignore errors
@@ -81,6 +125,9 @@ impl Cache {
                 text_body TEXT,
                 attachments_json TEXT NOT NULL DEFAULT '[]',
                 is_outgoing INTEGER NOT NULL DEFAULT 0,
+                message_id TEXT NOT NULL DEFAULT '',
+                in_reply_to TEXT NOT NULL DEFAULT '',
+                references_json TEXT NOT NULL DEFAULT '[]',
                 cached_at INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(folder, uid, account_key)
             );
@@ -89,6 +136,10 @@ impl Cache {
         // Migrations for existing databases
         conn.execute("ALTER TABLE conversations ADD COLUMN avatar_hash TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE conversations ADD COLUMN received_by TEXT NOT NULL DEFAULT ''", []).ok();
+        conn.execute("ALTER TABLE conversations ADD COLUMN last_subject TEXT NOT NULL DEFAULT ''", []).ok();
+        conn.execute("ALTER TABLE message_bodies ADD COLUMN message_id TEXT NOT NULL DEFAULT ''", []).ok();
+        conn.execute("ALTER TABLE message_bodies ADD COLUMN in_reply_to TEXT NOT NULL DEFAULT ''", []).ok();
+        conn.execute("ALTER TABLE message_bodies ADD COLUMN references_json TEXT NOT NULL DEFAULT '[]'", []).ok();
 
         Ok(Self { conn: Mutex::new(conn) })
     }
@@ -113,12 +164,12 @@ impl Cache {
 
             tx.execute(
                 "INSERT INTO conversations (id, account_key, label, avatar_hash, received_by, counterpart_name, counterpart_addr, \
-                 is_group, last_date, last_date_ts, last_preview, last_from, unread_count, total_count, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 is_group, last_date, last_date_ts, last_subject, unread_count, total_count, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     conv.id, account_key, conv.label, conv.avatar_hash, conv.received_by, cp_name, cp_addr,
                     conv.is_group as i32, conv.last_date, conv.last_date_ts,
-                    conv.last_preview, conv.last_from, conv.unread_count, conv.total_count, now
+                    conv.last_subject, conv.unread_count, conv.total_count, now
                 ],
             ).map_err(|e| format!("ins conv: {e}"))?;
 
@@ -127,6 +178,19 @@ impl Cache {
                     "INSERT OR IGNORE INTO conversation_messages (conversation_id, folder, uid) VALUES (?1, ?2, ?3)",
                     params![conv.id, mr.folder, mr.uid],
                 ).map_err(|e| format!("ins msg ref: {e}"))?;
+            }
+
+            // Auto-record the counterpart as a contact.
+            if !cp_addr.is_empty() {
+                let lc = cp_addr.to_lowercase();
+                tx.execute(
+                    "INSERT INTO contacts (account_key, email, name, source, last_seen_ts) \
+                     VALUES (?1, ?2, ?3, 'auto', ?4) \
+                     ON CONFLICT(account_key, email, source) DO UPDATE SET \
+                       name = CASE WHEN excluded.name != '' THEN excluded.name ELSE name END, \
+                       last_seen_ts = excluded.last_seen_ts",
+                    params![account_key, lc, cp_name, conv.last_date_ts]
+                ).map_err(|e| format!("auto-contact: {e}"))?;
             }
         }
 
@@ -140,7 +204,7 @@ impl Cache {
 
         let mut stmt = conn.prepare(
             "SELECT id, label, avatar_hash, received_by, counterpart_name, counterpart_addr, is_group, \
-             last_date, last_date_ts, last_preview, last_from, unread_count, total_count \
+             last_date, last_date_ts, last_subject, unread_count, total_count \
              FROM conversations WHERE account_key = ?1 ORDER BY last_date_ts DESC"
         ).map_err(|e| format!("prepare: {e}"))?;
 
@@ -155,17 +219,16 @@ impl Cache {
                 row.get::<_, bool>(6)?,     // is_group
                 row.get::<_, String>(7)?,   // last_date
                 row.get::<_, i64>(8)?,      // last_date_ts
-                row.get::<_, String>(9)?,   // last_preview
-                row.get::<_, String>(10)?,  // last_from
-                row.get::<_, u32>(11)?,     // unread_count
-                row.get::<_, u32>(12)?,     // total_count
+                row.get::<_, String>(9)?,   // last_subject
+                row.get::<_, u32>(10)?,     // unread_count
+                row.get::<_, u32>(11)?,     // total_count
             ))
         }).map_err(|e| format!("query: {e}"))?;
 
         let mut conversations = Vec::new();
         for row in rows {
             let (id, label, avatar_hash, received_by, cp_name, cp_addr, is_group, last_date, last_date_ts,
-                 last_preview, last_from, unread_count, total_count) = row.map_err(|e| format!("row: {e}"))?;
+                 last_subject, unread_count, total_count) = row.map_err(|e| format!("row: {e}"))?;
 
             // Load message refs
             let mut msg_stmt = conn.prepare(
@@ -186,8 +249,7 @@ impl Cache {
                 is_group,
                 last_date,
                 last_date_ts,
-                last_preview,
-                last_from,
+                last_subject,
                 unread_count,
                 total_count,
                 messages,
@@ -203,20 +265,40 @@ impl Cache {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         let now = chrono::Utc::now().timestamp();
 
+        // Auto-record contacts from From/To/Cc of each message.
+        for body in bodies {
+            let entries = collect_address_entries(body);
+            for (name, addr) in entries {
+                if addr.is_empty() { continue; }
+                let lc = addr.to_lowercase();
+                conn.execute(
+                    "INSERT INTO contacts (account_key, email, name, source, last_seen_ts) \
+                     VALUES (?1, ?2, ?3, 'auto', ?4) \
+                     ON CONFLICT(account_key, email, source) DO UPDATE SET \
+                       name = CASE WHEN excluded.name != '' THEN excluded.name ELSE name END, \
+                       last_seen_ts = excluded.last_seen_ts",
+                    params![account_key, lc, name, body.date_ts]
+                ).map_err(|e| format!("auto-contact: {e}"))?;
+            }
+        }
+
         for body in bodies {
             let att_json = serde_json::to_string(&body.attachments).unwrap_or_else(|_| "[]".into());
+            let refs_json = serde_json::to_string(&body.references).unwrap_or_else(|_| "[]".into());
             conn.execute(
                 "INSERT OR REPLACE INTO message_bodies \
                  (folder, uid, account_key, subject, from_header, from_addr, to_header, cc_header, \
-                  date_header, date_ts, html, text_body, attachments_json, is_outgoing, cached_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                  date_header, date_ts, html, text_body, attachments_json, is_outgoing, \
+                  message_id, in_reply_to, references_json, cached_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     body.folder, body.uid, account_key,
                     body.subject, body.from, body.from_addr,
                     body.to.join(", "), body.cc.join(", "),
                     body.date, body.date_ts,
                     body.html, body.text, att_json,
-                    body.is_outgoing as i32, now
+                    body.is_outgoing as i32,
+                    body.message_id, body.in_reply_to, refs_json, now
                 ],
             ).map_err(|e| format!("ins body: {e}"))?;
         }
@@ -230,7 +312,8 @@ impl Cache {
         let mut bodies = Vec::new();
         let mut stmt = conn.prepare(
             "SELECT folder, uid, subject, from_header, from_addr, to_header, cc_header, \
-             date_header, date_ts, html, text_body, attachments_json, is_outgoing \
+             date_header, date_ts, html, text_body, attachments_json, is_outgoing, \
+             message_id, in_reply_to, references_json \
              FROM message_bodies WHERE folder = ?1 AND uid = ?2 AND account_key = ?3"
         ).map_err(|e| format!("prepare: {e}"))?;
 
@@ -239,6 +322,7 @@ impl Cache {
                 let to_str: String = row.get(5)?;
                 let cc_str: String = row.get(6)?;
                 let att_json: String = row.get(11)?;
+                let refs_json: String = row.get(15)?;
 
                 Ok(MessageBody {
                     folder: row.get(0)?,
@@ -254,6 +338,9 @@ impl Cache {
                     text: row.get(10)?,
                     attachments: serde_json::from_str(&att_json).unwrap_or_default(),
                     is_outgoing: row.get::<_, i32>(12)? != 0,
+                    message_id: row.get(13)?,
+                    in_reply_to: row.get(14)?,
+                    references: serde_json::from_str(&refs_json).unwrap_or_default(),
                 })
             });
 
@@ -306,6 +393,61 @@ impl Cache {
             }
         }
         Ok(identities)
+    }
+
+    /// Insert/update contacts in batch. Existing rows keep their non-empty names if a new
+    /// row arrives with empty name.
+    pub fn record_contacts(&self, account_key: &str, contacts: &[Contact]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        let now = chrono::Utc::now().timestamp();
+        let tx = conn.unchecked_transaction().map_err(|e| format!("tx: {e}"))?;
+        for c in contacts {
+            if c.email.is_empty() { continue; }
+            let lc = c.email.to_lowercase();
+            tx.execute(
+                "INSERT INTO contacts (account_key, email, name, source, last_seen_ts) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT(account_key, email, source) DO UPDATE SET \
+                   name = CASE WHEN excluded.name != '' THEN excluded.name ELSE name END, \
+                   last_seen_ts = excluded.last_seen_ts",
+                params![account_key, lc, c.name, c.source, now]
+            ).map_err(|e| format!("upsert contact: {e}"))?;
+        }
+        tx.commit().map_err(|e| format!("commit: {e}"))
+    }
+
+    /// Search contacts by query (matches against email or name, case-insensitive).
+    /// Deduped by email; carddav source wins over auto, then most recent.
+    pub fn search_contacts(&self, account_key: &str, query: &str, limit: u32) -> Result<Vec<Contact>, String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        let pattern = format!("%{}%", query.to_lowercase());
+        let mut stmt = conn.prepare(
+            "SELECT email, name, source, last_seen_ts FROM contacts \
+             WHERE account_key = ?1 \
+             AND (LOWER(email) LIKE ?2 OR LOWER(name) LIKE ?2) \
+             ORDER BY \
+               CASE WHEN source='carddav' THEN 0 ELSE 1 END, \
+               last_seen_ts DESC, \
+               name"
+        ).map_err(|e| format!("prepare: {e}"))?;
+        let rows = stmt.query_map(params![account_key, pattern], |row| {
+            Ok(Contact {
+                email: row.get::<_, String>(0)?,
+                name: row.get::<_, String>(1)?,
+                source: row.get::<_, String>(2)?,
+            })
+        }).map_err(|e| format!("query: {e}"))?;
+
+        let mut seen_emails: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut out: Vec<Contact> = Vec::new();
+        for row in rows {
+            if let Ok(c) = row {
+                if !seen_emails.insert(c.email.clone()) { continue; }
+                out.push(c);
+                if out.len() as u32 >= limit { break; }
+            }
+        }
+        Ok(out)
     }
 
     /// Get cached avatar PNG (if fresh enough — 7 days).

@@ -31,6 +31,7 @@ fn main() {
     env_logger::init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .manage(SessionPool::new())
@@ -51,8 +52,10 @@ fn main() {
             imap::load_cached_messages,
             imap::fetch_conversation_messages,
             imap::search_messages,
+            imap::search_contacts,
             imap::set_flags,
             imap::fetch_message_source,
+            imap::download_attachment,
             imap::fetch_identities,
             imap::fetch_avatar,
             imap::start_watching,

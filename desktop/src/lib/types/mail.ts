@@ -25,8 +25,7 @@ export interface Conversation {
   is_group: boolean;
   last_date: string;
   last_date_ts: number;
-  last_preview: string;
-  last_from: string;
+  last_subject: string;
   unread_count: number;
   total_count: number;
   messages: MessageRef[];
@@ -48,6 +47,9 @@ export interface MessageEnvelope {
   flagged: boolean;
   has_attachments: boolean;
   is_outgoing: boolean;
+  message_id: string;
+  in_reply_to: string;
+  references: string[];
 }
 
 export interface MessageBody {
@@ -64,6 +66,9 @@ export interface MessageBody {
   text: string | null;
   attachments: Attachment[];
   is_outgoing: boolean;
+  message_id: string;
+  in_reply_to: string;
+  references: string[];
 }
 
 export interface Attachment {
@@ -95,6 +100,12 @@ export interface OutgoingMessage {
   text: string;
   in_reply_to: string | null;
   references: string | null;
+}
+
+export interface Contact {
+  email: string;
+  name: string;
+  source: string; // "auto" | "carddav"
 }
 
 export interface Identity {

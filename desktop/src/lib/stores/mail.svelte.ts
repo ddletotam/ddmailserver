@@ -6,6 +6,7 @@ import type {
   MessageBody,
   MessageRef,
   MessageEnvelope,
+  Contact,
   Account,
 } from "../types/mail";
 
@@ -40,9 +41,19 @@ let pinnedIds = $state<Set<string>>(loadPinned());
 let connectionState = $state<"disconnected" | "connecting" | "connected" | "error">("disconnected");
 let connectionError = $state<string | null>(null);
 
-// Search
+// Search — combined contacts + messages, capped at 25 entries total.
+const SEARCH_TOTAL_LIMIT = 25;
+let searchContacts = $state<Contact[]>([]);
 let searchResults = $state<MessageEnvelope[]>([]);
 let searchLoading = $state(false);
+
+// Compose intent — set by Sidebar (e.g. "Compose to: …"); ChatView opens Composer with prefill.
+export interface ComposeIntent { to: string; focusField: "to" | "subject" | "body"; }
+let composeIntent = $state<ComposeIntent | null>(null);
+
+// Jump-to-message intent — set by Sidebar when a search-result message is clicked;
+// ChatView scrolls to it after opening the conversation.
+let jumpIntent = $state<{ folder: string; uid: number } | null>(null);
 
 // IDLE event listeners
 let _unlistenNewMail: (() => void) | null = null;
@@ -112,6 +123,9 @@ export const mailStore = {
   },
   get searchResults() {
     return searchResults;
+  },
+  get searchContacts() {
+    return searchContacts;
   },
   get searchLoading() {
     return searchLoading;
@@ -289,21 +303,57 @@ export const mailStore = {
     draftMessage = null;
   },
 
+  /** Append an optimistic locally-built message to the open conversation (pre-server confirmation). */
+  appendLocalMessage(msg: MessageBody) {
+    conversationMessages = [...conversationMessages, msg];
+  },
+
+  /** Re-fetch the open conversation's messages from server (used to reconcile after optimistic send). */
+  async refreshActive(account: Account) {
+    const id = activeConversationId;
+    if (!id) return;
+    const conv = conversations.find((c) => c.id === id);
+    if (!conv) return;
+    try {
+      const fresh = await invoke<MessageBody[]>("fetch_conversation_messages", {
+        ...imapArgs(account),
+        userEmail: account.email,
+        messages: conv.messages,
+      });
+      if (activeConversationId === id) conversationMessages = fresh;
+    } catch {
+      // ignore — keep local view
+    }
+  },
+
   async search(account: Account, query: string) {
-    if (!query.trim()) {
+    const q = query.trim();
+    if (!q) {
       searchResults = [];
+      searchContacts = [];
       return;
     }
     searchLoading = true;
+    // Run contacts and messages in parallel; cap combined output at SEARCH_TOTAL_LIMIT.
+    const contactsPromise = invoke<Contact[]>("search_contacts", {
+      host: account.imap_host,
+      username: account.username,
+      query: q,
+      limit: SEARCH_TOTAL_LIMIT,
+    }).catch((e) => { console.warn("search_contacts:", e); return [] as Contact[]; });
+    const messagesPromise = invoke<MessageEnvelope[]>("search_messages", {
+      ...imapArgs(account),
+      userEmail: account.email,
+      query: q,
+    }).catch((e) => { console.warn("search_messages:", e); return [] as MessageEnvelope[]; });
     try {
-      searchResults = await invoke<MessageEnvelope[]>("search_messages", {
-        ...imapArgs(account),
-        userEmail: account.email,
-        query,
-      });
-    } catch (e) {
-      error = String(e);
-      searchResults = [];
+      const [contacts, messages] = await Promise.all([contactsPromise, messagesPromise]);
+      // Reserve at least ~15 slots for messages when both sections have results,
+      // so a noisy contact list never starves the message search.
+      const contactCap = messages.length > 0 ? Math.min(10, contacts.length) : Math.min(SEARCH_TOTAL_LIMIT, contacts.length);
+      searchContacts = contacts.slice(0, contactCap);
+      const remaining = Math.max(0, SEARCH_TOTAL_LIMIT - searchContacts.length);
+      searchResults = messages.slice(0, remaining);
     } finally {
       searchLoading = false;
     }
@@ -311,7 +361,14 @@ export const mailStore = {
 
   clearSearch() {
     searchResults = [];
+    searchContacts = [];
   },
+
+  get composeIntent() { return composeIntent; },
+  setComposeIntent(intent: ComposeIntent | null) { composeIntent = intent; },
+
+  get jumpIntent() { return jumpIntent; },
+  setJumpIntent(intent: { folder: string; uid: number } | null) { jumpIntent = intent; },
 
   smtpArgs,
   imapArgs,
