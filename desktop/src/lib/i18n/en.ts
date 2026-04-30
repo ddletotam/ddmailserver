@@ -1,5 +1,7 @@
 export default {
   // Context menu
+  "menu.reply": "Reply",
+  "menu.forward": "Forward",
   "menu.viewSource": "View source",
   "menu.viewAsText": "View as text",
   "menu.viewAsHtml": "View as HTML",

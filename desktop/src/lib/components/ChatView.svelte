@@ -6,16 +6,64 @@
   import MessageBubble from "./MessageBubble.svelte";
   import Composer from "./Composer.svelte";
   import { cleanName, sameDay, formatDateSeparator } from "../utils/format";
-  import type { OutgoingMessage } from "../types/mail";
+  import type { OutgoingMessage, MessageBody } from "../types/mail";
 
   let showComposer = $state(false);
   let replyMode = $state<"reply" | "forward" | null>(null);
+  let composerSource = $state<MessageBody | null>(null);
+  let composerPrefillTo = $state<string>("");
+  let composerFocusField = $state<"to" | "subject" | "body">("to");
   let chatContainer = $state<HTMLDivElement | null>(null);
   let showScrollBtn = $state(false);
+
+  // Quote-reply (Telegram-style) for the inline quick-reply input
+  let replyTo = $state<MessageBody | null>(null);
 
   const conv = $derived(mailStore.activeConversation);
   const msgs = $derived(mailStore.conversationMessages);
   const lastMessage = $derived(msgs.length > 0 ? msgs[msgs.length - 1] : null);
+  const composerOriginal = $derived(composerSource ?? lastMessage);
+
+  // Map Message-Id → message, so each bubble can resolve its parent (in-reply-to).
+  const byMessageId = $derived.by(() => {
+    const map = new Map<string, MessageBody>();
+    for (const m of msgs) { if (m.message_id) map.set(m.message_id, m); }
+    return map;
+  });
+  function parentOf(m: MessageBody): MessageBody | null {
+    if (!m.in_reply_to) return null;
+    return byMessageId.get(m.in_reply_to) ?? null;
+  }
+
+  function jumpToMessage(m: MessageBody) {
+    if (!chatContainer) return;
+    const el = chatContainer.querySelector(
+      `[data-msg-uid="${m.uid}"][data-msg-folder="${CSS.escape(m.folder)}"]`
+    ) as HTMLElement | null;
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("flash-highlight");
+    setTimeout(() => el.classList.remove("flash-highlight"), 1500);
+  }
+
+  // For Ctrl+Up shortcut: walk through incoming messages from newest to oldest
+  function pickPreviousIncoming(current: MessageBody | null): MessageBody | null {
+    const incoming = msgs.filter(m => !m.is_outgoing);
+    if (incoming.length === 0) return null;
+    if (!current) return incoming[incoming.length - 1];
+    const idx = incoming.findIndex(m => m.uid === current.uid && m.folder === current.folder);
+    if (idx <= 0) return incoming[0];
+    return incoming[idx - 1];
+  }
+
+  function quotePreview(m: MessageBody): string {
+    const raw = (m.text ?? m.html ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    return raw.length > 120 ? raw.slice(0, 117) + "…" : raw;
+  }
+
+  function escapeHtml(s: string): string {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
 
   // Message grouping: compute first/last in sender group
   function isFirstInGroup(i: number): boolean {
@@ -26,6 +74,30 @@
     if (i === msgs.length - 1) return true;
     return msgs[i].from_addr !== msgs[i + 1].from_addr;
   }
+
+  // Compose intent from search dropdown ("Compose to: …").
+  $effect(() => {
+    const intent = mailStore.composeIntent;
+    if (!intent) return;
+    composerSource = null;
+    composerPrefillTo = intent.to;
+    composerFocusField = intent.focusField;
+    replyMode = null;
+    showComposer = true;
+    mailStore.setComposeIntent(null);
+  });
+
+  // Jump-to-message intent — fired when a search-result message is clicked.
+  // Wait until msgs contains the target before scrolling.
+  $effect(() => {
+    const intent = mailStore.jumpIntent;
+    if (!intent || msgs.length === 0) return;
+    const found = msgs.find(m => m.folder === intent.folder && m.uid === intent.uid);
+    if (found) {
+      mailStore.setJumpIntent(null);
+      requestAnimationFrame(() => jumpToMessage(found));
+    }
+  });
 
   // Auto-scroll to bottom
   $effect(() => {
@@ -51,10 +123,24 @@
     }
   }
 
-  function handleReply() { replyMode = "reply"; showComposer = true; }
-  function handleForward() { replyMode = "forward"; showComposer = true; }
-  function handleCompose() { replyMode = null; showComposer = true; }
-  function closeComposer() { showComposer = false; replyMode = null; }
+  function handleReply() { composerSource = null; replyMode = "reply"; composerPrefillTo = ""; composerFocusField = "body"; showComposer = true; }
+  function handleForward() { composerSource = null; replyMode = "forward"; composerPrefillTo = ""; composerFocusField = "to"; showComposer = true; }
+  function handleCompose() { composerSource = null; replyMode = null; composerPrefillTo = ""; composerFocusField = "to"; showComposer = true; }
+  function closeComposer() { showComposer = false; replyMode = null; composerSource = null; composerPrefillTo = ""; composerFocusField = "to"; }
+
+  // From context menu: quick-reply with quote
+  function startQuoteReply(msg: MessageBody) {
+    replyTo = msg;
+    requestAnimationFrame(() => replyEditorRef?.focus());
+  }
+  function cancelQuoteReply() { replyTo = null; }
+
+  // From context menu: open Composer in forward mode for a specific message
+  function startForward(msg: MessageBody) {
+    composerSource = msg;
+    replyMode = "forward";
+    showComposer = true;
+  }
 
   // Quick-reply
   let quickReplySending = $state(false);
@@ -161,32 +247,86 @@
   async function sendQuickReply() {
     const account = accountStore.activeAccount;
     const text = getEditorText();
-    if (!account || !text || !conv || !lastMessage) return;
+    if (!account || !text || !conv) return;
+
+    // What we're replying to: the explicitly chosen message, or the last incoming, or the last message overall.
+    const target: MessageBody | null = replyTo
+      ?? msgs.filter(m => !m.is_outgoing).at(-1)
+      ?? lastMessage;
+    if (!target) return;
 
     quickReplySending = true;
     try {
-      const replyTo = lastMessage.from_addr;
-      const subject = lastMessage.subject.startsWith("Re:")
-        ? lastMessage.subject
-        : `Re: ${lastMessage.subject}`;
-      const html = getEditorHtml();
+      const fromEmail = (selectedFromEmail || account.email).toLowerCase();
+      const recipient = target.from_addr;
+      const baseSubject = target.subject || "";
+      const subject = /^re:/i.test(baseSubject) ? baseSubject : `Re: ${baseSubject}`;
+      const userHtml = getEditorHtml();
+      const userBody = userHtml || text.replace(/\n/g, "<br>");
+      const quoteHtml = buildQuoteBlock(target);
+      const quoteText = buildQuoteText(target);
+      const html = `<div style="font-family:sans-serif;font-size:14px">${userBody}${quoteHtml}</div>`;
+      const fullText = `${text}\n\n${quoteText}`;
+      // Threading headers: In-Reply-To = target's Message-Id; References = target.references + target.message_id.
+      const inReplyTo = target.message_id ? `<${target.message_id}>` : null;
+      const refIds = [...(target.references ?? []), ...(target.message_id ? [target.message_id] : [])];
+      const references = refIds.length > 0 ? refIds.map(id => `<${id}>`).join(" ") : null;
+
+      // Did the user pick a different identity than the conversation's current one?
+      const conversationIdentity = conv.received_by.toLowerCase();
+      const switchedIdentity = fromEmail !== conversationIdentity;
+
+      // Local optimistic message (only if identity didn't change — otherwise we'll redirect to a different convo).
+      const localMsgId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const optimistic: MessageBody = {
+        uid: -Date.now(), // negative uid signals "not from server yet"
+        folder: "Sent",
+        subject,
+        from: fromEmail,
+        from_addr: fromEmail,
+        to: [recipient],
+        cc: [],
+        date: new Date().toUTCString(),
+        date_ts: Math.floor(Date.now() / 1000),
+        html,
+        text: fullText,
+        attachments: [],
+        is_outgoing: true,
+        message_id: localMsgId,
+        in_reply_to: target.message_id ?? "",
+        references: refIds,
+      };
+      if (!switchedIdentity) {
+        mailStore.appendLocalMessage(optimistic);
+      }
+
       const msg: OutgoingMessage = {
-        from: selectedFromEmail || account.email,
-        to: [replyTo],
+        from: fromEmail,
+        to: [recipient],
         cc: [],
         subject,
-        text,
-        html: html ? `<div style="font-family:sans-serif;font-size:14px">${html}</div>` : `<div style="font-family:sans-serif;font-size:14px">${text.replace(/\n/g, "<br>")}</div>`,
-        in_reply_to: null,
-        references: null,
+        text: fullText,
+        html,
+        in_reply_to: inReplyTo,
+        references,
       };
       await invoke("send_message", {
         ...mailStore.smtpArgs(account),
         message: msg,
       });
       clearEditor();
-      // Refresh conversation
-      mailStore.openConversation(account, conv.id);
+      replyTo = null;
+
+      if (switchedIdentity) {
+        // Land in the conversation that matches the new (counterpart, identity) pair.
+        const cpAddr = (conv.counterparts[0]?.addr ?? recipient).toLowerCase();
+        const targetConvId = `${fromEmail}|${cpAddr}`;
+        await mailStore.loadConversations(account);
+        await mailStore.openConversation(account, targetConvId);
+      } else {
+        // Quietly reconcile the optimistic message with the server's view in the background.
+        setTimeout(() => mailStore.refreshActive(account), 1500);
+      }
     } catch (e) {
       console.error("Send failed:", e);
     } finally {
@@ -194,13 +334,38 @@
     }
   }
 
+  function buildQuoteBlock(m: MessageBody): string {
+    const who = escapeHtml(m.from || m.from_addr);
+    const when = m.date ? escapeHtml(m.date) : "";
+    const body = (m.html ?? (m.text ? escapeHtml(m.text).replace(/\n/g, "<br>") : "")) || "";
+    return `<blockquote style="margin:12px 0 0 0;padding:0 0 0 12px;border-left:3px solid #ccc;color:#666;">`
+      + `<div style="font-size:12px;margin-bottom:4px;">${who}${when ? ` &middot; ${when}` : ""}</div>`
+      + body + `</blockquote>`;
+  }
+
+  function buildQuoteText(m: MessageBody): string {
+    const header = `On ${m.date || ""}, ${m.from || m.from_addr} wrote:`;
+    const body = (m.text ?? "").split("\n").map(l => `> ${l}`).join("\n");
+    return `${header}\n${body}`;
+  }
+
 
   // Keyboard shortcuts
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
       if (identityDropdownOpen) { identityDropdownOpen = false; e.preventDefault(); }
+      else if (replyTo) { cancelQuoteReply(); e.preventDefault(); }
       else if (showComposer) { closeComposer(); e.preventDefault(); }
       else if (conv) { mailStore.closeConversation(); e.preventDefault(); }
+      return;
+    }
+    // Ctrl+Up: reply to last incoming message; repeated presses step further back.
+    if ((e.ctrlKey || e.metaKey) && e.key === "ArrowUp" && conv && !showComposer) {
+      const target = pickPreviousIncoming(replyTo);
+      if (target) {
+        e.preventDefault();
+        startQuoteReply(target);
+      }
     }
   }
 
@@ -248,24 +413,6 @@
         </div>
       </div>
 
-      <div class="chat-actions">
-        <button class="btn-icon" onclick={handleReply} title="Reply">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="9 17 4 12 9 7" /><path d="M20 18v-2a4 4 0 0 0-4-4H4" />
-          </svg>
-        </button>
-        <button class="btn-icon" onclick={handleForward} title="Forward">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="15 17 20 12 15 7" /><path d="M4 18v-2a4 4 0 0 1 4-4h12" />
-          </svg>
-        </button>
-        <button class="btn-icon" onclick={handleCompose} title="New message">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-          </svg>
-        </button>
-      </div>
     </div>
 
     <!-- Messages -->
@@ -286,6 +433,10 @@
             message={msg}
             isFirstInGroup={isFirstInGroup(i)}
             isLastInGroup={isLastInGroup(i)}
+            parent={parentOf(msg)}
+            onreply={startQuoteReply}
+            onforward={startForward}
+            onjump={jumpToMessage}
           />
         {/each}
       {/if}
@@ -302,9 +453,22 @@
 
     <!-- Quick-reply input (Telegram-style) -->
     {#if showComposer}
-      <Composer mode={replyMode} originalMessage={lastMessage} onclose={closeComposer} />
+      <Composer mode={replyMode} originalMessage={composerOriginal} prefillTo={composerPrefillTo} focusField={composerFocusField} onclose={closeComposer} />
     {:else}
       <div class="quick-reply">
+        {#if replyTo}
+          <div class="reply-quote-bar">
+            <div class="reply-quote-content">
+              <div class="reply-quote-name">{replyTo.from || replyTo.from_addr}</div>
+              <div class="reply-quote-text">{quotePreview(replyTo)}</div>
+            </div>
+            <button class="reply-quote-close" onclick={cancelQuoteReply} title="Cancel reply" aria-label="Cancel reply">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+        {/if}
         <div class="reply-input-row">
           <!-- Identity selector (if multiple) -->
           {#if identityStore.hasMultiple}
@@ -393,7 +557,7 @@
 
     {#if showComposer}
       <div class="composer-overlay">
-        <Composer mode={null} originalMessage={null} onclose={closeComposer} />
+        <Composer mode={null} originalMessage={null} prefillTo={composerPrefillTo} focusField={composerFocusField} onclose={closeComposer} />
       </div>
     {/if}
   {/if}
@@ -503,6 +667,14 @@
     font-size: 12px; color: var(--text-secondary); font-weight: 500;
   }
 
+  :global(.flash-highlight .bubble) {
+    animation: flash-bubble 1.4s ease-out;
+  }
+  @keyframes flash-bubble {
+    0%   { box-shadow: 0 0 0 3px var(--text-accent); }
+    100% { box-shadow: 0 1px 1px rgba(0, 0, 0, 0.06); }
+  }
+
   /* ── Scroll FAB ── */
   .scroll-fab {
     position: absolute;
@@ -526,6 +698,40 @@
     border-top: 1px solid var(--border-color);
     padding: 6px 12px;
   }
+
+  /* Telegram-style quote bar above the editor */
+  .reply-quote-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+    padding: 6px 8px 6px 10px;
+    background: var(--bg-secondary);
+    border-left: 3px solid var(--text-accent);
+    border-radius: 6px;
+  }
+  .reply-quote-content {
+    flex: 1; min-width: 0;
+    display: flex; flex-direction: column; gap: 1px;
+  }
+  .reply-quote-name {
+    font-size: var(--font-size-xs);
+    font-weight: 600;
+    color: var(--text-accent);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .reply-quote-text {
+    font-size: var(--font-size-xs);
+    color: var(--text-secondary);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .reply-quote-close {
+    width: 26px; height: 26px;
+    display: flex; align-items: center; justify-content: center;
+    border: none; background: none; border-radius: 50%;
+    cursor: pointer; color: var(--text-secondary); flex-shrink: 0;
+  }
+  .reply-quote-close:hover { background: var(--bg-hover); color: var(--text-primary); }
   /* Identity picker */
   .identity-picker {
     position: relative;

@@ -2,19 +2,30 @@
   import { accountStore } from "../stores/accounts.svelte";
   import { permissionStore } from "../stores/permissions.svelte";
   import { themeStore } from "../stores/theme.svelte";
-  import { fetchMessageSource } from "../api/imap";
+  import { fetchMessageSource, downloadAttachment } from "../api/imap";
   import { formatDateTime, formatSize, hashColor } from "../utils/format";
   import { resolveDisplayContent, extractBlockedDomains, extractEmailDomains, type DisplayMode, type ContentPermissions } from "../utils/html";
   import { t } from "../i18n/index.svelte";
   import SandboxedEmail from "./SandboxedEmail.svelte";
-  import type { MessageBody } from "../types/mail";
+  import type { MessageBody, Attachment } from "../types/mail";
 
   interface Props {
     message: MessageBody;
     isFirstInGroup: boolean;
     isLastInGroup: boolean;
+    parent?: MessageBody | null;
+    onreply?: (msg: MessageBody) => void;
+    onforward?: (msg: MessageBody) => void;
+    onjump?: (msg: MessageBody) => void;
   }
-  let { message, isFirstInGroup, isLastInGroup }: Props = $props();
+  let { message, isFirstInGroup, isLastInGroup, parent = null, onreply, onforward, onjump }: Props = $props();
+
+  const parentPreview = $derived.by(() => {
+    if (!parent) return "";
+    const raw = (parent.text ?? parent.html ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    return raw.length > 100 ? raw.slice(0, 97) + "…" : raw;
+  });
+  const parentName = $derived(parent ? (parent.from || parent.from_addr) : "");
 
   // Display mode: auto prefers HTML, user can switch
   let displayMode = $state<DisplayMode>("auto");
@@ -99,6 +110,19 @@
     permissionStore.toggleScripts(message.from_addr);
   }
 
+  let downloadingIndex = $state<number | null>(null);
+  async function openAttachment(att: Attachment) {
+    const account = accountStore.activeAccount;
+    if (!account || downloadingIndex !== null) return;
+    downloadingIndex = att.index;
+    try {
+      await downloadAttachment(account, message.folder, message.uid, att.index, att.filename);
+    } catch (e) {
+      console.error("attachment download/open failed:", e);
+    } finally {
+      downloadingIndex = null;
+    }
+  }
 
   const displayContent = $derived(resolveDisplayContent(message.text, message.html, displayMode));
 </script>
@@ -112,9 +136,25 @@
   class:last={isLastInGroup}
   class:single={isFirstInGroup && isLastInGroup}
   class:has-html={displayContent.type === "html"}
+  data-msg-uid={message.uid}
+  data-msg-folder={message.folder}
   oncontextmenu={handleContextMenu}
 >
   <div class="bubble" class:outgoing={message.is_outgoing} class:first={isFirstInGroup} class:last={isLastInGroup}>
+    {#if parent}
+      <button
+        type="button"
+        class="reply-quote"
+        onclick={(e) => { e.stopPropagation(); onjump?.(parent); }}
+        title="Jump to original message"
+      >
+        <span class="reply-quote-bar"></span>
+        <span class="reply-quote-body">
+          <span class="reply-quote-name">{parentName}</span>
+          <span class="reply-quote-text">{parentPreview}</span>
+        </span>
+      </button>
+    {/if}
     {#if message.subject}
       <div class="subject">{message.subject}</div>
     {/if}
@@ -134,7 +174,14 @@
     {#if message.attachments.length > 0}
       <div class="attachments">
         {#each message.attachments as att}
-          <div class="attachment">
+          <button
+            type="button"
+            class="attachment"
+            class:loading={downloadingIndex === att.index}
+            disabled={downloadingIndex !== null && downloadingIndex !== att.index}
+            onclick={() => openAttachment(att)}
+            title={att.filename}
+          >
             <div class="att-icon">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
@@ -145,7 +192,7 @@
               <span class="att-name">{att.filename}</span>
               <span class="att-size">{formatSize(att.size)}</span>
             </div>
-          </div>
+          </button>
         {/each}
       </div>
     {/if}
@@ -168,6 +215,10 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="ctx-menu" style:left="{contextMenu.x}px" style:top="{contextMenu.y}px"
     onclick={(e) => e.stopPropagation()}>
+    <button onclick={() => { closeContextMenu(); onreply?.(message); }}>{t("menu.reply")}</button>
+    <button onclick={() => { closeContextMenu(); onforward?.(message); }}>{t("menu.forward")}</button>
+    <div class="ctx-divider"></div>
+
     {#if hasMultipart}
       <button onclick={toggleDisplayMode}>
         {displayMode === "text" ? t("menu.viewAsHtml") : t("menu.viewAsText")}
@@ -313,6 +364,46 @@
     color: var(--text-primary);
   }
 
+  .reply-quote {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+    width: 100%;
+    margin-bottom: 4px;
+    padding: 4px 8px 4px 0;
+    border: none;
+    background: rgba(0, 0, 0, 0.04);
+    border-radius: 6px;
+    cursor: pointer;
+    text-align: left;
+    font-family: var(--font-family);
+    color: var(--text-primary);
+    overflow: hidden;
+  }
+  .reply-quote:hover { background: rgba(0, 0, 0, 0.08); }
+  .reply-quote-bar {
+    width: 3px;
+    background: var(--text-accent);
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+  .reply-quote-body {
+    display: flex; flex-direction: column; gap: 1px;
+    flex: 1; min-width: 0;
+    padding: 2px 0;
+  }
+  .reply-quote-name {
+    font-size: var(--font-size-xs);
+    font-weight: 600;
+    color: var(--text-accent);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .reply-quote-text {
+    font-size: var(--font-size-xs);
+    color: var(--text-secondary);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
   .text-body {
     word-wrap: break-word;
     overflow-wrap: break-word;
@@ -326,9 +417,14 @@
   .attachment {
     display: flex; align-items: center; gap: 8px;
     padding: 8px 10px; background: rgba(0, 0, 0, 0.04);
-    border-radius: 8px; cursor: pointer;
+    border: none; border-radius: 8px; cursor: pointer;
+    width: 100%; text-align: left;
+    font-family: var(--font-family); color: var(--text-primary);
+    transition: background-color var(--transition);
   }
-  .attachment:hover { background: rgba(0, 0, 0, 0.07); }
+  .attachment:hover:not(:disabled) { background: rgba(0, 0, 0, 0.07); }
+  .attachment:disabled { cursor: default; opacity: 0.6; }
+  .attachment.loading { opacity: 0.7; }
   .att-icon { color: var(--text-accent); flex-shrink: 0; display: flex; }
   .att-info { flex: 1; min-width: 0; }
   .att-name { display: block; font-size: var(--font-size-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -371,6 +467,11 @@
     height: 1px;
     background: var(--border-color);
     margin: 4px 8px;
+  }
+  .ctx-divider {
+    height: 1px;
+    background: var(--border-color);
+    margin: 4px 0;
   }
 
   /* Source modal */

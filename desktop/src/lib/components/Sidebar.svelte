@@ -2,9 +2,10 @@
   import { accountStore } from "../stores/accounts.svelte";
   import { mailStore } from "../stores/mail.svelte";
   import { themeStore } from "../stores/theme.svelte";
+  import { identityStore } from "../stores/identity.svelte";
   import ConversationItem from "./ConversationItem.svelte";
   import SearchDropdown from "./SearchDropdown.svelte";
-  import type { MessageEnvelope } from "../types/mail";
+  import type { MessageEnvelope, Contact } from "../types/mail";
 
   // Track pinned/unpinned boundary for divider
   const hasPinned = $derived(mailStore.conversations.some(c => mailStore.isPinned(c.id)));
@@ -40,24 +41,79 @@
     }, 400);
   }
 
-  function handleSearchSelect(msg: MessageEnvelope) {
-    // Find the conversation containing this message, or open it directly
-    const account = accountStore.activeAccount;
-    if (!account) return;
+  function firstIdentityEmail(): string {
+    return (identityStore.defaultIdentity?.email ?? identityStore.identities[0]?.email
+      ?? accountStore.activeAccount?.email ?? "").toLowerCase();
+  }
 
-    // Try to find conversation by from_addr
-    const addr = msg.is_outgoing
-      ? msg.to_addrs[0] ?? ""
-      : msg.from_addr;
-    const conv = mailStore.conversations.find(
-      (c) => c.id === addr || c.counterparts.some((cp) => cp.addr === addr)
-    );
-    if (conv) {
-      mailStore.openConversation(account, conv.id);
-    }
+  function resetSearch() {
     searchQuery = "";
     showSearch = false;
     mailStore.clearSearch();
+  }
+
+  function handleComposeNew(email: string) {
+    mailStore.setComposeIntent({ to: email, focusField: "subject" });
+    resetSearch();
+  }
+
+  function handleSelectContact(c: Contact) {
+    const account = accountStore.activeAccount;
+    if (!account) return;
+    const cpLc = c.email.toLowerCase();
+    // Find ANY conversation with this counterpart, regardless of which identity. If there
+    // are several (same person via different identities), prefer the most recent one.
+    const candidates = mailStore.conversations.filter(
+      (cv) => (cv.counterparts[0]?.addr ?? "").toLowerCase() === cpLc,
+    );
+    if (candidates.length > 0) {
+      const best = candidates.reduce((a, b) => (a.last_date_ts >= b.last_date_ts ? a : b));
+      mailStore.openConversation(account, best.id);
+    } else {
+      // No existing conversation — open Composer pre-filled to that contact.
+      mailStore.setComposeIntent({ to: c.email, focusField: "subject" });
+    }
+    resetSearch();
+  }
+
+  function handleSelectMessage(msg: MessageEnvelope) {
+    const account = accountStore.activeAccount;
+    if (!account) return;
+
+    const ourAddrs = new Set(
+      identityStore.identities.map((i) => i.email.toLowerCase())
+        .concat([account.email.toLowerCase()]),
+    );
+    const fromLc = msg.from_addr.toLowerCase();
+    const isOutgoing = ourAddrs.has(fromLc);
+    const cpLc = isOutgoing
+      ? (msg.to_addrs.find((a) => !ourAddrs.has(a.toLowerCase())) ?? msg.to_addrs[0] ?? "").toLowerCase()
+      : fromLc;
+
+    // Find by counterpart across all identities; pick the one that actually contains this message.
+    const candidates = mailStore.conversations.filter(
+      (c) => (c.counterparts[0]?.addr ?? "").toLowerCase() === cpLc,
+    );
+    const conv = candidates.find((c) =>
+      c.messages.some((mr) => mr.folder === msg.folder && mr.uid === msg.uid),
+    ) ?? candidates.reduce<typeof candidates[number] | null>(
+      (best, c) => (best === null || c.last_date_ts > best.last_date_ts ? c : best),
+      null,
+    );
+    if (!conv) {
+      alert("Письмо есть на сервере, но соответствующего диалога ещё не построилось — попробуйте перезагрузить список или поискать в корзине через веб-интерфейс.");
+      resetSearch();
+      return;
+    }
+    const refExists = conv.messages.some((mr) => mr.folder === msg.folder && mr.uid === msg.uid);
+    if (!refExists) {
+      alert("Письмо было, но, вероятно, удалено. Зайдите в веб-интерфейс сервера и проверьте корзину.");
+      resetSearch();
+      return;
+    }
+    mailStore.setJumpIntent({ folder: msg.folder, uid: msg.uid });
+    mailStore.openConversation(account, conv.id);
+    resetSearch();
   }
 
   function handleSearchBlur() {
@@ -130,9 +186,13 @@
 
       {#if showSearch}
         <SearchDropdown
+          query={searchQuery}
+          contacts={mailStore.searchContacts}
           results={mailStore.searchResults}
           loading={mailStore.searchLoading}
-          onselect={handleSearchSelect}
+          oncomposeNew={handleComposeNew}
+          onselectContact={handleSelectContact}
+          onselectMessage={handleSelectMessage}
         />
       {/if}
     </div>

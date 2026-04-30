@@ -13,7 +13,9 @@
   let { conversation, active, pinned, onclick, oncontextmenu }: Props = $props();
 
   const c = $derived(conversation);
+  const cp = $derived(c.counterparts[0]);
   const displayName = $derived(cleanName(c.label));
+  const tooltip = $derived(cp?.name && cp.name !== cp.addr ? `${cp.name} <${cp.addr}>` : (cp?.addr ?? displayName));
   const identityColor = $derived.by(() => {
     return identityStore.loaded ? identityStore.colorForEmail(c.received_by) : "transparent";
   });
@@ -24,6 +26,7 @@
   class:active
   class:unread={c.unread_count > 0}
   style:background-color={active ? '' : identityColor}
+  title={tooltip}
   {onclick}
   {oncontextmenu}
 >
@@ -47,11 +50,9 @@
       <span class="date">{formatDate(c.last_date_ts)}</span>
     </div>
 
-    <!-- Line 2: Message preview + unread badge -->
+    <!-- Line 2: Subject of last message + unread badge -->
     <div class="row-2">
-      <span class="preview">
-        {#if c.last_from}<span class="from-tag">{c.last_from}: </span>{/if}{c.last_preview}
-      </span>
+      <span class="subject">{c.last_subject}</span>
       {#if c.unread_count > 0}
         <span class="badge">{c.unread_count}</span>
       {/if}
@@ -76,9 +77,8 @@
   .conv-item:hover { background: var(--bg-hover); }
   .conv-item.active { background: var(--bg-active); }
   .conv-item.active .label,
-  .conv-item.active .preview,
-  .conv-item.active .date,
-  .conv-item.active .from-tag { color: var(--text-on-active); }
+  .conv-item.active .subject,
+  .conv-item.active .date { color: var(--text-on-active); }
 
   /* Avatar */
   .avatar-wrap {
@@ -119,12 +119,11 @@
   }
   .unread .date { color: var(--text-accent); font-weight: 600; }
 
-  .preview {
+  .subject {
     font-size: var(--font-size-sm); color: var(--text-secondary);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
   }
-  .from-tag { color: var(--text-primary); font-weight: 500; }
-  .unread .preview { color: var(--text-primary); }
+  .unread .subject { color: var(--text-primary); }
 
   .badge {
     background: var(--bg-active); color: white;
