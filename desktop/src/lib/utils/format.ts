@@ -34,6 +34,15 @@ export function formatDateShort(ts: number): string {
   return new Date(ts * 1000).toLocaleDateString([], { day: "numeric", month: "short" });
 }
 
+/** Format unix timestamp to short date + time: "24 Apr, 14:30" */
+export function formatDateTime(ts: number): string {
+  if (!ts) return "";
+  const d = new Date(ts * 1000);
+  const date = d.toLocaleDateString([], { day: "numeric", month: "short" });
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return `${date}, ${time}`;
+}
+
 /** Format byte size to human-readable string */
 export function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
