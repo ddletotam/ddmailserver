@@ -179,27 +179,30 @@ func (m *Mailbox) SearchMessages(uid bool, criteria *imap.SearchCriteria) ([]uin
 	var messages []*models.Message
 	var err error
 
-	// If we have a text query and Meilisearch is available, use it
-	if textQuery != "" && m.searchIndexer != nil {
+	if textQuery != "" {
+		// Text search REQUIRES the search indexer. If it isn't available or fails,
+		// return zero hits — falling back to "all messages in folder" produces
+		// massively confusing results for the user.
+		if m.searchIndexer == nil {
+			log.Printf("Text search requested but search indexer unavailable; returning empty")
+			return nil, nil
+		}
 		log.Printf("Using Meilisearch for text query: %s", textQuery)
 		searchResult, searchErr := m.searchIndexer.SearchInFolder(m.user.userID, m.folderID, textQuery, 10000, 0)
-		if searchErr == nil && searchResult != nil {
-			// Convert search results to message IDs and fetch from DB
-			ids := make([]int64, 0, len(searchResult.Hits))
-			for _, hit := range searchResult.Hits {
-				ids = append(ids, hit.ID)
-			}
-			messages, err = m.database.GetMessagesByIDs(ids)
-			if err != nil {
-				log.Printf("Failed to get messages by IDs, falling back to DB search: %v", err)
-				messages, err = m.database.GetMessagesByFolder(m.folderID, 10000, 0)
-			}
-		} else {
-			log.Printf("Meilisearch failed, falling back to DB: %v", searchErr)
-			messages, err = m.database.GetMessagesByFolder(m.folderID, 10000, 0)
+		if searchErr != nil || searchResult == nil {
+			log.Printf("Meilisearch query failed: %v", searchErr)
+			return nil, nil
 		}
+		ids := make([]int64, 0, len(searchResult.Hits))
+		for _, hit := range searchResult.Hits {
+			ids = append(ids, hit.ID)
+		}
+		if len(ids) == 0 {
+			return nil, nil
+		}
+		messages, err = m.database.GetMessagesByIDs(ids)
 	} else {
-		// No text query or no Meilisearch - use database
+		// No text query — pull the whole folder so non-text criteria can filter it.
 		messages, err = m.database.GetMessagesByFolder(m.folderID, 10000, 0)
 	}
 
@@ -223,32 +226,31 @@ func (m *Mailbox) SearchMessages(uid bool, criteria *imap.SearchCriteria) ([]uin
 	return results, nil
 }
 
-// extractTextQuery extracts text search terms from criteria
+// extractTextQuery extracts text search terms from criteria.
+// Only TEXT, BODY and SUBJECT contribute — the search index is built over
+// subject+body, so FROM/TO/CC criteria are ignored here.
 func (m *Mailbox) extractTextQuery(criteria *imap.SearchCriteria) string {
 	var parts []string
 
-	// Check for TEXT criterion
 	for _, text := range criteria.Text {
 		if text != "" {
 			parts = append(parts, text)
 		}
 	}
 
-	// Check for BODY criterion
 	for _, body := range criteria.Body {
 		if body != "" {
 			parts = append(parts, body)
 		}
 	}
 
-	// Check Header criteria (From, To, Subject, etc.)
 	for key, values := range criteria.Header {
+		if !strings.EqualFold(key, "SUBJECT") {
+			continue
+		}
 		for _, v := range values {
 			if v != "" {
-				switch strings.ToUpper(key) {
-				case "FROM", "TO", "CC", "SUBJECT":
-					parts = append(parts, v)
-				}
+				parts = append(parts, v)
 			}
 		}
 	}

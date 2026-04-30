@@ -117,14 +117,13 @@ func (c *Client) CreateIndex() error {
 		// Index might already exist, ignore error
 	}
 
-	// Configure searchable attributes
+	// Configure searchable attributes — only subject and body. The other fields
+	// (from/to/cc/message_id) are addressing/threading metadata, not user-facing
+	// search content; including them produces noisy matches against quoted-reply
+	// chains and threading headers.
 	searchable := []string{
 		"subject",
-		"from",
-		"to",
-		"cc",
 		"body",
-		"message_id",
 	}
 	_, err = c.request("PUT", "/indexes/messages/settings/searchable-attributes", searchable)
 	if err != nil {
