@@ -862,9 +862,12 @@ where
         // servers that reject the CHARSET argument.
         let crit = format!("OR SUBJECT \"{}\" BODY \"{}\"", escaped, escaped);
         let with_charset = format!("CHARSET UTF-8 {}", crit);
-        let uids = match session.search(&with_charset).await {
+        // UID SEARCH (vs plain SEARCH) so the server returns UIDs directly — sequence
+        // numbers depend on the SELECTed mailbox state and our server currently mis-
+        // computes them, which made FETCH-by-seqno return the wrong message.
+        let uids = match session.uid_search(&with_charset).await {
             Ok(u) => u,
-            Err(_) => match session.search(&crit).await {
+            Err(_) => match session.uid_search(&crit).await {
                 Ok(u) => u,
                 Err(_) => continue,
             },
