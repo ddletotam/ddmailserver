@@ -212,18 +212,50 @@ func (m *Mailbox) SearchMessages(uid bool, criteria *imap.SearchCriteria) ([]uin
 
 	// Apply non-text criteria filters
 	var results []uint32
-	for seqNum, msg := range messages {
-		if m.matchesCriteria(msg, criteria) {
-			if uid {
+	if uid {
+		for _, msg := range messages {
+			if m.matchesCriteria(msg, criteria) {
 				results = append(results, msg.UID)
-			} else {
-				results = append(results, uint32(seqNum+1))
+			}
+		}
+	} else {
+		// IMAP SEARCH returns sequence numbers relative to the SELECTed mailbox,
+		// NOT the index inside the matched-result subset. Build UID→seqno from
+		// the full mailbox once, then look up each match.
+		uidToSeq, mapErr := m.uidSeqMap()
+		if mapErr != nil {
+			log.Printf("uidSeqMap failed (%v); falling back to UIDs in SEARCH response", mapErr)
+		}
+		for _, msg := range messages {
+			if !m.matchesCriteria(msg, criteria) {
+				continue
+			}
+			if uidToSeq == nil {
+				results = append(results, msg.UID)
+				continue
+			}
+			if seq, ok := uidToSeq[msg.UID]; ok {
+				results = append(results, seq)
 			}
 		}
 	}
 
 	log.Printf("Search found %d messages", len(results))
 	return results, nil
+}
+
+// uidSeqMap returns a UID → 1-based sequence-number map for the entire mailbox,
+// ordered by UID ascending (which is the standard IMAP sequence ordering).
+func (m *Mailbox) uidSeqMap() (map[uint32]uint32, error) {
+	all, err := m.database.GetMessagesByFolder(m.folderID, 1000000, 0)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uint32]uint32, len(all))
+	for i, msg := range all {
+		out[msg.UID] = uint32(i + 1)
+	}
+	return out, nil
 }
 
 // extractTextQuery extracts text search terms from criteria.
