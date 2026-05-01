@@ -345,7 +345,9 @@ func (db *DB) GetOrCreateLocalFolder(userID int64, name, folderType string) (*mo
 	return folder, nil
 }
 
-// EnsureDefaultFolders creates Inbox, Sent, Trash if missing and subscribes to Inbox
+// EnsureDefaultFolders creates Inbox, Sent, Drafts, Trash if missing and subscribes
+// to Inbox. The folders carry the right `type` so IMAP clients can detect them via
+// the SPECIAL-USE attributes (\Sent, \Drafts, \Trash).
 func (db *DB) EnsureDefaultFolders(userID int64) error {
 	inbox, err := db.GetOrCreateLocalFolder(userID, "INBOX", "inbox")
 	if err != nil {
@@ -353,6 +355,9 @@ func (db *DB) EnsureDefaultFolders(userID int64) error {
 	}
 	if _, err := db.GetOrCreateLocalFolder(userID, "Sent", "sent"); err != nil {
 		return fmt.Errorf("ensure sent: %w", err)
+	}
+	if _, err := db.GetOrCreateLocalFolder(userID, "Drafts", "drafts"); err != nil {
+		return fmt.Errorf("ensure drafts: %w", err)
 	}
 	if _, err := db.GetOrCreateLocalFolder(userID, "Trash", "trash"); err != nil {
 		return fmt.Errorf("ensure trash: %w", err)
