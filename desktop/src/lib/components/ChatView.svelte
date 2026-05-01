@@ -25,9 +25,14 @@
   const composerOriginal = $derived(composerSource ?? lastMessage);
 
   // Map Message-Id → message, so each bubble can resolve its parent (in-reply-to).
+  // Skip locally-built optimistic messages (their message_id is `local-…`) so quote
+  // links never point at a stub — once the server roundtrip lands they're replaced
+  // with the real message anyway.
   const byMessageId = $derived.by(() => {
     const map = new Map<string, MessageBody>();
-    for (const m of msgs) { if (m.message_id) map.set(m.message_id, m); }
+    for (const m of msgs) {
+      if (m.message_id && !m.message_id.startsWith("local-")) map.set(m.message_id, m);
+    }
     return map;
   });
   function parentOf(m: MessageBody): MessageBody | null {
@@ -88,15 +93,23 @@
   });
 
   // Jump-to-message intent — fired when a search-result message is clicked.
-  // Wait until msgs contains the target before scrolling.
+  // Wait until msgs contains the target before scrolling. Drop the intent after
+  // a short grace window so a stale jump doesn't latch onto an unrelated reload.
   $effect(() => {
     const intent = mailStore.jumpIntent;
-    if (!intent || msgs.length === 0) return;
-    const found = msgs.find(m => m.folder === intent.folder && m.uid === intent.uid);
-    if (found) {
-      mailStore.setJumpIntent(null);
-      requestAnimationFrame(() => jumpToMessage(found));
+    if (!intent) return;
+    if (msgs.length > 0) {
+      const found = msgs.find(m => m.folder === intent.folder && m.uid === intent.uid);
+      if (found) {
+        mailStore.setJumpIntent(null);
+        requestAnimationFrame(() => jumpToMessage(found));
+        return;
+      }
     }
+    const timer = setTimeout(() => {
+      if (mailStore.jumpIntent === intent) mailStore.setJumpIntent(null);
+    }, 4000);
+    return () => clearTimeout(timer);
   });
 
   // Auto-scroll to bottom
@@ -337,10 +350,32 @@
   function buildQuoteBlock(m: MessageBody): string {
     const who = escapeHtml(m.from || m.from_addr);
     const when = m.date ? escapeHtml(m.date) : "";
-    const body = (m.html ?? (m.text ? escapeHtml(m.text).replace(/\n/g, "<br>") : "")) || "";
+    // Quote the parent as plain text, NOT raw HTML — otherwise scripts / on*-handlers
+    // / tracking pixels from the original sender flow through us into the recipient.
+    const plain = m.text ?? htmlToText(m.html ?? "");
+    const body = escapeHtml(plain).replace(/\n/g, "<br>");
     return `<blockquote style="margin:12px 0 0 0;padding:0 0 0 12px;border-left:3px solid #ccc;color:#666;">`
       + `<div style="font-size:12px;margin-bottom:4px;">${who}${when ? ` &middot; ${when}` : ""}</div>`
       + body + `</blockquote>`;
+  }
+
+  function htmlToText(html: string): string {
+    if (!html) return "";
+    return html
+      .replace(/<style[\s\S]*?<\/style>/gi, "")
+      .replace(/<script[\s\S]*?<\/script>/gi, "")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/(p|div|h[1-6]|li|tr)>/gi, "\n")
+      .replace(/<[^>]+>/g, "")
+      .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
   }
 
   function buildQuoteText(m: MessageBody): string {

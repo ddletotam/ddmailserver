@@ -90,24 +90,22 @@
       ? (msg.to_addrs.find((a) => !ourAddrs.has(a.toLowerCase())) ?? msg.to_addrs[0] ?? "").toLowerCase()
       : fromLc;
 
-    // Find by counterpart across all identities; pick the one that actually contains this message.
-    const candidates = mailStore.conversations.filter(
-      (c) => (c.counterparts[0]?.addr ?? "").toLowerCase() === cpLc,
-    );
-    const conv = candidates.find((c) =>
+    // The conversation that *actually* owns this message is the only one whose
+    // messages list contains the (folder, uid) pair. Don't fall back to "any
+    // conversation with this counterpart" — that triggers a phantom jumpIntent
+    // against a thread that doesn't have the message and the highlight never
+    // fires. If it's nowhere local, the message exists on the server but we
+    // haven't pulled it into a conversation yet (or it was deleted).
+    const conv = mailStore.conversations.find((c) =>
+      (c.counterparts[0]?.addr ?? "").toLowerCase() === cpLc &&
       c.messages.some((mr) => mr.folder === msg.folder && mr.uid === msg.uid),
-    ) ?? candidates.reduce<typeof candidates[number] | null>(
-      (best, c) => (best === null || c.last_date_ts > best.last_date_ts ? c : best),
-      null,
     );
     if (!conv) {
-      alert("Письмо есть на сервере, но соответствующего диалога ещё не построилось — попробуйте перезагрузить список или поискать в корзине через веб-интерфейс.");
-      resetSearch();
-      return;
-    }
-    const refExists = conv.messages.some((mr) => mr.folder === msg.folder && mr.uid === msg.uid);
-    if (!refExists) {
-      alert("Письмо было, но, вероятно, удалено. Зайдите в веб-интерфейс сервера и проверьте корзину.");
+      alert(
+        "Письмо есть на сервере, но в локальной выборке диалога его нет.\n" +
+        "Возможно, оно удалено — проверьте корзину в веб-интерфейсе сервера, " +
+        "либо перезагрузите список диалогов (Ctrl+R), чтобы подтянуть свежее."
+      );
       resetSearch();
       return;
     }

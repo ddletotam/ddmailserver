@@ -10,10 +10,16 @@
 
   $effect(() => {
     const account = accountStore.activeAccount;
-    if (account) {
-      identityStore.load(account);
-      mailStore.loadConversations(account);
-    }
+    if (!account) return;
+    // Identities must be available BEFORE the conversation grouping runs — the
+    // server-side `fetch_conversations` derives "our addresses" from the cached
+    // identity list to compute (counterpart, my_identity) pairs. If we don't wait,
+    // a fresh login groups everything under the single account.email and aliases
+    // appear as self-threads.
+    (async () => {
+      await identityStore.load(account);
+      await mailStore.loadConversations(account);
+    })();
   });
 
   function handleAccountAdded() {

@@ -54,6 +54,7 @@ fn main() {
             imap::search_messages,
             imap::search_contacts,
             imap::set_flags,
+            imap::set_flags_batch,
             imap::fetch_message_source,
             imap::download_attachment,
             imap::fetch_identities,
