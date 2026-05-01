@@ -229,21 +229,35 @@ func (m *Mailbox) SearchMessages(uid bool, criteria *imap.SearchCriteria) ([]uin
 // extractTextQuery extracts text search terms from criteria.
 // Only TEXT, BODY and SUBJECT contribute — the search index is built over
 // subject+body, so FROM/TO/CC criteria are ignored here.
+//
+// Recurses into the Or list: clients that send `OR SUBJECT "x" BODY "x"` parse into
+// criteria.Or = [[<SUBJECT>, <BODY>]] rather than flat Header+Body, so the surface-
+// level fields are empty and a non-recursive walk would think the query is empty —
+// which makes SearchMessages fall through to the "no text query" branch and dump
+// the entire folder.
 func (m *Mailbox) extractTextQuery(criteria *imap.SearchCriteria) string {
-	var parts []string
+	if criteria == nil {
+		return ""
+	}
+	parts := collectTextParts(criteria)
+	return strings.Join(parts, " ")
+}
 
+func collectTextParts(criteria *imap.SearchCriteria) []string {
+	if criteria == nil {
+		return nil
+	}
+	var parts []string
 	for _, text := range criteria.Text {
 		if text != "" {
 			parts = append(parts, text)
 		}
 	}
-
 	for _, body := range criteria.Body {
 		if body != "" {
 			parts = append(parts, body)
 		}
 	}
-
 	for key, values := range criteria.Header {
 		if !strings.EqualFold(key, "SUBJECT") {
 			continue
@@ -254,8 +268,13 @@ func (m *Mailbox) extractTextQuery(criteria *imap.SearchCriteria) string {
 			}
 		}
 	}
-
-	return strings.Join(parts, " ")
+	for _, pair := range criteria.Or {
+		parts = append(parts, collectTextParts(pair[0])...)
+		parts = append(parts, collectTextParts(pair[1])...)
+	}
+	// Note: criteria.Not is intentionally skipped — those terms must NOT appear,
+	// so they shouldn't be sent to the full-text index as "find these".
+	return parts
 }
 
 // CreateMessage creates a new message (APPEND command)
