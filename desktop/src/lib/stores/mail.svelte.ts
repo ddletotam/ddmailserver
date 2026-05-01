@@ -10,10 +10,17 @@ import type {
   Account,
 } from "../types/mail";
 
-const PINNED_KEY = "ddmail_pinned";
+// Bumped from "ddmail_pinned" when conversation IDs switched from raw counterpart
+// addresses to "{my_identity}|{counterpart}" — old pins no longer match anything,
+// so we drop the legacy key on first read of v2.
+const PINNED_KEY = "ddmail_pinned_v2";
+const LEGACY_PINNED_KEY = "ddmail_pinned";
 
 function loadPinned(): Set<string> {
   try {
+    if (localStorage.getItem(LEGACY_PINNED_KEY) !== null && localStorage.getItem(PINNED_KEY) === null) {
+      localStorage.removeItem(LEGACY_PINNED_KEY);
+    }
     const raw = localStorage.getItem(PINNED_KEY);
     return raw ? new Set(JSON.parse(raw)) : new Set();
   } catch {
@@ -275,16 +282,13 @@ export const mailStore = {
       if (conv.unread_count > 0) {
         conv.unread_count = 0;
         conversations = [...conversations];
-        // Single background call per message — fire and forget
-        for (const msgRef of conv.messages) {
-          invoke("set_flags", {
-            ...imapArgs(account),
-            folder: msgRef.folder,
-            uid: msgRef.uid,
-            flags: "\\Seen",
-            add: true,
-          }).catch(() => {});
-        }
+        // One IMAP session for the whole conversation, grouped by folder server-side.
+        invoke("set_flags_batch", {
+          ...imapArgs(account),
+          messages: conv.messages,
+          flags: "\\Seen",
+          add: true,
+        }).catch(() => {});
       }
     } catch (e) {
       if (activeConversationId === conversationId && conversationMessages.length === 0) {

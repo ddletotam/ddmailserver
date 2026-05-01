@@ -936,6 +936,54 @@ pub async fn set_flags(
     Ok(())
 }
 
+/// Apply flag changes to many messages in a single IMAP session — avoids the
+/// thunder-on-handshake of one TLS connection per message.
+#[tauri::command]
+pub async fn set_flags_batch(
+    host: String, port: u16, username: String, password: String, use_tls: bool,
+    messages: Vec<MessageRef>, flags: String, add: bool,
+) -> Result<(), String> {
+    if messages.is_empty() { return Ok(()); }
+    if use_tls {
+        let mut session = connect_tls(&host, port, &username, &password).await?;
+        let r = store_flags_batch_impl(&mut session, &messages, &flags, add).await;
+        session.logout().await.ok();
+        r
+    } else {
+        let mut session = connect_plain(&host, port, &username, &password).await?;
+        let r = store_flags_batch_impl(&mut session, &messages, &flags, add).await;
+        session.logout().await.ok();
+        r
+    }
+}
+
+async fn store_flags_batch_impl<T>(
+    session: &mut async_imap::Session<T>,
+    messages: &[MessageRef], flags: &str, add: bool,
+) -> Result<(), String>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + std::fmt::Debug,
+{
+    let mut by_folder: HashMap<String, Vec<u32>> = HashMap::new();
+    for mr in messages {
+        if mr.uid == 0 { continue; }
+        by_folder.entry(mr.folder.clone()).or_default().push(mr.uid);
+    }
+    let op = if add { "+FLAGS" } else { "-FLAGS" };
+    for (folder, uids) in by_folder {
+        if let Err(e) = session.select(&folder).await {
+            log::warn!("set_flags_batch: SELECT {folder} failed: {e}");
+            continue;
+        }
+        let uid_set = uids.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",");
+        match session.uid_store(uid_set, format!("{op} ({flags})")).await {
+            Ok(stream) => { let _: Vec<_> = stream.try_collect::<Vec<_>>().await.unwrap_or_default(); }
+            Err(e) => log::warn!("set_flags_batch: STORE in {folder}: {e}"),
+        }
+    }
+    Ok(())
+}
+
 /// Fetch raw RFC-822 source of a single message.
 #[tauri::command]
 pub async fn fetch_message_source(
@@ -1144,6 +1192,37 @@ pub async fn fetch_identities(
     }
 }
 
+/// Extract the first top-level JSON array `[ ... ]` from a string, respecting
+/// string literals and escapes — i.e. `[`, `]`, `{`, `}` inside a JSON string don't
+/// affect bracket counting. Returns `None` if no balanced array is found.
+fn extract_top_level_array(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let start = bytes.iter().position(|&b| b == b'[')?;
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut esc = false;
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
+        if in_str {
+            if esc { esc = false; }
+            else if b == b'\\' { esc = true; }
+            else if b == b'"' { in_str = false; }
+            continue;
+        }
+        match b {
+            b'"' => in_str = true,
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return std::str::from_utf8(&bytes[start..=i]).ok().map(|s| s.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 async fn fetch_identities_impl<T>(
     session: &mut async_imap::Session<T>,
 ) -> Result<Vec<Identity>, String>
@@ -1162,41 +1241,29 @@ where
     let _tag = session.run_command("GETMETADATA \"\" /shared/vendor/ddmail/identities")
         .await.map_err(|e| format!("GETMETADATA send: {e}"))?;
 
-    // 3. Read responses — extract JSON from raw bytes
-    let mut json_data = String::new();
+    // 3. Accumulate every raw response chunk (literal-form values can span multiple
+    // reads), then extract the JSON array using bracket-matching that respects
+    // strings and escapes.
+    let mut buf = Vec::<u8>::new();
     loop {
         match session.read_response().await {
             Some(Ok(resp)) => {
-                // Get raw bytes of the IMAP response line
-                let raw_bytes = resp.borrow_owner();
-                let raw_text = String::from_utf8_lossy(raw_bytes);
-                log::debug!("GETMETADATA raw: {}", raw_text);
-
-                // Find JSON array in the raw response
-                if json_data.is_empty() {
-                    if let Some(start) = raw_text.find("[{") {
-                        if let Some(end) = raw_text.rfind("}]") {
-                            json_data = raw_text[start..=end + 1].to_string();
-                        }
-                    }
-                }
-
-                // Tagged response = done
-                if resp.request_id().is_some() {
-                    break;
-                }
+                buf.extend_from_slice(resp.borrow_owner());
+                if resp.request_id().is_some() { break; }
             }
-            Some(Err(e)) => {
-                return Err(format!("GETMETADATA read: {e}"));
-            }
+            Some(Err(e)) => return Err(format!("GETMETADATA read: {e}")),
             None => break,
         }
     }
 
-    if json_data.is_empty() {
-        log::warn!("GETMETADATA: no JSON data found in response");
-        return Ok(vec![]);
-    }
+    let raw = String::from_utf8_lossy(&buf);
+    let json_data = match extract_top_level_array(&raw) {
+        Some(s) => s,
+        None => {
+            log::warn!("GETMETADATA: no JSON array in response (len={})", raw.len());
+            return Ok(vec![]);
+        }
+    };
 
     log::info!("GETMETADATA JSON ({} bytes): {}...", json_data.len(),
         &json_data[..json_data.len().min(100)]);

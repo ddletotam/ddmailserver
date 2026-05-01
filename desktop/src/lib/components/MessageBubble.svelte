@@ -52,8 +52,13 @@
   });
   const mediaAllowed = $derived(contentPermissions.mediaAllowed);
   const scriptsAllowed = $derived(contentPermissions.scriptsAllowed);
+  // A locally-built optimistic message that has not been confirmed by the server yet.
+  // Its uid is a negative timestamp; the server has no record under that uid, so any
+  // command (set_flags, fetch_message_source, download_attachment) would error out.
+  const isPending = $derived(message.uid < 0);
 
   function handleContextMenu(e: MouseEvent) {
+    if (isPending) return;
     e.preventDefault();
     showMediaSubmenu = false;
     const menuW = 280, menuH = 300;
@@ -71,6 +76,7 @@
 
   async function viewSource() {
     contextMenu = null;
+    if (isPending) return;
     const account = accountStore.activeAccount;
     if (!account) return;
 
@@ -112,6 +118,7 @@
 
   let downloadingIndex = $state<number | null>(null);
   async function openAttachment(att: Attachment) {
+    if (isPending) return;
     const account = accountStore.activeAccount;
     if (!account || downloadingIndex !== null) return;
     downloadingIndex = att.index;
@@ -136,6 +143,7 @@
   class:last={isLastInGroup}
   class:single={isFirstInGroup && isLastInGroup}
   class:has-html={displayContent.type === "html"}
+  class:pending={isPending}
   data-msg-uid={message.uid}
   data-msg-folder={message.folder}
   oncontextmenu={handleContextMenu}
@@ -178,7 +186,7 @@
             type="button"
             class="attachment"
             class:loading={downloadingIndex === att.index}
-            disabled={downloadingIndex !== null && downloadingIndex !== att.index}
+            disabled={isPending || (downloadingIndex !== null && downloadingIndex !== att.index)}
             onclick={() => openAttachment(att)}
             title={att.filename}
           >
@@ -332,6 +340,7 @@
     align-items: flex-end;
     align-self: flex-end;
   }
+  .bubble-wrap.pending .bubble { opacity: 0.65; }
 
   .bubble {
     background: var(--bg-bubble-incoming);
