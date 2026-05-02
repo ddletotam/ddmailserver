@@ -56,6 +56,39 @@ func (s *Server) APIAuthMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// WebAdminMiddleware gates web routes that require admin (non-admins get 404
+// rather than 403 — we don't even acknowledge the page exists).
+func (s *Server) WebAdminMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user := s.GetUserFromContext(r.Context())
+		if user == nil {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		if !user.IsAdmin() {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// APIAdminMiddleware gates JSON API routes that require admin.
+func (s *Server) APIAdminMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user := s.GetUserFromContext(r.Context())
+		if user == nil {
+			respondError(w, http.StatusUnauthorized, "unauthorized - please login")
+			return
+		}
+		if !user.IsAdmin() {
+			respondError(w, http.StatusForbidden, "admin only")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // GetUserFromContext retrieves user from context
 func (s *Server) GetUserFromContext(ctx context.Context) *models.User {
 	user, ok := ctx.Value(userContextKey).(*models.User)

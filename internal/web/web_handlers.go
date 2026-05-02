@@ -723,7 +723,8 @@ func (s *Server) HandleComposePage(w http.ResponseWriter, r *http.Request) {
 	s.renderTemplate(w, "compose.html", data)
 }
 
-// HandleSettingsPage shows the settings page
+// HandleSettingsPage shows the per-user settings page (profile, language,
+// password, danger zone). Installation/server-wide settings live on /admin.
 func (s *Server) HandleSettingsPage(w http.ResponseWriter, r *http.Request) {
 	user := s.GetUserFromContext(r.Context())
 	if user == nil {
@@ -731,62 +732,20 @@ func (s *Server) HandleSettingsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get user's language preference (default to English)
 	language := user.Language
 	if language == "" {
 		language = "en"
 	}
 
-	// Get OAuth settings for admin
-	var oauthSettings *db.GoogleOAuthSettings
-	var microsoftOAuthSettings *db.MicrosoftOAuthSettings
-	var redirectURI, microsoftRedirectURI string
-	if user.IsAdmin() {
-		oauthSettings, _ = s.database.GetGoogleOAuthSettings()
-		if oauthSettings == nil {
-			oauthSettings = &db.GoogleOAuthSettings{}
-		}
-		microsoftOAuthSettings, _ = s.database.GetMicrosoftOAuthSettings()
-		if microsoftOAuthSettings == nil {
-			microsoftOAuthSettings = &db.MicrosoftOAuthSettings{}
-		}
-		// Build default redirect URIs from request
-		scheme := "https"
-		host := r.Host
-		// Check for reverse proxy headers
-		if fwdHost := r.Header.Get("X-Forwarded-Host"); fwdHost != "" {
-			host = fwdHost
-		}
-		if fwdProto := r.Header.Get("X-Forwarded-Proto"); fwdProto != "" {
-			scheme = fwdProto
-		} else if r.TLS == nil && (strings.HasPrefix(host, "localhost") || strings.HasPrefix(host, "127.0.0.1")) {
-			scheme = "http"
-		}
-		redirectURI = fmt.Sprintf("%s://%s/oauth/google/callback", scheme, host)
-		microsoftRedirectURI = fmt.Sprintf("%s://%s/oauth/microsoft/callback", scheme, host)
-	}
-
 	data := struct {
 		PageData
-		Language               string
-		OAuthSettings          *db.GoogleOAuthSettings
-		MicrosoftOAuthSettings *db.MicrosoftOAuthSettings
-		RedirectURI            string
-		MicrosoftRedirectURI   string
-		GoogleOAuthEnabled     bool
-		MicrosoftOAuthEnabled  bool
+		Language string
 	}{
 		PageData: PageData{
 			Title: "Settings",
 			User:  user,
 		},
-		Language:               language,
-		OAuthSettings:          oauthSettings,
-		MicrosoftOAuthSettings: microsoftOAuthSettings,
-		RedirectURI:            redirectURI,
-		MicrosoftRedirectURI:   microsoftRedirectURI,
-		GoogleOAuthEnabled:     s.googleOAuth != nil,
-		MicrosoftOAuthEnabled:  s.microsoftOAuth != nil,
+		Language: language,
 	}
 
 	s.renderTemplate(w, "settings.html", data)

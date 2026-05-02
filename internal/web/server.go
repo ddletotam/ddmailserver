@@ -140,6 +140,14 @@ func (s *Server) setupRoutes() {
 	settingsAPI.HandleFunc("/oauth/google", s.HandleSaveGoogleOAuthSettings).Methods("POST")
 	settingsAPI.HandleFunc("/oauth/microsoft", s.HandleSaveMicrosoftOAuthSettings).Methods("POST")
 
+	// Admin API (admin-only). Registered before general /api subrouter so the
+	// more-specific prefix wins in gorilla/mux's first-match-wins traversal.
+	adminAPI := s.router.PathPrefix("/api/admin").Subrouter()
+	adminAPI.Use(s.APIAdminMiddleware)
+	adminAPI.HandleFunc("/users/{id}/admin", s.HandleAdminToggleAdmin).Methods("POST")
+	adminAPI.HandleFunc("/users/{id}/ban", s.HandleAdminToggleBan).Methods("POST")
+	adminAPI.HandleFunc("/users/{id}", s.HandleAdminDeleteUser).Methods("DELETE")
+
 	// Accounts API (uses session cookie auth, must be registered before general API routes)
 	accountsAPI := s.router.PathPrefix("/api/accounts").Subrouter()
 	accountsAPI.Use(s.APIAuthMiddleware) // Returns JSON error instead of redirect
@@ -222,6 +230,13 @@ func (s *Server) setupRoutes() {
 
 	// Settings
 	web.HandleFunc("/settings", s.HandleSettingsPage).Methods("GET")
+
+	// Admin (server settings + user management). WebAdminMiddleware checks the
+	// is_admin flag and 404s for non-admins, so the page is invisible to the
+	// rest. The catch-all `web` subrouter has WebAuthMiddleware globally; that
+	// runs first, then the admin gate.
+	web.Handle("/admin", s.WebAdminMiddleware(http.HandlerFunc(s.HandleAdminPage))).Methods("GET")
+	web.Handle("/admin/users", s.WebAdminMiddleware(http.HandlerFunc(s.HandleAdminListUsers))).Methods("GET")
 
 	// Domains (for MX server)
 	web.HandleFunc("/domains", s.HandleDomainsPage).Methods("GET")

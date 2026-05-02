@@ -14,6 +14,7 @@ type User struct {
 	Language        string    `json:"language,omitempty"`
 	RecoveryKeyHash string    `json:"-"` // never expose in JSON
 	IsAdminFlag     bool      `json:"is_admin"`
+	IsBannedFlag    bool      `json:"is_banned"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
@@ -21,6 +22,11 @@ type User struct {
 // IsAdmin returns true if user is an administrator
 func (u *User) IsAdmin() bool {
 	return u.IsAdminFlag
+}
+
+// IsBanned returns true if user is banned from logging in
+func (u *User) IsBanned() bool {
+	return u.IsBannedFlag
 }
 
 // Account represents an external email account (Gmail, Outlook, etc.)
