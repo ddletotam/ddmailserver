@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/yourusername/mailserver/internal/db"
 	imapclient "github.com/yourusername/mailserver/internal/imap/client"
 	"github.com/yourusername/mailserver/internal/models"
 )
