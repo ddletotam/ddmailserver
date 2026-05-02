@@ -198,6 +198,14 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Banned users get the same generic error as wrong password — exposing
+	// "you're banned" leaks user state to anyone with the password.
+	if user.IsBanned() {
+		log.Printf("Login refused for banned user: %s", user.Username)
+		respondHTMXError(w, r, http.StatusUnauthorized, "Invalid username or password")
+		return
+	}
+
 	// Generate token
 	token, err := GenerateToken(user.ID, user.Username, s.jwtSecret)
 	if err != nil {

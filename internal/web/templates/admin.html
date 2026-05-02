@@ -1,0 +1,189 @@
+{{define "content"}}
+<div class="row row-cards">
+    <!-- Google OAuth -->
+    <div class="col-lg-6">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">Google OAuth</h3>
+                {{if .GoogleOAuthEnabled}}<span class="badge bg-success ms-2">Active</span>{{end}}
+            </div>
+            <div class="card-body">
+                <p class="text-muted mb-3">
+                    Configure Google OAuth to allow users to add Gmail accounts.
+                    <a href="#" onclick="document.getElementById('google-instructions').classList.toggle('d-none'); return false;">Show instructions</a>
+                </p>
+                <div id="google-instructions" class="alert alert-info d-none mb-3">
+                    <ol class="mb-0 ps-3">
+                        <li>Go to <a href="https://console.cloud.google.com/" target="_blank" rel="noopener">Google Cloud Console</a></li>
+                        <li>Create OAuth credentials</li>
+                        <li>Set redirect URI: <code>{{.GoogleRedirectURI}}</code></li>
+                    </ol>
+                </div>
+                <form hx-post="/api/settings/oauth/google" hx-target="#google-oauth-message" hx-swap="innerHTML">
+                    <div id="google-oauth-message"></div>
+                    <div class="mb-3">
+                        <label class="form-label">Client ID</label>
+                        <input type="text" name="client_id" class="form-control" value="{{.GoogleOAuthSettings.ClientID}}" placeholder="xxxxx.apps.googleusercontent.com">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Client Secret</label>
+                        <input type="password" name="client_secret" class="form-control" placeholder="{{if .GoogleOAuthSettings.ClientSecret}}(configured){{end}}">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Redirect URI</label>
+                        <input type="text" name="redirect_uri" class="form-control" value="{{if .GoogleOAuthSettings.RedirectURI}}{{.GoogleOAuthSettings.RedirectURI}}{{else}}{{.GoogleRedirectURI}}{{end}}">
+                    </div>
+                    <button type="submit" class="btn btn-primary">Save</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Microsoft OAuth -->
+    <div class="col-lg-6">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">Microsoft OAuth</h3>
+                {{if .MicrosoftOAuthEnabled}}<span class="badge bg-success ms-2">Active</span>{{end}}
+            </div>
+            <div class="card-body">
+                <p class="text-muted mb-3">
+                    Configure Microsoft OAuth for Outlook/Office 365 accounts.
+                    <a href="#" onclick="document.getElementById('ms-instructions').classList.toggle('d-none'); return false;">Show instructions</a>
+                </p>
+                <div id="ms-instructions" class="alert alert-info d-none mb-3">
+                    <ol class="mb-0 ps-3">
+                        <li>Go to <a href="https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noopener">Azure Portal</a></li>
+                        <li>Create app registration</li>
+                        <li>Set redirect URI: <code>{{.MicrosoftRedirectURI}}</code></li>
+                    </ol>
+                </div>
+                <form hx-post="/api/settings/oauth/microsoft" hx-target="#ms-oauth-message" hx-swap="innerHTML">
+                    <div id="ms-oauth-message"></div>
+                    <div class="mb-3">
+                        <label class="form-label">Application (Client) ID</label>
+                        <input type="text" name="client_id" class="form-control" value="{{.MicrosoftOAuthSettings.ClientID}}">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Client Secret</label>
+                        <input type="password" name="client_secret" class="form-control" placeholder="{{if .MicrosoftOAuthSettings.ClientSecret}}(configured){{end}}">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Redirect URI</label>
+                        <input type="text" name="redirect_uri" class="form-control" value="{{if .MicrosoftOAuthSettings.RedirectURI}}{{.MicrosoftOAuthSettings.RedirectURI}}{{else}}{{.MicrosoftRedirectURI}}{{end}}">
+                    </div>
+                    <button type="submit" class="btn btn-primary">Save</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Users -->
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">{{t "admin.users"}}</h3>
+            </div>
+            <div class="card-body p-0">
+                <div id="admin-users" hx-get="/admin/users" hx-trigger="load, ddmail:users-changed from:body" hx-swap="innerHTML">
+                    {{template "admin-users-table" .Users}}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+(function () {
+    function refresh() {
+        if (window.htmx) htmx.trigger(document.body, 'ddmail:users-changed');
+    }
+    document.addEventListener('click', function (e) {
+        var btn = e.target.closest('[data-admin-action]');
+        if (!btn) return;
+        e.preventDefault();
+        var action = btn.dataset.adminAction;
+        var id = btn.dataset.userId;
+        var username = btn.dataset.username || ('user #' + id);
+        var url = '/api/admin/users/' + id + (action === 'delete' ? '' : '/' + action);
+        var method = action === 'delete' ? 'DELETE' : 'POST';
+        var prompt = btn.dataset.confirm;
+        if (prompt && !confirm(prompt.replace('{u}', username))) return;
+        btn.disabled = true;
+        fetch(url, { method: method, credentials: 'same-origin' })
+            .then(function (r) {
+                if (!r.ok) return r.json().then(function (j) { throw new Error((j && j.error) || r.statusText); });
+                refresh();
+            })
+            .catch(function (err) { alert(err.message || 'Action failed'); btn.disabled = false; });
+    });
+})();
+</script>
+{{end}}
+
+{{define "admin-users-table"}}
+<div class="table-responsive">
+    <table class="table table-vcenter card-table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>{{t "admin.username"}}</th>
+                <th>{{t "admin.email"}}</th>
+                <th>{{t "admin.role"}}</th>
+                <th>{{t "admin.status"}}</th>
+                <th>{{t "admin.created"}}</th>
+                <th class="w-1">{{t "admin.actions"}}</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .}}
+            <tr {{if .IsBanned}}class="text-muted"{{end}}>
+                <td>{{.ID}}</td>
+                <td>
+                    {{.Username}}
+                    {{if .IsCurrent}}<span class="badge bg-blue-lt ms-1">{{t "admin.you"}}</span>{{end}}
+                </td>
+                <td>{{if .Email}}{{.Email}}{{else}}<span class="text-muted">—</span>{{end}}</td>
+                <td>
+                    {{if .IsAdmin}}<span class="badge bg-purple-lt">admin</span>{{else}}<span class="text-muted">user</span>{{end}}
+                </td>
+                <td>
+                    {{if .IsBanned}}<span class="badge bg-red-lt">{{t "admin.banned"}}</span>{{else}}<span class="badge bg-green-lt">{{t "admin.active"}}</span>{{end}}
+                </td>
+                <td>{{.CreatedAt}}</td>
+                <td>
+                    {{if not .IsCurrent}}
+                    <div class="btn-list flex-nowrap">
+                        <button class="btn btn-sm btn-outline-secondary"
+                                data-admin-action="admin"
+                                data-user-id="{{.ID}}"
+                                data-username="{{.Username}}"
+                                title="{{if .IsAdmin}}{{t "admin.demote"}}{{else}}{{t "admin.promote"}}{{end}}">
+                            {{if .IsAdmin}}<i class="ti ti-arrow-down"></i>{{else}}<i class="ti ti-arrow-up"></i>{{end}}
+                        </button>
+                        <button class="btn btn-sm {{if .IsBanned}}btn-outline-success{{else}}btn-outline-warning{{end}}"
+                                data-admin-action="ban"
+                                data-user-id="{{.ID}}"
+                                data-username="{{.Username}}"
+                                title="{{if .IsBanned}}{{t "admin.unban"}}{{else}}{{t "admin.ban"}}{{end}}">
+                            {{if .IsBanned}}<i class="ti ti-lock-open"></i>{{else}}<i class="ti ti-lock"></i>{{end}}
+                        </button>
+                        <button class="btn btn-sm btn-outline-danger"
+                                data-admin-action="delete"
+                                data-user-id="{{.ID}}"
+                                data-username="{{.Username}}"
+                                data-confirm="{{t "admin.delete_confirm"}}"
+                                title="{{t "admin.delete"}}">
+                            <i class="ti ti-trash"></i>
+                        </button>
+                    </div>
+                    {{end}}
+                </td>
+            </tr>
+            {{else}}
+            <tr><td colspan="7" class="text-center text-muted">{{t "admin.no_users"}}</td></tr>
+            {{end}}
+        </tbody>
+    </table>
+</div>
+{{end}}
