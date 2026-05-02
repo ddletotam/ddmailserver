@@ -76,6 +76,12 @@ func (r *AccountTokenRefresher) Refresh(account *models.Account, force bool) (re
 		newRefreshToken = account.OAuthRefreshToken
 	}
 
+	// Google returns the granted scopes on every refresh response. If a downstream
+	// service (IMAP/SMTP) keeps failing with "invalid_request" + scope hint, the
+	// refresh token was granted without that scope — log it so the diagnosis is
+	// obvious instead of "refresh works but auth still fails ¯\_(ツ)_/¯".
+	log.Printf("OAuth refresh response for %s: scope=%q expires_in=%d", account.Email, tokenResp.Scope, tokenResp.ExpiresIn)
+
 	if err := r.Store.UpdateAccountOAuthTokens(account.ID, tokenResp.AccessToken, newRefreshToken, expiry); err != nil {
 		return false, fmt.Errorf("failed to save new tokens: %w", err)
 	}
