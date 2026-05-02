@@ -115,6 +115,19 @@ func (s *Session) Data(r io.Reader) error {
 
 	header := mr.Header
 
+	// RFC 5322 §3.6.4 says Message-ID SHOULD be present, not MUST. We make it MUST on
+	// our submission port: a missing Message-ID later forces our parser to mint a
+	// `<unixnano@generated.local>` fallback, which makes the same email impossible to
+	// dedup across folders/copies. Rejecting at submission keeps storage clean.
+	if msgID, _ := header.Text("Message-Id"); strings.TrimSpace(msgID) == "" {
+		log.Printf("SMTP: rejecting submission from %s — missing Message-Id header", s.from)
+		return &smtp.SMTPError{
+			Code:         554,
+			EnhancedCode: smtp.EnhancedCode{5, 6, 0},
+			Message:      "Message-Id header is required",
+		}
+	}
+
 	// Extract fields
 	subject, _ := header.Subject()
 	_, _ = header.AddressList("From")
