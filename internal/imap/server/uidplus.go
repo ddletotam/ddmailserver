@@ -158,5 +158,6 @@ func formatUIDSet(uids []uint32) string {
 var _ imapserver.Extension = &UIDPLUSExtension{}
 var _ imapserver.Handler = &uidplusAppendHandler{}
 var _ imapserver.Handler = &uidplusCopyHandler{}
+
 // COPY must support UID prefix
 var _ imapserver.UidHandler = &uidplusCopyHandler{}

@@ -4,16 +4,16 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/crypto"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CreateAccount creates a new external email account
 func (db *DB) CreateAccount(account *models.Account) error {
-	account.CreatedAt = time.Now()
-	account.UpdatedAt = time.Now()
+	account.CreatedAt = timeutil.Now()
+	account.UpdatedAt = timeutil.Now()
 
 	// Set default auth type if not specified
 	if account.AuthType == "" {
@@ -65,9 +65,9 @@ func (db *DB) CreateAccount(account *models.Account) error {
 		RETURNING id
 	`
 
-	var tokenExpiry sql.NullTime
-	if !account.OAuthTokenExpiry.IsZero() {
-		tokenExpiry = sql.NullTime{Time: account.OAuthTokenExpiry, Valid: true}
+	var tokenExpiry sql.NullInt64
+	if account.OAuthTokenExpiry != 0 {
+		tokenExpiry = sql.NullInt64{Int64: account.OAuthTokenExpiry, Valid: true}
 	}
 
 	err = db.QueryRow(
@@ -111,7 +111,7 @@ func (db *DB) GetAccountsByUserID(userID int64) ([]*models.Account, error) {
 	var accounts []*models.Account
 	for rows.Next() {
 		account := &models.Account{}
-		var lastSync, tokenExpiry sql.NullTime
+		var lastSync, tokenExpiry sql.NullInt64
 
 		err := rows.Scan(
 			&account.ID, &account.UserID, &account.Name, &account.Email,
@@ -129,10 +129,10 @@ func (db *DB) GetAccountsByUserID(userID int64) ([]*models.Account, error) {
 		}
 
 		if lastSync.Valid {
-			account.LastSync = lastSync.Time
+			account.LastSync = lastSync.Int64
 		}
 		if tokenExpiry.Valid {
-			account.OAuthTokenExpiry = tokenExpiry.Time
+			account.OAuthTokenExpiry = tokenExpiry.Int64
 		}
 
 		// Decrypt passwords and tokens
@@ -149,7 +149,7 @@ func (db *DB) GetAccountsByUserID(userID int64) ([]*models.Account, error) {
 // GetAccountByID retrieves an account by ID
 func (db *DB) GetAccountByID(id int64) (*models.Account, error) {
 	account := &models.Account{}
-	var lastSync, tokenExpiry sql.NullTime
+	var lastSync, tokenExpiry sql.NullInt64
 
 	query := `
 		SELECT id, user_id, name, email, imap_host, imap_port, imap_username, imap_password, imap_tls,
@@ -183,10 +183,10 @@ func (db *DB) GetAccountByID(id int64) (*models.Account, error) {
 	}
 
 	if lastSync.Valid {
-		account.LastSync = lastSync.Time
+		account.LastSync = lastSync.Int64
 	}
 	if tokenExpiry.Valid {
-		account.OAuthTokenExpiry = tokenExpiry.Time
+		account.OAuthTokenExpiry = tokenExpiry.Int64
 	}
 
 	// Decrypt passwords and tokens
@@ -199,7 +199,7 @@ func (db *DB) GetAccountByID(id int64) (*models.Account, error) {
 
 // UpdateAccount updates an account
 func (db *DB) UpdateAccount(account *models.Account) error {
-	account.UpdatedAt = time.Now()
+	account.UpdatedAt = timeutil.Now()
 
 	// Encrypt passwords before storing
 	encryptedIMAPPassword, err := crypto.EncryptPassword(account.IMAPPassword, db.encryptionKey)
@@ -254,9 +254,9 @@ func (db *DB) DeleteAccount(id int64) error {
 }
 
 // UpdateAccountLastSync updates the last sync time for an account
-func (db *DB) UpdateAccountLastSync(accountID int64, lastSync time.Time) error {
+func (db *DB) UpdateAccountLastSync(accountID int64, lastSync int64) error {
 	query := `UPDATE accounts SET last_sync = $1, updated_at = $2 WHERE id = $3`
-	_, err := db.Exec(query, lastSync, time.Now(), accountID)
+	_, err := db.Exec(query, lastSync, timeutil.Now(), accountID)
 	if err != nil {
 		return fmt.Errorf("failed to update last sync: %w", err)
 	}
@@ -287,7 +287,7 @@ func (db *DB) GetAllEnabledAccounts() ([]*models.Account, error) {
 	var accounts []*models.Account
 	for rows.Next() {
 		account := &models.Account{}
-		var lastSync, tokenExpiry sql.NullTime
+		var lastSync, tokenExpiry sql.NullInt64
 
 		err := rows.Scan(
 			&account.ID, &account.UserID, &account.Name, &account.Email,
@@ -305,10 +305,10 @@ func (db *DB) GetAllEnabledAccounts() ([]*models.Account, error) {
 		}
 
 		if lastSync.Valid {
-			account.LastSync = lastSync.Time
+			account.LastSync = lastSync.Int64
 		}
 		if tokenExpiry.Valid {
-			account.OAuthTokenExpiry = tokenExpiry.Time
+			account.OAuthTokenExpiry = tokenExpiry.Int64
 		}
 
 		// Decrypt passwords and tokens
@@ -369,7 +369,7 @@ func (db *DB) decryptAccountPasswords(account *models.Account) error {
 }
 
 // UpdateAccountOAuthTokens updates OAuth tokens for an account
-func (db *DB) UpdateAccountOAuthTokens(accountID int64, accessToken, refreshToken string, expiry time.Time) error {
+func (db *DB) UpdateAccountOAuthTokens(accountID int64, accessToken, refreshToken string, expiry int64) error {
 	// Encrypt tokens before storing
 	encryptedAccessToken, err := crypto.EncryptPassword(accessToken, db.encryptionKey)
 	if err != nil {
@@ -391,7 +391,7 @@ func (db *DB) UpdateAccountOAuthTokens(accountID int64, accessToken, refreshToke
 		WHERE id = $5
 	`
 
-	_, err = db.Exec(query, encryptedAccessToken, encryptedRefreshToken, expiry, time.Now(), accountID)
+	_, err = db.Exec(query, encryptedAccessToken, encryptedRefreshToken, expiry, timeutil.Now(), accountID)
 	if err != nil {
 		return fmt.Errorf("failed to update OAuth tokens: %w", err)
 	}
@@ -402,7 +402,7 @@ func (db *DB) UpdateAccountOAuthTokens(accountID int64, accessToken, refreshToke
 // SetAccountSyncError records a sync failure for the account
 func (db *DB) SetAccountSyncError(accountID int64, errMsg string) error {
 	query := `UPDATE accounts SET last_sync_error = $1, consecutive_errors = COALESCE(consecutive_errors, 0) + 1, updated_at = $2 WHERE id = $3`
-	_, err := db.Exec(query, errMsg, time.Now(), accountID)
+	_, err := db.Exec(query, errMsg, timeutil.Now(), accountID)
 	if err != nil {
 		return fmt.Errorf("failed to set sync error: %w", err)
 	}
@@ -412,7 +412,7 @@ func (db *DB) SetAccountSyncError(accountID int64, errMsg string) error {
 // ClearAccountSyncError clears sync error on successful sync
 func (db *DB) ClearAccountSyncError(accountID int64) error {
 	query := `UPDATE accounts SET last_sync_error = '', consecutive_errors = 0, updated_at = $1 WHERE id = $2`
-	_, err := db.Exec(query, time.Now(), accountID)
+	_, err := db.Exec(query, timeutil.Now(), accountID)
 	if err != nil {
 		return fmt.Errorf("failed to clear sync error: %w", err)
 	}

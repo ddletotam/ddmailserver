@@ -13,11 +13,11 @@ import (
 
 // User represents an authenticated IMAP user
 type User struct {
-	username        string
-	userID          int64
-	database        *db.DB
-	searchIndexer   *search.Indexer
-	foldersEnsured  bool
+	username       string
+	userID         int64
+	database       *db.DB
+	searchIndexer  *search.Indexer
+	foldersEnsured bool
 }
 
 // Username returns the username

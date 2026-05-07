@@ -3,16 +3,16 @@ package db
 import (
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/crypto"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CreateContactSource creates a new contact source
 func (db *DB) CreateContactSource(source *models.ContactSource) error {
-	source.CreatedAt = time.Now()
-	source.UpdatedAt = time.Now()
+	source.CreatedAt = timeutil.Now()
+	source.UpdatedAt = timeutil.Now()
 
 	if source.AuthType == "" {
 		source.AuthType = "password"
@@ -43,9 +43,9 @@ func (db *DB) CreateContactSource(source *models.ContactSource) error {
 		}
 	}
 
-	var tokenExpiry sql.NullTime
-	if !source.OAuthTokenExpiry.IsZero() {
-		tokenExpiry = sql.NullTime{Time: source.OAuthTokenExpiry, Valid: true}
+	var tokenExpiry sql.NullInt64
+	if source.OAuthTokenExpiry != 0 {
+		tokenExpiry = sql.NullInt64{Int64: source.OAuthTokenExpiry, Valid: true}
 	}
 
 	query := `
@@ -95,7 +95,7 @@ func (db *DB) GetContactSourcesByUserID(userID int64) ([]*models.ContactSource, 
 	var sources []*models.ContactSource
 	for rows.Next() {
 		source := &models.ContactSource{}
-		var lastSync, tokenExpiry sql.NullTime
+		var lastSync, tokenExpiry sql.NullInt64
 
 		err := rows.Scan(
 			&source.ID, &source.UserID, &source.Name, &source.SourceType,
@@ -109,10 +109,10 @@ func (db *DB) GetContactSourcesByUserID(userID int64) ([]*models.ContactSource, 
 		}
 
 		if lastSync.Valid {
-			source.LastSync = lastSync.Time
+			source.LastSync = lastSync.Int64
 		}
 		if tokenExpiry.Valid {
-			source.OAuthTokenExpiry = tokenExpiry.Time
+			source.OAuthTokenExpiry = tokenExpiry.Int64
 		}
 
 		// Decrypt secrets
@@ -129,7 +129,7 @@ func (db *DB) GetContactSourcesByUserID(userID int64) ([]*models.ContactSource, 
 // GetContactSourceByID retrieves a contact source by ID
 func (db *DB) GetContactSourceByID(id int64) (*models.ContactSource, error) {
 	source := &models.ContactSource{}
-	var lastSync, tokenExpiry sql.NullTime
+	var lastSync, tokenExpiry sql.NullInt64
 
 	query := `
 		SELECT id, user_id, name, source_type,
@@ -157,10 +157,10 @@ func (db *DB) GetContactSourceByID(id int64) (*models.ContactSource, error) {
 	}
 
 	if lastSync.Valid {
-		source.LastSync = lastSync.Time
+		source.LastSync = lastSync.Int64
 	}
 	if tokenExpiry.Valid {
-		source.OAuthTokenExpiry = tokenExpiry.Time
+		source.OAuthTokenExpiry = tokenExpiry.Int64
 	}
 
 	// Decrypt secrets
@@ -173,7 +173,7 @@ func (db *DB) GetContactSourceByID(id int64) (*models.ContactSource, error) {
 
 // UpdateContactSource updates an existing contact source
 func (db *DB) UpdateContactSource(source *models.ContactSource) error {
-	source.UpdatedAt = time.Now()
+	source.UpdatedAt = timeutil.Now()
 
 	// Encrypt password
 	var encryptedPassword string
@@ -200,9 +200,9 @@ func (db *DB) UpdateContactSource(source *models.ContactSource) error {
 		}
 	}
 
-	var tokenExpiry sql.NullTime
-	if !source.OAuthTokenExpiry.IsZero() {
-		tokenExpiry = sql.NullTime{Time: source.OAuthTokenExpiry, Valid: true}
+	var tokenExpiry sql.NullInt64
+	if source.OAuthTokenExpiry != 0 {
+		tokenExpiry = sql.NullInt64{Int64: source.OAuthTokenExpiry, Valid: true}
 	}
 
 	query := `
@@ -239,9 +239,9 @@ func (db *DB) DeleteContactSource(id int64) error {
 }
 
 // UpdateContactSourceLastSync updates the last sync time for a contact source
-func (db *DB) UpdateContactSourceLastSync(id int64, lastSync time.Time) error {
+func (db *DB) UpdateContactSourceLastSync(id int64, lastSync int64) error {
 	query := `UPDATE contact_sources SET last_sync = $1, last_error = NULL, updated_at = $2 WHERE id = $3`
-	_, err := db.Exec(query, lastSync, time.Now(), id)
+	_, err := db.Exec(query, lastSync, timeutil.Now(), id)
 	if err != nil {
 		return fmt.Errorf("failed to update last sync: %w", err)
 	}
@@ -251,7 +251,7 @@ func (db *DB) UpdateContactSourceLastSync(id int64, lastSync time.Time) error {
 // UpdateContactSourceLastError updates the last error for a contact source
 func (db *DB) UpdateContactSourceLastError(id int64, lastError string) error {
 	query := `UPDATE contact_sources SET last_error = $1, updated_at = $2 WHERE id = $3`
-	_, err := db.Exec(query, lastError, time.Now(), id)
+	_, err := db.Exec(query, lastError, timeutil.Now(), id)
 	if err != nil {
 		return fmt.Errorf("failed to update last error: %w", err)
 	}
@@ -280,7 +280,7 @@ func (db *DB) GetAllEnabledContactSources() ([]*models.ContactSource, error) {
 	var sources []*models.ContactSource
 	for rows.Next() {
 		source := &models.ContactSource{}
-		var lastSync, tokenExpiry sql.NullTime
+		var lastSync, tokenExpiry sql.NullInt64
 
 		err := rows.Scan(
 			&source.ID, &source.UserID, &source.Name, &source.SourceType,
@@ -294,10 +294,10 @@ func (db *DB) GetAllEnabledContactSources() ([]*models.ContactSource, error) {
 		}
 
 		if lastSync.Valid {
-			source.LastSync = lastSync.Time
+			source.LastSync = lastSync.Int64
 		}
 		if tokenExpiry.Valid {
-			source.OAuthTokenExpiry = tokenExpiry.Time
+			source.OAuthTokenExpiry = tokenExpiry.Int64
 		}
 
 		// Decrypt secrets
@@ -312,7 +312,7 @@ func (db *DB) GetAllEnabledContactSources() ([]*models.ContactSource, error) {
 }
 
 // UpdateContactSourceOAuthTokens updates the OAuth tokens for a contact source
-func (db *DB) UpdateContactSourceOAuthTokens(id int64, accessToken, refreshToken string, expiry time.Time) error {
+func (db *DB) UpdateContactSourceOAuthTokens(id int64, accessToken, refreshToken string, expiry int64) error {
 	var encryptedAccessToken, encryptedRefreshToken string
 	var err error
 
@@ -334,7 +334,7 @@ func (db *DB) UpdateContactSourceOAuthTokens(id int64, accessToken, refreshToken
 			oauth_access_token = $1, oauth_refresh_token = $2, oauth_token_expiry = $3, updated_at = $4
 		WHERE id = $5
 	`
-	_, err = db.Exec(query, encryptedAccessToken, encryptedRefreshToken, expiry, time.Now(), id)
+	_, err = db.Exec(query, encryptedAccessToken, encryptedRefreshToken, expiry, timeutil.Now(), id)
 	if err != nil {
 		return fmt.Errorf("failed to update OAuth tokens: %w", err)
 	}

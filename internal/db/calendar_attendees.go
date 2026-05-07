@@ -3,15 +3,15 @@ package db
 import (
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CreateCalendarAttendee creates a new attendee for an event
 func (db *DB) CreateCalendarAttendee(attendee *models.CalendarAttendee) error {
-	attendee.CreatedAt = time.Now()
-	attendee.UpdatedAt = time.Now()
+	attendee.CreatedAt = timeutil.Now()
+	attendee.UpdatedAt = timeutil.Now()
 
 	if attendee.Role == "" {
 		attendee.Role = "REQ-PARTICIPANT"
@@ -107,7 +107,7 @@ func (db *DB) UpdateAttendeePartStat(eventID int64, email, partstat string) erro
 		WHERE event_id = $3 AND email = $4
 	`
 
-	result, err := db.Exec(query, partstat, time.Now(), eventID, email)
+	result, err := db.Exec(query, partstat, timeutil.Now(), eventID, email)
 	if err != nil {
 		return fmt.Errorf("failed to update attendee partstat: %w", err)
 	}
@@ -122,7 +122,7 @@ func (db *DB) UpdateAttendeePartStat(eventID int64, email, partstat string) erro
 
 // UpdateCalendarAttendee updates an attendee
 func (db *DB) UpdateCalendarAttendee(attendee *models.CalendarAttendee) error {
-	attendee.UpdatedAt = time.Now()
+	attendee.UpdatedAt = timeutil.Now()
 
 	query := `
 		UPDATE calendar_attendees
@@ -178,7 +178,7 @@ func (db *DB) ReplaceAttendees(eventID int64, attendees []*models.CalendarAttend
 	}
 
 	// Insert new attendees
-	now := time.Now()
+	now := timeutil.Now()
 	for _, attendee := range attendees {
 		attendee.EventID = eventID
 		attendee.CreatedAt = now
@@ -239,7 +239,7 @@ func (db *DB) GetEventWithAttendees(eventID int64) (*models.CalendarEvent, error
 }
 
 // GetEventsByUserEmail retrieves events where the user is an attendee
-func (db *DB) GetEventsByUserEmail(email string, start, end time.Time) ([]*models.CalendarEvent, error) {
+func (db *DB) GetEventsByUserEmail(email string, startMs, endMs int64) ([]*models.CalendarEvent, error) {
 	query := `
 		SELECT DISTINCT e.id, e.calendar_id, e.uid, COALESCE(e.remote_id, ''), e.ical_data,
 		       COALESCE(e.summary, ''), COALESCE(e.description, ''), COALESCE(e.location, ''),
@@ -254,30 +254,11 @@ func (db *DB) GetEventsByUserEmail(email string, start, end time.Time) ([]*model
 		ORDER BY e.dtstart
 	`
 
-	rows, err := db.Query(query, email, start, end)
+	rows, err := db.Query(query, email, startMs, endMs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get events by attendee: %w", err)
 	}
 	defer rows.Close()
 
-	var events []*models.CalendarEvent
-	for rows.Next() {
-		event := &models.CalendarEvent{}
-
-		err := rows.Scan(
-			&event.ID, &event.CalendarID, &event.UID, &event.RemoteID, &event.ICalData,
-			&event.Summary, &event.Description, &event.Location,
-			&event.DTStart, &event.DTEnd, &event.AllDay,
-			&event.OrganizerEmail, &event.OrganizerName, &event.Sequence, &event.Status,
-			&event.RRule, &event.RecurrenceID, &event.ETag, &event.LocalModified,
-			&event.CreatedAt, &event.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan event: %w", err)
-		}
-
-		events = append(events, event)
-	}
-
-	return events, nil
+	return scanCalendarEvents(rows)
 }

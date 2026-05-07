@@ -7,6 +7,7 @@ import (
 
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // Indexer handles synchronization between database and Meilisearch
@@ -168,9 +169,9 @@ func messageToDocument(msg *models.Message) IndexDocument {
 		To:              msg.To,
 		Cc:              msg.Cc,
 		Body:            body,
-		Date:            msg.Date.Unix(),
-		DateISO:         msg.Date.Format(time.RFC3339),
-		DateFormatted:   msg.Date.Format("02.01.2006"),
+		Date:            msg.Date / 1000, // ms to seconds
+		DateISO:         timeutil.FromMs(msg.Date).Format(time.RFC3339),
+		DateFormatted:   timeutil.FromMs(msg.Date).Format("02.01.2006"),
 		MessageID:       msg.MessageID,
 		HasAttach:       msg.Attachments > 0,
 		Seen:            msg.Seen,

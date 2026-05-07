@@ -3,15 +3,15 @@ package db
 import (
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CreateFolder creates a new folder
 func (db *DB) CreateFolder(folder *models.Folder) error {
-	folder.CreatedAt = time.Now()
-	folder.UpdatedAt = time.Now()
+	folder.CreatedAt = timeutil.Now()
+	folder.UpdatedAt = timeutil.Now()
 
 	query := `
 		INSERT INTO folders (user_id, account_id, name, path, type, parent_id, uid_next, uid_validity, created_at, updated_at)
@@ -221,7 +221,7 @@ func (db *DB) GetOrCreateLocalInbox(userID int64) (*models.Folder, error) {
 
 // UpdateFolder updates a folder
 func (db *DB) UpdateFolder(folder *models.Folder) error {
-	folder.UpdatedAt = time.Now()
+	folder.UpdatedAt = timeutil.Now()
 
 	query := `
 		UPDATE folders
@@ -251,7 +251,7 @@ func (db *DB) UpdateFolderUIDInfo(folderID int64, uidNext, uidValidity uint32) e
 		WHERE id = $4
 	`
 
-	_, err := db.Exec(query, uidNext, uidValidity, time.Now(), folderID)
+	_, err := db.Exec(query, uidNext, uidValidity, timeutil.Now(), folderID)
 	if err != nil {
 		return fmt.Errorf("failed to update folder UID info: %w", err)
 	}
@@ -327,7 +327,7 @@ func (db *DB) GetOrCreateLocalFolder(userID int64, name, folderType string) (*mo
 		return folder, nil
 	}
 	// Upsert — safe under concurrent access (uses partial unique index on local folders)
-	now := time.Now()
+	now := timeutil.Now()
 	folder = &models.Folder{}
 	err = db.QueryRow(`
 		INSERT INTO folders (user_id, account_id, name, path, type, uid_next, uid_validity, created_at, updated_at)
@@ -335,7 +335,7 @@ func (db *DB) GetOrCreateLocalFolder(userID int64, name, folderType string) (*mo
 		ON CONFLICT (user_id, type) WHERE account_id IS NULL AND type != 'custom'
 		DO UPDATE SET updated_at = EXCLUDED.updated_at
 		RETURNING id, user_id, COALESCE(account_id, 0), name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
-	`, userID, name, name, folderType, uint32(now.Unix()), now, now).Scan(
+	`, userID, name, name, folderType, uint32(now/1000), now, now).Scan(
 		&folder.ID, &folder.UserID, &folder.AccountID, &folder.Name, &folder.Path,
 		&folder.Type, &folder.ParentID, &folder.UIDNext, &folder.UIDValidity, &folder.CreatedAt, &folder.UpdatedAt,
 	)
@@ -487,7 +487,7 @@ func (db *DB) GetOrCreateFolderByNameAndUser(userID int64, name, folderType stri
 		Path:        name,
 		Type:        folderType,
 		UIDNext:     1,
-		UIDValidity: uint32(time.Now().Unix()),
+		UIDValidity: uint32(timeutil.Now() / 1000),
 	}
 
 	if err := db.CreateFolder(folder); err != nil {

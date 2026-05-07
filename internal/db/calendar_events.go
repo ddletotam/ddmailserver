@@ -3,15 +3,15 @@ package db
 import (
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CreateCalendarEvent creates a new calendar event
 func (db *DB) CreateCalendarEvent(event *models.CalendarEvent) error {
-	event.CreatedAt = time.Now()
-	event.UpdatedAt = time.Now()
+	event.CreatedAt = timeutil.Now()
+	event.UpdatedAt = timeutil.Now()
 
 	if event.Status == "" {
 		event.Status = "CONFIRMED"
@@ -91,26 +91,7 @@ func (db *DB) GetEventsByCalendarID(calendarID int64) ([]*models.CalendarEvent, 
 	}
 	defer rows.Close()
 
-	var events []*models.CalendarEvent
-	for rows.Next() {
-		event := &models.CalendarEvent{}
-
-		err := rows.Scan(
-			&event.ID, &event.CalendarID, &event.UID, &event.RemoteID, &event.ICalData,
-			&event.Summary, &event.Description, &event.Location,
-			&event.DTStart, &event.DTEnd, &event.AllDay,
-			&event.OrganizerEmail, &event.OrganizerName, &event.Sequence, &event.Status,
-			&event.RRule, &event.RecurrenceID, &event.ETag, &event.LocalModified,
-			&event.CreatedAt, &event.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan event: %w", err)
-		}
-
-		events = append(events, event)
-	}
-
-	return events, nil
+	return scanCalendarEvents(rows)
 }
 
 // GetEventByID retrieves an event by ID
@@ -128,10 +109,11 @@ func (db *DB) GetEventByID(id int64) (*models.CalendarEvent, error) {
 		WHERE id = $1
 	`
 
+	var dtEnd sql.NullInt64
 	err := db.QueryRow(query, id).Scan(
 		&event.ID, &event.CalendarID, &event.UID, &event.RemoteID, &event.ICalData,
 		&event.Summary, &event.Description, &event.Location,
-		&event.DTStart, &event.DTEnd, &event.AllDay,
+		&event.DTStart, &dtEnd, &event.AllDay,
 		&event.OrganizerEmail, &event.OrganizerName, &event.Sequence, &event.Status,
 		&event.RRule, &event.RecurrenceID, &event.ETag, &event.LocalModified,
 		&event.CreatedAt, &event.UpdatedAt,
@@ -142,6 +124,11 @@ func (db *DB) GetEventByID(id int64) (*models.CalendarEvent, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get event: %w", err)
+	}
+
+	if dtEnd.Valid {
+		val := dtEnd.Int64
+		event.DTEnd = &val
 	}
 
 	return event, nil
@@ -162,10 +149,11 @@ func (db *DB) GetEventByUID(calendarID int64, uid string) (*models.CalendarEvent
 		WHERE calendar_id = $1 AND uid = $2
 	`
 
+	var dtEnd sql.NullInt64
 	err := db.QueryRow(query, calendarID, uid).Scan(
 		&event.ID, &event.CalendarID, &event.UID, &event.RemoteID, &event.ICalData,
 		&event.Summary, &event.Description, &event.Location,
-		&event.DTStart, &event.DTEnd, &event.AllDay,
+		&event.DTStart, &dtEnd, &event.AllDay,
 		&event.OrganizerEmail, &event.OrganizerName, &event.Sequence, &event.Status,
 		&event.RRule, &event.RecurrenceID, &event.ETag, &event.LocalModified,
 		&event.CreatedAt, &event.UpdatedAt,
@@ -178,11 +166,16 @@ func (db *DB) GetEventByUID(calendarID int64, uid string) (*models.CalendarEvent
 		return nil, fmt.Errorf("failed to get event: %w", err)
 	}
 
+	if dtEnd.Valid {
+		val := dtEnd.Int64
+		event.DTEnd = &val
+	}
+
 	return event, nil
 }
 
-// GetEventsByTimeRange retrieves events within a time range
-func (db *DB) GetEventsByTimeRange(calendarID int64, start, end time.Time) ([]*models.CalendarEvent, error) {
+// GetEventsByTimeRange retrieves events within a time range (ms since epoch)
+func (db *DB) GetEventsByTimeRange(calendarID int64, startMs, endMs int64) ([]*models.CalendarEvent, error) {
 	query := `
 		SELECT id, calendar_id, uid, COALESCE(remote_id, ''), ical_data,
 		       COALESCE(summary, ''), COALESCE(description, ''), COALESCE(location, ''),
@@ -199,37 +192,18 @@ func (db *DB) GetEventsByTimeRange(calendarID int64, start, end time.Time) ([]*m
 		ORDER BY dtstart
 	`
 
-	rows, err := db.Query(query, calendarID, start, end)
+	rows, err := db.Query(query, calendarID, startMs, endMs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get events: %w", err)
 	}
 	defer rows.Close()
 
-	var events []*models.CalendarEvent
-	for rows.Next() {
-		event := &models.CalendarEvent{}
-
-		err := rows.Scan(
-			&event.ID, &event.CalendarID, &event.UID, &event.RemoteID, &event.ICalData,
-			&event.Summary, &event.Description, &event.Location,
-			&event.DTStart, &event.DTEnd, &event.AllDay,
-			&event.OrganizerEmail, &event.OrganizerName, &event.Sequence, &event.Status,
-			&event.RRule, &event.RecurrenceID, &event.ETag, &event.LocalModified,
-			&event.CreatedAt, &event.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan event: %w", err)
-		}
-
-		events = append(events, event)
-	}
-
-	return events, nil
+	return scanCalendarEvents(rows)
 }
 
 // UpdateCalendarEvent updates an event
 func (db *DB) UpdateCalendarEvent(event *models.CalendarEvent) error {
-	event.UpdatedAt = time.Now()
+	event.UpdatedAt = timeutil.Now()
 
 	query := `
 		UPDATE calendar_events
@@ -296,32 +270,13 @@ func (db *DB) GetLocallyModifiedEvents(calendarID int64) ([]*models.CalendarEven
 	}
 	defer rows.Close()
 
-	var events []*models.CalendarEvent
-	for rows.Next() {
-		event := &models.CalendarEvent{}
-
-		err := rows.Scan(
-			&event.ID, &event.CalendarID, &event.UID, &event.RemoteID, &event.ICalData,
-			&event.Summary, &event.Description, &event.Location,
-			&event.DTStart, &event.DTEnd, &event.AllDay,
-			&event.OrganizerEmail, &event.OrganizerName, &event.Sequence, &event.Status,
-			&event.RRule, &event.RecurrenceID, &event.ETag, &event.LocalModified,
-			&event.CreatedAt, &event.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan event: %w", err)
-		}
-
-		events = append(events, event)
-	}
-
-	return events, nil
+	return scanCalendarEvents(rows)
 }
 
 // MarkEventSynced marks an event as synchronized (not locally modified)
 func (db *DB) MarkEventSynced(eventID int64, etag string) error {
 	query := `UPDATE calendar_events SET local_modified = false, etag = $1, updated_at = $2 WHERE id = $3`
-	_, err := db.Exec(query, etag, time.Now(), eventID)
+	_, err := db.Exec(query, etag, timeutil.Now(), eventID)
 	if err != nil {
 		return fmt.Errorf("failed to mark event synced: %w", err)
 	}
@@ -331,7 +286,7 @@ func (db *DB) MarkEventSynced(eventID int64, etag string) error {
 // UpdateEventRemoteID updates the remote_id of an event after pushing to remote server
 func (db *DB) UpdateEventRemoteID(eventID int64, remoteID string) error {
 	query := `UPDATE calendar_events SET remote_id = $1, updated_at = $2 WHERE id = $3`
-	_, err := db.Exec(query, remoteID, time.Now(), eventID)
+	_, err := db.Exec(query, remoteID, timeutil.Now(), eventID)
 	if err != nil {
 		return fmt.Errorf("failed to update event remote ID: %w", err)
 	}
@@ -387,7 +342,7 @@ func (db *DB) ApplySyncChanges(changes *SyncEventChanges) error {
 	}
 	defer tx.Rollback()
 
-	now := time.Now()
+	now := timeutil.Now()
 
 	// Apply deletes first
 	for _, uid := range changes.DeleteUIDs {
@@ -491,4 +446,34 @@ func (db *DB) ApplySyncChanges(changes *SyncEventChanges) error {
 	}
 
 	return nil
+}
+
+// scanCalendarEvents scans multiple calendar event rows
+func scanCalendarEvents(rows *sql.Rows) ([]*models.CalendarEvent, error) {
+	var events []*models.CalendarEvent
+	for rows.Next() {
+		event := &models.CalendarEvent{}
+		var dtEnd sql.NullInt64
+
+		err := rows.Scan(
+			&event.ID, &event.CalendarID, &event.UID, &event.RemoteID, &event.ICalData,
+			&event.Summary, &event.Description, &event.Location,
+			&event.DTStart, &dtEnd, &event.AllDay,
+			&event.OrganizerEmail, &event.OrganizerName, &event.Sequence, &event.Status,
+			&event.RRule, &event.RecurrenceID, &event.ETag, &event.LocalModified,
+			&event.CreatedAt, &event.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan event: %w", err)
+		}
+
+		if dtEnd.Valid {
+			val := dtEnd.Int64
+			event.DTEnd = &val
+		}
+
+		events = append(events, event)
+	}
+
+	return events, nil
 }

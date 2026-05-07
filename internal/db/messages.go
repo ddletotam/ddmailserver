@@ -8,12 +8,13 @@ import (
 
 	"github.com/lib/pq"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CreateMessage creates a new message
 func (db *DB) CreateMessage(msg *models.Message) error {
-	msg.CreatedAt = time.Now()
-	msg.UpdatedAt = time.Now()
+	msg.CreatedAt = timeutil.Now()
+	msg.UpdatedAt = timeutil.Now()
 
 	// Default spam status if not set
 	if msg.SpamStatus == "" {
@@ -180,7 +181,7 @@ func (db *DB) UpdateMessageFlags(id int64, seen, flagged, answered, deleted bool
 		WHERE id = $6
 	`
 
-	_, err := db.Exec(query, seen, flagged, answered, deleted, time.Now(), id)
+	_, err := db.Exec(query, seen, flagged, answered, deleted, timeutil.Now(), id)
 	if err != nil {
 		return fmt.Errorf("failed to update message flags: %w", err)
 	}
@@ -191,13 +192,13 @@ func (db *DB) UpdateMessageFlags(id int64, seen, flagged, answered, deleted bool
 // UpdateMessageFlag sets a single flag on a message.
 func (db *DB) UpdateMessageFlag(id int64, flag string, value bool) error {
 	query := fmt.Sprintf(`UPDATE messages SET %s = $1, updated_at = $2 WHERE id = $3`, flag)
-	_, err := db.Exec(query, value, time.Now(), id)
+	_, err := db.Exec(query, value, timeutil.Now(), id)
 	return err
 }
 
 // UpdateMessage updates a message
 func (db *DB) UpdateMessage(msg *models.Message) error {
-	msg.UpdatedAt = time.Now()
+	msg.UpdatedAt = timeutil.Now()
 
 	query := `
 		UPDATE messages SET
@@ -395,7 +396,7 @@ func (db *DB) UpdateMessageRemoteUID(userID int64, messageID string, remoteUID u
 		WHERE user_id = $4 AND message_id = $5 AND (remote_uid IS NULL OR remote_uid = 0)
 	`
 
-	result, err := db.Exec(query, remoteUID, remoteFolder, time.Now(), userID, messageID)
+	result, err := db.Exec(query, remoteUID, remoteFolder, timeutil.Now(), userID, messageID)
 	if err != nil {
 		return false, fmt.Errorf("failed to update message remote_uid: %w", err)
 	}
@@ -423,13 +424,14 @@ func (db *DB) GetNextUIDForFolder(folderID int64) (uint32, error) {
 
 // SoftDeleteMessage marks a message as soft deleted (moves to vault)
 func (db *DB) SoftDeleteMessage(id int64) error {
+	now := timeutil.Now()
 	query := `
 		UPDATE messages
 		SET soft_deleted = true, soft_deleted_at = $1, original_folder_id = folder_id, updated_at = $1
 		WHERE id = $2
 	`
 
-	_, err := db.Exec(query, time.Now(), id)
+	_, err := db.Exec(query, now, id)
 	if err != nil {
 		return fmt.Errorf("failed to soft delete message: %w", err)
 	}
@@ -443,13 +445,14 @@ func (db *DB) SoftDeleteMessagesByUIDs(folderID int64, uids []uint32) (int64, er
 		return 0, nil
 	}
 
+	now := timeutil.Now()
 	query := `
 		UPDATE messages
 		SET soft_deleted = true, soft_deleted_at = $1, original_folder_id = folder_id, updated_at = $1
 		WHERE folder_id = $2 AND uid = ANY($3) AND deleted = true
 	`
 
-	result, err := db.Exec(query, time.Now(), folderID, pq.Array(uids))
+	result, err := db.Exec(query, now, folderID, pq.Array(uids))
 	if err != nil {
 		return 0, fmt.Errorf("failed to soft delete messages: %w", err)
 	}
@@ -492,7 +495,7 @@ func (db *DB) RestoreFromVault(id int64) error {
 		WHERE id = $2 AND soft_deleted = true
 	`
 
-	result, err := db.Exec(query, time.Now(), id)
+	result, err := db.Exec(query, timeutil.Now(), id)
 	if err != nil {
 		return fmt.Errorf("failed to restore message from vault: %w", err)
 	}
@@ -533,10 +536,10 @@ func (db *DB) GetVaultMessages(userID int64, limit, offset int) ([]*models.Messa
 
 // PurgeVaultMessages permanently deletes messages that have been in vault longer than given duration
 func (db *DB) PurgeVaultMessages(olderThan time.Duration) (int64, error) {
-	cutoff := time.Now().Add(-olderThan)
+	cutoffMs := timeutil.Now() - olderThan.Milliseconds()
 	query := `DELETE FROM messages WHERE soft_deleted = true AND soft_deleted_at < $1`
 
-	result, err := db.Exec(query, cutoff)
+	result, err := db.Exec(query, cutoffMs)
 	if err != nil {
 		return 0, fmt.Errorf("failed to purge vault messages: %w", err)
 	}
@@ -735,9 +738,8 @@ func (db *DB) CopyMessageToFolder(msgID, destFolderID int64) (uint32, error) {
 		return 0, fmt.Errorf("failed to update folder UID: %w", err)
 	}
 
-	// Create copy in destination folder. Carry raw_email along — without it
-	// the COPY/MOVE operation would silently strip the original RFC-822 from
-	// the destination row, breaking View Source for moved messages.
+	// Create copy in destination folder. Carry raw_email along.
+	now := timeutil.Now()
 	query := `
 		INSERT INTO messages (
 			account_id, user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
@@ -753,7 +755,7 @@ func (db *DB) CopyMessageToFolder(msgID, destFolderID int64) (uint32, error) {
 	`
 
 	var newMsgID int64
-	err = db.QueryRow(query, destFolderID, newUID, time.Now(), msgID).Scan(&newMsgID)
+	err = db.QueryRow(query, destFolderID, newUID, now, msgID).Scan(&newMsgID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to copy message: %w", err)
 	}

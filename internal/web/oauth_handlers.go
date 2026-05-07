@@ -4,7 +4,6 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/config"
 	"github.com/yourusername/mailserver/internal/db"
@@ -169,7 +168,7 @@ func (s *Server) RefreshOAuthToken(account *models.Account) error {
 	}
 
 	// Update tokens in database
-	expiry := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+	expiry := oauth.TokenExpiry(tokenResp.ExpiresIn)
 	if err := s.database.UpdateAccountOAuthTokens(account.ID, tokenResp.AccessToken, tokenResp.RefreshToken, expiry); err != nil {
 		return err
 	}
@@ -427,7 +426,7 @@ func (s *Server) RefreshMicrosoftOAuthToken(account *models.Account) error {
 	}
 
 	// Update tokens in database
-	expiry := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+	expiry := oauth.TokenExpiry(tokenResp.ExpiresIn)
 	if err := s.database.UpdateAccountOAuthTokens(account.ID, tokenResp.AccessToken, tokenResp.RefreshToken, expiry); err != nil {
 		return err
 	}
@@ -781,7 +780,7 @@ func (s *Server) HandleGoogleContactsOAuthCallback(w http.ResponseWriter, r *htt
 		Name:              "Google (" + userInfo.Email + ")",
 		SourceType:        "carddav",
 		CardDAVURL:        oauth.GoogleCardDAVURL(userInfo.Email),
-		CardDAVUsername:    userInfo.Email,
+		CardDAVUsername:   userInfo.Email,
 		AuthType:          "oauth2_google",
 		OAuthAccessToken:  tokenResp.AccessToken,
 		OAuthRefreshToken: tokenResp.RefreshToken,
@@ -824,4 +823,3 @@ func getSchemeFromRequest(r *http.Request) string {
 	}
 	return "https"
 }
-

@@ -3,7 +3,8 @@ package db
 import (
 	"database/sql"
 	"fmt"
-	"time"
+
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // SenderReputation represents a sender's spam/ham statistics
@@ -14,13 +15,13 @@ type SenderReputation struct {
 	IP        string
 	SpamCount int
 	HamCount  int
-	LastSeen  time.Time
+	LastSeen  int64
 }
 
 // GetSenderReputation retrieves reputation for an email/IP combination
 func (db *DB) GetSenderReputation(email, ip string) (*SenderReputation, error) {
 	rep := &SenderReputation{}
-	var lastSeen sql.NullTime
+	var lastSeen sql.NullInt64
 
 	query := `
 		SELECT id, email, domain, ip, spam_count, ham_count, last_seen
@@ -41,7 +42,7 @@ func (db *DB) GetSenderReputation(email, ip string) (*SenderReputation, error) {
 	}
 
 	if lastSeen.Valid {
-		rep.LastSeen = lastSeen.Time
+		rep.LastSeen = lastSeen.Int64
 	}
 
 	return rep, nil
@@ -82,7 +83,7 @@ func (db *DB) UpdateSenderReputation(email, domain, ip string, isSpam bool) erro
 		hamIncr = 1
 	}
 
-	_, err := db.Exec(query, email, domain, ip, spamIncr, hamIncr, time.Now())
+	_, err := db.Exec(query, email, domain, ip, spamIncr, hamIncr, timeutil.Now())
 	if err != nil {
 		return fmt.Errorf("failed to update sender reputation: %w", err)
 	}
@@ -129,7 +130,7 @@ func (db *DB) RecordSpamFeedback(userID, messageID int64, action string) error {
 		VALUES ($1, $2, $3, $4)
 	`
 
-	_, err := db.Exec(query, userID, messageID, action, time.Now())
+	_, err := db.Exec(query, userID, messageID, action, timeutil.Now())
 	if err != nil {
 		return fmt.Errorf("failed to record spam feedback: %w", err)
 	}
@@ -160,8 +161,8 @@ func (db *DB) CleanOldReputation(daysOld int) (int64, error) {
 		WHERE last_seen < $1
 	`
 
-	cutoff := time.Now().AddDate(0, 0, -daysOld)
-	result, err := db.Exec(query, cutoff)
+	cutoffMs := timeutil.Now() - int64(daysOld)*24*60*60*1000
+	result, err := db.Exec(query, cutoffMs)
 	if err != nil {
 		return 0, fmt.Errorf("failed to clean old reputation: %w", err)
 	}

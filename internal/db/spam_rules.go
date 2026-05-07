@@ -4,32 +4,32 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // SpamRule represents a user-defined spam rule (whitelist/blacklist)
 type SpamRule struct {
-	ID        int64     `json:"id"`
-	UserID    int64     `json:"user_id"`
-	RuleType  string    `json:"rule_type"`  // 'address', 'domain'
-	RuleValue string    `json:"rule_value"` // email or domain
-	Action    string    `json:"action"`     // 'spam', 'allow'
-	CreatedAt time.Time `json:"created_at"`
+	ID        int64  `json:"id"`
+	UserID    int64  `json:"user_id"`
+	RuleType  string `json:"rule_type"`  // 'address', 'domain'
+	RuleValue string `json:"rule_value"` // email or domain
+	Action    string `json:"action"`     // 'spam', 'allow'
+	CreatedAt int64  `json:"created_at"`
 }
 
 // DisabledSpamCheck represents a disabled system spam check for a user
 type DisabledSpamCheck struct {
-	ID         int64     `json:"id"`
-	UserID     int64     `json:"user_id"`
-	CheckName  string    `json:"check_name"`
-	DisabledAt time.Time `json:"disabled_at"`
+	ID         int64  `json:"id"`
+	UserID     int64  `json:"user_id"`
+	CheckName  string `json:"check_name"`
+	DisabledAt int64  `json:"disabled_at"`
 }
 
 // CreateSpamRule creates a new spam rule
 func (db *DB) CreateSpamRule(rule *SpamRule) error {
-	rule.CreatedAt = time.Now()
+	rule.CreatedAt = timeutil.Now()
 	rule.RuleValue = strings.ToLower(rule.RuleValue)
 
 	query := `
@@ -157,7 +157,7 @@ func (db *DB) DisableSpamCheck(userID int64, checkName string) error {
 		ON CONFLICT (user_id, check_name) DO NOTHING
 	`
 
-	_, err := db.Exec(query, userID, checkName, time.Now())
+	_, err := db.Exec(query, userID, checkName, timeutil.Now())
 	if err != nil {
 		return fmt.Errorf("failed to disable spam check: %w", err)
 	}
@@ -308,8 +308,8 @@ func (db *DB) DeleteOldSpamMessages(daysOld int) (int64, error) {
 		WHERE is_spam = true AND date < $1
 	`
 
-	cutoff := time.Now().AddDate(0, 0, -daysOld)
-	result, err := db.Exec(query, cutoff)
+	cutoffMs := timeutil.Now() - int64(daysOld)*24*60*60*1000
+	result, err := db.Exec(query, cutoffMs)
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete old spam messages: %w", err)
 	}
@@ -366,8 +366,8 @@ func (db *DB) GetSpamMessageCount(userID int64) (int, error) {
 type SenderStats struct {
 	TotalMessages   int
 	SpamMessages    int
-	FirstMessageAt  time.Time
-	LastMessageAt   time.Time
+	FirstMessageAt  int64
+	LastMessageAt   int64
 	HasWhitelist    bool
 	HasBlacklist    bool
 	MatchedRuleType string // "address" or "domain"

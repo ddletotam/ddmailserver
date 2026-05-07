@@ -14,6 +14,7 @@ import (
 	"github.com/emersion/go-ical"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -616,15 +617,15 @@ func uidFromHref(href string) string {
 // eventMatchesTimeRange checks if an event overlaps with the given time range
 func eventMatchesTimeRange(event *models.CalendarEvent, tr *timeRange) bool {
 	// If no DTStart, include the event (can't filter)
-	if event.DTStart.IsZero() {
+	if event.DTStart == 0 {
 		return true
 	}
 
-	eventEnd := event.DTStart // default: instant event
-	if event.DTEnd.Valid && !event.DTEnd.Time.IsZero() {
-		eventEnd = event.DTEnd.Time
+	eventEnd := event.DTStart // default: instant event (ms)
+	if event.DTEnd != nil && *event.DTEnd != 0 {
+		eventEnd = *event.DTEnd
 	} else if event.AllDay {
-		eventEnd = event.DTStart.AddDate(0, 0, 1)
+		eventEnd = event.DTStart + 24*60*60*1000 // +1 day in ms
 	}
 
 	// Recurring events: always include (proper RRULE expansion is complex)
@@ -633,10 +634,13 @@ func eventMatchesTimeRange(event *models.CalendarEvent, tr *timeRange) bool {
 	}
 
 	// Check overlap: event starts before range ends AND event ends after range starts
-	if !tr.end.IsZero() && event.DTStart.After(tr.end) {
+	trStartMs := timeutil.ToMs(tr.start)
+	trEndMs := timeutil.ToMs(tr.end)
+
+	if trEndMs != 0 && event.DTStart > trEndMs {
 		return false
 	}
-	if !tr.start.IsZero() && eventEnd.Before(tr.start) {
+	if trStartMs != 0 && eventEnd < trStartMs {
 		return false
 	}
 	return true
@@ -773,7 +777,7 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 		}
 		if prop := vevent.Props.Get(ical.PropDateTimeStart); prop != nil {
 			if t, err := prop.DateTime(nil); err == nil {
-				event.DTStart = t
+				event.DTStart = timeutil.ToMs(t)
 			}
 			if prop.Params.Get(ical.ParamValue) == "DATE" {
 				event.AllDay = true
@@ -781,8 +785,8 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 		}
 		if prop := vevent.Props.Get(ical.PropDateTimeEnd); prop != nil {
 			if t, err := prop.DateTime(nil); err == nil {
-				event.DTEnd.Time = t
-				event.DTEnd.Valid = true
+				ms := timeutil.ToMs(t)
+				event.DTEnd = &ms
 			}
 		}
 		break

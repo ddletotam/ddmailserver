@@ -15,6 +15,7 @@ import (
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/parser"
 	"github.com/yourusername/mailserver/internal/search"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // Mailbox represents an IMAP mailbox
@@ -99,9 +100,9 @@ func (m *Mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error) {
 
 	// Count recent messages (last 24 hours)
 	recentCount := uint32(0)
-	yesterday := time.Now().Add(-24 * time.Hour)
+	yesterdayMs := timeutil.Now() - 24*60*60*1000
 	for _, msg := range messages {
-		if msg.CreatedAt.After(yesterday) {
+		if msg.CreatedAt > yesterdayMs {
 			recentCount++
 		}
 	}
@@ -379,6 +380,7 @@ func (m *Mailbox) CreateMessage(flags []string, date time.Time, body imap.Litera
 	if msgDate.IsZero() {
 		msgDate = time.Now()
 	}
+	msgDateMs := timeutil.ToMs(msgDate)
 
 	// Create message
 	msg := &models.Message{
@@ -391,7 +393,7 @@ func (m *Mailbox) CreateMessage(flags []string, date time.Time, body imap.Litera
 		To:        parser.SanitizeUTF8(parser.FormatAddressList(parsed.To)),
 		Cc:        parser.SanitizeUTF8(parser.FormatAddressList(parsed.Cc)),
 		ReplyTo:   parser.SanitizeUTF8(parser.FormatAddress(parsed.ReplyTo)),
-		Date:      msgDate,
+		Date:      msgDateMs,
 		Body:      parser.SanitizeUTF8(parsed.Body),
 		BodyHTML:  parser.SanitizeUTF8(parsed.BodyHTML),
 		Size:      int64(len(data)),
@@ -551,13 +553,14 @@ func (m *Mailbox) CreateMessageUID(flags []string, date time.Time, body imap.Lit
 		}
 	}
 
-	msgDate := date
-	if msgDate.IsZero() {
-		msgDate = parsed.GetDate()
+	msgDate2 := date
+	if msgDate2.IsZero() {
+		msgDate2 = parsed.GetDate()
 	}
-	if msgDate.IsZero() {
-		msgDate = time.Now()
+	if msgDate2.IsZero() {
+		msgDate2 = time.Now()
 	}
+	msgDateMs2 := timeutil.ToMs(msgDate2)
 
 	msg := &models.Message{
 		AccountID: 0,
@@ -569,7 +572,7 @@ func (m *Mailbox) CreateMessageUID(flags []string, date time.Time, body imap.Lit
 		To:        parser.SanitizeUTF8(parser.FormatAddressList(parsed.To)),
 		Cc:        parser.SanitizeUTF8(parser.FormatAddressList(parsed.Cc)),
 		ReplyTo:   parser.SanitizeUTF8(parser.FormatAddress(parsed.ReplyTo)),
-		Date:      msgDate,
+		Date:      msgDateMs2,
 		Body:      parser.SanitizeUTF8(parsed.Body),
 		BodyHTML:  parser.SanitizeUTF8(parsed.BodyHTML),
 		Size:      int64(len(data)),
@@ -844,7 +847,7 @@ func (m *Mailbox) convertToIMAPMessage(msg *models.Message, seqNum uint32, items
 		switch item {
 		case imap.FetchEnvelope:
 			imapMsg.Envelope = &imap.Envelope{
-				Date:      msg.Date,
+				Date:      timeutil.FromMs(msg.Date),
 				Subject:   msg.Subject,
 				From:      parseAddresses(msg.From),
 				Sender:    parseAddresses(msg.From),
@@ -983,7 +986,7 @@ func (m *Mailbox) convertToIMAPMessage(msg *models.Message, seqNum uint32, items
 			imapMsg.Flags = flags
 
 		case imap.FetchInternalDate:
-			imapMsg.InternalDate = msg.Date
+			imapMsg.InternalDate = timeutil.FromMs(msg.Date)
 
 		case imap.FetchUid:
 			imapMsg.Uid = msg.UID
@@ -1071,7 +1074,7 @@ func (m *Mailbox) buildMessageLiteral(msg *models.Message, section *imap.BodySec
 		buf.WriteString(fmt.Sprintf("Cc: %s\r\n", encodeAddressHeader(msg.Cc)))
 	}
 	buf.WriteString(fmt.Sprintf("Subject: %s\r\n", encodeHeader(msg.Subject)))
-	buf.WriteString(fmt.Sprintf("Date: %s\r\n", msg.Date.Format("Mon, 02 Jan 2006 15:04:05 -0700")))
+	buf.WriteString(fmt.Sprintf("Date: %s\r\n", timeutil.FromMs(msg.Date).Format("Mon, 02 Jan 2006 15:04:05 -0700")))
 	buf.WriteString(fmt.Sprintf("Message-ID: %s\r\n", msg.MessageID))
 	buf.WriteString("MIME-Version: 1.0\r\n")
 

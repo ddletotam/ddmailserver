@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // SpamData holds data for the spam page
@@ -717,7 +718,7 @@ func (s *Server) analyzeMessageForSpam(userID int64, msg *models.Message) *SpamA
 	result := &SpamAnalysisResult{
 		Subject: msg.Subject,
 		From:    msg.From,
-		Date:    msg.Date.Format("02.01.2006 15:04"),
+		Date:    timeutil.FromMs(msg.Date).Format("02.01.2006 15:04"),
 	}
 
 	// Extract sender info
@@ -1550,9 +1551,9 @@ func (s *Server) renderSpamAnalysisResult(w http.ResponseWriter, result *SpamAna
 		b.WriteString(`<tr><td>Marked as spam</td><td class="text-end"><strong>`)
 		b.WriteString(fmt.Sprintf("%d", result.SenderStats.SpamMessages))
 		b.WriteString(`</strong></td></tr>`)
-		if !result.SenderStats.FirstMessageAt.IsZero() {
+		if result.SenderStats.FirstMessageAt != 0 {
 			b.WriteString(`<tr><td>First message</td><td class="text-end">`)
-			b.WriteString(result.SenderStats.FirstMessageAt.Format("02.01.2006"))
+			b.WriteString(timeutil.FromMs(result.SenderStats.FirstMessageAt).Format("02.01.2006"))
 			b.WriteString(`</td></tr>`)
 		}
 		b.WriteString(`</table></div>`)

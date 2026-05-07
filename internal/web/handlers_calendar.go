@@ -4,16 +4,15 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"io"
-	"log"
-	"net/http"
-	"strconv"
-	"time"
-
 	"github.com/gorilla/mux"
 	"github.com/yourusername/mailserver/internal/caldav/importer"
 	"github.com/yourusername/mailserver/internal/calendar"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
+	"io"
+	"log"
+	"net/http"
+	"strconv"
 )
 
 // Calendar Sources Handlers
@@ -743,12 +742,12 @@ func generateUID() string {
 }
 
 func generateICalData(event *models.CalendarEvent) string {
-	dtstart := event.DTStart.Format("20060102T150405Z")
+	dtstart := timeutil.FromMs(event.DTStart).Format("20060102T150405Z")
 	var dtend string
-	if event.DTEnd.Valid {
-		dtend = event.DTEnd.Time.Format("20060102T150405Z")
+	if event.DTEnd != nil && *event.DTEnd != 0 {
+		dtend = timeutil.FromMs(*event.DTEnd).Format("20060102T150405Z")
 	} else {
-		dtend = event.DTStart.Add(time.Hour).Format("20060102T150405Z")
+		dtend = timeutil.FromMs(event.DTStart + 3600*1000).Format("20060102T150405Z")
 	}
 
 	ical := "BEGIN:VCALENDAR\r\n"

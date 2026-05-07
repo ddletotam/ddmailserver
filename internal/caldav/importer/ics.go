@@ -9,6 +9,7 @@ import (
 	"github.com/emersion/go-ical"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // ParseICS parses ICS data and returns events without importing
@@ -191,7 +192,7 @@ func parseICalEvent(event *ical.Event, calendarID int64, cal *ical.Calendar) (*m
 	if prop := event.Props.Get(ical.PropDateTimeStart); prop != nil {
 		t, err := prop.DateTime(nil)
 		if err == nil {
-			modelEvent.DTStart = t
+			modelEvent.DTStart = timeutil.ToMs(t)
 		}
 		// Check if all-day event
 		if prop.Params.Get(ical.ParamValue) == "DATE" {
@@ -203,8 +204,8 @@ func parseICalEvent(event *ical.Event, calendarID int64, cal *ical.Calendar) (*m
 	if prop := event.Props.Get(ical.PropDateTimeEnd); prop != nil {
 		t, err := prop.DateTime(nil)
 		if err == nil {
-			modelEvent.DTEnd.Time = t
-			modelEvent.DTEnd.Valid = true
+			ms := timeutil.ToMs(t)
+			modelEvent.DTEnd = &ms
 		}
 	}
 
@@ -280,12 +281,14 @@ func parseVEvent(vevent string, calendarID int64) *models.CalendarEvent {
 			event.RRule = strings.TrimPrefix(line, "RRULE:")
 		} else if strings.HasPrefix(line, "DTSTART") {
 			value := extractValue(line)
-			event.DTStart, event.AllDay = parseDateTimeSimple(value, line)
+			t, allDay := parseDateTimeSimple(value, line)
+			event.DTStart = timeutil.ToMs(t)
+			event.AllDay = allDay
 		} else if strings.HasPrefix(line, "DTEND") {
 			value := extractValue(line)
 			dtend, _ := parseDateTimeSimple(value, line)
-			event.DTEnd.Time = dtend
-			event.DTEnd.Valid = true
+			ms := timeutil.ToMs(dtend)
+			event.DTEnd = &ms
 		}
 	}
 
@@ -340,12 +343,12 @@ func wrapVEvent(vevent string) string {
 
 // generateVEvent generates a VEVENT from a CalendarEvent
 func generateVEvent(event *models.CalendarEvent) string {
-	dtstart := event.DTStart.Format("20060102T150405Z")
+	dtstart := timeutil.FromMs(event.DTStart).Format("20060102T150405Z")
 	var dtend string
-	if event.DTEnd.Valid {
-		dtend = event.DTEnd.Time.Format("20060102T150405Z")
+	if event.DTEnd != nil && *event.DTEnd != 0 {
+		dtend = timeutil.FromMs(*event.DTEnd).Format("20060102T150405Z")
 	} else {
-		dtend = event.DTStart.Add(time.Hour).Format("20060102T150405Z")
+		dtend = timeutil.FromMs(event.DTStart + 3600*1000).Format("20060102T150405Z")
 	}
 
 	vevent := "BEGIN:VEVENT\r\n"

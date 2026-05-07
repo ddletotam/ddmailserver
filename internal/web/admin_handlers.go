@@ -10,6 +10,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // adminUserRow is the projection rendered in the admin user table.
@@ -33,7 +34,7 @@ func toAdminUserRows(users []*models.User, currentID int64) []adminUserRow {
 			IsAdmin:   u.IsAdmin(),
 			IsBanned:  u.IsBanned(),
 			IsCurrent: u.ID == currentID,
-			CreatedAt: u.CreatedAt.Format("2006-01-02"),
+			CreatedAt: timeutil.FromMs(u.CreatedAt).Format("2006-01-02"),
 		})
 	}
 	return rows
@@ -231,4 +232,3 @@ func (s *Server) HandleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 	log.Printf("admin: user %d deleted (by user %d)", id, s.GetUserFromContext(r.Context()).ID)
 	respondJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }
-

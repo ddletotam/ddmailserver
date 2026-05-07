@@ -3,14 +3,14 @@ package db
 import (
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CreateAttachment creates a new attachment
 func (db *DB) CreateAttachment(att *models.Attachment) error {
-	att.CreatedAt = time.Now()
+	att.CreatedAt = timeutil.Now()
 
 	query := `
 		INSERT INTO attachments (message_id, content_id, filename, content_type, size, is_inline, data, created_at)

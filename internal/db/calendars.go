@@ -3,15 +3,15 @@ package db
 import (
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CreateCalendar creates a new calendar
 func (db *DB) CreateCalendar(cal *models.Calendar) error {
-	cal.CreatedAt = time.Now()
-	cal.UpdatedAt = time.Now()
+	cal.CreatedAt = timeutil.Now()
+	cal.UpdatedAt = timeutil.Now()
 
 	var remoteID sql.NullString
 	if cal.RemoteID != "" {
@@ -195,7 +195,7 @@ func (db *DB) GetCalendarByRemoteID(sourceID int64, remoteID string) (*models.Ca
 
 // UpdateCalendar updates a calendar
 func (db *DB) UpdateCalendar(cal *models.Calendar) error {
-	cal.UpdatedAt = time.Now()
+	cal.UpdatedAt = timeutil.Now()
 
 	query := `
 		UPDATE calendars
@@ -230,7 +230,7 @@ func (db *DB) DeleteCalendar(id int64) error {
 // UpdateCalendarCTag updates the CTag for sync detection
 func (db *DB) UpdateCalendarCTag(calendarID int64, ctag string) error {
 	query := `UPDATE calendars SET ctag = $1, updated_at = $2 WHERE id = $3`
-	_, err := db.Exec(query, ctag, time.Now(), calendarID)
+	_, err := db.Exec(query, ctag, timeutil.Now(), calendarID)
 	if err != nil {
 		return fmt.Errorf("failed to update calendar ctag: %w", err)
 	}

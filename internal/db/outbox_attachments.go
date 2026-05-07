@@ -2,14 +2,14 @@ package db
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CreateOutboxAttachment stores a file attachment for an outbox message
 func (db *DB) CreateOutboxAttachment(att *models.OutboxAttachment) error {
-	att.CreatedAt = time.Now()
+	att.CreatedAt = timeutil.Now()
 	query := `INSERT INTO outbox_attachments (outbox_message_id, filename, content_type, size, data, content_id, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`
 	var contentID *string

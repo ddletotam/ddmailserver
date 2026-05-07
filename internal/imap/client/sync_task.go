@@ -17,6 +17,7 @@ import (
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/parser"
 	"github.com/yourusername/mailserver/internal/task"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 type SyncTask struct {
@@ -103,7 +104,7 @@ func (t *SyncTask) doExecute(ctx context.Context) error {
 	if err := t.syncRemoteInbox(ctx, client, localInbox); err != nil {
 		t.accountLog("error", "sync INBOX failed: %v", err)
 	}
-	if err := t.database.UpdateAccountLastSync(t.account.ID, time.Now()); err != nil {
+	if err := t.database.UpdateAccountLastSync(t.account.ID, timeutil.Now()); err != nil {
 		log.Printf("Failed to update last sync time: %v", err)
 	}
 	t.accountLog("info", "sync completed")
@@ -213,9 +214,9 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 	if err != nil {
 		return false, false, fmt.Errorf("failed to get next UID: %w", err)
 	}
-	msgDate := imapMsg.Envelope.Date.UTC()
-	if msgDate.Year() < 1970 {
-		msgDate = time.Now().UTC()
+	msgDateMs := timeutil.ToMs(imapMsg.Envelope.Date.UTC())
+	if msgDateMs <= 0 {
+		msgDateMs = timeutil.Now()
 	}
 	fromAddr := parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.From))
 	isSpam := false
@@ -285,7 +286,7 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 		Cc:      parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.Cc)),
 		Bcc:     parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.Bcc)),
 		ReplyTo: parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.ReplyTo)),
-		Date:    msgDate, Body: parser.SanitizeUTF8(body), BodyHTML: parser.SanitizeUTF8(bodyHTML),
+		Date:    msgDateMs, Body: parser.SanitizeUTF8(body), BodyHTML: parser.SanitizeUTF8(bodyHTML),
 		UID: localUID, Seen: hasFlag(imapMsg.Flags, imap.SeenFlag),
 		Flagged:   hasFlag(imapMsg.Flags, imap.FlaggedFlag),
 		Answered:  hasFlag(imapMsg.Flags, imap.AnsweredFlag),

@@ -3,9 +3,9 @@ package db
 import (
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // QueueCalendarEventSync adds or updates a calendar event sync entry
@@ -20,7 +20,7 @@ func (db *DB) QueueCalendarEventSync(eventID, calendarID, sourceID int64, uid, r
 			created_at = EXCLUDED.created_at
 	`
 
-	result, err := db.Exec(query, eventID, calendarID, sourceID, uid, remoteID, icalData, operation, time.Now())
+	result, err := db.Exec(query, eventID, calendarID, sourceID, uid, remoteID, icalData, operation, timeutil.Now())
 	if err != nil {
 		return fmt.Errorf("failed to queue calendar event sync: %w", err)
 	}

@@ -2,9 +2,9 @@ package db
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // QueueContactSync adds or updates a contact sync entry
@@ -18,7 +18,7 @@ func (db *DB) QueueContactSync(contactID, addressBookID, sourceID int64, uid, re
 			created_at = EXCLUDED.created_at
 	`
 
-	_, err := db.Exec(query, contactID, addressBookID, sourceID, uid, remoteID, vcardData, operation, time.Now())
+	_, err := db.Exec(query, contactID, addressBookID, sourceID, uid, remoteID, vcardData, operation, timeutil.Now())
 	if err != nil {
 		return fmt.Errorf("failed to queue contact sync: %w", err)
 	}

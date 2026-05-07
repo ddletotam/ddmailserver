@@ -1,8 +1,7 @@
 package models
 
 import (
-	"database/sql"
-	"time"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CalendarSource represents a source of calendars (local, CalDAV, or ICS import)
@@ -24,26 +23,26 @@ type CalendarSource struct {
 	IcsURL string `json:"ics_url,omitempty"`
 
 	// OAuth fields
-	AuthType          string    `json:"auth_type"` // "password", "oauth2_google", "oauth2_microsoft"
-	OAuthAccessToken  string    `json:"-"`
-	OAuthRefreshToken string    `json:"-"`
-	OAuthTokenExpiry  time.Time `json:"oauth_token_expiry,omitempty"`
+	AuthType          string `json:"auth_type"` // "password", "oauth2_google", "oauth2_microsoft"
+	OAuthAccessToken  string `json:"-"`
+	OAuthRefreshToken string `json:"-"`
+	OAuthTokenExpiry  int64  `json:"oauth_token_expiry,omitempty"`
 
 	// Sync settings
-	SyncEnabled  bool      `json:"sync_enabled"`
-	SyncInterval int       `json:"sync_interval"` // seconds
-	LastSync     time.Time `json:"last_sync,omitempty"`
-	LastError    string    `json:"last_error,omitempty"` // last sync error
-	SyncToken    string    `json:"-"`                    // for incremental sync
+	SyncEnabled  bool   `json:"sync_enabled"`
+	SyncInterval int    `json:"sync_interval"` // seconds
+	LastSync     int64  `json:"last_sync,omitempty"`
+	LastError    string `json:"last_error,omitempty"`
+	SyncToken    string `json:"-"`
 
-	Color     string    `json:"color"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Color     string `json:"color"`
+	CreatedAt int64  `json:"created_at"`
+	UpdatedAt int64  `json:"updated_at"`
 
-	// Default alarm settings (add VALARM if missing in events)
+	// Default alarm settings
 	DefaultAlarmEnabled bool   `json:"default_alarm_enabled"`
-	DefaultAlarmBefore  int    `json:"default_alarm_before"` // number of units before event
-	DefaultAlarmUnit    string `json:"default_alarm_unit"`   // "minutes", "hours", "days"
+	DefaultAlarmBefore  int    `json:"default_alarm_before"`
+	DefaultAlarmUnit    string `json:"default_alarm_unit"`
 
 	// Joined field (not stored in DB)
 	AccountEmail string `json:"account_email,omitempty"`
@@ -51,14 +50,14 @@ type CalendarSource struct {
 
 // NeedsSync returns true if the source needs synchronization
 func (s *CalendarSource) NeedsSync() bool {
-	// Local calendars and one-time imports don't sync
 	if !s.SyncEnabled || s.SourceType == "local" || s.SourceType == "ics_import" {
 		return false
 	}
-	if s.LastSync.IsZero() {
+	if s.LastSync == 0 {
 		return true
 	}
-	return time.Since(s.LastSync) >= time.Duration(s.SyncInterval)*time.Second
+	elapsed := timeutil.Now() - s.LastSync
+	return elapsed >= int64(s.SyncInterval)*1000
 }
 
 // Calendar represents a calendar (can be local or from external source)
@@ -66,20 +65,20 @@ type Calendar struct {
 	ID          int64  `json:"id"`
 	SourceID    int64  `json:"source_id"`
 	UserID      int64  `json:"user_id"`
-	RemoteID    string `json:"remote_id,omitempty"` // ID on remote server
+	RemoteID    string `json:"remote_id,omitempty"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Color       string `json:"color"`
 	Timezone    string `json:"timezone"`
-	CTag        string `json:"-"` // for sync
+	CTag        string `json:"-"`
 	CanWrite    bool   `json:"can_write"`
-	ReverseSync bool   `json:"reverse_sync"` // Sync changes back to external CalDAV
-	Enabled     bool   `json:"enabled"`      // Calendar is active (synced, shown in CalDAV)
+	ReverseSync bool   `json:"reverse_sync"`
+	Enabled     bool   `json:"enabled"`
 
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	CreatedAt int64 `json:"created_at"`
+	UpdatedAt int64 `json:"updated_at"`
 
-	// Joined field (not stored in DB)
+	// Joined field
 	SourceType string `json:"source_type,omitempty"`
 }
 
@@ -87,23 +86,25 @@ type Calendar struct {
 type CalendarEvent struct {
 	ID         int64  `json:"id"`
 	CalendarID int64  `json:"calendar_id"`
-	UID        string `json:"uid"` // iCalendar UID
-	RemoteID   string `json:"-"`   // ID on remote server
-	ICalData   string `json:"-"`   // raw iCalendar VEVENT
+	UID        string `json:"uid"`
+	RemoteID   string `json:"-"`
+	ICalData   string `json:"-"`
 
-	// Indexed fields for display and search
-	Summary     string       `json:"summary"`
-	Description string       `json:"description"`
-	Location    string       `json:"location"`
-	DTStart     time.Time    `json:"dtstart"`
-	DTEnd       sql.NullTime `json:"dtend"`
-	AllDay      bool         `json:"all_day"`
+	// Indexed fields
+	Summary     string `json:"summary"`
+	Description string `json:"description"`
+	Location    string `json:"location"`
+	DTStart     int64  `json:"dtstart"`
+	DTStartTZ   int16  `json:"dtstart_tz"` // UTC offset in minutes
+	DTEnd       *int64 `json:"dtend"`      // nullable
+	DTEndTZ     int16  `json:"dtend_tz"`
+	AllDay      bool   `json:"all_day"`
 
-	// Organizer (for invites)
+	// Organizer
 	OrganizerEmail string `json:"organizer_email,omitempty"`
 	OrganizerName  string `json:"organizer_name,omitempty"`
 	Sequence       int    `json:"sequence"`
-	Status         string `json:"status"` // CONFIRMED, TENTATIVE, CANCELLED
+	Status         string `json:"status"`
 
 	// Recurring events
 	RRule        string `json:"rrule,omitempty"`
@@ -111,24 +112,32 @@ type CalendarEvent struct {
 
 	// Sync fields
 	ETag          string `json:"-"`
-	LocalModified bool   `json:"-"` // modified locally, needs push to remote
+	LocalModified bool   `json:"-"`
 
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	CreatedAt int64 `json:"created_at"`
+	UpdatedAt int64 `json:"updated_at"`
 
-	// Joined fields (not stored in DB)
+	// Soft delete
+	SoftDeletedAt *int64 `json:"soft_deleted_at,omitempty"`
+
+	// Joined fields
 	Attendees []CalendarAttendee `json:"attendees,omitempty"`
+}
+
+// DTStartAsTime returns DTStart as time.Time for CalDAV/iCal serialization.
+func (e *CalendarEvent) DTStartAsTime() interface{} {
+	return timeutil.FromMs(e.DTStart)
 }
 
 // CalendarAttendee represents an attendee of a calendar event
 type CalendarAttendee struct {
-	ID        int64     `json:"id"`
-	EventID   int64     `json:"event_id"`
-	Email     string    `json:"email"`
-	Name      string    `json:"name"`
-	Role      string    `json:"role"`     // CHAIR, REQ-PARTICIPANT, OPT-PARTICIPANT, NON-PARTICIPANT
-	PartStat  string    `json:"partstat"` // NEEDS-ACTION, ACCEPTED, DECLINED, TENTATIVE
-	RSVP      bool      `json:"rsvp"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        int64  `json:"id"`
+	EventID   int64  `json:"event_id"`
+	Email     string `json:"email"`
+	Name      string `json:"name"`
+	Role      string `json:"role"`
+	PartStat  string `json:"partstat"`
+	RSVP      bool   `json:"rsvp"`
+	CreatedAt int64  `json:"created_at"`
+	UpdatedAt int64  `json:"updated_at"`
 }

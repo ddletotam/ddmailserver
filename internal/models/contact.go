@@ -1,8 +1,7 @@
 package models
 
 import (
-	"database/sql"
-	"time"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // ContactSource represents a source of contacts (local, CardDAV, Google, Microsoft)
@@ -18,31 +17,31 @@ type ContactSource struct {
 	CardDAVPassword string `json:"-"` // encrypted
 
 	// OAuth fields
-	AuthType          string    `json:"auth_type"` // "password", "oauth2_google", "oauth2_microsoft"
-	OAuthAccessToken  string    `json:"-"`
-	OAuthRefreshToken string    `json:"-"`
-	OAuthTokenExpiry  time.Time `json:"oauth_token_expiry,omitempty"`
+	AuthType          string `json:"auth_type"` // "password", "oauth2_google", "oauth2_microsoft"
+	OAuthAccessToken  string `json:"-"`
+	OAuthRefreshToken string `json:"-"`
+	OAuthTokenExpiry  int64  `json:"oauth_token_expiry,omitempty"`
 
 	// Sync settings
-	SyncEnabled  bool      `json:"sync_enabled"`
-	SyncInterval int       `json:"sync_interval"` // seconds
-	LastSync     time.Time `json:"last_sync,omitempty"`
-	LastError    string    `json:"last_error,omitempty"`
+	SyncEnabled  bool   `json:"sync_enabled"`
+	SyncInterval int    `json:"sync_interval"` // seconds
+	LastSync     int64  `json:"last_sync,omitempty"`
+	LastError    string `json:"last_error,omitempty"`
 
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	CreatedAt int64 `json:"created_at"`
+	UpdatedAt int64 `json:"updated_at"`
 }
 
 // NeedsSync returns true if the source needs synchronization
 func (s *ContactSource) NeedsSync() bool {
-	// Local sources don't sync
 	if !s.SyncEnabled || s.SourceType == "local" {
 		return false
 	}
-	if s.LastSync.IsZero() {
+	if s.LastSync == 0 {
 		return true
 	}
-	return time.Since(s.LastSync) >= time.Duration(s.SyncInterval)*time.Second
+	elapsed := timeutil.Now() - s.LastSync
+	return elapsed >= int64(s.SyncInterval)*1000
 }
 
 // IsOAuth returns true if the source uses OAuth authentication
@@ -65,20 +64,20 @@ type AddressBook struct {
 	ID       int64  `json:"id"`
 	UserID   int64  `json:"user_id"`
 	SourceID int64  `json:"source_id"`
-	RemoteID string `json:"remote_id,omitempty"` // ID on remote server
+	RemoteID string `json:"remote_id,omitempty"`
 
 	Name        string `json:"name"`
 	Description string `json:"description"`
-	CTag        string `json:"-"` // for sync
+	CTag        string `json:"-"`
 
 	CanWrite    bool `json:"can_write"`
-	ReverseSync bool `json:"reverse_sync"` // Sync changes back to external CardDAV
-	Enabled     bool `json:"enabled"`      // Address book is active (synced, shown in CardDAV)
+	ReverseSync bool `json:"reverse_sync"`
+	Enabled     bool `json:"enabled"`
 
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	CreatedAt int64 `json:"created_at"`
+	UpdatedAt int64 `json:"updated_at"`
 
-	// Joined field (not stored in DB)
+	// Joined field
 	SourceType string `json:"source_type,omitempty"`
 }
 
@@ -87,11 +86,11 @@ type Contact struct {
 	ID            int64  `json:"id"`
 	UserID        int64  `json:"user_id"`
 	AddressBookID int64  `json:"address_book_id"`
-	UID           string `json:"uid"` // vCard UID
-	RemoteID      string `json:"-"`   // ID on remote server
-	VCardData     string `json:"-"`   // raw vCard data
+	UID           string `json:"uid"`
+	RemoteID      string `json:"-"`
+	VCardData     string `json:"-"`
 
-	// Parsed fields for display and search
+	// Parsed fields
 	FullName   string `json:"full_name"`
 	GivenName  string `json:"given_name"`
 	FamilyName string `json:"family_name"`
@@ -113,17 +112,20 @@ type Contact struct {
 	Department   string `json:"department,omitempty"`
 
 	// Other fields
-	Address  string       `json:"address,omitempty"`
-	Notes    string       `json:"notes,omitempty"`
-	PhotoURL string       `json:"photo_url,omitempty"`
-	Birthday sql.NullTime `json:"birthday,omitempty"`
+	Address  string `json:"address,omitempty"`
+	Notes    string `json:"notes,omitempty"`
+	PhotoURL string `json:"photo_url,omitempty"`
+	Birthday *int64 `json:"birthday,omitempty"` // ms since epoch, nullable
 
 	// Sync fields
 	ETag          string `json:"-"`
-	LocalModified bool   `json:"-"` // modified locally, needs push to remote
+	LocalModified bool   `json:"-"`
 
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	CreatedAt int64 `json:"created_at"`
+	UpdatedAt int64 `json:"updated_at"`
+
+	// Soft delete
+	SoftDeletedAt *int64 `json:"soft_deleted_at,omitempty"`
 }
 
 // DisplayName returns the best available display name for the contact

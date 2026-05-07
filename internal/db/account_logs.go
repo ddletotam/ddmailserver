@@ -2,15 +2,15 @@ package db
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // AddAccountLog writes a log entry for an account
 func (db *DB) AddAccountLog(accountID int64, level, message string) error {
 	query := `INSERT INTO account_logs (account_id, level, message, created_at) VALUES ($1, $2, $3, $4)`
-	_, err := db.Exec(query, accountID, level, message, time.Now())
+	_, err := db.Exec(query, accountID, level, message, timeutil.Now())
 	if err != nil {
 		return fmt.Errorf("failed to add account log: %w", err)
 	}
@@ -45,8 +45,8 @@ func (db *DB) GetAccountLogs(accountID int64, errorsOnly bool, limit int) ([]*mo
 
 // CleanupAccountLogs deletes log entries older than the given number of days.
 func (db *DB) CleanupAccountLogs(days int) (int64, error) {
-	cutoff := time.Now().AddDate(0, 0, -days)
-	result, err := db.Exec(`DELETE FROM account_logs WHERE created_at < $1`, cutoff)
+	cutoffMs := timeutil.Now() - int64(days)*24*60*60*1000
+	result, err := db.Exec(`DELETE FROM account_logs WHERE created_at < $1`, cutoffMs)
 	if err != nil {
 		return 0, fmt.Errorf("failed to cleanup account logs: %w", err)
 	}

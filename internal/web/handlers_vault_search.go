@@ -8,6 +8,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/search"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // VaultData holds data for the vault page
@@ -209,8 +210,8 @@ func messagesToIndexDocuments(messages []*models.Message) []search.IndexDocument
 			To:              msg.To,
 			Cc:              msg.Cc,
 			Body:            body,
-			Date:            msg.Date.Unix(),
-			DateFormatted:   msg.Date.Format("02.01.2006"),
+			Date:            msg.Date / 1000,
+			DateFormatted:   timeutil.FromMs(msg.Date).Format("02.01.2006"),
 			Seen:            msg.Seen,
 			Flagged:         msg.Flagged,
 			SpamStatus:      msg.SpamStatus,

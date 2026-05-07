@@ -11,6 +11,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // HandleDeleteMessage soft-deletes a message (moves to vault)
@@ -77,7 +78,7 @@ func (s *Server) HandleReply(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build quoted body
-	dateStr := msg.Date.Format("02 Jan 2006 15:04")
+	dateStr := timeutil.FromMs(msg.Date).Format("02 Jan 2006 15:04")
 	body := msg.Body
 	if body == "" {
 		body = stripHTMLSimple(msg.BodyHTML)
@@ -144,7 +145,7 @@ func (s *Server) HandleForward(w http.ResponseWriter, r *http.Request) {
 	fwd.WriteString("\n\n--- Forwarded Message ---\n")
 	fwd.WriteString(fmt.Sprintf("From: %s\n", msg.From))
 	fwd.WriteString(fmt.Sprintf("To: %s\n", msg.To))
-	fwd.WriteString(fmt.Sprintf("Date: %s\n", msg.Date.Format("02 Jan 2006 15:04")))
+	fwd.WriteString(fmt.Sprintf("Date: %s\n", timeutil.FromMs(msg.Date).Format("02 Jan 2006 15:04")))
 	fwd.WriteString(fmt.Sprintf("Subject: %s\n\n", msg.Subject))
 	fwd.WriteString(body)
 
@@ -218,7 +219,7 @@ func (s *Server) HandleSaveDraft(w http.ResponseWriter, r *http.Request) {
 		BodyHTML:  bodyHTML,
 		Draft:     true,
 		Seen:      true,
-		Date:      time.Now(),
+		Date:      timeutil.Now(),
 		AccountID: accountID,
 	}
 
@@ -304,7 +305,7 @@ func (s *Server) HandleMessageSource(w http.ResponseWriter, r *http.Request) {
 	if msg.ReplyTo != "" {
 		src.WriteString(fmt.Sprintf("Reply-To: %s\n", msg.ReplyTo))
 	}
-	src.WriteString(fmt.Sprintf("Date: %s\n", msg.Date.Format(time.RFC1123Z)))
+	src.WriteString(fmt.Sprintf("Date: %s\n", timeutil.FromMs(msg.Date).Format(time.RFC1123Z)))
 	src.WriteString(fmt.Sprintf("Subject: %s\n", msg.Subject))
 	if msg.InReplyTo != "" {
 		src.WriteString(fmt.Sprintf("In-Reply-To: %s\n", msg.InReplyTo))
@@ -323,7 +324,7 @@ func (s *Server) HandleMessageSource(w http.ResponseWriter, r *http.Request) {
 		msg.Seen, msg.Flagged, msg.Answered, msg.Draft, msg.Deleted))
 	src.WriteString(fmt.Sprintf("Size: %d\n", msg.Size))
 	src.WriteString(fmt.Sprintf("Attachments: %d\n", msg.Attachments))
-	src.WriteString(fmt.Sprintf("Created: %s\n", msg.CreatedAt.Format(time.RFC1123Z)))
+	src.WriteString(fmt.Sprintf("Created: %s\n", timeutil.FromMs(msg.CreatedAt).Format(time.RFC1123Z)))
 
 	if msg.Body != "" {
 		src.WriteString(fmt.Sprintf("\n--- text/plain (%d bytes) ---\n%s\n", len(msg.Body), msg.Body))

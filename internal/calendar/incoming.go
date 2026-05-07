@@ -11,6 +11,7 @@ import (
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/parser"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // IncomingHandler handles incoming calendar invites
@@ -187,9 +188,9 @@ func (h *IncomingHandler) parseICSSimple(icsData string) (*InviteInfo, error) {
 	info.Summary = event.Summary
 	info.Description = event.Description
 	info.Location = event.Location
-	info.DTStart = event.DTStart
-	if event.DTEnd.Valid {
-		info.DTEnd = event.DTEnd.Time
+	info.DTStart = timeutil.FromMs(event.DTStart)
+	if event.DTEnd != nil && *event.DTEnd != 0 {
+		info.DTEnd = timeutil.FromMs(*event.DTEnd)
 	}
 	info.AllDay = event.AllDay
 
@@ -219,6 +220,7 @@ func (h *IncomingHandler) HandleInviteRequest(userID int64, calendarID int64, in
 		return nil, fmt.Errorf("failed to check existing event: %w", err)
 	}
 
+	dtStartMs := timeutil.ToMs(info.DTStart)
 	event := &models.CalendarEvent{
 		CalendarID:     calendarID,
 		UID:            info.EventUID,
@@ -226,7 +228,7 @@ func (h *IncomingHandler) HandleInviteRequest(userID int64, calendarID int64, in
 		Summary:        info.Summary,
 		Description:    info.Description,
 		Location:       info.Location,
-		DTStart:        info.DTStart,
+		DTStart:        dtStartMs,
 		AllDay:         info.AllDay,
 		OrganizerEmail: info.OrganizerEmail,
 		OrganizerName:  info.OrganizerName,
@@ -235,8 +237,8 @@ func (h *IncomingHandler) HandleInviteRequest(userID int64, calendarID int64, in
 	}
 
 	if !info.DTEnd.IsZero() {
-		event.DTEnd.Time = info.DTEnd
-		event.DTEnd.Valid = true
+		dtEndMs := timeutil.ToMs(info.DTEnd)
+		event.DTEnd = &dtEndMs
 	}
 
 	if existing != nil {
@@ -246,7 +248,7 @@ func (h *IncomingHandler) HandleInviteRequest(userID int64, calendarID int64, in
 			existing.Summary = info.Summary
 			existing.Description = info.Description
 			existing.Location = info.Location
-			existing.DTStart = info.DTStart
+			existing.DTStart = dtStartMs
 			existing.DTEnd = event.DTEnd
 			existing.AllDay = info.AllDay
 			existing.OrganizerEmail = info.OrganizerEmail
