@@ -323,8 +323,10 @@
         in_reply_to: inReplyTo,
         references,
       };
-      await invoke("send_message", {
-        ...mailStore.smtpArgs(account),
+      await invoke("v2_send_message", {
+        accountId: account.id,
+        smtpHost: account.smtp_host,
+        smtpPort: account.smtp_port,
         message: msg,
       });
       clearEditor();

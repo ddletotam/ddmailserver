@@ -1,12 +1,19 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cache;
+mod commands;
 mod imap;
+mod imap_provider;
+mod native_provider;
+mod provider;
+mod registry;
 mod session;
 mod smtp;
 mod tray;
+mod types;
 
 use cache::Cache;
+use registry::ProviderRegistry;
 use session::SessionPool;
 use tauri::Manager;
 
@@ -35,6 +42,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .manage(SessionPool::new())
+        .manage(ProviderRegistry::new())
         .setup(|app| {
             // Init cache in app data dir
             let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -62,6 +70,20 @@ fn main() {
             imap::start_watching,
             smtp::send_message,
             open_url,
+            // v2 commands (provider-based)
+            commands::detect_server,
+            commands::native_login,
+            commands::activate_account,
+            commands::v2_list_folders,
+            commands::v2_fetch_conversations,
+            commands::v2_fetch_conversation_messages,
+            commands::v2_search_messages,
+            commands::v2_set_flags,
+            commands::v2_set_flags_batch,
+            commands::v2_fetch_message_source,
+            commands::v2_fetch_identities,
+            commands::v2_send_message,
+            commands::v2_start_watching,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DDMail");

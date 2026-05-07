@@ -62,9 +62,33 @@ let composeIntent = $state<ComposeIntent | null>(null);
 // ChatView scrolls to it after opening the conversation.
 let jumpIntent = $state<{ folder: string; uid: number } | null>(null);
 
-// IDLE event listeners
+// IDLE/push event listeners
 let _unlistenNewMail: (() => void) | null = null;
 let _unlistenConnState: (() => void) | null = null;
+let _idleSetUp = false; // Guard: set up push only once per account
+
+// ── Sorted conversations (cached, recomputed only when data changes) ──
+
+let _sortedCache: Conversation[] = [];
+let _sortedConvRef: Conversation[] = [];
+let _sortedPinRef: Set<string> = new Set();
+
+function getSortedConversations(): Conversation[] {
+  // Only recompute if source data changed (reference equality)
+  if (conversations === _sortedConvRef && pinnedIds === _sortedPinRef) {
+    return _sortedCache;
+  }
+  _sortedConvRef = conversations;
+  _sortedPinRef = pinnedIds;
+  const pinned = conversations
+    .filter((c) => pinnedIds.has(c.id))
+    .sort((a, b) => b.last_date_ts - a.last_date_ts);
+  const unpinned = conversations
+    .filter((c) => !pinnedIds.has(c.id))
+    .sort((a, b) => b.last_date_ts - a.last_date_ts);
+  _sortedCache = [...pinned, ...unpinned];
+  return _sortedCache;
+}
 
 // ── Helpers ──
 
@@ -88,14 +112,70 @@ function smtpArgs(account: Account) {
   };
 }
 
-function sortedConversations(): Conversation[] {
-  const pinned = conversations
-    .filter((c) => pinnedIds.has(c.id))
-    .sort((a, b) => b.last_date_ts - a.last_date_ts);
-  const unpinned = conversations
-    .filter((c) => !pinnedIds.has(c.id))
-    .sort((a, b) => b.last_date_ts - a.last_date_ts);
-  return [...pinned, ...unpinned];
+// Track which accounts have been activated in this session
+const activatedAccounts = new Set<string>();
+
+/** Activate provider for this account (detect DDMail server, login if native). */
+async function ensureActivated(account: Account): Promise<void> {
+  if (activatedAccounts.has(account.id)) return;
+
+  // Auto-detect DDMail server if not yet detected
+  if (!account.provider_type) {
+    try {
+      const result = await invoke<{ server_url: string; api_base: string } | null>(
+        "detect_server",
+        { host: account.imap_host }
+      );
+      if (result) {
+        // DDMail server — login to get JWT
+        const token = await invoke<string>("native_login", {
+          serverUrl: result.server_url,
+          username: account.username,
+          password: account.password,
+        });
+        account.provider_type = "native";
+        account.native_url = result.server_url;
+        account.native_token = token;
+      } else {
+        account.provider_type = "imap";
+      }
+    } catch {
+      account.provider_type = "imap";
+    }
+  }
+
+  // Register provider in Tauri backend
+  await invoke<string>("activate_account", {
+    accountId: account.id,
+    imapHost: account.imap_host,
+    imapPort: account.imap_port,
+    username: account.username,
+    password: account.password,
+    useTls: account.use_tls,
+    email: account.email,
+    nativeUrl: account.native_url ?? null,
+    nativeToken: account.native_token ?? null,
+  });
+
+  activatedAccounts.add(account.id);
+}
+
+// Debounce: coalesce rapid new-mail events into a single loadConversations
+let _refreshTimer: ReturnType<typeof setTimeout> | null = null;
+let _refreshing = false;
+
+function scheduleRefresh(account: Account) {
+  if (_refreshTimer) clearTimeout(_refreshTimer);
+  _refreshTimer = setTimeout(async () => {
+    _refreshTimer = null;
+    if (_refreshing) return; // already in progress
+    _refreshing = true;
+    try {
+      await mailStore.loadConversations(account);
+    } finally {
+      _refreshing = false;
+    }
+  }, 2000); // 2s debounce window
 }
 
 // ── Exports ──
@@ -105,7 +185,7 @@ export const mailStore = {
     return folders;
   },
   get conversations() {
-    return sortedConversations();
+    return getSortedConversations();
   },
   get activeConversationId() {
     return activeConversationId;
@@ -173,17 +253,28 @@ export const mailStore = {
         loading = false; // show cached data immediately
       }
 
-      // 2. Sync from server in background
-      folders = await invoke<Folder[]>("connect", imapArgs(account));
-      const fresh = await invoke<Conversation[]>("fetch_conversations", {
-        ...imapArgs(account),
-        userEmail: account.email,
-        limit: 200,
-      });
+      // 2. Activate provider (auto-detect DDMail server on first call)
+      await ensureActivated(account);
+
+      // 3. Sync folders + conversations in parallel
+      const [foldersResult, fresh] = await Promise.all([
+        invoke<Folder[]>("v2_list_folders", { accountId: account.id }),
+        invoke<Conversation[]>("v2_fetch_conversations", {
+          accountId: account.id,
+          host: account.imap_host,
+          username: account.username,
+          userEmail: account.email,
+          limit: 200,
+        }),
+      ]);
+      folders = foldersResult;
       conversations = fresh;
 
-      // 3. Start IDLE watcher
-      this._setupIdle(account);
+      // 4. Start push listener once (not on every load)
+      if (!_idleSetUp) {
+        this._setupIdle(account);
+        _idleSetUp = true;
+      }
     } catch (e) {
       // If we have cached data, don't show error for sync failure
       if (conversations.length === 0) {
@@ -199,10 +290,9 @@ export const mailStore = {
     _unlistenNewMail?.();
     _unlistenConnState?.();
 
-    // Listen for new mail events from IDLE
+    // Listen for new mail events — debounced to prevent thundering herd
     _unlistenNewMail = await listen<{ folder: string; count: number }>("new-mail", () => {
-      // Refresh conversations on new mail
-      this.loadConversations(account);
+      scheduleRefresh(account);
     });
 
     // Listen for connection state
@@ -214,12 +304,11 @@ export const mailStore = {
       },
     );
 
-    // Start the IDLE watcher
-    invoke("start_watching", {
-      ...imapArgs(account),
-      userEmail: account.email,
+    // Start the push listener (IDLE for IMAP, WebSocket for native)
+    invoke("v2_start_watching", {
+      accountId: account.id,
     }).catch(() => {
-      // IDLE not critical — swallow errors
+      // Push not critical — swallow errors
     });
   },
 
@@ -247,44 +336,37 @@ export const mailStore = {
         loadingMessages = false;
       }
 
-      // 2. Fetch fresh from server
-      const fresh = await invoke<MessageBody[]>(
-        "fetch_conversation_messages",
-        {
-          ...imapArgs(account),
-          userEmail: account.email,
-          messages: conv.messages,
-        }
+      // 2. Fetch fresh messages + draft in parallel
+      const fetchArgs = {
+        accountId: account.id,
+        host: account.imap_host,
+        username: account.username,
+        userEmail: account.email,
+      };
+      const messagesPromise = invoke<MessageBody[]>(
+        "v2_fetch_conversation_messages",
+        { ...fetchArgs, messages: conv.messages }
       );
+      const draftPromise = conv.draft
+        ? invoke<MessageBody[]>(
+            "v2_fetch_conversation_messages",
+            { ...fetchArgs, messages: [conv.draft] }
+          ).catch(() => [] as MessageBody[])
+        : Promise.resolve([] as MessageBody[]);
+
+      const [fresh, draftBodies] = await Promise.all([messagesPromise, draftPromise]);
       if (activeConversationId !== conversationId) return;
       conversationMessages = fresh;
-
-      // 3. Load draft if exists
-      if (conv.draft) {
-        try {
-          const draftBodies = await invoke<MessageBody[]>(
-            "fetch_conversation_messages",
-            {
-              ...imapArgs(account),
-              userEmail: account.email,
-              messages: [conv.draft],
-            }
-          );
-          if (activeConversationId === conversationId && draftBodies.length > 0) {
-            draftMessage = draftBodies[0];
-          }
-        } catch {
-          // Draft loading failure is non-critical
-        }
+      if (draftBodies.length > 0) {
+        draftMessage = draftBodies[0];
       }
 
-      // 4. Mark as read (update local count immediately, server in background)
+      // 3. Mark as read (update local count immediately, server in background)
       if (conv.unread_count > 0) {
         conv.unread_count = 0;
         conversations = [...conversations];
-        // One IMAP session for the whole conversation, grouped by folder server-side.
-        invoke("set_flags_batch", {
-          ...imapArgs(account),
+        invoke("v2_set_flags_batch", {
+          accountId: account.id,
           messages: conv.messages,
           flags: "\\Seen",
           add: true,
@@ -319,8 +401,10 @@ export const mailStore = {
     const conv = conversations.find((c) => c.id === id);
     if (!conv) return;
     try {
-      const fresh = await invoke<MessageBody[]>("fetch_conversation_messages", {
-        ...imapArgs(account),
+      const fresh = await invoke<MessageBody[]>("v2_fetch_conversation_messages", {
+        accountId: account.id,
+        host: account.imap_host,
+        username: account.username,
         userEmail: account.email,
         messages: conv.messages,
       });
@@ -345,8 +429,8 @@ export const mailStore = {
       query: q,
       limit: SEARCH_TOTAL_LIMIT,
     }).catch((e) => { console.warn("search_contacts:", e); return [] as Contact[]; });
-    const messagesPromise = invoke<MessageEnvelope[]>("search_messages", {
-      ...imapArgs(account),
+    const messagesPromise = invoke<MessageEnvelope[]>("v2_search_messages", {
+      accountId: account.id,
       userEmail: account.email,
       query: q,
     }).catch((e) => { console.warn("search_messages:", e); return [] as MessageEnvelope[]; });

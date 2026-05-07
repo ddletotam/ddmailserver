@@ -119,12 +119,27 @@ func (s *Session) Data(r io.Reader) error {
 	// our submission port: a missing Message-ID later forces our parser to mint a
 	// `<unixnano@generated.local>` fallback, which makes the same email impossible to
 	// dedup across folders/copies. Rejecting at submission keeps storage clean.
-	if msgID, _ := header.Text("Message-Id"); strings.TrimSpace(msgID) == "" {
+	msgID, _ := header.Text("Message-Id")
+	msgID = strings.TrimSpace(msgID)
+	msgID = strings.TrimPrefix(msgID, "<")
+	msgID = strings.TrimSuffix(msgID, ">")
+	if msgID == "" {
 		log.Printf("SMTP: rejecting submission from %s — missing Message-Id header", s.from)
 		return &smtp.SMTPError{
 			Code:         554,
 			EnhancedCode: smtp.EnhancedCode{5, 6, 0},
 			Message:      "Message-Id header is required",
+		}
+	}
+
+	// Dedup: if this Message-ID already exists in the user's Sent folder,
+	// the message was already delivered — return OK without re-queuing.
+	// This prevents buggy clients (e.g. eM Client) from flooding recipients
+	// by re-submitting the same message every 10 minutes.
+	if sentFolder, err := s.database.GetLocalFolderByType(s.userID, "sent"); err == nil && sentFolder != nil {
+		if exists, _ := s.database.MessageExistsInFolder(sentFolder.ID, msgID); exists {
+			log.Printf("SMTP: dedup — message %s from %s already in Sent folder, returning OK without re-queuing", msgID, s.from)
+			return nil
 		}
 	}
 

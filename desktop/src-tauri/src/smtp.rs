@@ -1,35 +1,15 @@
-use serde::{Deserialize, Serialize};
 use lettre::{
     transport::smtp::authentication::Credentials,
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
 use lettre::message::{header::ContentType, Mailbox, MultiPart, SinglePart};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SmtpConfig {
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-    pub password: String,
-    pub use_tls: bool,
-}
+use crate::types::OutgoingMessage;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OutgoingMessage {
-    pub from: String,
-    pub to: Vec<String>,
-    pub cc: Vec<String>,
-    pub subject: String,
-    pub html: String,
-    pub text: String,
-    pub in_reply_to: Option<String>,
-    pub references: Option<String>,
-}
-
-#[tauri::command]
-pub async fn send_message(
-    host: String, port: u16, username: String, password: String, use_tls: bool,
-    message: OutgoingMessage,
+/// Core send logic, reusable by both the Tauri command and ImapProvider.
+pub(crate) async fn send_message_impl(
+    host: &str, port: u16, username: &str, password: &str, use_tls: bool,
+    message: &OutgoingMessage,
 ) -> Result<String, String> {
     let from_mailbox: Mailbox = message.from.parse()
         .map_err(|e| format!("Invalid from address: {e}"))?;
@@ -64,26 +44,26 @@ pub async fn send_message(
                 .singlepart(
                     SinglePart::builder()
                         .header(ContentType::TEXT_PLAIN)
-                        .body(message.text),
+                        .body(message.text.clone()),
                 )
                 .singlepart(
                     SinglePart::builder()
                         .header(ContentType::TEXT_HTML)
-                        .body(message.html),
+                        .body(message.html.clone()),
                 ),
         )
         .map_err(|e| format!("Build email: {e}"))?;
 
-    let creds = Credentials::new(username.clone(), password.clone());
+    let creds = Credentials::new(username.to_string(), password.to_string());
 
     let mailer = if use_tls {
-        AsyncSmtpTransport::<Tokio1Executor>::relay(&host)
+        AsyncSmtpTransport::<Tokio1Executor>::relay(host)
             .map_err(|e| format!("SMTP relay: {e}"))?
             .port(port)
             .credentials(creds)
             .build()
     } else {
-        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&host)
+        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
             .map_err(|e| format!("SMTP starttls: {e}"))?
             .port(port)
             .credentials(creds)
@@ -95,4 +75,13 @@ pub async fn send_message(
         .map_err(|e| format!("Send failed: {e}"))?;
 
     Ok(format!("Sent: {:?}", response.code()))
+}
+
+/// Tauri command wrapper.
+#[tauri::command]
+pub async fn send_message(
+    host: String, port: u16, username: String, password: String, use_tls: bool,
+    message: OutgoingMessage,
+) -> Result<String, String> {
+    send_message_impl(&host, port, &username, &password, use_tls, &message).await
 }

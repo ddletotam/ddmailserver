@@ -38,18 +38,15 @@ export const identityStore = {
     return null;
   },
 
-  /** Load identities from server (checks CAPABILITY for METADATA) */
+  /** Load identities from server (via IMAP METADATA or native HTTP API) */
   async load(account: Account) {
     try {
-      identities = await invoke<Identity[]>("fetch_identities", {
+      identities = await invoke<Identity[]>("v2_fetch_identities", {
+        accountId: account.id,
         host: account.imap_host,
-        port: account.imap_port,
         username: account.username,
-        password: account.password,
-        useTls: account.use_tls,
       });
       loaded = true;
-      // identities loaded successfully
     } catch (e) {
       console.warn("[identity] Failed to load:", e);
       identities = [];

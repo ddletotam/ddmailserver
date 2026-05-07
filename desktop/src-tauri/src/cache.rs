@@ -1,16 +1,8 @@
 use rusqlite::{Connection, params};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use serde::{Serialize, Deserialize};
 
-use crate::imap::{Conversation, ContactInfo, MessageRef, MessageBody, Attachment, Identity};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Contact {
-    pub email: String,
-    pub name: String,
-    pub source: String, // "auto" | "carddav"
-}
+use crate::types::*;
 
 /// Parse a "Name <email>" header value into (name, addr). Returns ("", "") if no addr present.
 fn parse_addr_pair(value: &str) -> (String, String) {
