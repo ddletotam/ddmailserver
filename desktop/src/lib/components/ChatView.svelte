@@ -334,6 +334,7 @@
         in_reply_to: inReplyTo,
         references,
         attachment_paths: [],
+        inline_paths: [],
       };
       await invoke("v2_send_message", {
         accountId: account.id,

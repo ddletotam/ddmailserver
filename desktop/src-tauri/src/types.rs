@@ -181,11 +181,22 @@ pub struct OutgoingMessage {
     pub text: String,
     pub in_reply_to: Option<String>,
     pub references: Option<String>,
-    /// Filesystem paths picked by the user (composer dialog). Populated by JS,
-    /// resolved into `attachments` by the v2_send_message command before the
-    /// provider sees the message. Providers themselves only look at `attachments`.
+    /// Filesystem paths picked by the user (composer dialog) for file-mode
+    /// attachments. Populated by JS, resolved into `attachments` by the
+    /// v2_send_message command. Providers themselves only look at `attachments`.
     #[serde(default)]
     pub attachment_paths: Vec<String>,
+    /// Paths intended as inline images, paired with the cid the HTML body
+    /// references via `<img src="cid:{content_id}">`. Resolved into
+    /// `attachments` (with content_id set) by v2_send_message.
+    #[serde(default)]
+    pub inline_paths: Vec<InlineRef>,
     #[serde(default)]
     pub attachments: Vec<OutgoingAttachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InlineRef {
+    pub path: String,
+    pub content_id: String,
 }
