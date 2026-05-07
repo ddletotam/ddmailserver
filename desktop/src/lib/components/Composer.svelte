@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { accountStore } from "../stores/accounts.svelte";
   import { mailStore } from "../stores/mail.svelte";
   import { identityStore } from "../stores/identity.svelte";
@@ -67,6 +68,32 @@
   let sending = $state(false);
   let error = $state("");
 
+  // Attachments — list of absolute paths picked via the system dialog. Bytes are
+  // read on the Rust side at send time, so we don't keep large blobs in memory.
+  interface Attachment { path: string; name: string; }
+  let attachments = $state<Attachment[]>([]);
+
+  async function pickAttachment() {
+    try {
+      const picked = await openDialog({ multiple: true, directory: false });
+      if (!picked) return;
+      const paths = Array.isArray(picked) ? picked : [picked];
+      const next = paths.map((p) => ({ path: p, name: basename(p) }));
+      // Drop duplicates by path.
+      const existing = new Set(attachments.map((a) => a.path));
+      attachments = [...attachments, ...next.filter((a) => !existing.has(a.path))];
+    } catch (e) {
+      console.error("[composer] pickAttachment failed:", e);
+    }
+  }
+  function removeAttachment(path: string) {
+    attachments = attachments.filter((a) => a.path !== path);
+  }
+  function basename(p: string): string {
+    const m = p.replace(/\\/g, "/").match(/[^/]+$/);
+    return m ? m[0] : p;
+  }
+
   let toInputEl = $state<HTMLInputElement | null>(null);
   let subjectInputEl = $state<HTMLInputElement | null>(null);
   let bodyTextareaEl = $state<HTMLTextAreaElement | null>(null);
@@ -106,6 +133,14 @@
     target?.focus();
   });
 
+  function handleComposerKeydown(e: KeyboardEvent) {
+    // Ctrl+Enter (or ⌘+Enter on Mac) sends from any field inside the composer.
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !sending) {
+      e.preventDefault();
+      handleSend();
+    }
+  }
+
   async function handleSend() {
     if (!account || !to.trim()) return;
 
@@ -130,6 +165,7 @@
       html: `<div style="font-family: sans-serif; font-size: 14px;">${bodyText.replace(/\n/g, "<br>")}</div>`,
       in_reply_to: inReplyTo,
       references,
+      attachment_paths: attachments.map((a) => a.path),
     };
 
     try {
@@ -148,7 +184,7 @@
   }
 </script>
 
-<div class="composer" style:height="{composerHeight}px">
+<div class="composer" style:height="{composerHeight}px" onkeydown={handleComposerKeydown}>
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="composer-resizer" onmousedown={startResize} aria-label="Resize composer"></div>
   <div class="composer-header">
@@ -224,14 +260,31 @@
     placeholder="Write a message..."
   ></textarea>
 
+  {#if attachments.length > 0}
+    <div class="attachments-row">
+      {#each attachments as att (att.path)}
+        <div class="attachment-chip" title={att.path}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+          </svg>
+          <span class="attachment-name">{att.name}</span>
+          <button type="button" class="attachment-remove" onclick={() => removeAttachment(att.path)} aria-label="Remove">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+      {/each}
+    </div>
+  {/if}
+
   {#if error}
     <div class="error">{error}</div>
   {/if}
 
   <div class="composer-footer">
     <div class="toolbar">
-      <!-- Future: TipTap formatting buttons -->
-      <button class="btn-toolbar" title="Attach file">
+      <button type="button" class="btn-toolbar" title="Attach file" onclick={pickAttachment}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
         </svg>
@@ -257,6 +310,8 @@
     background: var(--bg-primary);
     border-top: 1px solid var(--border-color);
     position: relative;
+    min-height: 0;
+    overflow: hidden;
   }
 
   .composer-resizer {
@@ -411,8 +466,8 @@
   .identity-option svg { color: var(--text-accent); flex-shrink: 0; }
 
   .body-input {
-    flex: 1;
-    min-height: 120px;
+    flex: 1 1 0;
+    min-height: 0;
     padding: 12px 16px;
     border: none;
     outline: none;
@@ -431,6 +486,46 @@
     color: #d32f2f;
     font-size: var(--font-size-sm);
   }
+
+  .attachments-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 16px;
+    border-top: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+  }
+  .attachment-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 4px 4px 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    font-size: var(--font-size-xs);
+    color: var(--text-primary);
+    max-width: 240px;
+  }
+  .attachment-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .attachment-remove {
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: none;
+    border-radius: 50%;
+    cursor: pointer;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+  }
+  .attachment-remove:hover { background: var(--bg-hover); color: var(--text-primary); }
 
   .composer-footer {
     display: flex;

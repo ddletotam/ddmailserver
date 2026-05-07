@@ -2,12 +2,15 @@ package web
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/yourusername/mailserver/internal/models"
@@ -365,6 +368,18 @@ func (s *Server) HandleDesktopSend(w http.ResponseWriter, r *http.Request) {
 		Status:    "pending",
 	}
 
+	// Threading: outbox_messages has no in_reply_to/references columns and
+	// constructEmail() in send_task ignores those fields, so a reply submitted
+	// via the Desktop API would otherwise lose its threading headers. Pre-build
+	// a RawEmail here when threading info is present — send_task uses RawEmail
+	// verbatim when non-empty (smtp/client/send_task.go:80).
+	if req.InReplyTo != "" || req.References != "" {
+		outboxMsg.RawEmail = buildRawEmailWithThreading(
+			req.From, outboxMsg.To, outboxMsg.Cc, req.Subject, req.Text, req.HTML,
+			req.InReplyTo, req.References,
+		)
+	}
+
 	if err := s.database.CreateOutboxMessage(outboxMsg); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to queue message")
 		return
@@ -390,4 +405,61 @@ func extractEmail(addr string) string {
 // setUserContext puts user into context using the shared key.
 func setUserContext(ctx context.Context, user *models.User) context.Context {
 	return context.WithValue(ctx, userContextKey, user)
+}
+
+// buildRawEmailWithThreading produces an RFC 5322 message including
+// In-Reply-To/References headers. Used by HandleDesktopSend so that
+// Desktop API replies preserve threading — without this, send_task's
+// constructEmail() drops those headers (it has no field for them).
+// Mirrors the structure of constructEmail() for the no-attachments
+// case (Desktop API does not yet accept attachments).
+func buildRawEmailWithThreading(from, to, cc, subject, text, html, inReplyTo, references string) []byte {
+	domain := "localhost"
+	if at := strings.LastIndex(from, "@"); at >= 0 {
+		d := from[at+1:]
+		d = strings.TrimRight(d, ">")
+		d = strings.TrimSpace(d)
+		if d != "" {
+			domain = d
+		}
+	}
+	idBytes := make([]byte, 8)
+	_, _ = rand.Read(idBytes)
+	messageID := fmt.Sprintf("<%d.%s@%s>", time.Now().UnixNano(), hex.EncodeToString(idBytes), domain)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Message-ID: %s\r\n", messageID)
+	fmt.Fprintf(&b, "Date: %s\r\n", time.Now().Format("Mon, 02 Jan 2006 15:04:05 -0700"))
+	fmt.Fprintf(&b, "From: %s\r\n", from)
+	fmt.Fprintf(&b, "To: %s\r\n", to)
+	if cc != "" {
+		fmt.Fprintf(&b, "Cc: %s\r\n", cc)
+	}
+	if subject != "" {
+		fmt.Fprintf(&b, "Subject: %s\r\n", subject)
+	}
+	if inReplyTo != "" {
+		fmt.Fprintf(&b, "In-Reply-To: %s\r\n", inReplyTo)
+	}
+	if references != "" {
+		fmt.Fprintf(&b, "References: %s\r\n", references)
+	}
+	b.WriteString("MIME-Version: 1.0\r\n")
+
+	hasText, hasHTML := text != "", html != ""
+	switch {
+	case hasText && hasHTML:
+		boundary := fmt.Sprintf("----=_Part_%s", hex.EncodeToString(idBytes))
+		fmt.Fprintf(&b, "Content-Type: multipart/alternative; boundary=\"%s\"\r\n\r\n", boundary)
+		fmt.Fprintf(&b, "--%s\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n", boundary, text)
+		fmt.Fprintf(&b, "--%s\r\nContent-Type: text/html; charset=utf-8\r\n\r\n%s\r\n", boundary, html)
+		fmt.Fprintf(&b, "--%s--\r\n", boundary)
+	case hasHTML:
+		b.WriteString("Content-Type: text/html; charset=utf-8\r\n\r\n")
+		b.WriteString(html)
+	default:
+		b.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
+		b.WriteString(text)
+	}
+	return []byte(b.String())
 }

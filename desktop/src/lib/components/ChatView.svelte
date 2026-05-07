@@ -20,7 +20,18 @@
   let replyTo = $state<MessageBody | null>(null);
 
   const conv = $derived(mailStore.activeConversation);
-  const msgs = $derived(mailStore.conversationMessages);
+  // Override is_outgoing per the conversation owner: a message is outgoing iff its sender
+  // matches the dialog's identity (received_by). Anything else — including mail from one
+  // of our other identities — is incoming for THIS conversation.
+  const msgs = $derived.by(() => {
+    const raw = mailStore.conversationMessages;
+    const owner = conv?.received_by?.toLowerCase() ?? "";
+    if (!owner) return raw;
+    return raw.map(m => {
+      const isOut = m.from_addr.toLowerCase() === owner;
+      return isOut === m.is_outgoing ? m : { ...m, is_outgoing: isOut };
+    });
+  });
   const lastMessage = $derived(msgs.length > 0 ? msgs[msgs.length - 1] : null);
   const composerOriginal = $derived(composerSource ?? lastMessage);
 
@@ -322,6 +333,7 @@
         html,
         in_reply_to: inReplyTo,
         references,
+        attachment_paths: [],
       };
       await invoke("v2_send_message", {
         accountId: account.id,
@@ -480,7 +492,7 @@
     </div>
 
     <!-- Scroll to bottom FAB -->
-    {#if showScrollBtn}
+    {#if showScrollBtn && !showComposer}
       <button class="scroll-fab" onclick={scrollToBottom} title="Scroll to bottom">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
           <polyline points="6 9 12 15 18 9" />

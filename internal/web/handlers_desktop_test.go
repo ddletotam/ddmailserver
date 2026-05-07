@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -113,5 +114,37 @@ func TestExtractEmail(t *testing.T) {
 		if got != tt.expected {
 			t.Errorf("extractEmail(%q) = %q, want %q", tt.input, got, tt.expected)
 		}
+	}
+}
+
+func TestBuildRawEmailWithThreading(t *testing.T) {
+	raw := string(buildRawEmailWithThreading(
+		"sender@example.com",
+		"recipient@other.com",
+		"",
+		"Re: hello",
+		"plain body",
+		"<p>html body</p>",
+		"<parent@x>",
+		"<root@x> <parent@x>",
+	))
+
+	for _, want := range []string{
+		"From: sender@example.com\r\n",
+		"To: recipient@other.com\r\n",
+		"Subject: Re: hello\r\n",
+		"In-Reply-To: <parent@x>\r\n",
+		"References: <root@x> <parent@x>\r\n",
+		"MIME-Version: 1.0\r\n",
+		"Content-Type: multipart/alternative",
+		"plain body",
+		"<p>html body</p>",
+	} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("missing %q in raw email:\n%s", want, raw)
+		}
+	}
+	if !strings.Contains(raw, "Message-ID: <") || !strings.Contains(raw, "@example.com>") {
+		t.Errorf("missing Message-ID with sender domain in raw email:\n%s", raw)
 	}
 }
