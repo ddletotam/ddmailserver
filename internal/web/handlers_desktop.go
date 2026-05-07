@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -335,14 +336,20 @@ func (s *Server) HandleDesktopSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		From       string   `json:"from"`
-		To         []string `json:"to"`
-		Cc         []string `json:"cc"`
-		Subject    string   `json:"subject"`
-		HTML       string   `json:"html"`
-		Text       string   `json:"text"`
-		InReplyTo  string   `json:"in_reply_to"`
-		References string   `json:"references"`
+		From        string   `json:"from"`
+		To          []string `json:"to"`
+		Cc          []string `json:"cc"`
+		Subject     string   `json:"subject"`
+		HTML        string   `json:"html"`
+		Text        string   `json:"text"`
+		InReplyTo   string   `json:"in_reply_to"`
+		References  string   `json:"references"`
+		Attachments []struct {
+			Filename  string  `json:"filename"`
+			MimeType  string  `json:"mime_type"`
+			Content   []byte  `json:"content"`
+			ContentID *string `json:"content_id"`
+		} `json:"attachments"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid request body")
@@ -374,21 +381,48 @@ func (s *Server) HandleDesktopSend(w http.ResponseWriter, r *http.Request) {
 		Status:    "pending",
 	}
 
-	// Threading: outbox_messages has no in_reply_to/references columns and
-	// constructEmail() in send_task ignores those fields, so a reply submitted
-	// via the Desktop API would otherwise lose its threading headers. Pre-build
-	// a RawEmail here when threading info is present — send_task uses RawEmail
-	// verbatim when non-empty (smtp/client/send_task.go:80).
-	if req.InReplyTo != "" || req.References != "" {
-		outboxMsg.RawEmail = buildRawEmailWithThreading(
+	var rawAtts []emailAttachment
+	for _, a := range req.Attachments {
+		cid := ""
+		if a.ContentID != nil {
+			cid = *a.ContentID
+		}
+		rawAtts = append(rawAtts, emailAttachment{
+			Filename:  a.Filename,
+			MimeType:  a.MimeType,
+			Data:      a.Content,
+			ContentID: cid,
+		})
+	}
+
+	// If threading headers or attachments are present, build full RawEmail.
+	// send_task sends RawEmail verbatim when non-empty (smtp/client/send_task.go:80),
+	// so this preserves both threading and attachments.
+	hasThreading := req.InReplyTo != "" || req.References != ""
+	hasAttachments := len(rawAtts) > 0
+	if hasThreading || hasAttachments {
+		outboxMsg.RawEmail = buildRawEmail(
 			req.From, outboxMsg.To, outboxMsg.Cc, req.Subject, req.Text, req.HTML,
-			req.InReplyTo, req.References,
+			req.InReplyTo, req.References, rawAtts,
 		)
 	}
 
 	if err := s.database.CreateOutboxMessage(outboxMsg); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to queue message")
 		return
+	}
+
+	// Also save attachments to outbox_attachments table (for fallback path
+	// when constructEmail is used instead of RawEmail).
+	for _, a := range rawAtts {
+		s.database.CreateOutboxAttachment(&models.OutboxAttachment{
+			OutboxMessageID: outboxMsg.ID,
+			Filename:        a.Filename,
+			ContentType:     a.MimeType,
+			Size:            len(a.Data),
+			Data:            a.Data,
+			ContentID:       a.ContentID,
+		})
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
@@ -920,13 +954,20 @@ func setUserContext(ctx context.Context, user *models.User) context.Context {
 	return context.WithValue(ctx, userContextKey, user)
 }
 
-// buildRawEmailWithThreading produces an RFC 5322 message including
-// In-Reply-To/References headers. Used by HandleDesktopSend so that
-// Desktop API replies preserve threading — without this, send_task's
-// constructEmail() drops those headers (it has no field for them).
-// Mirrors the structure of constructEmail() for the no-attachments
-// case (Desktop API does not yet accept attachments).
-func buildRawEmailWithThreading(from, to, cc, subject, text, html, inReplyTo, references string) []byte {
+// emailAttachment is a raw attachment for MIME building.
+type emailAttachment struct {
+	Filename  string
+	MimeType  string
+	Data      []byte
+	ContentID string // empty = file attachment, non-empty = inline image
+}
+
+// buildRawEmail produces a full RFC 5322 message with optional threading
+// headers and attachments (both inline and file). MIME structure:
+//   - body_alt = multipart/alternative { text/plain, text/html }
+//   - if inline images → wrap body_alt in multipart/related, add inline parts
+//   - if file attachments → wrap everything in multipart/mixed, add file parts
+func buildRawEmail(from, to, cc, subject, text, html, inReplyTo, references string, atts []emailAttachment) []byte {
 	domain := "localhost"
 	if at := strings.LastIndex(from, "@"); at >= 0 {
 		d := from[at+1:]
@@ -941,6 +982,8 @@ func buildRawEmailWithThreading(from, to, cc, subject, text, html, inReplyTo, re
 	messageID := fmt.Sprintf("<%d.%s@%s>", time.Now().UnixNano(), hex.EncodeToString(idBytes), domain)
 
 	var b strings.Builder
+
+	// Headers
 	fmt.Fprintf(&b, "Message-ID: %s\r\n", messageID)
 	fmt.Fprintf(&b, "Date: %s\r\n", time.Now().Format("Mon, 02 Jan 2006 15:04:05 -0700"))
 	fmt.Fprintf(&b, "From: %s\r\n", from)
@@ -959,20 +1002,109 @@ func buildRawEmailWithThreading(from, to, cc, subject, text, html, inReplyTo, re
 	}
 	b.WriteString("MIME-Version: 1.0\r\n")
 
-	hasText, hasHTML := text != "", html != ""
-	switch {
-	case hasText && hasHTML:
-		boundary := fmt.Sprintf("----=_Part_%s", hex.EncodeToString(idBytes))
-		fmt.Fprintf(&b, "Content-Type: multipart/alternative; boundary=\"%s\"\r\n\r\n", boundary)
-		fmt.Fprintf(&b, "--%s\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n", boundary, text)
-		fmt.Fprintf(&b, "--%s\r\nContent-Type: text/html; charset=utf-8\r\n\r\n%s\r\n", boundary, html)
-		fmt.Fprintf(&b, "--%s--\r\n", boundary)
-	case hasHTML:
-		b.WriteString("Content-Type: text/html; charset=utf-8\r\n\r\n")
-		b.WriteString(html)
-	default:
-		b.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
-		b.WriteString(text)
+	// Separate inline images from file attachments
+	var inlineAtts, fileAtts []emailAttachment
+	for _, a := range atts {
+		if a.ContentID != "" {
+			inlineAtts = append(inlineAtts, a)
+		} else {
+			fileAtts = append(fileAtts, a)
+		}
 	}
+
+	// Build body_alt (text/html alternative)
+	altBoundary := fmt.Sprintf("----=_Alt_%s", hex.EncodeToString(idBytes))
+	hasText, hasHTML := text != "", html != ""
+
+	writeBodyAlt := func(w *strings.Builder) {
+		switch {
+		case hasText && hasHTML:
+			fmt.Fprintf(w, "Content-Type: multipart/alternative; boundary=\"%s\"\r\n\r\n", altBoundary)
+			fmt.Fprintf(w, "--%s\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n", altBoundary, text)
+			fmt.Fprintf(w, "--%s\r\nContent-Type: text/html; charset=utf-8\r\n\r\n%s\r\n", altBoundary, html)
+			fmt.Fprintf(w, "--%s--\r\n", altBoundary)
+		case hasHTML:
+			w.WriteString("Content-Type: text/html; charset=utf-8\r\n\r\n")
+			w.WriteString(html)
+			w.WriteString("\r\n")
+		default:
+			w.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
+			w.WriteString(text)
+			w.WriteString("\r\n")
+		}
+	}
+
+	writeBase64Part := func(w *strings.Builder, boundary string, a emailAttachment) {
+		fmt.Fprintf(w, "--%s\r\n", boundary)
+		fmt.Fprintf(w, "Content-Type: %s; name=\"%s\"\r\n", a.MimeType, a.Filename)
+		w.WriteString("Content-Transfer-Encoding: base64\r\n")
+		if a.ContentID != "" {
+			fmt.Fprintf(w, "Content-ID: <%s>\r\n", a.ContentID)
+			fmt.Fprintf(w, "Content-Disposition: inline; filename=\"%s\"\r\n\r\n", a.Filename)
+		} else {
+			fmt.Fprintf(w, "Content-Disposition: attachment; filename=\"%s\"\r\n\r\n", a.Filename)
+		}
+		encoded := base64.StdEncoding.EncodeToString(a.Data)
+		for i := 0; i < len(encoded); i += 76 {
+			end := i + 76
+			if end > len(encoded) {
+				end = len(encoded)
+			}
+			w.WriteString(encoded[i:end])
+			w.WriteString("\r\n")
+		}
+	}
+
+	// No attachments at all — simple body
+	if len(inlineAtts) == 0 && len(fileAtts) == 0 {
+		writeBodyAlt(&b)
+		return []byte(b.String())
+	}
+
+	// Has inline images → wrap body in multipart/related
+	relBoundary := fmt.Sprintf("----=_Rel_%s", hex.EncodeToString(idBytes))
+	mixBoundary := fmt.Sprintf("----=_Mix_%s", hex.EncodeToString(idBytes))
+
+	if len(fileAtts) > 0 {
+		// Outermost: multipart/mixed
+		fmt.Fprintf(&b, "Content-Type: multipart/mixed; boundary=\"%s\"\r\n\r\n", mixBoundary)
+
+		if len(inlineAtts) > 0 {
+			// Body + inlines wrapped in multipart/related
+			fmt.Fprintf(&b, "--%s\r\n", mixBoundary)
+			fmt.Fprintf(&b, "Content-Type: multipart/related; boundary=\"%s\"\r\n\r\n", relBoundary)
+			fmt.Fprintf(&b, "--%s\r\n", relBoundary)
+			writeBodyAlt(&b)
+			for _, a := range inlineAtts {
+				writeBase64Part(&b, relBoundary, a)
+			}
+			fmt.Fprintf(&b, "--%s--\r\n", relBoundary)
+		} else {
+			// No inlines — body directly inside mixed
+			fmt.Fprintf(&b, "--%s\r\n", mixBoundary)
+			writeBodyAlt(&b)
+		}
+
+		// File attachments
+		for _, a := range fileAtts {
+			writeBase64Part(&b, mixBoundary, a)
+		}
+		fmt.Fprintf(&b, "--%s--\r\n", mixBoundary)
+	} else {
+		// Only inline images, no file attachments → multipart/related at top
+		fmt.Fprintf(&b, "Content-Type: multipart/related; boundary=\"%s\"\r\n\r\n", relBoundary)
+		fmt.Fprintf(&b, "--%s\r\n", relBoundary)
+		writeBodyAlt(&b)
+		for _, a := range inlineAtts {
+			writeBase64Part(&b, relBoundary, a)
+		}
+		fmt.Fprintf(&b, "--%s--\r\n", relBoundary)
+	}
+
 	return []byte(b.String())
+}
+
+// buildRawEmailWithThreading is a backward-compatible wrapper (no attachments).
+func buildRawEmailWithThreading(from, to, cc, subject, text, html, inReplyTo, references string) []byte {
+	return buildRawEmail(from, to, cc, subject, text, html, inReplyTo, references, nil)
 }
