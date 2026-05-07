@@ -128,6 +128,19 @@ impl MailProvider for ImapProvider {
         })
     }
 
+    async fn fetch_inline_part(
+        &self,
+        _message_id: u32,
+        _content_id: &str,
+    ) -> Result<InlinePart, String> {
+        // Inline parts via IMAP would require fetching the raw message bytes,
+        // running a MIME parser, and walking parts to find the matching
+        // Content-ID. Not yet implemented — third-party IMAP accounts will
+        // see broken cid: refs in inline images for now. Native path covers
+        // our own server.
+        Err("inline parts not implemented for IMAP provider".into())
+    }
+
     async fn send_message(
         &self,
         smtp_host: &str,

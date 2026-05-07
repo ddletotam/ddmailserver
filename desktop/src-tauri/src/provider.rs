@@ -57,6 +57,15 @@ pub trait MailProvider: Send + Sync {
         uid: u32,
     ) -> Result<String, String>;
 
+    /// Fetch one inline body part (e.g. an inline image referenced as `cid:…`
+    /// in the HTML body). Used by SandboxedEmail to substitute `cid:` URLs
+    /// with renderable `data:` URLs before mounting the shadow DOM.
+    async fn fetch_inline_part(
+        &self,
+        message_id: u32,
+        content_id: &str,
+    ) -> Result<InlinePart, String>;
+
     /// Fetch raw message bytes (for attachment extraction).
     async fn fetch_raw_message(
         &self,

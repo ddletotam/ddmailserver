@@ -269,6 +269,19 @@ pub async fn v2_set_flags_batch(
 }
 
 #[tauri::command]
+pub async fn v2_fetch_inline_part(
+    registry: tauri::State<'_, ProviderRegistry>,
+    account_id: String,
+    message_id: u32,
+    content_id: String,
+) -> Result<InlinePart, String> {
+    get_provider(&registry, &account_id)
+        .await?
+        .fetch_inline_part(message_id, &content_id)
+        .await
+}
+
+#[tauri::command]
 pub async fn v2_fetch_message_source(
     registry: tauri::State<'_, ProviderRegistry>,
     account_id: String,

@@ -172,6 +172,7 @@
         html={displayContent.content}
         isDark={themeStore.isDark}
         permissions={contentPermissions}
+        messageUid={message.uid}
       />
     {:else if displayContent.type === "text"}
       <div class="text-body text-plain">{displayContent.content}</div>
