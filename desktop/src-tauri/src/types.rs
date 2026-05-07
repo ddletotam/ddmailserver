@@ -1,4 +1,15 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Tolerate `null` for Vec fields. Native server returns `null` instead of `[]`
+/// when a slice is empty (Go marshals nil slices as null), and Rust's default
+/// `Vec` deserializer rejects null. Apply via `#[serde(default, deserialize_with = "null_as_empty_vec")]`.
+fn null_as_empty_vec<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<Vec<T>>::deserialize(d).map(|v| v.unwrap_or_default())
+}
 
 // ── Identity ──
 
@@ -53,6 +64,7 @@ pub struct Conversation {
     pub label: String,
     pub avatar_hash: String,
     pub received_by: String, // which of our emails received this conversation's messages
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub counterparts: Vec<ContactInfo>,
     pub is_group: bool,
     pub last_date: String,
@@ -60,6 +72,7 @@ pub struct Conversation {
     pub last_subject: String,
     pub unread_count: u32,
     pub total_count: u32,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub messages: Vec<MessageRef>,
     pub draft: Option<MessageRef>, // latest draft for this conversation
 }
@@ -71,8 +84,11 @@ pub struct MessageEnvelope {
     pub subject: String,
     pub from: String,
     pub from_addr: String,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub to: Vec<String>,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub to_addrs: Vec<String>,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub cc_addrs: Vec<String>,
     pub date: String,
     pub date_ts: i64,
@@ -82,6 +98,7 @@ pub struct MessageEnvelope {
     pub is_outgoing: bool,
     pub message_id: String,
     pub in_reply_to: String,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub references: Vec<String>,
 }
 
@@ -92,16 +109,20 @@ pub struct MessageBody {
     pub subject: String,
     pub from: String,
     pub from_addr: String,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub to: Vec<String>,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub cc: Vec<String>,
     pub date: String,
     pub date_ts: i64,
     pub html: Option<String>,
     pub text: Option<String>,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub attachments: Vec<Attachment>,
     pub is_outgoing: bool,
     pub message_id: String,
     pub in_reply_to: String,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub references: Vec<String>,
 }
 

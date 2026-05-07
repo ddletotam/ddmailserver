@@ -4,6 +4,14 @@ import type { Identity, Account } from "../types/mail";
 // Ugly gray for unknown/alias recipients
 const UNKNOWN_COLOR = "#d5d5d0";
 
+// Pastel palette assigned to identities lacking a server-side color.
+// Matches imap.rs::fetch_identities_impl so IMAP and native paths look the same.
+const PASTEL = [
+  "#FFE4E1", "#E8F5E9", "#E3F2FD", "#FFF9C4", "#F3E5F5",
+  "#E0F7FA", "#FBE9E7", "#F1F8E9", "#EDE7F6", "#E8EAF6",
+  "#FCE4EC", "#E0F2F1", "#FFF3E0", "#F9FBE7", "#EFEBE9",
+];
+
 let identities = $state<Identity[]>([]);
 let loaded = $state(false);
 
@@ -41,11 +49,17 @@ export const identityStore = {
   /** Load identities from server (via IMAP METADATA or native HTTP API) */
   async load(account: Account) {
     try {
-      identities = await invoke<Identity[]>("v2_fetch_identities", {
+      const fresh = await invoke<Identity[]>("v2_fetch_identities", {
         accountId: account.id,
         host: account.imap_host,
         username: account.username,
       });
+      // Native HTTP path doesn't assign colors server-side (only the IMAP path
+      // does, in imap.rs::fetch_identities_impl). Backfill here so both paths
+      // produce coloured identity rows.
+      identities = fresh.map((id, i) =>
+        id.color ? id : { ...id, color: PASTEL[i % PASTEL.length] }
+      );
       loaded = true;
     } catch (e) {
       console.warn("[identity] Failed to load:", e);
