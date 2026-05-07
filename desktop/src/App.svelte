@@ -18,13 +18,9 @@
     // appear as self-threads.
     (async () => {
       try {
-        console.log("[app] ensureActivated…", account.email);
         await mailStore.ensureActivated(account);
-        console.log("[app] activated. provider_type=", account.provider_type);
         await identityStore.load(account);
-        console.log("[app] identities loaded:", identityStore.identities.length);
         await mailStore.loadConversations(account);
-        console.log("[app] conversations loaded:", mailStore.conversations.length);
       } catch (e) {
         console.error("[app] startup failed:", e);
       }

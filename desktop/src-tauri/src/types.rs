@@ -136,6 +136,41 @@ pub struct Attachment {
 
 // ── Outgoing ──
 
+/// Attachment as a self-contained blob: filename + mime + raw bytes.
+/// Serialised to JSON with the bytes base64-encoded (via serde_bytes), which
+/// is how the native /send endpoint receives them. The IMAP path consumes the
+/// same struct in-process — no encoding round-trip there.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutgoingAttachment {
+    pub filename: String,
+    pub mime_type: String,
+    #[serde(with = "base64_bytes")]
+    pub content: Vec<u8>,
+    /// When set, the part is an inline body part (Content-ID + Content-Disposition: inline).
+    /// HTML body is expected to reference it as `<img src="cid:{content_id}">`. The whole
+    /// message is then framed as multipart/related so MUAs render the image in place,
+    /// telegram-style. Empty/None = regular file attachment (multipart/mixed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_id: Option<String>,
+}
+
+/// Serde codec that turns `Vec<u8>` into a base64 string (and back) for JSON
+/// transport — matches Go's default `[]byte` JSON encoding so the native
+/// /send endpoint can decode `attachments[].content` straight into `[]byte`.
+mod base64_bytes {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        STANDARD.decode(s.as_bytes()).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutgoingMessage {
     pub from: String,
@@ -146,6 +181,11 @@ pub struct OutgoingMessage {
     pub text: String,
     pub in_reply_to: Option<String>,
     pub references: Option<String>,
+    /// Filesystem paths picked by the user (composer dialog). Populated by JS,
+    /// resolved into `attachments` by the v2_send_message command before the
+    /// provider sees the message. Providers themselves only look at `attachments`.
     #[serde(default)]
     pub attachment_paths: Vec<String>,
+    #[serde(default)]
+    pub attachments: Vec<OutgoingAttachment>,
 }
