@@ -125,4 +125,6 @@ pub struct OutgoingMessage {
     pub text: String,
     pub in_reply_to: Option<String>,
     pub references: Option<String>,
+    #[serde(default)]
+    pub attachment_paths: Vec<String>,
 }

@@ -9,6 +9,7 @@ import type {
   Contact,
   Account,
 } from "../types/mail";
+import { identityStore } from "./identity.svelte";
 
 // Bumped from "ddmail_pinned" when conversation IDs switched from raw counterpart
 // addresses to "{my_identity}|{counterpart}" — old pins no longer match anything,
@@ -176,6 +177,32 @@ function scheduleRefresh(account: Account) {
       _refreshing = false;
     }
   }, 2000); // 2s debounce window
+}
+
+/// Collapse search-result messages so each (counterpart, my_identity) pair shows up
+/// at most once — multiple messages in the same thread otherwise produce a wall of
+/// near-identical "Re:"-rows. Keeps the most recent representative per pair.
+function dedupByConversation(messages: MessageEnvelope[], account: Account): MessageEnvelope[] {
+  const ourLc = new Set<string>(
+    identityStore.identities.map((i) => i.email.toLowerCase()).concat([account.email.toLowerCase()])
+  );
+  const best = new Map<string, MessageEnvelope>();
+  for (const m of messages) {
+    const fromLc = m.from_addr.toLowerCase();
+    const isOut = ourLc.has(fromLc);
+    const cp = isOut
+      ? (m.to_addrs.find((a) => !ourLc.has(a.toLowerCase())) ?? m.to_addrs[0] ?? "").toLowerCase()
+      : fromLc;
+    const myId = isOut
+      ? fromLc
+      : (m.to_addrs.concat(m.cc_addrs).find((a) => ourLc.has(a.toLowerCase()))
+          ?? account.email).toLowerCase();
+    if (!cp) continue;
+    const key = `${myId}|${cp}`;
+    const prev = best.get(key);
+    if (!prev || prev.date_ts < m.date_ts) best.set(key, m);
+  }
+  return [...best.values()].sort((a, b) => b.date_ts - a.date_ts);
 }
 
 // ── Exports ──
@@ -435,7 +462,8 @@ export const mailStore = {
       query: q,
     }).catch((e) => { console.warn("search_messages:", e); return [] as MessageEnvelope[]; });
     try {
-      const [contacts, messages] = await Promise.all([contactsPromise, messagesPromise]);
+      const [contacts, rawMessages] = await Promise.all([contactsPromise, messagesPromise]);
+      const messages = dedupByConversation(rawMessages, account);
       // Reserve at least ~15 slots for messages when both sections have results,
       // so a noisy contact list never starves the message search.
       const contactCap = messages.length > 0 ? Math.min(10, contacts.length) : Math.min(SEARCH_TOTAL_LIMIT, contacts.length);

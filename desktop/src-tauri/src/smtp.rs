@@ -1,10 +1,24 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use lettre::{
     transport::smtp::authentication::Credentials,
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
-use lettre::message::{header::ContentType, Mailbox, MultiPart, SinglePart};
+use lettre::message::{header::ContentType, Attachment, Mailbox, MultiPart, SinglePart};
 
 use crate::types::OutgoingMessage;
+
+// RFC 5322 §3.6.4 says Message-ID SHOULD be unique. lettre 0.11 doesn't add one
+// unless we call `.message_id(...)` explicitly — so without this every send goes out
+// without a Message-ID and our server has to mint a `<unixnano@generated.local>`
+// fallback, which makes the same email impossible to dedup across folders.
+static MSG_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn make_message_id(from_email: &str) -> String {
+    let domain = from_email.rsplit_once('@').map(|(_, d)| d).unwrap_or("localhost");
+    let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
+    let counter = MSG_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("<{nanos:x}.{counter:x}@{domain}>")
+}
 
 /// Core send logic, reusable by both the Tauri command and ImapProvider.
 pub(crate) async fn send_message_impl(
@@ -14,8 +28,10 @@ pub(crate) async fn send_message_impl(
     let from_mailbox: Mailbox = message.from.parse()
         .map_err(|e| format!("Invalid from address: {e}"))?;
 
+    let msg_id = make_message_id(from_mailbox.email.as_ref());
     let mut email_builder = Message::builder()
         .from(from_mailbox)
+        .message_id(Some(msg_id))
         .subject(&message.subject);
 
     for to_addr in &message.to {
@@ -38,20 +54,39 @@ pub(crate) async fn send_message_impl(
         email_builder = email_builder.references(refs.clone());
     }
 
-    let email = email_builder
-        .multipart(
-            MultiPart::alternative()
-                .singlepart(
-                    SinglePart::builder()
-                        .header(ContentType::TEXT_PLAIN)
-                        .body(message.text.clone()),
-                )
-                .singlepart(
-                    SinglePart::builder()
-                        .header(ContentType::TEXT_HTML)
-                        .body(message.html.clone()),
-                ),
+    let body_alt = MultiPart::alternative()
+        .singlepart(
+            SinglePart::builder()
+                .header(ContentType::TEXT_PLAIN)
+                .body(message.text.clone()),
         )
+        .singlepart(
+            SinglePart::builder()
+                .header(ContentType::TEXT_HTML)
+                .body(message.html.clone()),
+        );
+
+    let mp = if message.attachment_paths.is_empty() {
+        body_alt
+    } else {
+        let mut mixed = MultiPart::mixed().multipart(body_alt);
+        for path_str in &message.attachment_paths {
+            let path = std::path::Path::new(path_str);
+            let bytes = std::fs::read(path)
+                .map_err(|e| format!("read attachment {path_str}: {e}"))?;
+            let filename = path.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "attachment".into());
+            let mime = guess_mime(&filename);
+            let ct: ContentType = mime.parse()
+                .map_err(|_| format!("invalid mime for {filename}"))?;
+            mixed = mixed.singlepart(Attachment::new(filename).body(bytes, ct));
+        }
+        mixed
+    };
+
+    let email = email_builder
+        .multipart(mp)
         .map_err(|e| format!("Build email: {e}"))?;
 
     let creds = Credentials::new(username.to_string(), password.to_string());
@@ -84,4 +119,30 @@ pub async fn send_message(
     message: OutgoingMessage,
 ) -> Result<String, String> {
     send_message_impl(&host, port, &username, &password, use_tls, &message).await
+}
+
+fn guess_mime(filename: &str) -> &'static str {
+    let lower = filename.to_lowercase();
+    let ext = lower.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    match ext {
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "txt" | "log" => "text/plain",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "zip" => "application/zip",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        _ => "application/octet-stream",
+    }
 }

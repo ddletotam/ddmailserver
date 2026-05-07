@@ -104,6 +104,7 @@ export interface OutgoingMessage {
   text: string;
   in_reply_to: string | null;
   references: string | null;
+  attachment_paths: string[];
 }
 
 export interface Contact {

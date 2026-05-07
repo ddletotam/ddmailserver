@@ -487,16 +487,24 @@ where
         our_addrs.iter().any(|o| *o == lc)
     };
 
+    // Group key = (my_id, counterpart). Direction is decided strictly from the FROM
+    // header: if the sender is one of our identities, that identity is `my_id`; otherwise
+    // the sender is the counterpart and `my_id` is the first of our addresses found in
+    // To/Cc. The same physical message landing in both Sent and Inbox (typical when both
+    // endpoints are local) collapses into one row because the key is folder-independent.
     let mut conv_map: HashMap<(String, String), Vec<RawEnvelope>> = HashMap::new();
     for env in all_envelopes {
         let from_lc = env.from_addr.to_lowercase();
         let (my_id, cp) = if is_ours(&from_lc) {
-            // Outgoing: my_id = sender; counterpart = first non-self recipient (To then Cc).
+            // We sent it. Counterpart = first non-self recipient (external preferred,
+            // otherwise another of our identities). Skip pure me-to-me.
             let cp = env.to_addrs.iter().chain(env.cc_addrs.iter())
                 .map(|a| a.to_lowercase())
                 .find(|a| !is_ours(a))
-                .or_else(|| env.to_addrs.first().map(|a| a.to_lowercase()))
-                .unwrap_or_default();
+                .or_else(|| env.to_addrs.iter().chain(env.cc_addrs.iter())
+                    .map(|a| a.to_lowercase())
+                    .find(|a| *a != from_lc));
+            let Some(cp) = cp else { continue };
             (from_lc, cp)
         } else {
             // Incoming: my_id = first of our addresses found in To/Cc; counterpart = sender.
@@ -514,6 +522,34 @@ where
 
     for ((my_id, cp_addr), mut msgs) in conv_map {
         msgs.sort_by_key(|m| m.date_ts);
+
+        // Same physical message can appear in multiple folders (e.g. self-mail lands in
+        // both Sent and INBOX when both endpoints are local). Dedup by Message-Id, keeping
+        // the Sent copy when there's a choice — that's the canonical "I wrote this" view.
+        if msgs.iter().any(|m| !m.message_id.is_empty()) {
+            let sent_lc = sent_name.as_ref().map(|s| s.to_lowercase());
+            let prefer_folder = |folder: &str| -> u8 {
+                let lc = folder.to_lowercase();
+                if Some(lc.as_str()) == sent_lc.as_deref() { 0 } else { 1 }
+            };
+            let mut seen: HashMap<String, usize> = HashMap::new();
+            let mut keep = vec![true; msgs.len()];
+            for (i, m) in msgs.iter().enumerate() {
+                if m.message_id.is_empty() { continue; }
+                if let Some(&j) = seen.get(&m.message_id) {
+                    if prefer_folder(&m.folder) < prefer_folder(&msgs[j].folder) {
+                        keep[j] = false;
+                        seen.insert(m.message_id.clone(), i);
+                    } else {
+                        keep[i] = false;
+                    }
+                } else {
+                    seen.insert(m.message_id.clone(), i);
+                }
+            }
+            let mut iter = keep.into_iter();
+            msgs.retain(|_| iter.next().unwrap_or(true));
+        }
 
         // Display name for the counterpart: try FROM names (when they wrote to us),
         // then TO names (when we wrote to them). Drop names that look like raw addresses.
