@@ -488,4 +488,5 @@ export const mailStore = {
 
   smtpArgs,
   imapArgs,
+  ensureActivated,
 };
