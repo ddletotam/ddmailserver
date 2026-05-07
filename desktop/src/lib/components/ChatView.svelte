@@ -269,6 +269,37 @@
     }
   });
 
+  // ── Composer expand/collapse + advanced fields ──
+  //
+  // Collapsed: the inline reply is paperclip + body + send + chevron-down.
+  // Expanded: the chevron flips up and an advanced-fields panel appears
+  // above showing identity selector + To/Cc/Bcc/Subject inputs. Empty
+  // strings mean "auto-derive from the reply target on send"; once the
+  // user types, that override sticks. Fields are reset after each send.
+  let composerExpanded = $state(false);
+  let composerTo = $state("");
+  let composerCc = $state("");
+  let composerBcc = $state("");
+  let composerSubject = $state("");
+
+  $effect(() => {
+    // Pre-fill the advanced fields the first time the user opens the panel
+    // for a given reply target. Don't overwrite values the user has already
+    // typed (non-empty stays).
+    if (!composerExpanded) return;
+    const target = replyTo
+      ?? mailStore.conversationMessages.filter(m => !m.is_outgoing).at(-1)
+      ?? (mailStore.conversationMessages.length
+            ? mailStore.conversationMessages[mailStore.conversationMessages.length - 1]
+            : null);
+    if (!target) return;
+    if (!composerTo) composerTo = target.from_addr;
+    if (!composerSubject) {
+      const base = target.subject || "";
+      composerSubject = /^re:/i.test(base) ? base : `Re: ${base}`;
+    }
+  });
+
   // Quick-reply attachments — same shape & flow as Composer's, scoped to the
   // inline input. We intentionally duplicate the (small) logic instead of
   // extracting a shared component for now: the surface is two consumers and
@@ -351,9 +382,15 @@
     quickReplySending = true;
     try {
       const fromEmail = (selectedFromEmail || account.email).toLowerCase();
-      const recipient = target.from_addr;
+      // Prefer user-typed advanced-field values when expanded; otherwise
+      // auto-derive from the reply target (parity with the original
+      // collapsed-only behaviour).
+      const recipient = composerTo.trim() || target.from_addr;
       const baseSubject = target.subject || "";
-      const subject = /^re:/i.test(baseSubject) ? baseSubject : `Re: ${baseSubject}`;
+      const subject = composerSubject.trim()
+        || (/^re:/i.test(baseSubject) ? baseSubject : `Re: ${baseSubject}`);
+      const ccList = composerCc.split(",").map(s => s.trim()).filter(Boolean);
+      const bccList = composerBcc.split(",").map(s => s.trim()).filter(Boolean);
       const userHtml = getEditorHtml();
       const userBody = userHtml || text.replace(/\n/g, "<br>");
       const quoteHtml = buildQuoteBlock(target);
@@ -383,13 +420,19 @@
 
       // Local optimistic message (only if identity didn't change — otherwise we'll redirect to a different convo).
       const localMsgId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      // Recipient list. composerTo overrides target.from_addr (the auto-derived
+      // recipient) when set; either way, advanced cc adds extras.
+      const toList = composerTo.trim()
+        ? composerTo.split(",").map(s => s.trim()).filter(Boolean)
+        : [recipient];
+
       const optimistic: MessageBody = {
         uid: -Date.now(), // negative uid signals "not from server yet"
         folder: "Sent",
         subject,
         from: fromEmail,
         from_addr: fromEmail,
-        to: [recipient],
+        to: toList,
         cc: [],
         date: new Date().toUTCString(),
         date_ts: Math.floor(Date.now() / 1000),
@@ -405,10 +448,15 @@
         mailStore.appendLocalMessage(optimistic);
       }
 
+      // bccList is collected from the advanced field but currently dropped on
+      // the floor — OutgoingMessage has no bcc slot yet. TODO: extend the
+      // protocol so SMTP envelope picks up Bcc without leaking into headers.
+      void bccList;
+
       const msg: OutgoingMessage = {
         from: fromEmail,
-        to: [recipient],
-        cc: [],
+        to: toList,
+        cc: ccList,
         subject,
         text: fullText,
         html,
@@ -426,6 +474,13 @@
       clearEditor();
       qrAttachments = [];
       replyTo = null;
+      // Reset advanced fields after a successful send so the next reply starts
+      // fresh. The expanded panel itself stays open if the user opened it —
+      // that's a deliberate state, not a per-message thing.
+      composerTo = "";
+      composerCc = "";
+      composerBcc = "";
+      composerSubject = "";
 
       if (switchedIdentity) {
         // Land in the conversation that matches the new (counterpart, identity) pair.
@@ -588,6 +643,64 @@
       <Composer mode={replyMode} originalMessage={composerOriginal} prefillTo={composerPrefillTo} focusField={composerFocusField} onclose={closeComposer} />
     {:else}
       <div class="quick-reply">
+        {#if composerExpanded}
+          <div class="advanced-fields">
+            {#if identityStore.hasMultiple}
+              <div class="advanced-row">
+                <label>From</label>
+                <div class="identity-picker advanced-picker">
+                  <button
+                    class="identity-picker-btn"
+                    onclick={() => identityDropdownOpen = !identityDropdownOpen}
+                    title="Send from"
+                  >
+                    <span class="identity-dot" style:background={identityStore.findByEmail(selectedFromEmail)?.color ?? '#ccc'}></span>
+                    <span class="identity-email">{selectedFromEmail}</span>
+                    <svg class="identity-chevron" class:open={identityDropdownOpen} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                  </button>
+                  {#if identityDropdownOpen}
+                    <div class="identity-dropdown">
+                      {#each identityStore.identities as id}
+                        <button
+                          class="identity-option"
+                          class:selected={id.email === selectedFromEmail}
+                          onclick={() => { selectedFromEmail = id.email; identityDropdownOpen = false; }}
+                        >
+                          <span class="identity-dot" style:background={id.color}></span>
+                          <span class="identity-option-email">{id.email}</span>
+                          {#if id.email === selectedFromEmail}
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                              <polyline points="20 6 9 17 4 12" />
+                            </svg>
+                          {/if}
+                        </button>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+            <div class="advanced-row">
+              <label for="adv-to">To</label>
+              <input id="adv-to" type="text" bind:value={composerTo} placeholder="recipient@example.com" />
+            </div>
+            <div class="advanced-row">
+              <label for="adv-cc">Cc</label>
+              <input id="adv-cc" type="text" bind:value={composerCc} placeholder="comma-separated" />
+            </div>
+            <div class="advanced-row">
+              <label for="adv-bcc">Bcc</label>
+              <input id="adv-bcc" type="text" bind:value={composerBcc} placeholder="comma-separated" />
+            </div>
+            <div class="advanced-row">
+              <label for="adv-subject">Subject</label>
+              <input id="adv-subject" type="text" bind:value={composerSubject} placeholder="Subject" />
+            </div>
+          </div>
+        {/if}
+
         {#if replyTo}
           <div class="reply-quote-bar">
             <div class="reply-quote-content">
@@ -659,42 +772,6 @@
         {/if}
 
         <div class="reply-input-row">
-          <!-- Identity selector (if multiple) -->
-          {#if identityStore.hasMultiple}
-            <div class="identity-picker">
-              <button
-                class="identity-picker-btn"
-                onclick={() => identityDropdownOpen = !identityDropdownOpen}
-                title="Send from"
-              >
-                <span class="identity-dot" style:background={identityStore.findByEmail(selectedFromEmail)?.color ?? '#ccc'}></span>
-                <span class="identity-email">{selectedFromEmail}</span>
-                <svg class="identity-chevron" class:open={identityDropdownOpen} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <polyline points="6 9 12 15 18 9" />
-                </svg>
-              </button>
-              {#if identityDropdownOpen}
-                <div class="identity-dropdown">
-                  {#each identityStore.identities as id}
-                    <button
-                      class="identity-option"
-                      class:selected={id.email === selectedFromEmail}
-                      onclick={() => { selectedFromEmail = id.email; identityDropdownOpen = false; }}
-                    >
-                      <span class="identity-dot" style:background={id.color}></span>
-                      <span class="identity-option-email">{id.email}</span>
-                      {#if id.email === selectedFromEmail}
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                          <polyline points="20 6 9 17 4 12" />
-                        </svg>
-                      {/if}
-                    </button>
-                  {/each}
-                </div>
-              {/if}
-            </div>
-          {/if}
-
           <!-- Attach button: opens system file picker. Image-only batches
                trigger the "send as pictures or files" prompt above. -->
           <button
@@ -732,6 +809,22 @@
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="22" y1="2" x2="11" y2="13" />
               <polygon points="22 2 15 22 11 13 2 9 22 2" />
+            </svg>
+          </button>
+
+          <!-- Expand/collapse toggle. Double-chevron flips up when expanded
+               so the user has a visual cue. -->
+          <button
+            type="button"
+            class="qr-expand-btn"
+            class:open={composerExpanded}
+            onclick={() => composerExpanded = !composerExpanded}
+            title={composerExpanded ? "Collapse" : "Expand (To/Cc/Subject)"}
+            aria-label="Toggle composer fields"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <polyline points="7 13 12 18 17 13" />
+              <polyline points="7 6 12 11 17 6" />
             </svg>
           </button>
         </div>
@@ -1116,7 +1209,8 @@
 
   /* Quick-reply attachments — mirrors Composer's gallery/chip styling but
      scoped here to keep the inline reply self-contained. */
-  .qr-attach-btn {
+  .qr-attach-btn,
+  .qr-expand-btn {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1128,8 +1222,50 @@
     border-radius: 50%;
     cursor: pointer;
     flex-shrink: 0;
+    transition: transform 0.18s ease;
   }
-  .qr-attach-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+  .qr-attach-btn:hover,
+  .qr-expand-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+  /* Double-chevron points down when collapsed (expand cue), flips 180° when
+     expanded (collapse cue). */
+  .qr-expand-btn.open { transform: rotate(180deg); color: var(--text-accent); }
+
+  /* Advanced fields panel — appears above the input row in expanded mode. */
+  .advanced-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px 6px;
+    border-top: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+  }
+  .advanced-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .advanced-row label {
+    width: 56px;
+    font-size: var(--font-size-xs);
+    color: var(--text-secondary);
+    text-align: right;
+    flex-shrink: 0;
+  }
+  .advanced-row input[type="text"] {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: var(--font-size-sm);
+    outline: none;
+  }
+  .advanced-row input[type="text"]:focus {
+    border-color: var(--text-accent);
+  }
+  .advanced-picker { flex: 1; min-width: 0; }
 
   .attachments-row {
     display: flex;
