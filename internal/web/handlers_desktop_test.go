@@ -148,3 +148,48 @@ func TestBuildRawEmailWithThreading(t *testing.T) {
 		t.Errorf("missing Message-ID with sender domain in raw email:\n%s", raw)
 	}
 }
+
+func TestExtractName(t *testing.T) {
+	tests := []struct {
+		input, expected string
+	}{
+		{`Alice <alice@x.com>`, "Alice"},
+		{`"Bob Smith" <bob@x.com>`, "Bob Smith"},
+		{`alice@x.com`, ""},
+		{`<alice@x.com>`, ""},
+	}
+	for _, tt := range tests {
+		got := extractName(tt.input)
+		if got != tt.expected {
+			t.Errorf("extractName(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestParseRecipientAddrs(t *testing.T) {
+	addrs := parseRecipientAddrs("Alice <alice@x.com>, bob@y.com", "cc@z.com")
+	if len(addrs) != 3 {
+		t.Fatalf("expected 3 addrs, got %d: %v", len(addrs), addrs)
+	}
+	if addrs[0] != "alice@x.com" {
+		t.Errorf("addrs[0] = %q, want alice@x.com", addrs[0])
+	}
+}
+
+func TestParseMessageIDs(t *testing.T) {
+	ids := parseMessageIDs("<root@x> <parent@y>")
+	if len(ids) != 2 {
+		t.Fatalf("expected 2 ids, got %d: %v", len(ids), ids)
+	}
+	if ids[0] != "root@x" || ids[1] != "parent@y" {
+		t.Errorf("got %v", ids)
+	}
+}
+
+func TestGravatarHash(t *testing.T) {
+	// MD5 of "test@example.com" is well-known
+	h := gravatarHash("test@example.com")
+	if len(h) != 32 {
+		t.Errorf("expected 32-char hex, got %q (%d chars)", h, len(h))
+	}
+}

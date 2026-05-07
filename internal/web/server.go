@@ -174,6 +174,8 @@ func (s *Server) setupRoutes() {
 	desktopAuthAPI := desktopAPI.PathPrefix("").Subrouter()
 	desktopAuthAPI.Use(s.DesktopAuthMiddleware)
 	desktopAuthAPI.HandleFunc("/folders", s.HandleDesktopFolders).Methods("GET")
+	desktopAuthAPI.HandleFunc("/conversations", s.HandleDesktopConversations).Methods("GET")
+	desktopAuthAPI.HandleFunc("/conversations/messages", s.HandleDesktopConversationMessages).Methods("POST")
 	desktopAuthAPI.HandleFunc("/search", s.HandleDesktopSearch).Methods("GET")
 	desktopAuthAPI.HandleFunc("/messages/{id}/source", s.HandleDesktopMessageSource).Methods("GET")
 	desktopAuthAPI.HandleFunc("/messages/flags", s.HandleDesktopSetFlags).Methods("POST")

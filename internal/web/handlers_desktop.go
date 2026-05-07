@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -212,6 +213,8 @@ func (s *Server) HandleDesktopMessageSource(w http.ResponseWriter, r *http.Reque
 }
 
 // HandleDesktopSetFlags updates flags on messages.
+// Accepts client format: {"messages":[{"folder":"X","uid":123},...], "flags":"\\Seen", "add":true}
+// where "uid" is actually messages.id (DB primary key) in native mode.
 func (s *Server) HandleDesktopSetFlags(w http.ResponseWriter, r *http.Request) {
 	user := s.GetUserFromContext(r.Context())
 	if user == nil {
@@ -220,32 +223,35 @@ func (s *Server) HandleDesktopSetFlags(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		MessageIDs []int64 `json:"message_ids"`
-		Flags      string  `json:"flags"` // e.g. "\\Seen"
-		Add        bool    `json:"add"`
+		Messages []struct {
+			Folder string `json:"folder"`
+			UID    int64  `json:"uid"` // messages.id in native mode
+		} `json:"messages"`
+		Flags string `json:"flags"`
+		Add   bool   `json:"add"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	for _, msgID := range req.MessageIDs {
-		msg, err := s.database.GetMessageByID(msgID)
+	for _, ref := range req.Messages {
+		msg, err := s.database.GetMessageByID(ref.UID)
 		if err != nil || msg.UserID != user.ID {
 			continue
 		}
 
 		switch req.Flags {
 		case "\\Seen":
-			s.database.UpdateMessageFlag(msgID, "seen", req.Add)
+			s.database.UpdateMessageFlag(ref.UID, "seen", req.Add)
 		case "\\Flagged":
-			s.database.UpdateMessageFlag(msgID, "flagged", req.Add)
+			s.database.UpdateMessageFlag(ref.UID, "flagged", req.Add)
 		case "\\Answered":
-			s.database.UpdateMessageFlag(msgID, "answered", req.Add)
+			s.database.UpdateMessageFlag(ref.UID, "answered", req.Add)
 		case "\\Deleted":
-			s.database.UpdateMessageFlag(msgID, "deleted", req.Add)
+			s.database.UpdateMessageFlag(ref.UID, "deleted", req.Add)
 		case "\\Draft":
-			s.database.UpdateMessageFlag(msgID, "draft", req.Add)
+			s.database.UpdateMessageFlag(ref.UID, "draft", req.Add)
 		}
 	}
 
@@ -389,6 +395,513 @@ func (s *Server) HandleDesktopSend(w http.ResponseWriter, r *http.Request) {
 		"status":     "queued",
 		"message_id": outboxMsg.ID,
 	})
+}
+
+// ── Conversations ──
+
+// collectIdentities returns lowercase email set for the user (local mailboxes + accounts + aliases).
+func (s *Server) collectIdentities(userID int64) map[string]bool {
+	ids := make(map[string]bool)
+
+	mailboxes, err := s.database.GetMailboxesWithDomainByUserID(userID)
+	if err == nil {
+		for _, mb := range mailboxes {
+			if mb.Enabled {
+				ids[strings.ToLower(fmt.Sprintf("%s@%s", mb.LocalPart, mb.DomainName))] = true
+			}
+		}
+	}
+
+	accounts, err := s.database.GetAccountsByUserID(userID)
+	if err == nil {
+		for _, acc := range accounts {
+			if acc.Email != "" && acc.Enabled {
+				ids[strings.ToLower(acc.Email)] = true
+				for _, alias := range acc.GetAliases() {
+					ids[strings.ToLower(alias)] = true
+				}
+			}
+		}
+	}
+
+	return ids
+}
+
+func gravatarHash(email string) string {
+	h := md5.Sum([]byte(strings.TrimSpace(strings.ToLower(email))))
+	return hex.EncodeToString(h[:])
+}
+
+// DesktopContactInfo matches the client's ContactInfo type.
+type DesktopContactInfo struct {
+	Name string `json:"name"`
+	Addr string `json:"addr"`
+}
+
+// DesktopMessageRef matches the client's MessageRef type.
+type DesktopMessageRef struct {
+	Folder string `json:"folder"`
+	UID    int64  `json:"uid"` // messages.id in native mode
+}
+
+// DesktopConversation matches the client's Conversation type.
+type DesktopConversation struct {
+	ID           string               `json:"id"`
+	Label        string               `json:"label"`
+	AvatarHash   string               `json:"avatar_hash"`
+	ReceivedBy   string               `json:"received_by"`
+	Counterparts []DesktopContactInfo `json:"counterparts"`
+	IsGroup      bool                 `json:"is_group"`
+	LastDate     string               `json:"last_date"`
+	LastDateTS   int64                `json:"last_date_ts"`
+	LastSubject  string               `json:"last_subject"`
+	UnreadCount  int                  `json:"unread_count"`
+	TotalCount   int                  `json:"total_count"`
+	Messages     []DesktopMessageRef  `json:"messages"`
+	Draft        *DesktopMessageRef   `json:"draft"`
+}
+
+type msgEntry struct {
+	msg        *models.Message
+	folderName string
+}
+
+// HandleDesktopConversations groups messages into conversations.
+func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		respondError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	limit := 200
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 1000 {
+		limit = n
+	}
+
+	identities := s.collectIdentities(user.ID)
+	isOurs := func(addr string) bool { return identities[strings.ToLower(addr)] }
+
+	// Fetch messages across all folders (generous limit to cover grouping)
+	messages, err := s.database.GetMessagesByUser(user.ID, limit*5, 0)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to get messages")
+		return
+	}
+
+	// Build folder ID→name map
+	folders, _ := s.database.GetFoldersByUser(user.ID)
+	folderNames := make(map[int64]string)
+	sentFolderIDs := make(map[int64]bool)
+	for _, f := range folders {
+		folderNames[f.ID] = f.Name
+		if f.Type == "sent" {
+			sentFolderIDs[f.ID] = true
+		}
+	}
+
+	// Group by (my_id, counterpart)
+	type convKey struct{ myID, cp string }
+	convMap := make(map[convKey][]msgEntry)
+
+	for _, msg := range messages {
+		fromLc := strings.ToLower(extractEmail(msg.From))
+		fname := folderNames[msg.FolderID]
+
+		var myID, cp string
+		if isOurs(fromLc) {
+			// Outgoing: counterpart = first non-self in to+cc
+			recipients := parseRecipientAddrs(msg.To, msg.Cc)
+			cp = ""
+			for _, r := range recipients {
+				if !isOurs(r) {
+					cp = r
+					break
+				}
+			}
+			if cp == "" {
+				// All recipients are ours — pick first that differs from sender
+				for _, r := range recipients {
+					if r != fromLc {
+						cp = r
+						break
+					}
+				}
+			}
+			if cp == "" {
+				continue
+			}
+			myID = fromLc
+		} else {
+			// Incoming: my_id = first of our addrs in to+cc
+			recipients := parseRecipientAddrs(msg.To, msg.Cc)
+			myID = ""
+			for _, r := range recipients {
+				if isOurs(r) {
+					myID = r
+					break
+				}
+			}
+			if myID == "" {
+				// Fallback: use first identity
+				for id := range identities {
+					myID = id
+					break
+				}
+			}
+			cp = fromLc
+		}
+
+		key := convKey{myID: myID, cp: cp}
+		convMap[key] = append(convMap[key], msgEntry{msg: msg, folderName: fname})
+	}
+
+	// Build conversation objects
+	var convs []DesktopConversation
+
+	for key, entries := range convMap {
+		// Sort by date ascending
+		sortEntriesByDate(entries)
+
+		// Dedup by message_id (prefer Sent copy)
+		entries = dedupEntries(entries, sentFolderIDs)
+
+		// Separate drafts
+		var regular []msgEntry
+		var lastDraft *msgEntry
+		for i := range entries {
+			if entries[i].msg.Draft {
+				lastDraft = &entries[i]
+			} else {
+				regular = append(regular, entries[i])
+			}
+		}
+
+		if len(regular) == 0 && lastDraft == nil {
+			continue
+		}
+
+		// Stats from regular messages
+		unread := 0
+		var lastMsg *msgEntry
+		for i := range regular {
+			if !regular[i].msg.Seen {
+				unread++
+			}
+			lastMsg = &regular[i]
+		}
+		if lastMsg == nil && lastDraft != nil {
+			lastMsg = lastDraft
+		}
+
+		// Display name for counterpart
+		cpName := ""
+		for _, e := range entries {
+			fromLc := strings.ToLower(extractEmail(e.msg.From))
+			if fromLc == key.cp {
+				name := extractName(e.msg.From)
+				if name != "" && !strings.Contains(name, "@") {
+					cpName = name
+					break
+				}
+			}
+		}
+		label := cpName
+		if label == "" {
+			label = key.cp
+		}
+
+		// Build message refs
+		msgRefs := make([]DesktopMessageRef, 0, len(regular))
+		for _, e := range regular {
+			msgRefs = append(msgRefs, DesktopMessageRef{
+				Folder: e.folderName,
+				UID:    e.msg.ID,
+			})
+		}
+
+		var draftRef *DesktopMessageRef
+		if lastDraft != nil {
+			draftRef = &DesktopMessageRef{
+				Folder: lastDraft.folderName,
+				UID:    lastDraft.msg.ID,
+			}
+		}
+
+		conv := DesktopConversation{
+			ID:         fmt.Sprintf("%s|%s", key.myID, key.cp),
+			Label:      label,
+			AvatarHash: gravatarHash(key.cp),
+			ReceivedBy: key.myID,
+			Counterparts: []DesktopContactInfo{{
+				Name: cpName,
+				Addr: key.cp,
+			}},
+			IsGroup:     false,
+			LastDate:    lastMsg.msg.Date.Format(time.RFC1123Z),
+			LastDateTS:  lastMsg.msg.Date.Unix(),
+			LastSubject: lastMsg.msg.Subject,
+			UnreadCount: unread,
+			TotalCount:  len(regular),
+			Messages:    msgRefs,
+			Draft:       draftRef,
+		}
+		convs = append(convs, conv)
+	}
+
+	// Sort by last_date_ts DESC and limit
+	sortConversationsByDate(convs)
+	if len(convs) > limit {
+		convs = convs[:limit]
+	}
+
+	respondJSON(w, http.StatusOK, convs)
+}
+
+// parseRecipientAddrs extracts lowercased email addresses from To and Cc fields.
+func parseRecipientAddrs(to, cc string) []string {
+	var result []string
+	for _, field := range []string{to, cc} {
+		for _, part := range strings.Split(field, ",") {
+			addr := strings.ToLower(extractEmail(strings.TrimSpace(part)))
+			if addr != "" && strings.Contains(addr, "@") {
+				result = append(result, addr)
+			}
+		}
+	}
+	return result
+}
+
+// extractName extracts display name from "Name <email>" format.
+func extractName(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if idx := strings.Index(addr, "<"); idx > 0 {
+		name := strings.TrimSpace(addr[:idx])
+		name = strings.Trim(name, "\"'")
+		return name
+	}
+	return ""
+}
+
+func sortEntriesByDate(entries []msgEntry) {
+	for i := 1; i < len(entries); i++ {
+		for j := i; j > 0 && entries[j].msg.Date.Before(entries[j-1].msg.Date); j-- {
+			entries[j], entries[j-1] = entries[j-1], entries[j]
+		}
+	}
+}
+
+func dedupEntries(entries []msgEntry, sentFolderIDs map[int64]bool) []msgEntry {
+	seen := make(map[string]int)
+	keep := make([]bool, len(entries))
+	for i := range keep {
+		keep[i] = true
+	}
+
+	for i, e := range entries {
+		mid := e.msg.MessageID
+		if mid == "" {
+			continue
+		}
+		if j, exists := seen[mid]; exists {
+			isSent := sentFolderIDs[e.msg.FolderID]
+			jIsSent := sentFolderIDs[entries[j].msg.FolderID]
+			if isSent && !jIsSent {
+				keep[j] = false
+				seen[mid] = i
+			} else {
+				keep[i] = false
+			}
+		} else {
+			seen[mid] = i
+		}
+	}
+
+	var result []msgEntry
+	for i, e := range entries {
+		if keep[i] {
+			result = append(result, e)
+		}
+	}
+	return result
+}
+
+func sortConversationsByDate(convs []DesktopConversation) {
+	for i := 1; i < len(convs); i++ {
+		for j := i; j > 0 && convs[j].LastDateTS > convs[j-1].LastDateTS; j-- {
+			convs[j], convs[j-1] = convs[j-1], convs[j]
+		}
+	}
+}
+
+// ── Conversation messages ──
+
+// DesktopMessageBody matches the client's MessageBody type.
+type DesktopMessageBody struct {
+	UID         int64               `json:"uid"` // messages.id
+	Folder      string              `json:"folder"`
+	Subject     string              `json:"subject"`
+	From        string              `json:"from"`
+	FromAddr    string              `json:"from_addr"`
+	To          []string            `json:"to"`
+	Cc          []string            `json:"cc"`
+	Date        string              `json:"date"`
+	DateTS      int64               `json:"date_ts"`
+	HTML        *string             `json:"html"`
+	Text        *string             `json:"text"`
+	Attachments []DesktopAttachment `json:"attachments"`
+	IsOutgoing  bool                `json:"is_outgoing"`
+	MessageID   string              `json:"message_id"`
+	InReplyTo   string              `json:"in_reply_to"`
+	References  []string            `json:"references"`
+}
+
+type DesktopAttachment struct {
+	Filename string `json:"filename"`
+	MimeType string `json:"mime_type"`
+	Size     int    `json:"size"`
+	Index    int    `json:"index"`
+}
+
+// HandleDesktopConversationMessages returns full message bodies for given refs.
+func (s *Server) HandleDesktopConversationMessages(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		respondError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var refs []DesktopMessageRef
+	if err := json.NewDecoder(r.Body).Decode(&refs); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	identities := s.collectIdentities(user.ID)
+
+	// Build folder ID→name map
+	folders, _ := s.database.GetFoldersByUser(user.ID)
+	folderNames := make(map[int64]string)
+	for _, f := range folders {
+		folderNames[f.ID] = f.Name
+	}
+
+	var bodies []DesktopMessageBody
+	for _, ref := range refs {
+		msg, err := s.database.GetMessageByID(ref.UID)
+		if err != nil || msg.UserID != user.ID {
+			continue
+		}
+
+		fromAddr := strings.ToLower(extractEmail(msg.From))
+		isOutgoing := identities[fromAddr]
+
+		// Parse To/Cc into string slices
+		toList := splitAndTrim(msg.To)
+		ccList := splitAndTrim(msg.Cc)
+
+		// Get attachments
+		var atts []DesktopAttachment
+		dbAtts, err := s.database.GetAttachmentsByMessageID(msg.ID)
+		if err == nil {
+			for i, a := range dbAtts {
+				if a.IsInline {
+					continue
+				}
+				atts = append(atts, DesktopAttachment{
+					Filename: a.Filename,
+					MimeType: a.ContentType,
+					Size:     a.Size,
+					Index:    i,
+				})
+			}
+		}
+
+		// Parse references
+		var refs []string
+		if msg.MessageReferences != "" {
+			refs = parseMessageIDs(msg.MessageReferences)
+		}
+
+		var html, text *string
+		if msg.BodyHTML != "" {
+			html = &msg.BodyHTML
+		}
+		if msg.Body != "" {
+			text = &msg.Body
+		}
+
+		bodies = append(bodies, DesktopMessageBody{
+			UID:         msg.ID,
+			Folder:      folderNames[msg.FolderID],
+			Subject:     msg.Subject,
+			From:        msg.From,
+			FromAddr:    fromAddr,
+			To:          toList,
+			Cc:          ccList,
+			Date:        msg.Date.Format(time.RFC1123Z),
+			DateTS:      msg.Date.Unix(),
+			HTML:        html,
+			Text:        text,
+			Attachments: atts,
+			IsOutgoing:  isOutgoing,
+			MessageID:   msg.MessageID,
+			InReplyTo:   msg.InReplyTo,
+			References:  refs,
+		})
+	}
+
+	// Sort by date ascending (oldest first, like chat view)
+	for i := 1; i < len(bodies); i++ {
+		for j := i; j > 0 && bodies[j].DateTS < bodies[j-1].DateTS; j-- {
+			bodies[j], bodies[j-1] = bodies[j-1], bodies[j]
+		}
+	}
+
+	respondJSON(w, http.StatusOK, bodies)
+}
+
+func splitAndTrim(s string) []string {
+	if s == "" {
+		return []string{}
+	}
+	parts := strings.Split(s, ",")
+	var result []string
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
+// parseMessageIDs extracts Message-IDs from a References header value.
+func parseMessageIDs(refs string) []string {
+	var result []string
+	var current strings.Builder
+	depth := 0
+	for _, ch := range refs {
+		switch ch {
+		case '<':
+			depth++
+			current.Reset()
+		case '>':
+			if depth > 0 {
+				depth--
+				id := strings.TrimSpace(current.String())
+				if id != "" {
+					result = append(result, id)
+				}
+				current.Reset()
+			}
+		default:
+			if depth > 0 {
+				current.WriteRune(ch)
+			}
+		}
+	}
+	return result
 }
 
 // extractEmail extracts email from "Name <email>" format.
