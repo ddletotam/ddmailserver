@@ -213,6 +213,39 @@ func (s *Server) HandleDesktopMessageSource(w http.ResponseWriter, r *http.Reque
 		msg.MessageID, msg.Body)
 }
 
+// HandleDesktopMessagePart returns the binary content of an inline message part by Content-ID.
+func (s *Server) HandleDesktopMessagePart(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		respondError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	id, err := strconv.ParseInt(mux.Vars(r)["id"], 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid message id")
+		return
+	}
+
+	msg, err := s.database.GetMessageByID(id)
+	if err != nil || msg.UserID != user.ID {
+		respondError(w, http.StatusNotFound, "message not found")
+		return
+	}
+
+	cid := mux.Vars(r)["cid"]
+	att, err := s.database.GetAttachmentByContentID(msg.ID, cid)
+	if err != nil || att == nil || len(att.Data) == 0 {
+		respondError(w, http.StatusNotFound, "part not found")
+		return
+	}
+
+	w.Header().Set("Content-Type", att.ContentType)
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	w.Header().Set("Content-Length", strconv.Itoa(len(att.Data)))
+	w.Write(att.Data)
+}
+
 // HandleDesktopSetFlags updates flags on messages.
 // Accepts client format: {"messages":[{"folder":"X","uid":123},...], "flags":"\\Seen", "add":true}
 // where "uid" is actually messages.id (DB primary key) in native mode.

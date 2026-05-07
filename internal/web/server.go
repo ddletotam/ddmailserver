@@ -178,6 +178,7 @@ func (s *Server) setupRoutes() {
 	desktopAuthAPI.HandleFunc("/conversations/messages", s.HandleDesktopConversationMessages).Methods("POST")
 	desktopAuthAPI.HandleFunc("/search", s.HandleDesktopSearch).Methods("GET")
 	desktopAuthAPI.HandleFunc("/messages/{id}/source", s.HandleDesktopMessageSource).Methods("GET")
+	desktopAuthAPI.HandleFunc("/messages/{id}/parts/{cid}", s.HandleDesktopMessagePart).Methods("GET")
 	desktopAuthAPI.HandleFunc("/messages/flags", s.HandleDesktopSetFlags).Methods("POST")
 	desktopAuthAPI.HandleFunc("/identities", s.HandleDesktopIdentities).Methods("GET")
 	desktopAuthAPI.HandleFunc("/send", s.HandleDesktopSend).Methods("POST")
