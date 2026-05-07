@@ -82,8 +82,10 @@ func (s *Scheduler) TriggerSyncForAccount(account *models.Account) {
 
 	task := imapclient.NewSyncTask(account, s.database)
 	if s.notifyHub != nil {
+		userID := account.UserID
 		task.SetNotifyFunc(func(username, mailbox string, count uint32) {
 			s.notifyHub.Publish(notify.Event{
+				UserID:   userID,
 				Type:     notify.EventNewMessage,
 				Username: username,
 				Mailbox:  mailbox,
@@ -230,8 +232,10 @@ func (s *Scheduler) scheduleIMAPSync() {
 
 		task := imapclient.NewSyncTask(account, s.database)
 		if s.notifyHub != nil {
+			uid := account.UserID
 			task.SetNotifyFunc(func(username, mailbox string, count uint32) {
 				s.notifyHub.Publish(notify.Event{
+					UserID:   uid,
 					Type:     notify.EventNewMessage,
 					Username: username,
 					Mailbox:  mailbox,
