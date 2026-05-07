@@ -3,15 +3,15 @@ package db
 import (
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CreateOutboxMessage creates a new outbox message
 func (db *DB) CreateOutboxMessage(msg *models.OutboxMessage) error {
-	msg.CreatedAt = time.Now()
-	msg.UpdatedAt = time.Now()
+	msg.CreatedAt = timeutil.Now()
+	msg.UpdatedAt = timeutil.Now()
 
 	query := `
 		INSERT INTO outbox_messages (
@@ -64,7 +64,7 @@ func (db *DB) GetPendingOutboxMessages(limit int) ([]*models.OutboxMessage, erro
 // GetOutboxMessageByID retrieves an outbox message by ID
 func (db *DB) GetOutboxMessageByID(id int64) (*models.OutboxMessage, error) {
 	msg := &models.OutboxMessage{}
-	var sentAt sql.NullTime
+	var sentAt sql.NullInt64
 
 	query := `
 		SELECT id, user_id, COALESCE(account_id, 0), from_addr, to_addr, cc, bcc, subject, body, body_html,
@@ -87,7 +87,7 @@ func (db *DB) GetOutboxMessageByID(id int64) (*models.OutboxMessage, error) {
 	}
 
 	if sentAt.Valid {
-		msg.SentAt = sentAt.Time
+		msg.SentAt = sentAt.Int64
 	}
 
 	return msg, nil
@@ -95,7 +95,7 @@ func (db *DB) GetOutboxMessageByID(id int64) (*models.OutboxMessage, error) {
 
 // UpdateOutboxMessageStatus updates the status of an outbox message
 func (db *DB) UpdateOutboxMessageStatus(id int64, status string, lastError string) error {
-	now := time.Now()
+	now := timeutil.Now()
 	query := `
 		UPDATE outbox_messages
 		SET status = $1, last_error = $2, updated_at = $3
@@ -112,7 +112,7 @@ func (db *DB) UpdateOutboxMessageStatus(id int64, status string, lastError strin
 
 // MarkOutboxMessageSent marks a message as sent
 func (db *DB) MarkOutboxMessageSent(id int64) error {
-	now := time.Now()
+	now := timeutil.Now()
 	query := `
 		UPDATE outbox_messages
 		SET status = 'sent', sent_at = $1, updated_at = $2
@@ -129,7 +129,7 @@ func (db *DB) MarkOutboxMessageSent(id int64) error {
 
 // IncrementOutboxMessageRetries increments the retry counter
 func (db *DB) IncrementOutboxMessageRetries(id int64, lastError string) error {
-	now := time.Now()
+	now := timeutil.Now()
 	query := `
 		UPDATE outbox_messages
 		SET retries = retries + 1, last_error = $1, updated_at = $2
@@ -160,7 +160,7 @@ func scanOutboxMessages(rows *sql.Rows) ([]*models.OutboxMessage, error) {
 
 	for rows.Next() {
 		msg := &models.OutboxMessage{}
-		var sentAt sql.NullTime
+		var sentAt sql.NullInt64
 		var lastError sql.NullString
 
 		err := rows.Scan(
@@ -173,7 +173,7 @@ func scanOutboxMessages(rows *sql.Rows) ([]*models.OutboxMessage, error) {
 		}
 
 		if sentAt.Valid {
-			msg.SentAt = sentAt.Time
+			msg.SentAt = sentAt.Int64
 		}
 		if lastError.Valid {
 			msg.LastError = lastError.String

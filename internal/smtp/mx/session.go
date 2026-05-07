@@ -14,6 +14,7 @@ import (
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/notify"
 	"github.com/yourusername/mailserver/internal/parser"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // Recipient holds info about a validated recipient
@@ -145,7 +146,9 @@ func (s *Session) Data(r io.Reader) error {
 	// Extract values from parsed message
 	subject := parsed.Subject
 	messageID := parsed.GetMessageID()
-	messageDate := parsed.GetDate()
+	rawDate := parsed.GetDate()
+	messageDate := timeutil.ToMs(rawDate)
+	messageDateTZ := timeutil.TZOffsetMinutes(rawDate)
 	inReplyTo := parsed.InReplyTo
 	references := strings.Join(parsed.References, " ")
 
@@ -262,6 +265,7 @@ func (s *Session) Data(r io.Reader) error {
 			Cc:                ccAddr,
 			ReplyTo:           replyTo,
 			Date:              messageDate,
+			DateTZ:            messageDateTZ,
 			Body:              body,
 			BodyHTML:          bodyHTML,
 			RawEmail:          messageData,

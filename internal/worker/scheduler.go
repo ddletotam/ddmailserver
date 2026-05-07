@@ -13,6 +13,7 @@ import (
 	"github.com/yourusername/mailserver/internal/parser"
 	smtpclient "github.com/yourusername/mailserver/internal/smtp/client"
 	taskpkg "github.com/yourusername/mailserver/internal/task"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // SchedulerDeps bundles all dependencies the Scheduler needs.
@@ -209,7 +210,6 @@ func (s *Scheduler) scheduleIMAPSync() {
 		return
 	}
 
-	now := time.Now()
 	synced := 0
 	for _, account := range accounts {
 		interval := 300 // default fallback for idle-mode accounts
@@ -218,7 +218,7 @@ func (s *Scheduler) scheduleIMAPSync() {
 		}
 
 		// Skip if not enough time since last sync
-		if !account.LastSync.IsZero() && now.Sub(account.LastSync) < time.Duration(interval)*time.Second {
+		if account.LastSync != 0 && timeutil.Now()-account.LastSync < int64(interval)*1000 {
 			continue
 		}
 

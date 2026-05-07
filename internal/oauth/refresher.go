@@ -9,14 +9,12 @@ import (
 )
 
 // AccountTokenStore is the minimal DB surface needed to persist refreshed tokens.
-// Using an interface keeps this package decoupled from the full DB type.
 type AccountTokenStore interface {
-	UpdateAccountOAuthTokens(accountID int64, accessToken, refreshToken string, expiry time.Time) error
+	UpdateAccountOAuthTokens(accountID int64, accessToken, refreshToken string, expiry int64) error
 }
 
 // AccountTokenRefresher refreshes OAuth tokens stored on an Account, persists
-// them, and updates the in-memory struct. Used by IMAP sync, IDLE manager and
-// the scheduler.
+// them, and updates the in-memory struct.
 type AccountTokenRefresher struct {
 	Google    *GoogleOAuth
 	Microsoft *MicrosoftOAuth
@@ -29,27 +27,21 @@ func NewAccountTokenRefresher(google *GoogleOAuth, microsoft *MicrosoftOAuth, st
 	return &AccountTokenRefresher{Google: google, Microsoft: microsoft, Store: store}
 }
 
-// Refresh refreshes the OAuth token for an account if needed. If force is true,
-// the expiry check is skipped and a refresh is always performed (used when an
-// auth attempt failed even though the stored expiry is in the future — providers
-// can revoke tokens early).
-//
-// Returns refreshed=true if a network refresh was actually performed and the
-// token was updated, false if the existing token was still valid or the
-// account isn't an OAuth account. Returns an error if no refresh token is
-// stored or if the token endpoint rejects the refresh.
+// Refresh refreshes the OAuth token for an account if needed.
 func (r *AccountTokenRefresher) Refresh(account *models.Account, force bool) (refreshed bool, err error) {
 	if account == nil || !account.IsOAuth() {
 		return false, nil
 	}
-	if !force && (account.OAuthTokenExpiry.IsZero() || time.Until(account.OAuthTokenExpiry) > 5*time.Minute) {
+	// OAuthTokenExpiry is now int64 ms. Check if still valid (>5 min remaining).
+	nowMs := time.Now().UnixMilli()
+	if !force && (account.OAuthTokenExpiry == 0 || account.OAuthTokenExpiry-nowMs > 5*60*1000) {
 		return false, nil
 	}
 	if account.OAuthRefreshToken == "" {
 		return false, fmt.Errorf("no refresh token available, please re-authenticate")
 	}
 
-	log.Printf("Refreshing OAuth token for %s (force=%v, expires=%v)", account.Email, force, account.OAuthTokenExpiry)
+	log.Printf("Refreshing OAuth token for %s (force=%v, expires_ms=%d)", account.Email, force, account.OAuthTokenExpiry)
 
 	var tokenResp *TokenResponse
 	switch account.AuthType {
@@ -76,17 +68,12 @@ func (r *AccountTokenRefresher) Refresh(account *models.Account, force bool) (re
 		newRefreshToken = account.OAuthRefreshToken
 	}
 
-	// Google returns the granted scopes on every refresh response. If a downstream
-	// service (IMAP/SMTP) keeps failing with "invalid_request" + scope hint, the
-	// refresh token was granted without that scope — log it so the diagnosis is
-	// obvious instead of "refresh works but auth still fails ¯\_(ツ)_/¯".
 	log.Printf("OAuth refresh response for %s: scope=%q expires_in=%d", account.Email, tokenResp.Scope, tokenResp.ExpiresIn)
 
 	if err := r.Store.UpdateAccountOAuthTokens(account.ID, tokenResp.AccessToken, newRefreshToken, expiry); err != nil {
 		return false, fmt.Errorf("failed to save new tokens: %w", err)
 	}
 
-	// Update in-memory copy so subsequent operations use the fresh token.
 	account.OAuthAccessToken = tokenResp.AccessToken
 	account.OAuthRefreshToken = newRefreshToken
 	account.OAuthTokenExpiry = expiry

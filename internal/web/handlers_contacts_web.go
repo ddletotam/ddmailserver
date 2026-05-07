@@ -14,6 +14,7 @@ import (
 	carddavclient "github.com/yourusername/mailserver/internal/carddav/client"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/oauth"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // ContactsData holds data for the contacts page
@@ -376,7 +377,7 @@ func (s *Server) refreshContactOAuthTokensIfNeeded(source *models.ContactSource)
 	}
 
 	// Check if token is expired or expires within 5 minutes
-	if source.OAuthTokenExpiry.IsZero() || time.Until(source.OAuthTokenExpiry) > 5*time.Minute {
+	if source.OAuthTokenExpiry == 0 || source.OAuthTokenExpiry-timeutil.Now() > 5*60*1000 {
 		return nil // Token still valid
 	}
 
@@ -491,7 +492,7 @@ func (s *Server) syncContactSource(ctx context.Context, source *models.ContactSo
 	}
 
 	// Update last sync time
-	if err := s.database.UpdateContactSourceLastSync(source.ID, time.Now()); err != nil {
+	if err := s.database.UpdateContactSourceLastSync(source.ID, timeutil.Now()); err != nil {
 		log.Printf("Failed to update last sync time: %v", err)
 	}
 

@@ -3,15 +3,15 @@ package db
 import (
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CreateAddressBook creates a new address book
 func (db *DB) CreateAddressBook(book *models.AddressBook) error {
-	book.CreatedAt = time.Now()
-	book.UpdatedAt = time.Now()
+	book.CreatedAt = timeutil.Now()
+	book.UpdatedAt = timeutil.Now()
 
 	query := `
 		INSERT INTO address_books (
@@ -155,7 +155,7 @@ func (db *DB) GetAddressBookByRemoteID(sourceID int64, remoteID string) (*models
 
 // UpdateAddressBook updates an existing address book
 func (db *DB) UpdateAddressBook(book *models.AddressBook) error {
-	book.UpdatedAt = time.Now()
+	book.UpdatedAt = timeutil.Now()
 
 	query := `
 		UPDATE address_books SET
@@ -179,7 +179,7 @@ func (db *DB) UpdateAddressBook(book *models.AddressBook) error {
 // UpdateAddressBookCTag updates the CTag for an address book
 func (db *DB) UpdateAddressBookCTag(id int64, ctag string) error {
 	query := `UPDATE address_books SET ctag = $1, updated_at = $2 WHERE id = $3`
-	_, err := db.Exec(query, ctag, time.Now(), id)
+	_, err := db.Exec(query, ctag, timeutil.Now(), id)
 	if err != nil {
 		return fmt.Errorf("failed to update address book ctag: %w", err)
 	}

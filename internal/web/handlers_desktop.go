@@ -16,6 +16,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // ── Auth ──
@@ -218,7 +219,7 @@ func (s *Server) HandleDesktopMessageSource(w http.ResponseWriter, r *http.Reque
 	}
 
 	fmt.Fprintf(w, "From: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nMessage-ID: %s\r\n\r\n%s",
-		msg.From, msg.To, msg.Subject, msg.Date.Format("Mon, 02 Jan 2006 15:04:05 -0700"),
+		msg.From, msg.To, msg.Subject, timeutil.FromMs(msg.Date).Format("Mon, 02 Jan 2006 15:04:05 -0700"),
 		msg.MessageID, msg.Body)
 }
 
@@ -714,8 +715,8 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 				Addr: key.cp,
 			}},
 			IsGroup:     false,
-			LastDate:    lastMsg.msg.Date.Format(time.RFC1123Z),
-			LastDateTS:  lastMsg.msg.Date.Unix(),
+			LastDate:    timeutil.FromMs(lastMsg.msg.Date).Format(time.RFC1123Z),
+			LastDateTS:  lastMsg.msg.Date / 1000,
 			LastSubject: lastMsg.msg.Subject,
 			UnreadCount: unread,
 			TotalCount:  len(regular),
@@ -761,7 +762,7 @@ func extractName(addr string) string {
 
 func sortEntriesByDate(entries []msgEntry) {
 	for i := 1; i < len(entries); i++ {
-		for j := i; j > 0 && entries[j].msg.Date.Before(entries[j-1].msg.Date); j-- {
+		for j := i; j > 0 && entries[j].msg.Date < entries[j-1].msg.Date; j-- {
 			entries[j], entries[j-1] = entries[j-1], entries[j]
 		}
 	}
@@ -915,8 +916,8 @@ func (s *Server) HandleDesktopConversationMessages(w http.ResponseWriter, r *htt
 			FromAddr:    fromAddr,
 			To:          toList,
 			Cc:          ccList,
-			Date:        msg.Date.Format(time.RFC1123Z),
-			DateTS:      msg.Date.Unix(),
+			Date:        timeutil.FromMs(msg.Date).Format(time.RFC1123Z),
+			DateTS:      msg.Date / 1000,
 			HTML:        html,
 			Text:        text,
 			Attachments: atts,

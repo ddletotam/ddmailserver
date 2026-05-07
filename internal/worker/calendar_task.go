@@ -10,6 +10,7 @@ import (
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/oauth"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CalendarSyncTask represents a calendar synchronization task
@@ -116,7 +117,7 @@ func (t *CalendarSyncTask) doSync(ctx context.Context) error {
 	}
 
 	// Update last sync time (clears last_error on success)
-	if err := t.database.UpdateCalendarSourceLastSync(t.source.ID, time.Now(), ""); err != nil {
+	if err := t.database.UpdateCalendarSourceLastSync(t.source.ID, timeutil.Now(), ""); err != nil {
 		log.Printf("Failed to update last sync time: %v", err)
 	}
 
@@ -151,7 +152,7 @@ func (t *CalendarSyncTask) refreshOAuthTokensIfNeeded() error {
 	}
 
 	// Check if token is expired or expires within 5 minutes
-	if t.source.OAuthTokenExpiry.IsZero() || time.Until(t.source.OAuthTokenExpiry) > 5*time.Minute {
+	if t.source.OAuthTokenExpiry == 0 || t.source.OAuthTokenExpiry-timeutil.Now() > 5*60*1000 {
 		return nil // Token still valid
 	}
 

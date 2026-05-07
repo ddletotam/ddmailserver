@@ -3,9 +3,9 @@ package db
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CreateFakeEmailForEvent creates a fake message for a calendar event
@@ -22,14 +22,16 @@ func (db *DB) CreateFakeEmailForEvent(event *models.CalendarEvent, userID int64,
 		bodyParts = append(bodyParts, fmt.Sprintf("\nLocation: %s", event.Location))
 	}
 
-	// Format date/time
+	// Format date/time using timeutil
+	startTime := timeutil.FromMs(event.DTStart)
 	dateFormat := "02.01.2006 15:04"
 	if event.AllDay {
 		dateFormat = "02.01.2006"
 	}
-	bodyParts = append(bodyParts, fmt.Sprintf("\nStart: %s", event.DTStart.Format(dateFormat)))
-	if event.DTEnd.Valid && !event.DTEnd.Time.IsZero() {
-		bodyParts = append(bodyParts, fmt.Sprintf("\nEnd: %s", event.DTEnd.Time.Format(dateFormat)))
+	bodyParts = append(bodyParts, fmt.Sprintf("\nStart: %s", startTime.Format(dateFormat)))
+	if event.DTEnd != nil && *event.DTEnd != 0 {
+		endTime := timeutil.FromMs(*event.DTEnd)
+		bodyParts = append(bodyParts, fmt.Sprintf("\nEnd: %s", endTime.Format(dateFormat)))
 	}
 
 	body := strings.Join(bodyParts, "")
@@ -43,7 +45,7 @@ func (db *DB) CreateFakeEmailForEvent(event *models.CalendarEvent, userID int64,
 		}
 	}
 
-	now := time.Now()
+	now := timeutil.Now()
 	eventID := event.ID
 
 	msg := &models.Message{
@@ -100,14 +102,16 @@ func (db *DB) UpdateFakeEmailForEvent(event *models.CalendarEvent) error {
 		bodyParts = append(bodyParts, fmt.Sprintf("\nLocation: %s", event.Location))
 	}
 
-	// Format date/time
+	// Format date/time using timeutil
+	startTime := timeutil.FromMs(event.DTStart)
 	dateFormat := "02.01.2006 15:04"
 	if event.AllDay {
 		dateFormat = "02.01.2006"
 	}
-	bodyParts = append(bodyParts, fmt.Sprintf("\nStart: %s", event.DTStart.Format(dateFormat)))
-	if event.DTEnd.Valid && !event.DTEnd.Time.IsZero() {
-		bodyParts = append(bodyParts, fmt.Sprintf("\nEnd: %s", event.DTEnd.Time.Format(dateFormat)))
+	bodyParts = append(bodyParts, fmt.Sprintf("\nStart: %s", startTime.Format(dateFormat)))
+	if event.DTEnd != nil && *event.DTEnd != 0 {
+		endTime := timeutil.FromMs(*event.DTEnd)
+		bodyParts = append(bodyParts, fmt.Sprintf("\nEnd: %s", endTime.Format(dateFormat)))
 	}
 
 	body := strings.Join(bodyParts, "")
@@ -134,7 +138,7 @@ func (db *DB) UpdateFakeEmailForEvent(event *models.CalendarEvent) error {
 		event.DTStart,
 		body,
 		int64(len(body)),
-		time.Now(),
+		timeutil.Now(),
 		event.ID,
 	)
 

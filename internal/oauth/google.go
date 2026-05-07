@@ -234,9 +234,9 @@ func (g *GoogleOAuth) GetUserInfo(accessToken string) (*UserInfo, error) {
 	return &userInfo, nil
 }
 
-// TokenExpiry calculates the token expiry time from ExpiresIn seconds
-func TokenExpiry(expiresIn int) time.Time {
-	return time.Now().Add(time.Duration(expiresIn) * time.Second)
+// TokenExpiry calculates the token expiry as ms since epoch from ExpiresIn seconds
+func TokenExpiry(expiresIn int) int64 {
+	return time.Now().UnixMilli() + int64(expiresIn)*1000
 }
 
 // BuildXOAuth2String builds the XOAUTH2 authentication string for IMAP/SMTP

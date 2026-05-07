@@ -18,6 +18,7 @@ import (
 	caldavutil "github.com/yourusername/mailserver/internal/caldav"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // Client is a CalDAV client for syncing with external calendars
@@ -498,7 +499,7 @@ func (c *Client) parseCalendarObject(obj *caldav.CalendarObject, calendarID int6
 		// Parse DTSTART
 		if prop := vevent.Props.Get(ical.PropDateTimeStart); prop != nil {
 			if t, err := prop.DateTime(nil); err == nil {
-				event.DTStart = t
+				event.DTStart = timeutil.ToMs(t)
 			}
 			if prop.Params.Get(ical.ParamValue) == "DATE" {
 				event.AllDay = true
@@ -508,8 +509,8 @@ func (c *Client) parseCalendarObject(obj *caldav.CalendarObject, calendarID int6
 		// Parse DTEND
 		if prop := vevent.Props.Get(ical.PropDateTimeEnd); prop != nil {
 			if t, err := prop.DateTime(nil); err == nil {
-				event.DTEnd.Time = t
-				event.DTEnd.Valid = true
+				ms := timeutil.ToMs(t)
+				event.DTEnd = &ms
 			}
 		}
 
@@ -545,13 +546,13 @@ func (c *Client) createICalFromEvent(event *models.CalendarEvent) *ical.Calendar
 
 	// Set DTSTART
 	dtstart := ical.NewProp(ical.PropDateTimeStart)
-	dtstart.SetDateTime(event.DTStart)
+	dtstart.SetDateTime(timeutil.FromMs(event.DTStart))
 	vevent.Props.Add(dtstart)
 
 	// Set DTEND
-	if event.DTEnd.Valid {
+	if event.DTEnd != nil && *event.DTEnd != 0 {
 		dtend := ical.NewProp(ical.PropDateTimeEnd)
-		dtend.SetDateTime(event.DTEnd.Time)
+		dtend.SetDateTime(timeutil.FromMs(*event.DTEnd))
 		vevent.Props.Add(dtend)
 	}
 

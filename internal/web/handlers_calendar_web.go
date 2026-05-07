@@ -19,6 +19,7 @@ import (
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/oauth"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CalendarsData holds data for the calendars page
@@ -369,7 +370,7 @@ func (s *Server) refreshOAuthTokensIfNeeded(source *models.CalendarSource) error
 	}
 
 	// Check if token is expired or expires within 5 minutes
-	if source.OAuthTokenExpiry.IsZero() || time.Until(source.OAuthTokenExpiry) > 5*time.Minute {
+	if source.OAuthTokenExpiry == 0 || source.OAuthTokenExpiry-timeutil.Now() > 5*60*1000 {
 		return nil // Token still valid
 	}
 
@@ -489,7 +490,7 @@ func (s *Server) syncCalendarSource(ctx context.Context, source *models.Calendar
 	}
 
 	// Update last sync time (clears error on success)
-	if err := s.database.UpdateCalendarSourceLastSync(source.ID, time.Now(), ""); err != nil {
+	if err := s.database.UpdateCalendarSourceLastSync(source.ID, timeutil.Now(), ""); err != nil {
 		log.Printf("Failed to update last sync time: %v", err)
 	}
 
@@ -644,7 +645,7 @@ func (s *Server) syncICSURLSource(ctx context.Context, source *models.CalendarSo
 	}
 
 	// Update last sync time
-	if err := s.database.UpdateCalendarSourceLastSync(source.ID, time.Now(), ""); err != nil {
+	if err := s.database.UpdateCalendarSourceLastSync(source.ID, timeutil.Now(), ""); err != nil {
 		log.Printf("Failed to update last sync time: %v", err)
 	}
 

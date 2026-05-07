@@ -14,6 +14,7 @@ import (
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/parser"
 	"github.com/yourusername/mailserver/internal/task"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 const maxRetries = 3
@@ -314,15 +315,15 @@ func saveToSentFolder(database *db.DB, userID int64, emailData []byte, messageID
 		From:      fromStr,
 		To:        strings.Join(toStrs, ", "),
 		Cc:        strings.Join(ccStrs, ", "),
-		Date:      parsed.Date,
+		Date:      timeutil.ToMs(parsed.Date),
 		Body:      parsed.Body,
 		BodyHTML:  parsed.BodyHTML,
 		RawEmail:  emailData, // store the real RFC-822 so View Source isn't a stitched fake
 		Size:      int64(len(emailData)),
 		UID:       nextUID,
 		Seen:      true, // Sent messages are always read
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		CreatedAt: timeutil.Now(),
+		UpdatedAt: timeutil.Now(),
 	}
 
 	if err := database.CreateMessage(msg); err != nil {

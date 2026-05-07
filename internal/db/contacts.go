@@ -3,19 +3,19 @@ package db
 import (
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CreateContact creates a new contact
 func (db *DB) CreateContact(contact *models.Contact) error {
-	contact.CreatedAt = time.Now()
-	contact.UpdatedAt = time.Now()
+	contact.CreatedAt = timeutil.Now()
+	contact.UpdatedAt = timeutil.Now()
 
-	var birthday sql.NullTime
-	if contact.Birthday.Valid {
-		birthday = contact.Birthday
+	var birthday sql.NullInt64
+	if contact.Birthday != nil {
+		birthday = sql.NullInt64{Int64: *contact.Birthday, Valid: true}
 	}
 
 	query := `
@@ -109,13 +109,14 @@ func (db *DB) GetContactByID(id int64) (*models.Contact, error) {
 	`
 
 	contact := &models.Contact{}
+	var birthday sql.NullInt64
 	err := db.QueryRow(query, id).Scan(
 		&contact.ID, &contact.UserID, &contact.AddressBookID, &contact.UID, &contact.RemoteID, &contact.VCardData,
 		&contact.FullName, &contact.GivenName, &contact.FamilyName, &contact.Nickname,
 		&contact.Email, &contact.Email2, &contact.Email3,
 		&contact.Phone, &contact.Phone2, &contact.Phone3,
 		&contact.Organization, &contact.Title, &contact.Department,
-		&contact.Address, &contact.Notes, &contact.PhotoURL, &contact.Birthday,
+		&contact.Address, &contact.Notes, &contact.PhotoURL, &birthday,
 		&contact.ETag, &contact.LocalModified, &contact.CreatedAt, &contact.UpdatedAt,
 	)
 
@@ -124,6 +125,11 @@ func (db *DB) GetContactByID(id int64) (*models.Contact, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get contact: %w", err)
+	}
+
+	if birthday.Valid {
+		val := birthday.Int64
+		contact.Birthday = &val
 	}
 
 	return contact, nil
@@ -144,13 +150,14 @@ func (db *DB) GetContactByUID(addressBookID int64, uid string) (*models.Contact,
 	`
 
 	contact := &models.Contact{}
+	var birthday sql.NullInt64
 	err := db.QueryRow(query, addressBookID, uid).Scan(
 		&contact.ID, &contact.UserID, &contact.AddressBookID, &contact.UID, &contact.RemoteID, &contact.VCardData,
 		&contact.FullName, &contact.GivenName, &contact.FamilyName, &contact.Nickname,
 		&contact.Email, &contact.Email2, &contact.Email3,
 		&contact.Phone, &contact.Phone2, &contact.Phone3,
 		&contact.Organization, &contact.Title, &contact.Department,
-		&contact.Address, &contact.Notes, &contact.PhotoURL, &contact.Birthday,
+		&contact.Address, &contact.Notes, &contact.PhotoURL, &birthday,
 		&contact.ETag, &contact.LocalModified, &contact.CreatedAt, &contact.UpdatedAt,
 	)
 
@@ -161,16 +168,21 @@ func (db *DB) GetContactByUID(addressBookID int64, uid string) (*models.Contact,
 		return nil, fmt.Errorf("failed to get contact by UID: %w", err)
 	}
 
+	if birthday.Valid {
+		val := birthday.Int64
+		contact.Birthday = &val
+	}
+
 	return contact, nil
 }
 
 // UpdateContact updates an existing contact
 func (db *DB) UpdateContact(contact *models.Contact) error {
-	contact.UpdatedAt = time.Now()
+	contact.UpdatedAt = timeutil.Now()
 
-	var birthday sql.NullTime
-	if contact.Birthday.Valid {
-		birthday = contact.Birthday
+	var birthday sql.NullInt64
+	if contact.Birthday != nil {
+		birthday = sql.NullInt64{Int64: *contact.Birthday, Valid: true}
 	}
 
 	query := `
@@ -279,7 +291,7 @@ func (db *DB) GetLocallyModifiedContacts(addressBookID int64) ([]*models.Contact
 // MarkContactSynced marks a contact as synced (not locally modified)
 func (db *DB) MarkContactSynced(id int64, etag string) error {
 	query := `UPDATE contacts SET etag = $1, local_modified = false, updated_at = $2 WHERE id = $3`
-	_, err := db.Exec(query, etag, time.Now(), id)
+	_, err := db.Exec(query, etag, timeutil.Now(), id)
 	if err != nil {
 		return fmt.Errorf("failed to mark contact synced: %w", err)
 	}
@@ -289,7 +301,7 @@ func (db *DB) MarkContactSynced(id int64, etag string) error {
 // UpdateContactRemoteID updates the remote_id of a contact after pushing to remote server
 func (db *DB) UpdateContactRemoteID(contactID int64, remoteID string) error {
 	query := `UPDATE contacts SET remote_id = $1, updated_at = $2 WHERE id = $3`
-	_, err := db.Exec(query, remoteID, time.Now(), contactID)
+	_, err := db.Exec(query, remoteID, timeutil.Now(), contactID)
 	if err != nil {
 		return fmt.Errorf("failed to update contact remote ID: %w", err)
 	}
@@ -348,17 +360,22 @@ func scanContacts(rows *sql.Rows) ([]*models.Contact, error) {
 	var contacts []*models.Contact
 	for rows.Next() {
 		contact := &models.Contact{}
+		var birthday sql.NullInt64
 		err := rows.Scan(
 			&contact.ID, &contact.UserID, &contact.AddressBookID, &contact.UID, &contact.RemoteID, &contact.VCardData,
 			&contact.FullName, &contact.GivenName, &contact.FamilyName, &contact.Nickname,
 			&contact.Email, &contact.Email2, &contact.Email3,
 			&contact.Phone, &contact.Phone2, &contact.Phone3,
 			&contact.Organization, &contact.Title, &contact.Department,
-			&contact.Address, &contact.Notes, &contact.PhotoURL, &contact.Birthday,
+			&contact.Address, &contact.Notes, &contact.PhotoURL, &birthday,
 			&contact.ETag, &contact.LocalModified, &contact.CreatedAt, &contact.UpdatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan contact: %w", err)
+		}
+		if birthday.Valid {
+			val := birthday.Int64
+			contact.Birthday = &val
 		}
 		contacts = append(contacts, contact)
 	}
@@ -391,12 +408,13 @@ func (db *DB) ApplyContactSyncChanges(addressBookID int64, changes *SyncContactC
 	// Create new contacts
 	for _, contact := range changes.Creates {
 		contact.AddressBookID = addressBookID
-		contact.CreatedAt = time.Now()
-		contact.UpdatedAt = time.Now()
+		now := timeutil.Now()
+		contact.CreatedAt = now
+		contact.UpdatedAt = now
 
-		var birthday sql.NullTime
-		if contact.Birthday.Valid {
-			birthday = contact.Birthday
+		var birthday sql.NullInt64
+		if contact.Birthday != nil {
+			birthday = sql.NullInt64{Int64: *contact.Birthday, Valid: true}
 		}
 
 		query := `
@@ -426,11 +444,11 @@ func (db *DB) ApplyContactSyncChanges(addressBookID int64, changes *SyncContactC
 
 	// Update existing contacts
 	for _, contact := range changes.Updates {
-		contact.UpdatedAt = time.Now()
+		contact.UpdatedAt = timeutil.Now()
 
-		var birthday sql.NullTime
-		if contact.Birthday.Valid {
-			birthday = contact.Birthday
+		var birthday sql.NullInt64
+		if contact.Birthday != nil {
+			birthday = sql.NullInt64{Int64: *contact.Birthday, Valid: true}
 		}
 
 		query := `

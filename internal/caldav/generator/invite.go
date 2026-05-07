@@ -3,9 +3,9 @@ package generator
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // GenerateInvite generates an iCal invite (REQUEST, REPLY, or CANCEL)
@@ -19,7 +19,7 @@ func GenerateInvite(event *models.CalendarEvent, attendees []models.CalendarAtte
 
 	sb.WriteString("BEGIN:VEVENT\r\n")
 	sb.WriteString(fmt.Sprintf("UID:%s\r\n", event.UID))
-	sb.WriteString(fmt.Sprintf("DTSTAMP:%s\r\n", formatDateTime(time.Now().UTC())))
+	sb.WriteString(fmt.Sprintf("DTSTAMP:%s\r\n", formatDateTime(timeutil.Now())))
 
 	// Start time
 	if event.AllDay {
@@ -29,11 +29,11 @@ func GenerateInvite(event *models.CalendarEvent, attendees []models.CalendarAtte
 	}
 
 	// End time
-	if event.DTEnd.Valid {
+	if event.DTEnd != nil && *event.DTEnd != 0 {
 		if event.AllDay {
-			sb.WriteString(fmt.Sprintf("DTEND;VALUE=DATE:%s\r\n", formatDate(event.DTEnd.Time)))
+			sb.WriteString(fmt.Sprintf("DTEND;VALUE=DATE:%s\r\n", formatDate(*event.DTEnd)))
 		} else {
-			sb.WriteString(fmt.Sprintf("DTEND:%s\r\n", formatDateTime(event.DTEnd.Time)))
+			sb.WriteString(fmt.Sprintf("DTEND:%s\r\n", formatDateTime(*event.DTEnd)))
 		}
 	}
 
@@ -142,13 +142,13 @@ func formatAttendee(att models.CalendarAttendee) string {
 }
 
 // formatDateTime formats a time in iCal UTC format
-func formatDateTime(t time.Time) string {
-	return t.UTC().Format("20060102T150405Z")
+func formatDateTime(ms int64) string {
+	return timeutil.FromMs(ms).Format("20060102T150405Z")
 }
 
 // formatDate formats a date in iCal date format (no time)
-func formatDate(t time.Time) string {
-	return t.Format("20060102")
+func formatDate(ms int64) string {
+	return timeutil.FromMs(ms).Format("20060102")
 }
 
 // escapeText escapes text for iCal (newlines, semicolons, commas, backslashes)

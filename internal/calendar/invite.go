@@ -14,6 +14,7 @@ import (
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 	smtpclient "github.com/yourusername/mailserver/internal/smtp/client"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // InviteService handles calendar invite operations
@@ -182,12 +183,13 @@ func buildInviteBody(event *models.CalendarEvent, action string) string {
 
 	sb.WriteString(fmt.Sprintf("Title: %s\n", event.Summary))
 
+	dtStart := timeutil.FromMs(event.DTStart)
 	if event.AllDay {
-		sb.WriteString(fmt.Sprintf("When: %s (all day)\n", event.DTStart.Format("Monday, January 2, 2006")))
+		sb.WriteString(fmt.Sprintf("When: %s (all day)\n", dtStart.Format("Monday, January 2, 2006")))
 	} else {
-		sb.WriteString(fmt.Sprintf("When: %s\n", event.DTStart.Format("Monday, January 2, 2006 at 15:04")))
-		if event.DTEnd.Valid {
-			sb.WriteString(fmt.Sprintf("Until: %s\n", event.DTEnd.Time.Format("15:04")))
+		sb.WriteString(fmt.Sprintf("When: %s\n", dtStart.Format("Monday, January 2, 2006 at 15:04")))
+		if event.DTEnd != nil && *event.DTEnd != 0 {
+			sb.WriteString(fmt.Sprintf("Until: %s\n", timeutil.FromMs(*event.DTEnd).Format("15:04")))
 		}
 	}
 

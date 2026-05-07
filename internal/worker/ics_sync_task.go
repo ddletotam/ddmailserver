@@ -13,6 +13,7 @@ import (
 	"github.com/yourusername/mailserver/internal/caldav/importer"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // ICSSyncTask represents an ICS URL synchronization task
@@ -163,7 +164,7 @@ func (t *ICSSyncTask) doSync(ctx context.Context) error {
 	}
 
 	// Update last sync time (clears error on success)
-	if err := t.database.UpdateCalendarSourceLastSync(t.source.ID, time.Now(), ""); err != nil {
+	if err := t.database.UpdateCalendarSourceLastSync(t.source.ID, timeutil.Now(), ""); err != nil {
 		log.Printf("Failed to update last sync time: %v", err)
 	}
 

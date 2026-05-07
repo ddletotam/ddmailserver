@@ -3,16 +3,16 @@ package db
 import (
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/crypto"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CreateCalendarSource creates a new calendar source
 func (db *DB) CreateCalendarSource(source *models.CalendarSource) error {
-	source.CreatedAt = time.Now()
-	source.UpdatedAt = time.Now()
+	source.CreatedAt = timeutil.Now()
+	source.UpdatedAt = timeutil.Now()
 
 	if source.AuthType == "" {
 		source.AuthType = "password"
@@ -43,9 +43,9 @@ func (db *DB) CreateCalendarSource(source *models.CalendarSource) error {
 		}
 	}
 
-	var tokenExpiry sql.NullTime
-	if !source.OAuthTokenExpiry.IsZero() {
-		tokenExpiry = sql.NullTime{Time: source.OAuthTokenExpiry, Valid: true}
+	var tokenExpiry sql.NullInt64
+	if source.OAuthTokenExpiry != 0 {
+		tokenExpiry = sql.NullInt64{Int64: source.OAuthTokenExpiry, Valid: true}
 	}
 
 	query := `
@@ -100,7 +100,7 @@ func (db *DB) GetCalendarSourcesByUserID(userID int64) ([]*models.CalendarSource
 	var sources []*models.CalendarSource
 	for rows.Next() {
 		source := &models.CalendarSource{}
-		var lastSync, tokenExpiry sql.NullTime
+		var lastSync, tokenExpiry sql.NullInt64
 		var accountID sql.NullInt64
 
 		err := rows.Scan(
@@ -117,10 +117,10 @@ func (db *DB) GetCalendarSourcesByUserID(userID int64) ([]*models.CalendarSource
 		}
 
 		if lastSync.Valid {
-			source.LastSync = lastSync.Time
+			source.LastSync = lastSync.Int64
 		}
 		if tokenExpiry.Valid {
-			source.OAuthTokenExpiry = tokenExpiry.Time
+			source.OAuthTokenExpiry = tokenExpiry.Int64
 		}
 		if accountID.Valid {
 			source.AccountID = &accountID.Int64
@@ -140,7 +140,7 @@ func (db *DB) GetCalendarSourcesByUserID(userID int64) ([]*models.CalendarSource
 // GetCalendarSourceByID retrieves a calendar source by ID
 func (db *DB) GetCalendarSourceByID(id int64) (*models.CalendarSource, error) {
 	source := &models.CalendarSource{}
-	var lastSync, tokenExpiry sql.NullTime
+	var lastSync, tokenExpiry sql.NullInt64
 	var accountID sql.NullInt64
 
 	query := `
@@ -174,10 +174,10 @@ func (db *DB) GetCalendarSourceByID(id int64) (*models.CalendarSource, error) {
 	}
 
 	if lastSync.Valid {
-		source.LastSync = lastSync.Time
+		source.LastSync = lastSync.Int64
 	}
 	if tokenExpiry.Valid {
-		source.OAuthTokenExpiry = tokenExpiry.Time
+		source.OAuthTokenExpiry = tokenExpiry.Int64
 	}
 	if accountID.Valid {
 		source.AccountID = &accountID.Int64
@@ -193,7 +193,7 @@ func (db *DB) GetCalendarSourceByID(id int64) (*models.CalendarSource, error) {
 
 // UpdateCalendarSource updates a calendar source
 func (db *DB) UpdateCalendarSource(source *models.CalendarSource) error {
-	source.UpdatedAt = time.Now()
+	source.UpdatedAt = timeutil.Now()
 
 	// Encrypt password
 	var encryptedPassword string
@@ -238,9 +238,9 @@ func (db *DB) DeleteCalendarSource(id int64) error {
 }
 
 // UpdateCalendarSourceLastSync updates the last sync time and token
-func (db *DB) UpdateCalendarSourceLastSync(sourceID int64, lastSync time.Time, syncToken string) error {
+func (db *DB) UpdateCalendarSourceLastSync(sourceID int64, lastSync int64, syncToken string) error {
 	query := `UPDATE calendar_sources SET last_sync = $1, sync_token = $2, last_error = '', updated_at = $3 WHERE id = $4`
-	_, err := db.Exec(query, lastSync, syncToken, time.Now(), sourceID)
+	_, err := db.Exec(query, lastSync, syncToken, timeutil.Now(), sourceID)
 	if err != nil {
 		return fmt.Errorf("failed to update last sync: %w", err)
 	}
@@ -250,7 +250,7 @@ func (db *DB) UpdateCalendarSourceLastSync(sourceID int64, lastSync time.Time, s
 // UpdateCalendarSourceLastError updates the last error for a calendar source
 func (db *DB) UpdateCalendarSourceLastError(sourceID int64, lastError string) error {
 	query := `UPDATE calendar_sources SET last_error = $1, updated_at = $2 WHERE id = $3`
-	_, err := db.Exec(query, lastError, time.Now(), sourceID)
+	_, err := db.Exec(query, lastError, timeutil.Now(), sourceID)
 	if err != nil {
 		return fmt.Errorf("failed to update last error: %w", err)
 	}
@@ -280,7 +280,7 @@ func (db *DB) GetAllEnabledCalendarSources() ([]*models.CalendarSource, error) {
 	var sources []*models.CalendarSource
 	for rows.Next() {
 		source := &models.CalendarSource{}
-		var lastSync, tokenExpiry sql.NullTime
+		var lastSync, tokenExpiry sql.NullInt64
 		var accountID sql.NullInt64
 
 		err := rows.Scan(
@@ -296,10 +296,10 @@ func (db *DB) GetAllEnabledCalendarSources() ([]*models.CalendarSource, error) {
 		}
 
 		if lastSync.Valid {
-			source.LastSync = lastSync.Time
+			source.LastSync = lastSync.Int64
 		}
 		if tokenExpiry.Valid {
-			source.OAuthTokenExpiry = tokenExpiry.Time
+			source.OAuthTokenExpiry = tokenExpiry.Int64
 		}
 		if accountID.Valid {
 			source.AccountID = &accountID.Int64
@@ -317,7 +317,7 @@ func (db *DB) GetAllEnabledCalendarSources() ([]*models.CalendarSource, error) {
 }
 
 // UpdateCalendarSourceOAuthTokens updates OAuth tokens for a calendar source
-func (db *DB) UpdateCalendarSourceOAuthTokens(sourceID int64, accessToken, refreshToken string, expiry time.Time) error {
+func (db *DB) UpdateCalendarSourceOAuthTokens(sourceID int64, accessToken, refreshToken string, expiry int64) error {
 	encryptedAccessToken, err := crypto.EncryptPassword(accessToken, db.encryptionKey)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt access token: %w", err)
@@ -338,7 +338,7 @@ func (db *DB) UpdateCalendarSourceOAuthTokens(sourceID int64, accessToken, refre
 		WHERE id = $5
 	`
 
-	_, err = db.Exec(query, encryptedAccessToken, encryptedRefreshToken, expiry, time.Now(), sourceID)
+	_, err = db.Exec(query, encryptedAccessToken, encryptedRefreshToken, expiry, timeutil.Now(), sourceID)
 	if err != nil {
 		return fmt.Errorf("failed to update OAuth tokens: %w", err)
 	}

@@ -2,8 +2,8 @@ package web
 
 import (
 	"context"
-	"log"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -14,12 +14,12 @@ import (
 
 // Input size limits
 const (
-	MaxRequestBodySize   = 10 << 20 // 10 MB for general requests
-	MaxFormFieldLength   = 10000    // 10KB per form field
-	MaxUsernameLength    = 255
-	MaxPasswordLength    = 1000
-	MaxEmailLength       = 320      // RFC 5321
-	MaxSubjectLength     = 1000
+	MaxRequestBodySize = 10 << 20 // 10 MB for general requests
+	MaxFormFieldLength = 10000    // 10KB per form field
+	MaxUsernameLength  = 255
+	MaxPasswordLength  = 1000
+	MaxEmailLength     = 320 // RFC 5321
+	MaxSubjectLength   = 1000
 )
 
 // RateLimiter provides IP-based rate limiting

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // QueueFlagSync adds or updates a flag sync entry for a message
@@ -21,7 +22,7 @@ func (db *DB) QueueFlagSync(messageID, accountID int64, remoteFolder string, rem
 			created_at = EXCLUDED.created_at
 	`
 
-	_, err := db.Exec(query, messageID, accountID, remoteFolder, remoteUID, seen, flagged, answered, deleted, time.Now())
+	_, err := db.Exec(query, messageID, accountID, remoteFolder, remoteUID, seen, flagged, answered, deleted, timeutil.Now())
 	if err != nil {
 		return fmt.Errorf("failed to queue flag sync: %w", err)
 	}
@@ -95,10 +96,10 @@ func (db *DB) GetAccountsWithPendingFlagSync() ([]int64, error) {
 
 // CleanupOldFlagSync removes flag sync entries older than the given duration
 func (db *DB) CleanupOldFlagSync(olderThan time.Duration) (int64, error) {
-	cutoff := time.Now().Add(-olderThan)
+	cutoffMs := timeutil.Now() - olderThan.Milliseconds()
 	query := `DELETE FROM flag_sync_queue WHERE created_at < $1`
 
-	result, err := db.Exec(query, cutoff)
+	result, err := db.Exec(query, cutoffMs)
 	if err != nil {
 		return 0, fmt.Errorf("failed to cleanup old flag sync: %w", err)
 	}

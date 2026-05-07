@@ -3,9 +3,9 @@ package db
 import (
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/crypto"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // System settings keys
@@ -40,7 +40,7 @@ func (db *DB) SetSetting(key, value string) error {
 		VALUES ($1, $2, $3)
 		ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = $3
 	`
-	_, err := db.Exec(query, key, value, time.Now())
+	_, err := db.Exec(query, key, value, timeutil.Now())
 	if err != nil {
 		return fmt.Errorf("failed to set setting %s: %w", key, err)
 	}

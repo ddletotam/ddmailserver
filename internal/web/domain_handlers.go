@@ -9,6 +9,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // HandleDomainsPage renders the domains management page
@@ -145,7 +146,7 @@ func (s *Server) HandleToggleDomain(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`<tr>
 		<td><div class="d-flex align-items-center"><i class="ti ti-world text-muted me-2"></i><span class="fw-medium">` + domain.Domain + `</span></div></td>
 		<td>` + statusBadge + `</td>
-		<td class="text-muted">` + domain.CreatedAt.Format("2006-01-02") + `</td>
+		<td class="text-muted">` + timeutil.FromMs(domain.CreatedAt).Format("2006-01-02") + `</td>
 		<td><div class="btn-list flex-nowrap">
 			<button hx-post="/api/domains/` + strconv.FormatInt(domain.ID, 10) + `/toggle" hx-target="closest tr" hx-swap="outerHTML" class="btn btn-sm btn-ghost-secondary">` + toggleLabel + `</button>
 			<button hx-delete="/api/domains/` + strconv.FormatInt(domain.ID, 10) + `" hx-confirm="Delete domain ` + domain.Domain + `?" hx-target="closest tr" hx-swap="outerHTML swap:0.3s" class="btn btn-sm btn-ghost-danger"><i class="ti ti-trash"></i></button>
@@ -304,7 +305,7 @@ func (s *Server) HandleToggleMailbox(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`<tr>
 		<td><div class="d-flex align-items-center"><i class="ti ti-mail text-muted me-2"></i><span class="fw-medium">` + mailbox.LocalPart + `@` + domainName + `</span></div></td>
 		<td>` + statusBadge + `</td>
-		<td class="text-muted">` + mailbox.CreatedAt.Format("2006-01-02") + `</td>
+		<td class="text-muted">` + timeutil.FromMs(mailbox.CreatedAt).Format("2006-01-02") + `</td>
 		<td><div class="btn-list flex-nowrap">
 			<button hx-post="/api/mailboxes/` + idStr + `/toggle" hx-target="closest tr" hx-swap="outerHTML" class="btn btn-sm btn-ghost-secondary">` + toggleLabel + `</button>
 			<button hx-delete="/api/mailboxes/` + idStr + `" hx-confirm="Delete mailbox ` + mailbox.LocalPart + `@` + domainName + `?" hx-target="closest tr" hx-swap="outerHTML swap:0.3s" class="btn btn-sm btn-ghost-danger"><i class="ti ti-trash"></i></button>

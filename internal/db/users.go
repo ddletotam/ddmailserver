@@ -3,9 +3,9 @@ package db
 import (
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CreateUser creates a new user with recovery key. The first user ever created
@@ -17,8 +17,8 @@ func (db *DB) CreateUser(username, passwordHash, email, recoveryKeyHash string) 
 		PasswordHash:    passwordHash,
 		Email:           email,
 		RecoveryKeyHash: recoveryKeyHash,
-		CreatedAt:       time.Now(),
-		UpdatedAt:       time.Now(),
+		CreatedAt:       timeutil.Now(),
+		UpdatedAt:       timeutil.Now(),
 	}
 
 	var emailVal sql.NullString
@@ -104,7 +104,7 @@ func (db *DB) GetUserByID(id int64) (*models.User, error) {
 
 // UpdateUser updates user information
 func (db *DB) UpdateUser(user *models.User) error {
-	user.UpdatedAt = time.Now()
+	user.UpdatedAt = timeutil.Now()
 	query := `
 		UPDATE users
 		SET username = $1, password_hash = $2, email = $3, recovery_key_hash = $4, updated_at = $5
@@ -132,7 +132,7 @@ func (db *DB) UpdatePasswordByRecoveryKey(username, newPasswordHash string) erro
 		WHERE username = $3
 	`
 
-	_, err := db.Exec(query, newPasswordHash, time.Now(), username)
+	_, err := db.Exec(query, newPasswordHash, timeutil.Now(), username)
 	if err != nil {
 		return fmt.Errorf("failed to update password: %w", err)
 	}
@@ -148,7 +148,7 @@ func (db *DB) UpdatePassword(userID int64, newPasswordHash string) error {
 		WHERE id = $3
 	`
 
-	_, err := db.Exec(query, newPasswordHash, time.Now(), userID)
+	_, err := db.Exec(query, newPasswordHash, timeutil.Now(), userID)
 	if err != nil {
 		return fmt.Errorf("failed to update password: %w", err)
 	}
@@ -164,7 +164,7 @@ func (db *DB) UpdateLanguage(userID int64, language string) error {
 		WHERE id = $3
 	`
 
-	_, err := db.Exec(query, language, time.Now(), userID)
+	_, err := db.Exec(query, language, timeutil.Now(), userID)
 	if err != nil {
 		return fmt.Errorf("failed to update language: %w", err)
 	}
@@ -219,7 +219,7 @@ func (db *DB) ListUsers() ([]*models.User, error) {
 
 // SetUserAdmin flips the admin flag on a user.
 func (db *DB) SetUserAdmin(id int64, isAdmin bool) error {
-	_, err := db.Exec(`UPDATE users SET is_admin = $1, updated_at = $2 WHERE id = $3`, isAdmin, time.Now(), id)
+	_, err := db.Exec(`UPDATE users SET is_admin = $1, updated_at = $2 WHERE id = $3`, isAdmin, timeutil.Now(), id)
 	if err != nil {
 		return fmt.Errorf("failed to update is_admin: %w", err)
 	}
@@ -229,7 +229,7 @@ func (db *DB) SetUserAdmin(id int64, isAdmin bool) error {
 // SetUserBanned flips the banned flag on a user. A banned user can't log in
 // but their data is preserved (use DeleteUser to wipe).
 func (db *DB) SetUserBanned(id int64, isBanned bool) error {
-	_, err := db.Exec(`UPDATE users SET is_banned = $1, updated_at = $2 WHERE id = $3`, isBanned, time.Now(), id)
+	_, err := db.Exec(`UPDATE users SET is_banned = $1, updated_at = $2 WHERE id = $3`, isBanned, timeutil.Now(), id)
 	if err != nil {
 		return fmt.Errorf("failed to update is_banned: %w", err)
 	}
