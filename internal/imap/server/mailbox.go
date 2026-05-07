@@ -113,6 +113,11 @@ func (m *Mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error) {
 	// \* means client can create custom flags (we don't support this, so we omit it)
 	status.PermanentFlags = []string{imap.SeenFlag, imap.AnsweredFlag, imap.FlaggedFlag, imap.DeletedFlag, imap.DraftFlag}
 
+	// APPENDLIMIT: max message size for APPEND (RFC 7889).
+	// 0 means "0 bytes allowed" which makes clients think APPEND is forbidden!
+	// We set it to our actual limit (10 MB, same as SMTP MaxMessageBytes).
+	status.AppendLimit = 10 * 1024 * 1024
+
 	log.Printf("Mailbox %s status: %d messages, %d unseen, %d recent, uidnext=%d, uidvalidity=%d, permanentflags=%v",
 		m.name, status.Messages, status.Unseen, status.Recent, status.UidNext, status.UidValidity, status.PermanentFlags)
 
@@ -488,6 +493,190 @@ func (m *Mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, operation i
 	}
 
 	return nil
+}
+
+// getUIDValidity returns the UIDVALIDITY for this mailbox (always >= 1).
+func (m *Mailbox) getUIDValidity() uint32 {
+	folder, err := m.database.GetFolderByID(m.folderID)
+	if err != nil || folder.UIDValidity == 0 {
+		return 1
+	}
+	return folder.UIDValidity
+}
+
+// CreateMessageUID is like CreateMessage but returns (uid, uidValidity) for UIDPLUS.
+func (m *Mailbox) CreateMessageUID(flags []string, date time.Time, body imap.Literal) (uint32, uint32, error) {
+	log.Printf("CreateMessageUID called for mailbox %s (type=%s) with %d flags", m.name, m.folderType, len(flags))
+
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to read message body: %w", err)
+	}
+
+	p := parser.New()
+	parsed, err := p.ParseBytes(data)
+	if err != nil {
+		parsed = &parser.ParsedMessage{}
+	}
+
+	// Dedup for Sent folder
+	if m.folderType == "sent" && parsed.GetMessageID() != "" {
+		exists, err := m.database.MessageExistsInFolder(m.folderID, parsed.GetMessageID())
+		if err == nil && exists {
+			log.Printf("CreateMessageUID: dedup — message %s already in Sent, skipping", parsed.GetMessageID())
+			// Return existing UID for deduped message
+			existingUID, _ := m.database.GetMessageUIDByMessageID(m.folderID, parsed.GetMessageID())
+			return existingUID, m.getUIDValidity(), nil
+		}
+	}
+
+	nextUID, err := m.database.GetNextUIDForFolder(m.folderID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to get next UID: %w", err)
+	}
+
+	seen, flagged, answered, draft, deleted := false, false, false, false, false
+	for _, flag := range flags {
+		switch flag {
+		case imap.SeenFlag:
+			seen = true
+		case imap.FlaggedFlag:
+			flagged = true
+		case imap.AnsweredFlag:
+			answered = true
+		case imap.DraftFlag:
+			draft = true
+		case imap.DeletedFlag:
+			deleted = true
+		}
+	}
+
+	msgDate := date
+	if msgDate.IsZero() {
+		msgDate = parsed.GetDate()
+	}
+	if msgDate.IsZero() {
+		msgDate = time.Now()
+	}
+
+	msg := &models.Message{
+		AccountID: 0,
+		UserID:    m.user.userID,
+		FolderID:  m.folderID,
+		MessageID: parsed.GetMessageID(),
+		Subject:   parser.SanitizeUTF8(parsed.Subject),
+		From:      parser.SanitizeUTF8(parser.FormatAddress(parsed.From)),
+		To:        parser.SanitizeUTF8(parser.FormatAddressList(parsed.To)),
+		Cc:        parser.SanitizeUTF8(parser.FormatAddressList(parsed.Cc)),
+		ReplyTo:   parser.SanitizeUTF8(parser.FormatAddress(parsed.ReplyTo)),
+		Date:      msgDate,
+		Body:      parser.SanitizeUTF8(parsed.Body),
+		BodyHTML:  parser.SanitizeUTF8(parsed.BodyHTML),
+		Size:      int64(len(data)),
+		UID:       nextUID,
+		Seen:      seen,
+		Flagged:   flagged,
+		Answered:  answered,
+		Draft:     draft,
+		Deleted:   deleted,
+		InReplyTo: parser.SanitizeUTF8(parsed.InReplyTo),
+	}
+
+	if err := m.database.CreateMessage(msg); err != nil {
+		return 0, 0, fmt.Errorf("failed to save message: %w", err)
+	}
+
+	log.Printf("CreateMessageUID: saved message %d with UID %d to mailbox %s", msg.ID, msg.UID, m.name)
+	return nextUID, m.getUIDValidity(), nil
+}
+
+// CopyMessagesUID is like CopyMessages but returns UID mapping for UIDPLUS.
+func (m *Mailbox) CopyMessagesUID(uid bool, seqSet *imap.SeqSet, destName string) (uidValidity uint32, srcUIDs, destUIDs []uint32, err error) {
+	destFolder, err := m.database.GetOrCreateFolderByNameAndUser(m.user.userID, destName, inferFolderType(destName))
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("failed to get destination folder: %w", err)
+	}
+
+	messages, err := m.database.GetMessagesByFolder(m.folderID, 10000, 0)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+
+	for seqNum, msg := range messages {
+		id := uint32(seqNum + 1)
+		if uid {
+			id = msg.UID
+		}
+		if !seqSet.Contains(id) {
+			continue
+		}
+
+		newUID, copyErr := m.database.CopyMessageToFolder(msg.ID, destFolder.ID)
+		if copyErr != nil {
+			log.Printf("CopyMessagesUID: failed to copy message %d: %v", msg.ID, copyErr)
+			continue
+		}
+		srcUIDs = append(srcUIDs, msg.UID)
+		destUIDs = append(destUIDs, newUID)
+	}
+
+	// Get destination folder UIDVALIDITY
+	df, _ := m.database.GetFolderByID(destFolder.ID)
+	uidValidity = 1
+	if df != nil && df.UIDValidity > 0 {
+		uidValidity = df.UIDValidity
+	}
+
+	log.Printf("CopyMessagesUID: copied %d messages to %s", len(srcUIDs), destName)
+	return uidValidity, srcUIDs, destUIDs, nil
+}
+
+// MoveMessagesUID is like MoveMessages but returns UID mapping for UIDPLUS.
+func (m *Mailbox) MoveMessagesUID(uid bool, seqSet *imap.SeqSet, destName string) (uidValidity uint32, srcUIDs, destUIDs []uint32, err error) {
+	destFolder, err := m.database.GetOrCreateFolderByNameAndUser(m.user.userID, destName, inferFolderType(destName))
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("failed to get destination folder: %w", err)
+	}
+
+	messages, err := m.database.GetMessagesByFolder(m.folderID, 10000, 0)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+
+	var movedMsgIDs []int64
+	for seqNum, msg := range messages {
+		id := uint32(seqNum + 1)
+		if uid {
+			id = msg.UID
+		}
+		if !seqSet.Contains(id) {
+			continue
+		}
+
+		newUID, copyErr := m.database.CopyMessageToFolder(msg.ID, destFolder.ID)
+		if copyErr != nil {
+			log.Printf("MoveMessagesUID: failed to move message %d: %v", msg.ID, copyErr)
+			continue
+		}
+		srcUIDs = append(srcUIDs, msg.UID)
+		destUIDs = append(destUIDs, newUID)
+		movedMsgIDs = append(movedMsgIDs, msg.ID)
+	}
+
+	for _, msgID := range movedMsgIDs {
+		if delErr := m.database.DeleteMessage(msgID); delErr != nil {
+			log.Printf("MoveMessagesUID: failed to delete original message %d: %v", msgID, delErr)
+		}
+	}
+
+	df, _ := m.database.GetFolderByID(destFolder.ID)
+	uidValidity = 1
+	if df != nil && df.UIDValidity > 0 {
+		uidValidity = df.UIDValidity
+	}
+
+	log.Printf("MoveMessagesUID: moved %d messages to %s", len(srcUIDs), destName)
+	return uidValidity, srcUIDs, destUIDs, nil
 }
 
 // CopyMessages copies messages to another mailbox

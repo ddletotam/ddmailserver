@@ -187,6 +187,13 @@ func (db *DB) UpdateMessageFlags(id int64, seen, flagged, answered, deleted bool
 	return nil
 }
 
+// UpdateMessageFlag sets a single flag on a message.
+func (db *DB) UpdateMessageFlag(id int64, flag string, value bool) error {
+	query := fmt.Sprintf(`UPDATE messages SET %s = $1, updated_at = $2 WHERE id = $3`, flag)
+	_, err := db.Exec(query, value, time.Now(), id)
+	return err
+}
+
 // UpdateMessage updates a message
 func (db *DB) UpdateMessage(msg *models.Message) error {
 	msg.UpdatedAt = time.Now()
@@ -692,6 +699,16 @@ func (db *DB) MessageExistsInFolder(folderID int64, messageID string) (bool, err
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// GetMessageUIDByMessageID returns the UID of a message in a folder by its Message-ID header.
+func (db *DB) GetMessageUIDByMessageID(folderID int64, messageID string) (uint32, error) {
+	var uid uint32
+	err := db.QueryRow(
+		`SELECT uid FROM messages WHERE folder_id = $1 AND message_id = $2 AND (soft_deleted = false OR soft_deleted IS NULL) ORDER BY uid LIMIT 1`,
+		folderID, messageID,
+	).Scan(&uid)
+	return uid, err
 }
 
 // CopyMessageToFolder copies a message to another folder with a new UID

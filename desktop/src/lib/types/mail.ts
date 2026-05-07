@@ -89,6 +89,10 @@ export interface Account {
   username: string;
   password: string;
   use_tls: boolean;
+  // Provider abstraction (auto-detected)
+  provider_type?: "imap" | "native";
+  native_url?: string;
+  native_token?: string;
 }
 
 export interface OutgoingMessage {

@@ -277,6 +277,7 @@ func main() {
 	log.Printf("Initializing web server...")
 	webSrv := web.New(database, cfg.Security.JWTSecret, cfg.Server.WebHost, cfg.Server.WebPort, cfg.Server.Locale, &cfg.OAuth)
 	webSrv.SetSyncIntervalSec(cfg.Sync.Interval)
+	webSrv.SetNotifyHub(notifyHub)
 	if searchIndexer != nil {
 		webSrv.SetSearchIndexer(searchIndexer)
 	}

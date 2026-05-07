@@ -415,6 +415,16 @@ func (db *DB) GetSubscribedFolderIDs(userID int64) (map[int64]bool, error) {
 	return result, nil
 }
 
+// GetFolderMessageCounts returns (total, unread) message counts for a folder.
+func (db *DB) GetFolderMessageCounts(folderID int64) (int, int, error) {
+	var total, unread int
+	err := db.QueryRow(
+		`SELECT COUNT(*), COUNT(*) FILTER (WHERE seen = false) FROM messages WHERE folder_id = $1 AND (soft_deleted = false OR soft_deleted IS NULL)`,
+		folderID,
+	).Scan(&total, &unread)
+	return total, unread, err
+}
+
 // Helper function to scan multiple folders
 func scanFolders(rows *sql.Rows) ([]*models.Folder, error) {
 	var folders []*models.Folder

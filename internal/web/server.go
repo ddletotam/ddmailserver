@@ -12,6 +12,7 @@ import (
 	carddavserver "github.com/yourusername/mailserver/internal/carddav/server"
 	"github.com/yourusername/mailserver/internal/config"
 	"github.com/yourusername/mailserver/internal/db"
+	"github.com/yourusername/mailserver/internal/notify"
 	"github.com/yourusername/mailserver/internal/oauth"
 	"github.com/yourusername/mailserver/internal/search"
 )
@@ -32,6 +33,7 @@ type Server struct {
 	caldavServer    *caldavserver.Server
 	carddavServer   *carddavserver.Server
 	searchIndexer   *search.Indexer
+	notifyHub       *notify.Hub
 	syncIntervalSec int
 }
 
@@ -160,6 +162,23 @@ func (s *Server) setupRoutes() {
 	// Protected API routes (uses JWT token auth)
 	api := s.router.PathPrefix("/api").Subrouter()
 	api.Use(s.AuthMiddleware)
+
+	// DDMail desktop client auto-detection
+	s.router.HandleFunc("/.well-known/ddmail", s.HandleDDMailDiscovery).Methods("GET")
+
+	// Desktop client API (Bearer token auth)
+	desktopAPI := s.router.PathPrefix("/api/desktop/v1").Subrouter()
+	desktopAPI.HandleFunc("/auth/login", s.HandleDesktopLogin).Methods("POST")
+	desktopAPI.HandleFunc("/ws", s.HandleDesktopWebSocket).Methods("GET")
+	// All other desktop endpoints require auth
+	desktopAuthAPI := desktopAPI.PathPrefix("").Subrouter()
+	desktopAuthAPI.Use(s.DesktopAuthMiddleware)
+	desktopAuthAPI.HandleFunc("/folders", s.HandleDesktopFolders).Methods("GET")
+	desktopAuthAPI.HandleFunc("/search", s.HandleDesktopSearch).Methods("GET")
+	desktopAuthAPI.HandleFunc("/messages/{id}/source", s.HandleDesktopMessageSource).Methods("GET")
+	desktopAuthAPI.HandleFunc("/messages/flags", s.HandleDesktopSetFlags).Methods("POST")
+	desktopAuthAPI.HandleFunc("/identities", s.HandleDesktopIdentities).Methods("GET")
+	desktopAuthAPI.HandleFunc("/send", s.HandleDesktopSend).Methods("POST")
 
 	// CalDAV server (uses Basic Auth, handles its own authentication)
 	// MUST be registered BEFORE the catch-all "/" web routes
@@ -352,6 +371,11 @@ func (s *Server) Start() error {
 // SetSearchIndexer sets the Meilisearch indexer for full-text search
 func (s *Server) SetSearchIndexer(indexer *search.Indexer) {
 	s.searchIndexer = indexer
+}
+
+// SetNotifyHub sets the notification hub for WebSocket push events.
+func (s *Server) SetNotifyHub(hub *notify.Hub) {
+	s.notifyHub = hub
 }
 
 // SetSyncIntervalSec sets the sync interval for display in the UI

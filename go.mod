@@ -22,6 +22,7 @@ require (
 	github.com/emersion/go-msgauth v0.7.0 // indirect
 	github.com/emersion/go-textwrapper v0.0.0-20200911093747-65d896831594 // indirect
 	github.com/emersion/go-vcard v0.0.0-20241024213814-c9703dde27ff // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/nmcclain/asn1-ber v0.0.0-20170104154839-2661553a0484 // indirect
 	github.com/nmcclain/ldap v0.0.0-20210720162743-7f8d1e44eeba // indirect
 	github.com/teambition/rrule-go v1.8.2 // indirect

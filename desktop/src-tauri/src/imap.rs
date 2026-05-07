@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -6,119 +5,18 @@ use futures::TryStreamExt;
 
 use md5::{Md5, Digest};
 
-use crate::cache::{Cache, Contact};
+use crate::cache::Cache;
 use crate::session::{Credentials, SessionPool};
+use crate::types::*;
 
-// ── Identity ──
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Identity {
-    pub email: String,
-    pub name: String,
-    pub signature: String,
-    pub is_default: bool,
-    #[serde(default)]
-    pub color: String, // assigned client-side, pastel
-}
-
-fn gravatar_hash(email: &str) -> String {
+pub(crate) fn gravatar_hash(email: &str) -> String {
     let trimmed = email.trim().to_lowercase();
     let hash = Md5::digest(trimmed.as_bytes());
     format!("{:x}", hash)
 }
 
-fn account_key(host: &str, username: &str) -> String {
+pub(crate) fn account_key(host: &str, username: &str) -> String {
     format!("{username}@{host}")
-}
-
-// ── Types ──
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Folder {
-    pub name: String,
-    pub delimiter: String,
-    pub unread: u32,
-    pub total: u32,
-    #[serde(default)]
-    pub special_use: String, // "\\Inbox", "\\Sent", "\\Drafts", "\\Trash", "\\Junk", "\\Archive", or ""
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContactInfo {
-    pub name: String,
-    pub addr: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageRef {
-    pub folder: String,
-    pub uid: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Conversation {
-    pub id: String,
-    pub label: String,
-    pub avatar_hash: String,
-    pub received_by: String, // which of our emails received this conversation's messages
-    pub counterparts: Vec<ContactInfo>,
-    pub is_group: bool,
-    pub last_date: String,
-    pub last_date_ts: i64,
-    pub last_subject: String,
-    pub unread_count: u32,
-    pub total_count: u32,
-    pub messages: Vec<MessageRef>,
-    pub draft: Option<MessageRef>, // latest draft for this conversation
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageEnvelope {
-    pub uid: u32,
-    pub folder: String,
-    pub subject: String,
-    pub from: String,
-    pub from_addr: String,
-    pub to: Vec<String>,
-    pub to_addrs: Vec<String>,
-    pub cc_addrs: Vec<String>,
-    pub date: String,
-    pub date_ts: i64,
-    pub seen: bool,
-    pub flagged: bool,
-    pub has_attachments: bool,
-    pub is_outgoing: bool,
-    pub message_id: String,
-    pub in_reply_to: String,
-    pub references: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageBody {
-    pub uid: u32,
-    pub folder: String,
-    pub subject: String,
-    pub from: String,
-    pub from_addr: String,
-    pub to: Vec<String>,
-    pub cc: Vec<String>,
-    pub date: String,
-    pub date_ts: i64,
-    pub html: Option<String>,
-    pub text: Option<String>,
-    pub attachments: Vec<Attachment>,
-    pub is_outgoing: bool,
-    pub message_id: String,
-    pub in_reply_to: String,
-    pub references: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Attachment {
-    pub filename: String,
-    pub mime_type: String,
-    pub size: usize,
-    pub index: usize,
 }
 
 // ── Internal helpers ──
@@ -399,7 +297,7 @@ where
 }
 
 // Macro-like helper: connect, login, get session (TLS)
-async fn connect_tls(host: &str, port: u16, username: &str, password: &str)
+pub(crate) async fn connect_tls(host: &str, port: u16, username: &str, password: &str)
     -> Result<async_imap::Session<async_native_tls::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>>, String>
 {
     let tls = async_native_tls::TlsConnector::new();
@@ -411,7 +309,7 @@ async fn connect_tls(host: &str, port: u16, username: &str, password: &str)
     client.login(username, password).await.map_err(|e| format!("Login: {:?}", e.0))
 }
 
-async fn connect_plain(host: &str, port: u16, username: &str, password: &str)
+pub(crate) async fn connect_plain(host: &str, port: u16, username: &str, password: &str)
     -> Result<async_imap::Session<tokio_util::compat::Compat<tokio::net::TcpStream>>, String>
 {
     let tcp = tokio::net::TcpStream::connect((host, port))
@@ -439,7 +337,7 @@ pub async fn connect(
     }
 }
 
-async fn list_folders_impl<T>(session: &mut async_imap::Session<T>) -> Result<Vec<Folder>, String>
+pub(crate) async fn list_folders_impl<T>(session: &mut async_imap::Session<T>) -> Result<Vec<Folder>, String>
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + std::fmt::Debug,
 {
@@ -520,7 +418,7 @@ pub async fn fetch_conversations(
     result
 }
 
-async fn fetch_conversations_impl<T>(
+pub(crate) async fn fetch_conversations_impl<T>(
     session: &mut async_imap::Session<T>,
     user_addr: &str,
     our_addrs: &[String],
@@ -704,7 +602,7 @@ pub async fn fetch_conversation_messages(
     result
 }
 
-async fn fetch_bodies_impl<T>(
+pub(crate) async fn fetch_bodies_impl<T>(
     session: &mut async_imap::Session<T>,
     our_addrs: &[String],
     message_refs: &[MessageRef],
@@ -820,7 +718,7 @@ pub async fn search_messages(
     }
 }
 
-async fn search_impl<T>(
+pub(crate) async fn search_impl<T>(
     session: &mut async_imap::Session<T>,
     user_addr: &str,
     query: &str,
@@ -906,7 +804,7 @@ where
     Ok(envelopes)
 }
 
-async fn store_flags_impl<T>(
+pub(crate) async fn store_flags_impl<T>(
     session: &mut async_imap::Session<T>,
     folder: &str, uid: u32, flags: &str, add: bool,
 ) -> Result<(), String>
@@ -960,7 +858,7 @@ pub async fn set_flags_batch(
     }
 }
 
-async fn store_flags_batch_impl<T>(
+pub(crate) async fn store_flags_batch_impl<T>(
     session: &mut async_imap::Session<T>,
     messages: &[MessageRef], flags: &str, add: bool,
 ) -> Result<(), String>
@@ -1006,7 +904,7 @@ pub async fn fetch_message_source(
     }
 }
 
-async fn fetch_source_impl<T>(
+pub(crate) async fn fetch_source_impl<T>(
     session: &mut async_imap::Session<T>,
     folder: &str,
     uid: u32,
@@ -1070,7 +968,7 @@ fn open_in_default_app(path: &std::path::Path) {
     { let _ = std::process::Command::new("xdg-open").arg(path).spawn(); }
 }
 
-async fn fetch_raw_message<T>(
+pub(crate) async fn fetch_raw_message<T>(
     session: &mut async_imap::Session<T>, folder: &str, uid: u32,
 ) -> Result<Vec<u8>, String>
 where
@@ -1226,7 +1124,7 @@ fn extract_top_level_array(s: &str) -> Option<String> {
     None
 }
 
-async fn fetch_identities_impl<T>(
+pub(crate) async fn fetch_identities_impl<T>(
     session: &mut async_imap::Session<T>,
 ) -> Result<Vec<Identity>, String>
 where

@@ -36,6 +36,12 @@ impl SessionPool {
         Self { idle_handles: Mutex::new(HashMap::new()) }
     }
 
+    /// Return an Arc-wrapped new pool that shares nothing with this one.
+    /// Used to give ImapProvider its own pool instance.
+    pub fn clone_inner(&self) -> std::sync::Arc<SessionPool> {
+        std::sync::Arc::new(SessionPool::new())
+    }
+
     pub async fn start_idle<R: Runtime>(&self, app: AppHandle<R>, creds: Credentials) {
         let key = format!("{}@{}:{}", creds.username, creds.host, creds.port);
         {

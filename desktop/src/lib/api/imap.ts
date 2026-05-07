@@ -17,14 +17,16 @@ export async function fetchMessageSource(
   folder: string,
   uid: number,
 ): Promise<string> {
-  return invoke<string>("fetch_message_source", {
-    ...imapArgs(account),
+  return invoke<string>("v2_fetch_message_source", {
+    accountId: account.id,
     folder,
     uid,
   });
 }
 
-/** Download an attachment to the user's Downloads folder; returns absolute file path. */
+/** Download an attachment to the user's Downloads folder; returns absolute file path.
+ *  NOTE: download_attachment stays on v1 — it does MIME parsing locally which
+ *  the provider abstraction doesn't handle yet. */
 export async function downloadAttachment(
   account: Account,
   folder: string,
