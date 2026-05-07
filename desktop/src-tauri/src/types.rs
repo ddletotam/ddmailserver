@@ -200,3 +200,12 @@ pub struct InlineRef {
     pub path: String,
     pub content_id: String,
 }
+
+/// One fetched inline part from a received message — bytes already base64-encoded
+/// so the frontend can stuff it into a `data:` URL without round-tripping through
+/// a binary IPC payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InlinePart {
+    pub mime_type: String,
+    pub content_b64: String,
+}

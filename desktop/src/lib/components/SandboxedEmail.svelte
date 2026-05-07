@@ -1,13 +1,17 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { prepareEmailHtml, type ContentPermissions } from "../utils/html";
+  import { accountStore } from "../stores/accounts.svelte";
 
   interface Props {
     html: string;
     isDark: boolean;
     permissions: ContentPermissions;
+    /** DB id of the message — required for resolving `cid:` inline images via
+     *  the v2_fetch_inline_part command. When omitted, cid: refs stay broken. */
+    messageUid?: number;
   }
-  let { html, isDark, permissions }: Props = $props();
+  let { html, isDark, permissions, messageUid }: Props = $props();
 
   let hostRef = $state<HTMLDivElement | null>(null);
   let shadow: ShadowRoot | null = null;
@@ -21,6 +25,26 @@
     }
 
     shadow.innerHTML = prepareEmailHtml(html, permissions, isDark);
+
+    // Inline images: resolve <img src="cid:..."> by fetching the part bytes
+    // through the provider and swapping in a data: URL. Webview doesn't know
+    // the cid: scheme natively. Failures leave the broken-image placeholder.
+    const account = accountStore.activeAccount;
+    if (account && messageUid != null) {
+      const cidImgs = shadow.querySelectorAll<HTMLImageElement>('img[src^="cid:"]');
+      for (const img of cidImgs) {
+        const cid = img.getAttribute("src")!.slice(4); // strip "cid:"
+        invoke<{ mime_type: string; content_b64: string }>("v2_fetch_inline_part", {
+          accountId: account.id,
+          messageId: messageUid,
+          contentId: cid,
+        }).then((part) => {
+          img.src = `data:${part.mime_type};base64,${part.content_b64}`;
+        }).catch((e) => {
+          console.warn("[SandboxedEmail] inline part fetch failed for", cid, e);
+        });
+      }
+    }
 
     // Intercept link clicks → open in system browser
     const links = shadow.querySelectorAll("a[href]");

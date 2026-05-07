@@ -82,6 +82,7 @@ fn main() {
             commands::v2_set_flags,
             commands::v2_set_flags_batch,
             commands::v2_fetch_message_source,
+            commands::v2_fetch_inline_part,
             commands::v2_fetch_identities,
             commands::v2_send_message,
             commands::v2_start_watching,

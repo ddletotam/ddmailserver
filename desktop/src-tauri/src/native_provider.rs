@@ -197,6 +197,41 @@ impl MailProvider for NativeProvider {
         self.get("/identities").await
     }
 
+    async fn fetch_inline_part(
+        &self,
+        message_id: u32,
+        content_id: &str,
+    ) -> Result<InlinePart, String> {
+        let cid_enc = urlencoding::encode(content_id);
+        let resp = self
+            .http
+            .get(self.api_url(&format!("/messages/{message_id}/parts/{cid_enc}")))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP: {e}"))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+
+        let mime_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("Read body: {e}"))?;
+
+        use base64::Engine as _;
+        let content_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok(InlinePart { mime_type, content_b64 })
+    }
+
     async fn send_message(
         &self,
         _smtp_host: &str,
