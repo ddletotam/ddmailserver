@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { accountStore } from "../stores/accounts.svelte";
   import { mailStore } from "../stores/mail.svelte";
   import { identityStore } from "../stores/identity.svelte";
@@ -268,10 +269,78 @@
     }
   });
 
+  // Quick-reply attachments — same shape & flow as Composer's, scoped to the
+  // inline input. We intentionally duplicate the (small) logic instead of
+  // extracting a shared component for now: the surface is two consumers and
+  // both are stable. If a third place ever needs the picker, refactor.
+  type QrAttachKind = "file" | "image";
+  interface QrAttach { path: string; name: string; kind: QrAttachKind; cid?: string }
+  let qrAttachments = $state<QrAttach[]>([]);
+  let qrPendingPicks = $state<{ paths: string[]; remember: boolean } | null>(null);
+  const QR_IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
+  type QrModePref = "ask" | "file" | "image";
+  function qrLoadPref(): QrModePref {
+    const v = localStorage.getItem("ddmail_image_attachment_mode");
+    return v === "file" || v === "image" ? v : "ask";
+  }
+  let qrModePref = $state<QrModePref>(qrLoadPref());
+  let qrCidCounter = 0;
+  function qrMakeCid(): string {
+    qrCidCounter += 1;
+    return `att${Date.now().toString(36)}${qrCidCounter}@dd.local`;
+  }
+  function qrBasename(p: string): string {
+    const m = p.replace(/\\/g, "/").match(/[^/]+$/);
+    return m ? m[0] : p;
+  }
+  async function qrPickAttachment() {
+    try {
+      const picked = await openDialog({ multiple: true, directory: false });
+      if (!picked) return;
+      const paths = (Array.isArray(picked) ? picked : [picked])
+        .filter((p) => !qrAttachments.some((a) => a.path === p));
+      if (paths.length === 0) return;
+      const allImages = paths.every((p) => QR_IMAGE_EXT.test(p));
+      if (allImages && qrModePref === "ask") {
+        qrPendingPicks = { paths, remember: false };
+        return;
+      }
+      const kind: QrAttachKind = allImages && qrModePref === "image" ? "image" : "file";
+      qrAddPicks(paths, kind);
+    } catch (e) {
+      console.error("[chatview] qrPickAttachment failed:", e);
+    }
+  }
+  function qrAddPicks(paths: string[], kind: QrAttachKind) {
+    const next: QrAttach[] = paths.map((p) => ({
+      path: p, name: qrBasename(p), kind,
+      cid: kind === "image" ? qrMakeCid() : undefined,
+    }));
+    qrAttachments = [...qrAttachments, ...next];
+  }
+  function qrResolvePending(kind: QrAttachKind) {
+    if (!qrPendingPicks) return;
+    qrAddPicks(qrPendingPicks.paths, kind);
+    if (qrPendingPicks.remember) {
+      qrModePref = kind;
+      try { localStorage.setItem("ddmail_image_attachment_mode", kind); } catch {}
+    }
+    qrPendingPicks = null;
+  }
+  function qrRemoveAttachment(path: string) {
+    qrAttachments = qrAttachments.filter((a) => a.path !== path);
+  }
+  const qrGalleryMode = $derived(
+    qrAttachments.length > 0 && qrAttachments.every((a) => a.kind === "image")
+  );
+
   async function sendQuickReply() {
     const account = accountStore.activeAccount;
     const text = getEditorText();
-    if (!account || !text || !conv) return;
+    // Allow sending if there's text OR attachments — pure-image quick replies
+    // are a valid telegram-style "send picture without caption" flow.
+    if (!account || !conv) return;
+    if (!text && qrAttachments.length === 0) return;
 
     // What we're replying to: the explicitly chosen message, or the last incoming, or the last message overall.
     const target: MessageBody | null = replyTo
@@ -289,7 +358,19 @@
       const userBody = userHtml || text.replace(/\n/g, "<br>");
       const quoteHtml = buildQuoteBlock(target);
       const quoteText = buildQuoteText(target);
-      const html = `<div style="font-family:sans-serif;font-size:14px">${userBody}${quoteHtml}</div>`;
+
+      // Inline pictures: prepend <img cid:…> tiles before the user body so the
+      // recipient sees them as a witрина above the text. File attachments are
+      // separate and ride along as multipart/mixed parts.
+      const fileAttachs = qrAttachments.filter((a) => a.kind === "file");
+      const inlineAttachs = qrAttachments.filter((a) => a.kind === "image" && a.cid);
+      const inlineImgsHtml = inlineAttachs
+        .map((a) =>
+          `<div style="margin: 4px 0;"><img src="cid:${a.cid}" alt="${a.name.replace(/"/g, "&quot;")}" style="max-width: 100%; border-radius: 6px;" /></div>`
+        )
+        .join("");
+
+      const html = `<div style="font-family:sans-serif;font-size:14px">${inlineImgsHtml}${userBody}${quoteHtml}</div>`;
       const fullText = `${text}\n\n${quoteText}`;
       // Threading headers: In-Reply-To = target's Message-Id; References = target.references + target.message_id.
       const inReplyTo = target.message_id ? `<${target.message_id}>` : null;
@@ -333,8 +414,8 @@
         html,
         in_reply_to: inReplyTo,
         references,
-        attachment_paths: [],
-        inline_paths: [],
+        attachment_paths: fileAttachs.map((a) => a.path),
+        inline_paths: inlineAttachs.map((a) => ({ path: a.path, content_id: a.cid! })),
       };
       await invoke("v2_send_message", {
         accountId: account.id,
@@ -343,6 +424,7 @@
         message: msg,
       });
       clearEditor();
+      qrAttachments = [];
       replyTo = null;
 
       if (switchedIdentity) {
@@ -519,6 +601,63 @@
             </button>
           </div>
         {/if}
+
+        {#if qrPendingPicks}
+          <div class="pick-prompt">
+            <div class="pick-prompt-text">
+              Send {qrPendingPicks.paths.length === 1 ? "this picture" : `${qrPendingPicks.paths.length} pictures`} as…
+            </div>
+            <div class="pick-prompt-actions">
+              <button type="button" class="pick-btn" onclick={() => qrResolvePending("image")}>📷 Pictures</button>
+              <button type="button" class="pick-btn" onclick={() => qrResolvePending("file")}>📎 Files</button>
+            </div>
+            <label class="pick-remember">
+              <input type="checkbox" bind:checked={qrPendingPicks.remember} />
+              Remember
+            </label>
+          </div>
+        {/if}
+
+        {#if qrAttachments.length > 0}
+          {#if qrGalleryMode}
+            <div class="gallery-row">
+              {#each qrAttachments as att (att.path)}
+                <div class="gallery-tile" title={att.name}>
+                  <div class="gallery-tile-thumb">
+                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                      <rect x="3" y="3" width="18" height="18" rx="2" />
+                      <circle cx="8.5" cy="8.5" r="1.5" />
+                      <polyline points="21 15 16 10 5 21" />
+                    </svg>
+                  </div>
+                  <span class="gallery-tile-name">{att.name}</span>
+                  <button type="button" class="gallery-tile-remove" onclick={() => qrRemoveAttachment(att.path)} aria-label="Remove">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                      <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                  </button>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <div class="attachments-row">
+              {#each qrAttachments as att (att.path)}
+                <div class="attachment-chip" title={att.path}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                  </svg>
+                  <span class="attachment-name">{att.name}</span>
+                  <button type="button" class="attachment-remove" onclick={() => qrRemoveAttachment(att.path)} aria-label="Remove">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                      <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                  </button>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        {/if}
+
         <div class="reply-input-row">
           <!-- Identity selector (if multiple) -->
           {#if identityStore.hasMultiple}
@@ -555,6 +694,20 @@
               {/if}
             </div>
           {/if}
+
+          <!-- Attach button: opens system file picker. Image-only batches
+               trigger the "send as pictures or files" prompt above. -->
+          <button
+            type="button"
+            class="qr-attach-btn"
+            onclick={qrPickAttachment}
+            title="Attach files"
+            aria-label="Attach files"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+            </svg>
+          </button>
 
           <!-- Rich text editor -->
           <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -959,5 +1112,147 @@
     position: absolute;
     bottom: 0; left: 0; right: 0;
     z-index: 20;
+  }
+
+  /* Quick-reply attachments — mirrors Composer's gallery/chip styling but
+     scoped here to keep the inline reply self-contained. */
+  .qr-attach-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: 50%;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .qr-attach-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+  .attachments-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 12px;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border-color);
+  }
+  .attachment-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 4px 4px 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    font-size: var(--font-size-xs);
+    color: var(--text-primary);
+    max-width: 240px;
+  }
+  .attachment-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .attachment-remove {
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: none;
+    border-radius: 50%;
+    cursor: pointer;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+  }
+  .attachment-remove:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+  .gallery-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border-color);
+  }
+  .gallery-tile {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 84px;
+    padding: 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+  }
+  .gallery-tile-thumb {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 56px;
+    height: 56px;
+    color: var(--text-accent);
+  }
+  .gallery-tile-name {
+    width: 100%;
+    margin-top: 4px;
+    font-size: var(--font-size-xs);
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: center;
+  }
+  .gallery-tile-remove {
+    position: absolute;
+    top: 2px; right: 2px;
+    width: 18px; height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 50%;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+  .gallery-tile-remove:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+  .pick-prompt {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border-color);
+    font-size: var(--font-size-sm);
+    color: var(--text-primary);
+  }
+  .pick-prompt-text { flex-shrink: 0; }
+  .pick-prompt-actions { display: flex; gap: 6px; }
+  .pick-btn {
+    padding: 4px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: var(--font-size-xs);
+  }
+  .pick-btn:hover { background: var(--bg-hover); }
+  .pick-remember {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: var(--font-size-xs);
+    color: var(--text-secondary);
+    user-select: none;
+    cursor: pointer;
   }
 </style>
