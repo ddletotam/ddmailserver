@@ -592,10 +592,12 @@
           {:else}
             {conv.counterparts[0]?.addr ?? ""}
           {/if}
-          {#if mailStore.connectionState === "connected"}
-            <span class="conn-dot connected" title="Connected"></span>
-          {:else if mailStore.connectionState === "connecting"}
-            <span class="conn-dot connecting" title="Connecting..."></span>
+          <!-- Receiving identity — replaces the old connection dot now that the
+               identity selector is hidden in the collapsed composer. Tells the
+               user at a glance which of their addresses this conversation
+               targets ("they wrote to <my email>"). -->
+          {#if conv.received_by}
+            <span class="chat-identity"> → {conv.received_by}</span>
           {/if}
         </div>
       </div>
@@ -912,13 +914,11 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
 
-  .conn-dot {
-    width: 6px; height: 6px; border-radius: 50%;
-    flex-shrink: 0;
+  .chat-identity {
+    color: var(--text-accent);
+    font-size: var(--font-size-xs);
+    margin-left: 2px;
   }
-  .conn-dot.connected { background: #7bc862; }
-  .conn-dot.connecting { background: #e5ca77; animation: pulse 1.5s infinite; }
-  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
   .chat-actions { display: flex; gap: 4px; }
   .btn-icon {
