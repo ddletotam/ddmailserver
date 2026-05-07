@@ -264,6 +264,7 @@ func (s *Session) Data(r io.Reader) error {
 			Date:              messageDate,
 			Body:              body,
 			BodyHTML:          bodyHTML,
+			RawEmail:          messageData,
 			Size:              messageSize,
 			UID:               nextUID,
 			Seen:              false,

@@ -317,6 +317,7 @@ func saveToSentFolder(database *db.DB, userID int64, emailData []byte, messageID
 		Date:      parsed.Date,
 		Body:      parsed.Body,
 		BodyHTML:  parsed.BodyHTML,
+		RawEmail:  emailData, // store the real RFC-822 so View Source isn't a stitched fake
 		Size:      int64(len(emailData)),
 		UID:       nextUID,
 		Seen:      true, // Sent messages are always read

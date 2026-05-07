@@ -206,8 +206,17 @@ func (s *Server) HandleDesktopMessageSource(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Reconstruct minimal RFC-822 from stored fields
 	w.Header().Set("Content-Type", "message/rfc822")
+
+	// Prefer the original RFC-822 bytes (stored on receive in MX and on Sent
+	// copy in saveToSentFolder via migration 032). Fall back to a stitched
+	// reconstruction for legacy rows pre-dating that migration — at least
+	// the user sees the headers and plain body instead of an empty modal.
+	if raw, err := s.database.GetMessageRawEmail(msg.ID); err == nil && len(raw) > 0 {
+		w.Write(raw)
+		return
+	}
+
 	fmt.Fprintf(w, "From: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nMessage-ID: %s\r\n\r\n%s",
 		msg.From, msg.To, msg.Subject, msg.Date.Format("Mon, 02 Jan 2006 15:04:05 -0700"),
 		msg.MessageID, msg.Body)
