@@ -87,6 +87,7 @@ type OutboxAttachment struct {
 	ContentType     string    `json:"content_type"`
 	Size            int       `json:"size"`
 	Data            []byte    `json:"-"`
+	ContentID       string    `json:"content_id,omitempty"` // non-empty = inline image (cid:xxx)
 	CreatedAt       time.Time `json:"created_at"`
 }
 
