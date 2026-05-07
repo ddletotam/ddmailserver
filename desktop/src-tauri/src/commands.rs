@@ -309,12 +309,62 @@ pub async fn v2_send_message(
     account_id: String,
     smtp_host: String,
     smtp_port: u16,
-    message: OutgoingMessage,
+    mut message: OutgoingMessage,
 ) -> Result<String, String> {
+    // Resolve filesystem paths into self-contained blobs once, here, so each
+    // provider receives a fully-formed message and never touches the disk.
+    // JS only knows the picked paths; turning them into bytes lives at the
+    // command boundary.
+    for path_str in std::mem::take(&mut message.attachment_paths) {
+        let path = std::path::Path::new(&path_str);
+        let content = std::fs::read(path)
+            .map_err(|e| format!("read attachment {path_str}: {e}"))?;
+        let filename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "attachment".into());
+        let mime_type = guess_mime(&filename).to_string();
+        message.attachments.push(OutgoingAttachment {
+            filename,
+            mime_type,
+            content,
+            content_id: None, // attachment_paths is the file-mode entry point
+        });
+    }
+
     get_provider(&registry, &account_id)
         .await?
         .send_message(&smtp_host, smtp_port, &message)
         .await
+}
+
+/// MIME-type lookup by filename extension. Lives in commands.rs so both the
+/// path-resolution above and any future ad-hoc inline-image guessing can share
+/// it without depending on smtp.rs.
+fn guess_mime(filename: &str) -> &'static str {
+    let lower = filename.to_lowercase();
+    let ext = lower.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    match ext {
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "txt" | "log" => "text/plain",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "zip" => "application/zip",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        _ => "application/octet-stream",
+    }
 }
 
 #[tauri::command]

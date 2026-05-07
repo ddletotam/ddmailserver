@@ -5,7 +5,7 @@ use lettre::{
 };
 use lettre::message::{header::ContentType, Attachment, Mailbox, MultiPart, SinglePart};
 
-use crate::types::OutgoingMessage;
+use crate::types::{OutgoingAttachment, OutgoingMessage};
 
 // RFC 5322 §3.6.4 says Message-ID SHOULD be unique. lettre 0.11 doesn't add one
 // unless we call `.message_id(...)` explicitly — so without this every send goes out
@@ -54,36 +54,7 @@ pub(crate) async fn send_message_impl(
         email_builder = email_builder.references(refs.clone());
     }
 
-    let body_alt = MultiPart::alternative()
-        .singlepart(
-            SinglePart::builder()
-                .header(ContentType::TEXT_PLAIN)
-                .body(message.text.clone()),
-        )
-        .singlepart(
-            SinglePart::builder()
-                .header(ContentType::TEXT_HTML)
-                .body(message.html.clone()),
-        );
-
-    let mp = if message.attachment_paths.is_empty() {
-        body_alt
-    } else {
-        let mut mixed = MultiPart::mixed().multipart(body_alt);
-        for path_str in &message.attachment_paths {
-            let path = std::path::Path::new(path_str);
-            let bytes = std::fs::read(path)
-                .map_err(|e| format!("read attachment {path_str}: {e}"))?;
-            let filename = path.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "attachment".into());
-            let mime = guess_mime(&filename);
-            let ct: ContentType = mime.parse()
-                .map_err(|_| format!("invalid mime for {filename}"))?;
-            mixed = mixed.singlepart(Attachment::new(filename).body(bytes, ct));
-        }
-        mixed
-    };
+    let mp = build_body(&message.text, &message.html, &message.attachments)?;
 
     let email = email_builder
         .multipart(mp)
@@ -121,28 +92,66 @@ pub async fn send_message(
     send_message_impl(&host, port, &username, &password, use_tls, &message).await
 }
 
-fn guess_mime(filename: &str) -> &'static str {
-    let lower = filename.to_lowercase();
-    let ext = lower.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-    match ext {
-        "pdf" => "application/pdf",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        "txt" | "log" => "text/plain",
-        "csv" => "text/csv",
-        "html" | "htm" => "text/html",
-        "json" => "application/json",
-        "xml" => "application/xml",
-        "zip" => "application/zip",
-        "doc" => "application/msword",
-        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "xls" => "application/vnd.ms-excel",
-        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "ppt" => "application/vnd.ms-powerpoint",
-        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        _ => "application/octet-stream",
+/// Assemble the message body part. Layered MIME structure:
+///   - body_alt = multipart/alternative { text/plain, text/html }
+///   - if any inline attachments → multipart/related { body_alt, ...inlines }
+///   - if any file attachments    → multipart/mixed  { related-or-alt, ...files }
+///
+/// Inline parts carry Content-ID so the HTML can reference them as cid:….
+/// File parts use Content-Disposition: attachment.
+fn build_body(
+    text: &str,
+    html: &str,
+    attachments: &[OutgoingAttachment],
+) -> Result<MultiPart, String> {
+    let body_alt = MultiPart::alternative()
+        .singlepart(
+            SinglePart::builder()
+                .header(ContentType::TEXT_PLAIN)
+                .body(text.to_string()),
+        )
+        .singlepart(
+            SinglePart::builder()
+                .header(ContentType::TEXT_HTML)
+                .body(html.to_string()),
+        );
+
+    let (inlines, files): (Vec<_>, Vec<_>) = attachments
+        .iter()
+        .partition(|a| a.content_id.is_some());
+
+    // Wrap body_alt with multipart/related when there are inline images, so the
+    // HTML's cid: references are resolved against the same envelope.
+    let body_or_related = if inlines.is_empty() {
+        body_alt
+    } else {
+        let mut related = MultiPart::related().multipart(body_alt);
+        for att in &inlines {
+            related = related.singlepart(build_inline_part(att)?);
+        }
+        related
+    };
+
+    if files.is_empty() {
+        return Ok(body_or_related);
     }
+
+    let mut mixed = MultiPart::mixed().multipart(body_or_related);
+    for att in &files {
+        mixed = mixed.singlepart(build_file_part(att)?);
+    }
+    Ok(mixed)
+}
+
+fn build_inline_part(att: &OutgoingAttachment) -> Result<SinglePart, String> {
+    let ct: ContentType = att.mime_type.parse()
+        .map_err(|_| format!("invalid mime for inline {}", att.filename))?;
+    let cid = att.content_id.as_deref().unwrap_or_default();
+    Ok(Attachment::new_inline(cid.to_string()).body(att.content.clone(), ct))
+}
+
+fn build_file_part(att: &OutgoingAttachment) -> Result<SinglePart, String> {
+    let ct: ContentType = att.mime_type.parse()
+        .map_err(|_| format!("invalid mime for {}", att.filename))?;
+    Ok(Attachment::new(att.filename.clone()).body(att.content.clone(), ct))
 }
