@@ -173,6 +173,11 @@ function scheduleRefresh(account: Account) {
     _refreshing = true;
     try {
       await mailStore.loadConversations(account);
+      // If a conversation is open, the conversations list now has the new
+      // MessageRef but conversationMessages is still the previous fetch.
+      // Re-pull the active thread's bodies so the right pane shows the
+      // freshly arrived message instead of stalling until reopen.
+      await mailStore.refreshActive(account);
     } finally {
       _refreshing = false;
     }
