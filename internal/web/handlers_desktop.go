@@ -131,7 +131,7 @@ func (s *Server) HandleDesktopFolders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var result []DesktopFolder
+	result := []DesktopFolder{}
 	for _, f := range folders {
 		total, unread, _ := s.database.GetFolderMessageCounts(f.ID)
 		result = append(result, DesktopFolder{
@@ -275,7 +275,7 @@ func (s *Server) HandleDesktopIdentities(w http.ResponseWriter, r *http.Request)
 		IsDefault bool   `json:"is_default"`
 	}
 
-	var identities []Identity
+	identities := []Identity{}
 
 	// Local mailboxes
 	mailboxes, err := s.database.GetMailboxesWithDomainByUserID(user.ID)
@@ -557,7 +557,7 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Build conversation objects
-	var convs []DesktopConversation
+	convs := []DesktopConversation{}
 
 	for key, entries := range convMap {
 		// Sort by date ascending
@@ -567,7 +567,7 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 		entries = dedupEntries(entries, sentFolderIDs)
 
 		// Separate drafts
-		var regular []msgEntry
+		regular := []msgEntry{}
 		var lastDraft *msgEntry
 		for i := range entries {
 			if entries[i].msg.Draft {
@@ -786,7 +786,7 @@ func (s *Server) HandleDesktopConversationMessages(w http.ResponseWriter, r *htt
 		folderNames[f.ID] = f.Name
 	}
 
-	var bodies []DesktopMessageBody
+	bodies := []DesktopMessageBody{}
 	for _, ref := range refs {
 		msg, err := s.database.GetMessageByID(ref.UID)
 		if err != nil || msg.UserID != user.ID {
@@ -801,7 +801,7 @@ func (s *Server) HandleDesktopConversationMessages(w http.ResponseWriter, r *htt
 		ccList := splitAndTrim(msg.Cc)
 
 		// Get attachments
-		var atts []DesktopAttachment
+		atts := []DesktopAttachment{}
 		dbAtts, err := s.database.GetAttachmentsByMessageID(msg.ID)
 		if err == nil {
 			for i, a := range dbAtts {
@@ -818,9 +818,9 @@ func (s *Server) HandleDesktopConversationMessages(w http.ResponseWriter, r *htt
 		}
 
 		// Parse references
-		var refs []string
+		msgRefs := []string{}
 		if msg.MessageReferences != "" {
-			refs = parseMessageIDs(msg.MessageReferences)
+			msgRefs = parseMessageIDs(msg.MessageReferences)
 		}
 
 		var html, text *string
@@ -847,7 +847,7 @@ func (s *Server) HandleDesktopConversationMessages(w http.ResponseWriter, r *htt
 			IsOutgoing:  isOutgoing,
 			MessageID:   msg.MessageID,
 			InReplyTo:   msg.InReplyTo,
-			References:  refs,
+			References:  msgRefs,
 		})
 	}
 
@@ -866,7 +866,7 @@ func splitAndTrim(s string) []string {
 		return []string{}
 	}
 	parts := strings.Split(s, ",")
-	var result []string
+	result := []string{}
 	for _, p := range parts {
 		trimmed := strings.TrimSpace(p)
 		if trimmed != "" {
