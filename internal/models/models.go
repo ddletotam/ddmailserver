@@ -177,6 +177,7 @@ type Message struct {
 	Date              time.Time `json:"date"`
 	Body              string    `json:"body"`        // Plain text body
 	BodyHTML          string    `json:"body_html"`   // HTML body
+	RawEmail          []byte    `json:"-"`           // Original RFC-822 bytes; populated on receive, served by /messages/{id}/source
 	Attachments       int       `json:"attachments"` // Number of attachments
 	Size              int64     `json:"size"`        // Size in bytes
 	UID               uint32    `json:"uid"`         // IMAP UID

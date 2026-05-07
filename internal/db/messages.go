@@ -25,8 +25,8 @@ func (db *DB) CreateMessage(msg *models.Message) error {
 			account_id, user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 			date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 			in_reply_to, message_references, spam_score, spam_status, spam_reasons,
-			is_spam, spam_rule_id, remote_uid, remote_folder, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
+			is_spam, spam_rule_id, remote_uid, remote_folder, raw_email, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
 		RETURNING id
 	`
 
@@ -57,6 +57,7 @@ func (db *DB) CreateMessage(msg *models.Message) error {
 		remoteFolder = "INBOX"
 	}
 
+	// raw_email may be nil for legacy callers; PostgreSQL stores nil []byte as NULL.
 	err := db.QueryRow(
 		query,
 		accountID, msg.UserID, msg.FolderID, msg.MessageID, msg.Subject,
@@ -64,7 +65,7 @@ func (db *DB) CreateMessage(msg *models.Message) error {
 		msg.Date, msg.Body, msg.BodyHTML, msg.Attachments, msg.Size,
 		msg.UID, msg.Seen, msg.Flagged, msg.Answered, msg.Draft, msg.Deleted,
 		msg.InReplyTo, msg.MessageReferences, msg.SpamScore, msg.SpamStatus, msg.SpamReasons,
-		msg.IsSpam, spamRuleID, remoteUID, remoteFolder, msg.CreatedAt, msg.UpdatedAt,
+		msg.IsSpam, spamRuleID, remoteUID, remoteFolder, msg.RawEmail, msg.CreatedAt, msg.UpdatedAt,
 	).Scan(&msg.ID)
 
 	if err != nil {
@@ -734,17 +735,19 @@ func (db *DB) CopyMessageToFolder(msgID, destFolderID int64) (uint32, error) {
 		return 0, fmt.Errorf("failed to update folder UID: %w", err)
 	}
 
-	// Create copy in destination folder
+	// Create copy in destination folder. Carry raw_email along — without it
+	// the COPY/MOVE operation would silently strip the original RFC-822 from
+	// the destination row, breaking View Source for moved messages.
 	query := `
 		INSERT INTO messages (
 			account_id, user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 			date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
-			in_reply_to, message_references, created_at, updated_at
+			in_reply_to, message_references, raw_email, created_at, updated_at
 		)
 		SELECT
 			account_id, user_id, $1, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 			date, body, body_html, attachments, size, $2, seen, flagged, answered, draft, false,
-			in_reply_to, message_references, $3, $3
+			in_reply_to, message_references, raw_email, $3, $3
 		FROM messages WHERE id = $4
 		RETURNING id
 	`
@@ -854,4 +857,19 @@ func (db *DB) GetMessagesByUserFiltered(userID int64, folderType string, account
 		return nil, 0, err
 	}
 	return msgs, total, nil
+}
+
+// GetMessageRawEmail returns the original RFC-822 bytes of a message, or nil if
+// not stored (legacy rows pre-dating migration 032). Kept as a separate fetch
+// so the standard SELECTs don't drag the BYTEA payload through every list call.
+func (db *DB) GetMessageRawEmail(messageID int64) ([]byte, error) {
+	var raw []byte
+	err := db.QueryRow(
+		`SELECT raw_email FROM messages WHERE id = $1`,
+		messageID,
+	).Scan(&raw)
+	if err != nil {
+		return nil, fmt.Errorf("get raw email: %w", err)
+	}
+	return raw, nil
 }
