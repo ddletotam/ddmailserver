@@ -95,6 +95,11 @@ export interface Account {
   native_token?: string;
 }
 
+export interface InlineRef {
+  path: string;
+  content_id: string;
+}
+
 export interface OutgoingMessage {
   from: string;
   to: string[];
@@ -105,6 +110,7 @@ export interface OutgoingMessage {
   in_reply_to: string | null;
   references: string | null;
   attachment_paths: string[];
+  inline_paths: InlineRef[];
 }
 
 export interface Contact {

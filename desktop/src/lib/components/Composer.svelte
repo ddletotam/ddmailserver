@@ -68,31 +68,94 @@
   let sending = $state(false);
   let error = $state("");
 
-  // Attachments — list of absolute paths picked via the system dialog. Bytes are
-  // read on the Rust side at send time, so we don't keep large blobs in memory.
-  interface Attachment { path: string; name: string; }
+  // Attachments. Each carries the picked absolute path (bytes are loaded on
+  // the Rust side at send time) plus a per-batch decision of how to send it:
+  //   "file"  → multipart/mixed file part, shown as a chip in the composer.
+  //   "image" → multipart/related inline image referenced via cid in HTML,
+  //             shown as a thumbnail tile (telegram-style "send as picture").
+  // The decision applies to the whole pick batch when all picked files are
+  // images; mixed batches are forced to "file" mode.
+  type AttachKind = "file" | "image";
+  interface Attachment { path: string; name: string; kind: AttachKind; cid?: string }
   let attachments = $state<Attachment[]>([]);
+
+  // Remembered preference for image-only batches: "ask" prompts each time,
+  // "file"/"image" auto-applies. Persisted in localStorage.
+  const IMAGE_MODE_KEY = "ddmail_image_attachment_mode";
+  type ImageModePref = "ask" | "file" | "image";
+  function loadImageModePref(): ImageModePref {
+    const v = localStorage.getItem(IMAGE_MODE_KEY);
+    return v === "file" || v === "image" ? v : "ask";
+  }
+  function saveImageModePref(v: ImageModePref) {
+    try { localStorage.setItem(IMAGE_MODE_KEY, v); } catch {}
+  }
+  let imageModePref = $state<ImageModePref>(loadImageModePref());
+
+  // Pending pick prompt — when all picks are images and pref is "ask", show
+  // an inline modal with two buttons + "remember" toggle. Holds the picked
+  // paths until the user decides.
+  let pendingPicks = $state<{ paths: string[]; remember: boolean } | null>(null);
+
+  const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
+  const isImagePath = (p: string) => IMAGE_EXT.test(p);
+
+  function basename(p: string): string {
+    const m = p.replace(/\\/g, "/").match(/[^/]+$/);
+    return m ? m[0] : p;
+  }
+  let cidCounter = 0;
+  function makeCid(): string {
+    cidCounter += 1;
+    return `att${Date.now().toString(36)}${cidCounter}@dd.local`;
+  }
 
   async function pickAttachment() {
     try {
       const picked = await openDialog({ multiple: true, directory: false });
       if (!picked) return;
-      const paths = Array.isArray(picked) ? picked : [picked];
-      const next = paths.map((p) => ({ path: p, name: basename(p) }));
-      // Drop duplicates by path.
-      const existing = new Set(attachments.map((a) => a.path));
-      attachments = [...attachments, ...next.filter((a) => !existing.has(a.path))];
+      const paths = (Array.isArray(picked) ? picked : [picked])
+        .filter((p) => !attachments.some((a) => a.path === p));
+      if (paths.length === 0) return;
+
+      const allImages = paths.every(isImagePath);
+      if (allImages && imageModePref === "ask") {
+        pendingPicks = { paths, remember: false };
+        return;
+      }
+      const kind: AttachKind = allImages && imageModePref === "image" ? "image" : "file";
+      addPicks(paths, kind);
     } catch (e) {
       console.error("[composer] pickAttachment failed:", e);
     }
   }
+  function addPicks(paths: string[], kind: AttachKind) {
+    const next: Attachment[] = paths.map((p) => ({
+      path: p,
+      name: basename(p),
+      kind,
+      cid: kind === "image" ? makeCid() : undefined,
+    }));
+    attachments = [...attachments, ...next];
+  }
+  function resolvePending(kind: AttachKind) {
+    if (!pendingPicks) return;
+    addPicks(pendingPicks.paths, kind);
+    if (pendingPicks.remember) {
+      imageModePref = kind;
+      saveImageModePref(kind);
+    }
+    pendingPicks = null;
+  }
   function removeAttachment(path: string) {
     attachments = attachments.filter((a) => a.path !== path);
   }
-  function basename(p: string): string {
-    const m = p.replace(/\\/g, "/").match(/[^/]+$/);
-    return m ? m[0] : p;
-  }
+
+  // Show a gallery row when *all* current attachments are inline images. Mixed
+  // batches collapse to chips so the user sees one consistent representation.
+  const galleryMode = $derived(
+    attachments.length > 0 && attachments.every((a) => a.kind === "image")
+  );
 
   let toInputEl = $state<HTMLInputElement | null>(null);
   let subjectInputEl = $state<HTMLInputElement | null>(null);
@@ -156,16 +219,30 @@
       references = chain.map(id => `<${id}>`).join(" ");
     }
 
+    // Split picks by kind. Inline images get appended to the HTML as
+    // <img src="cid:..."> tiles before the text body — telegram-style witрина
+    // where the recipient sees pictures inline. File-mode picks just go in
+    // attachment_paths and render as MIME parts at the receiving end.
+    const fileAttachs = attachments.filter((a) => a.kind === "file");
+    const inlineAttachs = attachments.filter((a) => a.kind === "image" && a.cid);
+
+    const inlineImgsHtml = inlineAttachs
+      .map((a) =>
+        `<div style="margin: 4px 0;"><img src="cid:${a.cid}" alt="${a.name.replace(/"/g, "&quot;")}" style="max-width: 100%; border-radius: 6px;" /></div>`
+      )
+      .join("");
+
     const msg: OutgoingMessage = {
       from: selectedFromEmail || account.email,
       to: to.split(",").map(s => s.trim()).filter(Boolean),
       cc: cc ? cc.split(",").map(s => s.trim()).filter(Boolean) : [],
       subject,
       text: bodyText,
-      html: `<div style="font-family: sans-serif; font-size: 14px;">${bodyText.replace(/\n/g, "<br>")}</div>`,
+      html: `<div style="font-family: sans-serif; font-size: 14px;">${inlineImgsHtml}${bodyText.replace(/\n/g, "<br>")}</div>`,
       in_reply_to: inReplyTo,
       references,
-      attachment_paths: attachments.map((a) => a.path),
+      attachment_paths: fileAttachs.map((a) => a.path),
+      inline_paths: inlineAttachs.map((a) => ({ path: a.path, content_id: a.cid! })),
     };
 
     try {
@@ -260,22 +337,60 @@
     placeholder="Write a message..."
   ></textarea>
 
-  {#if attachments.length > 0}
-    <div class="attachments-row">
-      {#each attachments as att (att.path)}
-        <div class="attachment-chip" title={att.path}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-          </svg>
-          <span class="attachment-name">{att.name}</span>
-          <button type="button" class="attachment-remove" onclick={() => removeAttachment(att.path)} aria-label="Remove">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          </button>
-        </div>
-      {/each}
+  {#if pendingPicks}
+    <div class="pick-prompt">
+      <div class="pick-prompt-text">
+        Send {pendingPicks.paths.length === 1 ? "this picture" : `${pendingPicks.paths.length} pictures`} as…
+      </div>
+      <div class="pick-prompt-actions">
+        <button type="button" class="pick-btn" onclick={() => resolvePending("image")}>📷 Pictures</button>
+        <button type="button" class="pick-btn" onclick={() => resolvePending("file")}>📎 Files</button>
+      </div>
+      <label class="pick-remember">
+        <input type="checkbox" bind:checked={pendingPicks.remember} />
+        Remember choice
+      </label>
     </div>
+  {/if}
+
+  {#if attachments.length > 0}
+    {#if galleryMode}
+      <div class="gallery-row">
+        {#each attachments as att (att.path)}
+          <div class="gallery-tile" title={att.name}>
+            <div class="gallery-tile-thumb">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <circle cx="8.5" cy="8.5" r="1.5" />
+                <polyline points="21 15 16 10 5 21" />
+              </svg>
+            </div>
+            <span class="gallery-tile-name">{att.name}</span>
+            <button type="button" class="attachment-remove gallery-tile-remove" onclick={() => removeAttachment(att.path)} aria-label="Remove">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+        {/each}
+      </div>
+    {:else}
+      <div class="attachments-row">
+        {#each attachments as att (att.path)}
+          <div class="attachment-chip" title={att.path}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+            </svg>
+            <span class="attachment-name">{att.name}</span>
+            <button type="button" class="attachment-remove" onclick={() => removeAttachment(att.path)} aria-label="Remove">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+        {/each}
+      </div>
+    {/if}
   {/if}
 
   {#if error}
@@ -526,6 +641,87 @@
     flex-shrink: 0;
   }
   .attachment-remove:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+  /* Gallery row — telegram-style "send as picture" tile strip */
+  .gallery-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 16px;
+    border-top: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+  }
+  .gallery-tile {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 84px;
+    padding: 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-secondary);
+  }
+  .gallery-tile-thumb {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 56px;
+    height: 56px;
+    color: var(--text-accent);
+  }
+  .gallery-tile-name {
+    width: 100%;
+    margin-top: 4px;
+    font-size: var(--font-size-xs);
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: center;
+  }
+  .gallery-tile-remove {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    background: var(--bg-secondary);
+  }
+
+  /* "Send as pictures or files?" inline prompt after a multi-image pick */
+  .pick-prompt {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 16px;
+    border-top: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    font-size: var(--font-size-sm);
+    color: var(--text-primary);
+  }
+  .pick-prompt-text { flex-shrink: 0; }
+  .pick-prompt-actions { display: flex; gap: 6px; }
+  .pick-btn {
+    padding: 4px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: var(--font-size-xs);
+  }
+  .pick-btn:hover { background: var(--bg-hover); }
+  .pick-remember {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: var(--font-size-xs);
+    color: var(--text-secondary);
+    user-select: none;
+    cursor: pointer;
+  }
 
   .composer-footer {
     display: flex;

@@ -316,26 +316,32 @@ pub async fn v2_send_message(
     // JS only knows the picked paths; turning them into bytes lives at the
     // command boundary.
     for path_str in std::mem::take(&mut message.attachment_paths) {
-        let path = std::path::Path::new(&path_str);
-        let content = std::fs::read(path)
-            .map_err(|e| format!("read attachment {path_str}: {e}"))?;
-        let filename = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "attachment".into());
-        let mime_type = guess_mime(&filename).to_string();
-        message.attachments.push(OutgoingAttachment {
-            filename,
-            mime_type,
-            content,
-            content_id: None, // attachment_paths is the file-mode entry point
-        });
+        message.attachments.push(read_attachment(&path_str, None)?);
+    }
+    for inline in std::mem::take(&mut message.inline_paths) {
+        message.attachments.push(read_attachment(&inline.path, Some(inline.content_id))?);
     }
 
     get_provider(&registry, &account_id)
         .await?
         .send_message(&smtp_host, smtp_port, &message)
         .await
+}
+
+fn read_attachment(path_str: &str, content_id: Option<String>) -> Result<OutgoingAttachment, String> {
+    let path = std::path::Path::new(path_str);
+    let content = std::fs::read(path)
+        .map_err(|e| format!("read attachment {path_str}: {e}"))?;
+    let filename = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "attachment".into());
+    Ok(OutgoingAttachment {
+        mime_type: guess_mime(&filename).to_string(),
+        filename,
+        content,
+        content_id,
+    })
 }
 
 /// MIME-type lookup by filename extension. Lives in commands.rs so both the
