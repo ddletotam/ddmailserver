@@ -329,5 +329,25 @@ func saveToSentFolder(database *db.DB, userID int64, emailData []byte, messageID
 		return
 	}
 
-	log.Printf("saveToSentFolder: saved message %s to Sent folder", messageID)
+	// Save attachments (including inline images with Content-ID)
+	for _, att := range parsed.Attachments {
+		contentID := strings.Trim(att.ContentID, "<>")
+		attachment := &models.Attachment{
+			MessageID:   msg.ID,
+			ContentID:   contentID,
+			Filename:    att.Filename,
+			ContentType: att.ContentType,
+			Size:        int(att.Size),
+			IsInline:    att.IsInline,
+			Data:        att.Data,
+		}
+		if err := database.CreateAttachment(attachment); err != nil {
+			log.Printf("saveToSentFolder: failed to save attachment %s: %v", att.Filename, err)
+		}
+	}
+	if len(parsed.Attachments) > 0 {
+		database.UpdateMessageAttachmentCount(msg.ID, len(parsed.Attachments))
+	}
+
+	log.Printf("saveToSentFolder: saved message %s to Sent folder (attachments: %d)", messageID, len(parsed.Attachments))
 }
