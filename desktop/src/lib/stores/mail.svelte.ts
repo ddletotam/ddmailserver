@@ -68,27 +68,22 @@ let _unlistenNewMail: (() => void) | null = null;
 let _unlistenConnState: (() => void) | null = null;
 let _idleSetUp = false; // Guard: set up push only once per account
 
-// ── Sorted conversations (cached, recomputed only when data changes) ──
-
-let _sortedCache: Conversation[] = [];
-let _sortedConvRef: Conversation[] = [];
-let _sortedPinRef: Set<string> = new Set();
-
+// ── Sorted conversations ──
+//
+// Sort on every read. The previous version cached the sorted result keyed by
+// reference equality on `conversations` and `pinnedIds`, but Svelte 5 wraps
+// $state values in a proxy whose identity behaviour around reassignment is
+// not guaranteed — the cache silently returned a stale ordering after a new-
+// mail push. With ~200 rows the sort is sub-millisecond, so the cache was
+// negative ROI: pure correctness risk for a perf saving nobody will measure.
 function getSortedConversations(): Conversation[] {
-  // Only recompute if source data changed (reference equality)
-  if (conversations === _sortedConvRef && pinnedIds === _sortedPinRef) {
-    return _sortedCache;
-  }
-  _sortedConvRef = conversations;
-  _sortedPinRef = pinnedIds;
   const pinned = conversations
     .filter((c) => pinnedIds.has(c.id))
     .sort((a, b) => b.last_date_ts - a.last_date_ts);
   const unpinned = conversations
     .filter((c) => !pinnedIds.has(c.id))
     .sort((a, b) => b.last_date_ts - a.last_date_ts);
-  _sortedCache = [...pinned, ...unpinned];
-  return _sortedCache;
+  return [...pinned, ...unpinned];
 }
 
 // ── Helpers ──
