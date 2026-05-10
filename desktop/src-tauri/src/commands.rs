@@ -114,6 +114,7 @@ pub async fn native_login(
 /// registers it in the ProviderRegistry. Subsequent v2 commands use account_id.
 #[tauri::command]
 pub async fn activate_account(
+    app: tauri::AppHandle,
     registry: tauri::State<'_, ProviderRegistry>,
     pool: tauri::State<'_, SessionPool>,
     account_id: String,
@@ -130,7 +131,13 @@ pub async fn activate_account(
 ) -> Result<String, String> {
     let provider: Arc<dyn MailProvider> =
         if let (Some(url), Some(token)) = (native_url, native_token) {
-            Arc::new(NativeProvider::new(url, token, email))
+            Arc::new(NativeProvider::new(
+                url,
+                token,
+                email,
+                Some(app.clone()),
+                account_id.clone(),
+            ))
         } else {
             Arc::new(ImapProvider {
                 host: imap_host,

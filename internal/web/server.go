@@ -169,6 +169,7 @@ func (s *Server) setupRoutes() {
 	// Desktop client API (Bearer token auth)
 	desktopAPI := s.router.PathPrefix("/api/desktop/v1").Subrouter()
 	desktopAPI.HandleFunc("/auth/login", s.HandleDesktopLogin).Methods("POST")
+	desktopAPI.HandleFunc("/auth/refresh", s.HandleDesktopRefresh).Methods("POST")
 	desktopAPI.HandleFunc("/ws", s.HandleDesktopWebSocket).Methods("GET")
 	// All other desktop endpoints require auth
 	desktopAuthAPI := desktopAPI.PathPrefix("").Subrouter()
