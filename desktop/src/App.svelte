@@ -2,9 +2,15 @@
   import Sidebar from "./lib/components/Sidebar.svelte";
   import ChatView from "./lib/components/ChatView.svelte";
   import LoginScreen from "./lib/components/LoginScreen.svelte";
+  import CalendarView from "./lib/components/CalendarView.svelte";
   import { accountStore } from "./lib/stores/accounts.svelte";
   import { mailStore } from "./lib/stores/mail.svelte";
   import { identityStore } from "./lib/stores/identity.svelte";
+
+  // Secondary windows (Calendar, future Settings) are loaded as the same
+  // SPA bundle with `?view=…` — keeps webview management trivial without
+  // pulling in a router. The mail UI is the default.
+  const view = new URLSearchParams(window.location.search).get("view");
 
   let showLogin = $state(accountStore.accounts.length === 0);
 
@@ -39,6 +45,7 @@
   }
 
   $effect(() => {
+    if (view === "calendar") return; // calendar window doesn't load mail
     const account = accountStore.activeAccount;
     if (!account) return;
     // Identities must be available BEFORE the conversation grouping runs — the
@@ -62,7 +69,9 @@
   }
 </script>
 
-{#if showLogin}
+{#if view === "calendar"}
+  <CalendarView />
+{:else if showLogin}
   <LoginScreen onSuccess={handleAccountAdded} />
 {:else}
   <div class="app-layout" style:--sidebar-width="{sidebarWidth}px">

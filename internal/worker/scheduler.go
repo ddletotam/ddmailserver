@@ -331,9 +331,9 @@ func (s *Scheduler) TriggerCalendarSyncForUser(userID int64) {
 		var task Task
 		switch source.SourceType {
 		case "caldav":
-			task = NewCalendarSyncTask(source, s.database, s.googleOAuth, s.microsoftOAuth)
+			task = NewCalendarSyncTask(source, s.database, s.googleOAuth, s.microsoftOAuth, s.notifyHub)
 		case "ics_url":
-			task = NewICSSyncTask(source, s.database)
+			task = NewICSSyncTask(source, s.database, s.notifyHub)
 		default:
 			continue
 		}
@@ -369,9 +369,9 @@ func (s *Scheduler) scheduleCalendarSync() {
 		var task Task
 		switch source.SourceType {
 		case "caldav":
-			task = NewCalendarSyncTask(source, s.database, s.googleOAuth, s.microsoftOAuth)
+			task = NewCalendarSyncTask(source, s.database, s.googleOAuth, s.microsoftOAuth, s.notifyHub)
 		case "ics_url":
-			task = NewICSSyncTask(source, s.database)
+			task = NewICSSyncTask(source, s.database, s.notifyHub)
 		default:
 			log.Printf("Unknown source type: %s", source.SourceType)
 			continue

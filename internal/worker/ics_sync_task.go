@@ -13,20 +13,23 @@ import (
 	"github.com/yourusername/mailserver/internal/caldav/importer"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/notify"
 	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // ICSSyncTask represents an ICS URL synchronization task
 type ICSSyncTask struct {
-	source   *models.CalendarSource
-	database *db.DB
+	source    *models.CalendarSource
+	database  *db.DB
+	notifyHub *notify.Hub
 }
 
 // NewICSSyncTask creates a new ICS URL sync task
-func NewICSSyncTask(source *models.CalendarSource, database *db.DB) *ICSSyncTask {
+func NewICSSyncTask(source *models.CalendarSource, database *db.DB, notifyHub *notify.Hub) *ICSSyncTask {
 	return &ICSSyncTask{
-		source:   source,
-		database: database,
+		source:    source,
+		database:  database,
+		notifyHub: notifyHub,
 	}
 }
 
@@ -161,6 +164,14 @@ func (t *ICSSyncTask) doSync(ctx context.Context) error {
 		}
 		log.Printf("ICS sync applied: %d created, %d updated, %d deleted",
 			len(changes.Creates), len(changes.Updates), len(changes.DeleteUIDs))
+
+		if t.notifyHub != nil {
+			t.notifyHub.Publish(notify.Event{
+				UserID:     t.source.UserID,
+				Type:       notify.EventCalendarUpdated,
+				CalendarID: calendar.ID,
+			})
+		}
 	}
 
 	// Update last sync time (clears error on success)

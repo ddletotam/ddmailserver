@@ -176,6 +176,19 @@ impl MailProvider for ImapProvider {
         Ok(())
     }
 
+    async fn list_calendars(&self) -> Result<Vec<DesktopCalendar>, String> {
+        Err("Calendars require a DDMail server. Add an account on a server that supports the native protocol, or wait for standalone CalDAV support.".into())
+    }
+
+    async fn fetch_calendar_events(
+        &self,
+        _from_ms: i64,
+        _to_ms: i64,
+        _calendar_ids: &[i64],
+    ) -> Result<Vec<DesktopCalendarEvent>, String> {
+        Err("Calendars require a DDMail server.".into())
+    }
+
     fn provider_type(&self) -> &'static str {
         "imap"
     }

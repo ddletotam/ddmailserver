@@ -86,6 +86,8 @@ fn main() {
             commands::v2_fetch_identities,
             commands::v2_send_message,
             commands::v2_start_watching,
+            commands::v2_list_calendars,
+            commands::v2_fetch_calendar_events,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DDMail");

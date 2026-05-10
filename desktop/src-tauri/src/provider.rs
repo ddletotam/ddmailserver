@@ -90,6 +90,20 @@ pub trait MailProvider: Send + Sync {
         app: tauri::AppHandle,
     ) -> Result<(), String>;
 
+    /// List the user's calendars. Native-only feature; IMAP-only providers
+    /// return an error explaining the limitation.
+    async fn list_calendars(&self) -> Result<Vec<DesktopCalendar>, String>;
+
+    /// Fetch calendar events that overlap [from_ms, to_ms). When
+    /// `calendar_ids` is empty the server returns events for all of the
+    /// user's calendars (used on first paint before settings are loaded).
+    async fn fetch_calendar_events(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+        calendar_ids: &[i64],
+    ) -> Result<Vec<DesktopCalendarEvent>, String>;
+
     /// Provider type identifier.
     fn provider_type(&self) -> &'static str;
 }

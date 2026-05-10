@@ -17,10 +17,11 @@ var wsUpgrader = websocket.Upgrader{
 
 // WSEvent is the JSON frame sent to the client over WebSocket.
 type WSEvent struct {
-	Type   string `json:"type"`    // "new_message", "flags_changed", "expunge"
-	Folder string `json:"folder"`  // Mailbox name
-	Count  uint32 `json:"count"`   // Message count (for EXISTS)
-	UserID int64  `json:"user_id"` // For filtering
+	Type       string `json:"type"`                  // "new_message", "flags_changed", "expunge", "calendar_updated"
+	UserID     int64  `json:"user_id"`               // For filtering
+	Folder     string `json:"folder,omitempty"`      // Mailbox name (mail events)
+	Count      uint32 `json:"count,omitempty"`       // Message count for EXISTS (mail events)
+	CalendarID int64  `json:"calendar_id,omitempty"` // Affected calendar (calendar events)
 }
 
 // HandleDesktopWebSocket upgrades to WebSocket and streams push events.
@@ -87,10 +88,11 @@ func (s *Server) HandleDesktopWebSocket(w http.ResponseWriter, r *http.Request) 
 				return // Channel closed
 			}
 			wsEvent := WSEvent{
-				Type:   string(event.Type),
-				Folder: event.Mailbox,
-				Count:  event.Count,
-				UserID: event.UserID,
+				Type:       string(event.Type),
+				UserID:     event.UserID,
+				Folder:     event.Mailbox,
+				Count:      event.Count,
+				CalendarID: event.CalendarID,
 			}
 			data, _ := json.Marshal(wsEvent)
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))

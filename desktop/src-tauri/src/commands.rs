@@ -404,3 +404,28 @@ pub async fn v2_start_watching(
         .start_watching(app)
         .await
 }
+
+#[tauri::command]
+pub async fn v2_list_calendars(
+    registry: tauri::State<'_, ProviderRegistry>,
+    account_id: String,
+) -> Result<Vec<DesktopCalendar>, String> {
+    get_provider(&registry, &account_id)
+        .await?
+        .list_calendars()
+        .await
+}
+
+#[tauri::command]
+pub async fn v2_fetch_calendar_events(
+    registry: tauri::State<'_, ProviderRegistry>,
+    account_id: String,
+    from_ms: i64,
+    to_ms: i64,
+    calendar_ids: Vec<i64>,
+) -> Result<Vec<DesktopCalendarEvent>, String> {
+    get_provider(&registry, &account_id)
+        .await?
+        .fetch_calendar_events(from_ms, to_ms, &calendar_ids)
+        .await
+}
