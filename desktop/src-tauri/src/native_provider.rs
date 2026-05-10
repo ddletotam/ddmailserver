@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use tauri::{AppHandle, Emitter};
+use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite;
 
 use crate::provider::MailProvider;
@@ -9,24 +12,39 @@ use crate::types::*;
 
 /// DDMail native provider — communicates with our server via HTTP/2 + WebSocket
 /// instead of IMAP. Faster, richer features (server search, push for all folders).
+///
+/// The JWT is held behind an `RwLock` so it can be swapped in place when a 401
+/// triggers an auto-refresh. After a successful refresh the new token is
+/// emitted to the frontend (event `token-refreshed`) so it can be persisted to
+/// localStorage and survive app restarts.
 pub struct NativeProvider {
     server_url: String,
-    token: String,
+    token: Arc<RwLock<String>>,
     user_email: String,
     http: Client,
+    app: Option<AppHandle>,
+    account_id: String,
 }
 
 impl NativeProvider {
-    pub fn new(server_url: String, token: String, user_email: String) -> Self {
+    pub fn new(
+        server_url: String,
+        token: String,
+        user_email: String,
+        app: Option<AppHandle>,
+        account_id: String,
+    ) -> Self {
         let http = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_default();
         Self {
             server_url,
-            token,
+            token: Arc::new(RwLock::new(token)),
             user_email,
             http,
+            app,
+            account_id,
         }
     }
 
@@ -34,14 +52,77 @@ impl NativeProvider {
         format!("{}/api/desktop/v1{}", self.server_url, path)
     }
 
-    async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, String> {
+    /// Exchange the current (possibly expired) token for a fresh one.
+    /// Updates the in-memory token and notifies the frontend on success.
+    async fn refresh_token(&self) -> Result<(), String> {
+        let old = self.token.read().await.clone();
         let resp = self
             .http
-            .get(self.api_url(path))
-            .bearer_auth(&self.token)
+            .post(format!("{}/api/desktop/v1/auth/refresh", self.server_url))
+            .bearer_auth(&old)
             .send()
             .await
-            .map_err(|e| format!("HTTP GET {path}: {e}"))?;
+            .map_err(|e| format!("Refresh request: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("Refresh failed HTTP {status}: {body}"));
+        }
+
+        let data: serde_json::Value =
+            resp.json().await.map_err(|e| format!("Refresh parse: {e}"))?;
+        let new_token = data
+            .get("token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Refresh: missing token in response".to_string())?
+            .to_string();
+
+        *self.token.write().await = new_token.clone();
+
+        if let Some(app) = &self.app {
+            let _ = app.emit(
+                "token-refreshed",
+                serde_json::json!({
+                    "account_id": self.account_id,
+                    "token": new_token,
+                }),
+            );
+        }
+        log::info!("NativeProvider: token refreshed for account {}", self.account_id);
+        Ok(())
+    }
+
+    /// Send a request with auto-refresh on 401. The closure is called once
+    /// with the current token; if the response is 401, the token is refreshed
+    /// and the closure is invoked again with the new token.
+    async fn send_authed<F>(&self, build: F) -> Result<Response, String>
+    where
+        F: Fn(&Client, &str) -> RequestBuilder,
+    {
+        let token = self.token.read().await.clone();
+        let resp = build(&self.http, &token)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP: {e}"))?;
+
+        if resp.status() != StatusCode::UNAUTHORIZED {
+            return Ok(resp);
+        }
+
+        self.refresh_token().await?;
+        let new_token = self.token.read().await.clone();
+        build(&self.http, &new_token)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP: {e}"))
+    }
+
+    async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, String> {
+        let url = self.api_url(path);
+        let resp = self
+            .send_authed(|http, token| http.get(&url).bearer_auth(token))
+            .await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -59,14 +140,11 @@ impl NativeProvider {
         path: &str,
         body: &B,
     ) -> Result<T, String> {
+        let url = self.api_url(path);
+        let body_json = serde_json::to_value(body).map_err(|e| format!("JSON encode: {e}"))?;
         let resp = self
-            .http
-            .post(self.api_url(path))
-            .bearer_auth(&self.token)
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| format!("HTTP POST {path}: {e}"))?;
+            .send_authed(|http, token| http.post(&url).bearer_auth(token).json(&body_json))
+            .await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -153,13 +231,10 @@ impl MailProvider for NativeProvider {
         uid: u32,
     ) -> Result<String, String> {
         // uid here is actually the server message ID for native provider
+        let url = self.api_url(&format!("/messages/{uid}/source"));
         let resp = self
-            .http
-            .get(self.api_url(&format!("/messages/{uid}/source")))
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .map_err(|e| format!("HTTP: {e}"))?;
+            .send_authed(|http, token| http.get(&url).bearer_auth(token))
+            .await?;
 
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));
@@ -175,13 +250,10 @@ impl MailProvider for NativeProvider {
         _folder: &str,
         uid: u32,
     ) -> Result<Vec<u8>, String> {
+        let url = self.api_url(&format!("/messages/{uid}/source"));
         let resp = self
-            .http
-            .get(self.api_url(&format!("/messages/{uid}/source")))
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .map_err(|e| format!("HTTP: {e}"))?;
+            .send_authed(|http, token| http.get(&url).bearer_auth(token))
+            .await?;
 
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));
@@ -203,13 +275,10 @@ impl MailProvider for NativeProvider {
         content_id: &str,
     ) -> Result<InlinePart, String> {
         let cid_enc = urlencoding::encode(content_id);
+        let url = self.api_url(&format!("/messages/{message_id}/parts/{cid_enc}"));
         let resp = self
-            .http
-            .get(self.api_url(&format!("/messages/{message_id}/parts/{cid_enc}")))
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .map_err(|e| format!("HTTP: {e}"))?;
+            .send_authed(|http, token| http.get(&url).bearer_auth(token))
+            .await?;
 
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));
@@ -247,12 +316,12 @@ impl MailProvider for NativeProvider {
     }
 
     async fn start_watching(&self, app: AppHandle) -> Result<(), String> {
-        let ws_url = format!(
-            "{}/api/desktop/v1/ws?token={}",
-            self.server_url.replace("https://", "wss://").replace("http://", "ws://"),
-            self.token,
-        );
+        let ws_base = self
+            .server_url
+            .replace("https://", "wss://")
+            .replace("http://", "ws://");
         let user_email = self.user_email.clone();
+        let token = self.token.clone();
 
         tokio::spawn(async move {
             log::info!("NativeProvider: connecting WebSocket for {user_email}");
@@ -266,6 +335,8 @@ impl MailProvider for NativeProvider {
             .ok();
 
             loop {
+                let current_token = token.read().await.clone();
+                let ws_url = format!("{ws_base}/api/desktop/v1/ws?token={current_token}");
                 match tokio_tungstenite::connect_async(&ws_url).await {
                     Ok((ws_stream, _)) => {
                         log::info!("NativeProvider: WebSocket connected for {user_email}");

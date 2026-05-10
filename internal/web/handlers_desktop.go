@@ -55,6 +55,45 @@ func (s *Server) HandleDesktopLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// HandleDesktopRefresh issues a new JWT in exchange for any signature-valid
+// token (even if expired). The user must still exist and not be banned.
+func (s *Server) HandleDesktopRefresh(w http.ResponseWriter, r *http.Request) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		respondError(w, http.StatusUnauthorized, "missing authorization header")
+		return
+	}
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		respondError(w, http.StatusUnauthorized, "invalid authorization header")
+		return
+	}
+
+	claims, err := ValidateTokenAllowExpired(parts[1], s.jwtSecret)
+	if err != nil {
+		respondError(w, http.StatusUnauthorized, "invalid token")
+		return
+	}
+
+	user, err := s.database.GetUserByID(claims.UserID)
+	if err != nil || user.IsBanned() {
+		respondError(w, http.StatusUnauthorized, "user not found or banned")
+		return
+	}
+
+	token, err := GenerateToken(user.ID, user.Username, s.jwtSecret)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to generate token")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"token":    token,
+		"user_id":  user.ID,
+		"username": user.Username,
+	})
+}
+
 // ── Desktop auth middleware (Bearer token → full User in context) ──
 
 // DesktopAuthMiddleware validates a Bearer JWT and loads the full User object.

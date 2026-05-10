@@ -52,3 +52,23 @@ func ValidateToken(tokenString string, jwtSecret string) (*Claims, error) {
 
 	return claims, nil
 }
+
+// ValidateTokenAllowExpired verifies signature only, ignoring exp/iat.
+// Used by the refresh endpoint so a client with an expired-but-signed token
+// can swap it for a fresh one without re-entering the password.
+func ValidateTokenAllowExpired(tokenString string, jwtSecret string) (*Claims, error) {
+	claims := &Claims{}
+
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	_, err := parser.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("invalid signing method")
+		}
+		return []byte(jwtSecret), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return claims, nil
+}

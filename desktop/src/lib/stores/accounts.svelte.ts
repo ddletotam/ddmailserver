@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import type { Account } from "../types/mail";
 
 const STORAGE_KEY = "ddmail_accounts";
@@ -50,3 +51,9 @@ export const accountStore = {
     saveAccounts(accounts);
   },
 };
+
+// Persist refreshed JWTs from the Tauri backend. NativeProvider auto-refreshes
+// on 401 and emits this event so the new token survives the next app restart.
+listen<{ account_id: string; token: string }>("token-refreshed", (e) => {
+  accountStore.update(e.payload.account_id, { native_token: e.payload.token });
+}).catch((err) => console.warn("[accounts] token-refreshed listener failed:", err));
