@@ -269,6 +269,28 @@ impl MailProvider for NativeProvider {
         self.get("/identities").await
     }
 
+    async fn list_calendars(&self) -> Result<Vec<DesktopCalendar>, String> {
+        self.get("/calendars").await
+    }
+
+    async fn fetch_calendar_events(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+        calendar_ids: &[i64],
+    ) -> Result<Vec<DesktopCalendarEvent>, String> {
+        let mut path = format!("/calendar-events?from={from_ms}&to={to_ms}");
+        if !calendar_ids.is_empty() {
+            let ids = calendar_ids
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            path.push_str(&format!("&ids={ids}"));
+        }
+        self.get(&path).await
+    }
+
     async fn fetch_inline_part(
         &self,
         message_id: u32,
@@ -375,6 +397,16 @@ impl MailProvider for NativeProvider {
                                                     folder: folder.to_string(),
                                                     count,
                                                 },
+                                            )
+                                            .ok();
+                                        } else if event_type == "calendar_updated" {
+                                            let calendar_id = event
+                                                .get("calendar_id")
+                                                .and_then(|v| v.as_i64())
+                                                .unwrap_or(0);
+                                            app.emit(
+                                                "calendar-updated",
+                                                serde_json::json!({ "calendar_id": calendar_id }),
                                             )
                                             .ok();
                                         }

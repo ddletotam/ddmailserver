@@ -9,19 +9,28 @@ import (
 type EventType string
 
 const (
-	EventNewMessage   EventType = "new_message"
-	EventFlagsChanged EventType = "flags_changed"
-	EventExpunge      EventType = "expunge"
+	EventNewMessage      EventType = "new_message"
+	EventFlagsChanged    EventType = "flags_changed"
+	EventExpunge         EventType = "expunge"
+	EventCalendarUpdated EventType = "calendar_updated"
 )
 
-// Event represents a mailbox change notification
+// Event represents a notification about a user-visible change.
+// Mail and calendar events share the same hub so a single WS subscription
+// covers both. Mail-only fields stay zeroed for calendar events and vice
+// versa — JSON serialization in WSEvent uses omitempty to keep frames lean.
 type Event struct {
 	UserID   int64
-	FolderID int64
 	Type     EventType
-	Count    uint32 // Total message count (for EXISTS)
 	Username string // User's login name (for IMAP filtering)
+
+	// Mail fields
+	FolderID int64
+	Count    uint32 // Total message count (for EXISTS)
 	Mailbox  string // Mailbox name (e.g., "INBOX")
+
+	// Calendar fields
+	CalendarID int64 // Affected calendar (0 means "any calendar for this user")
 }
 
 // Hub manages pub/sub for mailbox notifications

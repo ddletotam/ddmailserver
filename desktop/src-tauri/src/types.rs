@@ -209,3 +209,46 @@ pub struct InlinePart {
     pub mime_type: String,
     pub content_b64: String,
 }
+
+// ── Calendar ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopCalendar {
+    pub id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub color: String,
+    pub source_type: String, // "local" | "caldav" | "ics_import" | "ics_url"
+    pub can_write: bool,
+    pub enabled: bool,
+    #[serde(default)]
+    pub timezone: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopCalendarEvent {
+    pub id: i64,
+    pub calendar_id: i64,
+    pub uid: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub location: String,
+    pub dtstart: i64,        // ms since epoch
+    pub dtend: Option<i64>,  // ms since epoch, may be null
+    pub all_day: bool,
+    #[serde(default)]
+    pub organizer_email: String,
+    #[serde(default)]
+    pub organizer_name: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub rrule: String,
+    #[serde(default)]
+    pub recurrence_id: String,
+}

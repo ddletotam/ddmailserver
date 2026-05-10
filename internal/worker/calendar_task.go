@@ -9,6 +9,7 @@ import (
 	caldavclient "github.com/yourusername/mailserver/internal/caldav/client"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/notify"
 	"github.com/yourusername/mailserver/internal/oauth"
 	"github.com/yourusername/mailserver/internal/timeutil"
 )
@@ -19,15 +20,17 @@ type CalendarSyncTask struct {
 	database       *db.DB
 	googleOAuth    *oauth.GoogleOAuth
 	microsoftOAuth *oauth.MicrosoftOAuth
+	notifyHub      *notify.Hub
 }
 
 // NewCalendarSyncTask creates a new calendar sync task
-func NewCalendarSyncTask(source *models.CalendarSource, database *db.DB, googleOAuth *oauth.GoogleOAuth, microsoftOAuth *oauth.MicrosoftOAuth) *CalendarSyncTask {
+func NewCalendarSyncTask(source *models.CalendarSource, database *db.DB, googleOAuth *oauth.GoogleOAuth, microsoftOAuth *oauth.MicrosoftOAuth, notifyHub *notify.Hub) *CalendarSyncTask {
 	return &CalendarSyncTask{
 		source:         source,
 		database:       database,
 		googleOAuth:    googleOAuth,
 		microsoftOAuth: microsoftOAuth,
+		notifyHub:      notifyHub,
 	}
 }
 
@@ -114,6 +117,17 @@ func (t *CalendarSyncTask) doSync(ctx context.Context) error {
 		}
 
 		log.Printf("Synced calendar: %s", cal.Name)
+
+		// Notify connected desktop clients that this calendar's events changed.
+		// Even if the actual sync produced no diffs, an extra refresh on the
+		// client is cheap and keeps "did anything come in" simple.
+		if t.notifyHub != nil {
+			t.notifyHub.Publish(notify.Event{
+				UserID:     t.source.UserID,
+				Type:       notify.EventCalendarUpdated,
+				CalendarID: cal.ID,
+			})
+		}
 	}
 
 	// Update last sync time (clears last_error on success)

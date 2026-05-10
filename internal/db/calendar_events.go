@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/lib/pq"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/timeutil"
 )
@@ -172,6 +173,44 @@ func (db *DB) GetEventByUID(calendarID int64, uid string) (*models.CalendarEvent
 	}
 
 	return event, nil
+}
+
+// GetEventsForCalendarsInRange retrieves events for multiple calendars within
+// a time window (ms since epoch). Used by the desktop API which requests
+// "events visible in the current view" with a single round-trip.
+//
+// Includes any event whose interval overlaps [startMs, endMs) and any event
+// with an RRule (recurring events expand to instances client-side; the row
+// has to come back even if the master DTSTART is outside the window).
+func (db *DB) GetEventsForCalendarsInRange(calendarIDs []int64, startMs, endMs int64) ([]*models.CalendarEvent, error) {
+	if len(calendarIDs) == 0 {
+		return []*models.CalendarEvent{}, nil
+	}
+
+	query := `
+		SELECT id, calendar_id, uid, COALESCE(remote_id, ''), ical_data,
+		       COALESCE(summary, ''), COALESCE(description, ''), COALESCE(location, ''),
+		       dtstart, dtend, all_day,
+		       COALESCE(organizer_email, ''), COALESCE(organizer_name, ''), COALESCE(sequence, 0), COALESCE(status, 'CONFIRMED'),
+		       COALESCE(rrule, ''), COALESCE(recurrence_id, ''), COALESCE(etag, ''), local_modified,
+		       created_at, updated_at
+		FROM calendar_events
+		WHERE calendar_id = ANY($1)
+		  AND soft_deleted_at IS NULL
+		  AND ((dtstart >= $2 AND dtstart < $3)
+		       OR (dtend > $2 AND dtend <= $3)
+		       OR (dtstart < $2 AND dtend > $3)
+		       OR rrule IS NOT NULL AND rrule <> '')
+		ORDER BY dtstart
+	`
+
+	rows, err := db.Query(query, pq.Array(calendarIDs), startMs, endMs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get events: %w", err)
+	}
+	defer rows.Close()
+
+	return scanCalendarEvents(rows)
 }
 
 // GetEventsByTimeRange retrieves events within a time range (ms since epoch)
