@@ -162,6 +162,19 @@
     return `${fmt(s)}–${fmt(new Date(ev.dtend))}`;
   }
 
+  // ── Sidebar collapse ──
+
+  const SIDEBAR_KEY = "ddmail_calendar_sidebar_open";
+  function loadSidebarOpen(): boolean {
+    const raw = localStorage.getItem(SIDEBAR_KEY);
+    return raw === null ? true : raw === "1";
+  }
+  let sidebarOpen = $state(loadSidebarOpen());
+  function toggleSidebar() {
+    sidebarOpen = !sidebarOpen;
+    try { localStorage.setItem(SIDEBAR_KEY, sidebarOpen ? "1" : "0"); } catch {}
+  }
+
   // ── Color picker popover state ──
 
   let pickerFor = $state<number | null>(null);
@@ -182,6 +195,19 @@
 
 <div class="cal">
   <header class="topbar">
+    <button
+      class="btn-toggle"
+      onclick={toggleSidebar}
+      title={sidebarOpen ? "Скрыть панель календарей" : "Показать панель календарей"}
+      aria-label="Toggle calendar panel"
+      aria-pressed={sidebarOpen}
+    >
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <line x1="4" y1="6" x2="20" y2="6"/>
+        <line x1="4" y1="12" x2="20" y2="12"/>
+        <line x1="4" y1="18" x2="20" y2="18"/>
+      </svg>
+    </button>
     <div class="nav">
       <button class="btn-nav" onclick={prevWeek} title="Предыдущая неделя" aria-label="Предыдущая неделя">‹</button>
       <button class="btn-today" onclick={thisWeek}>Сегодня</button>
@@ -190,7 +216,7 @@
     <h1 class="title">{fmtMonthYear(weekStart)}</h1>
   </header>
 
-  <div class="layout">
+  <div class="layout" class:sidebar-collapsed={!sidebarOpen}>
     <aside class="cal-list">
       <div class="cal-list-title">Календари</div>
       {#if calendarStore.loading && calendarStore.calendars.length === 0}
@@ -322,6 +348,17 @@
   .btn-nav:hover, .btn-today:hover { background: var(--bg-hover); }
   .title { font-size: 16px; font-weight: 600; margin: 0; text-transform: capitalize; }
 
+  .btn-toggle {
+    width: 36px; height: 36px;
+    display: flex; align-items: center; justify-content: center;
+    border: none; background: none;
+    border-radius: 8px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .btn-toggle:hover { background: var(--bg-hover); color: var(--text-primary); }
+
   .layout {
     flex: 1;
     display: flex;
@@ -336,6 +373,13 @@
     overflow-y: auto;
     padding: 12px 8px;
     background: var(--bg-primary);
+    transition: width 150ms ease, padding 150ms ease, border-color 150ms ease;
+  }
+  .layout.sidebar-collapsed .cal-list {
+    width: 0;
+    padding: 12px 0;
+    border-right-color: transparent;
+    overflow: hidden;
   }
   .cal-list-title {
     font-size: var(--font-size-xs);

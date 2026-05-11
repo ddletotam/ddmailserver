@@ -67,7 +67,6 @@ fn main() {
             imap::fetch_message_source,
             imap::download_attachment,
             imap::fetch_identities,
-            imap::fetch_avatar,
             imap::start_watching,
             smtp::send_message,
             open_url,

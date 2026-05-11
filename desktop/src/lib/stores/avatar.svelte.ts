@@ -21,18 +21,22 @@ async function load(email: string): Promise<string> {
   if (existing) return existing;
 
   const account = accountStore.activeAccount;
-  if (!account) return "";
+  if (!account) {
+    console.warn("[avatar] no active account, skipping", key);
+    return "";
+  }
+  console.log("[avatar] fetching", key);
 
   const promise = (async () => {
     try {
-      const b64 = await invoke<string>("v2_fetch_avatar", {
+      const res = await invoke<{ data: string; mime: string }>("v2_fetch_avatar", {
         accountId: account.id,
         email: key,
       });
-      // We don't know the MIME from the command; image/* + base64 is fine
-      // for all our sources (PNG/JPEG/WebP/SVG decode from the leading bytes
-      // regardless of the declared type when the browser sniffs).
-      const url = b64 ? `data:image/*;base64,${b64}` : "";
+      console.log("[avatar] result for", key, "mime=", res.mime, "bytes=", res.data?.length ?? 0);
+      // Real MIME from the source — `data:image/*;base64,...` doesn't render
+      // in Chromium, the spec requires a concrete type.
+      const url = res.data && res.mime ? `data:${res.mime};base64,${res.data}` : "";
       dataUrlByEmail.set(key, url);
       bumped++;
       return url;

@@ -406,34 +406,51 @@ pub async fn v2_start_watching(
 }
 
 /// Fetch an avatar via the active provider with a thin Tauri-side cache.
-/// Returns a base64-encoded payload + MIME string (or empty payload when no
-/// source has anything). Caller renders the initial-bubble fallback in that case.
+/// Returns `{data, mime}` — empty `data` means no source had anything and
+/// the caller should render an initial bubble. MIME is required so the
+/// frontend can put it in a valid `data:` URL (image/* doesn't render in
+/// Chromium).
+#[derive(serde::Serialize)]
+pub struct AvatarResult {
+    pub data: String, // base64
+    pub mime: String,
+}
+
 #[tauri::command]
 pub async fn v2_fetch_avatar(
     registry: tauri::State<'_, ProviderRegistry>,
     cache: tauri::State<'_, Cache>,
     account_id: String,
     email: String,
-) -> Result<String, String> {
+) -> Result<AvatarResult, String> {
     let lower = email.trim().to_lowercase();
     if lower.is_empty() {
-        return Ok(String::new());
+        return Ok(AvatarResult { data: String::new(), mime: String::new() });
     }
-    if let Some(bytes) = cache.get_avatar(&lower) {
+    if let Some((bytes, mime)) = cache.get_avatar(&lower) {
         if bytes.is_empty() {
-            return Ok(String::new());
+            return Ok(AvatarResult { data: String::new(), mime: String::new() });
         }
         use base64::Engine as _;
-        return Ok(base64::engine::general_purpose::STANDARD.encode(&bytes));
+        return Ok(AvatarResult {
+            data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            mime,
+        });
     }
     let provider = get_provider(&registry, &account_id).await?;
-    let bytes = provider.fetch_avatar(&lower).await.unwrap_or_default();
-    let _ = cache.save_avatar(&lower, &bytes);
+    let (bytes, mime) = provider
+        .fetch_avatar(&lower)
+        .await
+        .unwrap_or_else(|_| (Vec::new(), String::new()));
+    let _ = cache.save_avatar(&lower, &bytes, &mime);
     if bytes.is_empty() {
-        return Ok(String::new());
+        return Ok(AvatarResult { data: String::new(), mime: String::new() });
     }
     use base64::Engine as _;
-    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+    Ok(AvatarResult {
+        data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        mime,
+    })
 }
 
 #[tauri::command]

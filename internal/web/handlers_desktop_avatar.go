@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/gorilla/mux"
 	"github.com/yourusername/mailserver/internal/avatar"
 )
 
@@ -14,7 +13,9 @@ import (
 // found so the client can fall back to its initial-bubble render without
 // treating it as an error.
 //
-// URL: GET /api/desktop/v1/avatars/{email}
+// URL: GET /api/desktop/v1/avatars?email=info@apple.com
+// Query param keeps the address safe across nginx and the router; encoding
+// `@` in a path segment depends on `UseEncodedPath` plumbing we don't control.
 func (s *Server) HandleDesktopAvatar(w http.ResponseWriter, r *http.Request) {
 	user := s.GetUserFromContext(r.Context())
 	if user == nil {
@@ -22,7 +23,7 @@ func (s *Server) HandleDesktopAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	email := mux.Vars(r)["email"]
+	email := r.URL.Query().Get("email")
 	if email == "" {
 		respondError(w, http.StatusBadRequest, "email required")
 		return

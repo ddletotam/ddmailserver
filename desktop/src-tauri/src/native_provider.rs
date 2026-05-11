@@ -269,22 +269,30 @@ impl MailProvider for NativeProvider {
         self.get("/identities").await
     }
 
-    async fn fetch_avatar(&self, email: &str) -> Result<Vec<u8>, String> {
+    async fn fetch_avatar(&self, email: &str) -> Result<(Vec<u8>, String), String> {
         // Server walks the source chain and returns bytes (or 204 None).
+        // Email goes through as a query param — keeps `@`, `+`, dots etc.
+        // safe across nginx and gorilla/mux without depending on path encoding.
         let encoded = urlencoding::encode(email.trim());
-        let url = self.api_url(&format!("/avatars/{encoded}"));
+        let url = self.api_url(&format!("/avatars?email={encoded}"));
         let resp = self
             .send_authed(|http, token| http.get(&url).bearer_auth(token))
             .await?;
         let status = resp.status();
         if status.as_u16() == 204 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), String::new()));
         }
         if !status.is_success() {
             return Err(format!("HTTP {status}"));
         }
+        let mime = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.split(';').next().unwrap_or("").trim().to_string())
+            .unwrap_or_else(|| "image/png".to_string());
         let bytes = resp.bytes().await.map_err(|e| format!("read: {e}"))?;
-        Ok(bytes.to_vec())
+        Ok((bytes.to_vec(), mime))
     }
 
     async fn list_calendars(&self) -> Result<Vec<DesktopCalendar>, String> {
