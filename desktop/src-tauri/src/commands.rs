@@ -405,6 +405,37 @@ pub async fn v2_start_watching(
         .await
 }
 
+/// Fetch an avatar via the active provider with a thin Tauri-side cache.
+/// Returns a base64-encoded payload + MIME string (or empty payload when no
+/// source has anything). Caller renders the initial-bubble fallback in that case.
+#[tauri::command]
+pub async fn v2_fetch_avatar(
+    registry: tauri::State<'_, ProviderRegistry>,
+    cache: tauri::State<'_, Cache>,
+    account_id: String,
+    email: String,
+) -> Result<String, String> {
+    let lower = email.trim().to_lowercase();
+    if lower.is_empty() {
+        return Ok(String::new());
+    }
+    if let Some(bytes) = cache.get_avatar(&lower) {
+        if bytes.is_empty() {
+            return Ok(String::new());
+        }
+        use base64::Engine as _;
+        return Ok(base64::engine::general_purpose::STANDARD.encode(&bytes));
+    }
+    let provider = get_provider(&registry, &account_id).await?;
+    let bytes = provider.fetch_avatar(&lower).await.unwrap_or_default();
+    let _ = cache.save_avatar(&lower, &bytes);
+    if bytes.is_empty() {
+        return Ok(String::new());
+    }
+    use base64::Engine as _;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+}
+
 #[tauri::command]
 pub async fn v2_list_calendars(
     registry: tauri::State<'_, ProviderRegistry>,

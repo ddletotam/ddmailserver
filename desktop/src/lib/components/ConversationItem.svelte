@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Conversation } from "../types/mail";
   import { identityStore } from "../stores/identity.svelte";
+  import { avatarStore } from "../stores/avatar.svelte";
   import { formatDate, hashColor, initials, cleanName } from "../utils/format";
 
   interface Props {
@@ -19,6 +20,10 @@
   const identityColor = $derived.by(() => {
     return identityStore.loaded ? identityStore.colorForEmail(c.received_by) : "transparent";
   });
+  // Lazy avatar lookup keyed by counterpart email. Empty string until the
+  // first server response lands; the store bumps a reactivity counter so
+  // this $derived re-runs once data arrives.
+  const avatarUrl = $derived(cp?.addr ? avatarStore.urlFor(cp.addr) : "");
 </script>
 
 <button
@@ -30,11 +35,15 @@
   {onclick}
   {oncontextmenu}
 >
-  <!-- Avatar -->
+  <!-- Avatar: real image when we have one, initials bubble otherwise -->
   <div class="avatar-wrap">
-    <div class="avatar-initials" style:background={hashColor(c.id)}>
-      {initials(displayName)}
-    </div>
+    {#if avatarUrl}
+      <img class="avatar-img" src={avatarUrl} alt="" loading="lazy" />
+    {:else}
+      <div class="avatar-initials" style:background={hashColor(c.id)}>
+        {initials(displayName)}
+      </div>
+    {/if}
   </div>
 
   <!-- 2 lines -->
