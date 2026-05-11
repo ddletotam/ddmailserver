@@ -90,12 +90,11 @@ pub trait MailProvider: Send + Sync {
         app: tauri::AppHandle,
     ) -> Result<(), String>;
 
-    /// Fetch the avatar bytes for a remote email address.
-    /// Returns an empty Vec when no source has anything (Caller renders the
-    /// initial-bubble fallback). Native providers go through their server's
-    /// chain (CardDAV → Libravatar → Gravatar → BIMI → favicon); IMAP-only
-    /// providers fall back to Gravatar.
-    async fn fetch_avatar(&self, email: &str) -> Result<Vec<u8>, String>;
+    /// Fetch an avatar for the given email. Returns `(bytes, mime)`; bytes
+    /// are empty when no source has anything (the caller renders an initial-
+    /// bubble fallback). MIME flows through unchanged so the frontend can put
+    /// it in a `data:` URL — generic `image/*` doesn't render in Chromium.
+    async fn fetch_avatar(&self, email: &str) -> Result<(Vec<u8>, String), String>;
 
     /// List the user's calendars. Native-only feature; IMAP-only providers
     /// return an error explaining the limitation.

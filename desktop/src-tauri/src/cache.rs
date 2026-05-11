@@ -74,8 +74,12 @@ impl Cache {
             CREATE TABLE IF NOT EXISTS avatar_cache (
                 email TEXT PRIMARY KEY,
                 png_data BLOB,
+                mime TEXT NOT NULL DEFAULT '',
                 cached_at INTEGER NOT NULL DEFAULT 0
             );
+            -- Add mime column for installs that predate it (SQLite ignores
+            -- the error if it already exists; we just don't want to write a
+            -- separate version table for one column).
 
             CREATE TABLE IF NOT EXISTS contacts (
                 account_key TEXT NOT NULL,
@@ -132,6 +136,10 @@ impl Cache {
         conn.execute("ALTER TABLE message_bodies ADD COLUMN message_id TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE message_bodies ADD COLUMN in_reply_to TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE message_bodies ADD COLUMN references_json TEXT NOT NULL DEFAULT '[]'", []).ok();
+        conn.execute("ALTER TABLE avatar_cache ADD COLUMN mime TEXT NOT NULL DEFAULT ''", []).ok();
+        // Existing rows pre-MIME stored Gravatar PNG bytes — purge so the
+        // next lookup uses the new chain (and labels the result with a MIME).
+        conn.execute("DELETE FROM avatar_cache WHERE mime = ''", []).ok();
 
         Ok(Self { conn: Mutex::new(conn) })
     }
@@ -442,24 +450,35 @@ impl Cache {
         Ok(out)
     }
 
-    /// Get cached avatar PNG (if fresh enough — 7 days).
-    pub fn get_avatar(&self, email: &str) -> Option<Vec<u8>> {
+    /// Get cached avatar bytes + MIME if fresh enough (7d positive / 1d negative).
+    /// Returns None when the cache miss should trigger a refetch.
+    pub fn get_avatar(&self, email: &str) -> Option<(Vec<u8>, String)> {
         let conn = self.conn.lock().ok()?;
-        let week_ago = chrono::Utc::now().timestamp() - 7 * 86400;
-        conn.query_row(
-            "SELECT png_data FROM avatar_cache WHERE email = ?1 AND cached_at > ?2",
-            params![email, week_ago],
-            |row| row.get::<_, Vec<u8>>(0),
-        ).ok()
+        let now = chrono::Utc::now().timestamp();
+        let week_ago = now - 7 * 86400;
+        let day_ago = now - 86400;
+        // Empty payload = negative cache; expire after 1 day so transient
+        // failures (DNS hiccup, server restart) get re-tried sooner.
+        let row = conn.query_row(
+            "SELECT png_data, mime, cached_at FROM avatar_cache WHERE email = ?1",
+            params![email],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)),
+        ).ok()?;
+        let (data, mime, cached_at) = row;
+        let ttl_floor = if data.is_empty() { day_ago } else { week_ago };
+        if cached_at <= ttl_floor {
+            return None;
+        }
+        Some((data, mime))
     }
 
-    /// Save avatar PNG to cache.
-    pub fn save_avatar(&self, email: &str, png_data: &[u8]) -> Result<(), String> {
+    /// Save avatar bytes + MIME to cache. Empty data = negative cache row.
+    pub fn save_avatar(&self, email: &str, data: &[u8], mime: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
-            "INSERT OR REPLACE INTO avatar_cache (email, png_data, cached_at) VALUES (?1, ?2, ?3)",
-            params![email, png_data, now],
+            "INSERT OR REPLACE INTO avatar_cache (email, png_data, mime, cached_at) VALUES (?1, ?2, ?3, ?4)",
+            params![email, data, mime, now],
         ).map_err(|e| format!("ins avatar: {e}"))?;
         Ok(())
     }

@@ -1225,37 +1225,6 @@ where
 }
 
 #[tauri::command]
-pub async fn fetch_avatar(
-    cache: tauri::State<'_, Cache>,
-    email: String,
-) -> Result<String, String> {
-    let email_lower = email.trim().to_lowercase();
-
-    // Check cache first
-    if let Some(data) = cache.get_avatar(&email_lower) {
-        use base64::Engine;
-        return Ok(base64::engine::general_purpose::STANDARD.encode(&data));
-    }
-
-    // Fetch from Gravatar
-    let hash = gravatar_hash(&email_lower);
-    let url = format!("https://www.gravatar.com/avatar/{hash}?d=404&s=96");
-
-    let response = reqwest::get(&url).await.map_err(|e| format!("HTTP: {e}"))?;
-    if !response.status().is_success() {
-        return Ok(String::new()); // No gravatar
-    }
-
-    let bytes = response.bytes().await.map_err(|e| format!("read: {e}"))?;
-
-    // Cache it
-    cache.save_avatar(&email_lower, &bytes).ok();
-
-    use base64::Engine;
-    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
-}
-
-#[tauri::command]
 pub async fn start_watching(
     app: AppHandle<impl Runtime>,
     pool: tauri::State<'_, SessionPool>,

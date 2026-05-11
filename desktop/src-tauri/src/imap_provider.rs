@@ -177,7 +177,7 @@ impl MailProvider for ImapProvider {
         Ok(())
     }
 
-    async fn fetch_avatar(&self, email: &str) -> Result<Vec<u8>, String> {
+    async fn fetch_avatar(&self, email: &str) -> Result<(Vec<u8>, String), String> {
         // IMAP-only mode: Gravatar by md5(email).
         let trimmed = email.trim().to_lowercase();
         let hash = format!("{:x}", md5::Md5::new().chain_update(trimmed.as_bytes()).finalize());
@@ -188,10 +188,16 @@ impl MailProvider for ImapProvider {
             .map_err(|e| format!("client: {e}"))?;
         let resp = client.get(&url).send().await.map_err(|e| format!("HTTP: {e}"))?;
         if !resp.status().is_success() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), String::new()));
         }
+        let mime = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.split(';').next().unwrap_or("").trim().to_string())
+            .unwrap_or_else(|| "image/png".to_string());
         let bytes = resp.bytes().await.map_err(|e| format!("read: {e}"))?;
-        Ok(bytes.to_vec())
+        Ok((bytes.to_vec(), mime))
     }
 
     async fn list_calendars(&self) -> Result<Vec<DesktopCalendar>, String> {
