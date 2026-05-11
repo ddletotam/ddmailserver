@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/timeutil"
@@ -173,6 +174,54 @@ func (db *DB) GetContactByUID(addressBookID int64, uid string) (*models.Contact,
 		contact.Birthday = &val
 	}
 
+	return contact, nil
+}
+
+// GetContactByEmail finds a contact in any of the user's address books by
+// matching the lowercased email against email/email2/email3. Returns nil with
+// no error when nothing matches (avatar fetcher uses that to fall through to
+// the next source).
+func (db *DB) GetContactByEmail(userID int64, email string) (*models.Contact, error) {
+	lower := strings.ToLower(strings.TrimSpace(email))
+	if lower == "" {
+		return nil, nil
+	}
+
+	query := `
+		SELECT id, user_id, address_book_id, uid, COALESCE(remote_id, ''), vcard_data,
+		       COALESCE(full_name, ''), COALESCE(given_name, ''), COALESCE(family_name, ''), COALESCE(nickname, ''),
+		       COALESCE(email, ''), COALESCE(email2, ''), COALESCE(email3, ''),
+		       COALESCE(phone, ''), COALESCE(phone2, ''), COALESCE(phone3, ''),
+		       COALESCE(organization, ''), COALESCE(title, ''), COALESCE(department, ''),
+		       COALESCE(address, ''), COALESCE(notes, ''), COALESCE(photo_url, ''), birthday,
+		       COALESCE(etag, ''), local_modified, created_at, updated_at
+		FROM contacts
+		WHERE user_id = $1
+		  AND (LOWER(email) = $2 OR LOWER(email2) = $2 OR LOWER(email3) = $2)
+		LIMIT 1
+	`
+
+	contact := &models.Contact{}
+	var birthday sql.NullInt64
+	err := db.QueryRow(query, userID, lower).Scan(
+		&contact.ID, &contact.UserID, &contact.AddressBookID, &contact.UID, &contact.RemoteID, &contact.VCardData,
+		&contact.FullName, &contact.GivenName, &contact.FamilyName, &contact.Nickname,
+		&contact.Email, &contact.Email2, &contact.Email3,
+		&contact.Phone, &contact.Phone2, &contact.Phone3,
+		&contact.Organization, &contact.Title, &contact.Department,
+		&contact.Address, &contact.Notes, &contact.PhotoURL, &birthday,
+		&contact.ETag, &contact.LocalModified, &contact.CreatedAt, &contact.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get contact by email: %w", err)
+	}
+	if birthday.Valid {
+		val := birthday.Int64
+		contact.Birthday = &val
+	}
 	return contact, nil
 }
 

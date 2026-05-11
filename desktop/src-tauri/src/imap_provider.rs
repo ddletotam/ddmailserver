@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use md5::Digest;
 use tauri::AppHandle;
 
 use crate::imap;
@@ -174,6 +175,23 @@ impl MailProvider for ImapProvider {
         };
         self.pool.start_idle(app, creds).await;
         Ok(())
+    }
+
+    async fn fetch_avatar(&self, email: &str) -> Result<Vec<u8>, String> {
+        // IMAP-only mode: Gravatar by md5(email).
+        let trimmed = email.trim().to_lowercase();
+        let hash = format!("{:x}", md5::Md5::new().chain_update(trimmed.as_bytes()).finalize());
+        let url = format!("https://www.gravatar.com/avatar/{hash}?d=404&s=96");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .map_err(|e| format!("client: {e}"))?;
+        let resp = client.get(&url).send().await.map_err(|e| format!("HTTP: {e}"))?;
+        if !resp.status().is_success() {
+            return Ok(Vec::new());
+        }
+        let bytes = resp.bytes().await.map_err(|e| format!("read: {e}"))?;
+        Ok(bytes.to_vec())
     }
 
     async fn list_calendars(&self) -> Result<Vec<DesktopCalendar>, String> {

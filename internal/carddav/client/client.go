@@ -512,11 +512,23 @@ func (c *Client) parseVCard(card vcard.Card, book *models.AddressBook) (*models.
 		contact.Notes = note.Value
 	}
 
-	// Parse photo URL
+	// Parse photo — either a URL or inline base64. Inline values get stored as
+	// a `data:` URL so the avatar fetcher can decode them without touching the
+	// network. vCard parameters: TYPE=PNG / ENCODING=BASE64 hint at the MIME.
 	if photo := card.Get(vcard.FieldPhoto); photo != nil {
-		// Check if it's a URL
-		if strings.HasPrefix(photo.Value, "http") {
-			contact.PhotoURL = photo.Value
+		val := photo.Value
+		switch {
+		case strings.HasPrefix(val, "data:"):
+			contact.PhotoURL = val
+		case strings.HasPrefix(val, "http"):
+			contact.PhotoURL = val
+		case val != "":
+			// Inline base64 (vCard 3.0) — wrap into a data URL.
+			mime := "image/jpeg"
+			if t := photo.Params.Get("TYPE"); t != "" {
+				mime = "image/" + strings.ToLower(t)
+			}
+			contact.PhotoURL = "data:" + mime + ";base64," + val
 		}
 	}
 

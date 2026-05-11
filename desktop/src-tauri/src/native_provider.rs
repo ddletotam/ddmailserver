@@ -269,6 +269,24 @@ impl MailProvider for NativeProvider {
         self.get("/identities").await
     }
 
+    async fn fetch_avatar(&self, email: &str) -> Result<Vec<u8>, String> {
+        // Server walks the source chain and returns bytes (or 204 None).
+        let encoded = urlencoding::encode(email.trim());
+        let url = self.api_url(&format!("/avatars/{encoded}"));
+        let resp = self
+            .send_authed(|http, token| http.get(&url).bearer_auth(token))
+            .await?;
+        let status = resp.status();
+        if status.as_u16() == 204 {
+            return Ok(Vec::new());
+        }
+        if !status.is_success() {
+            return Err(format!("HTTP {status}"));
+        }
+        let bytes = resp.bytes().await.map_err(|e| format!("read: {e}"))?;
+        Ok(bytes.to_vec())
+    }
+
     async fn list_calendars(&self) -> Result<Vec<DesktopCalendar>, String> {
         self.get("/calendars").await
     }
