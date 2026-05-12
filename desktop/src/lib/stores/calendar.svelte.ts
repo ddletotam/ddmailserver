@@ -150,6 +150,13 @@ export const calendarStore = {
     loadEventsNow(account);
   },
 
+  /// Re-fetch the current window after a write the user made (RSVP, edit, …).
+  /// Caller does this so the chip on the card matches what's on the grid
+  /// without waiting for the WS push to round-trip.
+  async refreshAfterRSVP(account: Account) {
+    await loadEventsNow(account);
+  },
+
   async load(account: Account) {
     loading = true;
     try {

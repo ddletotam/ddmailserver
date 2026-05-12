@@ -110,6 +110,11 @@ pub trait MailProvider: Send + Sync {
         calendar_ids: &[i64],
     ) -> Result<Vec<DesktopCalendarEvent>, String>;
 
+    /// Update the requesting user's PARTSTAT on an event. PartStat must be
+    /// one of ACCEPTED / DECLINED / TENTATIVE. Returns the value the server
+    /// persisted so the caller can reconcile.
+    async fn rsvp_event(&self, event_id: i64, partstat: &str) -> Result<String, String>;
+
     /// Provider type identifier.
     fn provider_type(&self) -> &'static str;
 }

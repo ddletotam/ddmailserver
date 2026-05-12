@@ -9,6 +9,13 @@ export interface DesktopCalendar {
   timezone?: string;
 }
 
+export interface DesktopCalendarAttendee {
+  email: string;
+  name?: string;
+  role?: string;
+  partstat?: string;  // "ACCEPTED" | "DECLINED" | "TENTATIVE" | "NEEDS-ACTION" | "DELEGATED"
+}
+
 export interface DesktopCalendarEvent {
   id: number;
   calendar_id: number;
@@ -24,4 +31,5 @@ export interface DesktopCalendarEvent {
   status?: string;
   rrule?: string;
   recurrence_id?: string;
+  attendees?: DesktopCalendarAttendee[];
 }

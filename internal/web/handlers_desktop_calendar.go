@@ -20,23 +20,33 @@ type DesktopCalendar struct {
 	Timezone    string `json:"timezone,omitempty"`
 }
 
+// DesktopCalendarAttendee is the trimmed attendee shape; matches what the
+// desktop card renders (chips + RSVP pills for the matching identity).
+type DesktopCalendarAttendee struct {
+	Email    string `json:"email"`
+	Name     string `json:"name,omitempty"`
+	Role     string `json:"role,omitempty"`
+	PartStat string `json:"partstat,omitempty"`
+}
+
 // DesktopCalendarEvent flattens models.CalendarEvent for JSON over the wire.
 // Recurring events come back as the master record (client expands RRULE).
 type DesktopCalendarEvent struct {
-	ID             int64  `json:"id"`
-	CalendarID     int64  `json:"calendar_id"`
-	UID            string `json:"uid"`
-	Summary        string `json:"summary"`
-	Description    string `json:"description,omitempty"`
-	Location       string `json:"location,omitempty"`
-	DTStart        int64  `json:"dtstart"`        // ms since epoch
-	DTEnd          *int64 `json:"dtend"`          // ms since epoch, nullable
-	AllDay         bool   `json:"all_day"`
-	OrganizerEmail string `json:"organizer_email,omitempty"`
-	OrganizerName  string `json:"organizer_name,omitempty"`
-	Status         string `json:"status,omitempty"`
-	RRule          string `json:"rrule,omitempty"`
-	RecurrenceID   string `json:"recurrence_id,omitempty"`
+	ID             int64                     `json:"id"`
+	CalendarID     int64                     `json:"calendar_id"`
+	UID            string                    `json:"uid"`
+	Summary        string                    `json:"summary"`
+	Description    string                    `json:"description,omitempty"`
+	Location       string                    `json:"location,omitempty"`
+	DTStart        int64                     `json:"dtstart"`        // ms since epoch
+	DTEnd          *int64                    `json:"dtend"`          // ms since epoch, nullable
+	AllDay         bool                      `json:"all_day"`
+	OrganizerEmail string                    `json:"organizer_email,omitempty"`
+	OrganizerName  string                    `json:"organizer_name,omitempty"`
+	Status         string                    `json:"status,omitempty"`
+	RRule          string                    `json:"rrule,omitempty"`
+	RecurrenceID   string                    `json:"recurrence_id,omitempty"`
+	Attendees      []DesktopCalendarAttendee `json:"attendees,omitempty"`
 }
 
 // HandleDesktopCalendars returns all of the user's calendars (enabled + disabled).
@@ -142,6 +152,16 @@ func (s *Server) HandleDesktopCalendarEvents(w http.ResponseWriter, r *http.Requ
 
 	out := make([]DesktopCalendarEvent, 0, len(events))
 	for _, e := range events {
+		atts, _ := s.database.GetAttendeesByEventID(e.ID)
+		dtos := make([]DesktopCalendarAttendee, 0, len(atts))
+		for _, a := range atts {
+			dtos = append(dtos, DesktopCalendarAttendee{
+				Email:    a.Email,
+				Name:     a.Name,
+				Role:     a.Role,
+				PartStat: a.PartStat,
+			})
+		}
 		out = append(out, DesktopCalendarEvent{
 			ID:             e.ID,
 			CalendarID:     e.CalendarID,
@@ -157,6 +177,7 @@ func (s *Server) HandleDesktopCalendarEvents(w http.ResponseWriter, r *http.Requ
 			Status:         e.Status,
 			RRule:          e.RRule,
 			RecurrenceID:   e.RecurrenceID,
+			Attendees:      dtos,
 		})
 	}
 

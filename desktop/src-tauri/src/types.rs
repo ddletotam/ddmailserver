@@ -228,6 +228,17 @@ pub struct DesktopCalendar {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopCalendarAttendee {
+    pub email: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub partstat: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DesktopCalendarEvent {
     pub id: i64,
     pub calendar_id: i64,
@@ -251,4 +262,6 @@ pub struct DesktopCalendarEvent {
     pub rrule: String,
     #[serde(default)]
     pub recurrence_id: String,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
+    pub attendees: Vec<DesktopCalendarAttendee>,
 }
