@@ -22,7 +22,8 @@
     "@tiptap/extension-text-align": "^2.11",
     "@tiptap/extension-text-style": "^2.11",
     "@tiptap/extension-underline": "^2.11",
-    "@tiptap/starter-kit": "^2.11"
+    "@tiptap/starter-kit": "^2.11",
+    "rrule": "^2.8.1"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5",

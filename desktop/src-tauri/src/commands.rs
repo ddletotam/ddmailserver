@@ -477,3 +477,16 @@ pub async fn v2_fetch_calendar_events(
         .fetch_calendar_events(from_ms, to_ms, &calendar_ids)
         .await
 }
+
+#[tauri::command]
+pub async fn v2_rsvp_event(
+    registry: tauri::State<'_, ProviderRegistry>,
+    account_id: String,
+    event_id: i64,
+    partstat: String,
+) -> Result<String, String> {
+    get_provider(&registry, &account_id)
+        .await?
+        .rsvp_event(event_id, &partstat)
+        .await
+}

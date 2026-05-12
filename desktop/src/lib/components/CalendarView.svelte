@@ -1,18 +1,49 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
+  import { RRule } from "rrule";
   import { accountStore } from "../stores/accounts.svelte";
   import { mailStore } from "../stores/mail.svelte";
   import { calendarStore, PALETTE } from "../stores/calendar.svelte";
+  import EventDetail from "./EventDetail.svelte";
   import type { DesktopCalendarEvent } from "../types/calendar";
 
-  // Default view: 5 working days (Mon-Fri), 8:00-18:00, 15-minute subdivisions.
   const HOUR_HEIGHT = 60; // px per hour — 1 px per minute, 15 px per quarter
-  const startHour = 8;
-  const endHour = 18; // bottom edge — last hour cell is 17:00..18:00
-  const dayCount = 5;
-  const totalHeightPx = (endHour - startHour) * HOUR_HEIGHT;
 
-  const hours = Array.from({ length: endHour - startHour }, (_, i) => startHour + i);
+  // ── View prefs (persisted in localStorage) ──
+  //
+  // workdaysOnly: Mon-Fri vs full week.
+  // showNonWorkHours: 8:00-18:00 vs 0:00-24:00.
+
+  const DAYS_KEY = "ddmail_calendar_workdays_only";
+  const HOURS_KEY = "ddmail_calendar_show_nonwork";
+
+  function loadPref(key: string, def: boolean): boolean {
+    const raw = localStorage.getItem(key);
+    return raw === null ? def : raw === "1";
+  }
+  function savePref(key: string, v: boolean) {
+    try { localStorage.setItem(key, v ? "1" : "0"); } catch {}
+  }
+
+  let workdaysOnly = $state(loadPref(DAYS_KEY, true));
+  let showNonWorkHours = $state(loadPref(HOURS_KEY, false));
+
+  const dayCount = $derived(workdaysOnly ? 5 : 7);
+  const startHour = $derived(showNonWorkHours ? 0 : 8);
+  const endHour = $derived(showNonWorkHours ? 24 : 18);
+  const totalHeightPx = $derived((endHour - startHour) * HOUR_HEIGHT);
+  const hours = $derived(
+    Array.from({ length: endHour - startHour }, (_, i) => startHour + i),
+  );
+
+  function toggleWorkdays() {
+    workdaysOnly = !workdaysOnly;
+    savePref(DAYS_KEY, workdaysOnly);
+  }
+  function toggleNonWorkHours() {
+    showNonWorkHours = !showNonWorkHours;
+    savePref(HOURS_KEY, showNonWorkHours);
+  }
 
   function startOfWeek(d: Date): Date {
     const dow = d.getDay();          // Sun=0..Sat=6
@@ -25,7 +56,7 @@
 
   function endOfWeek(d: Date): Date {
     const e = new Date(d);
-    e.setDate(d.getDate() + dayCount); // exclusive end (Sat 00:00 when start = Mon)
+    e.setDate(d.getDate() + dayCount); // exclusive end
     e.setHours(0, 0, 0, 0);
     return e;
   }
@@ -109,43 +140,137 @@
 
   interface PlacedEvent {
     ev: DesktopCalendarEvent;
+    occStart: number; // ms — actual instance start (differs from ev.dtstart for RRULE)
+    occEnd: number;   // ms — actual instance end
     dayIndex: number;
     topPx: number;
     heightPx: number;
     color: string;
+    col: number;   // 0..cols-1 — horizontal slot within the overlap cluster
+    cols: number;  // how many slots wide the cluster is (≥1)
+  }
+
+  /// Expand an RRULE event's occurrences that overlap [from, to). Returns
+  /// the list of start timestamps (ms). When parsing fails (malformed rule,
+  /// rare iCal extensions) we fall back to the master DTSTART so the user
+  /// still sees *something* on that one date — better than silently dropping.
+  function expandRRule(ev: DesktopCalendarEvent, from: number, to: number): number[] {
+    if (!ev.rrule) return [ev.dtstart];
+    try {
+      const opts = RRule.parseString(ev.rrule);
+      opts.dtstart = new Date(ev.dtstart);
+      const rule = new RRule(opts);
+      const occs = rule.between(new Date(from), new Date(to), true);
+      return occs.map((d) => d.getTime());
+    } catch (e) {
+      console.warn("[calendar] RRULE parse failed", ev.uid, ev.rrule, e);
+      return [ev.dtstart];
+    }
   }
 
   function placeEvents(): PlacedEvent[] {
     const placed: PlacedEvent[] = [];
     const minView = weekStart.getTime();
     const maxView = endOfWeek(weekStart).getTime();
+    const duration = (ev: DesktopCalendarEvent) =>
+      (ev.dtend ?? ev.dtstart + 60 * 60 * 1000) - ev.dtstart;
 
     for (const ev of calendarStore.events) {
       if (ev.all_day) continue; // all-day band not implemented yet
-      if (ev.dtstart >= maxView) continue;
-      const end = ev.dtend ?? ev.dtstart + 60 * 60 * 1000; // default 1h if missing
-      if (end <= minView) continue;
 
-      const startDate = new Date(ev.dtstart);
-      const dayMidnight = new Date(startDate);
-      dayMidnight.setHours(0, 0, 0, 0);
-      const dayIndex = Math.round((dayMidnight.getTime() - weekStart.getTime()) / (24 * 60 * 60 * 1000));
-      if (dayIndex < 0 || dayIndex >= dayCount) continue;
+      // For non-recurring events, the master dtstart IS the occurrence.
+      // For recurring, expand within the current view window so a weekly
+      // standup created last year appears every week.
+      const occurrences = ev.rrule
+        ? expandRRule(ev, minView, maxView)
+        : (ev.dtstart < maxView && (ev.dtend ?? ev.dtstart) > minView ? [ev.dtstart] : []);
 
-      const startMin = (startDate.getHours() - startHour) * 60 + startDate.getMinutes();
-      const durationMin = Math.max(15, Math.round((end - ev.dtstart) / 60000));
-      const top = startMin; // 1 px/min
-      const height = durationMin;
+      const dur = duration(ev);
 
-      placed.push({
-        ev,
-        dayIndex,
-        topPx: top,
-        heightPx: height,
-        color: calendarStore.colorFor(ev.calendar_id),
-      });
+      for (const occStart of occurrences) {
+        const occEnd = occStart + dur;
+        if (occStart >= maxView || occEnd <= minView) continue;
+
+        const startDate = new Date(occStart);
+        const dayMidnight = new Date(startDate);
+        dayMidnight.setHours(0, 0, 0, 0);
+        const dayIndex = Math.round(
+          (dayMidnight.getTime() - weekStart.getTime()) / (24 * 60 * 60 * 1000),
+        );
+        if (dayIndex < 0 || dayIndex >= dayCount) continue;
+
+        const startMin = (startDate.getHours() - startHour) * 60 + startDate.getMinutes();
+        const durationMin = Math.max(15, Math.round(dur / 60000));
+        const top = startMin; // 1 px/min
+        const height = durationMin;
+
+        placed.push({
+          ev,
+          occStart,
+          occEnd,
+          dayIndex,
+          topPx: top,
+          heightPx: height,
+          color: calendarStore.colorFor(ev.calendar_id),
+          col: 0,
+          cols: 1,
+        });
+      }
     }
+    assignColumns(placed);
     return placed;
+  }
+
+  /// Distribute overlapping events into vertical column slots, Google-Calendar
+  /// style. Same algorithm: sweep events sorted by start, place each in the
+  /// first column whose last event ended at-or-before this one's start;
+  /// otherwise allocate a new column. Events that share an overlap cluster
+  /// (transitive overlap) all get `cols` = the cluster's column count, so a
+  /// 3-way overlap renders as three equal-width slots even if only two events
+  /// pairwise overlap at any single instant.
+  function assignColumns(events: PlacedEvent[]) {
+    const byDay = new Map<number, PlacedEvent[]>();
+    for (const p of events) {
+      const arr = byDay.get(p.dayIndex) ?? [];
+      arr.push(p);
+      byDay.set(p.dayIndex, arr);
+    }
+    for (const dayEvents of byDay.values()) {
+      dayEvents.sort((a, b) => a.occStart - b.occStart || a.occEnd - b.occEnd);
+
+      // Break the day into clusters of transitive overlap. Within a cluster,
+      // every event ends after the next event starts at least once removed.
+      let i = 0;
+      while (i < dayEvents.length) {
+        let clusterEnd = dayEvents[i].occEnd;
+        let j = i + 1;
+        while (j < dayEvents.length && dayEvents[j].occStart < clusterEnd) {
+          clusterEnd = Math.max(clusterEnd, dayEvents[j].occEnd);
+          j++;
+        }
+        // Cluster is dayEvents[i..j). Assign columns.
+        const cluster = dayEvents.slice(i, j);
+        const colEnds: number[] = []; // index → end time of last event in that column
+        for (const ev of cluster) {
+          let placed = false;
+          for (let c = 0; c < colEnds.length; c++) {
+            if (ev.occStart >= colEnds[c]) {
+              ev.col = c;
+              colEnds[c] = ev.occEnd;
+              placed = true;
+              break;
+            }
+          }
+          if (!placed) {
+            ev.col = colEnds.length;
+            colEnds.push(ev.occEnd);
+          }
+        }
+        const cols = colEnds.length;
+        for (const ev of cluster) ev.cols = cols;
+        i = j;
+      }
+    }
   }
 
   const placedEvents = $derived(placeEvents());
@@ -154,12 +279,10 @@
     return placedEvents.filter((p) => p.dayIndex === idx);
   }
 
-  function fmtTimeRange(ev: DesktopCalendarEvent): string {
-    const s = new Date(ev.dtstart);
+  function fmtTimeRange(p: PlacedEvent): string {
     const fmt = (d: Date) =>
       `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-    if (!ev.dtend) return fmt(s);
-    return `${fmt(s)}–${fmt(new Date(ev.dtend))}`;
+    return `${fmt(new Date(p.occStart))}–${fmt(new Date(p.occEnd))}`;
   }
 
   // ── Sidebar collapse ──
@@ -173,6 +296,16 @@
   function toggleSidebar() {
     sidebarOpen = !sidebarOpen;
     try { localStorage.setItem(SIDEBAR_KEY, sidebarOpen ? "1" : "0"); } catch {}
+  }
+
+  // ── Event detail card ──
+
+  let openedEvent = $state<PlacedEvent | null>(null);
+  function openEvent(p: PlacedEvent) {
+    openedEvent = p;
+  }
+  function closeEvent() {
+    openedEvent = null;
   }
 
   // ── Color picker popover state ──
@@ -193,7 +326,7 @@
 
 <svelte:window onclick={closePicker} />
 
-<div class="cal">
+<div class="cal" style:--day-count={dayCount}>
   <header class="topbar">
     <button
       class="btn-toggle"
@@ -202,10 +335,14 @@
       aria-label="Toggle calendar panel"
       aria-pressed={sidebarOpen}
     >
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-        <line x1="4" y1="6" x2="20" y2="6"/>
-        <line x1="4" y1="12" x2="20" y2="12"/>
-        <line x1="4" y1="18" x2="20" y2="18"/>
+      <!-- Chevron points toward where the panel will go: left when open
+           (collapse to the left), right when collapsed (expand back out). -->
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        {#if sidebarOpen}
+          <polyline points="15 18 9 12 15 6"/>
+        {:else}
+          <polyline points="9 18 15 12 9 6"/>
+        {/if}
       </svg>
     </button>
     <div class="nav">
@@ -214,6 +351,25 @@
       <button class="btn-nav" onclick={nextWeek} title="Следующая неделя" aria-label="Следующая неделя">›</button>
     </div>
     <h1 class="title">{fmtMonthYear(weekStart)}</h1>
+
+    <div class="view-toggles">
+      <button
+        class="btn-toggle-pill"
+        class:on={!workdaysOnly}
+        onclick={toggleWorkdays}
+        title="5 рабочих / вся неделя"
+      >
+        {workdaysOnly ? "5 дней" : "7 дней"}
+      </button>
+      <button
+        class="btn-toggle-pill"
+        class:on={showNonWorkHours}
+        onclick={toggleNonWorkHours}
+        title="Показывать нерабочее время"
+      >
+        {showNonWorkHours ? "0–24" : "8–18"}
+      </button>
+    </div>
   </header>
 
   <div class="layout" class:sidebar-collapsed={!sidebarOpen}>
@@ -294,15 +450,19 @@
                 <div class="quarter q60"></div>
               </div>
             {/each}
-            {#each eventsForDay(di) as p (p.ev.id)}
+            {#each eventsForDay(di) as p (p.ev.id + ":" + p.occStart)}
+              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
               <div
                 class="event"
                 style:top="{p.topPx}px"
                 style:height="{p.heightPx}px"
+                style:left="calc({(p.col / p.cols) * 100}% + 2px)"
+                style:width="calc({(1 / p.cols) * 100}% - 4px)"
                 style:background={p.color}
                 title={p.ev.summary}
+                ondblclick={() => openEvent(p)}
               >
-                <div class="ev-time">{fmtTimeRange(p.ev)}</div>
+                <div class="ev-time">{fmtTimeRange(p)}</div>
                 <div class="ev-title">{p.ev.summary || "(без названия)"}</div>
               </div>
             {/each}
@@ -311,6 +471,15 @@
       </div>
     </div>
   </div>
+
+  {#if openedEvent}
+    <EventDetail
+      event={openedEvent.ev}
+      occStart={openedEvent.occStart}
+      occEnd={openedEvent.occEnd}
+      onclose={closeEvent}
+    />
+  {/if}
 </div>
 
 <style>
@@ -358,6 +527,29 @@
     flex-shrink: 0;
   }
   .btn-toggle:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+  .view-toggles {
+    margin-left: auto;
+    display: flex;
+    gap: 6px;
+  }
+  .btn-toggle-pill {
+    padding: 6px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: var(--font-size-sm);
+    cursor: pointer;
+    transition: background var(--transition), color var(--transition), border-color var(--transition);
+  }
+  .btn-toggle-pill:hover { background: var(--bg-hover); color: var(--text-primary); }
+  .btn-toggle-pill.on {
+    background: var(--text-accent);
+    border-color: var(--text-accent);
+    color: var(--text-on-active);
+  }
 
   .layout {
     flex: 1;
@@ -459,7 +651,7 @@
   }
   .day-row {
     display: grid;
-    grid-template-columns: 60px repeat(5, 1fr);
+    grid-template-columns: 60px repeat(var(--day-count, 5), 1fr);
     border-bottom: 1px solid var(--border-color);
     background: var(--bg-primary);
     flex-shrink: 0;
@@ -478,7 +670,7 @@
 
   .body {
     display: grid;
-    grid-template-columns: 60px repeat(5, 1fr);
+    grid-template-columns: 60px repeat(var(--day-count, 5), 1fr);
     overflow-y: auto;
     flex: 1;
     min-height: 0;
@@ -514,11 +706,12 @@
   .q15, .q45 { border-bottom: 1px dotted var(--border-color); }
   .q30 { border-bottom: 1px dashed var(--border-color); }
 
-  /* ── Events ── */
+  /* ── Events ──
+     left/width are set inline based on col/cols so overlapping events split
+     the day column horizontally instead of stacking opaquely on top of each
+     other. */
   .event {
     position: absolute;
-    left: 2px;
-    right: 2px;
     border-radius: 4px;
     padding: 2px 6px;
     color: #fff;

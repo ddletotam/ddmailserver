@@ -317,6 +317,16 @@ impl MailProvider for NativeProvider {
         self.get(&path).await
     }
 
+    async fn rsvp_event(&self, event_id: i64, partstat: &str) -> Result<String, String> {
+        let body = serde_json::json!({ "partstat": partstat });
+        let resp: serde_json::Value = self.post(&format!("/events/{event_id}/rsvp"), &body).await?;
+        Ok(resp
+            .get("partstat")
+            .and_then(|v| v.as_str())
+            .unwrap_or(partstat)
+            .to_string())
+    }
+
     async fn fetch_inline_part(
         &self,
         message_id: u32,

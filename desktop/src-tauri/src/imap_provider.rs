@@ -213,6 +213,10 @@ impl MailProvider for ImapProvider {
         Err("Calendars require a DDMail server.".into())
     }
 
+    async fn rsvp_event(&self, _event_id: i64, _partstat: &str) -> Result<String, String> {
+        Err("RSVP requires a DDMail server.".into())
+    }
+
     fn provider_type(&self) -> &'static str {
         "imap"
     }
