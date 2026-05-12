@@ -192,12 +192,11 @@ func (f *Fetcher) fromFavicon(ctx context.Context, domain string) *Result {
 			return &Result{Data: data, MIME: mime, Source: "favicon"}
 		}
 	}
-	// Last resort — Google's favicon mirror works even when the domain itself
-	// doesn't serve a favicon at a guessable path.
-	mirror := "https://www.google.com/s2/favicons?domain=" + url.QueryEscape(domain) + "&sz=64"
-	if data, mime, ok := f.fetchURL(ctx, mirror); ok {
-		return &Result{Data: data, MIME: mime, Source: "favicon"}
-	}
+	// Deliberately no third-party favicon mirror. Forwarding every sender's
+	// domain to Google's / DuckDuckGo's API would leak the user's address book
+	// to an external service — exactly the kind of trade-off a self-hosted
+	// mail server exists to avoid. If the sender doesn't serve a favicon, the
+	// client falls through to the initials bubble.
 	return nil
 }
 
@@ -251,13 +250,23 @@ func lookupBIMI(ctx context.Context, domain string) (string, bool) {
 		return "", false
 	}
 	for _, rec := range records {
-		// Some resolvers split long TXTs into chunks — join before regex.
-		if m := bimiL.FindStringSubmatch(rec); len(m) == 2 {
-			u := strings.Trim(m[1], "\"'")
-			if strings.HasPrefix(u, "http") {
-				return u, true
-			}
+		m := bimiL.FindStringSubmatch(rec)
+		if len(m) != 2 {
+			continue
 		}
+		raw := strings.Trim(m[1], "\"'")
+		// BIMI's `l=` is attacker-controlled DNS data. Spec mandates HTTPS
+		// (RFC draft-blank-ietf-bimi, §3.1), so refuse http:// and anything
+		// non-URL entirely. `url.Parse` also catches the `httpfoo` near-match
+		// that the previous `strings.HasPrefix` accepted.
+		u, err := url.Parse(raw)
+		if err != nil {
+			continue
+		}
+		if u.Scheme != "https" {
+			continue
+		}
+		return raw, true
 	}
 	return "", false
 }
@@ -265,7 +274,20 @@ func lookupBIMI(ctx context.Context, domain string) (string, bool) {
 // fetchURL pulls a URL with a per-source deadline and basic content sniffing.
 // Returns false when the response is non-2xx, an HTML page, or larger than
 // maxBytes (some servers return a 200 HTML 404 page for missing favicons).
+//
+// Targets are resolved and checked against the private/loopback/link-local
+// ranges before the request goes out. Without this, a malicious BIMI DNS
+// record could point `l=` at http://10.0.0.2/admin and use the server's
+// fetcher as an SSRF probe into the LAN.
 func (f *Fetcher) fetchURL(ctx context.Context, urlStr string) ([]byte, string, bool) {
+	u, err := url.Parse(urlStr)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
+		return nil, "", false
+	}
+	if !hostIsPublic(ctx, u.Hostname()) {
+		return nil, "", false
+	}
+
 	cctx, cancel := context.WithTimeout(ctx, perSourceTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(cctx, "GET", urlStr, nil)
@@ -307,6 +329,43 @@ func (f *Fetcher) fetchURL(ctx context.Context, urlStr string) ([]byte, string, 
 		return nil, "", false
 	}
 	return body, mime, true
+}
+
+// hostIsPublic resolves the hostname and refuses if any answer is in a
+// private / loopback / link-local / CGNAT range. Used by fetchURL to keep
+// attacker-controlled BIMI / favicon URLs from being weaponized as an SSRF
+// probe against internal infrastructure.
+//
+// Resolution is intentionally synchronous — the per-source deadline already
+// bounds it, and avoiding a TOCTOU between resolve and connect matters more
+// than the few ms saved by skipping the check on the hot path.
+func hostIsPublic(ctx context.Context, host string) bool {
+	if host == "" {
+		return false
+	}
+	resolver := &net.Resolver{}
+	cctx, cancel := context.WithTimeout(ctx, perSourceTimeout)
+	defer cancel()
+	addrs, err := resolver.LookupIPAddr(cctx, host)
+	if err != nil || len(addrs) == 0 {
+		return false
+	}
+	for _, a := range addrs {
+		ip := a.IP
+		if ip == nil {
+			return false
+		}
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() ||
+			ip.IsMulticast() || ip.IsUnspecified() {
+			return false
+		}
+		// 100.64.0.0/10 — Carrier-Grade NAT, also non-routable on the public Internet.
+		if ip4 := ip.To4(); ip4 != nil && ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+			return false
+		}
+	}
+	return true
 }
 
 // decodeDataURL extracts MIME + payload from a `data:image/png;base64,...` URL.

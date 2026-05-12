@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use tauri::{AppHandle, Emitter};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio_tungstenite::tungstenite;
 
 use crate::provider::MailProvider;
@@ -24,6 +24,12 @@ pub struct NativeProvider {
     http: Client,
     app: Option<AppHandle>,
     account_id: String,
+    // Serializes concurrent refreshes so parallel 401s don't fan out into N
+    // refresh round trips (each using the same stale token, with only the
+    // first having well-defined behaviour). Whoever wins the mutex performs
+    // the actual exchange; latecomers observe the already-rotated token
+    // and short-circuit.
+    refresh_lock: Arc<Mutex<()>>,
 }
 
 impl NativeProvider {
@@ -45,6 +51,7 @@ impl NativeProvider {
             http,
             app,
             account_id,
+            refresh_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -54,12 +61,27 @@ impl NativeProvider {
 
     /// Exchange the current (possibly expired) token for a fresh one.
     /// Updates the in-memory token and notifies the frontend on success.
-    async fn refresh_token(&self) -> Result<(), String> {
-        let old = self.token.read().await.clone();
+    ///
+    /// `seen_token` is what the caller had in hand when its request hit 401.
+    /// We acquire the refresh lock and, *under the lock*, compare seen vs.
+    /// current; if a parallel caller already rotated, we return success
+    /// immediately. Otherwise we perform the exchange. This is the standard
+    /// single-flight pattern: N concurrent 401s produce one refresh.
+    async fn refresh_token(&self, seen_token: &str) -> Result<(), String> {
+        let _guard = self.refresh_lock.lock().await;
+
+        // Under the lock — has someone already refreshed for us?
+        {
+            let current = self.token.read().await;
+            if current.as_str() != seen_token {
+                return Ok(());
+            }
+        }
+
         let resp = self
             .http
             .post(format!("{}/api/desktop/v1/auth/refresh", self.server_url))
-            .bearer_auth(&old)
+            .bearer_auth(seen_token)
             .send()
             .await
             .map_err(|e| format!("Refresh request: {e}"))?;
@@ -110,7 +132,9 @@ impl NativeProvider {
             return Ok(resp);
         }
 
-        self.refresh_token().await?;
+        // Pass the token that hit 401 so refresh_token can short-circuit if
+        // a concurrent request already rotated under us.
+        self.refresh_token(&token).await?;
         let new_token = self.token.read().await.clone();
         build(&self.http, &new_token)
             .send()

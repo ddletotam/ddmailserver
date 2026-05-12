@@ -138,11 +138,20 @@ func (s *Server) applyEditAll(event *models.CalendarEvent, req *EventPatchReques
 
 // applyEditFuture splits the recurring series: the master's RRULE gets a
 // new UNTIL clause one millisecond before the edited instance, and a new
-// event row with a fresh UID inherits the remaining recurrences starting
+// event row with a derived UID inherits the remaining recurrences starting
 // at the edited instance with the modified fields applied.
+//
+// Idempotent on retry: the continuation UID is derived deterministically
+// from the master UID + cutoff, so a duplicate request finds the existing
+// continuation via GetEventByUID and updates fields in place rather than
+// creating a second row.
 func (s *Server) applyEditFuture(master *models.CalendarEvent, cal *models.Calendar, req *EventPatchRequest) (*models.CalendarEvent, error) {
-	// 1. Cap the master series. The UNTIL value is expressed in UTC per spec.
 	cutoff := req.RecurrenceID - 1 // one ms before the edited instance
+	contUID := fmt.Sprintf("%s-cont-%d@ddmailserver", master.UID, req.RecurrenceID)
+
+	// 1. Cap the master series — safe to repeat: addUntilToRRule replaces
+	// any existing UNTIL clause, so re-running the operation produces the
+	// same capped value.
 	cappedRule := addUntilToRRule(master.RRule, timeutil.FromMs(cutoff))
 	master.RRule = cappedRule
 	if newICal, ok := capRRuleInICal(master.ICalData, cappedRule); ok {
@@ -153,15 +162,35 @@ func (s *Server) applyEditFuture(master *models.CalendarEvent, cal *models.Calen
 		return nil, fmt.Errorf("update master: %w", err)
 	}
 
-	// 2. Build the continuation event. It inherits master's fields, applies
-	// the edit, gets a new UID, and starts at the edited instance.
+	// 2. Resolve continuation: either an existing row from a prior call, or
+	// a fresh one. Updating in place on retry avoids two duplicate halves
+	// hanging around after a network glitch.
+	existing, _ := s.database.GetEventByUID(master.CalendarID, contUID)
 	duration := int64(0)
 	if master.DTEnd != nil && *master.DTEnd > master.DTStart {
 		duration = *master.DTEnd - master.DTStart
 	}
+	if existing != nil {
+		applyFieldsToModel(existing, req)
+		if req.DTStart == nil {
+			existing.DTStart = req.RecurrenceID
+		}
+		if req.DTEnd == nil && duration > 0 {
+			end := existing.DTStart + duration
+			existing.DTEnd = &end
+		}
+		existing.RRule = stripUntilFromRRule(master.RRule)
+		existing.ICalData = generateICalData(existing)
+		existing.LocalModified = true
+		if err := s.database.UpdateCalendarEvent(existing); err != nil {
+			return nil, fmt.Errorf("update continuation: %w", err)
+		}
+		return existing, nil
+	}
+
 	cont := *master
 	cont.ID = 0
-	cont.UID = generateUID()
+	cont.UID = contUID
 	cont.RemoteID = ""
 	cont.ETag = ""
 	cont.RRule = stripUntilFromRRule(master.RRule)
