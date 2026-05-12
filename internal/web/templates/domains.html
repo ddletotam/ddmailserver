@@ -90,7 +90,7 @@
                         <span class="badge bg-secondary-lt">{{t "domains.disabled"}}</span>
                         {{end}}
                     </td>
-                    <td class="text-muted">{{.CreatedAt.Format "2006-01-02"}}</td>
+                    <td class="text-muted">{{fmtTime .CreatedAt "2006-01-02"}}</td>
                     <td>
                         <div class="btn-list flex-nowrap">
                             <button hx-post="/api/domains/{{.ID}}/toggle"
@@ -158,7 +158,7 @@
                         <span class="badge bg-secondary-lt">{{t "domains.disabled"}}</span>
                         {{end}}
                     </td>
-                    <td class="text-muted">{{.CreatedAt.Format "2006-01-02"}}</td>
+                    <td class="text-muted">{{fmtTime .CreatedAt "2006-01-02"}}</td>
                     <td>
                         <div class="btn-list flex-nowrap">
                             <button hx-post="/api/mailboxes/{{.ID}}/toggle"

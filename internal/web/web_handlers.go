@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/mux"
 	imapclient "github.com/yourusername/mailserver/internal/imap/client"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 //go:embed templates/*
@@ -132,6 +133,17 @@ func (s *Server) buildFuncMap(data interface{}) template.FuncMap {
 			}
 			return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
 		},
+		// fmtTime formats a unix-ms timestamp. Templates used to call
+		// `.Field.Format "..."` when these fields were time.Time; after the
+		// 693f9ae migration to int64 ms those calls panic the template and
+		// return 500. Existing pages should swap to `{{fmtTime .Field "..."}}`.
+		// Returns "—" for zero so an unset timestamp doesn't render as 1970.
+		"fmtTime": func(ms int64, layout string) string {
+			if ms == 0 {
+				return "—"
+			}
+			return timeutil.FromMs(ms).Local().Format(layout)
+		},
 	}
 }
 
@@ -245,10 +257,7 @@ func (s *Server) HandleAccountsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Render just the accounts-list template
-	funcMap := template.FuncMap{
-		"t": s.i18n.T,
-	}
-	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templatesFS, "templates/accounts.html")
+	tmpl, err := template.New("").Funcs(s.buildFuncMap(data)).ParseFS(templatesFS, "templates/accounts.html")
 	if err != nil {
 		log.Printf("Error parsing template: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -528,8 +537,7 @@ func (s *Server) HandleToggleAccountWeb(w http.ResponseWriter, r *http.Request) 
 	}
 
 	data := AccountsData{Accounts: accounts}
-	funcMap := template.FuncMap{"t": s.i18n.T}
-	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templatesFS, "templates/accounts.html")
+	tmpl, err := template.New("").Funcs(s.buildFuncMap(data)).ParseFS(templatesFS, "templates/accounts.html")
 	if err != nil {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
