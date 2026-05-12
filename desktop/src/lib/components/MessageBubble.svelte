@@ -13,12 +13,26 @@
     message: MessageBody;
     isFirstInGroup: boolean;
     isLastInGroup: boolean;
+    /** True when the parent conversation has multiple counterparts. Incoming
+     *  bubbles in groups prefix the subject with the sender's display name so
+     *  the reader can tell who said what without scrolling to the From line. */
+    inGroupConversation?: boolean;
     parent?: MessageBody | null;
     onreply?: (msg: MessageBody) => void;
     onforward?: (msg: MessageBody) => void;
     onjump?: (msg: MessageBody) => void;
   }
-  let { message, isFirstInGroup, isLastInGroup, parent = null, onreply, onforward, onjump }: Props = $props();
+  let { message, isFirstInGroup, isLastInGroup, inGroupConversation = false, parent = null, onreply, onforward, onjump }: Props = $props();
+
+  const groupSenderName = $derived.by(() => {
+    if (!inGroupConversation || message.is_outgoing) return "";
+    const raw = (message.from || message.from_addr || "").trim();
+    // `from` may be "Display Name <email>" or just an email — strip the angle-
+    // bracket address part, fall back to the bare from_addr.
+    const lt = raw.indexOf("<");
+    const cleaned = lt > 0 ? raw.slice(0, lt).trim().replace(/^"+|"+$/g, "") : raw;
+    return cleaned || message.from_addr;
+  });
 
   const parentPreview = $derived.by(() => {
     if (!parent) return "";
@@ -39,6 +53,9 @@
   let showSource = $state(false);
   let sourceText = $state("");
   let sourceLoading = $state(false);
+
+  // "Load all" for this message — remembered per component instance
+  let loadAllOnce = $state(false);
 
   // Permission state — read reactive values here so $derived tracks them
   // Domains referenced in this message's HTML
@@ -101,8 +118,6 @@
     displayMode = displayMode === "text" ? "html" : "text";
   }
 
-  // "Load all" for this message — remembered per component instance
-  let loadAllOnce = $state(false);
   function loadAllInMessage() {
     loadAllOnce = true;
     contextMenu = null;
@@ -163,8 +178,10 @@
         </span>
       </button>
     {/if}
-    {#if message.subject}
-      <div class="subject">{message.subject}</div>
+    {#if message.subject || groupSenderName}
+      <div class="subject">
+        {#if groupSenderName}<span class="subject-sender">{groupSenderName}</span>{#if message.subject} : {/if}{/if}{message.subject}
+      </div>
     {/if}
 
     {#if displayContent.type === "html"}
@@ -330,6 +347,8 @@
     max-width: 85%;
     min-width: 25%;
     margin-bottom: 6px;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 200px;
   }
   /* HTML emails: stretch bubble to full available width */
   .bubble-wrap.has-html {
@@ -373,6 +392,7 @@
     margin-bottom: 2px;
     color: var(--text-primary);
   }
+  .subject-sender { color: var(--text-accent); }
 
   .reply-quote {
     display: flex;

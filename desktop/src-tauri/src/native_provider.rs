@@ -249,6 +249,18 @@ impl MailProvider for NativeProvider {
         Ok(())
     }
 
+    async fn delete_messages(
+        &self,
+        messages: &[MessageRef],
+    ) -> Result<(), String> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        let body = serde_json::json!({ "messages": messages });
+        let _: serde_json::Value = self.post("/messages/delete", &body).await?;
+        Ok(())
+    }
+
     async fn fetch_message_source(
         &self,
         _folder: &str,

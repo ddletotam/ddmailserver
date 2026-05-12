@@ -421,6 +421,73 @@ export const mailStore = {
     conversationMessages = [...conversationMessages, msg];
   },
 
+  /** Soft-delete every message in a conversation and drop the conversation
+   *  from the local list. Closes the chat if it was the active one. */
+  async deleteConversation(account: Account, conv: Conversation) {
+    const id = conv.id;
+    try {
+      await invoke("v2_delete_messages", {
+        accountId: account.id,
+        messages: conv.messages,
+      });
+    } catch (e) {
+      console.error("[mail] delete conversation failed:", e);
+      throw e;
+    }
+    conversations = conversations.filter((c) => c.id !== id);
+    if (pinnedIds.has(id)) {
+      const next = new Set(pinnedIds);
+      next.delete(id);
+      pinnedIds = next;
+      savePinned(pinnedIds);
+    }
+    if (activeConversationId === id) {
+      activeConversationId = null;
+      conversationMessages = [];
+      draftMessage = null;
+    }
+  },
+
+  /** Mark every message in a conversation as \Seen (server-side + local count). */
+  async markConversationRead(account: Account, conv: Conversation) {
+    if (conv.unread_count === 0) return;
+    conv.unread_count = 0;
+    conversations = [...conversations];
+    try {
+      await invoke("v2_set_flags_batch", {
+        accountId: account.id,
+        messages: conv.messages,
+        flags: "\\Seen",
+        add: true,
+      });
+    } catch (e) {
+      console.warn("[mail] mark read failed:", e);
+    }
+  },
+
+  /** Mark every conversation in the list as read. Coalesces all message refs
+   *  across conversations into a single batched STORE on the server side. */
+  async markAllRead(account: Account) {
+    const unread = conversations.filter((c) => c.unread_count > 0);
+    if (unread.length === 0) return;
+    const refs: MessageRef[] = [];
+    for (const c of unread) {
+      c.unread_count = 0;
+      for (const m of c.messages) refs.push(m);
+    }
+    conversations = [...conversations];
+    try {
+      await invoke("v2_set_flags_batch", {
+        accountId: account.id,
+        messages: refs,
+        flags: "\\Seen",
+        add: true,
+      });
+    } catch (e) {
+      console.warn("[mail] mark all read failed:", e);
+    }
+  },
+
   /** Re-fetch the open conversation's messages from server (used to reconcile after optimistic send). */
   async refreshActive(account: Account) {
     const id = activeConversationId;

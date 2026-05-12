@@ -52,6 +52,7 @@ impl Cache {
                 avatar_hash TEXT NOT NULL DEFAULT '',
                 counterpart_name TEXT NOT NULL DEFAULT '',
                 counterpart_addr TEXT NOT NULL DEFAULT '',
+                counterparts_json TEXT NOT NULL DEFAULT '[]',
                 is_group INTEGER NOT NULL DEFAULT 0,
                 last_date TEXT NOT NULL DEFAULT '',
                 last_date_ts INTEGER NOT NULL DEFAULT 0,
@@ -133,6 +134,7 @@ impl Cache {
         conn.execute("ALTER TABLE conversations ADD COLUMN avatar_hash TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE conversations ADD COLUMN received_by TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE conversations ADD COLUMN last_subject TEXT NOT NULL DEFAULT ''", []).ok();
+        conn.execute("ALTER TABLE conversations ADD COLUMN counterparts_json TEXT NOT NULL DEFAULT '[]'", []).ok();
         conn.execute("ALTER TABLE message_bodies ADD COLUMN message_id TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE message_bodies ADD COLUMN in_reply_to TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE message_bodies ADD COLUMN references_json TEXT NOT NULL DEFAULT '[]'", []).ok();
@@ -161,14 +163,16 @@ impl Cache {
         for conv in conversations {
             let cp_name = conv.counterparts.first().map(|c| c.name.as_str()).unwrap_or("");
             let cp_addr = conv.counterparts.first().map(|c| c.addr.as_str()).unwrap_or("");
+            let cps_json = serde_json::to_string(&conv.counterparts)
+                .map_err(|e| format!("serialize counterparts: {e}"))?;
 
             tx.execute(
                 "INSERT INTO conversations (id, account_key, label, avatar_hash, received_by, counterpart_name, counterpart_addr, \
-                 is_group, last_date, last_date_ts, last_subject, unread_count, total_count, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                 counterparts_json, is_group, last_date, last_date_ts, last_subject, unread_count, total_count, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     conv.id, account_key, conv.label, conv.avatar_hash, conv.received_by, cp_name, cp_addr,
-                    conv.is_group as i32, conv.last_date, conv.last_date_ts,
+                    cps_json, conv.is_group as i32, conv.last_date, conv.last_date_ts,
                     conv.last_subject, conv.unread_count, conv.total_count, now
                 ],
             ).map_err(|e| format!("ins conv: {e}"))?;
@@ -203,7 +207,7 @@ impl Cache {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
 
         let mut stmt = conn.prepare(
-            "SELECT id, label, avatar_hash, received_by, counterpart_name, counterpart_addr, is_group, \
+            "SELECT id, label, avatar_hash, received_by, counterpart_name, counterpart_addr, counterparts_json, is_group, \
              last_date, last_date_ts, last_subject, unread_count, total_count \
              FROM conversations WHERE account_key = ?1 ORDER BY last_date_ts DESC"
         ).map_err(|e| format!("prepare: {e}"))?;
@@ -214,21 +218,30 @@ impl Cache {
                 row.get::<_, String>(1)?,   // label
                 row.get::<_, String>(2)?,   // avatar_hash
                 row.get::<_, String>(3)?,   // received_by
-                row.get::<_, String>(4)?,   // cp_name
-                row.get::<_, String>(5)?,   // cp_addr
-                row.get::<_, bool>(6)?,     // is_group
-                row.get::<_, String>(7)?,   // last_date
-                row.get::<_, i64>(8)?,      // last_date_ts
-                row.get::<_, String>(9)?,   // last_subject
-                row.get::<_, u32>(10)?,     // unread_count
-                row.get::<_, u32>(11)?,     // total_count
+                row.get::<_, String>(4)?,   // cp_name (legacy)
+                row.get::<_, String>(5)?,   // cp_addr (legacy)
+                row.get::<_, String>(6)?,   // counterparts_json
+                row.get::<_, bool>(7)?,     // is_group
+                row.get::<_, String>(8)?,   // last_date
+                row.get::<_, i64>(9)?,      // last_date_ts
+                row.get::<_, String>(10)?,  // last_subject
+                row.get::<_, u32>(11)?,     // unread_count
+                row.get::<_, u32>(12)?,     // total_count
             ))
         }).map_err(|e| format!("query: {e}"))?;
 
         let mut conversations = Vec::new();
         for row in rows {
-            let (id, label, avatar_hash, received_by, cp_name, cp_addr, is_group, last_date, last_date_ts,
+            let (id, label, avatar_hash, received_by, cp_name, cp_addr, cps_json, is_group, last_date, last_date_ts,
                  last_subject, unread_count, total_count) = row.map_err(|e| format!("row: {e}"))?;
+
+            // Prefer the JSON column. Rows written before that migration will
+            // store an empty array there — fall back to the legacy single-pair
+            // columns for those.
+            let counterparts: Vec<ContactInfo> = serde_json::from_str(&cps_json)
+                .ok()
+                .filter(|v: &Vec<ContactInfo>| !v.is_empty())
+                .unwrap_or_else(|| vec![ContactInfo { name: cp_name, addr: cp_addr }]);
 
             // Load message refs
             let mut msg_stmt = conn.prepare(
@@ -245,7 +258,7 @@ impl Cache {
                 label,
                 avatar_hash,
                 received_by,
-                counterparts: vec![ContactInfo { name: cp_name, addr: cp_addr }],
+                counterparts,
                 is_group,
                 last_date,
                 last_date_ts,

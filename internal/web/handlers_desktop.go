@@ -353,6 +353,42 @@ func (s *Server) HandleDesktopSetFlags(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// HandleDesktopDeleteMessages soft-deletes a batch of messages by ID. Used by
+// the "Delete conversation" action in the desktop sidebar — soft delete keeps
+// the rows around (and out of the conversation list, since GetMessagesByUser
+// filters them) so the user can recover from vault if needed.
+func (s *Server) HandleDesktopDeleteMessages(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		respondError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var req struct {
+		Messages []struct {
+			Folder string `json:"folder"`
+			UID    int64  `json:"uid"`
+		} `json:"messages"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	deleted := 0
+	for _, ref := range req.Messages {
+		msg, err := s.database.GetMessageByID(ref.UID)
+		if err != nil || msg.UserID != user.ID {
+			continue
+		}
+		if err := s.database.SoftDeleteMessage(ref.UID); err == nil {
+			deleted++
+		}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]int{"deleted": deleted})
+}
+
 // ── Identities ──
 
 // HandleDesktopIdentities returns the user's email identities.
@@ -610,14 +646,10 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 	identities := s.collectIdentities(user.ID)
 	isOurs := func(addr string) bool { return identities[strings.ToLower(addr)] }
 
-	// Fetch messages across all folders (generous limit to cover grouping)
-	messages, err := s.database.GetMessagesByUser(user.ID, limit*5, 0)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to get messages")
-		return
-	}
-
-	// Build folder ID→name map
+	// Per-folder fetch mirroring the IMAP fallback path: pull recent rows from
+	// INBOX/Sent/Drafts only. Trash/Spam/Archive stay invisible in the chat
+	// list. Per-folder limits keep this O(limit) regardless of total mailbox
+	// size, which matters once user inboxes grow into the tens of thousands.
 	folders, _ := s.database.GetFoldersByUser(user.ID)
 	folderNames := make(map[int64]string)
 	folderAccount := make(map[int64]int64)
@@ -651,42 +683,69 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 	}
 	sort.Strings(sortedIdentities)
 
-	// Group by (my_id, counterpart)
-	type convKey struct{ myID, cp string }
-	convMap := make(map[convKey][]msgEntry)
+	type folderQuota struct {
+		id    int64
+		quota int
+	}
+	quotas := []folderQuota{}
+	for _, f := range folders {
+		switch f.Type {
+		case "inbox":
+			quotas = append(quotas, folderQuota{f.ID, limit})
+		case "sent":
+			quotas = append(quotas, folderQuota{f.ID, limit / 2})
+		case "drafts":
+			quotas = append(quotas, folderQuota{f.ID, limit / 4})
+		}
+	}
+
+	messages := []*models.Message{}
+	for _, q := range quotas {
+		if q.quota <= 0 {
+			continue
+		}
+		batch, err := s.database.GetMessagesByFolder(q.id, q.quota, 0)
+		if err != nil {
+			log.Printf("HandleDesktopConversations: GetMessagesByFolder %d: %v", q.id, err)
+			continue
+		}
+		// GetMessagesByFolder doesn't filter by user — guard at the call site.
+		for _, m := range batch {
+			if m.UserID == user.ID {
+				messages = append(messages, m)
+			}
+		}
+	}
+
+	// Group by (my_id, sorted_counterparts). For 1:1 messages this collapses to
+	// the historical (my_id, single_cp) key — preserving the "{my_id}|{cp}" id
+	// format that pinned-conversation localStorage and search-result handlers
+	// depend on. For multi-recipient mail (To+Cc has >1 non-self address, or
+	// the sender is not among our identities and other recipients exist) we
+	// keep all counterparts in the key so each unique participant set forms its
+	// own group conversation.
+	type convKey struct {
+		myID string
+		cps  string // comma-joined sorted unique counterpart addresses
+	}
+	type convMeta struct {
+		entries []msgEntry
+		cpAddrs []string // canonical sorted counterpart list for this key
+	}
+	convMap := make(map[convKey]*convMeta)
 
 	for _, msg := range messages {
 		fromLc := strings.ToLower(extractEmail(msg.From))
 		fname := folderNames[msg.FolderID]
 
-		var myID, cp string
+		recipients := parseRecipientAddrs(msg.To, msg.Cc)
+
+		// Pick myID: for outgoing, the sender; for incoming, the first of our
+		// addresses present in To/Cc.
+		var myID string
 		if isOurs(fromLc) {
-			// Outgoing: counterpart = first non-self in to+cc
-			recipients := parseRecipientAddrs(msg.To, msg.Cc)
-			cp = ""
-			for _, r := range recipients {
-				if !isOurs(r) {
-					cp = r
-					break
-				}
-			}
-			if cp == "" {
-				// All recipients are ours — pick first that differs from sender
-				for _, r := range recipients {
-					if r != fromLc {
-						cp = r
-						break
-					}
-				}
-			}
-			if cp == "" {
-				continue
-			}
 			myID = fromLc
 		} else {
-			// Incoming: my_id = first of our addrs in to+cc
-			recipients := parseRecipientAddrs(msg.To, msg.Cc)
-			myID = ""
 			for _, r := range recipients {
 				if isOurs(r) {
 					myID = r
@@ -713,17 +772,42 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 				// reloads and across users with the same identity set.
 				myID = sortedIdentities[0]
 			}
-			cp = fromLc
 		}
 
-		key := convKey{myID: myID, cp: cp}
-		convMap[key] = append(convMap[key], msgEntry{msg: msg, folderName: fname})
+		// Counterparts = union of (from, to, cc) minus our identities, deduped
+		// and sorted for canonical key form. Skip pure self-traffic.
+		seen := map[string]bool{}
+		cps := []string{}
+		add := func(a string) {
+			if a == "" || isOurs(a) || seen[a] {
+				return
+			}
+			seen[a] = true
+			cps = append(cps, a)
+		}
+		add(fromLc)
+		for _, r := range recipients {
+			add(r)
+		}
+		if len(cps) == 0 {
+			continue
+		}
+		sort.Strings(cps)
+
+		key := convKey{myID: myID, cps: strings.Join(cps, ",")}
+		meta, ok := convMap[key]
+		if !ok {
+			meta = &convMeta{cpAddrs: cps}
+			convMap[key] = meta
+		}
+		meta.entries = append(meta.entries, msgEntry{msg: msg, folderName: fname})
 	}
 
 	// Build conversation objects
 	convs := []DesktopConversation{}
 
-	for key, entries := range convMap {
+	for key, meta := range convMap {
+		entries := meta.entries
 		// Sort by date ascending
 		sortEntriesByDate(entries)
 
@@ -747,32 +831,52 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 
 		// Stats from regular messages
 		unread := 0
-		var lastMsg *msgEntry
+		var firstMsg, lastMsg *msgEntry
 		for i := range regular {
 			if !regular[i].msg.Seen {
 				unread++
+			}
+			if firstMsg == nil {
+				firstMsg = &regular[i]
 			}
 			lastMsg = &regular[i]
 		}
 		if lastMsg == nil && lastDraft != nil {
 			lastMsg = lastDraft
 		}
-
-		// Display name for counterpart
-		cpName := ""
-		for _, e := range entries {
-			fromLc := strings.ToLower(extractEmail(e.msg.From))
-			if fromLc == key.cp {
-				name := extractName(e.msg.From)
-				if name != "" && !strings.Contains(name, "@") {
-					cpName = name
-					break
-				}
-			}
+		if firstMsg == nil {
+			firstMsg = lastMsg
 		}
-		label := cpName
-		if label == "" {
-			label = key.cp
+
+		// Resolve display names for each counterpart from any message in the
+		// thread that referenced them (From for incoming, To/Cc names for
+		// outgoing). First match wins. Anything that looks like a raw address
+		// is dropped — those are useless as labels.
+		cpInfos := make([]DesktopContactInfo, 0, len(meta.cpAddrs))
+		for _, addr := range meta.cpAddrs {
+			cpInfos = append(cpInfos, DesktopContactInfo{Addr: addr, Name: nameForAddr(entries, addr)})
+		}
+
+		isGroup := len(meta.cpAddrs) > 1
+
+		// 1:1: label = counterpart name (or addr).
+		// Group: label = first message subject + " (N чел)" where N counts all
+		// human participants (counterparts + me).
+		var label string
+		var id string
+		if isGroup {
+			subject := strings.TrimSpace(firstMsg.msg.Subject)
+			if subject == "" {
+				subject = "(без темы)"
+			}
+			label = fmt.Sprintf("%s (%d чел)", subject, len(meta.cpAddrs)+1)
+			id = fmt.Sprintf("%s|group:%s", key.myID, key.cps)
+		} else {
+			label = cpInfos[0].Name
+			if label == "" {
+				label = cpInfos[0].Addr
+			}
+			id = fmt.Sprintf("%s|%s", key.myID, key.cps)
 		}
 
 		// Build message refs
@@ -792,23 +896,24 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 			}
 		}
 
+		// Avatar: use the first counterpart for both 1:1 and groups (groups
+		// would ideally show a stack but that's UI-side).
+		avatarSeed := cpInfos[0].Addr
+
 		conv := DesktopConversation{
-			ID:         fmt.Sprintf("%s|%s", key.myID, key.cp),
-			Label:      label,
-			AvatarHash: gravatarHash(key.cp),
-			ReceivedBy: key.myID,
-			Counterparts: []DesktopContactInfo{{
-				Name: cpName,
-				Addr: key.cp,
-			}},
-			IsGroup:     false,
-			LastDate:    timeutil.FromMs(lastMsg.msg.Date).Format(time.RFC1123Z),
-			LastDateTS:  lastMsg.msg.Date / 1000,
-			LastSubject: lastMsg.msg.Subject,
-			UnreadCount: unread,
-			TotalCount:  len(regular),
-			Messages:    msgRefs,
-			Draft:       draftRef,
+			ID:           id,
+			Label:        label,
+			AvatarHash:   gravatarHash(avatarSeed),
+			ReceivedBy:   key.myID,
+			Counterparts: cpInfos,
+			IsGroup:      isGroup,
+			LastDate:     timeutil.FromMs(lastMsg.msg.Date).Format(time.RFC1123Z),
+			LastDateTS:   lastMsg.msg.Date / 1000,
+			LastSubject:  lastMsg.msg.Subject,
+			UnreadCount:  unread,
+			TotalCount:   len(regular),
+			Messages:     msgRefs,
+			Draft:        draftRef,
 		}
 		convs = append(convs, conv)
 	}
@@ -834,6 +939,36 @@ func parseRecipientAddrs(to, cc string) []string {
 		}
 	}
 	return result
+}
+
+// nameForAddr looks across thread messages for a display name attached to a
+// specific address (in From or in any To/Cc entry). Returns the first match
+// that isn't itself an email-looking string; empty string if none found.
+func nameForAddr(entries []msgEntry, addr string) string {
+	addrLc := strings.ToLower(addr)
+	for _, e := range entries {
+		// Check From
+		if strings.ToLower(extractEmail(e.msg.From)) == addrLc {
+			if n := extractName(e.msg.From); n != "" && !strings.Contains(n, "@") {
+				return n
+			}
+		}
+		// Check each "Name <email>" in To and Cc
+		for _, field := range []string{e.msg.To, e.msg.Cc} {
+			for _, part := range strings.Split(field, ",") {
+				part = strings.TrimSpace(part)
+				if part == "" {
+					continue
+				}
+				if strings.ToLower(extractEmail(part)) == addrLc {
+					if n := extractName(part); n != "" && !strings.Contains(n, "@") {
+						return n
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // extractName extracts display name from "Name <email>" format.

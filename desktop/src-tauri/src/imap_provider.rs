@@ -103,6 +103,18 @@ impl MailProvider for ImapProvider {
         })
     }
 
+    async fn delete_messages(
+        &self,
+        messages: &[MessageRef],
+    ) -> Result<(), String> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        with_session!(self, |session| {
+            imap::delete_messages_impl(&mut session, messages).await
+        })
+    }
+
     async fn fetch_message_source(
         &self,
         folder: &str,

@@ -306,7 +306,7 @@ pub(crate) async fn connect_tls(host: &str, port: u16, username: &str, password:
     let tls_stream = tls.connect(host, tcp.compat())
         .await.map_err(|e| format!("TLS: {e}"))?;
     let client = async_imap::Client::new(tls_stream);
-    client.login(username, password).await.map_err(|e| format!("Login: {:?}", e.0))
+    client.login(username, password).await.map_err(|e| crate::session::friendly_login_error(e.0))
 }
 
 pub(crate) async fn connect_plain(host: &str, port: u16, username: &str, password: &str)
@@ -315,7 +315,7 @@ pub(crate) async fn connect_plain(host: &str, port: u16, username: &str, passwor
     let tcp = tokio::net::TcpStream::connect((host, port))
         .await.map_err(|e| format!("TCP: {e}"))?;
     let client = async_imap::Client::new(tcp.compat());
-    client.login(username, password).await.map_err(|e| format!("Login: {:?}", e.0))
+    client.login(username, password).await.map_err(|e| crate::session::friendly_login_error(e.0))
 }
 
 // ── Commands ──
@@ -478,49 +478,55 @@ where
         }
     }
 
-    // Group into conversations by (counterpart, my_identity) pair.
-    // Same counterpart with two different identities = two separate conversation rows.
-    // Both sides of the key are lowercased so the conversation `id` is canonical and matches
-    // whatever the frontend constructs when synthesising a target id (search clicks, etc.).
+    // Group into conversations by (my_id, sorted_counterparts). 1:1 mail produces
+    // a single-counterpart key — collapsing to the historical "{my_id}|{cp}" id
+    // string so pinned-conversation localStorage stays valid. Multi-recipient
+    // mail (To+Cc has >1 non-self address) keeps the full participant set in
+    // the key so each unique group is its own row.
     let is_ours = |a: &str| {
         let lc = a.to_lowercase();
         our_addrs.iter().any(|o| *o == lc)
     };
 
-    // Group key = (my_id, counterpart). Direction is decided strictly from the FROM
-    // header: if the sender is one of our identities, that identity is `my_id`; otherwise
-    // the sender is the counterpart and `my_id` is the first of our addresses found in
-    // To/Cc. The same physical message landing in both Sent and Inbox (typical when both
-    // endpoints are local) collapses into one row because the key is folder-independent.
-    let mut conv_map: HashMap<(String, String), Vec<RawEnvelope>> = HashMap::new();
+    let mut conv_map: HashMap<(String, String), (Vec<String>, Vec<RawEnvelope>)> = HashMap::new();
     for env in all_envelopes {
         let from_lc = env.from_addr.to_lowercase();
-        let (my_id, cp) = if is_ours(&from_lc) {
-            // We sent it. Counterpart = first non-self recipient (external preferred,
-            // otherwise another of our identities). Skip pure me-to-me.
-            let cp = env.to_addrs.iter().chain(env.cc_addrs.iter())
-                .map(|a| a.to_lowercase())
-                .find(|a| !is_ours(a))
-                .or_else(|| env.to_addrs.iter().chain(env.cc_addrs.iter())
-                    .map(|a| a.to_lowercase())
-                    .find(|a| *a != from_lc));
-            let Some(cp) = cp else { continue };
-            (from_lc, cp)
+
+        // Pick myID: outgoing → sender, incoming → first of our addrs in To/Cc.
+        let my_id = if is_ours(&from_lc) {
+            from_lc.clone()
         } else {
-            // Incoming: my_id = first of our addresses found in To/Cc; counterpart = sender.
-            let my_id = env.to_addrs.iter().chain(env.cc_addrs.iter())
+            env.to_addrs.iter().chain(env.cc_addrs.iter())
                 .map(|a| a.to_lowercase())
                 .find(|a| is_ours(a))
-                .unwrap_or_else(|| user_addr.to_string());
-            (my_id, from_lc)
+                .unwrap_or_else(|| user_addr.to_string())
         };
-        if cp.is_empty() { continue; }
-        conv_map.entry((my_id, cp)).or_default().push(env);
+
+        // Counterparts = unique sorted (from ∪ to ∪ cc) minus our identities.
+        let mut cps: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut push = |a: &str| {
+            let lc = a.to_lowercase();
+            if lc.is_empty() || is_ours(&lc) { return None; }
+            if seen.insert(lc.clone()) { Some(lc) } else { None }
+        };
+        if let Some(v) = push(&from_lc) { cps.push(v); }
+        for a in env.to_addrs.iter().chain(env.cc_addrs.iter()) {
+            if let Some(v) = push(a) { cps.push(v); }
+        }
+        if cps.is_empty() { continue; }
+        cps.sort();
+
+        let cps_key = cps.join(",");
+        conv_map.entry((my_id, cps_key))
+            .or_insert_with(|| (cps.clone(), Vec::new()))
+            .1
+            .push(env);
     }
 
     let mut conversations: Vec<Conversation> = Vec::new();
 
-    for ((my_id, cp_addr), mut msgs) in conv_map {
+    for ((my_id, cps_key), (cp_addrs, mut msgs)) in conv_map {
         msgs.sort_by_key(|m| m.date_ts);
 
         // Same physical message can appear in multiple folders (e.g. self-mail lands in
@@ -551,25 +557,25 @@ where
             msgs.retain(|_| iter.next().unwrap_or(true));
         }
 
-        // Display name for the counterpart: try FROM names (when they wrote to us),
-        // then TO names (when we wrote to them). Drop names that look like raw addresses.
-        let cp_name = msgs.iter()
-            .find(|m| m.from_addr.eq_ignore_ascii_case(&cp_addr) && !m.from_name.is_empty())
-            .map(|m| clean_display_name(&m.from_name))
-            .filter(|n| !n.is_empty() && !n.contains('@'))
-            .or_else(|| msgs.iter().flat_map(|m|
-                m.to_addrs.iter().zip(m.to_names.iter())
-                    .filter(|(a, _)| a.eq_ignore_ascii_case(&cp_addr))
-                    .map(|(_, n)| clean_display_name(n))
-            ).find(|n| !n.is_empty() && !n.contains('@')))
-            .unwrap_or_default();
+        // Display name for each counterpart: scan the thread for FROM names
+        // (when they wrote to us) or To/Cc names (when we wrote to them).
+        // Drop names that look like raw addresses — those are useless labels.
+        let name_for = |addr: &str| -> String {
+            msgs.iter()
+                .find(|m| m.from_addr.eq_ignore_ascii_case(addr) && !m.from_name.is_empty())
+                .map(|m| clean_display_name(&m.from_name))
+                .filter(|n| !n.is_empty() && !n.contains('@'))
+                .or_else(|| msgs.iter().flat_map(|m|
+                    m.to_addrs.iter().zip(m.to_names.iter())
+                        .filter(|(a, _)| a.eq_ignore_ascii_case(addr))
+                        .map(|(_, n)| clean_display_name(n))
+                ).find(|n| !n.is_empty() && !n.contains('@')))
+                .unwrap_or_default()
+        };
 
-        let label = if cp_name.is_empty() { cp_addr.clone() } else { cp_name.clone() };
-
-        let counterparts = vec![ContactInfo {
-            name: cp_name,
-            addr: cp_addr.clone(),
-        }];
+        let counterparts: Vec<ContactInfo> = cp_addrs.iter()
+            .map(|a| ContactInfo { name: name_for(a), addr: a.clone() })
+            .collect();
 
         // Separate drafts from regular messages.
         let draft = msgs.iter().rev().find(|m| m.is_draft)
@@ -578,16 +584,40 @@ where
 
         if regular_msgs.is_empty() && draft.is_none() { continue; }
 
+        let first = regular_msgs.first().copied().unwrap_or(msgs.first().unwrap());
         let last = regular_msgs.last().copied().unwrap_or(msgs.last().unwrap());
 
-        let id = format!("{}|{}", my_id, cp_addr);
+        let is_group = cp_addrs.len() > 1;
+
+        // 1:1: label = counterpart name (or addr).
+        // Group: label = first message subject + " (N чел)" where N counts all
+        // human participants (counterparts + me).
+        let (id, label) = if is_group {
+            let subject = if first.subject.trim().is_empty() {
+                "(без темы)".to_string()
+            } else {
+                first.subject.clone()
+            };
+            (
+                format!("{}|group:{}", my_id, cps_key),
+                format!("{} ({} чел)", subject, cp_addrs.len() + 1),
+            )
+        } else {
+            let cp_name = &counterparts[0].name;
+            let label = if cp_name.is_empty() { cp_addrs[0].clone() } else { cp_name.clone() };
+            (format!("{}|{}", my_id, cps_key), label)
+        };
+
+        // Avatar seed: for both 1:1 and groups, use the first counterpart for now.
+        let avatar_seed = &cp_addrs[0];
+
         conversations.push(Conversation {
             id,
             label,
-            avatar_hash: gravatar_hash(&counterparts[0].addr),
+            avatar_hash: gravatar_hash(avatar_seed),
             received_by: my_id,
             counterparts,
-            is_group: false,
+            is_group,
             last_date: last.date.clone(),
             last_date_ts: last.date_ts,
             last_subject: last.subject.clone(),
@@ -916,6 +946,39 @@ where
         match session.uid_store(uid_set, format!("{op} ({flags})")).await {
             Ok(stream) => { let _: Vec<_> = stream.try_collect::<Vec<_>>().await.unwrap_or_default(); }
             Err(e) => log::warn!("set_flags_batch: STORE in {folder}: {e}"),
+        }
+    }
+    Ok(())
+}
+
+/// Soft-delete via IMAP: STORE +FLAGS (\Deleted) on the UIDs in each folder,
+/// then EXPUNGE that folder. Folders are processed sequentially so a partial
+/// failure on one mailbox doesn't poison the rest.
+pub(crate) async fn delete_messages_impl<T>(
+    session: &mut async_imap::Session<T>,
+    messages: &[MessageRef],
+) -> Result<(), String>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + std::fmt::Debug,
+{
+    let mut by_folder: HashMap<String, Vec<u32>> = HashMap::new();
+    for mr in messages {
+        if mr.uid == 0 { continue; }
+        by_folder.entry(mr.folder.clone()).or_default().push(mr.uid);
+    }
+    for (folder, uids) in by_folder {
+        if let Err(e) = session.select(&folder).await {
+            log::warn!("delete_messages: SELECT {folder} failed: {e}");
+            continue;
+        }
+        let uid_set = uids.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",");
+        match session.uid_store(uid_set, "+FLAGS (\\Deleted)").await {
+            Ok(stream) => { let _: Vec<_> = stream.try_collect::<Vec<_>>().await.unwrap_or_default(); }
+            Err(e) => { log::warn!("delete_messages: STORE in {folder}: {e}"); continue; }
+        }
+        match session.expunge().await {
+            Ok(stream) => { let _: Vec<_> = stream.try_collect::<Vec<_>>().await.unwrap_or_default(); }
+            Err(e) => log::warn!("delete_messages: EXPUNGE in {folder}: {e}"),
         }
     }
     Ok(())

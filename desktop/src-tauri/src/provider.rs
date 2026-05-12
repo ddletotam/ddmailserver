@@ -50,6 +50,13 @@ pub trait MailProvider: Send + Sync {
         add: bool,
     ) -> Result<(), String>;
 
+    /// Delete a batch of messages. Native: soft-deletes server-side. IMAP:
+    /// STORE \Deleted then EXPUNGE.
+    async fn delete_messages(
+        &self,
+        messages: &[MessageRef],
+    ) -> Result<(), String>;
+
     /// Fetch raw RFC-822 source of a message.
     async fn fetch_message_source(
         &self,

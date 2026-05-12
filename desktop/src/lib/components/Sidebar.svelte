@@ -136,6 +136,37 @@
       contextMenu = null;
     }
   }
+
+  async function handleDelete() {
+    if (!contextMenu) return;
+    const id = contextMenu.convId;
+    contextMenu = null;
+    const account = accountStore.activeAccount;
+    const conv = mailStore.conversations.find((c) => c.id === id);
+    if (!account || !conv) return;
+    try {
+      await mailStore.deleteConversation(account, conv);
+    } catch (e) {
+      alert(`Не удалось удалить: ${e}`);
+    }
+  }
+
+  async function handleMarkRead() {
+    if (!contextMenu) return;
+    const id = contextMenu.convId;
+    contextMenu = null;
+    const account = accountStore.activeAccount;
+    const conv = mailStore.conversations.find((c) => c.id === id);
+    if (!account || !conv) return;
+    await mailStore.markConversationRead(account, conv);
+  }
+
+  async function handleMarkAllRead() {
+    contextMenu = null;
+    const account = accountStore.activeAccount;
+    if (!account) return;
+    await mailStore.markAllRead(account);
+  }
 </script>
 
 <svelte:window onclick={closeContextMenu} />
@@ -209,10 +240,17 @@
 
   <!-- Context menu -->
   {#if contextMenu}
+    {@const ctxConv = mailStore.conversations.find((c) => c.id === contextMenu!.convId)}
     <div class="context-menu" style:left="{contextMenu.x}px" style:top="{contextMenu.y}px">
       <button onclick={handlePin}>
-        {mailStore.isPinned(contextMenu.convId) ? "Unpin" : "Pin to top"}
+        {mailStore.isPinned(contextMenu.convId) ? "Открепить" : "Закрепить наверху"}
       </button>
+      <button onclick={handleDelete}>Удалить</button>
+      <button onclick={handleMarkRead} disabled={!ctxConv || ctxConv.unread_count === 0}>
+        Пометить прочитанным
+      </button>
+      <div class="ctx-separator"></div>
+      <button onclick={handleMarkAllRead}>Все прочитанные</button>
     </div>
   {/if}
 </aside>
@@ -350,7 +388,17 @@
     color: var(--text-primary);
   }
 
-  .context-menu button:hover {
+  .context-menu button:hover:not(:disabled) {
     background: var(--bg-hover);
+  }
+  .context-menu button:disabled {
+    color: var(--text-secondary);
+    cursor: default;
+    opacity: 0.55;
+  }
+  .ctx-separator {
+    height: 1px;
+    background: var(--border-color);
+    margin: 4px 0;
   }
 </style>
