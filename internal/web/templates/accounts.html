@@ -72,7 +72,7 @@
                 </div>
                 <div class="text-muted small">
                     {{if .HasSynced}}
-                    <i class="ti ti-clock me-1"></i>Last sync: {{.LastSync.Format "02 Jan 15:04"}}
+                    <i class="ti ti-clock me-1"></i>Last sync: {{fmtTime .LastSync "02 Jan 15:04"}}
                     {{else}}
                     <i class="ti ti-clock me-1"></i>Never synced
                     {{end}}

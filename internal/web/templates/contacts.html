@@ -200,9 +200,9 @@
                 </div>
                 {{end}}
 
-                {{if not .LastSync.IsZero}}
+                {{if .LastSync}}
                 <div class="text-muted small">
-                    <i class="ti ti-refresh me-1"></i>{{.LastSync.Format "2006-01-02 15:04"}}
+                    <i class="ti ti-refresh me-1"></i>{{fmtTime .LastSync "2006-01-02 15:04"}}
                 </div>
                 {{end}}
 

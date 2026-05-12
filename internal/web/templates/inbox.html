@@ -108,7 +108,7 @@
                     {{if .Attachments}}<i class="ti ti-paperclip ms-1 text-muted"></i>{{end}}
                     {{if .Draft}}<span class="badge bg-yellow-lt ms-1">Draft</span>{{end}}
                 </td>
-                <td class="text-muted text-nowrap" style="width:1%">{{.Date.Format "02 Jan 15:04"}}</td>
+                <td class="text-muted text-nowrap" style="width:1%">{{.DateAsTime.Format "02 Jan 15:04"}}</td>
             </tr>
             {{end}}
         </tbody>
