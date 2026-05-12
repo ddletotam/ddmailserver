@@ -80,6 +80,7 @@ fn main() {
             commands::v2_search_messages,
             commands::v2_set_flags,
             commands::v2_set_flags_batch,
+            commands::v2_delete_messages,
             commands::v2_fetch_message_source,
             commands::v2_fetch_inline_part,
             commands::v2_fetch_identities,

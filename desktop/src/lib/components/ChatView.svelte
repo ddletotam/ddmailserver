@@ -6,7 +6,7 @@
   import { identityStore } from "../stores/identity.svelte";
   import MessageBubble from "./MessageBubble.svelte";
   import Composer from "./Composer.svelte";
-  import { cleanName, sameDay, formatDateSeparator } from "../utils/format";
+  import { cleanName, sameDay, formatDateSeparator, formatFromHeader } from "../utils/format";
   import type { OutgoingMessage, MessageBody } from "../types/mail";
 
   let showComposer = $state(false);
@@ -124,7 +124,7 @@
     return () => clearTimeout(timer);
   });
 
-  // Auto-scroll to bottom
+  // Auto-scroll to bottom whenever the message set changes (open conv, new mail).
   $effect(() => {
     if (msgs.length > 0 && chatContainer) {
       requestAnimationFrame(() => {
@@ -150,7 +150,6 @@
 
   function handleReply() { composerSource = null; replyMode = "reply"; composerPrefillTo = ""; composerFocusField = "body"; showComposer = true; }
   function handleForward() { composerSource = null; replyMode = "forward"; composerPrefillTo = ""; composerFocusField = "to"; showComposer = true; }
-  function handleCompose() { composerSource = null; replyMode = null; composerPrefillTo = ""; composerFocusField = "to"; showComposer = true; }
   function closeComposer() { showComposer = false; replyMode = null; composerSource = null; composerPrefillTo = ""; composerFocusField = "to"; }
 
   // From context menu: quick-reply with quote
@@ -293,7 +292,44 @@
             ? mailStore.conversationMessages[mailStore.conversationMessages.length - 1]
             : null);
     if (!target) return;
-    if (!composerTo) composerTo = target.from_addr;
+    if (!composerTo) {
+      // Group conversation → pre-fill To with reply-all (sender + other
+      // recipients minus our identities). 1:1 → just the sender.
+      if (conv?.is_group) {
+        const account = accountStore.activeAccount;
+        const ourLc = new Set<string>(
+          identityStore.identities.map(i => i.email.toLowerCase())
+            .concat(account ? [account.email.toLowerCase()] : []),
+        );
+        const extractAddr = (raw: string): string => {
+          const lt = raw.indexOf("<"); const gt = raw.indexOf(">", lt);
+          return lt >= 0 && gt > lt ? raw.slice(lt + 1, gt).trim().toLowerCase() : raw.trim().toLowerCase();
+        };
+        const seen = new Set<string>();
+        const list: string[] = [];
+        const push = (a: string) => {
+          if (!a || ourLc.has(a) || seen.has(a)) return;
+          seen.add(a);
+          list.push(a);
+        };
+        push(target.from_addr.toLowerCase());
+        for (const a of (target.to ?? [])) push(extractAddr(a));
+        composerTo = list.join(", ");
+        if (!composerCc) {
+          const ccSeen = new Set<string>(seen);
+          const ccList: string[] = [];
+          for (const a of (target.cc ?? [])) {
+            const addr = extractAddr(a);
+            if (!addr || ourLc.has(addr) || ccSeen.has(addr)) continue;
+            ccSeen.add(addr);
+            ccList.push(addr);
+          }
+          composerCc = ccList.join(", ");
+        }
+      } else {
+        composerTo = target.from_addr;
+      }
+    }
     if (!composerSubject) {
       const base = target.subject || "";
       composerSubject = /^re:/i.test(base) ? base : `Re: ${base}`;
@@ -382,10 +418,32 @@
     quickReplySending = true;
     try {
       const fromEmail = (selectedFromEmail || account.email).toLowerCase();
-      // Prefer user-typed advanced-field values when expanded; otherwise
-      // auto-derive from the reply target (parity with the original
-      // collapsed-only behaviour).
-      const recipient = composerTo.trim() || target.from_addr;
+      const fromName = identityStore.findByEmail(fromEmail)?.name?.trim() || account.name?.trim() || "";
+      const fromHeader = formatFromHeader(fromName, fromEmail);
+
+      // Default recipient list. 1:1 → just the sender; group → reply-all =
+      // (target.from + target.to + target.cc) minus all our identities and
+      // deduped. composerTo overrides entirely when typed.
+      const ourLc = new Set<string>(
+        identityStore.identities.map(i => i.email.toLowerCase()).concat([account.email.toLowerCase()])
+      );
+      const extractAddr = (raw: string): string => {
+        const lt = raw.indexOf("<"); const gt = raw.indexOf(">", lt);
+        return lt >= 0 && gt > lt ? raw.slice(lt + 1, gt).trim().toLowerCase() : raw.trim().toLowerCase();
+      };
+      const replyAllAddrs: string[] = [];
+      const seenAddr = new Set<string>();
+      const pushAddr = (a: string) => {
+        if (!a || ourLc.has(a) || seenAddr.has(a)) return;
+        seenAddr.add(a);
+        replyAllAddrs.push(a);
+      };
+      pushAddr(target.from_addr.toLowerCase());
+      if (conv.is_group) {
+        for (const a of (target.to ?? [])) pushAddr(extractAddr(a));
+        for (const a of (target.cc ?? [])) pushAddr(extractAddr(a));
+      }
+
       const baseSubject = target.subject || "";
       const subject = composerSubject.trim()
         || (/^re:/i.test(baseSubject) ? baseSubject : `Re: ${baseSubject}`);
@@ -414,23 +472,35 @@
       const refIds = [...(target.references ?? []), ...(target.message_id ? [target.message_id] : [])];
       const references = refIds.length > 0 ? refIds.map(id => `<${id}>`).join(" ") : null;
 
-      // Did the user pick a different identity than the conversation's current one?
-      const conversationIdentity = conv.received_by.toLowerCase();
-      const switchedIdentity = fromEmail !== conversationIdentity;
-
-      // Local optimistic message (only if identity didn't change — otherwise we'll redirect to a different convo).
-      const localMsgId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-      // Recipient list. composerTo overrides target.from_addr (the auto-derived
-      // recipient) when set; either way, advanced cc adds extras.
+      // Recipient list. composerTo (when typed) overrides; otherwise fall back
+      // to the auto-derived list — sender for 1:1, reply-all for groups.
       const toList = composerTo.trim()
         ? composerTo.split(",").map(s => s.trim()).filter(Boolean)
-        : [recipient];
+        : replyAllAddrs;
+
+      // Where will this message land server-side? Compute the target conv id
+      // from the actual recipient set so we can detect both identity-switches
+      // AND group-membership shifts (per spec: a reply with a different
+      // participant set forms a new group conversation).
+      const sentCps = Array.from(new Set([
+        ...toList.map(extractAddr),
+        ...ccList.map(extractAddr),
+      ].filter(a => a && !ourLc.has(a)))).sort();
+      const targetConvId = sentCps.length > 1
+        ? `${fromEmail}|group:${sentCps.join(",")}`
+        : `${fromEmail}|${sentCps[0] ?? ""}`;
+      const willLandHere = targetConvId === conv.id;
+
+      // Local optimistic message — only when this send lands in the current
+      // conversation. If it'll create a new group / land in a different
+      // identity's thread, we redirect after send instead.
+      const localMsgId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
       const optimistic: MessageBody = {
         uid: -Date.now(), // negative uid signals "not from server yet"
         folder: "Sent",
         subject,
-        from: fromEmail,
+        from: fromName || fromEmail,
         from_addr: fromEmail,
         to: toList,
         cc: [],
@@ -444,7 +514,7 @@
         in_reply_to: target.message_id ?? "",
         references: refIds,
       };
-      if (!switchedIdentity) {
+      if (willLandHere) {
         mailStore.appendLocalMessage(optimistic);
       }
 
@@ -454,7 +524,7 @@
       void bccList;
 
       const msg: OutgoingMessage = {
-        from: fromEmail,
+        from: fromHeader,
         to: toList,
         cc: ccList,
         subject,
@@ -482,10 +552,9 @@
       composerBcc = "";
       composerSubject = "";
 
-      if (switchedIdentity) {
-        // Land in the conversation that matches the new (counterpart, identity) pair.
-        const cpAddr = (conv.counterparts[0]?.addr ?? recipient).toLowerCase();
-        const targetConvId = `${fromEmail}|${cpAddr}`;
+      if (!willLandHere) {
+        // Identity changed or participant set differs → message lands in a
+        // different conversation. Reload list and open the right one.
         await mailStore.loadConversations(account);
         await mailStore.openConversation(account, targetConvId);
       } else {
@@ -586,9 +655,9 @@
 
       <div class="chat-info">
         <div class="chat-name">{cleanName(conv.label)}</div>
-        <div class="chat-meta">
+        <div class="chat-meta" class:multi={conv.is_group} title={conv.is_group ? conv.counterparts.map(cp => cp.name || cp.addr).join(", ") : ""}>
           {#if conv.is_group}
-            {conv.counterparts.map(cp => cp.name || cp.addr).join(", ")}
+            <span class="participants">{conv.counterparts.map(cp => cp.name || cp.addr).join(", ")}</span>
           {:else}
             {conv.counterparts[0]?.addr ?? ""}
           {/if}
@@ -622,6 +691,7 @@
             message={msg}
             isFirstInGroup={isFirstInGroup(i)}
             isLastInGroup={isLastInGroup(i)}
+            inGroupConversation={!!conv?.is_group}
             parent={parentOf(msg)}
             onreply={startQuoteReply}
             onforward={startForward}
@@ -846,13 +916,6 @@
       <p class="empty-text">Select a conversation</p>
     </div>
 
-    <button class="compose-fab" onclick={handleCompose} title="New message">
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-      </svg>
-    </button>
-
     {#if showComposer}
       <div class="composer-overlay">
         <Composer mode={null} originalMessage={null} prefillTo={composerPrefillTo} focusField={composerFocusField} onclose={closeComposer} />
@@ -892,7 +955,7 @@
     padding: 8px 16px;
     background: var(--bg-primary);
     border-bottom: 1px solid var(--border-color);
-    height: var(--header-height);
+    min-height: var(--header-height);
   }
 
   .btn-back {
@@ -913,6 +976,20 @@
     font-size: var(--font-size-xs); color: var(--text-secondary);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
+  /* Group conversations: list every participant. Wrap to up to 2 lines, then
+     ellipsis — full list is on hover via the `title` attribute. */
+  .chat-meta.multi {
+    display: block;
+    white-space: normal;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    line-height: 1.3;
+  }
+  .chat-meta.multi .participants { word-break: break-word; }
 
   .chat-identity {
     color: var(--text-accent);
@@ -1185,21 +1262,6 @@
     font-size: var(--font-size-sm); max-width: 80%; text-align: center;
     border: 1px solid #fcc;
   }
-
-  .compose-fab {
-    position: absolute;
-    bottom: 24px; right: 24px;
-    width: 56px; height: 56px;
-    border-radius: 50%;
-    background: var(--bg-active);
-    border: none; color: white;
-    box-shadow: 0 4px 12px rgba(65, 159, 217, 0.4);
-    cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    transition: transform 0.15s ease, box-shadow 0.15s ease;
-    z-index: 10;
-  }
-  .compose-fab:hover { transform: scale(1.05); box-shadow: 0 6px 16px rgba(65, 159, 217, 0.5); }
 
   .composer-overlay {
     position: absolute;

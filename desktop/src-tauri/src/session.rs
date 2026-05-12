@@ -31,6 +31,47 @@ pub struct SessionPool {
     idle_handles: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
+/// Turn an async_imap login error into a clean, user-facing message.
+/// async_imap stuffs the raw debug-formatted response into `Error::No(String)`,
+/// e.g. `code: None, info: Some("invalid credentials")` — we extract the info
+/// portion and map a few known phrases.
+pub fn friendly_login_error(e: async_imap::error::Error) -> String {
+    use async_imap::error::Error;
+    match e {
+        Error::No(s) | Error::Bad(s) => extract_info(&s)
+            .map(|info| humanize_login_info(&info))
+            .unwrap_or_else(|| s),
+        Error::Io(io) => format!("Connection error: {io}"),
+        Error::ConnectionLost => "Connection lost".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn extract_info(s: &str) -> Option<String> {
+    let key = "info: Some(\"";
+    let start = s.find(key)? + key.len();
+    let rest = &s[start..];
+    let end = rest.rfind("\")")?;
+    Some(rest[..end].replace("\\\"", "\"").replace("\\\\", "\\"))
+}
+
+fn humanize_login_info(info: &str) -> String {
+    let lower = info.trim().to_ascii_lowercase();
+    if lower.contains("invalid credentials")
+        || lower.contains("authentication failed")
+        || lower.contains("authenticationfailed")
+        || lower.contains("login failed")
+    {
+        return "Invalid username or password".to_string();
+    }
+    let trimmed = info.trim();
+    let mut chars = trimmed.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 impl SessionPool {
     pub fn new() -> Self {
         Self { idle_handles: Mutex::new(HashMap::new()) }
@@ -83,7 +124,7 @@ async fn run_idle_tls<R: Runtime>(app: &AppHandle<R>, creds: &Credentials) -> Re
         .await.map_err(|e| format!("TLS: {e}"))?;
     let client = async_imap::Client::new(tls_stream);
     let session = client.login(&creds.username, &creds.password)
-        .await.map_err(|e| format!("Login: {:?}", e.0))?;
+        .await.map_err(|e| friendly_login_error(e.0))?;
     do_idle(app, session).await
 }
 
@@ -92,7 +133,7 @@ async fn run_idle_plain<R: Runtime>(app: &AppHandle<R>, creds: &Credentials) -> 
         .await.map_err(|e| format!("TCP: {e}"))?;
     let client = async_imap::Client::new(tcp.compat());
     let session = client.login(&creds.username, &creds.password)
-        .await.map_err(|e| format!("Login: {:?}", e.0))?;
+        .await.map_err(|e| friendly_login_error(e.0))?;
     do_idle(app, session).await
 }
 

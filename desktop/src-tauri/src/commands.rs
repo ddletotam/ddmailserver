@@ -276,6 +276,18 @@ pub async fn v2_set_flags_batch(
 }
 
 #[tauri::command]
+pub async fn v2_delete_messages(
+    registry: tauri::State<'_, ProviderRegistry>,
+    account_id: String,
+    messages: Vec<MessageRef>,
+) -> Result<(), String> {
+    get_provider(&registry, &account_id)
+        .await?
+        .delete_messages(&messages)
+        .await
+}
+
+#[tauri::command]
 pub async fn v2_fetch_inline_part(
     registry: tauri::State<'_, ProviderRegistry>,
     account_id: String,

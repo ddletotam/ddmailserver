@@ -86,3 +86,14 @@ export function sameDay(ts1: number, ts2: number): boolean {
 export function gravatarUrl(hash: string | null): string | null {
   return hash ? `https://www.gravatar.com/avatar/${hash}?d=404&s=96` : null;
 }
+
+/** Format an RFC 5322 mailbox: `Display Name <email>` (quoted when the name
+ *  contains specials). Returns just the email when no name is provided. */
+export function formatFromHeader(name: string | undefined | null, email: string): string {
+  const trimmed = (name ?? "").trim();
+  if (!trimmed) return email;
+  const needsQuoting = /[",;:<>@\[\]\\()]/.test(trimmed);
+  const escaped = trimmed.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const display = needsQuoting ? `"${escaped}"` : trimmed;
+  return `${display} <${email}>`;
+}

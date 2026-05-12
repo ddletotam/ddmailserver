@@ -4,6 +4,7 @@
   import { accountStore } from "../stores/accounts.svelte";
   import { mailStore } from "../stores/mail.svelte";
   import { identityStore } from "../stores/identity.svelte";
+  import { formatFromHeader } from "../utils/format";
   import type { MessageBody, OutgoingMessage } from "../types/mail";
 
   interface Props {
@@ -232,8 +233,11 @@
       )
       .join("");
 
+    const fromEmail = selectedFromEmail || account.email;
+    const fromName = identityStore.findByEmail(fromEmail)?.name?.trim() || account.name?.trim() || "";
+
     const msg: OutgoingMessage = {
-      from: selectedFromEmail || account.email,
+      from: formatFromHeader(fromName, fromEmail),
       to: to.split(",").map(s => s.trim()).filter(Boolean),
       cc: cc ? cc.split(",").map(s => s.trim()).filter(Boolean) : [],
       subject,
