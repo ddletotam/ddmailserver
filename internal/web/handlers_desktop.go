@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -608,13 +609,36 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 	// Build folder ID→name map
 	folders, _ := s.database.GetFoldersByUser(user.ID)
 	folderNames := make(map[int64]string)
+	folderAccount := make(map[int64]int64)
 	sentFolderIDs := make(map[int64]bool)
 	for _, f := range folders {
 		folderNames[f.ID] = f.Name
+		folderAccount[f.ID] = f.AccountID
 		if f.Type == "sent" {
 			sentFolderIDs[f.ID] = true
 		}
 	}
+
+	// account_id → primary email, plus a sorted identity list. Both used by
+	// the "which identity received this message" fallback below: To/Cc parsing
+	// is the primary signal but breaks for BCC-only deliveries, stripped
+	// headers, and (most visibly) for messages restored from spam where the
+	// original recipient header may not match any identity. We fall through
+	// to the message's account email, then the folder's, then a stable sort
+	// — never a random map iteration.
+	accountEmail := make(map[int64]string)
+	if accounts, err := s.database.GetAccountsByUserID(user.ID); err == nil {
+		for _, acc := range accounts {
+			if acc.Email != "" {
+				accountEmail[acc.ID] = strings.ToLower(acc.Email)
+			}
+		}
+	}
+	sortedIdentities := make([]string, 0, len(identities))
+	for id := range identities {
+		sortedIdentities = append(sortedIdentities, id)
+	}
+	sort.Strings(sortedIdentities)
 
 	// Group by (my_id, counterpart)
 	type convKey struct{ myID, cp string }
@@ -659,11 +683,24 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 				}
 			}
 			if myID == "" {
-				// Fallback: use first identity
-				for id := range identities {
-					myID = id
-					break
+				// Recipient parsing missed (BCC-only, stripped header, etc.).
+				// Walk a priority chain that never returns a random identity.
+				if e, ok := accountEmail[msg.AccountID]; ok && identities[e] {
+					myID = e
 				}
+			}
+			if myID == "" {
+				if accID, ok := folderAccount[msg.FolderID]; ok {
+					if e, ok := accountEmail[accID]; ok && identities[e] {
+						myID = e
+					}
+				}
+			}
+			if myID == "" && len(sortedIdentities) > 0 {
+				// Deterministic last resort — picks the alphabetically first
+				// identity. Still wrong sometimes, but at least stable across
+				// reloads and across users with the same identity set.
+				myID = sortedIdentities[0]
 			}
 			cp = fromLc
 		}
