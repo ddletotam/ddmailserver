@@ -3,6 +3,7 @@
   import { accountStore } from "../stores/accounts.svelte";
   import { calendarStore } from "../stores/calendar.svelte";
   import { identityStore } from "../stores/identity.svelte";
+  import EventEdit from "./EventEdit.svelte";
   import type { DesktopCalendarEvent, DesktopCalendarAttendee } from "../types/calendar";
 
   interface Props {
@@ -138,6 +139,16 @@
     return calendar.source_type !== "ics_url" && calendar.source_type !== "ics_import";
   });
 
+  // Edit is allowed on the same writable-calendar set as RSVP, but doesn't
+  // require the user to be an attendee — even a personal note in your own
+  // calendar should be editable.
+  const canEdit = $derived.by(() => {
+    if (!calendar) return false;
+    return calendar.source_type !== "ics_url" && calendar.source_type !== "ics_import";
+  });
+
+  let editing = $state(false);
+
   // Local state for optimistic PARTSTAT updates. Falls back to the server
   // value until the user clicks a pill.
   let pendingPartstat = $state<string | null>(null);
@@ -187,6 +198,14 @@
       <div class="head-line">
         <span class="swatch" style:background={color} aria-hidden="true"></span>
         {#if calendar}<span class="cal-name">{calendar.name}</span>{/if}
+        {#if canEdit}
+          <button class="btn-edit" onclick={() => editing = true} title="Редактировать">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 20h9"/>
+              <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/>
+            </svg>
+          </button>
+        {/if}
         <button class="btn-close" onclick={onclose} aria-label="Закрыть">×</button>
       </div>
       <h2 class="summary">{event.summary || "(без названия)"}</h2>
@@ -256,6 +275,16 @@
         </section>
       {/if}
     </div>
+
+    {#if editing}
+      <EventEdit
+        {event}
+        {occStart}
+        {occEnd}
+        onclose={() => editing = false}
+        onsaved={() => { editing = false; onclose(); }}
+      />
+    {/if}
 
     {#if canRSVP}
       <footer class="rsvp-bar">
@@ -328,18 +357,21 @@
     font-size: var(--font-size-sm);
     flex: 1;
   }
-  .btn-close {
+  .btn-close, .btn-edit {
     width: 28px;
     height: 28px;
     border: none;
     background: none;
     color: var(--text-secondary);
-    font-size: 22px;
     line-height: 1;
     cursor: pointer;
     border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
-  .btn-close:hover {
+  .btn-close { font-size: 22px; }
+  .btn-close:hover, .btn-edit:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
   }

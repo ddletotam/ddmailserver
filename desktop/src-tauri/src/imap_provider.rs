@@ -217,6 +217,10 @@ impl MailProvider for ImapProvider {
         Err("RSVP requires a DDMail server.".into())
     }
 
+    async fn patch_event(&self, _event_id: i64, _body: serde_json::Value) -> Result<(), String> {
+        Err("Editing events requires a DDMail server.".into())
+    }
+
     fn provider_type(&self) -> &'static str {
         "imap"
     }

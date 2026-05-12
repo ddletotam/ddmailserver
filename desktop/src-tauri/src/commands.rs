@@ -490,3 +490,16 @@ pub async fn v2_rsvp_event(
         .rsvp_event(event_id, &partstat)
         .await
 }
+
+#[tauri::command]
+pub async fn v2_patch_event(
+    registry: tauri::State<'_, ProviderRegistry>,
+    account_id: String,
+    event_id: i64,
+    body: serde_json::Value,
+) -> Result<(), String> {
+    get_provider(&registry, &account_id)
+        .await?
+        .patch_event(event_id, body)
+        .await
+}
