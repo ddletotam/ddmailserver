@@ -76,6 +76,17 @@ func (s *Server) HandleDesktopRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Hard ceiling on how old a refreshable token can be. Without this any
+	// signature-valid token, including one stolen from a decommissioned
+	// laptop years ago, could be exchanged for a fresh one indefinitely.
+	// 30 days keeps the "no forced re-login during normal use" property
+	// while putting a floor under stale-credential exposure.
+	const maxRefreshAge = 30 * 24 * time.Hour
+	if claims.IssuedAt != nil && time.Since(claims.IssuedAt.Time) > maxRefreshAge {
+		respondError(w, http.StatusUnauthorized, "token too old to refresh, please log in again")
+		return
+	}
+
 	user, err := s.database.GetUserByID(claims.UserID)
 	if err != nil || user.IsBanned() {
 		respondError(w, http.StatusUnauthorized, "user not found or banned")
