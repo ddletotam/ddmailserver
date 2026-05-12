@@ -88,6 +88,7 @@ fn main() {
             commands::v2_list_calendars,
             commands::v2_fetch_calendar_events,
             commands::v2_rsvp_event,
+            commands::v2_patch_event,
             commands::v2_fetch_avatar,
         ])
         .run(tauri::generate_context!())

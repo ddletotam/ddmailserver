@@ -186,6 +186,7 @@ func (s *Server) setupRoutes() {
 	desktopAuthAPI.HandleFunc("/calendars", s.HandleDesktopCalendars).Methods("GET")
 	desktopAuthAPI.HandleFunc("/calendar-events", s.HandleDesktopCalendarEvents).Methods("GET")
 	desktopAuthAPI.HandleFunc("/events/{id}/rsvp", s.HandleDesktopEventRSVP).Methods("POST")
+	desktopAuthAPI.HandleFunc("/events/{id}", s.HandleDesktopEventPatch).Methods("PATCH")
 	desktopAuthAPI.HandleFunc("/avatars", s.HandleDesktopAvatar).Methods("GET")
 
 	// CalDAV server (uses Basic Auth, handles its own authentication)

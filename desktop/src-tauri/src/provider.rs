@@ -115,6 +115,11 @@ pub trait MailProvider: Send + Sync {
     /// persisted so the caller can reconcile.
     async fn rsvp_event(&self, event_id: i64, partstat: &str) -> Result<String, String>;
 
+    /// Edit a calendar event. The body is forwarded as-is — the server
+    /// validates scope and applied fields. ImapProvider returns "not
+    /// supported" since calendar editing requires the native backend.
+    async fn patch_event(&self, event_id: i64, body: serde_json::Value) -> Result<(), String>;
+
     /// Provider type identifier.
     fn provider_type(&self) -> &'static str;
 }

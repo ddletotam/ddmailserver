@@ -327,6 +327,21 @@ impl MailProvider for NativeProvider {
             .to_string())
     }
 
+    async fn patch_event(&self, event_id: i64, body: serde_json::Value) -> Result<(), String> {
+        let url = self.api_url(&format!("/events/{event_id}"));
+        let resp = self
+            .send_authed(|http, token| {
+                http.patch(&url).bearer_auth(token).json(&body)
+            })
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("HTTP {status}: {body}"));
+        }
+        Ok(())
+    }
+
     async fn fetch_inline_part(
         &self,
         message_id: u32,
