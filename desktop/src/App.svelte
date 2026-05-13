@@ -74,7 +74,7 @@
 {:else if showLogin}
   <LoginScreen onSuccess={handleAccountAdded} />
 {:else}
-  <div class="app-layout" style:--sidebar-width="{sidebarWidth}px">
+  <div class="app-layout" style="--sidebar-width: {sidebarWidth}px">
     <Sidebar />
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="splitter" onmousedown={startDragSplitter} role="separator" aria-orientation="vertical" tabindex="-1"></div>
