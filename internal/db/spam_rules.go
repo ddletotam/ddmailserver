@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -9,14 +10,19 @@ import (
 	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
-// SpamRule represents a user-defined spam rule (whitelist/blacklist)
+// SpamRule represents a user-defined spam rule (whitelist/blacklist).
+//
+// ExcludedChecks is meaningful only for `action='allow'` rules: when set, the
+// analyzer skips just those check categories for matching senders instead of
+// trusting the entire envelope. Stored as JSON in `user_spam_rules.excluded_checks`.
 type SpamRule struct {
-	ID        int64  `json:"id"`
-	UserID    int64  `json:"user_id"`
-	RuleType  string `json:"rule_type"`  // 'address', 'domain'
-	RuleValue string `json:"rule_value"` // email or domain
-	Action    string `json:"action"`     // 'spam', 'allow'
-	CreatedAt int64  `json:"created_at"`
+	ID             int64    `json:"id"`
+	UserID         int64    `json:"user_id"`
+	RuleType       string   `json:"rule_type"`  // 'address', 'domain'
+	RuleValue      string   `json:"rule_value"` // email or domain
+	Action         string   `json:"action"`     // 'spam', 'allow'
+	ExcludedChecks []string `json:"excluded_checks"`
+	CreatedAt      int64    `json:"created_at"`
 }
 
 // DisabledSpamCheck represents a disabled system spam check for a user
@@ -32,26 +38,47 @@ func (db *DB) CreateSpamRule(rule *SpamRule) error {
 	rule.CreatedAt = timeutil.Now()
 	rule.RuleValue = strings.ToLower(rule.RuleValue)
 
+	excludedJSON, err := json.Marshal(rule.ExcludedChecks)
+	if err != nil {
+		return fmt.Errorf("marshal excluded_checks: %w", err)
+	}
+	if rule.ExcludedChecks == nil {
+		excludedJSON = []byte("[]")
+	}
+
 	query := `
-		INSERT INTO user_spam_rules (user_id, rule_type, rule_value, action, created_at)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO user_spam_rules (user_id, rule_type, rule_value, action, excluded_checks, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (user_id, rule_type, rule_value) DO UPDATE SET
-			action = EXCLUDED.action
+			action = EXCLUDED.action,
+			excluded_checks = EXCLUDED.excluded_checks
 		RETURNING id
 	`
 
-	err := db.QueryRow(query, rule.UserID, rule.RuleType, rule.RuleValue, rule.Action, rule.CreatedAt).Scan(&rule.ID)
-	if err != nil {
+	if err := db.QueryRow(query, rule.UserID, rule.RuleType, rule.RuleValue, rule.Action, string(excludedJSON), rule.CreatedAt).Scan(&rule.ID); err != nil {
 		return fmt.Errorf("failed to create spam rule: %w", err)
 	}
 
 	return nil
 }
 
+func scanSpamRule(scanner interface {
+	Scan(dest ...interface{}) error
+}, rule *SpamRule) error {
+	var excludedJSON string
+	if err := scanner.Scan(&rule.ID, &rule.UserID, &rule.RuleType, &rule.RuleValue, &rule.Action, &excludedJSON, &rule.CreatedAt); err != nil {
+		return err
+	}
+	if excludedJSON != "" {
+		_ = json.Unmarshal([]byte(excludedJSON), &rule.ExcludedChecks)
+	}
+	return nil
+}
+
 // GetSpamRulesByUserID retrieves all spam rules for a user
 func (db *DB) GetSpamRulesByUserID(userID int64) ([]*SpamRule, error) {
 	query := `
-		SELECT id, user_id, rule_type, rule_value, action, created_at
+		SELECT id, user_id, rule_type, rule_value, action, excluded_checks, created_at
 		FROM user_spam_rules
 		WHERE user_id = $1
 		ORDER BY action DESC, rule_type, rule_value
@@ -66,8 +93,7 @@ func (db *DB) GetSpamRulesByUserID(userID int64) ([]*SpamRule, error) {
 	var rules []*SpamRule
 	for rows.Next() {
 		rule := &SpamRule{}
-		err := rows.Scan(&rule.ID, &rule.UserID, &rule.RuleType, &rule.RuleValue, &rule.Action, &rule.CreatedAt)
-		if err != nil {
+		if err := scanSpamRule(rows, rule); err != nil {
 			return nil, fmt.Errorf("failed to scan spam rule: %w", err)
 		}
 		rules = append(rules, rule)
@@ -79,13 +105,13 @@ func (db *DB) GetSpamRulesByUserID(userID int64) ([]*SpamRule, error) {
 // GetSpamRuleByID retrieves a spam rule by ID
 func (db *DB) GetSpamRuleByID(id int64) (*SpamRule, error) {
 	query := `
-		SELECT id, user_id, rule_type, rule_value, action, created_at
+		SELECT id, user_id, rule_type, rule_value, action, excluded_checks, created_at
 		FROM user_spam_rules
 		WHERE id = $1
 	`
 
 	rule := &SpamRule{}
-	err := db.QueryRow(query, id).Scan(&rule.ID, &rule.UserID, &rule.RuleType, &rule.RuleValue, &rule.Action, &rule.CreatedAt)
+	err := scanSpamRule(db.QueryRow(query, id), rule)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -94,6 +120,49 @@ func (db *DB) GetSpamRuleByID(id int64) (*SpamRule, error) {
 	}
 
 	return rule, nil
+}
+
+// GetSpamCheckWeights returns the per-check weight overrides for a user.
+// Missing checks default to 1.0 — callers should treat a missing key the
+// same way as `weight=1.0`.
+func (db *DB) GetSpamCheckWeights(userID int64) (map[string]float64, error) {
+	rows, err := db.Query(`SELECT check_name, weight FROM spam_check_weights WHERE user_id = $1`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get spam_check_weights: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]float64{}
+	for rows.Next() {
+		var name string
+		var w float64
+		if err := rows.Scan(&name, &w); err != nil {
+			return nil, fmt.Errorf("scan spam_check_weights: %w", err)
+		}
+		out[name] = w
+	}
+	return out, nil
+}
+
+// SetSpamCheckWeight upserts a per-user weight override. Pass weight=1.0 to
+// reset to the default (we still keep the row so the UI can show it as set,
+// but the analyzer's behaviour is identical to no row).
+func (db *DB) SetSpamCheckWeight(userID int64, checkName string, weight float64) error {
+	if weight < 0 {
+		weight = 0
+	}
+	if weight > 10 {
+		weight = 10
+	}
+	_, err := db.Exec(
+		`INSERT INTO spam_check_weights (user_id, check_name, weight, updated_at)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (user_id, check_name) DO UPDATE SET weight = EXCLUDED.weight, updated_at = EXCLUDED.updated_at`,
+		userID, checkName, weight, timeutil.Now(),
+	)
+	if err != nil {
+		return fmt.Errorf("set spam_check_weight: %w", err)
+	}
+	return nil
 }
 
 // DeleteSpamRule deletes a spam rule
@@ -350,6 +419,64 @@ func (db *DB) RestoreFromSpam(messageID, userID int64) error {
 	}
 
 	return nil
+}
+
+// GetSpamMessageIDsBySender returns the IDs of every spam message whose From
+// header matches the given lowercased email address. We match by substring on
+// `from_addr` because the column stores the full header (`Name <email>` or
+// just `email`) and Postgres' lower() is locale-safe enough for ASCII emails.
+func (db *DB) GetSpamMessageIDsBySender(userID int64, sender string) ([]int64, error) {
+	sender = strings.ToLower(strings.TrimSpace(sender))
+	if sender == "" {
+		return nil, nil
+	}
+	rows, err := db.Query(
+		`SELECT id FROM messages
+		 WHERE user_id = $1 AND is_spam = true
+		   AND (LOWER(from_addr) = $2 OR LOWER(from_addr) LIKE '%<' || $2 || '>%')`,
+		userID, sender,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query spam by sender: %w", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// GetSpamMessageIDsByDomain — same idea, but the match is against the host
+// part. Two SQL patterns cover both From forms: `user@host` and `Name <user@host>`.
+func (db *DB) GetSpamMessageIDsByDomain(userID int64, domain string) ([]int64, error) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" {
+		return nil, nil
+	}
+	rows, err := db.Query(
+		`SELECT id FROM messages
+		 WHERE user_id = $1 AND is_spam = true
+		   AND (LOWER(from_addr) LIKE '%@' || $2 OR LOWER(from_addr) LIKE '%@' || $2 || '>%')`,
+		userID, domain,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query spam by domain: %w", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 // GetSpamMessageCount returns count of spam messages for a user

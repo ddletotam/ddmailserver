@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/timeutil"
 )
@@ -353,6 +354,64 @@ func (s *Server) HandleDesktopSetFlags(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// HandleDesktopMarkSpamByDomain implements the sidebar's "Spam by domain"
+// action: insert a domain-level spam rule, then flag every supplied message
+// (an entire conversation, in practice) as spam. The rule covers future
+// deliveries; the explicit message flagging covers the past so the conv
+// disappears from the desktop immediately.
+func (s *Server) HandleDesktopMarkSpamByDomain(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		respondError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var req struct {
+		Domain   string `json:"domain"`
+		Messages []struct {
+			Folder string `json:"folder"`
+			UID    int64  `json:"uid"`
+		} `json:"messages"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	domain := strings.ToLower(strings.TrimSpace(req.Domain))
+	if domain == "" || !strings.Contains(domain, ".") {
+		respondError(w, http.StatusBadRequest, "invalid domain")
+		return
+	}
+
+	rule := &db.SpamRule{
+		UserID:    user.ID,
+		RuleType:  "domain",
+		RuleValue: domain,
+		Action:    "spam",
+	}
+	if err := s.database.CreateSpamRule(rule); err != nil {
+		log.Printf("desktop spam-by-domain: create rule for %s: %v", domain, err)
+		respondError(w, http.StatusInternalServerError, "create rule failed")
+		return
+	}
+
+	marked := 0
+	for _, m := range req.Messages {
+		msg, err := s.database.GetMessageByID(m.UID)
+		if err != nil || msg.UserID != user.ID {
+			continue
+		}
+		if err := s.database.MarkMessageAsSpam(m.UID, &rule.ID); err != nil {
+			log.Printf("desktop spam-by-domain: mark %d: %v", m.UID, err)
+			continue
+		}
+		marked++
+	}
+
+	log.Printf("desktop spam-by-domain: domain=%s rule_id=%d marked=%d/%d", domain, rule.ID, marked, len(req.Messages))
+	respondJSON(w, http.StatusOK, map[string]int{"rule_id": int(rule.ID), "marked": marked})
+}
+
 // HandleDesktopDeleteMessages soft-deletes a batch of messages by ID. Used by
 // the "Delete conversation" action in the desktop sidebar — soft delete keeps
 // the rows around (and out of the conversation list, since GetMessagesByUser
@@ -647,10 +706,13 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 	isOurs := func(addr string) bool { return identities[strings.ToLower(addr)] }
 
 	// Per-folder fetch mirroring the IMAP fallback path: pull recent rows from
-	// INBOX/Sent/Drafts only. Trash/Spam/Archive stay invisible in the chat
-	// list. Per-folder limits keep this O(limit) regardless of total mailbox
-	// size, which matters once user inboxes grow into the tens of thousands.
+	// INBOX/Sent/Drafts the user is subscribed to. Trash/Spam/Archive stay
+	// invisible in the chat list, and an unsubscribed-from inbox of a second
+	// account doesn't leak in either. Per-folder limits keep this O(limit)
+	// regardless of total mailbox size, which matters once user inboxes grow
+	// into the tens of thousands.
 	folders, _ := s.database.GetFoldersByUser(user.ID)
+	subscribed, _ := s.database.GetSubscribedFolderIDs(user.ID)
 	folderNames := make(map[int64]string)
 	folderAccount := make(map[int64]int64)
 	sentFolderIDs := make(map[int64]bool)
@@ -689,6 +751,9 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 	}
 	quotas := []folderQuota{}
 	for _, f := range folders {
+		if !subscribed[f.ID] {
+			continue
+		}
 		switch f.Type {
 		case "inbox":
 			quotas = append(quotas, folderQuota{f.ID, limit})
@@ -825,7 +890,12 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 			}
 		}
 
-		if len(regular) == 0 && lastDraft == nil {
+		// Drafts never start a conversation on their own. They're useful only
+		// to resume composition for a thread that already exists (regular
+		// messages present). A draft-only conv would render with empty
+		// messages[] and pollute the sidebar with what's effectively a
+		// scratch buffer.
+		if len(regular) == 0 {
 			continue
 		}
 

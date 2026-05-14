@@ -182,12 +182,14 @@ func (s *Server) setupRoutes() {
 	desktopAuthAPI.HandleFunc("/messages/{id}/parts/{cid}", s.HandleDesktopMessagePart).Methods("GET")
 	desktopAuthAPI.HandleFunc("/messages/flags", s.HandleDesktopSetFlags).Methods("POST")
 	desktopAuthAPI.HandleFunc("/messages/delete", s.HandleDesktopDeleteMessages).Methods("POST")
+	desktopAuthAPI.HandleFunc("/spam/mark-domain", s.HandleDesktopMarkSpamByDomain).Methods("POST")
 	desktopAuthAPI.HandleFunc("/identities", s.HandleDesktopIdentities).Methods("GET")
 	desktopAuthAPI.HandleFunc("/send", s.HandleDesktopSend).Methods("POST")
 	desktopAuthAPI.HandleFunc("/calendars", s.HandleDesktopCalendars).Methods("GET")
 	desktopAuthAPI.HandleFunc("/calendar-events", s.HandleDesktopCalendarEvents).Methods("GET")
 	desktopAuthAPI.HandleFunc("/events/{id}/rsvp", s.HandleDesktopEventRSVP).Methods("POST")
 	desktopAuthAPI.HandleFunc("/events/{id}", s.HandleDesktopEventPatch).Methods("PATCH")
+	desktopAuthAPI.HandleFunc("/events", s.HandleDesktopEventCreate).Methods("POST")
 	desktopAuthAPI.HandleFunc("/avatars", s.HandleDesktopAvatar).Methods("GET")
 
 	// CalDAV server (uses Basic Auth, handles its own authentication)
@@ -303,6 +305,8 @@ func (s *Server) setupRoutes() {
 	// Spam section
 	web.HandleFunc("/spam", s.HandleSpamPage).Methods("GET")
 	web.HandleFunc("/spam/restore/{id}", s.HandleRestoreFromSpam).Methods("POST")
+	web.HandleFunc("/spam/restore-by-sender", s.HandleRestoreSpamBySender).Methods("POST")
+	web.HandleFunc("/spam/restore-by-domain", s.HandleRestoreSpamByDomain).Methods("POST")
 	web.HandleFunc("/spam/delete/{id}", s.HandleDeleteSpamMessage).Methods("DELETE")
 	web.HandleFunc("/spam/analyze/{id}", s.HandleAnalyzeSpam).Methods("GET")
 	web.HandleFunc("/spam/mark/{id}", s.HandleMarkAsSpam).Methods("POST")
@@ -313,6 +317,7 @@ func (s *Server) setupRoutes() {
 	web.HandleFunc("/spam/rules/{id}", s.HandleDeleteSpamRule).Methods("DELETE")
 	web.HandleFunc("/spam/settings", s.HandleSpamSettingsPage).Methods("GET")
 	web.HandleFunc("/spam/settings/{name}", s.HandleToggleSpamCheck).Methods("POST")
+	web.HandleFunc("/spam/settings/weight/{name}", s.HandleSetSpamCheckWeight).Methods("POST")
 
 	// Search
 	web.HandleFunc("/search", s.HandleSearchPage).Methods("GET")

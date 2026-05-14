@@ -14,95 +14,47 @@
             </a>
         </div>
     </div>
-    <div class="card-body">
-        {{if .Messages}}
-        <div class="table-responsive">
-            <table class="table table-vcenter card-table table-hover">
+    <div class="card-body p-0">
+        {{if .Rows}}
+        <div class="table-responsive" style="overflow: visible;">
+            <style>
+              /* Table-layout:fixed locks column widths so a long Message-ID or
+                 subject can't blow out the actions column off-screen. The
+                 wrap-anywhere rule lets the code/email content break at any
+                 character. */
+              .spam-table { table-layout: fixed; width: 100%; }
+              .spam-table .col-from { width: 220px; }
+              .spam-table .col-score { width: 80px; }
+              .spam-table .col-date { width: 130px; }
+              .spam-table .col-actions { width: 140px; }
+              .spam-table td, .spam-table th { overflow-wrap: anywhere; word-break: break-word; }
+              .spam-table code { white-space: normal; word-break: break-all; }
+              /* Buttons default to white-space:nowrap which keeps long body
+                 previews on one line and breaks the column. Force-wrap and
+                 left-align inside the spam table. */
+              .spam-table .btn-link {
+                white-space: normal;
+                text-align: left;
+                word-break: break-word;
+                overflow-wrap: anywhere;
+              }
+              .spam-table .col-actions { white-space: nowrap; }
+            </style>
+            <table class="table table-vcenter card-table spam-table">
                 <thead>
                     <tr>
-                        <th>{{t "messages.from"}}</th>
-                        <th>{{t "messages.subject"}}</th>
-                        <th>{{t "spam.score"}}</th>
-                        <th>{{t "messages.date"}}</th>
-                        <th class="w-1"></th>
+                        <th class="col-from">{{t "messages.from"}}</th>
+                        <th>{{t "messages.subject"}} / {{t "spam.reasons"}}</th>
+                        <th class="col-score">{{t "spam.score"}}</th>
+                        <th class="col-date">{{t "messages.date"}}</th>
+                        <th class="col-actions"></th>
                     </tr>
                 </thead>
-                <tbody id="spam-messages">
-                    {{range .Messages}}
-                    <tr id="msg-{{.ID}}">
-                        <td>
-                            <div class="text-truncate" style="max-width: 200px;">
-                                {{.From}}
-                            </div>
-                        </td>
-                        <td>
-                            <div class="text-truncate" style="max-width: 300px;">
-                                {{.Subject}}
-                            </div>
-                        </td>
-                        <td>
-                            <span class="badge {{if ge .SpamScore 6.0}}bg-red{{else if ge .SpamScore 3.0}}bg-orange{{else}}bg-yellow{{end}}">
-                                {{printf "%.1f" .SpamScore}}
-                            </span>
-                            <button type="button" class="btn btn-sm btn-ghost-secondary"
-                                    hx-get="/spam/analyze/{{.ID}}"
-                                    hx-target="#analysis-{{.ID}}"
-                                    hx-swap="innerHTML"
-                                    title="{{t "spam.analyze"}}">
-                                <i class="ti ti-info-circle"></i>
-                            </button>
-                            <div id="analysis-{{.ID}}" class="small text-muted"></div>
-                        </td>
-                        <td class="text-muted">
-                            {{.DateAsTime.Format "02.01.2006 15:04"}}
-                        </td>
-                        <td>
-                            <div class="btn-list flex-nowrap">
-                                <button type="button" class="btn btn-sm btn-success"
-                                        hx-post="/spam/restore/{{.ID}}"
-                                        hx-target="#msg-{{.ID}}"
-                                        hx-swap="outerHTML"
-                                        title="{{t "spam.restore"}}">
-                                    <i class="ti ti-inbox"></i>
-                                </button>
-                                <button type="button" class="btn btn-sm btn-danger"
-                                        hx-delete="/spam/delete/{{.ID}}"
-                                        hx-target="#msg-{{.ID}}"
-                                        hx-swap="outerHTML"
-                                        hx-confirm="{{t "spam.confirm_delete"}}"
-                                        title="{{t "spam.delete"}}">
-                                    <i class="ti ti-trash"></i>
-                                </button>
-                            </div>
-                        </td>
-                    </tr>
-                    {{end}}
+                <tbody id="spam-list" hx-target="closest tr" hx-swap="outerHTML">
+                    {{template "spam-rows" .}}
                 </tbody>
             </table>
         </div>
-        {{if gt .TotalCount .PageSize}}
-        <div class="card-footer d-flex align-items-center">
-            <p class="m-0 text-muted">
-                {{t "pagination.showing"}} <span>{{.MessageCount}}</span> {{t "pagination.of"}} <span>{{.TotalCount}}</span>
-            </p>
-            <ul class="pagination m-0 ms-auto">
-                {{if gt .Page 1}}
-                <li class="page-item">
-                    <a class="page-link" href="/spam?page={{.PrevPage}}">
-                        <i class="ti ti-chevron-left"></i>
-                    </a>
-                </li>
-                {{end}}
-                {{if .HasNextPage}}
-                <li class="page-item">
-                    <a class="page-link" href="/spam?page={{.NextPage}}">
-                        <i class="ti ti-chevron-right"></i>
-                    </a>
-                </li>
-                {{end}}
-            </ul>
-        </div>
-        {{end}}
         {{else}}
         <div class="empty">
             <div class="empty-icon">
@@ -117,26 +69,183 @@
     </div>
 </div>
 
+<!-- Source viewer modal — htmx GETs /messages/{id}/source into the pre -->
+<div class="modal modal-blur fade" id="spam-source-modal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">{{t "spam.view_source"}}</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-0">
+        <pre id="spam-source-body" class="m-0 p-3 small" style="white-space:pre-wrap;max-height:70vh;overflow:auto"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Body preview modal — populated client-side from data attribute -->
+<div class="modal modal-blur fade" id="spam-body-modal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">{{t "messages.body"}}</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <pre id="spam-body-text" class="m-0 small" style="white-space:pre-wrap"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
-// Handle spam analysis response
-htmx.on("htmx:afterSwap", function(evt) {
-    if (evt.detail.target.id.startsWith("analysis-")) {
-        try {
-            const data = JSON.parse(evt.detail.target.innerHTML);
-            let html = '<div class="mt-1">';
-            if (data.spam_reasons && data.spam_reasons.length > 0) {
-                html += '<ul class="list-unstyled mb-0">';
-                data.spam_reasons.forEach(reason => {
-                    html += '<li><i class="ti ti-alert-triangle text-warning"></i> ' + reason + '</li>';
-                });
-                html += '</ul>';
-            }
-            html += '</div>';
-            evt.detail.target.innerHTML = html;
-        } catch(e) {
-            // Not JSON, leave as is
-        }
-    }
+// Open raw-source modal — htmx fetches /messages/{id}/source on demand.
+document.body.addEventListener("click", (e) => {
+  const view = e.target.closest("[data-action='view-source']");
+  if (view) {
+    const id = view.dataset.id;
+    const pre = document.getElementById("spam-source-body");
+    pre.textContent = "Loading…";
+    fetch(`/messages/${id}/source`, { credentials: "same-origin" })
+      .then(r => r.ok ? r.text() : Promise.reject(r.statusText))
+      .then(t => { pre.textContent = t; })
+      .catch(err => { pre.textContent = "Error: " + err; });
+    new bootstrap.Modal(document.getElementById("spam-source-modal")).show();
+  }
+  const body = e.target.closest("[data-action='view-body']");
+  if (body) {
+    document.getElementById("spam-body-text").textContent = body.dataset.body || "(empty body)";
+    new bootstrap.Modal(document.getElementById("spam-body-modal")).show();
+  }
+  const copy = e.target.closest("[data-action='copy']");
+  if (copy) {
+    navigator.clipboard.writeText(copy.dataset.value || "").catch(() => {});
+    const orig = copy.innerHTML;
+    copy.innerHTML = '<i class="ti ti-check"></i>';
+    setTimeout(() => { copy.innerHTML = orig; }, 900);
+  }
 });
 </script>
+{{end}}
+
+{{/* spam-rows is the per-page slice of <tr>'s. Rendered standalone for the
+     infinite-scroll partial; included inline for the initial page render. */}}
+{{define "spam-rows"}}
+{{range .Rows}}
+<tr id="msg-{{.ID}}">
+  <td class="align-top">
+    <div class="d-flex flex-column">
+      {{if .FromName}}<strong class="text-truncate" style="max-width:230px" title="{{.FromName}}">{{.FromName}}</strong>{{end}}
+      <small class="text-muted text-truncate" style="max-width:230px" title="{{.FromAddress}}">{{.FromAddress}}</small>
+      {{if .FromDomain}}<small class="text-muted">@{{.FromDomain}}</small>{{end}}
+    </div>
+  </td>
+  <td class="align-top">
+    <div class="fw-bold">{{.Subject}}</div>
+    {{if .BodyPreview}}
+    <button type="button" class="btn btn-link btn-sm p-0 text-muted small" data-action="view-body" data-body="{{.Body}}" title="{{t "messages.view_body"}}">
+      {{.BodyPreview}}
+    </button>
+    {{end}}
+    {{if .Reasons}}
+    <ul class="list-unstyled small mb-1 mt-1">
+      {{range .Reasons}}
+      <li class="text-muted"><i class="ti ti-flag text-warning me-1"></i>{{.}}</li>
+      {{end}}
+    </ul>
+    {{end}}
+    {{if .MessageID}}
+    <div class="small text-muted d-flex align-items-center">
+      <span class="me-1">Message-ID:</span>
+      <code class="me-1" style="font-size:0.75rem">{{.MessageID}}</code>
+      <button type="button" class="btn btn-sm btn-ghost-secondary p-0 px-1" data-action="copy" data-value="{{.MessageID}}" title="{{t "common.copy"}}">
+        <i class="ti ti-copy"></i>
+      </button>
+    </div>
+    {{end}}
+  </td>
+  <td class="align-top">
+    <span class="badge {{if ge .SpamScore 6.0}}bg-red{{else if ge .SpamScore 3.0}}bg-orange{{else}}bg-yellow{{end}}">
+      {{printf "%.1f" .SpamScore}}
+    </span>
+  </td>
+  <td class="align-top text-muted small">{{fmtTime .Date "02.01.2006 15:04"}}</td>
+  <td class="align-top">
+    <div class="btn-list flex-nowrap">
+      <button type="button" class="btn btn-sm btn-icon btn-ghost-secondary" data-action="view-source" data-id="{{.ID}}" title="{{t "spam.view_source"}}">
+        <i class="ti ti-code"></i>
+      </button>
+      <div class="btn-group">
+        <button type="button" class="btn btn-sm btn-success"
+                hx-post="/spam/restore/{{.ID}}"
+                hx-target="#msg-{{.ID}}" hx-swap="outerHTML"
+                title="{{t "spam.restore_this"}}">
+          <i class="ti ti-inbox"></i>
+        </button>
+        <button type="button" class="btn btn-sm btn-success dropdown-toggle dropdown-toggle-split"
+                data-bs-toggle="dropdown" aria-expanded="false">
+          <span class="visually-hidden">{{t "spam.restore"}}</span>
+        </button>
+        <div class="dropdown-menu dropdown-menu-end">
+          {{if .FromAddress}}
+          <h6 class="dropdown-header text-truncate" style="max-width:320px" title="{{.FromAddress}}">
+            <i class="ti ti-user me-1"></i>{{.FromAddress}}
+          </h6>
+          <button type="button" class="dropdown-item"
+                  hx-post="/spam/restore-by-sender?sender={{.FromAddress}}"
+                  hx-target="#spam-list" hx-swap="innerHTML"
+                  hx-confirm="{{t "spam.confirm_restore_sender"}} {{.FromAddress}}">
+            <i class="ti ti-inbox me-1"></i>{{t "spam.restore_all_from_sender"}}
+          </button>
+          <button type="button" class="dropdown-item text-success"
+                  hx-post="/spam/restore-by-sender?sender={{.FromAddress}}&allow=1"
+                  hx-target="#spam-list" hx-swap="innerHTML"
+                  hx-confirm="{{t "spam.confirm_restore_allow_sender"}} {{.FromAddress}}">
+            <i class="ti ti-shield-check me-1"></i>{{t "spam.restore_allow_sender"}}
+          </button>
+          {{end}}
+          {{if .FromDomain}}
+          <div class="dropdown-divider"></div>
+          <h6 class="dropdown-header"><i class="ti ti-world me-1"></i>@{{.FromDomain}}</h6>
+          <button type="button" class="dropdown-item"
+                  hx-post="/spam/restore-by-domain?domain={{.FromDomain}}"
+                  hx-target="#spam-list" hx-swap="innerHTML"
+                  hx-confirm="{{t "spam.confirm_restore_domain"}} {{.FromDomain}}">
+            <i class="ti ti-inbox me-1"></i>{{t "spam.restore_all_from_domain"}}
+          </button>
+          <button type="button" class="dropdown-item text-success"
+                  hx-post="/spam/restore-by-domain?domain={{.FromDomain}}&allow=1"
+                  hx-target="#spam-list" hx-swap="innerHTML"
+                  hx-confirm="{{t "spam.confirm_restore_allow_domain"}} {{.FromDomain}}">
+            <i class="ti ti-shield-check me-1"></i>{{t "spam.restore_allow_domain"}}
+          </button>
+          {{end}}
+        </div>
+      </div>
+      <button type="button" class="btn btn-sm btn-icon btn-danger"
+              hx-delete="/spam/delete/{{.ID}}"
+              hx-target="#msg-{{.ID}}" hx-swap="outerHTML"
+              hx-confirm="{{t "spam.confirm_delete"}}" title="{{t "spam.delete"}}">
+        <i class="ti ti-trash"></i>
+      </button>
+    </div>
+  </td>
+</tr>
+{{end}}
+{{if .HasNextPage}}
+{{/* Infinite-scroll sentinel: htmx fires the load when this row enters the
+     viewport, then replaces itself with the next page's rows. The new page
+     contains its own sentinel — so the chain continues until HasNextPage is
+     false. */}}
+<tr id="spam-sentinel"
+    hx-get="/spam?page={{add .Page 1}}&partial=1"
+    hx-trigger="revealed"
+    hx-target="#spam-sentinel"
+    hx-swap="outerHTML">
+  <td colspan="5" class="text-center text-muted py-3">
+    <span class="spinner-border spinner-border-sm me-2"></span>{{t "spam.loading_more"}}
+  </td>
+</tr>
+{{end}}
 {{end}}

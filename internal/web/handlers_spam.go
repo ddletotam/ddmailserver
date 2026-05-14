@@ -13,19 +13,51 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/notify"
 	"github.com/yourusername/mailserver/internal/timeutil"
 )
+
+// publishInboxUpdate nudges IMAP IDLE / WebSocket subscribers that the user's
+// INBOX changed (one or more restored messages). Idempotent — no-op when the
+// hub isn't wired up (e.g. tests). Uses count=1 even for bulk because the
+// listeners only care that "something changed", not how much.
+func (s *Server) publishInboxUpdate(user *models.User, count uint32) {
+	if s.notifyHub == nil || user == nil {
+		return
+	}
+	if count == 0 {
+		count = 1
+	}
+	s.notifyHub.Publish(notify.Event{
+		UserID:   user.ID,
+		Type:     notify.EventNewMessage,
+		Username: user.Username,
+		Mailbox:  "INBOX",
+		Count:    count,
+	})
+}
+
+// SpamRow is the per-message view-model rendered in the spam table. It
+// pre-decodes the reason list (stored as JSON in the DB), splits the From
+// header into display name + bare address + domain, and trims the body for a
+// preview so the template stays declarative.
+type SpamRow struct {
+	*models.Message
+	Reasons     []string
+	BodyPreview string
+	FromName    string
+	FromAddress string
+	FromDomain  string
+}
 
 // SpamData holds data for the spam page
 type SpamData struct {
 	PageData
-	Messages     []*models.Message
+	Rows         []SpamRow
 	MessageCount int
 	TotalCount   int
 	Page         int
 	PageSize     int
-	PrevPage     int
-	NextPage     int
 	HasNextPage  bool
 }
 
@@ -42,11 +74,13 @@ type SpamSettingsData struct {
 	AvailableChecks []SpamCheck
 }
 
-// SpamCheck represents a spam check that can be enabled/disabled
+// SpamCheck represents a spam check that can be enabled/disabled. Weight is
+// the per-user multiplier (1.0 = stock); the UI lets the user override it.
 type SpamCheck struct {
 	Name        string
 	Description string
 	Enabled     bool
+	Weight      float64
 }
 
 // SpamAnalysisData holds analysis data for a spam message
@@ -97,22 +131,71 @@ func (s *Server) HandleSpamPage(w http.ResponseWriter, r *http.Request) {
 	}
 	i18n := s.i18nManager.Get(userLang)
 
+	rows := buildSpamRows(messages)
+
+	// Partial render for infinite scroll — htmx fetches the next page and
+	// appends just the <tr> rows, no chrome.
+	if r.URL.Query().Get("partial") == "1" {
+		partial := SpamData{
+			PageData:     PageData{User: user},
+			Rows:         rows,
+			MessageCount: len(rows),
+			TotalCount:   total,
+			Page:         page,
+			PageSize:     pageSize,
+			HasNextPage:  page*pageSize < total,
+		}
+		s.renderTemplatePartial(w, "spam.html", "spam-rows", partial)
+		return
+	}
+
 	data := SpamData{
 		PageData: PageData{
 			Title: i18n.T("spam.title"),
 			User:  user,
 		},
-		Messages:     messages,
-		MessageCount: len(messages),
+		Rows:         rows,
+		MessageCount: len(rows),
 		TotalCount:   total,
 		Page:         page,
 		PageSize:     pageSize,
-		PrevPage:     page - 1,
-		NextPage:     page + 1,
 		HasNextPage:  page*pageSize < total,
 	}
 
 	s.renderTemplate(w, "spam.html", data)
+}
+
+// buildSpamRows decorates each message with parsed reasons, a body preview,
+// and a split sender. Kept in a helper so the partial-render path uses the
+// exact same projection.
+func buildSpamRows(messages []*models.Message) []SpamRow {
+	rows := make([]SpamRow, 0, len(messages))
+	for _, m := range messages {
+		var reasons []string
+		if m.SpamReasons != "" {
+			json.Unmarshal([]byte(m.SpamReasons), &reasons)
+		}
+		addr := strings.ToLower(extractEmailAddress(m.From))
+		name := extractName(m.From)
+		domain := ""
+		if at := strings.LastIndex(addr, "@"); at > 0 && at+1 < len(addr) {
+			domain = addr[at+1:]
+		}
+		preview := strings.TrimSpace(m.Body)
+		preview = strings.Join(strings.Fields(preview), " ")
+		if len(preview) > 220 {
+			preview = preview[:220] + "…"
+		}
+		rows = append(rows, SpamRow{
+			Message:     m,
+			Reasons:     reasons,
+			BodyPreview: preview,
+			FromName:    name,
+			FromAddress: addr,
+			FromDomain:  domain,
+		})
+	}
+	return rows
 }
 
 // HandleRestoreFromSpam restores a message from spam to inbox
@@ -142,9 +225,115 @@ func (s *Server) HandleRestoreFromSpam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Wake any IMAP IDLE / WebSocket subscribers — without this the desktop
+	// client doesn't notice the message reappearing in INBOX until it
+	// reconnects.
+	s.publishInboxUpdate(user, 1)
+
 	// For htmx, return empty response to remove the row
 	w.Header().Set("HX-Trigger", "spamRestored")
 	w.WriteHeader(http.StatusOK)
+}
+
+// HandleRestoreSpamBySender restores every spam message whose From matches
+// the given address. When `allow=1` is passed it also inserts a whitelist
+// rule so future deliveries from the same sender skip the filter. Renders
+// the refreshed first page of remaining spam rows for htmx to swap in.
+func (s *Server) HandleRestoreSpamBySender(w http.ResponseWriter, r *http.Request) {
+	s.handleRestoreSpamBulk(w, r, "sender")
+}
+
+// HandleRestoreSpamByDomain — domain variant of the above. Matches the host
+// part of the From address and supports the same optional whitelist rule.
+func (s *Server) HandleRestoreSpamByDomain(w http.ResponseWriter, r *http.Request) {
+	s.handleRestoreSpamBulk(w, r, "domain")
+}
+
+func (s *Server) handleRestoreSpamBulk(w http.ResponseWriter, r *http.Request, mode string) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var value string
+	var ids []int64
+	var err error
+	switch mode {
+	case "sender":
+		value = strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sender")))
+		if value == "" {
+			http.Error(w, "missing sender", http.StatusBadRequest)
+			return
+		}
+		ids, err = s.database.GetSpamMessageIDsBySender(user.ID, value)
+	case "domain":
+		value = strings.ToLower(strings.TrimSpace(r.URL.Query().Get("domain")))
+		if value == "" {
+			http.Error(w, "missing domain", http.StatusBadRequest)
+			return
+		}
+		ids, err = s.database.GetSpamMessageIDsByDomain(user.ID, value)
+	}
+	if err != nil {
+		log.Printf("Bulk restore: query failed: %v", err)
+		http.Error(w, "Lookup failed", http.StatusInternalServerError)
+		return
+	}
+
+	restored := 0
+	for _, id := range ids {
+		if err := s.database.RestoreFromSpam(id, user.ID); err != nil {
+			log.Printf("Bulk restore: failed to restore %d: %v", id, err)
+			continue
+		}
+		restored++
+	}
+
+	if r.URL.Query().Get("allow") == "1" {
+		ruleType := "address"
+		if mode == "domain" {
+			ruleType = "domain"
+		}
+		if err := s.database.CreateSpamRule(&db.SpamRule{
+			UserID:    user.ID,
+			RuleType:  ruleType,
+			RuleValue: value,
+			Action:    "allow",
+		}); err != nil {
+			log.Printf("Bulk restore: failed to create allow rule: %v", err)
+		}
+	}
+
+	log.Printf("Spam bulk restore (%s=%s, allow=%v): restored %d/%d messages",
+		mode, value, r.URL.Query().Get("allow") == "1", restored, len(ids))
+
+	if restored > 0 {
+		s.publishInboxUpdate(user, uint32(restored))
+	}
+
+	// Re-render the first page of spam so htmx swaps the table body with the
+	// fresh remainder. The user keeps their place; the dropdown's
+	// hx-target points at #spam-list innerHTML.
+	s.renderRefreshedSpamRows(w, r, user)
+}
+
+func (s *Server) renderRefreshedSpamRows(w http.ResponseWriter, r *http.Request, user *models.User) {
+	pageSize := 50
+	messages, total, err := s.database.GetSpamMessages(user.ID, pageSize, 0)
+	if err != nil {
+		log.Printf("Failed to reload spam messages: %v", err)
+	}
+	data := SpamData{
+		PageData:     PageData{User: user},
+		Rows:         buildSpamRows(messages),
+		MessageCount: len(messages),
+		TotalCount:   total,
+		Page:         1,
+		PageSize:     pageSize,
+		HasNextPage:  pageSize < total,
+	}
+	s.renderTemplatePartial(w, "spam.html", "spam-rows", data)
 }
 
 // HandleDeleteSpamMessage permanently deletes a spam message
@@ -246,12 +435,25 @@ func (s *Server) HandleCreateSpamRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create rule
+	// Per-rule check exclusions — only meaningful for allow rules. The form
+	// posts each selected check as a separate `excluded_checks` value; the
+	// rest of the form ignores it.
+	var excluded []string
+	if action == "allow" {
+		for _, c := range r.Form["excluded_checks"] {
+			c = strings.TrimSpace(c)
+			if validCheckName(c) {
+				excluded = append(excluded, c)
+			}
+		}
+	}
+
 	rule := &db.SpamRule{
-		UserID:    user.ID,
-		RuleType:  ruleType,
-		RuleValue: strings.ToLower(ruleValue),
-		Action:    action,
+		UserID:         user.ID,
+		RuleType:       ruleType,
+		RuleValue:      strings.ToLower(ruleValue),
+		Action:         action,
+		ExcludedChecks: excluded,
 	}
 
 	if err := s.database.CreateSpamRule(rule); err != nil {
@@ -324,12 +526,34 @@ func (s *Server) HandleSpamSettingsPage(w http.ResponseWriter, r *http.Request) 
 	}
 	i18n := s.i18nManager.Get(userLang)
 
-	// Available checks
+	weights, wErr := s.database.GetSpamCheckWeights(user.ID)
+	if wErr != nil {
+		log.Printf("Failed to get spam weights: %v", wErr)
+		weights = map[string]float64{}
+	}
+	weightOr := func(name string) float64 {
+		if w, ok := weights[name]; ok {
+			return w
+		}
+		return 1.0
+	}
+
+	// One row per analyzer category (parser.SpamCheckCategories). Two extra
+	// fine-grained toggles (url_shortener, spam_word:xxx) live under content/
+	// links and are exposed only via the per-check disable flow, not weights.
 	availableChecks := []SpamCheck{
-		{Name: "spf", Description: i18n.T("spam.check.spf"), Enabled: !disabledMap["spf"]},
-		{Name: "dkim", Description: i18n.T("spam.check.dkim"), Enabled: !disabledMap["dkim"]},
-		{Name: "rbl", Description: i18n.T("spam.check.rbl"), Enabled: !disabledMap["rbl"]},
-		{Name: "url_shortener", Description: i18n.T("spam.check.url_shortener"), Enabled: !disabledMap["url_shortener"]},
+		{Name: "chain", Description: i18n.T("spam.check.chain"), Enabled: !disabledMap["chain"], Weight: weightOr("chain")},
+		{Name: "spf", Description: i18n.T("spam.check.spf"), Enabled: !disabledMap["spf"], Weight: weightOr("spf")},
+		{Name: "dkim", Description: i18n.T("spam.check.dkim"), Enabled: !disabledMap["dkim"], Weight: weightOr("dkim")},
+		{Name: "rbl", Description: i18n.T("spam.check.rbl"), Enabled: !disabledMap["rbl"], Weight: weightOr("rbl")},
+		{Name: "headers", Description: i18n.T("spam.check.headers"), Enabled: !disabledMap["headers"], Weight: weightOr("headers")},
+		{Name: "content", Description: i18n.T("spam.check.content"), Enabled: !disabledMap["content"], Weight: weightOr("content")},
+		{Name: "attachments", Description: i18n.T("spam.check.attachments"), Enabled: !disabledMap["attachments"], Weight: weightOr("attachments")},
+		{Name: "links", Description: i18n.T("spam.check.links"), Enabled: !disabledMap["links"], Weight: weightOr("links")},
+		{Name: "embedded", Description: i18n.T("spam.check.embedded"), Enabled: !disabledMap["embedded"], Weight: weightOr("embedded")},
+		{Name: "sender", Description: i18n.T("spam.check.sender"), Enabled: !disabledMap["sender"], Weight: weightOr("sender")},
+		{Name: "emojis", Description: i18n.T("spam.check.emojis"), Enabled: !disabledMap["emojis"], Weight: weightOr("emojis")},
+		{Name: "url_shortener", Description: i18n.T("spam.check.url_shortener"), Enabled: !disabledMap["url_shortener"], Weight: 1.0},
 	}
 
 	data := SpamSettingsData{
@@ -355,11 +579,7 @@ func (s *Server) HandleToggleSpamCheck(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	checkName := vars["name"]
 
-	// Validate check name
-	validChecks := map[string]bool{
-		"spf": true, "dkim": true, "rbl": true, "url_shortener": true,
-	}
-	if !validChecks[checkName] {
+	if !validCheckName(checkName) {
 		http.Error(w, "Invalid check name", http.StatusBadRequest)
 		return
 	}
@@ -392,6 +612,51 @@ func (s *Server) HandleToggleSpamCheck(w http.ResponseWriter, r *http.Request) {
 	// Return new state for htmx
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"enabled": isDisabled}) // flipped
+}
+
+// validCheckName is the single source of truth for which check-name strings
+// are valid input on the settings page. Includes the analyzer categories
+// (parser.SpamCheckCategories) and the two fine-grained sub-toggles that
+// `disabledChecks` keys also use.
+func validCheckName(name string) bool {
+	switch name {
+	case "chain", "spf", "dkim", "rbl", "headers", "content",
+		"attachments", "links", "embedded", "sender", "emojis",
+		"url_shortener":
+		return true
+	}
+	return false
+}
+
+// HandleSetSpamCheckWeight upserts a per-check weight. POST form field
+// `weight` (float, clamped to [0, 10]). Returns 204 on success — htmx can
+// just ignore the body.
+func (s *Server) HandleSetSpamCheckWeight(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	name := mux.Vars(r)["name"]
+	if !validCheckName(name) {
+		http.Error(w, "Invalid check name", http.StatusBadRequest)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Invalid form", http.StatusBadRequest)
+		return
+	}
+	weight, err := strconv.ParseFloat(r.FormValue("weight"), 64)
+	if err != nil {
+		http.Error(w, "Invalid weight", http.StatusBadRequest)
+		return
+	}
+	if err := s.database.SetSpamCheckWeight(user.ID, name, weight); err != nil {
+		log.Printf("Failed to set spam check weight: %v", err)
+		http.Error(w, "Failed to save", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // HandleAnalyzeSpam analyzes a spam message and suggests rules

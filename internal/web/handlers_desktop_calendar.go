@@ -2,9 +2,92 @@ package web
 
 import (
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
+
+// parseExDates pulls EXDATE values out of raw iCal data and converts them
+// to ms-since-epoch. Handles the most common forms:
+//
+//	EXDATE;TZID=Europe/Moscow:20260513T120000
+//	EXDATE:20260513T120000Z
+//	EXDATE;VALUE=DATE:20260513
+//	EXDATE:20260513T120000,20260520T120000
+//
+// Returned values are sorted ascending. Anything we can't parse is silently
+// skipped — a single malformed EXDATE shouldn't poison the rest, and the
+// caller can still expand RRULE without that one exception.
+func parseExDates(icalData string) []int64 {
+	if !strings.Contains(icalData, "EXDATE") {
+		return nil
+	}
+	var out []int64
+	// Unfold RFC 5545 line folding before processing — continuation lines
+	// start with a single space/tab and continue the previous logical line.
+	lines := strings.Split(icalData, "\n")
+	logical := make([]string, 0, len(lines))
+	for _, raw := range lines {
+		raw = strings.TrimRight(raw, "\r")
+		if (strings.HasPrefix(raw, " ") || strings.HasPrefix(raw, "\t")) && len(logical) > 0 {
+			logical[len(logical)-1] += raw[1:]
+			continue
+		}
+		logical = append(logical, raw)
+	}
+	for _, line := range logical {
+		if !strings.HasPrefix(line, "EXDATE") {
+			continue
+		}
+		colon := strings.Index(line, ":")
+		if colon < 0 {
+			continue
+		}
+		params := line[:colon]
+		values := line[colon+1:]
+		loc := time.UTC
+		isDate := false
+		for _, p := range strings.Split(params, ";") {
+			if strings.HasPrefix(p, "TZID=") {
+				if l, err := time.LoadLocation(strings.TrimPrefix(p, "TZID=")); err == nil {
+					loc = l
+				}
+			}
+			if p == "VALUE=DATE" {
+				isDate = true
+			}
+		}
+		for _, v := range strings.Split(values, ",") {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				continue
+			}
+			var parsed time.Time
+			var ok bool
+			if isDate {
+				if t, err := time.ParseInLocation("20060102", v, loc); err == nil {
+					parsed, ok = t, true
+				}
+			} else if strings.HasSuffix(v, "Z") {
+				if t, err := time.Parse("20060102T150405Z", v); err == nil {
+					parsed, ok = t, true
+				}
+			} else {
+				if t, err := time.ParseInLocation("20060102T150405", v, loc); err == nil {
+					parsed, ok = t, true
+				}
+			}
+			if ok {
+				out = append(out, timeutil.ToMs(parsed))
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
 
 // DesktopCalendar is the trimmed shape the desktop client wants for a calendar.
 // Server color is included for back-compat but the desktop ignores it and
@@ -46,7 +129,11 @@ type DesktopCalendarEvent struct {
 	Status         string                    `json:"status,omitempty"`
 	RRule          string                    `json:"rrule,omitempty"`
 	RecurrenceID   string                    `json:"recurrence_id,omitempty"`
-	Attendees      []DesktopCalendarAttendee `json:"attendees,omitempty"`
+	// ExDates lists deleted recurring-instance starts as ms-since-epoch. The
+	// client must filter these out when expanding `RRule` so removed
+	// occurrences don't reappear on the calendar.
+	ExDates   []int64                   `json:"exdates,omitempty"`
+	Attendees []DesktopCalendarAttendee `json:"attendees,omitempty"`
 }
 
 // HandleDesktopCalendars returns all of the user's calendars (enabled + disabled).
@@ -162,6 +249,10 @@ func (s *Server) HandleDesktopCalendarEvents(w http.ResponseWriter, r *http.Requ
 				PartStat: a.PartStat,
 			})
 		}
+		var exDates []int64
+		if e.RRule != "" {
+			exDates = parseExDates(e.ICalData)
+		}
 		out = append(out, DesktopCalendarEvent{
 			ID:             e.ID,
 			CalendarID:     e.CalendarID,
@@ -177,6 +268,7 @@ func (s *Server) HandleDesktopCalendarEvents(w http.ResponseWriter, r *http.Requ
 			Status:         e.Status,
 			RRule:          e.RRule,
 			RecurrenceID:   e.RecurrenceID,
+			ExDates:        exDates,
 			Attendees:      dtos,
 		})
 	}

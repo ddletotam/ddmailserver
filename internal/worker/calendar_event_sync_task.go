@@ -97,7 +97,14 @@ func (t *CalendarEventSyncTask) Execute(ctx context.Context) error {
 		}
 
 		if err != nil {
-			log.Printf("Calendar event sync failed for %s (%s): %v", entry.UID, entry.Operation, err)
+			log.Printf("Calendar event sync failed for %s (%s, retry=%d): %v",
+				entry.UID, entry.Operation, entry.RetryCount, err)
+			// Persist failure for backoff + DLQ warning logic. Best-effort:
+			// if we can't update the DB the entry just re-fires on the next
+			// cycle, which is still correct (just chattier).
+			if dbErr := t.database.MarkCalendarEventSyncFailed(entry.ID, err.Error()); dbErr != nil {
+				log.Printf("MarkCalendarEventSyncFailed: %v", dbErr)
+			}
 			failCount++
 			continue
 		}
@@ -116,6 +123,17 @@ func (t *CalendarEventSyncTask) Execute(ctx context.Context) error {
 
 	log.Printf("Calendar event sync completed for %s: %d success, %d failed",
 		t.source.Name, successCount, failCount)
+
+	// If everything we attempted this round succeeded AND the queue is
+	// completely drained, reset the warning counter — a successful run means
+	// the user must have fixed whatever was broken, so the daily reminder
+	// loop should stop.
+	if failCount == 0 {
+		left, _ := t.database.CountPendingCalendarSyncFailures(t.source.ID, 1)
+		if left == 0 {
+			_ = t.database.SetCalendarSourceWarning(t.source.ID, 0, 0)
+		}
+	}
 
 	return nil
 }

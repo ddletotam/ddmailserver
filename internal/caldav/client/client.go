@@ -476,19 +476,31 @@ func (c *Client) parseCalendarObject(obj *caldav.CalendarObject, calendarID int6
 			event.UID = prop.Value
 		}
 
-		// Get Summary
+		// Get Summary / Description / Location — these are TEXT-typed in RFC
+		// 5545, which means commas, semicolons, backslashes and newlines
+		// arrive escaped (`\,` `\;` `\\` `\n`). Prop.Value keeps the raw
+		// form; Text() decodes it. Without this the client renders
+		// "массаж\, Маргарита" literally.
 		if prop := vevent.Props.Get(ical.PropSummary); prop != nil {
-			event.Summary = prop.Value
+			if v, err := prop.Text(); err == nil {
+				event.Summary = v
+			} else {
+				event.Summary = prop.Value
+			}
 		}
-
-		// Get Description
 		if prop := vevent.Props.Get(ical.PropDescription); prop != nil {
-			event.Description = prop.Value
+			if v, err := prop.Text(); err == nil {
+				event.Description = v
+			} else {
+				event.Description = prop.Value
+			}
 		}
-
-		// Get Location
 		if prop := vevent.Props.Get(ical.PropLocation); prop != nil {
-			event.Location = prop.Value
+			if v, err := prop.Text(); err == nil {
+				event.Location = v
+			} else {
+				event.Location = prop.Value
+			}
 		}
 
 		// Get RRULE
