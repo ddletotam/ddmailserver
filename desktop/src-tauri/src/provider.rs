@@ -57,6 +57,15 @@ pub trait MailProvider: Send + Sync {
         messages: &[MessageRef],
     ) -> Result<(), String>;
 
+    /// Mark a conversation as spam by domain. Native: posts the domain rule
+    /// + flags the messages on the server. IMAP fallback: STORE \Deleted +
+    /// EXPUNGE — closest behaviour without server-side rules.
+    async fn mark_spam_by_domain(
+        &self,
+        domain: &str,
+        messages: &[MessageRef],
+    ) -> Result<(), String>;
+
     /// Fetch raw RFC-822 source of a message.
     async fn fetch_message_source(
         &self,
@@ -126,6 +135,12 @@ pub trait MailProvider: Send + Sync {
     /// validates scope and applied fields. ImapProvider returns "not
     /// supported" since calendar editing requires the native backend.
     async fn patch_event(&self, event_id: i64, body: serde_json::Value) -> Result<(), String>;
+
+    /// Create a calendar event on the named calendar (passed inside `body`).
+    /// Returns the canonical server row as JSON; the desktop refreshes the
+    /// view from cache + a fresh fetch anyway, but receiving the new id
+    /// avoids the "the row I just made" flicker.
+    async fn create_event(&self, body: serde_json::Value) -> Result<serde_json::Value, String>;
 
     /// Provider type identifier.
     fn provider_type(&self) -> &'static str;

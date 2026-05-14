@@ -5,17 +5,29 @@ mod commands;
 mod imap;
 mod imap_provider;
 mod native_provider;
+mod notify;
 mod provider;
 mod registry;
+mod reminders;
 mod session;
 mod smtp;
 mod tray;
 mod types;
 
+use std::sync::Arc;
+
 use cache::Cache;
 use registry::ProviderRegistry;
+use reminders::ReminderScheduler;
 use session::SessionPool;
 use tauri::Manager;
+
+/// Push the latest unread-conversation total from the JS store down to the
+/// native tray, which composites a notification dot when count > 0.
+#[tauri::command]
+fn set_tray_unread(count: u32) {
+    tray::set_unread(count);
+}
 
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
@@ -45,12 +57,22 @@ fn main() {
         .manage(SessionPool::new())
         .manage(ProviderRegistry::new())
         .setup(|app| {
-            // Init cache in app data dir
+            // Init cache in app data dir. Wrapped in an Arc so the
+            // long-lived reminder scheduler can hold its own clone — the
+            // tauri::State path needs a ref with the app's lifetime, which
+            // a Tokio task can't satisfy.
             let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-            let cache = Cache::new(app_dir).map_err(|e| e.to_string())?;
-            app.manage(cache);
+            let cache = Arc::new(Cache::new(app_dir).map_err(|e| e.to_string())?);
+            app.manage(cache.clone());
 
             tray::create_tray(app.handle())?;
+
+            // Reminder scheduler — owns its own Tokio task and a clone of
+            // the cache. The handle stays in app state so commands can
+            // push fresh schedules into it.
+            let scheduler = ReminderScheduler::spawn(cache.clone(), app.handle().clone());
+            app.manage(scheduler);
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -70,6 +92,9 @@ fn main() {
             imap::start_watching,
             smtp::send_message,
             open_url,
+            set_tray_unread,
+            reminders::schedule_reminders,
+            reminders::reminder_action,
             // v2 commands (provider-based)
             commands::detect_server,
             commands::native_login,
@@ -81,6 +106,7 @@ fn main() {
             commands::v2_set_flags,
             commands::v2_set_flags_batch,
             commands::v2_delete_messages,
+            commands::v2_mark_spam_by_domain,
             commands::v2_fetch_message_source,
             commands::v2_fetch_inline_part,
             commands::v2_fetch_identities,
@@ -90,6 +116,7 @@ fn main() {
             commands::v2_fetch_calendar_events,
             commands::v2_rsvp_event,
             commands::v2_patch_event,
+            commands::v2_create_event,
             commands::v2_fetch_avatar,
         ])
         .run(tauri::generate_context!())

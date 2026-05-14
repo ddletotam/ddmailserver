@@ -1,4 +1,8 @@
 <script lang="ts">
+  import { onMount, onDestroy } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import ChatView from "./lib/components/ChatView.svelte";
   import LoginScreen from "./lib/components/LoginScreen.svelte";
@@ -64,6 +68,59 @@
     })();
   });
 
+  // Push total-unread count to the OS tray whenever it changes so the
+  // Linux backend can composite the notification dot. Only the main
+  // window owns the tray — the calendar window has no conversations to
+  // count.
+  $effect(() => {
+    if (view === "calendar") return;
+    const total = mailStore.conversations.reduce(
+      (sum, c) => sum + (c.unread_count > 0 ? 1 : 0),
+      0,
+    );
+    invoke("set_tray_unread", { count: total }).catch(() => {});
+  });
+
+  // Reminder-toast routing — only the MAIN window needs to handle
+  // "open-event" from this side: when the calendar window is closed and
+  // the user clicks a reminder, we have to open the calendar with the
+  // event id in the URL so the freshly-mounted CalendarView knows what
+  // to show. If the calendar window is already alive it handles the
+  // event itself; we only set focus and bail.
+  let unlistenOpenEvent: UnlistenFn | null = null;
+  onMount(async () => {
+    if (view === "calendar") return; // calendar handles its own
+    try {
+      unlistenOpenEvent = await listen<{ event_id: number; occurrence_start_ms: number }>(
+        "open-event",
+        async (e) => {
+          const { event_id, occurrence_start_ms } = e.payload;
+          const existing = await WebviewWindow.getByLabel("calendar");
+          if (existing) {
+            await existing.setFocus().catch(() => {});
+            await existing.unminimize().catch(() => {});
+            // calendar window's own listener will open the modal
+            return;
+          }
+          const win = new WebviewWindow("calendar", {
+            url: `index.html?view=calendar&open=${event_id}:${occurrence_start_ms}`,
+            title: "DDMail — Календарь",
+            width: 1100,
+            height: 700,
+            minWidth: 700,
+            minHeight: 500,
+          });
+          win.once("tauri://error", (err) => console.error("[reminders] open calendar:", err));
+        },
+      );
+    } catch (e) {
+      console.warn("[reminders] open-event listener failed:", e);
+    }
+  });
+  onDestroy(() => {
+    if (unlistenOpenEvent) unlistenOpenEvent();
+  });
+
   function handleAccountAdded() {
     showLogin = false;
   }
@@ -82,26 +139,6 @@
   </div>
 {/if}
 
-<style>
-  .app-layout {
-    display: flex;
-    height: 100vh;
-    width: 100vw;
-    overflow: hidden;
-  }
-  /* 4-px wide drag handle. Sits in the flex flow between sidebar and chat
-     view; cursor changes on hover so the user discovers it. Hairline visual
-     uses border-color so it blends with the sidebar's existing right border
-     in non-dragged state. */
-  .splitter {
-    width: 4px;
-    flex-shrink: 0;
-    cursor: col-resize;
-    background: transparent;
-    transition: background 0.1s;
-  }
-  .splitter:hover,
-  .splitter:active {
-    background: var(--text-accent);
-  }
-</style>
+<!-- App layout styles live in app.css (global) because Svelte 5's scoped CSS
+     pass intermittently strips `.app-layout` from this file, leaving the flex
+     layout collapsed and the chat pane invisible. -->

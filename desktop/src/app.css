@@ -85,3 +85,25 @@ html, body, #app {
 
 ::selection { background: rgba(65, 159, 217, 0.3); }
 .no-select { user-select: none; }
+
+/* Global layout shell. Kept here (not in App.svelte) because the Svelte 5
+   compiler intermittently strips `.app-layout` from scoped output — see the
+   "Svelte 5 stripping App.svelte styles" investigation in git history. The
+   global file is immune to that scope analysis. */
+.app-layout {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+.splitter {
+  width: 4px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.1s;
+}
+.splitter:hover,
+.splitter:active {
+  background: var(--text-accent);
+}

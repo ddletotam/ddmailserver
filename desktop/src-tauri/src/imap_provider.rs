@@ -115,6 +115,23 @@ impl MailProvider for ImapProvider {
         })
     }
 
+    async fn mark_spam_by_domain(
+        &self,
+        _domain: &str,
+        messages: &[MessageRef],
+    ) -> Result<(), String> {
+        // No native spam-rule concept on third-party IMAP servers — degrade
+        // to the same destructive flow as delete_messages so the conv at
+        // least disappears from the client. Callers should warn the user that
+        // future deliveries from this domain won't be auto-spammed.
+        if messages.is_empty() {
+            return Ok(());
+        }
+        with_session!(self, |session| {
+            imap::delete_messages_impl(&mut session, messages).await
+        })
+    }
+
     async fn fetch_message_source(
         &self,
         folder: &str,
@@ -231,6 +248,10 @@ impl MailProvider for ImapProvider {
 
     async fn patch_event(&self, _event_id: i64, _body: serde_json::Value) -> Result<(), String> {
         Err("Editing events requires a DDMail server.".into())
+    }
+
+    async fn create_event(&self, _body: serde_json::Value) -> Result<serde_json::Value, String> {
+        Err("Creating events requires a DDMail server.".into())
     }
 
     fn provider_type(&self) -> &'static str {

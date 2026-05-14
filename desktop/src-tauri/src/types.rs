@@ -262,6 +262,11 @@ pub struct DesktopCalendarEvent {
     pub rrule: String,
     #[serde(default)]
     pub recurrence_id: String,
+    /// Deleted instances of a recurring event, as ms-since-epoch starts.
+    /// The frontend filters these out when expanding `rrule` so removed
+    /// occurrences don't reappear on the calendar.
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
+    pub exdates: Vec<i64>,
     #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub attendees: Vec<DesktopCalendarAttendee>,
 }

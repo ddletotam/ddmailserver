@@ -5,24 +5,46 @@
   import type { DesktopCalendarEvent } from "../types/calendar";
 
   interface Props {
-    event: DesktopCalendarEvent;
-    occStart: number; // ms — the instance being edited (matters for recurring)
+    /** Existing event to edit. Omit for create-mode. */
+    event?: DesktopCalendarEvent | null;
+    occStart: number; // ms
     occEnd: number;
+    /** Calendar to seed the picker with in create-mode. */
+    initialCalendarId?: number | null;
     onclose: () => void;
     onsaved: () => void;
   }
-  let { event, occStart, occEnd, onclose, onsaved }: Props = $props();
+  let { event = null, occStart, occEnd, initialCalendarId = null, onclose, onsaved }: Props = $props();
 
-  const isRecurring = $derived(!!event.rrule);
+  const isCreate = $derived(!event);
+  const isRecurring = $derived(!!event?.rrule);
+
+  // Calendar picker for create-mode: only writable AND currently visible to
+  // the user. The user almost never wants to create on a calendar they've
+  // hidden, and a read-only one would error on save anyway.
+  const writableVisibleCalendars = $derived(
+    calendarStore.calendars.filter((c) => c.can_write && calendarStore.isVisible(c.id)),
+  );
+  let selectedCalendarId = $state<number | null>(
+    initialCalendarId ?? null,
+  );
+  $effect(() => {
+    // Seed once when the writable+visible list materialises and nothing's
+    // chosen. Don't overwrite the user's explicit pick.
+    if (selectedCalendarId == null && writableVisibleCalendars.length > 0) {
+      selectedCalendarId = writableVisibleCalendars[0].id;
+    }
+  });
 
   // Form fields seeded from the *instance* being edited, not the master's
   // DTSTART. For a non-recurring event occStart == event.dtstart so they're
   // identical; for a recurring instance, the user expects the form to show
-  // the date of the occurrence they double-clicked.
-  let summary = $state(event.summary || "");
-  let description = $state(event.description || "");
-  let location = $state(event.location || "");
-  let allDay = $state(event.all_day);
+  // the date of the occurrence they double-clicked. In create-mode all
+  // fields start empty/from the clicked cell.
+  let summary = $state(event?.summary ?? "");
+  let description = $state(event?.description ?? "");
+  let location = $state(event?.location ?? "");
+  let allDay = $state(event?.all_day ?? false);
   let startStr = $state(toInputValue(occStart, allDay));
   let endStr = $state(toInputValue(occEnd, allDay));
 
@@ -68,26 +90,41 @@
     if (!account) return;
     saving = true;
     errorMsg = null;
-    const body: Record<string, unknown> = {
-      scope,
-      summary,
-      description,
-      location,
-      all_day: allDay,
-    };
-    if (scope !== "all") {
-      body.recurrence_id = occStart;
-    }
     const sMs = fromInputValue(startStr, allDay);
     const eMs = fromInputValue(endStr, allDay);
-    if (sMs) body.dtstart = sMs;
-    body.dtend = eMs; // explicit 0 ⇒ clear end on the server
     try {
-      await invoke("v2_patch_event", {
-        accountId: account.id,
-        eventId: event.id,
-        body,
-      });
+      if (isCreate) {
+        if (!selectedCalendarId) {
+          errorMsg = "Выберите календарь";
+          return;
+        }
+        const body: Record<string, unknown> = {
+          calendar_id: selectedCalendarId,
+          summary,
+          description,
+          location,
+          all_day: allDay,
+          dtstart: sMs || occStart,
+        };
+        if (eMs) body.dtend = eMs;
+        await invoke("v2_create_event", { accountId: account.id, body });
+      } else {
+        const body: Record<string, unknown> = {
+          scope,
+          summary,
+          description,
+          location,
+          all_day: allDay,
+        };
+        if (scope !== "all") body.recurrence_id = occStart;
+        if (sMs) body.dtstart = sMs;
+        body.dtend = eMs; // explicit 0 ⇒ clear end on the server
+        await invoke("v2_patch_event", {
+          accountId: account.id,
+          eventId: event!.id,
+          body,
+        });
+      }
       await calendarStore.refreshAfterRSVP(account);
       onsaved();
     } catch (e: unknown) {
@@ -99,7 +136,9 @@
   }
 
   function handleSave() {
-    if (isRecurring) {
+    if (isCreate) {
+      doSave("all"); // scope irrelevant for create
+    } else if (isRecurring) {
       showScope = true;
     } else {
       doSave("all");
@@ -120,11 +159,26 @@
 <div class="backdrop" onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
   <div class="card" role="dialog" aria-modal="true" aria-label="Редактировать событие">
     <header class="card-head">
-      <h2>Редактировать</h2>
+      <h2>{isCreate ? "Новое событие" : "Редактировать"}</h2>
       <button class="btn-close" onclick={onclose} aria-label="Закрыть">×</button>
     </header>
 
     <div class="form">
+      {#if isCreate}
+        <label class="field">
+          <span class="label">Календарь</span>
+          {#if writableVisibleCalendars.length === 0}
+            <div class="err">Нет доступных для записи и видимых календарей. Включите хотя бы один в левой панели.</div>
+          {:else}
+            <select bind:value={selectedCalendarId}>
+              {#each writableVisibleCalendars as c}
+                <option value={c.id}>{c.name}</option>
+              {/each}
+            </select>
+          {/if}
+        </label>
+      {/if}
+
       <label class="field">
         <span class="label">Название</span>
         <input type="text" bind:value={summary} />
@@ -272,7 +326,7 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
-  input[type="text"], input[type="date"], input[type="datetime-local"], textarea {
+  input[type="text"], input[type="date"], input[type="datetime-local"], textarea, select {
     border: 1px solid var(--border-color);
     border-radius: 8px;
     padding: 8px 10px;
@@ -282,7 +336,7 @@
     font-size: var(--font-size);
     outline: none;
   }
-  input:focus, textarea:focus { border-color: var(--text-accent); }
+  input:focus, textarea:focus, select:focus { border-color: var(--text-accent); }
   textarea { resize: vertical; min-height: 80px; }
 
   .err {

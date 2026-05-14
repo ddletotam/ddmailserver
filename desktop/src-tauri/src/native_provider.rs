@@ -261,6 +261,19 @@ impl MailProvider for NativeProvider {
         Ok(())
     }
 
+    async fn mark_spam_by_domain(
+        &self,
+        domain: &str,
+        messages: &[MessageRef],
+    ) -> Result<(), String> {
+        if domain.is_empty() {
+            return Err("empty domain".into());
+        }
+        let body = serde_json::json!({ "domain": domain, "messages": messages });
+        let _: serde_json::Value = self.post("/spam/mark-domain", &body).await?;
+        Ok(())
+    }
+
     async fn fetch_message_source(
         &self,
         _folder: &str,
@@ -376,6 +389,10 @@ impl MailProvider for NativeProvider {
             return Err(format!("HTTP {status}: {body}"));
         }
         Ok(())
+    }
+
+    async fn create_event(&self, body: serde_json::Value) -> Result<serde_json::Value, String> {
+        self.post("/events", &body).await
     }
 
     async fn fetch_inline_part(
