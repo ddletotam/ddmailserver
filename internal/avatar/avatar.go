@@ -39,7 +39,7 @@ const (
 	// PDF or a multi-MB hi-res image at the favicon URL.
 	maxBytes = 512 * 1024
 
-	bimiLookupFmt = "default._bimi.%s"
+	bimiLookupFmt     = "default._bimi.%s"
 	libravatarDefault = "https://seccdn.libravatar.org/avatar/%s?d=404&s=96"
 	gravatarURL       = "https://www.gravatar.com/avatar/%s?d=404&s=96"
 )

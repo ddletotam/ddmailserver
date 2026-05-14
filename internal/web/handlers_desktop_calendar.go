@@ -115,20 +115,20 @@ type DesktopCalendarAttendee struct {
 // DesktopCalendarEvent flattens models.CalendarEvent for JSON over the wire.
 // Recurring events come back as the master record (client expands RRULE).
 type DesktopCalendarEvent struct {
-	ID             int64                     `json:"id"`
-	CalendarID     int64                     `json:"calendar_id"`
-	UID            string                    `json:"uid"`
-	Summary        string                    `json:"summary"`
-	Description    string                    `json:"description,omitempty"`
-	Location       string                    `json:"location,omitempty"`
-	DTStart        int64                     `json:"dtstart"`        // ms since epoch
-	DTEnd          *int64                    `json:"dtend"`          // ms since epoch, nullable
-	AllDay         bool                      `json:"all_day"`
-	OrganizerEmail string                    `json:"organizer_email,omitempty"`
-	OrganizerName  string                    `json:"organizer_name,omitempty"`
-	Status         string                    `json:"status,omitempty"`
-	RRule          string                    `json:"rrule,omitempty"`
-	RecurrenceID   string                    `json:"recurrence_id,omitempty"`
+	ID             int64  `json:"id"`
+	CalendarID     int64  `json:"calendar_id"`
+	UID            string `json:"uid"`
+	Summary        string `json:"summary"`
+	Description    string `json:"description,omitempty"`
+	Location       string `json:"location,omitempty"`
+	DTStart        int64  `json:"dtstart"` // ms since epoch
+	DTEnd          *int64 `json:"dtend"`   // ms since epoch, nullable
+	AllDay         bool   `json:"all_day"`
+	OrganizerEmail string `json:"organizer_email,omitempty"`
+	OrganizerName  string `json:"organizer_name,omitempty"`
+	Status         string `json:"status,omitempty"`
+	RRule          string `json:"rrule,omitempty"`
+	RecurrenceID   string `json:"recurrence_id,omitempty"`
 	// ExDates lists deleted recurring-instance starts as ms-since-epoch. The
 	// client must filter these out when expanding `RRule` so removed
 	// occurrences don't reappear on the calendar.
