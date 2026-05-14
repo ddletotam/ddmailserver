@@ -19,8 +19,8 @@ import (
 // `scope` is ignored for non-recurring events; "single" and "future" require
 // `recurrence_id` (ms — the start of the instance being edited).
 type EventPatchRequest struct {
-	Scope        string  `json:"scope"`          // "all" | "single" | "future"
-	RecurrenceID int64   `json:"recurrence_id"`  // ms, the instance being edited
+	Scope        string  `json:"scope"`         // "all" | "single" | "future"
+	RecurrenceID int64   `json:"recurrence_id"` // ms, the instance being edited
 	Summary      *string `json:"summary"`
 	Description  *string `json:"description"`
 	Location     *string `json:"location"`
@@ -30,13 +30,13 @@ type EventPatchRequest struct {
 }
 
 // HandleDesktopEventPatch edits a calendar event. Scope handling:
-//   * "all" (default): rewrite the master VEVENT in place. All instances of a
+//   - "all" (default): rewrite the master VEVENT in place. All instances of a
 //     recurring series inherit the change.
-//   * "future": modify the master's RRULE to end one millisecond before the
+//   - "future": modify the master's RRULE to end one millisecond before the
 //     instance being edited, then create a new event with a fresh UID whose
 //     DTSTART is the edited instance and whose RRULE continues from there.
 //     The two halves are separate UIDs — the cleanest cross-server split.
-//   * "single": not yet implemented. iCal allows per-instance overrides via
+//   - "single": not yet implemented. iCal allows per-instance overrides via
 //     a sibling VEVENT with RECURRENCE-ID inside the same ical_data, but the
 //     client-side RRULE expansion would also need to apply those overrides
 //     during occurrence generation. Tracked for a follow-up.
@@ -119,8 +119,8 @@ func (s *Server) HandleDesktopEventPatch(w http.ResponseWriter, r *http.Request)
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{
-		"id":     event.ID,
-		"scope":  scope,
+		"id":    event.ID,
+		"scope": scope,
 	})
 }
 
