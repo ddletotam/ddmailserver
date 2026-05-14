@@ -192,7 +192,7 @@ pub async fn v2_list_folders(
 #[tauri::command]
 pub async fn v2_fetch_conversations(
     registry: tauri::State<'_, ProviderRegistry>,
-    cache: tauri::State<'_, Cache>,
+    cache: tauri::State<'_, std::sync::Arc<Cache>>,
     account_id: String,
     host: String,
     username: String,
@@ -213,7 +213,7 @@ pub async fn v2_fetch_conversations(
 #[tauri::command]
 pub async fn v2_fetch_conversation_messages(
     registry: tauri::State<'_, ProviderRegistry>,
-    cache: tauri::State<'_, Cache>,
+    cache: tauri::State<'_, std::sync::Arc<Cache>>,
     account_id: String,
     host: String,
     username: String,
@@ -288,6 +288,19 @@ pub async fn v2_delete_messages(
 }
 
 #[tauri::command]
+pub async fn v2_mark_spam_by_domain(
+    registry: tauri::State<'_, ProviderRegistry>,
+    account_id: String,
+    domain: String,
+    messages: Vec<MessageRef>,
+) -> Result<(), String> {
+    get_provider(&registry, &account_id)
+        .await?
+        .mark_spam_by_domain(&domain, &messages)
+        .await
+}
+
+#[tauri::command]
 pub async fn v2_fetch_inline_part(
     registry: tauri::State<'_, ProviderRegistry>,
     account_id: String,
@@ -316,7 +329,7 @@ pub async fn v2_fetch_message_source(
 #[tauri::command]
 pub async fn v2_fetch_identities(
     registry: tauri::State<'_, ProviderRegistry>,
-    cache: tauri::State<'_, Cache>,
+    cache: tauri::State<'_, std::sync::Arc<Cache>>,
     account_id: String,
     host: String,
     username: String,
@@ -431,7 +444,7 @@ pub struct AvatarResult {
 #[tauri::command]
 pub async fn v2_fetch_avatar(
     registry: tauri::State<'_, ProviderRegistry>,
-    cache: tauri::State<'_, Cache>,
+    cache: tauri::State<'_, std::sync::Arc<Cache>>,
     account_id: String,
     email: String,
 ) -> Result<AvatarResult, String> {
@@ -513,5 +526,17 @@ pub async fn v2_patch_event(
     get_provider(&registry, &account_id)
         .await?
         .patch_event(event_id, body)
+        .await
+}
+
+#[tauri::command]
+pub async fn v2_create_event(
+    registry: tauri::State<'_, ProviderRegistry>,
+    account_id: String,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    get_provider(&registry, &account_id)
+        .await?
+        .create_event(body)
         .await
 }

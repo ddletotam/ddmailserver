@@ -34,3 +34,15 @@ url = "2"
 urlencoding = "2"
 base64 = "0.22"
 async-trait = "0.1"
+
+# Linux-only: implement StatusNotifierItem directly so KDE / GNOME (with
+# the AppIndicator extension) deliver left-click and right-click as
+# separate events. Tauri's bundled tray-icon backend goes through
+# libappindicator which collapses every click into "show menu", which is
+# the limitation we work around here.
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = "0.2"
+# Reminders rendering — speaks org.freedesktop.Notifications over D-Bus.
+# Supports action arrays and the conventional `default` action for body
+# clicks; both are what the calendar reminders need on KDE / dunst.
+notify-rust = "4"

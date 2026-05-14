@@ -383,7 +383,7 @@ pub async fn list_folders(
 
 #[tauri::command]
 pub async fn fetch_conversations(
-    cache: tauri::State<'_, Cache>,
+    cache: tauri::State<'_, std::sync::Arc<Cache>>,
     host: String, port: u16, username: String, password: String, use_tls: bool,
     user_email: String, limit: u32,
 ) -> Result<Vec<Conversation>, String> {
@@ -582,10 +582,12 @@ where
             .map(|m| MessageRef { folder: m.folder.clone(), uid: m.uid });
         let regular_msgs: Vec<&RawEnvelope> = msgs.iter().filter(|m| !m.is_draft).collect();
 
-        if regular_msgs.is_empty() && draft.is_none() { continue; }
+        // Drafts alone don't make a conversation — see HandleDesktopConversations
+        // in the Go server for the matching server-side rule.
+        if regular_msgs.is_empty() { continue; }
 
-        let first = regular_msgs.first().copied().unwrap_or(msgs.first().unwrap());
-        let last = regular_msgs.last().copied().unwrap_or(msgs.last().unwrap());
+        let first = regular_msgs.first().copied().unwrap();
+        let last = regular_msgs.last().copied().unwrap();
 
         let is_group = cp_addrs.len() > 1;
 
@@ -634,7 +636,7 @@ where
 
 #[tauri::command]
 pub async fn fetch_conversation_messages(
-    cache: tauri::State<'_, Cache>,
+    cache: tauri::State<'_, std::sync::Arc<Cache>>,
     host: String, port: u16, username: String, password: String, use_tls: bool,
     user_email: String, messages: Vec<MessageRef>,
 ) -> Result<Vec<MessageBody>, String> {
@@ -1125,7 +1127,7 @@ fn unique_path(dir: &std::path::Path, filename: &str) -> std::path::PathBuf {
 
 #[tauri::command]
 pub async fn search_contacts(
-    cache: tauri::State<'_, Cache>,
+    cache: tauri::State<'_, std::sync::Arc<Cache>>,
     host: String, username: String, query: String, limit: u32,
 ) -> Result<Vec<Contact>, String> {
     let key = account_key(&host, &username);
@@ -1137,7 +1139,7 @@ pub async fn search_contacts(
 /// Load conversations from local SQLite cache (instant).
 #[tauri::command]
 pub async fn load_cached_conversations(
-    cache: tauri::State<'_, Cache>,
+    cache: tauri::State<'_, std::sync::Arc<Cache>>,
     host: String, username: String,
 ) -> Result<Vec<Conversation>, String> {
     let key = account_key(&host, &username);
@@ -1147,7 +1149,7 @@ pub async fn load_cached_conversations(
 /// Load message bodies from local cache (instant).
 #[tauri::command]
 pub async fn load_cached_messages(
-    cache: tauri::State<'_, Cache>,
+    cache: tauri::State<'_, std::sync::Arc<Cache>>,
     host: String, username: String, messages: Vec<MessageRef>,
 ) -> Result<Vec<MessageBody>, String> {
     let key = account_key(&host, &username);
@@ -1160,7 +1162,7 @@ pub async fn load_cached_messages(
 /// Returns empty vec if not our server.
 #[tauri::command]
 pub async fn fetch_identities(
-    cache: tauri::State<'_, Cache>,
+    cache: tauri::State<'_, std::sync::Arc<Cache>>,
     host: String, port: u16, username: String, password: String, use_tls: bool,
 ) -> Result<Vec<Identity>, String> {
     let key = account_key(&host, &username);

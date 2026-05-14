@@ -421,6 +421,36 @@ export const mailStore = {
     conversationMessages = [...conversationMessages, msg];
   },
 
+  /** Mark all messages in `conv` as spam by their sender's domain. Server
+   *  creates a domain-level spam rule and flags the messages so future
+   *  deliveries from the same domain also land in spam. IMAP-only accounts
+   *  degrade to a destructive delete (no rule storage available). */
+  async markConversationSpam(account: Account, conv: Conversation) {
+    const id = conv.id;
+    // Pick a domain — first counterpart preferred. Strip "Name <a@b>" form
+    // defensively even though counterparts[].addr should be bare.
+    const addr = (conv.counterparts[0]?.addr ?? "").toLowerCase();
+    const at = addr.lastIndexOf("@");
+    const domain = at > 0 && at + 1 < addr.length ? addr.slice(at + 1) : "";
+    if (!domain) throw new Error("no sender domain available");
+    try {
+      await invoke("v2_mark_spam_by_domain", {
+        accountId: account.id,
+        domain,
+        messages: conv.messages,
+      });
+    } catch (e) {
+      console.error("[mail] mark spam by domain failed:", e);
+      throw e;
+    }
+    conversations = conversations.filter((c) => c.id !== id);
+    if (activeConversationId === id) {
+      activeConversationId = null;
+      conversationMessages = [];
+      draftMessage = null;
+    }
+  },
+
   /** Soft-delete every message in a conversation and drop the conversation
    *  from the local list. Closes the chat if it was the active one. */
   async deleteConversation(account: Account, conv: Conversation) {

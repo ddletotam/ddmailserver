@@ -4,10 +4,17 @@
   import { accountStore } from "../stores/accounts.svelte";
   import { mailStore } from "../stores/mail.svelte";
   import { calendarStore, PALETTE } from "../stores/calendar.svelte";
+  import { invoke } from "@tauri-apps/api/core";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
   import EventDetail from "./EventDetail.svelte";
+  import EventEdit from "./EventEdit.svelte";
   import type { DesktopCalendarEvent } from "../types/calendar";
 
-  const HOUR_HEIGHT = 60; // px per hour — 1 px per minute, 15 px per quarter
+  // Lower bound for an hour row. Below this, hour labels start overlapping
+  // and 15-minute event chips become unclickable. The actual rendered hour
+  // height stretches above this whenever the grid viewport has slack.
+  const HOUR_HEIGHT_MIN = 60;
 
   // ── View prefs (persisted in localStorage) ──
   //
@@ -31,10 +38,25 @@
   const dayCount = $derived(workdaysOnly ? 5 : 7);
   const startHour = $derived(showNonWorkHours ? 0 : 8);
   const endHour = $derived(showNonWorkHours ? 24 : 18);
-  const totalHeightPx = $derived((endHour - startHour) * HOUR_HEIGHT);
+  const hourCount = $derived(endHour - startHour);
   const hours = $derived(
-    Array.from({ length: endHour - startHour }, (_, i) => startHour + i),
+    Array.from({ length: hourCount }, (_, i) => startHour + i),
   );
+
+  // Measured viewport of the scrollable body. We stretch hour rows to fill
+  // it whenever there's room — so the grid no longer leaves dead space at
+  // the bottom on tall windows. When the viewport is shorter than
+  // hourCount * HOUR_HEIGHT_MIN, we fall back to the minimum and the body
+  // scrolls.
+  let bodyHeightPx = $state(0);
+  const hourHeightPx = $derived(
+    Math.max(HOUR_HEIGHT_MIN, Math.floor(bodyHeightPx / Math.max(1, hourCount))),
+  );
+  const totalHeightPx = $derived(hourCount * hourHeightPx);
+  // Pixels per minute — used to convert event start/duration (stored as
+  // minutes) into vertical pixel offsets and to translate drag-Y back into
+  // minute deltas.
+  const pxPerMin = $derived(hourHeightPx / 60);
 
   function toggleWorkdays() {
     workdaysOnly = !workdaysOnly;
@@ -105,7 +127,28 @@
 
   let initError = $state<string | null>(null);
 
+  // Re-tick the "now" line every 30 seconds. The line moves smoothly enough
+  // at that rate (≈ 0.5 px on a typical 60 px hour) and we don't burn cycles
+  // on layout for sub-second precision nobody perceives.
+  let nowTs = $state(Date.now());
+  let nowTimer: ReturnType<typeof setInterval> | null = null;
+  // Unlisten handle for the close-requested hook that flushes
+  // tauri-plugin-window-state to disk. The plugin only writes on
+  // RunEvent::Exit by default, so closing just the calendar window
+  // (while the app keeps running) would drop the new geometry on a
+  // subsequent crash. Forcing the save on close-requested makes the
+  // size/position survive anything short of SIGKILL on this exact tick.
+  let unlistenClose: (() => void) | null = null;
+
   onMount(async () => {
+    nowTimer = setInterval(() => { nowTs = Date.now(); }, 30_000);
+    try {
+      unlistenClose = await getCurrentWebviewWindow().onCloseRequested(async () => {
+        try { await invoke("plugin:window-state|save_window_state"); } catch {}
+      });
+    } catch (e) {
+      console.warn("[calendar] could not hook close-requested:", e);
+    }
     const account = accountStore.activeAccount;
     if (!account) {
       initError = "Нет активной учётки. Сначала войдите в основном окне.";
@@ -121,7 +164,21 @@
   });
 
   onDestroy(() => {
+    if (nowTimer) clearInterval(nowTimer);
+    if (unlistenClose) unlistenClose();
+    if (unlistenOpenEvent) unlistenOpenEvent();
     calendarStore.stopWatching();
+  });
+
+  // Vertical pixel offset of the current-time line inside a day column.
+  // null when "now" falls outside the visible hour range — we render
+  // nothing rather than clamping to the top/bottom edge (a stuck line at
+  // 18:00 reads as "still working at 18:00" which is misleading).
+  const nowOffsetPx = $derived.by((): number | null => {
+    const d = new Date(nowTs);
+    const min = d.getHours() * 60 + d.getMinutes() + d.getSeconds() / 60 - startHour * 60;
+    if (min < 0 || min > hourCount * 60) return null;
+    return min * pxPerMin;
   });
 
   // Re-fetch events whenever the visible week changes (after load() has run
@@ -143,8 +200,10 @@
     occStart: number; // ms — actual instance start (differs from ev.dtstart for RRULE)
     occEnd: number;   // ms — actual instance end
     dayIndex: number;
-    topPx: number;
-    heightPx: number;
+    // Position stored as minutes-from-start-hour; the renderer multiplies by
+    // pxPerMin so the grid can stretch vertically without re-placing.
+    topMin: number;
+    heightMin: number;
     color: string;
     col: number;   // 0..cols-1 — horizontal slot within the overlap cluster
     cols: number;  // how many slots wide the cluster is (≥1)
@@ -161,7 +220,16 @@
       opts.dtstart = new Date(ev.dtstart);
       const rule = new RRule(opts);
       const occs = rule.between(new Date(from), new Date(to), true);
-      return occs.map((d) => d.getTime());
+      let starts = occs.map((d) => d.getTime());
+      // Filter out deleted single occurrences (EXDATE values from the master
+      // VEVENT). The server delivers them as ms timestamps — a recurring
+      // event keeps its UID when the user deletes "just this one" so we'd
+      // otherwise still render the cancelled slot.
+      if (ev.exdates && ev.exdates.length) {
+        const blocked = new Set(ev.exdates);
+        starts = starts.filter((ms) => !blocked.has(ms));
+      }
+      return starts;
     } catch (e) {
       console.warn("[calendar] RRULE parse failed", ev.uid, ev.rrule, e);
       return [ev.dtstart];
@@ -201,16 +269,14 @@
 
         const startMin = (startDate.getHours() - startHour) * 60 + startDate.getMinutes();
         const durationMin = Math.max(15, Math.round(dur / 60000));
-        const top = startMin; // 1 px/min
-        const height = durationMin;
 
         placed.push({
           ev,
           occStart,
           occEnd,
           dayIndex,
-          topPx: top,
-          heightPx: height,
+          topMin: startMin,
+          heightMin: durationMin,
           color: calendarStore.colorFor(ev.calendar_id),
           col: 0,
           cols: 1,
@@ -306,6 +372,237 @@
   }
   function closeEvent() {
     openedEvent = null;
+  }
+
+  /// Open the detail card from a (event_id, occStart) pair coming from a
+  /// reminder toast. Synthesises just enough PlacedEvent shape for
+  /// EventDetail — we don't need topPx/cols/etc. because the modal is
+  /// freestanding, not laid out on the grid.
+  function openEventByIdOccurrence(eventId: number, occStartMs: number) {
+    const ev = calendarStore.events.find((e) => e.id === eventId);
+    if (!ev) {
+      console.warn("[reminders] open-event for unknown id", eventId);
+      return;
+    }
+    const dur = (ev.dtend ?? ev.dtstart + 60 * 60 * 1000) - ev.dtstart;
+    openedEvent = {
+      ev,
+      occStart: occStartMs,
+      occEnd: occStartMs + dur,
+      dayIndex: 0,
+      topMin: 0,
+      heightMin: 0,
+      color: calendarStore.colorFor(ev.calendar_id),
+      col: 0,
+      cols: 1,
+    };
+    // Pull the calendar window forward; if it's already focused this is
+    // a no-op.
+    getCurrentWebviewWindow().setFocus().catch(() => {});
+  }
+
+  // ── Reminder scheduling ──
+  //
+  // After every calendar refresh we feed the Rust scheduler a list of
+  // upcoming occurrences. The scheduler INSERT-OR-IGNOREs each entry,
+  // so we can over-send freely — snoozed or acked rows are preserved.
+  //
+  // v1 uses a single global lead-time. Per-event override and VALARM
+  // pass-through are next.
+  const REMINDER_LEAD_MIN = 15;
+  // Look-ahead horizon. Has to be long enough to schedule "tomorrow
+  // 09:00 — remind 15 min before" tonight, even if the calendar window
+  // gets closed in the meantime. 36 h covers an overnight pause without
+  // re-opening the window.
+  const REMINDER_HORIZON_MS = 36 * 60 * 60 * 1000;
+
+  function pushRemindersToScheduler() {
+    const now = Date.now();
+    const horizon = now + REMINDER_HORIZON_MS;
+    const reminders: Array<{
+      event_id: number;
+      occurrence_start_ms: number;
+      fire_at_ms: number;
+      lead_min: number;
+      summary: string;
+    }> = [];
+    for (const ev of calendarStore.events) {
+      if (ev.all_day) continue; // all-day events skipped until we add per-day lead semantics
+      if (ev.status === "CANCELLED") continue;
+      const occs = ev.rrule ? expandRRule(ev, now, horizon) : [ev.dtstart];
+      for (const occ of occs) {
+        if (occ < now) continue;       // already happened
+        if (occ > horizon) continue;   // outside look-ahead
+        const fireAt = occ - REMINDER_LEAD_MIN * 60_000;
+        if (fireAt < now - 60_000) continue; // already past — don't backfill
+        reminders.push({
+          event_id: ev.id,
+          occurrence_start_ms: occ,
+          fire_at_ms: fireAt,
+          lead_min: REMINDER_LEAD_MIN,
+          summary: ev.summary || "",
+        });
+      }
+    }
+    if (reminders.length === 0) return;
+    invoke("schedule_reminders", { reminders }).catch((e) => {
+      console.warn("[reminders] schedule failed:", e);
+    });
+  }
+
+  // Re-push reminders whenever the events list changes. The scheduler's
+  // INSERT-OR-IGNORE policy means this is idempotent.
+  $effect(() => {
+    if (calendarStore.events.length === 0) return;
+    pushRemindersToScheduler();
+  });
+
+  // Receive open-event from a reminder toast (or any other source) and
+  // open the matching event card.
+  let unlistenOpenEvent: UnlistenFn | null = null;
+  // Cold-start path: when the main window opens the calendar in
+  // response to a reminder, it passes ?open=<event_id>:<occ_ms> so this
+  // window jumps straight to the event after the calendar list and
+  // events have loaded. Without the deferred-open buffer the URL would
+  // be parsed before calendarStore.events arrives.
+  let pendingOpen: { eventId: number; occStart: number } | null = (() => {
+    const raw = new URLSearchParams(window.location.search).get("open");
+    if (!raw) return null;
+    const [idStr, occStr] = raw.split(":");
+    const eventId = parseInt(idStr, 10);
+    const occStart = parseInt(occStr, 10);
+    return Number.isFinite(eventId) && Number.isFinite(occStart) ? { eventId, occStart } : null;
+  })();
+
+  onMount(async () => {
+    try {
+      unlistenOpenEvent = await listen<{ event_id: number; occurrence_start_ms: number }>(
+        "open-event",
+        (e) => openEventByIdOccurrence(e.payload.event_id, e.payload.occurrence_start_ms),
+      );
+    } catch (e) {
+      console.warn("[reminders] could not subscribe to open-event:", e);
+    }
+  });
+
+  $effect(() => {
+    if (!pendingOpen) return;
+    if (calendarStore.events.length === 0) return;
+    const target = pendingOpen;
+    pendingOpen = null;
+    openEventByIdOccurrence(target.eventId, target.occStart);
+  });
+
+  // ── Create-event dialog (double-click on empty grid) ──
+  //
+  // We capture the (day, time-of-day) of the click and seed EventEdit in
+  // create-mode with a 1-hour default duration snapped to 15 min.
+  let createDraft = $state<{ dtstart: number; dtend: number } | null>(null);
+
+  function dayColDblClick(dayIdx: number, ev: MouseEvent) {
+    // Ignore double-clicks that bubble up from an existing .event chip —
+    // those have their own handler that opens detail.
+    if ((ev.target as HTMLElement).closest(".event")) return;
+    const col = (ev.currentTarget as HTMLElement).getBoundingClientRect();
+    const yPx = ev.clientY - col.top;
+    const yMin = pxPerMin > 0 ? yPx / pxPerMin : 0;
+    const startMin = Math.max(0, Math.floor(yMin / 15) * 15); // 15-min snap
+    const dt = new Date(days[dayIdx]);
+    dt.setHours(startHour + Math.floor(startMin / 60), startMin % 60, 0, 0);
+    const dtstart = dt.getTime();
+    createDraft = { dtstart, dtend: dtstart + 60 * 60 * 1000 };
+  }
+
+  function closeCreate() {
+    createDraft = null;
+  }
+
+  async function onCreated() {
+    createDraft = null;
+    const account = accountStore.activeAccount;
+    if (account) await calendarStore.refreshAfterRSVP(account);
+  }
+
+  // ── Drag-to-move events ──
+  //
+  // Only writable calendars get the grabby cursor. We start tracking on
+  // pointerdown over an `.event`, record the original Y, and on each
+  // pointermove translate the chip visually via a dragOffset map. On
+  // pointerup, if the cumulative offset exceeds a small threshold, snap to
+  // 15-min and PATCH the event. For recurring series we apply scope="all"
+  // (i.e. shift the whole series) — single-instance edits aren't supported
+  // server-side yet.
+  type DragState = {
+    placedKey: string;        // ev.id + ":" + occStart
+    ev: DesktopCalendarEvent;
+    occStart: number;
+    startY: number;
+    deltaPx: number;          // current minutes offset (1 px = 1 min)
+  };
+  let drag = $state<DragState | null>(null);
+  // Per-placed-event Y offset for the visual translation while dragging.
+  // `dy` is in pixels (already snapped to 15-min steps) so the chip jumps
+  // by exact quarter-hour amounts even when each minute is < 1 px wide.
+  const dragOffset = $derived(
+    drag ? { key: drag.placedKey, dy: snapMinutes(drag.deltaPx) * pxPerMin } : null,
+  );
+
+  /// Convert a pixel delta into a minute delta snapped to a 15-minute grid.
+  /// Used by both the visual offset and the eventual PATCH payload, so the
+  /// preview and the persisted change always agree.
+  function snapMinutes(px: number): number {
+    if (pxPerMin <= 0) return 0;
+    return Math.round(px / pxPerMin / 15) * 15;
+  }
+
+  function eventPointerDown(p: PlacedEvent, ev: PointerEvent) {
+    const cal = calendarStore.calendars.find(c => c.id === p.ev.calendar_id);
+    if (!cal?.can_write) return; // hands-off on read-only calendars
+    // Skip if the click is on an interactive child (none today but defensive).
+    if ((ev.target as HTMLElement).tagName === "BUTTON") return;
+    ev.preventDefault();
+    drag = {
+      placedKey: p.ev.id + ":" + p.occStart,
+      ev: p.ev,
+      occStart: p.occStart,
+      startY: ev.clientY,
+      deltaPx: 0,
+    };
+    (ev.currentTarget as HTMLElement).setPointerCapture(ev.pointerId);
+  }
+
+  function eventPointerMove(ev: PointerEvent) {
+    if (!drag) return;
+    drag.deltaPx = ev.clientY - drag.startY;
+  }
+
+  async function eventPointerUp(p: PlacedEvent, ev: PointerEvent) {
+    if (!drag || drag.placedKey !== p.ev.id + ":" + p.occStart) return;
+    const minutes = snapMinutes(drag.deltaPx);
+    const dragged = drag;
+    drag = null;
+    try { (ev.currentTarget as HTMLElement).releasePointerCapture(ev.pointerId); } catch {}
+    if (Math.abs(minutes) < 15) return; // treat tiny moves as click — no patch
+    const account = accountStore.activeAccount;
+    if (!account) return;
+    const dt = dragged.ev.dtstart + minutes * 60 * 1000;
+    const newEnd = dragged.ev.dtend ? dragged.ev.dtend + minutes * 60 * 1000 : null;
+    try {
+      const body: Record<string, unknown> = {
+        scope: "all",
+        dtstart: dt,
+      };
+      if (newEnd != null) body.dtend = newEnd;
+      await invoke("v2_patch_event", {
+        accountId: account.id,
+        eventId: dragged.ev.id,
+        body,
+      });
+      await calendarStore.refreshAfterRSVP(account);
+    } catch (e) {
+      console.error("[calendar] drag patch failed:", e);
+      alert(`Не удалось перенести событие: ${e}`);
+    }
   }
 
   // ── Color picker popover state ──
@@ -432,18 +729,24 @@
         {/each}
       </div>
 
-      <div class="body">
+      <div class="body" bind:clientHeight={bodyHeightPx}>
         <div class="time-col" style:height="{totalHeightPx}px">
           {#each hours as h}
-            <div class="hour-label" style:height="{HOUR_HEIGHT}px">
+            <div class="hour-label" style:height="{hourHeightPx}px">
               {String(h).padStart(2, "0")}:00
             </div>
           {/each}
         </div>
         {#each days as d, di}
-          <div class="day-col" class:today={isToday(d)} style:height="{totalHeightPx}px">
+          <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+          <div
+            class="day-col"
+            class:today={isToday(d)}
+            style:height="{totalHeightPx}px"
+            ondblclick={(e) => dayColDblClick(di, e)}
+          >
             {#each hours as _h}
-              <div class="hour-cell" style:height="{HOUR_HEIGHT}px">
+              <div class="hour-cell" style:height="{hourHeightPx}px">
                 <div class="quarter q15"></div>
                 <div class="quarter q30"></div>
                 <div class="quarter q45"></div>
@@ -451,21 +754,32 @@
               </div>
             {/each}
             {#each eventsForDay(di) as p (p.ev.id + ":" + p.occStart)}
+              {@const writable = (calendarStore.calendars.find(c => c.id === p.ev.calendar_id)?.can_write) ?? false}
+              {@const dy = dragOffset && dragOffset.key === (p.ev.id + ":" + p.occStart) ? dragOffset.dy : 0}
               <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
               <div
                 class="event"
-                style:top="{p.topPx}px"
-                style:height="{p.heightPx}px"
+                class:draggable={writable}
+                class:dragging={!!drag && drag.placedKey === (p.ev.id + ":" + p.occStart)}
+                style:top="{p.topMin * pxPerMin + dy}px"
+                style:height="{p.heightMin * pxPerMin}px"
                 style:left="calc({(p.col / p.cols) * 100}% + 2px)"
                 style:width="calc({(1 / p.cols) * 100}% - 4px)"
                 style:background={p.color}
                 title={p.ev.summary}
-                ondblclick={() => openEvent(p)}
+                ondblclick={(e) => { e.stopPropagation(); openEvent(p); }}
+                onpointerdown={(e) => eventPointerDown(p, e)}
+                onpointermove={eventPointerMove}
+                onpointerup={(e) => eventPointerUp(p, e)}
+                onpointercancel={() => { drag = null; }}
               >
                 <div class="ev-time">{fmtTimeRange(p)}</div>
                 <div class="ev-title">{p.ev.summary || "(без названия)"}</div>
               </div>
             {/each}
+            {#if isToday(d) && nowOffsetPx !== null}
+              <div class="now-line" style:top="{nowOffsetPx}px" aria-hidden="true"></div>
+            {/if}
           </div>
         {/each}
       </div>
@@ -478,6 +792,16 @@
       occStart={openedEvent.occStart}
       occEnd={openedEvent.occEnd}
       onclose={closeEvent}
+    />
+  {/if}
+
+  {#if createDraft}
+    <EventEdit
+      event={null}
+      occStart={createDraft.dtstart}
+      occEnd={createDraft.dtend}
+      onclose={closeCreate}
+      onsaved={onCreated}
     />
   {/if}
 </div>
@@ -721,7 +1045,39 @@
     cursor: pointer;
     border: 1px solid rgba(255,255,255,0.15);
     box-sizing: border-box;
+    touch-action: none;
+  }
+  .event.draggable { cursor: grab; }
+  .event.dragging {
+    cursor: grabbing;
+    z-index: 2;
+    opacity: 0.85;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+    transition: none;
   }
   .ev-time { font-weight: 600; opacity: 0.85; line-height: 1.2; }
   .ev-title { line-height: 1.2; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+
+  /* Current-time marker. Sits above events (z-index > .event.dragging's 2)
+     and stretches the full column width with a small bullet on the left so
+     the line is readable against any background colour. */
+  .now-line {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: #e53935;
+    z-index: 3;
+    pointer-events: none;
+  }
+  .now-line::before {
+    content: "";
+    position: absolute;
+    left: -3px;
+    top: -3px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #e53935;
+  }
 </style>

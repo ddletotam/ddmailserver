@@ -167,9 +167,101 @@
     if (!account) return;
     await mailStore.markAllRead(account);
   }
+
+  async function handleSpam() {
+    if (!contextMenu) return;
+    const id = contextMenu.convId;
+    contextMenu = null;
+    const account = accountStore.activeAccount;
+    const conv = mailStore.conversations.find((c) => c.id === id);
+    if (!account || !conv) return;
+    const addr = (conv.counterparts[0]?.addr ?? "").toLowerCase();
+    const at = addr.lastIndexOf("@");
+    if (at <= 0) {
+      alert("У отправителя нет адреса с доменом — нечего блокировать.");
+      return;
+    }
+    const domain = addr.slice(at + 1);
+    if (!confirm(`Пометить весь этот диалог как спам и заблокировать домен @${domain}?`)) return;
+    try {
+      await mailStore.markConversationSpam(account, conv);
+    } catch (e) {
+      alert(`Не удалось пометить как спам: ${e}`);
+    }
+  }
+
+  // Keyboard navigation for the conversation list.
+  // - ArrowUp / ArrowDown: move selection (also opens the conv so the right
+  //   pane stays in sync — same UX as the Telegram desktop client).
+  // - Enter: focus current active conv; useful when nothing is selected yet.
+  // - Delete: delete the active conv after confirm.
+  //
+  // We bail out the moment the focused element is editable so users can keep
+  // typing in the search box, the composer body, advanced fields, etc.
+  function isEditableTarget(t: EventTarget | null): boolean {
+    if (!(t instanceof HTMLElement)) return false;
+    const tag = t.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+    if (t.isContentEditable) return true;
+    return false;
+  }
+
+  async function handleListShortcut(e: KeyboardEvent) {
+    if (isEditableTarget(e.target)) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const list = mailStore.conversations;
+    if (list.length === 0) return;
+    const activeId = mailStore.activeConversationId;
+    const idx = activeId ? list.findIndex(c => c.id === activeId) : -1;
+    const account = accountStore.activeAccount;
+    if (!account) return;
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      const next = idx < 0 ? 0 : Math.min(list.length - 1, idx + 1);
+      if (next !== idx) {
+        await mailStore.openConversation(account, list[next].id);
+        scrollActiveIntoView();
+      }
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      const next = idx <= 0 ? 0 : idx - 1;
+      if (next !== idx) {
+        await mailStore.openConversation(account, list[next].id);
+        scrollActiveIntoView();
+      }
+    } else if (e.key === "Enter") {
+      if (idx < 0) {
+        e.preventDefault();
+        await mailStore.openConversation(account, list[0].id);
+        scrollActiveIntoView();
+      }
+    } else if (e.key === "Delete") {
+      if (idx < 0) return;
+      const conv = list[idx];
+      if (!confirm(`Удалить диалог «${conv.label}»?`)) return;
+      e.preventDefault();
+      try {
+        await mailStore.deleteConversation(account, conv);
+      } catch (err) {
+        alert(`Не удалось удалить: ${err}`);
+      }
+    }
+  }
+
+  // After arrow-nav we want the new active row visible. Pure CSS focus
+  // wouldn't help here — the items are buttons but we don't actually shift
+  // DOM focus, the highlight comes from `active` class.
+  function scrollActiveIntoView() {
+    requestAnimationFrame(() => {
+      const id = mailStore.activeConversationId;
+      if (!id) return;
+      document.querySelector('.conv-item.active')?.scrollIntoView({ block: "nearest" });
+    });
+  }
 </script>
 
-<svelte:window onclick={closeContextMenu} />
+<svelte:window onclick={closeContextMenu} onkeydown={handleListShortcut} />
 
 <aside class="sidebar">
   <!-- Search -->
@@ -249,6 +341,7 @@
       <button onclick={handleMarkRead} disabled={!ctxConv || ctxConv.unread_count === 0}>
         Пометить прочитанным
       </button>
+      <button onclick={handleSpam} class="ctx-danger">В спам по домену</button>
       <div class="ctx-separator"></div>
       <button onclick={handleMarkAllRead}>Все прочитанные</button>
     </div>
@@ -391,6 +484,8 @@
   .context-menu button:hover:not(:disabled) {
     background: var(--bg-hover);
   }
+  .context-menu button.ctx-danger { color: #c0392b; }
+  .context-menu button.ctx-danger:hover:not(:disabled) { background: rgba(192, 57, 43, 0.08); }
   .context-menu button:disabled {
     color: var(--text-secondary);
     cursor: default;

@@ -128,6 +128,30 @@ impl Cache {
                 cached_at INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(folder, uid, account_key)
             );
+
+            -- Calendar reminders.
+            --
+            -- One row per (event, occurrence). The scheduler treats it as
+            -- the source of truth so snoozes and acks survive app restarts.
+            --
+            -- status state machine:
+            --   pending → fired   (notifier shows the toast)
+            --   fired   → acked   (user clicked OK / Open)
+            --   fired   → pending (user snoozed; fire_at_ms updated)
+            --
+            -- summary is denormalised so the toast can render without
+            -- re-fetching the event from the server.
+            CREATE TABLE IF NOT EXISTS event_reminders (
+                event_id INTEGER NOT NULL,
+                occurrence_start_ms INTEGER NOT NULL,
+                fire_at_ms INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                lead_min INTEGER NOT NULL DEFAULT 15,
+                summary TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (event_id, occurrence_start_ms)
+            );
+            CREATE INDEX IF NOT EXISTS idx_reminders_fire
+                ON event_reminders(fire_at_ms);
         ").map_err(|e| format!("SQLite init: {e}"))?;
 
         // Migrations for existing databases
@@ -495,4 +519,113 @@ impl Cache {
         ).map_err(|e| format!("ins avatar: {e}"))?;
         Ok(())
     }
+
+    // ── Calendar reminders ──
+
+    /// Insert a reminder for an event occurrence if no row exists yet.
+    /// Rows that are already in the table — including those the user has
+    /// acked or snoozed — are left alone so user state survives bulk
+    /// re-scheduling whenever the frontend refreshes the calendar view.
+    pub fn upsert_pending_reminder(
+        &self,
+        event_id: i64,
+        occurrence_start_ms: i64,
+        fire_at_ms: i64,
+        lead_min: i32,
+        summary: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        conn.execute(
+            "INSERT OR IGNORE INTO event_reminders \
+             (event_id, occurrence_start_ms, fire_at_ms, status, lead_min, summary) \
+             VALUES (?1, ?2, ?3, 'pending', ?4, ?5)",
+            params![event_id, occurrence_start_ms, fire_at_ms, lead_min, summary],
+        ).map_err(|e| format!("ins reminder: {e}"))?;
+        Ok(())
+    }
+
+    /// Reminders whose fire time has passed AND that haven't been shown
+    /// yet. Status 'fired' rows stay in the table so we don't re-toast a
+    /// notification the user dismissed deliberately.
+    pub fn due_reminders(&self, now_ms: i64) -> Result<Vec<ReminderRow>, String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT event_id, occurrence_start_ms, fire_at_ms, lead_min, summary \
+             FROM event_reminders \
+             WHERE status = 'pending' AND fire_at_ms <= ?1 \
+             ORDER BY fire_at_ms ASC"
+        ).map_err(|e| format!("prep: {e}"))?;
+        let rows = stmt.query_map(params![now_ms], |r| {
+            Ok(ReminderRow {
+                event_id: r.get(0)?,
+                occurrence_start_ms: r.get(1)?,
+                fire_at_ms: r.get(2)?,
+                lead_min: r.get(3)?,
+                summary: r.get(4)?,
+            })
+        }).map_err(|e| format!("query: {e}"))?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r.map_err(|e| format!("row: {e}"))?); }
+        Ok(out)
+    }
+
+    pub fn mark_reminder_fired(&self, event_id: i64, occurrence_start_ms: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        conn.execute(
+            "UPDATE event_reminders SET status = 'fired' \
+             WHERE event_id = ?1 AND occurrence_start_ms = ?2",
+            params![event_id, occurrence_start_ms],
+        ).map_err(|e| format!("upd fired: {e}"))?;
+        Ok(())
+    }
+
+    pub fn mark_reminder_acked(&self, event_id: i64, occurrence_start_ms: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        conn.execute(
+            "UPDATE event_reminders SET status = 'acked' \
+             WHERE event_id = ?1 AND occurrence_start_ms = ?2",
+            params![event_id, occurrence_start_ms],
+        ).map_err(|e| format!("upd acked: {e}"))?;
+        Ok(())
+    }
+
+    /// Snooze: reschedule fire_at and put status back to pending. Caller is
+    /// responsible for computing the new absolute fire_at_ms.
+    pub fn snooze_reminder(
+        &self,
+        event_id: i64,
+        occurrence_start_ms: i64,
+        new_fire_at_ms: i64,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        conn.execute(
+            "UPDATE event_reminders SET status = 'pending', fire_at_ms = ?3 \
+             WHERE event_id = ?1 AND occurrence_start_ms = ?2",
+            params![event_id, occurrence_start_ms, new_fire_at_ms],
+        ).map_err(|e| format!("upd snooze: {e}"))?;
+        Ok(())
+    }
+
+    /// Drop reminders whose occurrence is well in the past so the table
+    /// doesn't grow indefinitely. The cutoff is generous enough that we
+    /// don't lose history a user might still want to investigate.
+    pub fn prune_old_reminders(&self, cutoff_ms: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        conn.execute(
+            "DELETE FROM event_reminders WHERE occurrence_start_ms < ?1",
+            params![cutoff_ms],
+        ).map_err(|e| format!("prune: {e}"))?;
+        Ok(())
+    }
+}
+
+/// A scheduled reminder row, denormalised enough that the notifier can
+/// render the toast without touching any other table.
+#[derive(Debug, Clone)]
+pub struct ReminderRow {
+    pub event_id: i64,
+    pub occurrence_start_ms: i64,
+    pub fire_at_ms: i64,
+    pub lead_min: i32,
+    pub summary: String,
 }

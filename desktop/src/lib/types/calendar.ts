@@ -31,5 +31,9 @@ export interface DesktopCalendarEvent {
   status?: string;
   rrule?: string;
   recurrence_id?: string;
+  /** Deleted-instance starts (ms since epoch) for recurring events. The
+   *  client must skip these when expanding `rrule`, otherwise removed
+   *  occurrences keep rendering on the calendar. */
+  exdates?: number[];
   attendees?: DesktopCalendarAttendee[];
 }
