@@ -144,6 +144,18 @@ func (s *Server) buildFuncMap(data interface{}) template.FuncMap {
 			}
 			return timeutil.FromMs(ms).Local().Format(layout)
 		},
+		"add": func(a, b int) int { return a + b },
+		"list": func(items ...interface{}) []interface{} {
+			return items
+		},
+		"in": func(needle string, haystack []string) bool {
+			for _, h := range haystack {
+				if h == needle {
+					return true
+				}
+			}
+			return false
+		},
 	}
 }
 

@@ -90,7 +90,8 @@
                 </div>
                 <div class="col-auto">
                     <label class="form-label">{{t "spam.rules.action"}}</label>
-                    <select name="action" class="form-select" required>
+                    <select name="action" id="rule-action" class="form-select" required
+                            onchange="document.getElementById('excluded-section').classList.toggle('d-none', this.value !== 'allow')">
                         <option value="spam">{{t "spam.rules.action_spam"}}</option>
                         <option value="allow">{{t "spam.rules.action_allow"}}</option>
                     </select>
@@ -99,6 +100,21 @@
                     <button type="submit" class="btn btn-primary">
                         <i class="ti ti-plus me-1"></i>{{t "spam.rules.add"}}
                     </button>
+                </div>
+            </div>
+            <div id="excluded-section" class="row g-2 mt-2 d-none">
+                <div class="col-12">
+                    <label class="form-label">{{t "spam.rules.excluded_checks"}}</label>
+                    <div class="form-text mb-2">{{t "spam.rules.excluded_hint"}}</div>
+                    <div class="d-flex flex-wrap gap-3">
+                        {{$names := list "chain" "spf" "dkim" "rbl" "headers" "content" "attachments" "links" "embedded" "sender" "emojis"}}
+                        {{range $names}}
+                        <label class="form-check">
+                            <input class="form-check-input" type="checkbox" name="excluded_checks" value="{{.}}">
+                            <span class="form-check-label">{{t (printf "spam.check.%s" .)}}</span>
+                        </label>
+                        {{end}}
+                    </div>
                 </div>
             </div>
         </form>
@@ -132,6 +148,11 @@
                         <td>
                             {{if eq .Action "spam"}}
                             <span class="badge bg-red">{{t "spam.rules.action_spam"}}</span>
+                            {{else if .ExcludedChecks}}
+                            <span class="badge bg-yellow">{{t "spam.rules.action_allow"}} ({{len .ExcludedChecks}})</span>
+                            <div class="small text-muted mt-1">
+                                {{range $i, $c := .ExcludedChecks}}{{if $i}}, {{end}}<code>{{$c}}</code>{{end}}
+                            </div>
                             {{else}}
                             <span class="badge bg-green">{{t "spam.rules.action_allow"}}</span>
                             {{end}}

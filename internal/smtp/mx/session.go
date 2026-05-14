@@ -200,8 +200,9 @@ func (s *Session) Data(r io.Reader) error {
 			log.Printf("MX: Failed to check spam rules: %v", err)
 		}
 
-		if action == "allow" {
-			// Whitelist - never spam
+		fullAllow := action == "allow" && len(matchedRule.ExcludedChecks) == 0
+		if fullAllow {
+			// Whitelist with no exclusions — never spam, skip analyzer.
 			isSpam = false
 			log.Printf("MX: Message whitelisted by rule %d for user %d", matchedRule.ID, recipient.Mailbox.UserID)
 		} else if action == "spam" {
@@ -209,33 +210,44 @@ func (s *Session) Data(r io.Reader) error {
 			isSpam = true
 			spamRuleID = &matchedRule.ID
 			log.Printf("MX: Message blacklisted by rule %d for user %d", matchedRule.ID, recipient.Mailbox.UserID)
-		} else {
-			// No user rule matched - run spam analysis with user's disabled checks
-			if s.analyzer != nil {
-				// Get user's disabled spam checks
-				disabledChecks, err := s.database.GetDisabledSpamChecksMap(recipient.Mailbox.UserID)
-				if err != nil {
-					log.Printf("MX: Failed to get disabled spam checks: %v", err)
-					disabledChecks = nil
+		} else if s.analyzer != nil {
+			// Either no rule, or partial-allow with excluded_checks: run the
+			// analyzer but layer in the rule's exclusions and per-user
+			// weights. Partial-allow never marks the message as spam.
+			disabledChecks, err := s.database.GetDisabledSpamChecksMap(recipient.Mailbox.UserID)
+			if err != nil {
+				log.Printf("MX: Failed to get disabled spam checks: %v", err)
+				disabledChecks = nil
+			}
+			if action == "allow" && len(matchedRule.ExcludedChecks) > 0 {
+				if disabledChecks == nil {
+					disabledChecks = map[string]bool{}
 				}
+				for _, c := range matchedRule.ExcludedChecks {
+					disabledChecks[c] = true
+				}
+				spamRuleID = &matchedRule.ID
+			}
+			weights, wErr := s.database.GetSpamCheckWeights(recipient.Mailbox.UserID)
+			if wErr != nil {
+				log.Printf("MX: Failed to get spam weights: %v", wErr)
+				weights = nil
+			}
 
-				// Run analysis with user-specific disabled checks
-				s.analyzer.AnalyzeWithDisabledChecks(parsed, s.senderIP, s.fromDomain, disabledChecks)
-				if parsed.SpamScore > 0 {
-					log.Printf("MX: Spam analysis for user %d - score=%.1f status=%s reasons=%v",
-						recipient.Mailbox.UserID, parsed.SpamScore, parsed.SpamStatus, parsed.SpamReasons)
-				}
-				// Log auth results if available
-				if parsed.AuthResults != nil {
-					log.Printf("MX: Auth results - SPF=%s DKIM=%s",
-						parsed.AuthResults.SPF, parsed.AuthResults.DKIM)
-				}
+			s.analyzer.AnalyzeWithUserConfig(parsed, s.senderIP, s.fromDomain, disabledChecks, weights)
+			if parsed.SpamScore > 0 {
+				log.Printf("MX: Spam analysis for user %d - score=%.1f status=%s reasons=%v",
+					recipient.Mailbox.UserID, parsed.SpamScore, parsed.SpamStatus, parsed.SpamReasons)
+			}
+			if parsed.AuthResults != nil {
+				log.Printf("MX: Auth results - SPF=%s DKIM=%s",
+					parsed.AuthResults.SPF, parsed.AuthResults.DKIM)
+			}
 
-				if parsed.SpamStatus == parser.SpamStatusSpam {
-					isSpam = true
-					log.Printf("MX: Message marked as spam by system (score=%.1f) for user %d",
-						parsed.SpamScore, recipient.Mailbox.UserID)
-				}
+			if parsed.SpamStatus == parser.SpamStatusSpam && action != "allow" {
+				isSpam = true
+				log.Printf("MX: Message marked as spam by system (score=%.1f) for user %d",
+					parsed.SpamScore, recipient.Mailbox.UserID)
 			}
 		}
 

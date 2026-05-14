@@ -168,19 +168,29 @@ func parseICalEvent(event *ical.Event, calendarID int64, cal *ical.Calendar) (*m
 		return nil, fmt.Errorf("event has no UID")
 	}
 
-	// Get Summary
+	// TEXT-typed properties: Prop.Value is the raw escaped form (`\,` `\;`
+	// `\\` `\n` per RFC 5545). Text() decodes them — otherwise rendered
+	// summaries look like "массаж\, Маргарита".
 	if prop := event.Props.Get(ical.PropSummary); prop != nil {
-		modelEvent.Summary = prop.Value
+		if v, err := prop.Text(); err == nil {
+			modelEvent.Summary = v
+		} else {
+			modelEvent.Summary = prop.Value
+		}
 	}
-
-	// Get Description
 	if prop := event.Props.Get(ical.PropDescription); prop != nil {
-		modelEvent.Description = prop.Value
+		if v, err := prop.Text(); err == nil {
+			modelEvent.Description = v
+		} else {
+			modelEvent.Description = prop.Value
+		}
 	}
-
-	// Get Location
 	if prop := event.Props.Get(ical.PropLocation); prop != nil {
-		modelEvent.Location = prop.Value
+		if v, err := prop.Text(); err == nil {
+			modelEvent.Location = v
+		} else {
+			modelEvent.Location = prop.Value
+		}
 	}
 
 	// Get RRULE

@@ -763,14 +763,27 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 		if prop := vevent.Props.Get(ical.PropUID); prop != nil && event.UID == "" {
 			event.UID = prop.Value
 		}
+		// TEXT-typed values — Text() unescapes `\,` `\;` `\\` `\n` per RFC 5545.
 		if prop := vevent.Props.Get(ical.PropSummary); prop != nil {
-			event.Summary = prop.Value
+			if v, err := prop.Text(); err == nil {
+				event.Summary = v
+			} else {
+				event.Summary = prop.Value
+			}
 		}
 		if prop := vevent.Props.Get(ical.PropDescription); prop != nil {
-			event.Description = prop.Value
+			if v, err := prop.Text(); err == nil {
+				event.Description = v
+			} else {
+				event.Description = prop.Value
+			}
 		}
 		if prop := vevent.Props.Get(ical.PropLocation); prop != nil {
-			event.Location = prop.Value
+			if v, err := prop.Text(); err == nil {
+				event.Location = v
+			} else {
+				event.Location = prop.Value
+			}
 		}
 		if prop := vevent.Props.Get(ical.PropRecurrenceRule); prop != nil {
 			event.RRule = prop.Value

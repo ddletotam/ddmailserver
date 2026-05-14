@@ -227,7 +227,9 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 	if ruleErr != nil {
 		log.Printf("IMAP sync: Failed to check spam rules: %v", ruleErr)
 	}
-	if action == "allow" {
+	// Whitelist rule with NO per-check exclusions = full bypass.
+	fullAllow := action == "allow" && len(matchedRule.ExcludedChecks) == 0
+	if fullAllow {
 		isSpam = false
 		log.Printf("IMAP sync: Message whitelisted by rule %d for user %d", matchedRule.ID, t.account.UserID)
 	} else if action == "spam" {
@@ -240,15 +242,34 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 			log.Printf("IMAP sync: Failed to get disabled spam checks: %v", err)
 			disabledChecks = nil
 		}
+		// Partial-allow rule: merge its excluded checks into disabledChecks
+		// so the analyzer still runs the rest. We also record the rule id so
+		// the UI can trace the score-reduction back to the rule.
+		if action == "allow" && len(matchedRule.ExcludedChecks) > 0 {
+			if disabledChecks == nil {
+				disabledChecks = map[string]bool{}
+			}
+			for _, c := range matchedRule.ExcludedChecks {
+				disabledChecks[c] = true
+			}
+			spamRuleID = &matchedRule.ID
+		}
+		weights, wErr := t.database.GetSpamCheckWeights(t.account.UserID)
+		if wErr != nil {
+			log.Printf("IMAP sync: Failed to get spam weights: %v", wErr)
+			weights = nil
+		}
 		if len(rawData) > 0 {
 			p := parser.New()
 			parsed, _ = p.ParseBytes(rawData)
 		}
-		t.analyzer.AnalyzeWithDisabledChecks(parsed, "", "", disabledChecks)
+		t.analyzer.AnalyzeWithUserConfig(parsed, "", "", disabledChecks, weights)
 		spamScore = parsed.SpamScore
 		spamStatus = string(parsed.SpamStatus)
 		spamReasons = parser.GetSpamReasonsJSON(parsed.SpamReasons)
-		if parsed.SpamStatus == parser.SpamStatusSpam {
+		// Partial-allow rules never mark spam — that's the point of the
+		// exception: trust this sender even if a subset of checks fired.
+		if parsed.SpamStatus == parser.SpamStatusSpam && action != "allow" {
 			isSpam = true
 			log.Printf("IMAP sync: Message marked as spam (score=%.1f, reasons=%v) for user %d", parsed.SpamScore, parsed.SpamReasons, t.account.UserID)
 		}

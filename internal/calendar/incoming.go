@@ -103,19 +103,28 @@ func (h *IncomingHandler) ParseICSInvite(icsData string) (*InviteInfo, error) {
 			info.EventUID = prop.Value
 		}
 
-		// Summary
+		// TEXT-typed properties — decode RFC 5545 escapes via Text() so we
+		// don't leak literal `\,` into Summary/Description/Location.
 		if prop := event.Props.Get(ical.PropSummary); prop != nil {
-			info.Summary = prop.Value
+			if v, err := prop.Text(); err == nil {
+				info.Summary = v
+			} else {
+				info.Summary = prop.Value
+			}
 		}
-
-		// Description
 		if prop := event.Props.Get(ical.PropDescription); prop != nil {
-			info.Description = prop.Value
+			if v, err := prop.Text(); err == nil {
+				info.Description = v
+			} else {
+				info.Description = prop.Value
+			}
 		}
-
-		// Location
 		if prop := event.Props.Get(ical.PropLocation); prop != nil {
-			info.Location = prop.Value
+			if v, err := prop.Text(); err == nil {
+				info.Location = v
+			} else {
+				info.Location = prop.Value
+			}
 		}
 
 		// Organizer

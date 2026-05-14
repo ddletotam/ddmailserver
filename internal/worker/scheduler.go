@@ -169,6 +169,10 @@ func (s *Scheduler) scheduleAllAccounts() {
 	// Schedule calendar event reverse sync tasks
 	s.scheduleCalendarEventSync()
 
+	// Schedule calendar sync warning emails (one per source per day when
+	// retries pile up — see CalendarSyncWarningTask for the threshold).
+	s.scheduleCalendarSyncWarning()
+
 	// Run spam cleanup (periodically delete old spam)
 	s.runSpamCleanup()
 
@@ -484,6 +488,18 @@ func (s *Scheduler) scheduleCalendarEventSync() {
 		} else {
 			log.Printf("Submitted calendar event sync task for %s", source.Name)
 		}
+	}
+}
+
+// scheduleCalendarSyncWarning submits a single task that scans every
+// CalDAV source for stuck reverse-sync entries and sends a system email
+// when the threshold + cooldown say it's time. The task itself rate-limits
+// per source via `calendar_source_warnings`, so submitting on every
+// scheduler tick is cheap and idempotent.
+func (s *Scheduler) scheduleCalendarSyncWarning() {
+	task := NewCalendarSyncWarningTask(s.database, s.notifyHub, s.getHostname())
+	if err := s.pool.Submit(task); err != nil {
+		log.Printf("Failed to submit calendar sync warning task: %v", err)
 	}
 }
 

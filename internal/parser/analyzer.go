@@ -117,6 +117,23 @@ func (a *Analyzer) AnalyzeWithContext(msg *ParsedMessage, senderIP, fromDomain s
 // disabledChecks is a map of check names that should be skipped for this user
 // Check names: "spf", "dkim", "rbl", "url_shortener", "spam_word:xxx"
 func (a *Analyzer) AnalyzeWithDisabledChecks(msg *ParsedMessage, senderIP, fromDomain string, disabledChecks map[string]bool) {
+	a.AnalyzeWithUserConfig(msg, senderIP, fromDomain, disabledChecks, nil)
+}
+
+// SpamCheckCategories is the canonical list of named check categories the
+// analyzer accumulates score into. Each name is what UIs and DB rows use:
+// keep this in sync with `disabledChecks` keys + weight columns.
+var SpamCheckCategories = []string{
+	"chain", "spf", "rbl", "dkim", "headers", "content",
+	"attachments", "links", "embedded", "sender", "emojis",
+}
+
+// AnalyzeWithUserConfig is the full-power variant: in addition to disabled
+// checks (binary off/on), it applies a per-category weight multiplier. A
+// weight of 0 means "skip this category entirely" (no score, no reasons),
+// 1.0 keeps stock behaviour, anything in between or above scales the
+// category's contribution. Missing keys default to 1.0.
+func (a *Analyzer) AnalyzeWithUserConfig(msg *ParsedMessage, senderIP, fromDomain string, disabledChecks map[string]bool, weights map[string]float64) {
 	if !a.config.Enabled {
 		msg.SpamStatus = SpamStatusClean
 		return
@@ -143,77 +160,78 @@ func (a *Analyzer) AnalyzeWithDisabledChecks(msg *ParsedMessage, senderIP, fromD
 		msg.AuthResults.SenderIP = senderIP
 	}
 
+	apply := func(name string, score float64, catReasons []string) {
+		if disabledChecks[name] {
+			return
+		}
+		w := categoryWeight(weights, name)
+		if w == 0 {
+			return
+		}
+		totalScore += score * w
+		reasons = append(reasons, catReasons...)
+	}
+
 	// Analyze the Received chain itself (missing headers, time anomalies, suspicious MTA names)
 	chainScore, chainReasons := a.analyzeReceivedChain(msg)
-	totalScore += chainScore
-	reasons = append(reasons, chainReasons...)
+	apply("chain", chainScore, chainReasons)
 
 	// Check SPF (if sender IP provided and not disabled)
-	if a.spfChecker != nil && senderIP != "" && fromDomain != "" && !IsPrivateIP(senderIP) && !disabledChecks["spf"] {
+	if a.spfChecker != nil && senderIP != "" && fromDomain != "" && !IsPrivateIP(senderIP) && !disabledChecks["spf"] && categoryWeight(weights, "spf") > 0 {
 		score, spfReasons := a.analyzeSPF(senderIP, fromDomain, msg)
-		totalScore += score
-		reasons = append(reasons, spfReasons...)
+		apply("spf", score, spfReasons)
 	}
 
 	// Check RBL (if sender IP provided and not disabled)
-	if a.rblChecker != nil && senderIP != "" && !IsPrivateIP(senderIP) && !disabledChecks["rbl"] {
+	if a.rblChecker != nil && senderIP != "" && !IsPrivateIP(senderIP) && !disabledChecks["rbl"] && categoryWeight(weights, "rbl") > 0 {
 		score, rblReasons := a.analyzeRBL(senderIP, msg)
-		totalScore += score
-		reasons = append(reasons, rblReasons...)
+		apply("rbl", score, rblReasons)
 	}
 
 	// Check DKIM (if raw message data available and not disabled)
-	if a.dkimChecker != nil && len(msg.RawData) > 0 && !disabledChecks["dkim"] {
+	if a.dkimChecker != nil && len(msg.RawData) > 0 && !disabledChecks["dkim"] && categoryWeight(weights, "dkim") > 0 {
 		score, dkimReasons := a.analyzeDKIM(msg)
-		totalScore += score
-		reasons = append(reasons, dkimReasons...)
+		apply("dkim", score, dkimReasons)
 	}
 
 	// Check headers
 	if a.config.CheckHeaders {
 		score, headerReasons := a.analyzeHeaders(msg)
-		totalScore += score
-		reasons = append(reasons, headerReasons...)
+		apply("headers", score, headerReasons)
 	}
 
 	// Check content
-	if a.config.CheckContent {
+	if a.config.CheckContent && categoryWeight(weights, "content") > 0 {
 		score, contentReasons := a.analyzeContent(msg, disabledChecks)
-		totalScore += score
-		reasons = append(reasons, contentReasons...)
+		apply("content", score, contentReasons)
 	}
 
 	// Check attachments
 	if a.config.CheckAttachments {
 		score, attachReasons := a.analyzeAttachments(msg)
-		totalScore += score
-		reasons = append(reasons, attachReasons...)
+		apply("attachments", score, attachReasons)
 	}
 
 	// Check links
-	if a.config.CheckLinks {
+	if a.config.CheckLinks && categoryWeight(weights, "links") > 0 {
 		score, linkReasons := a.analyzeLinks(msg, disabledChecks)
-		totalScore += score
-		reasons = append(reasons, linkReasons...)
+		apply("links", score, linkReasons)
 	}
 
 	// Check embedded messages
 	if len(msg.EmbeddedMessages) > 0 {
-		totalScore += 2.0
-		reasons = append(reasons, "contains embedded message (message/rfc822)")
+		apply("embedded", 2.0, []string{"contains embedded message (message/rfc822)"})
 	}
 
 	// Check for brand impersonation and scam sender names
 	if msg.From != nil {
 		score, senderReasons := a.analyzeSenderBrand(msg)
-		totalScore += score
-		reasons = append(reasons, senderReasons...)
+		apply("sender", score, senderReasons)
 	}
 
 	// Check for emojis in subject (common spam indicator)
 	emojiScore, emojiReasons := a.analyzeEmojis(msg)
-	totalScore += emojiScore
-	reasons = append(reasons, emojiReasons...)
+	apply("emojis", emojiScore, emojiReasons)
 
 	// Set final score and status
 	msg.SpamScore = totalScore
@@ -226,6 +244,23 @@ func (a *Analyzer) AnalyzeWithDisabledChecks(msg *ParsedMessage, senderIP, fromD
 	} else {
 		msg.SpamStatus = SpamStatusClean
 	}
+}
+
+// categoryWeight returns the per-category multiplier. Nil map or missing key
+// → 1.0 (stock behaviour). A negative value is clamped to 0 so the analyzer
+// never accidentally subtracts from the score.
+func categoryWeight(weights map[string]float64, name string) float64 {
+	if weights == nil {
+		return 1.0
+	}
+	w, ok := weights[name]
+	if !ok {
+		return 1.0
+	}
+	if w < 0 {
+		return 0
+	}
+	return w
 }
 
 // analyzeSPF performs SPF check

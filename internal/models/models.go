@@ -336,4 +336,6 @@ type CalendarEventSyncEntry struct {
 	ICalData   string `json:"-"`
 	Operation  string `json:"operation"`
 	CreatedAt  int64  `json:"created_at"`
+	RetryCount int    `json:"retry_count"`
+	LastError  string `json:"last_error,omitempty"`
 }
