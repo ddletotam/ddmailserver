@@ -4,6 +4,7 @@
   import { accountStore } from "../stores/accounts.svelte";
   import { mailStore } from "../stores/mail.svelte";
   import { calendarStore, PALETTE } from "../stores/calendar.svelte";
+  import { identityStore } from "../stores/identity.svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -156,6 +157,12 @@
     }
     try {
       await mailStore.ensureActivated(account);
+      // Identity list has to be loaded for "this attendee is me" matching
+      // (used by EventDetail's RSVP pills). Main window loads it in
+      // App.svelte's effect, but the calendar window skips that branch — so
+      // load it explicitly here. Without this myAttendee never resolves and
+      // the RSVP pills never render.
+      await identityStore.load(account);
       await calendarStore.load(account);
       await calendarStore.startWatching(account);
     } catch (e: unknown) {
@@ -773,6 +780,9 @@
                 onpointerup={(e) => eventPointerUp(p, e)}
                 onpointercancel={() => { drag = null; }}
               >
+                {#if (p.ev.attendees?.length ?? 0) >= 2}
+                  <span class="ev-count" title="{p.ev.attendees!.length} участников">{p.ev.attendees!.length}</span>
+                {/if}
                 <div class="ev-time">{fmtTimeRange(p)}</div>
                 <div class="ev-title">{p.ev.summary || "(без названия)"}</div>
               </div>
@@ -1057,6 +1067,24 @@
   }
   .ev-time { font-weight: 600; opacity: 0.85; line-height: 1.2; }
   .ev-title { line-height: 1.2; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+  /* Attendee count badge in the upper-right of the event tile. Only renders
+     when the event has 2+ attendees (a meeting, not a personal block). */
+  .ev-count {
+    position: absolute;
+    top: 2px;
+    right: 4px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 5px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.28);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 16px;
+    text-align: center;
+    pointer-events: none;
+  }
 
   /* Current-time marker. Sits above events (z-index > .event.dragging's 2)
      and stretches the full column width with a small bullet on the left so

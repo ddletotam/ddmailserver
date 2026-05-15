@@ -187,6 +187,18 @@
       default:            return { label: p,             cls: "ps-other" };
     }
   }
+
+  // Role chip — REQ-PARTICIPANT is the default for most invites so we don't
+  // render anything for it (avoid visual noise on the common case). Only
+  // non-default roles get a chip.
+  function roleBadge(role: string): { label: string; cls: string } | null {
+    switch ((role || "").toUpperCase()) {
+      case "OPT-PARTICIPANT": return { label: "опц.",      cls: "role-opt" };
+      case "CHAIR":           return { label: "ведущий",   cls: "role-chair" };
+      case "NON-PARTICIPANT": return { label: "наблюд.",   cls: "role-non" };
+      default:                return null;
+    }
+  }
 </script>
 
 <svelte:window onkeydown={keyHandler} />
@@ -264,10 +276,12 @@
           <ul class="attendees">
             {#each attendees as a}
               {@const badge = partStatBadge(a.partstat ?? "")}
+              {@const role = roleBadge(a.role ?? "")}
               <li class="attendee" class:me={a === myAttendee}>
                 <span class="att-name">
                   {a.name || a.email}{#if a.name && a.email}<span class="att-email"> &lt;{a.email}&gt;</span>{/if}
                 </span>
+                {#if role}<span class="role-badge {role.cls}">{role.label}</span>{/if}
                 <span class="ps-badge {badge.cls}">{badge.label}</span>
               </li>
             {/each}
@@ -462,6 +476,21 @@
   .ps-tentative { background: #c8a83222; color: #c8a832; border-color: #c8a83255; }
   .ps-pending   { background: var(--bg-hover); color: var(--text-secondary); border-color: var(--border-color); }
   .ps-other     { background: var(--bg-hover); color: var(--text-secondary); border-color: var(--border-color); }
+
+  /* Role chips. REQ-PARTICIPANT (the default) renders nothing; only the
+     non-default roles get a marker so optional attendees stand out. */
+  .role-badge {
+    font-size: var(--font-size-xs);
+    padding: 1px 8px;
+    border-radius: 10px;
+    border: 1px dashed var(--border-color);
+    color: var(--text-secondary);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .role-chair { color: var(--text-accent); border-color: var(--text-accent); }
+  .role-opt   { color: var(--text-secondary); }
+  .role-non   { color: var(--text-secondary); font-style: italic; }
 
   /* RSVP bar */
   .rsvp-bar {
