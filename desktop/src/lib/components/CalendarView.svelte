@@ -358,6 +358,28 @@
     return `${fmt(new Date(p.occStart))}–${fmt(new Date(p.occEnd))}`;
   }
 
+  /// Meeting (≥2 attendees) where the user is on the invite list but hasn't
+  /// answered yet. Renders with a lighter tone so it's visually distinct
+  /// from confirmed events the user has explicitly accepted — at a glance
+  /// "needs RSVP". Events the user isn't invited to (shared calendars,
+  /// other people's blocks) render normally.
+  function isUnansweredMeeting(ev: DesktopCalendarEvent): boolean {
+    const atts = ev.attendees ?? [];
+    if (atts.length < 2) return false;
+    const acctEmail = accountStore.activeAccount?.email?.toLowerCase() ?? "";
+    let mine: typeof atts[number] | null = null;
+    for (const a of atts) {
+      const lower = a.email.toLowerCase();
+      if (lower === acctEmail || identityStore.findByEmail(a.email)) {
+        mine = a;
+        break;
+      }
+    }
+    if (!mine) return false;
+    const ps = (mine.partstat ?? "").toUpperCase();
+    return ps === "" || ps === "NEEDS-ACTION";
+  }
+
   // ── Sidebar collapse ──
 
   const SIDEBAR_KEY = "ddmail_calendar_sidebar_open";
@@ -768,11 +790,12 @@
                 class="event"
                 class:draggable={writable}
                 class:dragging={!!drag && drag.placedKey === (p.ev.id + ":" + p.occStart)}
+                class:tentative-look={isUnansweredMeeting(p.ev)}
                 style:top="{p.topMin * pxPerMin + dy}px"
                 style:height="{p.heightMin * pxPerMin}px"
-                style:left="calc({(p.col / p.cols) * 100}% + 2px)"
-                style:width="calc({(1 / p.cols) * 100}% - 4px)"
-                style:background={p.color}
+                style:left="calc({p.col / p.cols} * (100% - var(--ev-gutter)) + 2px)"
+                style:width="calc({1 / p.cols} * (100% - var(--ev-gutter)) - 4px)"
+                style:--ev-bg={p.color}
                 title={p.ev.summary}
                 ondblclick={(e) => { e.stopPropagation(); openEvent(p); }}
                 onpointerdown={(e) => eventPointerDown(p, e)}
@@ -1043,7 +1066,11 @@
   /* ── Events ──
      left/width are set inline based on col/cols so overlapping events split
      the day column horizontally instead of stacking opaquely on top of each
-     other. */
+     other. The right-side gutter (--ev-gutter) reserves a strip of empty
+     column space no matter how many events overlap, so the user can always
+     double-click into a busy column to create a new event without having to
+     pick a free vertical lane manually. */
+  .day-col { --ev-gutter: 8px; }
   .event {
     position: absolute;
     border-radius: 4px;
@@ -1056,6 +1083,17 @@
     border: 1px solid rgba(255,255,255,0.15);
     box-sizing: border-box;
     touch-action: none;
+    background: var(--ev-bg);
+  }
+  /* Meeting awaiting my RSVP — lighten by mixing in the page background.
+     `color-mix` keeps the hue but pulls saturation/lightness toward neutral,
+     so a saturated blue meeting becomes a softer blue without losing its
+     calendar identity. */
+  .event.tentative-look {
+    background: color-mix(in srgb, var(--ev-bg) 70%, var(--bg-primary));
+    border-style: dashed;
+    border-color: color-mix(in srgb, var(--ev-bg) 60%, transparent);
+    color: color-mix(in srgb, #fff 85%, transparent);
   }
   .event.draggable { cursor: grab; }
   .event.dragging {
