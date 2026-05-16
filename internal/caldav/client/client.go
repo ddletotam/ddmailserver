@@ -16,6 +16,7 @@ import (
 	"github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/caldav"
 	caldavutil "github.com/yourusername/mailserver/internal/caldav"
+	"github.com/yourusername/mailserver/internal/caldav/importer"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/timeutil"
@@ -349,6 +350,9 @@ func (c *Client) SyncCalendar(ctx context.Context, cal *models.Calendar) error {
 				existing.AllDay = event.AllDay
 				existing.RRule = event.RRule
 				existing.ETag = event.ETag
+				existing.OrganizerEmail = event.OrganizerEmail
+				existing.OrganizerName = event.OrganizerName
+				existing.Attendees = event.Attendees
 				changes.Updates = append(changes.Updates, existing)
 			}
 		} else {
@@ -525,6 +529,12 @@ func (c *Client) parseCalendarObject(obj *caldav.CalendarObject, calendarID int6
 				event.DTEnd = &ms
 			}
 		}
+
+		// Organizer + attendees. Without these the RSVP pills in the desktop
+		// card never resolve `myAttendee` and the bar stays hidden — the user
+		// can't see they were invited to an externally-synced meeting.
+		event.OrganizerEmail, event.OrganizerName = importer.ParseOrganizer(&vevent)
+		event.Attendees = importer.ParseAttendees(&vevent)
 
 		break // Only process first VEVENT
 	}

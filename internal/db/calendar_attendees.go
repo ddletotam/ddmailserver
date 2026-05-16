@@ -171,13 +171,27 @@ func (db *DB) ReplaceAttendees(eventID int64, attendees []*models.CalendarAttend
 	}
 	defer tx.Rollback()
 
-	// Delete existing attendees
-	_, err = tx.Exec(`DELETE FROM calendar_attendees WHERE event_id = $1`, eventID)
-	if err != nil {
+	if err := ReplaceAttendeesTx(tx, eventID, attendees); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+// ReplaceAttendeesTx is the transaction-scoped variant of ReplaceAttendees.
+// Callers that already hold a tx (e.g. ApplySyncChanges, CalDAV PUT) use this
+// to keep the event row and its attendees atomically consistent — otherwise
+// a crash between the two writes leaves the event with stale attendees and
+// the desktop's `myAttendee` lookup misfires.
+func ReplaceAttendeesTx(tx *sql.Tx, eventID int64, attendees []*models.CalendarAttendee) error {
+	if _, err := tx.Exec(`DELETE FROM calendar_attendees WHERE event_id = $1`, eventID); err != nil {
 		return fmt.Errorf("failed to delete existing attendees: %w", err)
 	}
 
-	// Insert new attendees
 	now := timeutil.Now()
 	for _, attendee := range attendees {
 		attendee.EventID = eventID
@@ -198,20 +212,14 @@ func (db *DB) ReplaceAttendees(eventID int64, attendees []*models.CalendarAttend
 			RETURNING id
 		`
 
-		err := tx.QueryRow(
+		if err := tx.QueryRow(
 			query,
 			attendee.EventID, attendee.Email, attendee.Name,
 			attendee.Role, attendee.PartStat, attendee.RSVP,
 			attendee.CreatedAt, attendee.UpdatedAt,
-		).Scan(&attendee.ID)
-
-		if err != nil {
+		).Scan(&attendee.ID); err != nil {
 			return fmt.Errorf("failed to create attendee %s: %w", attendee.Email, err)
 		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return nil

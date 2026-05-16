@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/emersion/go-message"
+	"github.com/yourusername/mailserver/internal/caldav/importer"
 	"github.com/yourusername/mailserver/internal/config"
 	"github.com/yourusername/mailserver/internal/db"
 	imapclient "github.com/yourusername/mailserver/internal/imap/client"
@@ -73,6 +74,13 @@ func main() {
 	log.Printf("Checking for unencrypted passwords...")
 	if err := database.MigrateUnencryptedPasswords(); err != nil {
 		log.Fatalf("Failed to migrate unencrypted passwords: %v", err)
+	}
+
+	// One-off: backfill ATTENDEE/ORGANIZER rows on calendar events whose
+	// ical_data was synced before the structured-attendee write-paths landed.
+	// Cheap on every subsequent boot (idempotent, no-op when DB is current).
+	if err := importer.BackfillAttendees(database); err != nil {
+		log.Printf("Warning: attendee backfill failed: %v", err)
 	}
 
 	// Initialize Meilisearch if configured
