@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { onDestroy } from "svelte";
   import { accountStore } from "../stores/accounts.svelte";
   import { calendarStore } from "../stores/calendar.svelte";
   import { identityStore } from "../stores/identity.svelte";
@@ -156,19 +157,32 @@
   // value until the user clicks a pill.
   let pendingPartstat = $state<string | null>(null);
   let rsvpError = $state<string | null>(null);
+  let rsvpSaved = $state(false);
+  let savedTimer: ReturnType<typeof setTimeout> | null = null;
   const currentPartstat = $derived(pendingPartstat ?? myAttendee?.partstat ?? "NEEDS-ACTION");
+
+  onDestroy(() => {
+    if (savedTimer) clearTimeout(savedTimer);
+  });
 
   async function setRSVP(p: string) {
     const account = accountStore.activeAccount;
     if (!account) return;
     pendingPartstat = p;
     rsvpError = null;
+    rsvpSaved = false;
     try {
       await invoke<string>("v2_rsvp_event", {
         accountId: account.id,
         eventId: event.id,
         partstat: p,
       });
+      rsvpSaved = true;
+      if (savedTimer) clearTimeout(savedTimer);
+      savedTimer = setTimeout(() => {
+        rsvpSaved = false;
+        savedTimer = null;
+      }, 2200);
       // Refresh calendar view so attendees + chips reflect the new state
       // across all opened cards (rare but harmless to refetch).
       await calendarStore.refreshAfterRSVP(account);
@@ -278,7 +292,8 @@
           <div class="label">Участники ({attendees.length})</div>
           <ul class="attendees">
             {#each attendees as a}
-              {@const badge = partStatBadge(a.partstat ?? "")}
+              {@const ps = a === myAttendee ? currentPartstat : (a.partstat ?? "")}
+              {@const badge = partStatBadge(ps)}
               {@const role = roleBadge(a.role ?? "")}
               <li class="attendee" class:me={a === myAttendee}>
                 <span class="att-name">
@@ -321,6 +336,7 @@
           class:on={currentPartstat === "DECLINED"}
           onclick={() => setRSVP("DECLINED")}
         >Не иду</button>
+        {#if rsvpSaved}<span class="rsvp-ok" aria-live="polite">✓ Сохранено</span>{/if}
         {#if rsvpError}<span class="rsvp-err">{rsvpError}</span>{/if}
       </footer>
     {/if}
@@ -523,5 +539,18 @@
     margin-left: auto;
     color: #c03939;
     font-size: var(--font-size-xs);
+  }
+  .rsvp-ok {
+    margin-left: auto;
+    color: #2e8c4a;
+    font-size: var(--font-size-xs);
+    font-weight: 600;
+    animation: rsvp-fade 2.2s ease;
+  }
+  @keyframes rsvp-fade {
+    0%   { opacity: 0; }
+    12%  { opacity: 1; }
+    78%  { opacity: 1; }
+    100% { opacity: 0; }
   }
 </style>
