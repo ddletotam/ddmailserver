@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/emersion/go-ical"
+	"github.com/yourusername/mailserver/internal/caldav/importer"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/timeutil"
@@ -802,6 +803,11 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 				event.DTEnd = &ms
 			}
 		}
+		// Organizer + attendees. Mirror of what client.go does on inbound sync —
+		// without this, an event PUT by Evolution/Thunderbird/iOS to our CalDAV
+		// drops the attendee list, and the desktop RSVP bar stays hidden.
+		event.OrganizerEmail, event.OrganizerName = importer.ParseOrganizer(&vevent)
+		event.Attendees = importer.ParseAttendees(&vevent)
 		break
 	}
 
@@ -838,12 +844,17 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 		existing.AllDay = event.AllDay
 		existing.RRule = event.RRule
 		existing.ETag = event.ETag
+		existing.OrganizerEmail = event.OrganizerEmail
+		existing.OrganizerName = event.OrganizerName
 		existing.LocalModified = true
 
 		if err := s.database.UpdateCalendarEvent(existing); err != nil {
 			log.Printf("CalDAV PUT: UpdateCalendarEvent error for cal=%d uid=%s: %v", calID, uid, err)
 			http.Error(w, "Failed to update event", http.StatusInternalServerError)
 			return
+		}
+		if err := s.database.ReplaceAttendees(existing.ID, attendeesToPointers(event.Attendees)); err != nil {
+			log.Printf("CalDAV PUT: ReplaceAttendees error for event %d: %v", existing.ID, err)
 		}
 		log.Printf("CalDAV PUT: updated event id=%d cal=%d uid=%s summary=%s", existing.ID, calID, uid, event.Summary)
 
@@ -864,6 +875,9 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 			http.Error(w, "Failed to create event", http.StatusInternalServerError)
 			return
 		}
+		if err := s.database.ReplaceAttendees(event.ID, attendeesToPointers(event.Attendees)); err != nil {
+			log.Printf("CalDAV PUT: ReplaceAttendees error for event %d: %v", event.ID, err)
+		}
 		log.Printf("CalDAV PUT: created event id=%d cal=%d uid=%s summary=%s", event.ID, calID, uid, event.Summary)
 
 		// Queue reverse sync for external calendars
@@ -872,6 +886,14 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 		w.Header().Set("ETag", event.ETag)
 		w.WriteHeader(http.StatusCreated)
 	}
+}
+
+func attendeesToPointers(in []models.CalendarAttendee) []*models.CalendarAttendee {
+	out := make([]*models.CalendarAttendee, len(in))
+	for i := range in {
+		out[i] = &in[i]
+	}
+	return out
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, user *models.User) {

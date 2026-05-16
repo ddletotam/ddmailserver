@@ -125,7 +125,10 @@
   // For RSVP pills to be meaningful we need to know which row IS the user;
   // otherwise we can't tell which PARTSTAT to send back.
   const myAttendee = $derived.by<DesktopCalendarAttendee | null>(() => {
+    const acctEmail = accountStore.activeAccount?.email?.toLowerCase() ?? "";
     for (const a of attendees) {
+      const lower = a.email.toLowerCase();
+      if (lower === acctEmail) return a;
       if (identityStore.findByEmail(a.email)) return a;
     }
     return null;

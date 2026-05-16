@@ -450,6 +450,10 @@ func (db *DB) ApplySyncChanges(changes *SyncEventChanges) error {
 		if err != nil {
 			return fmt.Errorf("failed to create event %s: %w", event.UID, err)
 		}
+
+		if err := ReplaceAttendeesTx(tx, event.ID, attendeesToPtrs(event.Attendees)); err != nil {
+			return fmt.Errorf("failed to write attendees for %s: %w", event.UID, err)
+		}
 	}
 
 	// Apply updates
@@ -478,6 +482,10 @@ func (db *DB) ApplySyncChanges(changes *SyncEventChanges) error {
 		if err != nil {
 			return fmt.Errorf("failed to update event %s: %w", event.UID, err)
 		}
+
+		if err := ReplaceAttendeesTx(tx, event.ID, attendeesToPtrs(event.Attendees)); err != nil {
+			return fmt.Errorf("failed to update attendees for %s: %w", event.UID, err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -485,6 +493,14 @@ func (db *DB) ApplySyncChanges(changes *SyncEventChanges) error {
 	}
 
 	return nil
+}
+
+func attendeesToPtrs(in []models.CalendarAttendee) []*models.CalendarAttendee {
+	out := make([]*models.CalendarAttendee, len(in))
+	for i := range in {
+		out[i] = &in[i]
+	}
+	return out
 }
 
 // scanCalendarEvents scans multiple calendar event rows
