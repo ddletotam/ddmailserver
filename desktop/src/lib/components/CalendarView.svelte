@@ -619,6 +619,105 @@
     }
   }
 
+  // ── Resize-by-edge ──
+  //
+  // Two grab strips at the top and bottom of each writable event let the
+  // user change start time (top edge) or end time (bottom edge) without
+  // touching the move-drag flow. State lives separately from `drag` so
+  // a press on the handle never starts a chip-move and vice versa.
+  //
+  // Visual: while resizing we mutate the rendered `top` / `height` —
+  // NOT `transform` like move-drag does — so the chip really shrinks/
+  // grows in place. Pixels snap to 15 min steps via `snapMinutes`. We
+  // clamp so the duration never falls below 15 min and the top never
+  // crosses the bottom (or the day's start boundary).
+  type ResizeState = {
+    placedKey: string;
+    ev: DesktopCalendarEvent;
+    occStart: number;
+    edge: "top" | "bottom";
+    /** Original `topMin` / `heightMin` captured at pointerdown so the
+     *  pointermove math always references a stable baseline (PlacedEvent
+     *  rows can re-shuffle if calendarStore.events refreshes mid-drag). */
+    baseTopMin: number;
+    baseHeightMin: number;
+    startY: number;
+    deltaPx: number;
+  };
+  let resize = $state<ResizeState | null>(null);
+
+  /// Clamped minute delta for the current resize. Returns the SNAPPED
+  /// value, already constrained to "min 15-min duration" and "stay inside
+  /// the visible-hour band". The same value drives both the live preview
+  /// and the eventual PATCH so visuals never lie.
+  function resizeMinutes(r: ResizeState): number {
+    const m = snapMinutes(r.deltaPx);
+    if (r.edge === "top") {
+      // Can't shrink duration below 15 min, can't push top above startHour=0.
+      const min = -r.baseTopMin;
+      const max = r.baseHeightMin - 15;
+      return Math.max(min, Math.min(max, m));
+    }
+    // bottom edge: can't shrink below 15 min duration.
+    const min = -(r.baseHeightMin - 15);
+    return Math.max(min, m);
+  }
+
+  function edgePointerDown(p: PlacedEvent, edge: "top" | "bottom", ev: PointerEvent) {
+    const cal = calendarStore.calendars.find(c => c.id === p.ev.calendar_id);
+    if (!cal?.can_write) return;
+    ev.preventDefault();
+    ev.stopPropagation(); // don't bleed into the move-drag pointerdown
+    resize = {
+      placedKey: p.ev.id + ":" + p.occStart,
+      ev: p.ev,
+      occStart: p.occStart,
+      edge,
+      baseTopMin: p.topMin,
+      baseHeightMin: p.heightMin,
+      startY: ev.clientY,
+      deltaPx: 0,
+    };
+    (ev.currentTarget as HTMLElement).setPointerCapture(ev.pointerId);
+  }
+
+  function edgePointerMove(ev: PointerEvent) {
+    if (!resize) return;
+    resize.deltaPx = ev.clientY - resize.startY;
+  }
+
+  async function edgePointerUp(p: PlacedEvent, ev: PointerEvent) {
+    if (!resize || resize.placedKey !== p.ev.id + ":" + p.occStart) return;
+    const minutes = resizeMinutes(resize);
+    const r = resize;
+    resize = null;
+    try { (ev.currentTarget as HTMLElement).releasePointerCapture(ev.pointerId); } catch {}
+    if (minutes === 0) return;
+    const account = accountStore.activeAccount;
+    if (!account) return;
+    const body: Record<string, unknown> = { scope: "all" };
+    if (r.edge === "top") {
+      // Top edge moves dtstart by `minutes` (signed); dtend stays put.
+      body.dtstart = r.ev.dtstart + minutes * 60_000;
+    } else {
+      // Bottom edge moves dtend by `minutes`. Events without an explicit
+      // dtend imply a 1-hour duration — surface that to the server.
+      const oldEnd = r.ev.dtend ?? r.ev.dtstart + 60 * 60_000;
+      body.dtend = oldEnd + minutes * 60_000;
+    }
+    try {
+      await invoke("v2_patch_event", {
+        accountId: account.id,
+        eventId: r.ev.id,
+        body,
+      });
+      await calendarStore.refreshAfterRSVP(account);
+    } catch (e) {
+      console.error("[calendar] resize patch failed:", e);
+      alert(`Не удалось изменить длительность: ${e}`);
+    }
+  }
+
   // ── Color picker popover state ──
 
   let pickerFor = $state<number | null>(null);
@@ -778,15 +877,23 @@
             {/each}
             {#each eventsForDay(di) as p (p.ev.id + ":" + p.occStart)}
               {@const writable = (calendarStore.calendars.find(c => c.id === p.ev.calendar_id)?.can_write) ?? false}
-              {@const dy = dragOffset && dragOffset.key === (p.ev.id + ":" + p.occStart) ? dragOffset.dy : 0}
+              {@const placedKey = p.ev.id + ":" + p.occStart}
+              {@const dy = dragOffset && dragOffset.key === placedKey ? dragOffset.dy : 0}
+              {@const isResizing = !!resize && resize.placedKey === placedKey}
+              {@const rMin = isResizing ? resizeMinutes(resize!) : 0}
+              {@const topMinAdj = isResizing && resize!.edge === "top" ? p.topMin + rMin : p.topMin}
+              {@const heightMinAdj = isResizing
+                ? (resize!.edge === "top" ? p.heightMin - rMin : p.heightMin + rMin)
+                : p.heightMin}
               <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
               <div
                 class="event"
                 class:draggable={writable}
-                class:dragging={!!drag && drag.placedKey === (p.ev.id + ":" + p.occStart)}
+                class:dragging={!!drag && drag.placedKey === placedKey}
+                class:resizing={isResizing}
                 class:tentative-look={isUnansweredMeeting(p.ev)}
-                style:top="{p.topMin * pxPerMin + dy}px"
-                style:height="{p.heightMin * pxPerMin}px"
+                style:top="{topMinAdj * pxPerMin + dy}px"
+                style:height="{heightMinAdj * pxPerMin}px"
                 style:left="calc({p.col / p.cols} * (100% - var(--ev-gutter)) + 2px)"
                 style:width="calc({1 / p.cols} * (100% - var(--ev-gutter)) - 4px)"
                 style:--ev-bg={p.color}
@@ -797,11 +904,33 @@
                 onpointerup={(e) => eventPointerUp(p, e)}
                 onpointercancel={() => { drag = null; }}
               >
+                {#if writable}
+                  <!-- svelte-ignore a11y_no_static_element_interactions -->
+                  <div
+                    class="resize-handle resize-top"
+                    onpointerdown={(e) => edgePointerDown(p, "top", e)}
+                    onpointermove={edgePointerMove}
+                    onpointerup={(e) => edgePointerUp(p, e)}
+                    onpointercancel={() => { resize = null; }}
+                    aria-hidden="true"
+                  ></div>
+                {/if}
                 {#if (p.ev.attendees?.length ?? 0) >= 2}
                   <span class="ev-count" title="{p.ev.attendees!.length} участников">{p.ev.attendees!.length}</span>
                 {/if}
                 <div class="ev-time">{fmtTimeRange(p)}</div>
                 <div class="ev-title">{p.ev.summary || "(без названия)"}</div>
+                {#if writable}
+                  <!-- svelte-ignore a11y_no_static_element_interactions -->
+                  <div
+                    class="resize-handle resize-bottom"
+                    onpointerdown={(e) => edgePointerDown(p, "bottom", e)}
+                    onpointermove={edgePointerMove}
+                    onpointerup={(e) => edgePointerUp(p, e)}
+                    onpointercancel={() => { resize = null; }}
+                    aria-hidden="true"
+                  ></div>
+                {/if}
               </div>
             {/each}
             {#if isToday(d) && nowOffsetPx !== null}
@@ -1096,6 +1225,29 @@
     opacity: 0.85;
     box-shadow: 0 4px 12px rgba(0,0,0,0.35);
     transition: none;
+  }
+  .event.resizing {
+    z-index: 2;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+    transition: none;
+  }
+  /* Grab strips for edge-resize. Thin transparent zones on the top and
+     bottom of the event chip — hovering reveals a subtle highlight so the
+     interaction is discoverable. `touch-action: none` keeps the pointer
+     stream consistent with the rest of the chip. */
+  .resize-handle {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 6px;
+    cursor: ns-resize;
+    touch-action: none;
+    z-index: 1;
+  }
+  .resize-top { top: 0; }
+  .resize-bottom { bottom: 0; }
+  .event:hover .resize-handle {
+    background: rgba(255, 255, 255, 0.25);
   }
   .ev-time { font-weight: 600; opacity: 0.85; line-height: 1.2; }
   .ev-title { line-height: 1.2; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
