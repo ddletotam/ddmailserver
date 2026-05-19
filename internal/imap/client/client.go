@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"github.com/emersion/go-imap"
+	uidplus "github.com/emersion/go-imap-uidplus"
 	"github.com/emersion/go-imap/client"
 	"github.com/emersion/go-sasl"
 	"github.com/yourusername/mailserver/internal/models"
@@ -222,5 +223,51 @@ func (c *Client) StoreFlags(folder string, uid uint32, seen, flagged, answered, 
 		return fmt.Errorf("failed to store flags for UID %d: %w", uid, err)
 	}
 
+	return nil
+}
+
+// DeleteMessageRemote permanently removes a message from the remote IMAP
+// server by additively setting \Deleted and then EXPUNGE-ing it. Uses UID
+// EXPUNGE (UIDPLUS, RFC 4315) when supported so only the targeted UID is
+// affected even if other \Deleted messages happen to live in the same
+// folder; falls back to a full EXPUNGE otherwise.
+//
+// This is the proxied-delete path for desktop users — when they delete a
+// message in DDMail, the source IMAP account needs to see the deletion
+// too, otherwise the message stays in their "real" inbox on the upstream
+// provider.
+func (c *Client) DeleteMessageRemote(folder string, uid uint32) error {
+	if _, err := c.conn.Select(folder, false); err != nil {
+		return fmt.Errorf("select %s: %w", folder, err)
+	}
+
+	seqSet := new(imap.SeqSet)
+	seqSet.AddNum(uid)
+
+	// Additive +FLAGS so we don't blow away the user's other flags on the
+	// message in the same operation.
+	addItem := imap.FormatFlagsOp(imap.AddFlags, true)
+	if err := c.conn.UidStore(seqSet, addItem, []interface{}{imap.DeletedFlag}, nil); err != nil {
+		return fmt.Errorf("store \\Deleted for UID %d: %w", uid, err)
+	}
+
+	// UID EXPUNGE if the server advertises UIDPLUS. Most modern servers
+	// do (Yandex, Gmail, mail.ru, Fastmail, Dovecot, Cyrus). The fallback
+	// to a plain EXPUNGE is safe in practice because we've just set
+	// \Deleted on this UID and the user hasn't manually \Deleted other
+	// messages in the folder via DDMail — but it can in theory remove
+	// other messages a desktop user has tagged \Deleted via a parallel
+	// client. Log noisily when we hit that path.
+	ext := uidplus.NewClient(c.conn)
+	if ok, err := ext.SupportUidPlus(); err == nil && ok {
+		if err := ext.UidExpunge(seqSet, nil); err != nil {
+			return fmt.Errorf("UID EXPUNGE for UID %d: %w", uid, err)
+		}
+		return nil
+	}
+	log.Printf("Remote IMAP server does not advertise UIDPLUS; falling back to bulk EXPUNGE on %s", folder)
+	if err := c.conn.Expunge(nil); err != nil {
+		return fmt.Errorf("EXPUNGE on %s: %w", folder, err)
+	}
 	return nil
 }

@@ -152,6 +152,33 @@
   });
 
   let editing = $state(false);
+  let deleting = $state(false);
+  let deleteError = $state<string | null>(null);
+
+  async function deleteEvent() {
+    const account = accountStore.activeAccount;
+    if (!account) return;
+    const label = event.summary || "это событие";
+    const seriesNote = event.rrule
+      ? "\n\nЭто часть повторяющейся серии — будет удалена вся серия."
+      : "";
+    if (!confirm(`Удалить «${label}»?${seriesNote}`)) return;
+    deleting = true;
+    deleteError = null;
+    try {
+      await invoke("v2_delete_event", {
+        accountId: account.id,
+        eventId: event.id,
+      });
+      await calendarStore.refreshAfterRSVP(account);
+      onclose();
+    } catch (e: unknown) {
+      deleteError = e instanceof Error ? e.message : String(e);
+      console.error("[event-detail] delete failed:", e);
+    } finally {
+      deleting = false;
+    }
+  }
 
   // Local state for optimistic PARTSTAT updates. Falls back to the server
   // value until the user clicks a pill.
@@ -234,9 +261,20 @@
               <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/>
             </svg>
           </button>
+          <button class="btn-delete" onclick={deleteEvent} disabled={deleting} title="Удалить">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+              <path d="M10 11v6M14 11v6"/>
+              <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+            </svg>
+          </button>
         {/if}
         <button class="btn-close" onclick={onclose} aria-label="Закрыть">×</button>
       </div>
+      {#if deleteError}
+        <div class="err">Не удалось удалить: {deleteError}</div>
+      {/if}
       <h2 class="summary">{event.summary || "(без названия)"}</h2>
       <div class="when">{fmtRange()}</div>
       {#if event.rrule}<div class="rrule-hint">↻ повторяющееся событие</div>{/if}
@@ -390,7 +428,7 @@
     font-size: var(--font-size-sm);
     flex: 1;
   }
-  .btn-close, .btn-edit {
+  .btn-close, .btn-edit, .btn-delete {
     width: 28px;
     height: 28px;
     border: none;
@@ -407,6 +445,16 @@
   .btn-close:hover, .btn-edit:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+  .btn-delete:hover {
+    background: color-mix(in srgb, #e8616a 20%, transparent);
+    color: #e8616a;
+  }
+  .btn-delete:disabled { opacity: 0.5; cursor: not-allowed; }
+  .err {
+    color: #e8616a;
+    font-size: var(--font-size-sm);
+    padding: 4px 0;
   }
   .summary {
     margin: 0 0 6px;

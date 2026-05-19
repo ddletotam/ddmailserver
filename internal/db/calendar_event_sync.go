@@ -187,6 +187,29 @@ func (db *DB) SetCalendarSourceWarning(sourceID, lastSent int64, consecutive int
 	return nil
 }
 
+// IsEventPendingDelete returns true if there's a queued reverse-sync
+// entry with operation='delete' for the given (source_id, uid) pair.
+// Used by the inbound CalDAV importer to avoid resurrecting an event
+// that we've asked the upstream server to delete but the outbound
+// worker hasn't yet processed.
+func (db *DB) IsEventPendingDelete(sourceID int64, uid string) (bool, error) {
+	if uid == "" {
+		return false, nil
+	}
+	var exists bool
+	err := db.QueryRow(
+		`SELECT EXISTS(
+			SELECT 1 FROM calendar_event_sync_queue
+			WHERE source_id = $1 AND uid = $2 AND operation = 'delete'
+		)`,
+		sourceID, uid,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check pending delete: %w", err)
+	}
+	return exists, nil
+}
+
 // DeleteCalendarEventSyncEntry removes a completed calendar event sync entry
 func (db *DB) DeleteCalendarEventSyncEntry(id int64) error {
 	query := `DELETE FROM calendar_event_sync_queue WHERE id = $1`

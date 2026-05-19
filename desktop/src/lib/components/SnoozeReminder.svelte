@@ -34,20 +34,27 @@
   // calendar reschedule, not a snooze.
   const PRESETS = [5, 15, 30, 60, 240] as const;
 
-  onMount(async () => {
-    try {
-      const r = await invoke<Row | null>("get_reminder", {
-        eventId,
-        occurrenceStartMs: occMs,
-      });
-      if (!r) {
-        loadError = "Напоминание не найдено";
-        return;
+  onMount(() => {
+    // Async fetch fires off in parallel — Svelte 5's onMount must be
+    // synchronous to return a cleanup function, so we can't `await` here
+    // directly. The labels and presets render against a `null` row until
+    // the load resolves, which is fine because `loadError`/`row` flips
+    // their visibility.
+    (async () => {
+      try {
+        const r = await invoke<Row | null>("get_reminder", {
+          eventId,
+          occurrenceStartMs: occMs,
+        });
+        if (!r) {
+          loadError = "Напоминание не найдено";
+          return;
+        }
+        row = r;
+      } catch (e) {
+        loadError = String(e);
       }
-      row = r;
-    } catch (e) {
-      loadError = String(e);
-    }
+    })();
     // Keep "in N min until start" labels honest while the window stays open.
     const t = setInterval(() => (now = Date.now()), 30_000);
     return () => clearInterval(t);

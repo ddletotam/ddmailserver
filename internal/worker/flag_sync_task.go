@@ -77,19 +77,29 @@ func (t *FlagSyncTask) Execute(ctx context.Context) error {
 			return ctx.Err()
 		}
 
-		// Store flags on remote server
-		err := client.StoreFlags(
-			entry.RemoteFolder,
-			entry.RemoteUID,
-			entry.Seen,
-			entry.Flagged,
-			entry.Answered,
-			entry.Deleted,
-		)
+		// Delete + flag sync are mutually exclusive on the wire: a queued
+		// "deleted" entry means we want the message gone from the source
+		// server entirely (STORE +\Deleted + UID EXPUNGE). The seen /
+		// flagged / answered bits on a deleted row are irrelevant — the
+		// message ceases to exist on the remote — so we don't waste a
+		// STORE round-trip on them.
+		var err error
+		if entry.Deleted {
+			err = client.DeleteMessageRemote(entry.RemoteFolder, entry.RemoteUID)
+		} else {
+			err = client.StoreFlags(
+				entry.RemoteFolder,
+				entry.RemoteUID,
+				entry.Seen,
+				entry.Flagged,
+				entry.Answered,
+				false,
+			)
+		}
 
 		if err != nil {
-			log.Printf("Flag sync failed for message %d (remote UID %d): %v",
-				entry.MessageID, entry.RemoteUID, err)
+			log.Printf("Flag sync failed for message %d (remote UID %d, deleted=%v): %v",
+				entry.MessageID, entry.RemoteUID, entry.Deleted, err)
 			failCount++
 			// Continue with other entries, don't abort
 			continue

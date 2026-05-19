@@ -337,17 +337,44 @@ func (s *Server) HandleDesktopSetFlags(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// Compute the post-update flag state up-front so we can queue
+		// the remote sync with the right snapshot. StoreFlags on the
+		// upstream is SET (replace-all), not ADD/REMOVE, so we have to
+		// pass the full state — not just the bit that changed.
+		newSeen, newFlagged, newAnswered := msg.Seen, msg.Flagged, msg.Answered
+		propagate := false
 		switch req.Flags {
 		case "\\Seen":
 			s.database.UpdateMessageFlag(ref.UID, "seen", req.Add)
+			newSeen = req.Add
+			propagate = true
 		case "\\Flagged":
 			s.database.UpdateMessageFlag(ref.UID, "flagged", req.Add)
+			newFlagged = req.Add
+			propagate = true
 		case "\\Answered":
 			s.database.UpdateMessageFlag(ref.UID, "answered", req.Add)
+			newAnswered = req.Add
+			propagate = true
 		case "\\Deleted":
+			// Explicit \Deleted via this endpoint is rare (the dedicated
+			// /messages/delete handler is the normal path and proxies
+			// the delete via DeleteMessageRemote). Keep the local DB
+			// update for behavioural parity but don't queue here — the
+			// dedicated handler is the single-source-of-truth for the
+			// delete-on-remote dance.
 			s.database.UpdateMessageFlag(ref.UID, "deleted", req.Add)
 		case "\\Draft":
 			s.database.UpdateMessageFlag(ref.UID, "draft", req.Add)
+		}
+
+		if propagate && msg.AccountID > 0 && msg.RemoteUID > 0 {
+			if err := s.database.QueueFlagSync(
+				msg.ID, msg.AccountID, msg.RemoteFolder, msg.RemoteUID,
+				newSeen, newFlagged, newAnswered, false,
+			); err != nil {
+				log.Printf("desktop set-flags: queue flag sync failed for msg %d: %v", msg.ID, err)
+			}
 		}
 	}
 
@@ -435,17 +462,41 @@ func (s *Server) HandleDesktopDeleteMessages(w http.ResponseWriter, r *http.Requ
 	}
 
 	deleted := 0
+	queued := 0
 	for _, ref := range req.Messages {
 		msg, err := s.database.GetMessageByID(ref.UID)
 		if err != nil || msg.UserID != user.ID {
 			continue
 		}
-		if err := s.database.SoftDeleteMessage(ref.UID); err == nil {
-			deleted++
+		if err := s.database.SoftDeleteMessage(ref.UID); err != nil {
+			continue
+		}
+		deleted++
+
+		// External-account messages need the delete proxied to the source
+		// IMAP server — otherwise the message stays in the user's "real"
+		// inbox on small.kz / yandex / etc. forever. We queue a flag-sync
+		// entry with deleted=true; the worker stores \Deleted + UID
+		// EXPUNGE on the remote folder.
+		//
+		// account_id = 0 means a locally-delivered message (our own MX);
+		// remote_uid = 0 means we never learned the source UID (e.g. the
+		// message predates the remote_uid tracking migration). In both
+		// cases there's nothing to push.
+		if msg.AccountID > 0 && msg.RemoteUID > 0 {
+			if err := s.database.QueueFlagSync(
+				msg.ID, msg.AccountID, msg.RemoteFolder, msg.RemoteUID,
+				msg.Seen, msg.Flagged, msg.Answered, true,
+			); err != nil {
+				log.Printf("desktop delete: queue flag sync failed for msg %d: %v", msg.ID, err)
+			} else {
+				queued++
+			}
 		}
 	}
 
-	respondJSON(w, http.StatusOK, map[string]int{"deleted": deleted})
+	log.Printf("desktop delete: soft-deleted %d/%d messages, queued %d for remote sync", deleted, len(req.Messages), queued)
+	respondJSON(w, http.StatusOK, map[string]int{"deleted": deleted, "queued_remote": queued})
 }
 
 // ── Identities ──
