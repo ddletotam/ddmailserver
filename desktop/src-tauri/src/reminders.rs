@@ -149,14 +149,18 @@ struct OpenEventPayload {
 /// identical regardless of where the click came from.
 ///
 /// Recognised action ids:
-///   * `default`    → emit `open-event` so the calendar window opens.
-///                    Does NOT mark acked — opening the event is a
-///                    softer state than "I handled this".
-///   * `ack`        → mark acked; no further notifications.
-///   * `snz:N`      → snooze N minutes (5 / 15 / etc.).
-///   * `snz:atstart`→ re-fire exactly at the occurrence start.
-///   * anything else → log and ignore (defensive — server can send
-///                    e.g. `dismissed` on auto-timeouts).
+///   * `default`       → emit `open-event` so the calendar window opens.
+///                       Does NOT mark acked — opening the event is a
+///                       softer state than "I handled this".
+///   * `ack`           → mark acked; no further notifications.
+///   * `snooze-window` → emit `open-snooze-reminder` so the frontend
+///                       can spawn the snooze-config webview. Does
+///                       NOT change row state; the snooze window
+///                       commits via a subsequent `snz:N`/`snz:atstart`.
+///   * `snz:N`         → snooze N minutes (5 / 15 / etc.).
+///   * `snz:atstart`   → re-fire exactly at the occurrence start.
+///   * anything else   → log and ignore (defensive — server can send
+///                       e.g. `dismissed` on auto-timeouts).
 pub fn handle_action<R: Runtime>(
     cache: &Arc<Cache>,
     app: &AppHandle<R>,
@@ -176,8 +180,14 @@ pub fn handle_action<R: Runtime>(
                 log::warn!("[reminders] ack failed for event {event_id}: {e}");
             }
         }
+        "snooze-window" => {
+            let _ = app.emit(
+                "open-snooze-reminder",
+                OpenEventPayload { event_id, occurrence_start_ms },
+            );
+        }
         "snz:atstart" => {
-            if let Err(e) = cache.snooze_reminder(event_id, occurrence_start_ms, occurrence_start_ms) {
+            if let Err(e) = cache.snooze_reminder(event_id, occurrence_start_ms, occurrence_start_ms, 0) {
                 log::warn!("[reminders] snooze@start failed for event {event_id}: {e}");
             }
         }
@@ -188,7 +198,8 @@ pub fn handle_action<R: Runtime>(
                 return;
             }
             let new_fire_at = chrono::Utc::now().timestamp_millis() + minutes * 60_000;
-            if let Err(e) = cache.snooze_reminder(event_id, occurrence_start_ms, new_fire_at) {
+            let lead = ((occurrence_start_ms - new_fire_at) / 60_000).max(0) as i32;
+            if let Err(e) = cache.snooze_reminder(event_id, occurrence_start_ms, new_fire_at, lead) {
                 log::warn!("[reminders] snooze failed for event {event_id}: {e}");
             }
         }
@@ -196,4 +207,17 @@ pub fn handle_action<R: Runtime>(
             log::debug!("[reminders] ignoring action {action}");
         }
     }
+}
+
+/// Read a single reminder row. The snooze-config webview calls this on
+/// mount to populate its summary / occurrence-time / lead so the URL
+/// only has to carry the (event_id, occurrence_start_ms) pair.
+#[tauri::command]
+pub async fn get_reminder<R: Runtime>(
+    app: AppHandle<R>,
+    event_id: i64,
+    occurrence_start_ms: i64,
+) -> Result<Option<crate::cache::ReminderRow>, String> {
+    let cache = app.state::<Arc<Cache>>().inner().clone();
+    cache.get_reminder(event_id, occurrence_start_ms)
 }

@@ -29,14 +29,15 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), Box<dyn std::er
     }
 }
 
-/// Push the current unread-message total to the tray. The Linux backend
-/// repaints the icon with / without a blue dot in the bottom-right corner.
-/// macOS and Windows currently take the value but don't render the dot —
-/// adding the badge there is a separate task (set_icon on the stored
-/// TrayIcon handle with a re-composited PNG).
+/// Push the current unread-message total to the tray. Linux and Windows
+/// re-composite the icon with a blue dot when count > 0; macOS still
+/// no-ops because the menu-bar template-icon convention rules out
+/// per-app badges (Apple expects the count to live in the Dock).
 pub fn set_unread(count: u32) {
     #[cfg(target_os = "linux")]
     linux::set_unread(count);
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    windows::set_unread(count);
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     let _ = count;
 }

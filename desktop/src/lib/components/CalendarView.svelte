@@ -133,23 +133,8 @@
   // on layout for sub-second precision nobody perceives.
   let nowTs = $state(Date.now());
   let nowTimer: ReturnType<typeof setInterval> | null = null;
-  // Unlisten handle for the close-requested hook that flushes
-  // tauri-plugin-window-state to disk. The plugin only writes on
-  // RunEvent::Exit by default, so closing just the calendar window
-  // (while the app keeps running) would drop the new geometry on a
-  // subsequent crash. Forcing the save on close-requested makes the
-  // size/position survive anything short of SIGKILL on this exact tick.
-  let unlistenClose: (() => void) | null = null;
-
   onMount(async () => {
     nowTimer = setInterval(() => { nowTs = Date.now(); }, 30_000);
-    try {
-      unlistenClose = await getCurrentWebviewWindow().onCloseRequested(async () => {
-        try { await invoke("plugin:window-state|save_window_state"); } catch {}
-      });
-    } catch (e) {
-      console.warn("[calendar] could not hook close-requested:", e);
-    }
     const account = accountStore.activeAccount;
     if (!account) {
       initError = "Нет активной учётки. Сначала войдите в основном окне.";
@@ -172,9 +157,9 @@
 
   onDestroy(() => {
     if (nowTimer) clearInterval(nowTimer);
-    if (unlistenClose) unlistenClose();
     if (unlistenOpenEvent) unlistenOpenEvent();
     calendarStore.stopWatching();
+    invoke("plugin:window-state|save_window_state").catch(() => {});
   });
 
   // Vertical pixel offset of the current-time line inside a day column.
@@ -644,13 +629,22 @@
   function closePicker() {
     pickerFor = null;
   }
+
+  function onGlobalKey(e: KeyboardEvent) {
+    if (e.key !== "Escape") return;
+    if (pickerFor !== null) { pickerFor = null; return; }
+    if (openedEvent !== null) { openedEvent = null; return; }
+    if (createDraft !== null) { createDraft = null; return; }
+    void invoke("close_window", { label: "calendar" });
+  }
   function pickColor(id: number, color: string) {
     calendarStore.setColor(id, color);
     pickerFor = null;
   }
 </script>
 
-<svelte:window onclick={closePicker} />
+<svelte:window onclick={closePicker} onkeydown={onGlobalKey} />
+
 
 <div class="cal" style:--day-count={dayCount}>
   <header class="topbar">

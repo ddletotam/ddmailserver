@@ -7,6 +7,7 @@
   import ChatView from "./lib/components/ChatView.svelte";
   import LoginScreen from "./lib/components/LoginScreen.svelte";
   import CalendarView from "./lib/components/CalendarView.svelte";
+  import SnoozeReminder from "./lib/components/SnoozeReminder.svelte";
   import { accountStore } from "./lib/stores/accounts.svelte";
   import { mailStore } from "./lib/stores/mail.svelte";
   import { identityStore } from "./lib/stores/identity.svelte";
@@ -49,7 +50,7 @@
   }
 
   $effect(() => {
-    if (view === "calendar") return; // calendar window doesn't load mail
+    if (view === "calendar" || view === "snooze") return; // secondary windows don't load mail
     const account = accountStore.activeAccount;
     if (!account) return;
     // Identities must be available BEFORE the conversation grouping runs — the
@@ -73,7 +74,7 @@
   // window owns the tray — the calendar window has no conversations to
   // count.
   $effect(() => {
-    if (view === "calendar") return;
+    if (view === "calendar" || view === "snooze") return;
     const total = mailStore.conversations.reduce(
       (sum, c) => sum + (c.unread_count > 0 ? 1 : 0),
       0,
@@ -88,8 +89,9 @@
   // to show. If the calendar window is already alive it handles the
   // event itself; we only set focus and bail.
   let unlistenOpenEvent: UnlistenFn | null = null;
+  let unlistenOpenSnooze: UnlistenFn | null = null;
   onMount(async () => {
-    if (view === "calendar") return; // calendar handles its own
+    if (view === "calendar" || view === "snooze") return; // secondary windows handle their own
     try {
       unlistenOpenEvent = await listen<{ event_id: number; occurrence_start_ms: number }>(
         "open-event",
@@ -116,9 +118,45 @@
     } catch (e) {
       console.warn("[reminders] open-event listener failed:", e);
     }
+
+    // Snooze-config webview. The label is derived from the (event_id,
+    // occurrence_start_ms) pair so a second click on "Отложить…" while
+    // an existing snooze window is open just refocuses it instead of
+    // stacking duplicates.
+    try {
+      unlistenOpenSnooze = await listen<{ event_id: number; occurrence_start_ms: number }>(
+        "open-snooze-reminder",
+        async (e) => {
+          const { event_id, occurrence_start_ms } = e.payload;
+          const label = `snooze-${event_id}-${occurrence_start_ms}`;
+          const existing = await WebviewWindow.getByLabel(label);
+          if (existing) {
+            await existing.setFocus().catch(() => {});
+            await existing.unminimize().catch(() => {});
+            return;
+          }
+          const win = new WebviewWindow(label, {
+            url: `index.html?view=snooze&event_id=${event_id}&occ=${occurrence_start_ms}`,
+            title: "Отложить напоминание",
+            width: 380,
+            height: 360,
+            minWidth: 360,
+            minHeight: 320,
+            resizable: false,
+            alwaysOnTop: true,
+            skipTaskbar: true,
+            focus: true,
+          });
+          win.once("tauri://error", (err) => console.error("[reminders] open snooze:", err));
+        },
+      );
+    } catch (e) {
+      console.warn("[reminders] open-snooze-reminder listener failed:", e);
+    }
   });
   onDestroy(() => {
     if (unlistenOpenEvent) unlistenOpenEvent();
+    if (unlistenOpenSnooze) unlistenOpenSnooze();
   });
 
   function handleAccountAdded() {
@@ -128,6 +166,8 @@
 
 {#if view === "calendar"}
   <CalendarView />
+{:else if view === "snooze"}
+  <SnoozeReminder />
 {:else if showLogin}
   <LoginScreen onSuccess={handleAccountAdded} />
 {:else}

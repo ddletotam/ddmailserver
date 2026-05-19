@@ -29,28 +29,46 @@ fn set_tray_unread(count: u32) {
     tray::set_unread(count);
 }
 
+/// Close a window by label from JS — bypasses the JS-side allow-close
+/// capability check so secondary windows (calendar, snooze) can always
+/// close themselves regardless of the capabilities JSON state.
 #[tauri::command]
-fn open_url(url: String) -> Result<(), String> {
-    // WSL2: explorer.exe opens URLs in Windows default browser
-    if std::process::Command::new("explorer.exe").arg(&url).spawn().is_ok() {
-        return Ok(());
-    }
-    // Linux native
-    if std::process::Command::new("xdg-open").arg(&url).spawn().is_ok() {
-        return Ok(());
-    }
-    // macOS
-    if std::process::Command::new("open").arg(&url).spawn().is_ok() {
-        return Ok(());
-    }
-    Err("Failed to open URL".into())
+fn close_window(app: tauri::AppHandle, label: String) -> Result<(), String> {
+    app.get_webview_window(&label)
+        .ok_or_else(|| format!("no window: {label}"))?
+        .close()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_shell::ShellExt;
+    // Shell plugin routes through the per-OS native opener:
+    //   * Windows  → ShellExecuteW("open", url)   — default browser
+    //   * macOS    → /usr/bin/open
+    //   * Linux    → xdg-open (with WSL fallback handled inside the plugin)
+    // The previous implementation tried `explorer.exe URL` first, which on
+    // native Windows occasionally launches Explorer with the URL as a path
+    // instead of handing it to the http-protocol handler.
+    app.shell()
+        .open(&url, None)
+        .map_err(|e| e.to_string())
 }
 
 fn main() {
     env_logger::init();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            // Default builder has no state flags set, so the plugin loads
+            // but doesn't persist anything. Enable the full set: position,
+            // size, maximized/fullscreen/visible/decorations. Without this
+            // every launch on Windows lands at the tauri.conf.json default
+            // 1200×800 in the upper-left corner.
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(tauri_plugin_window_state::StateFlags::all())
+                .build(),
+        )
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
@@ -91,10 +109,12 @@ fn main() {
             imap::fetch_identities,
             imap::start_watching,
             smtp::send_message,
+            close_window,
             open_url,
             set_tray_unread,
             reminders::schedule_reminders,
             reminders::reminder_action,
+            reminders::get_reminder,
             // v2 commands (provider-based)
             commands::detect_server,
             commands::native_login,

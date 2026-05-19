@@ -2,17 +2,15 @@
 //!
 //! We use `notify-rust`, which speaks the fdo spec directly. The
 //! reminder is rendered as a critical-urgency, resident notification with
-//! five actions:
-//!   * `default` — body-click; opens the event in-app.
-//!   * `ack`     — "OK".
-//!   * `snz:5`   — snooze 5 minutes.
-//!   * `snz:15`  — snooze 15 minutes.
-//!   * `snz:atstart` — re-fire exactly at the occurrence start.
+//! three actions:
+//!   * `default`        — body-click; opens the event in-app.
+//!   * `ack`            — "Игнорировать".
+//!   * `snooze-window`  — "Отложить…"; spawns the snooze-config webview.
 //!
 //! `default` is part of the fdo contract — every server invokes it on
 //! body clicks even when it isn't rendered as a button. The explicit
 //! action buttons are rendered on KDE Plasma / dunst / xfce4-notifyd; on
-//! GNOME Shell only the body-click default works (their tos style is
+//! GNOME Shell only the body-click default works (their toast style is
 //! intentional). That's a graceful degradation: ack + snooze are still
 //! reachable via the in-app dialog the body-click opens.
 
@@ -51,11 +49,13 @@ pub(super) fn show_reminder<R: Runtime>(
         // snooze even if they were AFK when it fired.
         .hint(Hint::Resident(true))
         .hint(Hint::Category("im.received".into()))
+        // Two real actions; the rich snooze UX lives in a dedicated
+        // webview spawned by `snooze-window`. `default` is kept as the
+        // implicit body-click that opens the event — every fdo server
+        // honours it even without rendering it as a button.
         .action("default", "Открыть событие")
-        .action("ack", "OK")
-        .action("snz:5", "+5 мин")
-        .action("snz:15", "+15 мин")
-        .action("snz:atstart", "При начале")
+        .action("ack", "Игнорировать")
+        .action("snooze-window", "Отложить…")
         .show()
         .map_err(|e| format!("notify show: {e}"))?;
 
