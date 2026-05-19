@@ -1145,7 +1145,13 @@
     text-transform: capitalize;
   }
   .day-name:last-child { border-right: none; }
-  .day-name.today { color: var(--text-accent); font-weight: 700; }
+  /* Today header: the date number gets pulled into a filled pill so the
+     column reads as "this is today" at a glance from across the room. */
+  .day-name.today {
+    color: var(--text-on-active);
+    font-weight: 700;
+    background: var(--text-accent);
+  }
 
   .body {
     display: grid;
@@ -1174,7 +1180,16 @@
     position: relative;
   }
   .day-col:last-child { border-right: none; }
-  .day-col.today { background: color-mix(in srgb, var(--text-accent) 5%, transparent); }
+  /* Today column: stronger accent tint plus a coloured rule down each
+     side so the band reads clearly against the rest of the grid even on
+     low-contrast displays. The mix stays under 12% so event chips on
+     top remain the dominant content. */
+  .day-col.today {
+    background: color-mix(in srgb, var(--text-accent) 12%, transparent);
+    box-shadow:
+      inset 2px 0 0 var(--text-accent),
+      inset -2px 0 0 var(--text-accent);
+  }
   .hour-cell {
     border-bottom: 1px solid var(--border-color);
     display: flex;
