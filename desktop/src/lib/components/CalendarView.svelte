@@ -897,7 +897,7 @@
                 style:left="calc({p.col / p.cols} * (100% - var(--ev-gutter)) + 2px)"
                 style:width="calc({1 / p.cols} * (100% - var(--ev-gutter)) - 4px)"
                 style:--ev-bg={p.color}
-                title={p.ev.summary}
+                title="{fmtTimeRange(p)} — {p.ev.summary || '(без названия)'}"
                 ondblclick={(e) => { e.stopPropagation(); openEvent(p); }}
                 onpointerdown={(e) => eventPointerDown(p, e)}
                 onpointermove={eventPointerMove}
@@ -918,7 +918,6 @@
                 {#if (p.ev.attendees?.length ?? 0) >= 2}
                   <span class="ev-count" title="{p.ev.attendees!.length} участников">{p.ev.attendees!.length}</span>
                 {/if}
-                <div class="ev-time">{fmtTimeRange(p)}</div>
                 <div class="ev-title">{p.ev.summary || "(без названия)"}</div>
                 {#if writable}
                   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1249,8 +1248,14 @@
   .event:hover .resize-handle {
     background: rgba(255, 255, 255, 0.25);
   }
-  .ev-time { font-weight: 600; opacity: 0.85; line-height: 1.2; }
-  .ev-title { line-height: 1.2; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+  .ev-title {
+    line-height: 1.2;
+    /* Wrap to as many lines as fit; the `.event` parent has
+       overflow:hidden so anything past the chip just gets clipped. No
+       ellipsis — the full title is one tooltip away. */
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
   /* Attendee count badge in the upper-right of the event tile. Only renders
      when the event has 2+ attendees (a meeting, not a personal block). */
   .ev-count {
