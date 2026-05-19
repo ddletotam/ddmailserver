@@ -167,6 +167,42 @@ impl Cache {
         // next lookup uses the new chain (and labels the result with a MIME).
         conn.execute("DELETE FROM avatar_cache WHERE mime = ''", []).ok();
 
+        // Reminders dedup migration. The PRIMARY KEY (event_id,
+        // occurrence_start_ms) doesn't dedupe across calendar resyncs
+        // because CalDAV-side event ids are not stable: every sync mints
+        // new ids, the frontend re-pushes reminders, and INSERT-OR-IGNORE
+        // happily creates a fresh row per id. Result: one logical
+        // occurrence ends up with 6-10 reminder rows, the scheduler fires
+        // them one by one and the user sees the same toast nagging every
+        // scan tick.
+        //
+        // The logical key is (occurrence_start_ms, summary): two events
+        // can't legitimately share both. Dedupe rows along that key,
+        // keeping the one that's furthest along — acked > fired > pending
+        // — so the user's last action sticks. Then put a UNIQUE INDEX on
+        // the same key, and switch the upsert below to an ON CONFLICT
+        // path so new event_ids overwrite the old one in-place.
+        conn.execute(
+            "DELETE FROM event_reminders WHERE rowid IN (\
+                SELECT rowid FROM (\
+                    SELECT rowid, ROW_NUMBER() OVER (\
+                        PARTITION BY occurrence_start_ms, summary \
+                        ORDER BY CASE status \
+                            WHEN 'acked' THEN 0 \
+                            WHEN 'fired' THEN 1 \
+                            ELSE 2 END, \
+                        event_id DESC\
+                    ) AS rn FROM event_reminders\
+                ) WHERE rn > 1\
+            )",
+            [],
+        ).ok();
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_reminders_logical \
+             ON event_reminders(occurrence_start_ms, summary)",
+            [],
+        ).ok();
+
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -523,9 +559,16 @@ impl Cache {
     // ── Calendar reminders ──
 
     /// Insert a reminder for an event occurrence if no row exists yet.
-    /// Rows that are already in the table — including those the user has
-    /// acked or snoozed — are left alone so user state survives bulk
-    /// re-scheduling whenever the frontend refreshes the calendar view.
+    ///
+    /// Dedup is on (occurrence_start_ms, summary), not (event_id, occ): the
+    /// frontend re-pushes the whole schedule whenever the calendar list
+    /// changes, and CalDAV resyncs reassign `event_id` so the same logical
+    /// occurrence shows up with a different id each round. We treat
+    /// (occ, summary) as the logical identity and update event_id in-place
+    /// on conflict — the user's status / fire_at / lead_min stay put, so
+    /// acks and snoozes survive the resync. The latest event_id wins
+    /// because the open-event payload from the toast needs to route to
+    /// whichever row the backend currently exposes.
     pub fn upsert_pending_reminder(
         &self,
         event_id: i64,
@@ -536,9 +579,11 @@ impl Cache {
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         conn.execute(
-            "INSERT OR IGNORE INTO event_reminders \
+            "INSERT INTO event_reminders \
              (event_id, occurrence_start_ms, fire_at_ms, status, lead_min, summary) \
-             VALUES (?1, ?2, ?3, 'pending', ?4, ?5)",
+             VALUES (?1, ?2, ?3, 'pending', ?4, ?5) \
+             ON CONFLICT(occurrence_start_ms, summary) DO UPDATE SET \
+                event_id = excluded.event_id",
             params![event_id, occurrence_start_ms, fire_at_ms, lead_min, summary],
         ).map_err(|e| format!("ins reminder: {e}"))?;
         Ok(())
@@ -579,6 +624,34 @@ impl Cache {
         Ok(())
     }
 
+    /// Fetch a single reminder row by its logical id. Used by the
+    /// snooze-config window to populate its UI without round-tripping
+    /// the data through URL params.
+    pub fn get_reminder(
+        &self,
+        event_id: i64,
+        occurrence_start_ms: i64,
+    ) -> Result<Option<ReminderRow>, String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT event_id, occurrence_start_ms, fire_at_ms, lead_min, summary \
+             FROM event_reminders WHERE event_id = ?1 AND occurrence_start_ms = ?2",
+        ).map_err(|e| format!("prep: {e}"))?;
+        let mut rows = stmt.query_map(params![event_id, occurrence_start_ms], |r| {
+            Ok(ReminderRow {
+                event_id: r.get(0)?,
+                occurrence_start_ms: r.get(1)?,
+                fire_at_ms: r.get(2)?,
+                lead_min: r.get(3)?,
+                summary: r.get(4)?,
+            })
+        }).map_err(|e| format!("query: {e}"))?;
+        match rows.next() {
+            Some(r) => Ok(Some(r.map_err(|e| format!("row: {e}"))?)),
+            None => Ok(None),
+        }
+    }
+
     pub fn mark_reminder_acked(&self, event_id: i64, occurrence_start_ms: i64) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         conn.execute(
@@ -596,12 +669,13 @@ impl Cache {
         event_id: i64,
         occurrence_start_ms: i64,
         new_fire_at_ms: i64,
+        new_lead_min: i32,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         conn.execute(
-            "UPDATE event_reminders SET status = 'pending', fire_at_ms = ?3 \
+            "UPDATE event_reminders SET status = 'pending', fire_at_ms = ?3, lead_min = ?4 \
              WHERE event_id = ?1 AND occurrence_start_ms = ?2",
-            params![event_id, occurrence_start_ms, new_fire_at_ms],
+            params![event_id, occurrence_start_ms, new_fire_at_ms, new_lead_min],
         ).map_err(|e| format!("upd snooze: {e}"))?;
         Ok(())
     }
@@ -620,8 +694,10 @@ impl Cache {
 }
 
 /// A scheduled reminder row, denormalised enough that the notifier can
-/// render the toast without touching any other table.
-#[derive(Debug, Clone)]
+/// render the toast without touching any other table. Serialize so the
+/// snooze window (separate webview) can pull the row by id through a
+/// Tauri command — keeps the URL params shallow.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ReminderRow {
     pub event_id: i64,
     pub occurrence_start_ms: i64,

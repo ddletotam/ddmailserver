@@ -46,3 +46,18 @@ ksni = "0.2"
 # Supports action arrays and the conventional `default` action for body
 # clicks; both are what the calendar reminders need on KDE / dunst.
 notify-rust = "4"
+
+# macOS: notify-rust on Darwin wraps mac-notification-sys. Limited (no
+# action buttons; macOS reserves buttons for UNUserNotificationCenter
+# categories, which need a registered delegate at app launch — TODO).
+# This still gets the toast in front of the user and lets the body click
+# bring the app forward, which is enough until the full UN path is wired.
+[target.'cfg(target_os = "macos")'.dependencies]
+notify-rust = "4"
+
+# Windows: tauri-winrt-notification provides the full WinRT toast surface:
+# action buttons + in-process on_activated callback. tauri-plugin-notification
+# stays in the deps for any JS-side toast wiring, but for the calendar
+# reminder we go direct to get callbacks the plugin doesn't expose.
+[target.'cfg(target_os = "windows")'.dependencies]
+tauri-winrt-notification = "0.7"
