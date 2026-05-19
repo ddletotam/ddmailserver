@@ -269,4 +269,8 @@ pub struct DesktopCalendarEvent {
     pub exdates: Vec<i64>,
     #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub attendees: Vec<DesktopCalendarAttendee>,
+    /// VALARM trigger as "minutes before start". 0 / missing → desktop
+    /// should fall back to its global default lead-time.
+    #[serde(default)]
+    pub alarm_lead_min: i32,
 }

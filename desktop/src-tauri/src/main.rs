@@ -137,6 +137,7 @@ fn main() {
             commands::v2_rsvp_event,
             commands::v2_patch_event,
             commands::v2_create_event,
+            commands::v2_delete_event,
             commands::v2_fetch_avatar,
         ])
         .run(tauri::generate_context!())

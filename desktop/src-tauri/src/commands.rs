@@ -540,3 +540,15 @@ pub async fn v2_create_event(
         .create_event(body)
         .await
 }
+
+#[tauri::command]
+pub async fn v2_delete_event(
+    registry: tauri::State<'_, ProviderRegistry>,
+    account_id: String,
+    event_id: i64,
+) -> Result<(), String> {
+    get_provider(&registry, &account_id)
+        .await?
+        .delete_event(event_id)
+        .await
+}

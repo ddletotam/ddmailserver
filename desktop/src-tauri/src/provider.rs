@@ -142,6 +142,11 @@ pub trait MailProvider: Send + Sync {
     /// avoids the "the row I just made" flicker.
     async fn create_event(&self, body: serde_json::Value) -> Result<serde_json::Value, String>;
 
+    /// Delete a calendar event — the entire row, for v1. The server also
+    /// queues a reverse-sync so the upstream CalDAV server drops its copy.
+    /// ImapProvider returns "not supported".
+    async fn delete_event(&self, event_id: i64) -> Result<(), String>;
+
     /// Provider type identifier.
     fn provider_type(&self) -> &'static str;
 }

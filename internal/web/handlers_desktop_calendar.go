@@ -89,6 +89,135 @@ func parseExDates(icalData string) []int64 {
 	return out
 }
 
+// parseAlarmLeadMin pulls the first VALARM TRIGGER from an iCal blob and
+// returns it as "minutes before event start" (always a positive integer).
+//
+// Recognised forms (RFC 5545):
+//
+//	TRIGGER:-PT15M             → 15
+//	TRIGGER:-PT1H30M           → 90
+//	TRIGGER:-P1D               → 1440
+//	TRIGGER;RELATED=START:-PT5M → 5
+//
+// Skipped (returns 0):
+//   - Positive TRIGGER (alarm AFTER event start — we don't surface those).
+//   - TRIGGER;RELATED=END (alarm relative to end — meaning is fuzzy until
+//     we surface event duration in the reminder; deferred).
+//   - VALUE=DATE-TIME (absolute time — needs occurrence-aware handling for
+//     recurring events; deferred).
+//   - Anything we can't parse.
+//
+// Only the first VALARM is considered — clients that need multi-alarm
+// support can expand this once we have UI for it.
+func parseAlarmLeadMin(icalData string) int {
+	if !strings.Contains(icalData, "VALARM") {
+		return 0
+	}
+	// Unfold once so a `TRIGGER:\n -PT15M` continuation still resolves.
+	lines := strings.Split(icalData, "\n")
+	logical := make([]string, 0, len(lines))
+	for _, raw := range lines {
+		raw = strings.TrimRight(raw, "\r")
+		if (strings.HasPrefix(raw, " ") || strings.HasPrefix(raw, "\t")) && len(logical) > 0 {
+			logical[len(logical)-1] += raw[1:]
+			continue
+		}
+		logical = append(logical, raw)
+	}
+	inAlarm := false
+	for _, line := range logical {
+		switch {
+		case strings.HasPrefix(line, "BEGIN:VALARM"):
+			inAlarm = true
+		case strings.HasPrefix(line, "END:VALARM"):
+			return 0 // first VALARM had no usable TRIGGER
+		case inAlarm && strings.HasPrefix(line, "TRIGGER"):
+			colon := strings.Index(line, ":")
+			if colon < 0 {
+				continue
+			}
+			params := line[:colon]
+			value := strings.TrimSpace(line[colon+1:])
+			// Skip TRIGGER;RELATED=END or VALUE=DATE-TIME — out of scope.
+			if strings.Contains(params, "RELATED=END") || strings.Contains(params, "VALUE=DATE-TIME") {
+				continue
+			}
+			// Must start with '-' for "before"; positive means after start.
+			if !strings.HasPrefix(value, "-") {
+				continue
+			}
+			value = strings.TrimPrefix(value, "-")
+			// Expect "PnDTnHnMnS" but tolerate any prefix-stripping iso-8601
+			// the spec allows. We parse manually since stdlib doesn't have
+			// an ISO-8601 duration parser.
+			min := iso8601DurationToMinutes(value)
+			if min > 0 {
+				return min
+			}
+		}
+	}
+	return 0
+}
+
+// iso8601DurationToMinutes parses the shape "P[nW][nD][T[nH][nM][nS]]" and
+// returns the total in minutes (sub-minute components are floored). Returns
+// 0 on any parse error — we lose the alarm but never poison the response.
+func iso8601DurationToMinutes(s string) int {
+	if !strings.HasPrefix(s, "P") {
+		return 0
+	}
+	s = s[1:]
+	var total int
+	inTime := false
+	var num string
+	flush := func(unit byte) bool {
+		if num == "" {
+			return false
+		}
+		n, err := strconv.Atoi(num)
+		num = ""
+		if err != nil {
+			return false
+		}
+		switch unit {
+		case 'W':
+			total += n * 7 * 24 * 60
+		case 'D':
+			total += n * 24 * 60
+		case 'H':
+			total += n * 60
+		case 'M':
+			if inTime {
+				total += n
+			} else {
+				// month — not meaningful for VALARM, but tolerate
+				return false
+			}
+		case 'S':
+			// floor: 30 s of lead-time isn't worth burning a unit on
+		default:
+			return false
+		}
+		return true
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == 'T':
+			inTime = true
+		case c >= '0' && c <= '9':
+			num += string(c)
+		case c == 'W', c == 'D', c == 'H', c == 'M', c == 'S':
+			if !flush(c) {
+				return 0
+			}
+		default:
+			return 0
+		}
+	}
+	return total
+}
+
 // DesktopCalendar is the trimmed shape the desktop client wants for a calendar.
 // Server color is included for back-compat but the desktop ignores it and
 // keeps a per-calendar color override in localStorage.
@@ -134,6 +263,10 @@ type DesktopCalendarEvent struct {
 	// occurrences don't reappear on the calendar.
 	ExDates   []int64                   `json:"exdates,omitempty"`
 	Attendees []DesktopCalendarAttendee `json:"attendees,omitempty"`
+	// AlarmLeadMin is the VALARM trigger expressed as "minutes before
+	// start" (positive int). 0 means no usable VALARM was found and the
+	// desktop should fall back to its global default lead time.
+	AlarmLeadMin int `json:"alarm_lead_min,omitempty"`
 }
 
 // HandleDesktopCalendars returns all of the user's calendars (enabled + disabled).
@@ -270,6 +403,7 @@ func (s *Server) HandleDesktopCalendarEvents(w http.ResponseWriter, r *http.Requ
 			RecurrenceID:   e.RecurrenceID,
 			ExDates:        exDates,
 			Attendees:      dtos,
+			AlarmLeadMin:   parseAlarmLeadMin(e.ICalData),
 		})
 	}
 

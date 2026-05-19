@@ -36,4 +36,8 @@ export interface DesktopCalendarEvent {
    *  occurrences keep rendering on the calendar. */
   exdates?: number[];
   attendees?: DesktopCalendarAttendee[];
+  /** Minutes-before-start derived from the event's VALARM TRIGGER. 0 (or
+   *  missing) means the event has no usable VALARM and the desktop should
+   *  use its global default lead-time. */
+  alarm_lead_min?: number;
 }

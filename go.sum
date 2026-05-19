@@ -7,8 +7,9 @@ github.com/emersion/go-imap v1.2.1 h1:+s9ZjMEjOB8NzZMVTM3cCenz2JrQIGGo5j1df19WjT
 github.com/emersion/go-imap v1.2.1/go.mod h1:Qlx1FSx2FTxjnjWpIlVNEuX+ylerZQNFE5NsmKFSejY=
 github.com/emersion/go-imap-idle v0.0.0-20210907174914-db2568431445 h1:dAGbaaU4LLupO7dnYZaELOoI3RoVDNi5DCGejLe8a7c=
 github.com/emersion/go-imap-idle v0.0.0-20210907174914-db2568431445/go.mod h1:N/6S3dRTVt8xT867m+476C16+v/Fq4WZYvh2Chg0nmg=
+github.com/emersion/go-imap-uidplus v0.0.0-20200503180755-e75854c361e9 h1:2Kbw3iu7fFeSso6RWIArVNUj1VGG2PvjetnPUW7bnis=
+github.com/emersion/go-imap-uidplus v0.0.0-20200503180755-e75854c361e9/go.mod h1:GfiSiw/du0221I3Cf4F0DqX3Bv5Xe580gIIATrQtnJg=
 github.com/emersion/go-message v0.11.1/go.mod h1:C4jnca5HOTo4bGN9YdqNQM9sITuT3Y0K6bSUw9RklvY=
-github.com/emersion/go-message v0.15.0 h1:urgKGqt2JAc9NFJcgncQcohHdiYb803YTH9OQwHBHIY=
 github.com/emersion/go-message v0.15.0/go.mod h1:wQUEfE+38+7EW8p8aZ96ptg6bAb1iwdgej19uXASlE4=
 github.com/emersion/go-message v0.18.1 h1:tfTxIoXFSFRwWaZsgnqS1DSZuGpYGzSmCZD8SK3QA2E=
 github.com/emersion/go-message v0.18.1/go.mod h1:XpJyL70LwRvq2a8rVbHXikPgKj8+aI0kGdHlg16ibYA=
@@ -21,7 +22,6 @@ github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6/go.mod h1:iL2twTe
 github.com/emersion/go-smtp v0.24.0 h1:g6AfoF140mvW0vLNPD/LuCBLEAdlxOjIXqbIkJIS6Wk=
 github.com/emersion/go-smtp v0.24.0/go.mod h1:ZtRRkbTyp2XTHCA+BmyTFTrj8xY4I+b4McvHxCU2gsQ=
 github.com/emersion/go-textwrapper v0.0.0-20160606182133-d0e65e56babe/go.mod h1:aqO8z8wPrjkscevZJFVE1wXJrLpC5LtJG7fqLOsPb2U=
-github.com/emersion/go-textwrapper v0.0.0-20200911093747-65d896831594 h1:IbFBtwoTQyw0fIM5xv1HF+Y+3ZijDR839WMulgxCcUY=
 github.com/emersion/go-textwrapper v0.0.0-20200911093747-65d896831594/go.mod h1:aqO8z8wPrjkscevZJFVE1wXJrLpC5LtJG7fqLOsPb2U=
 github.com/emersion/go-vcard v0.0.0-20230815062825-8fda7d206ec9/go.mod h1:HMJKR5wlh/ziNp+sHEDV2ltblO4JD2+IdDOWtGcQBTM=
 github.com/emersion/go-vcard v0.0.0-20241024213814-c9703dde27ff h1:4N8wnS3f1hNHSmFD5zgFkWCyA4L1kCDkImPAtK7D6tg=

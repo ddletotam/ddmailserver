@@ -356,6 +356,24 @@ func (c *Client) SyncCalendar(ctx context.Context, cal *models.Calendar) error {
 				changes.Updates = append(changes.Updates, existing)
 			}
 		} else {
+			// Skip create when the user has already asked us to DELETE
+			// this event upstream and the outbound worker hasn't yet
+			// drained the queue. Without this guard, the next inbound
+			// sync would resurrect the row (deleted_locally → not_found
+			// → "queue create" branch), the frontend would show the
+			// event again for a couple minutes, and then the eventually-
+			// successful outbound DELETE would finally remove it on the
+			// upstream side and the row would vanish for good. From the
+			// user's perspective: "I deleted it, it came back, then it
+			// disappeared." Confusing.
+			pendingDelete, pdErr := c.database.IsEventPendingDelete(cal.SourceID, event.UID)
+			if pdErr != nil {
+				log.Printf("Failed to check pending delete for UID %s: %v", event.UID, pdErr)
+			}
+			if pendingDelete {
+				log.Printf("Skipping inbound create for UID %s on %s — delete pending in reverse-sync queue", event.UID, cal.Name)
+				continue
+			}
 			// Queue create
 			changes.Creates = append(changes.Creates, event)
 		}

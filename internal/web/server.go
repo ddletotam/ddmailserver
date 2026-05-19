@@ -189,6 +189,7 @@ func (s *Server) setupRoutes() {
 	desktopAuthAPI.HandleFunc("/calendar-events", s.HandleDesktopCalendarEvents).Methods("GET")
 	desktopAuthAPI.HandleFunc("/events/{id}/rsvp", s.HandleDesktopEventRSVP).Methods("POST")
 	desktopAuthAPI.HandleFunc("/events/{id}", s.HandleDesktopEventPatch).Methods("PATCH")
+	desktopAuthAPI.HandleFunc("/events/{id}", s.HandleDesktopEventDelete).Methods("DELETE")
 	desktopAuthAPI.HandleFunc("/events", s.HandleDesktopEventCreate).Methods("POST")
 	desktopAuthAPI.HandleFunc("/avatars", s.HandleDesktopAvatar).Methods("GET")
 

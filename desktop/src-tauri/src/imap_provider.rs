@@ -254,6 +254,10 @@ impl MailProvider for ImapProvider {
         Err("Creating events requires a DDMail server.".into())
     }
 
+    async fn delete_event(&self, _event_id: i64) -> Result<(), String> {
+        Err("Deleting events requires a DDMail server.".into())
+    }
+
     fn provider_type(&self) -> &'static str {
         "imap"
     }
