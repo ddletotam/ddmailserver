@@ -195,6 +195,30 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 		return false, false, err
 	}
 	if exists {
+		// Inbox path just refreshes the remote pointer if we never
+		// recorded one. Spam path is more interesting: the upstream
+		// provider has just (re-)classified an already-known message
+		// as junk. Flip is_spam on the local row, unless the user has
+		// a whitelist rule for that sender — that's the rescue path.
+		if treatAsSpam {
+			fromAddr := parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.From))
+			action, matchedRule, ruleErr := t.database.CheckSpamRules(t.account.UserID, fromAddr)
+			if ruleErr != nil {
+				log.Printf("IMAP sync: check spam rules during reclassify: %v", ruleErr)
+			}
+			rescue := action == "allow"
+			if rescue {
+				log.Printf("IMAP sync: remote-spam %s rescued by whitelist rule %d", messageID, matchedRule.ID)
+			} else {
+				log.Printf("IMAP sync: remote-spam %s reclassified as spam (folder=%s)", messageID, remoteFolderName)
+			}
+			if err := t.database.ReclassifyMessageFromRemoteSpam(
+				t.account.UserID, messageID, imapMsg.Uid, remoteFolderName, !rescue,
+			); err != nil {
+				log.Printf("IMAP sync: reclassify failed for %s: %v", messageID, err)
+			}
+			return false, !rescue, nil
+		}
 		if imapMsg.Uid > 0 {
 			t.database.UpdateMessageRemoteUID(t.account.UserID, messageID, imapMsg.Uid, remoteFolderName)
 		}
