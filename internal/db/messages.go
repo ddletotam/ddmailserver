@@ -383,6 +383,50 @@ func (db *DB) GetMessageByMessageID(userID int64, messageID string) (*models.Mes
 	return msg, nil
 }
 
+// ReclassifyMessageFromRemoteSpam re-tags an existing local message
+// when the upstream provider has moved it to a spam/junk folder. We
+// always refresh remote_uid + remote_folder (so future delete-sync
+// targets the right path), and we flip is_spam to the supplied value —
+// the caller has already consulted the user's whitelist to decide
+// whether the rescue applies. spam_status / spam_reasons get a marker
+// noting the upstream classification when isSpam is true.
+func (db *DB) ReclassifyMessageFromRemoteSpam(userID int64, messageID string, remoteUID uint32, remoteFolder string, isSpam bool) error {
+	if messageID == "" {
+		return nil
+	}
+	now := timeutil.Now()
+	if isSpam {
+		reason := fmt.Sprintf(`["classified spam by upstream (%s)"]`, remoteFolder)
+		_, err := db.Exec(
+			`UPDATE messages SET
+			   remote_uid = $1, remote_folder = $2,
+			   is_spam = true, spam_status = 'spam', spam_reasons = $3,
+			   updated_at = $4
+			 WHERE user_id = $5 AND message_id = $6 AND
+			       (is_spam = false OR is_spam IS NULL)`,
+			remoteUID, remoteFolder, reason, now, userID, messageID,
+		)
+		if err != nil {
+			return fmt.Errorf("reclassify as spam: %w", err)
+		}
+		return nil
+	}
+	// Rescue path: whitelist rule pulled the message back. Make sure the
+	// row reflects "not spam" and the remote_folder pointer is still up
+	// to date in case the user's other client moves it back.
+	_, err := db.Exec(
+		`UPDATE messages SET
+		   remote_uid = $1, remote_folder = $2,
+		   is_spam = false, updated_at = $3
+		 WHERE user_id = $4 AND message_id = $5`,
+		remoteUID, remoteFolder, now, userID, messageID,
+	)
+	if err != nil {
+		return fmt.Errorf("rescue from spam: %w", err)
+	}
+	return nil
+}
+
 // UpdateMessageRemoteUID updates the remote_uid and remote_folder for a message that doesn't have them set
 // Returns true if the message was updated, false if it already had remote_uid or doesn't exist
 func (db *DB) UpdateMessageRemoteUID(userID int64, messageID string, remoteUID uint32, remoteFolder string) (bool, error) {
@@ -764,10 +808,13 @@ func (db *DB) CopyMessageToFolder(msgID, destFolderID int64) (uint32, error) {
 }
 
 // selectColumns is the standard column list for message queries.
-const selectColumns = `id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
-       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
-       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
-       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at`
+// All columns are table-qualified so queries that JOIN folders (or any
+// other table that happens to share a column name like `account_id`)
+// don't trip on ambiguous references.
+const selectColumns = `m.id, COALESCE(m.account_id, 0), m.user_id, m.folder_id, m.message_id, m.subject, m.from_addr, m.to_addr, m.cc, m.bcc, m.reply_to,
+       m.date, m.body, m.body_html, m.attachments, m.size, m.uid, m.seen, m.flagged, m.answered, m.draft, m.deleted,
+       m.in_reply_to, m.message_references, COALESCE(m.spam_score, 0), COALESCE(m.spam_status, 'clean'), COALESCE(m.spam_reasons, ''),
+       COALESCE(m.remote_uid, 0), COALESCE(m.remote_folder, 'INBOX'), m.created_at, m.updated_at`
 
 // notDeletedCondition filters out deleted, soft-deleted, and spam messages.
 const notDeletedCondition = `deleted = false AND (soft_deleted = false OR soft_deleted IS NULL) AND (is_spam = false OR is_spam IS NULL)`
@@ -844,7 +891,7 @@ func (db *DB) GetMessagesByUserFiltered(userID int64, folderType string, account
 		orderBy = `m.updated_at DESC`
 	}
 
-	dataQuery := fmt.Sprintf(`SELECT m.%s FROM messages m%s WHERE %s ORDER BY %s LIMIT $%d OFFSET $%d`,
+	dataQuery := fmt.Sprintf(`SELECT %s FROM messages m%s WHERE %s ORDER BY %s LIMIT $%d OFFSET $%d`,
 		selectColumns, join, baseWhere, orderBy, argN, argN+1)
 	args = append(args, limit, offset)
 
