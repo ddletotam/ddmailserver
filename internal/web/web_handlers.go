@@ -598,7 +598,12 @@ func (s *Server) HandleInboxPage(w http.ResponseWriter, r *http.Request) {
 	accounts, _ := s.database.GetAccountsByUserID(user.ID)
 	folder := r.URL.Query().Get("folder")
 	if folder == "" {
-		folder = "all"
+		// "Inbox" page lands on the inbox folder, not on every message
+		// the user has ever received. The dropdown still offers "all"
+		// (and Sent / Drafts / Trash) for explicit switching; we just
+		// stop defaulting there. Matches the desktop client's
+		// conversation list, which is strictly inbox-scoped.
+		folder = "inbox"
 	}
 
 	unreadCount, _ := s.database.GetUnreadCountByUser(user.ID)
