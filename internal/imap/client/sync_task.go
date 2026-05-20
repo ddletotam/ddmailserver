@@ -104,6 +104,9 @@ func (t *SyncTask) doExecute(ctx context.Context) error {
 	if err := t.syncRemoteInbox(ctx, client, localInbox); err != nil {
 		t.accountLog("error", "sync INBOX failed: %v", err)
 	}
+	if err := t.syncRemoteSpamFolders(ctx, client, localInbox); err != nil {
+		t.accountLog("error", "sync spam folders failed: %v", err)
+	}
 	if err := t.database.UpdateAccountLastSync(t.account.ID, timeutil.Now()); err != nil {
 		log.Printf("Failed to update last sync time: %v", err)
 	}
@@ -131,7 +134,7 @@ func (t *SyncTask) syncRemoteInbox(ctx context.Context, client *Client, localInb
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		saved, isSpam, err := t.saveMessageToInbox(msg, localInbox)
+		saved, isSpam, err := t.saveMessageToInbox(msg, localInbox, "INBOX", false)
 		if err != nil {
 			log.Printf("Failed to save message: %v", err)
 			continue
@@ -158,7 +161,18 @@ func (t *SyncTask) syncRemoteInbox(ctx context.Context, client *Client, localInb
 	return nil
 }
 
-func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folder) (bool, bool, error) {
+// saveMessageToInbox persists a fetched IMAP message into our local
+// inbox folder, returning `(saved, isSpam, err)`.
+//
+//   - remoteFolderName names the upstream IMAP mailbox the message came
+//     from (e.g. "INBOX" or "[Gmail]/Spam"). Stored on the row so
+//     flag-sync / delete-sync know where to push back.
+//   - treatAsSpam=true is the path for remote spam/junk folders: the
+//     upstream provider has already classified the message as spam, so
+//     we default isSpam=true and skip our own analyzer. A user whitelist
+//     rule (`action="allow"`) still rescues the message — that's the
+//     "false positive on Gmail's side" escape hatch.
+func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folder, remoteFolderName string, treatAsSpam bool) (bool, bool, error) {
 	if imapMsg.Envelope == nil {
 		log.Printf("IMAP sync: Skipping message UID %d - no envelope data", imapMsg.Uid)
 		return false, false, nil
@@ -182,7 +196,7 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 	}
 	if exists {
 		if imapMsg.Uid > 0 {
-			t.database.UpdateMessageRemoteUID(t.account.UserID, messageID, imapMsg.Uid, "INBOX")
+			t.database.UpdateMessageRemoteUID(t.account.UserID, messageID, imapMsg.Uid, remoteFolderName)
 		}
 		return false, false, nil
 	}
@@ -219,7 +233,7 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 		msgDateMs = timeutil.Now()
 	}
 	fromAddr := parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.From))
-	isSpam := false
+	isSpam := treatAsSpam // default: trust the remote's spam-folder verdict
 	var spamScore float64
 	var spamStatus, spamReasons string
 	var spamRuleID *int64
@@ -227,9 +241,26 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 	if ruleErr != nil {
 		log.Printf("IMAP sync: Failed to check spam rules: %v", ruleErr)
 	}
+	// Remote spam-folder path: short-circuit our analyzer + recipient
+	// check (the upstream already classified, we just record the
+	// verdict). A whitelist rule still rescues — that's the entire
+	// point of pulling Spam: catch upstream false positives.
+	if treatAsSpam {
+		if action == "allow" {
+			isSpam = false
+			log.Printf("IMAP sync: Remote-spam message whitelisted by rule %d for user %d", matchedRule.ID, t.account.UserID)
+		} else {
+			spamStatus = string(parser.SpamStatusSpam)
+			spamReasons = parser.GetSpamReasonsJSON([]string{
+				fmt.Sprintf("classified spam by upstream (%s)", remoteFolderName),
+			})
+		}
+		// Skip the analyzer + recipient check — fall through to the
+		// row-build below, leaving everything else at zero / default.
+		goto buildMessage
+	}
 	// Whitelist rule with NO per-check exclusions = full bypass.
-	fullAllow := action == "allow" && len(matchedRule.ExcludedChecks) == 0
-	if fullAllow {
+	if action == "allow" && len(matchedRule.ExcludedChecks) == 0 {
 		isSpam = false
 		log.Printf("IMAP sync: Message whitelisted by rule %d for user %d", matchedRule.ID, t.account.UserID)
 	} else if action == "spam" {
@@ -300,6 +331,7 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 		}
 	}
 
+buildMessage:
 	msg := &models.Message{
 		AccountID: t.account.ID, UserID: t.account.UserID, FolderID: inbox.ID, MessageID: messageID,
 		Subject: parser.SanitizeUTF8(imapMsg.Envelope.Subject), From: fromAddr,
@@ -315,7 +347,7 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 		Draft:     hasFlag(imapMsg.Flags, imap.DraftFlag),
 		Deleted:   hasFlag(imapMsg.Flags, imap.DeletedFlag),
 		InReplyTo: parser.SanitizeUTF8(imapMsg.Envelope.InReplyTo),
-		RemoteUID: imapMsg.Uid, RemoteFolder: "INBOX",
+		RemoteUID: imapMsg.Uid, RemoteFolder: remoteFolderName,
 		SpamScore: spamScore, SpamStatus: spamStatus, SpamReasons: spamReasons,
 		IsSpam: isSpam, SpamRuleID: spamRuleID,
 	}
@@ -339,6 +371,111 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 		t.database.UpdateMessageAttachmentCount(msg.ID, attachmentCount)
 	}
 	return true, isSpam, nil
+}
+
+// syncRemoteSpamFolders pulls messages from upstream Spam/Junk
+// folders into our local inbox, tagged `is_spam=true` by default. A
+// user whitelist rule (`action="allow"` for that sender or domain) can
+// still flip it to non-spam — that's the entire reason we bother
+// pulling: catch upstream false positives where the remote provider
+// classified something as spam that the user actually wants.
+//
+// Folder discovery: prefer the IMAP SPECIAL-USE `\Junk` attribute
+// (modern servers — Gmail, Yandex, Fastmail, Dovecot — all advertise
+// it). Fall back to common folder names for older servers / providers
+// that don't expose SPECIAL-USE.
+func (t *SyncTask) syncRemoteSpamFolders(ctx context.Context, client *Client, localInbox *models.Folder) error {
+	mailboxes, err := client.ListFolders()
+	if err != nil {
+		return fmt.Errorf("list folders: %w", err)
+	}
+
+	var spamFolders []string
+	for _, mb := range mailboxes {
+		if mb == nil || mb.Name == "" {
+			continue
+		}
+		if isJunkMailbox(mb) {
+			spamFolders = append(spamFolders, mb.Name)
+		}
+	}
+	if len(spamFolders) == 0 {
+		return nil
+	}
+	log.Printf("Sync [%s]: discovered %d spam folder(s): %v", t.account.Email, len(spamFolders), spamFolders)
+
+	totalSaved, totalSkipped, totalRescued := 0, 0, 0
+	for _, name := range spamFolders {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		mbox, err := client.SelectFolder(name)
+		if err != nil {
+			log.Printf("Sync [%s]: failed to select %q: %v", t.account.Email, name, err)
+			continue
+		}
+		if mbox.Messages == 0 {
+			continue
+		}
+		uidSet := new(imap.SeqSet)
+		uidSet.AddRange(1, 0)
+		section := &imap.BodySectionName{Peek: true}
+		items := []imap.FetchItem{imap.FetchEnvelope, imap.FetchFlags, imap.FetchUid, section.FetchItem()}
+		messages, fetchDone := client.FetchMessagesByUID(uidSet, items)
+		for msg := range messages {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			saved, isSpam, err := t.saveMessageToInbox(msg, localInbox, name, true)
+			if err != nil {
+				log.Printf("Sync [%s]: failed to save spam msg: %v", t.account.Email, err)
+				continue
+			}
+			if saved {
+				totalSaved++
+				if !isSpam {
+					// Whitelist rescue — we pulled from remote spam but
+					// our rule said this sender is fine.
+					totalRescued++
+				}
+			} else {
+				totalSkipped++
+			}
+		}
+		if err := <-fetchDone; err != nil {
+			log.Printf("Sync [%s]: spam fetch on %q failed: %v", t.account.Email, name, err)
+		}
+	}
+	if totalSaved > 0 || totalSkipped > 0 {
+		t.accountLog("info", "spam folders: saved %d (rescued %d), skipped %d duplicates", totalSaved, totalRescued, totalSkipped)
+	}
+	return nil
+}
+
+// isJunkMailbox returns true for mailboxes that the user's upstream
+// provider treats as the spam/junk bin — either via the standardised
+// IMAP SPECIAL-USE `\Junk` attribute (RFC 6154) or a name match against
+// the de-facto conventions of major providers.
+func isJunkMailbox(mb *imap.MailboxInfo) bool {
+	for _, a := range mb.Attributes {
+		if strings.EqualFold(a, "\\Junk") {
+			return true
+		}
+	}
+	lower := strings.ToLower(mb.Name)
+	switch lower {
+	case "spam", "junk", "junk e-mail", "junk email", "bulk mail":
+		return true
+	}
+	// Path-style folder names that Gmail / Outlook hand out, plus the
+	// Russian-language defaults of Yandex / Mail.ru.
+	if strings.HasSuffix(lower, "/spam") || strings.HasSuffix(lower, "/junk") {
+		return true
+	}
+	if strings.Contains(lower, "нежелательная") || strings.Contains(lower, "спам") {
+		return true
+	}
+	return false
 }
 
 // isAuthError returns true if the error looks like an OAuth authentication failure

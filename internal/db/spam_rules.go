@@ -180,6 +180,19 @@ func (db *DB) DeleteSpamRule(id int64) error {
 func (db *DB) CheckSpamRules(userID int64, fromEmail string) (string, *SpamRule, error) {
 	fromEmail = strings.ToLower(fromEmail)
 
+	// Callers often pass the raw `From` header, which looks like
+	// `Name <addr@host>`. Pull the bare address out so both the address
+	// rule and the domain-derived match work — otherwise the domain
+	// extract sees `host>` (with the trailing angle bracket) and the
+	// address comparison sees the entire display-name string. Whitelist
+	// rules then silently never fire, which is the bug this guards
+	// against.
+	if lt := strings.LastIndex(fromEmail, "<"); lt >= 0 {
+		if gt := strings.LastIndex(fromEmail, ">"); gt > lt {
+			fromEmail = strings.TrimSpace(fromEmail[lt+1 : gt])
+		}
+	}
+
 	// Extract domain from email
 	parts := strings.SplitN(fromEmail, "@", 2)
 	var fromDomain string
