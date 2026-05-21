@@ -70,16 +70,25 @@ func decodeMIMEHeaderLenient(s string) string {
 		var raw []byte
 		switch enc {
 		case "B":
-			// Strip every trailing '=' and re-pad to a length that's a
-			// multiple of 4. Some senders emit one too many padding
-			// chars; stripping + repadding is harmless when the input
-			// is already correct.
-			body := strings.TrimRight(payload, "=")
-			for len(body)%4 != 0 {
-				body += "="
+			// Strip existing '=' padding and try re-padding from 0 to 3
+			// trailing-char shaves. Real-world senders ship base64
+			// payloads with extra padding (`===`) or extra data chars
+			// (length mod 4 == 1, which is structurally impossible in
+			// valid base64) — shaving the last 1-2 chars usually
+			// recovers the intended bytes.
+			stripped := strings.TrimRight(payload, "=")
+			var decoded []byte
+			for shave := 0; shave <= 3 && shave <= len(stripped); shave++ {
+				body := stripped[:len(stripped)-shave]
+				for len(body)%4 != 0 {
+					body += "="
+				}
+				if out, err := base64.StdEncoding.DecodeString(body); err == nil {
+					decoded = out
+					break
+				}
 			}
-			decoded, err := base64.StdEncoding.DecodeString(body)
-			if err != nil {
+			if decoded == nil {
 				return match
 			}
 			raw = decoded

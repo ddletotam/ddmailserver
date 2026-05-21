@@ -66,6 +66,13 @@ pub trait MailProvider: Send + Sync {
         messages: &[MessageRef],
     ) -> Result<(), String>;
 
+    /// Blacklist a sender (domain or address) AND hard-DELETE every
+    /// message from them for the active user. The chat-header "Spam"
+    /// quick-action: harder than `mark_spam_by_domain` (which only
+    /// soft-deletes the listed conversation), this removes the rows
+    /// entirely so they're not in the spam vault either. Native only.
+    async fn blacklist_and_purge(&self, domain: &str, address: &str) -> Result<i64, String>;
+
     /// Fetch raw RFC-822 source of a message.
     async fn fetch_message_source(
         &self,

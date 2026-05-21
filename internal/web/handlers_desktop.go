@@ -439,6 +439,78 @@ func (s *Server) HandleDesktopMarkSpamByDomain(w http.ResponseWriter, r *http.Re
 	respondJSON(w, http.StatusOK, map[string]int{"rule_id": int(rule.ID), "marked": marked})
 }
 
+// HandleDesktopBlacklistAndPurge implements the chat-header "Spam"
+// quick-action: blacklist the sender (domain or address) AND
+// hard-DELETE every message from that sender for this user. Hard-
+// delete, not soft — user intent is "this is unwanted and I don't
+// want it anywhere, including the spam vault." Future arrivals from
+// the same sender still get caught by the new spam rule and land
+// is_spam=true at import time.
+//
+// Per-user: the spam rule is scoped to user_id, so no cross-account
+// pollution. Existing rules for the same (rule_type, rule_value)
+// upsert via the unique constraint, so this is idempotent on the
+// rule side too.
+func (s *Server) HandleDesktopBlacklistAndPurge(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		respondError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var req struct {
+		Domain  string `json:"domain"`  // either domain OR address must be set
+		Address string `json:"address"` // takes priority if both supplied
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	addr := strings.ToLower(strings.TrimSpace(req.Address))
+	domain := strings.ToLower(strings.TrimSpace(req.Domain))
+	if addr == "" && domain == "" {
+		respondError(w, http.StatusBadRequest, "domain or address required")
+		return
+	}
+
+	// Insert blacklist rule. Most specific available wins: an address
+	// rule covers exactly one sender; a domain rule covers the whole
+	// domain. The UI is expected to pass whichever the user clicked.
+	var rule *db.SpamRule
+	if addr != "" {
+		rule = &db.SpamRule{UserID: user.ID, RuleType: "address", RuleValue: addr, Action: "spam"}
+	} else {
+		rule = &db.SpamRule{UserID: user.ID, RuleType: "domain", RuleValue: domain, Action: "spam"}
+	}
+	if err := s.database.CreateSpamRule(rule); err != nil {
+		log.Printf("blacklist-and-purge: create rule failed: %v", err)
+		respondError(w, http.StatusInternalServerError, "create rule failed")
+		return
+	}
+
+	// Hard-DELETE every message from the targeted sender for this
+	// user. ILIKE keeps us tolerant of display-name + angle-bracket
+	// formatting (`Name <addr>`) and case differences.
+	var pattern string
+	if addr != "" {
+		pattern = "%<" + addr + ">%"
+	} else {
+		pattern = "%@" + domain + ">%"
+	}
+	res, err := s.database.Exec(
+		`DELETE FROM messages WHERE user_id = $1 AND from_addr ILIKE $2`,
+		user.ID, pattern,
+	)
+	if err != nil {
+		log.Printf("blacklist-and-purge: delete failed: %v", err)
+		respondError(w, http.StatusInternalServerError, "delete failed")
+		return
+	}
+	deleted, _ := res.RowsAffected()
+	log.Printf("blacklist-and-purge: user=%d rule=%d (%s=%s) deleted=%d", user.ID, rule.ID, rule.RuleType, rule.RuleValue, deleted)
+	respondJSON(w, http.StatusOK, map[string]any{"rule_id": rule.ID, "deleted": deleted})
+}
+
 // HandleDesktopDeleteMessages soft-deletes a batch of messages by ID. Used by
 // the "Delete conversation" action in the desktop sidebar — soft delete keeps
 // the rows around (and out of the conversation list, since GetMessagesByUser
@@ -748,8 +820,17 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	limit := 200
-	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 1000 {
+	// Per-folder cap. Used as the LIMIT in GetMessagesByFolder before we
+	// group messages into conversations — so if the cap is too low we
+	// silently lose entire conversations whose latest message is older
+	// than the top-N. With users hitting ~2-3k messages in INBOX after
+	// pulling all non-Trash folders, the old default of 200 dropped
+	// most of February-April off the chat list. Bumped to 5000 with a
+	// 20000 ceiling; query overhead at this size is ms-not-seconds and
+	// the grouping step deduplicates so the wire payload stays bounded
+	// by unique conversations, not raw message count.
+	limit := 5000
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 20000 {
 		limit = n
 	}
 

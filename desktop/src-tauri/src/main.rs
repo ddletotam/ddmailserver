@@ -127,6 +127,7 @@ fn main() {
             commands::v2_set_flags_batch,
             commands::v2_delete_messages,
             commands::v2_mark_spam_by_domain,
+            commands::v2_blacklist_and_purge,
             commands::v2_fetch_message_source,
             commands::v2_fetch_inline_part,
             commands::v2_fetch_identities,

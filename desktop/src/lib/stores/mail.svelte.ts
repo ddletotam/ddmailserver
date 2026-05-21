@@ -291,7 +291,11 @@ export const mailStore = {
           host: account.imap_host,
           username: account.username,
           userEmail: account.email,
-          limit: 200,
+          // High limit on purpose: the server uses this as a per-folder
+          // cap during conversation grouping, and with inbox sizes in
+          // the multi-thousands a low number silently drops older
+          // conversations off the chat list.
+          limit: 5000,
         }),
       ]);
       folders = foldersResult;
@@ -419,6 +423,24 @@ export const mailStore = {
   /** Append an optimistic locally-built message to the open conversation (pre-server confirmation). */
   appendLocalMessage(msg: MessageBody) {
     conversationMessages = [...conversationMessages, msg];
+  },
+
+  /** Drop a conversation from the local store without hitting the
+   *  server. The blacklist-and-purge action handles deletion via its
+   *  own endpoint; this just keeps the UI in sync. */
+  removeConversation(id: string) {
+    conversations = conversations.filter((c) => c.id !== id);
+    if (pinnedIds.has(id)) {
+      const next = new Set(pinnedIds);
+      next.delete(id);
+      pinnedIds = next;
+      savePinned(pinnedIds);
+    }
+    if (activeConversationId === id) {
+      activeConversationId = null;
+      conversationMessages = [];
+      draftMessage = null;
+    }
   },
 
   /** Mark all messages in `conv` as spam by their sender's domain. Server
