@@ -1043,7 +1043,6 @@
     display: flex; align-items: center; justify-content: center;
     border: none; background: none; border-radius: 50%;
     cursor: pointer; color: var(--text-secondary); flex-shrink: 0;
-    margin-left: auto;
   }
   .btn-spam:hover {
     background: color-mix(in srgb, #e8616a 18%, transparent);
