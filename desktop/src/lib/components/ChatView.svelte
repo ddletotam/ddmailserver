@@ -51,10 +51,16 @@
           : sorted[(i + 1) % sorted.length].id
         : null;
 
+      // Pass the conversation's local message IDs so the server can
+      // hard-delete by id in addition to the from-pattern sweep —
+      // outgoing-from-us threads don't match the pattern and would
+      // otherwise stay put.
+      const messageIds = c.messages.map((m) => m.uid);
       await invoke("v2_blacklist_and_purge", {
         accountId: account.id,
         domain,
         address: addr,
+        messageIds,
       });
 
       // Drop the conversation locally + jump to the next one.

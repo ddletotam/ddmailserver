@@ -306,10 +306,11 @@ pub async fn v2_blacklist_and_purge(
     account_id: String,
     domain: String,
     address: String,
+    message_ids: Vec<i64>,
 ) -> Result<i64, String> {
     get_provider(&registry, &account_id)
         .await?
-        .blacklist_and_purge(&domain, &address)
+        .blacklist_and_purge(&domain, &address, &message_ids)
         .await
 }
 
