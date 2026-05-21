@@ -71,7 +71,13 @@ pub trait MailProvider: Send + Sync {
     /// quick-action: harder than `mark_spam_by_domain` (which only
     /// soft-deletes the listed conversation), this removes the rows
     /// entirely so they're not in the spam vault either. Native only.
-    async fn blacklist_and_purge(&self, domain: &str, address: &str) -> Result<i64, String>;
+    ///
+    /// `message_ids` are the local server PKs from the visible
+    /// conversation — the server also deletes those rows by id so
+    /// outgoing-from-us threads (where from_addr is OUR address,
+    /// not the counterpart's) actually disappear instead of just
+    /// the rule being created and the row left to re-sync back.
+    async fn blacklist_and_purge(&self, domain: &str, address: &str, message_ids: &[i64]) -> Result<i64, String>;
 
     /// Fetch raw RFC-822 source of a message.
     async fn fetch_message_source(

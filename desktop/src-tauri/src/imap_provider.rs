@@ -132,7 +132,7 @@ impl MailProvider for ImapProvider {
         })
     }
 
-    async fn blacklist_and_purge(&self, _domain: &str, _address: &str) -> Result<i64, String> {
+    async fn blacklist_and_purge(&self, _domain: &str, _address: &str, _message_ids: &[i64]) -> Result<i64, String> {
         Err("Blacklist requires a DDMail server.".into())
     }
 

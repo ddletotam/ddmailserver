@@ -474,9 +474,22 @@ export const mailStore = {
   },
 
   /** Soft-delete every message in a conversation and drop the conversation
-   *  from the local list. Closes the chat if it was the active one. */
+   *  from the local list. If the deleted conversation was the active one,
+   *  hop to the next conversation in the sidebar (cycling to the top if
+   *  we were on the last row) — same pattern as the chat-header Spam
+   *  button. Closing-to-empty is the fallback when there's nothing left. */
   async deleteConversation(account: Account, conv: Conversation) {
     const id = conv.id;
+    // Capture the "next" target BEFORE we mutate the list so the lookup
+    // is against the sorted order the user sees.
+    const sorted = this.conversations;
+    const i = sorted.findIndex((c) => c.id === id);
+    const nextId = sorted.length > 1
+      ? sorted[(i + 1) % sorted.length].id === id
+        ? sorted[0].id
+        : sorted[(i + 1) % sorted.length].id
+      : null;
+
     try {
       await invoke("v2_delete_messages", {
         accountId: account.id,
@@ -494,9 +507,13 @@ export const mailStore = {
       savePinned(pinnedIds);
     }
     if (activeConversationId === id) {
-      activeConversationId = null;
-      conversationMessages = [];
-      draftMessage = null;
+      if (nextId) {
+        await this.openConversation(account, nextId);
+      } else {
+        activeConversationId = null;
+        conversationMessages = [];
+        draftMessage = null;
+      }
     }
   },
 

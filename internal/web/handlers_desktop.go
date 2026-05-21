@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/lib/pq"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/timeutil"
@@ -461,6 +462,11 @@ func (s *Server) HandleDesktopBlacklistAndPurge(w http.ResponseWriter, r *http.R
 	var req struct {
 		Domain  string `json:"domain"`  // either domain OR address must be set
 		Address string `json:"address"` // takes priority if both supplied
+		// MessageIDs identifies the conversation rows the user is
+		// looking at right now. Hard-deleted in addition to the from-
+		// pattern sweep so outgoing-from-us threads (where from_addr
+		// is OUR address, not the counterpart's) actually disappear.
+		MessageIDs []int64 `json:"message_ids"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid request body")
@@ -488,9 +494,25 @@ func (s *Server) HandleDesktopBlacklistAndPurge(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Hard-DELETE every message from the targeted sender for this
-	// user. ILIKE keeps us tolerant of display-name + angle-bracket
-	// formatting (`Name <addr>`) and case differences.
+	// Two deletion passes:
+	//   1. By ID for the conversation the user is staring at. Covers
+	//      outgoing-from-us threads where the from-pattern misses.
+	//   2. By from-pattern across the user's whole mailbox. Covers
+	//      historical inbound from the same sender that wasn't in
+	//      the current conversation view.
+	totalDeleted := int64(0)
+	if len(req.MessageIDs) > 0 {
+		res, err := s.database.Exec(
+			`DELETE FROM messages WHERE user_id = $1 AND id = ANY($2)`,
+			user.ID, pq.Array(req.MessageIDs),
+		)
+		if err != nil {
+			log.Printf("blacklist-and-purge: id-delete failed: %v", err)
+		} else {
+			n, _ := res.RowsAffected()
+			totalDeleted += n
+		}
+	}
 	var pattern string
 	if addr != "" {
 		pattern = "%<" + addr + ">%"
@@ -502,13 +524,13 @@ func (s *Server) HandleDesktopBlacklistAndPurge(w http.ResponseWriter, r *http.R
 		user.ID, pattern,
 	)
 	if err != nil {
-		log.Printf("blacklist-and-purge: delete failed: %v", err)
-		respondError(w, http.StatusInternalServerError, "delete failed")
-		return
+		log.Printf("blacklist-and-purge: pattern-delete failed: %v", err)
+	} else {
+		n, _ := res.RowsAffected()
+		totalDeleted += n
 	}
-	deleted, _ := res.RowsAffected()
-	log.Printf("blacklist-and-purge: user=%d rule=%d (%s=%s) deleted=%d", user.ID, rule.ID, rule.RuleType, rule.RuleValue, deleted)
-	respondJSON(w, http.StatusOK, map[string]any{"rule_id": rule.ID, "deleted": deleted})
+	log.Printf("blacklist-and-purge: user=%d rule=%d (%s=%s) deleted=%d", user.ID, rule.ID, rule.RuleType, rule.RuleValue, totalDeleted)
+	respondJSON(w, http.StatusOK, map[string]any{"rule_id": rule.ID, "deleted": totalDeleted})
 }
 
 // HandleDesktopDeleteMessages soft-deletes a batch of messages by ID. Used by
