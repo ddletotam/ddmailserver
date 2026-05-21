@@ -101,11 +101,8 @@ func (t *SyncTask) doExecute(ctx context.Context) error {
 		t.accountLog("error", "failed to get local inbox: %v", err)
 		return fmt.Errorf("failed to get local inbox: %w", err)
 	}
-	if err := t.syncRemoteInbox(ctx, client, localInbox); err != nil {
-		t.accountLog("error", "sync INBOX failed: %v", err)
-	}
-	if err := t.syncRemoteSpamFolders(ctx, client, localInbox); err != nil {
-		t.accountLog("error", "sync spam folders failed: %v", err)
+	if err := t.syncAllRemoteFolders(ctx, client, localInbox); err != nil {
+		t.accountLog("error", "sync folders failed: %v", err)
 	}
 	if err := t.database.UpdateAccountLastSync(t.account.ID, timeutil.Now()); err != nil {
 		log.Printf("Failed to update last sync time: %v", err)
@@ -114,45 +111,56 @@ func (t *SyncTask) doExecute(ctx context.Context) error {
 	return nil
 }
 
-func (t *SyncTask) syncRemoteInbox(ctx context.Context, client *Client, localInbox *models.Folder) error {
-	log.Printf("Syncing remote INBOX for %s to local inbox (folder %d)", t.account.Email, localInbox.ID)
-	mbox, err := client.SelectFolder("INBOX")
+// syncAllRemoteFolders is the unified pull path. It lists every
+// mailbox the remote IMAP server exposes, filters out Trash and
+// All-Mail-style duplicates, and syncs each one into our local inbox
+// folder. Junk-class folders flow through saveMessageToInbox with
+// treatAsSpam=true; everything else (INBOX, Sent, Drafts, Archive,
+// user-named folders) goes through the regular inbox path.
+//
+// All synced messages share the same local folder (`localInbox`).
+// remote_folder on each row records the upstream mailbox, so the
+// flag-sync / delete-sync workers know where to push back.
+func (t *SyncTask) syncAllRemoteFolders(ctx context.Context, client *Client, localInbox *models.Folder) error {
+	mailboxes, err := client.ListFolders()
 	if err != nil {
-		return err
+		return fmt.Errorf("list folders: %w", err)
 	}
-	if mbox.Messages == 0 {
-		log.Printf("Remote INBOX is empty for %s", t.account.Email)
+
+	type folderJob struct {
+		name  string
+		class folderClass
+	}
+	var jobs []folderJob
+	for _, mb := range mailboxes {
+		c := classifyMailbox(mb)
+		if c == folderSkip {
+			continue
+		}
+		jobs = append(jobs, folderJob{name: mb.Name, class: c})
+	}
+	if len(jobs) == 0 {
+		log.Printf("Sync [%s]: no syncable folders found", t.account.Email)
 		return nil
 	}
-	uidSet := new(imap.SeqSet)
-	uidSet.AddRange(1, 0)
-	section := &imap.BodySectionName{Peek: true}
-	items := []imap.FetchItem{imap.FetchEnvelope, imap.FetchFlags, imap.FetchUid, section.FetchItem()}
-	messages, fetchDone := client.FetchMessagesByUID(uidSet, items)
-	messageCount, skippedCount, spamCount := 0, 0, 0
-	for msg := range messages {
+
+	totalNew, totalSkipped, totalSpam := 0, 0, 0
+	for _, j := range jobs {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		saved, isSpam, err := t.saveMessageToInbox(msg, localInbox, "INBOX", false)
+		newN, skipN, spamN, err := t.syncOneFolder(ctx, client, localInbox, j.name, j.class)
 		if err != nil {
-			log.Printf("Failed to save message: %v", err)
+			log.Printf("Sync [%s]: folder %q failed: %v", t.account.Email, j.name, err)
 			continue
 		}
-		if saved {
-			messageCount++
-			if isSpam {
-				spamCount++
-			}
-		} else {
-			skippedCount++
-		}
+		totalNew += newN
+		totalSkipped += skipN
+		totalSpam += spamN
 	}
-	if err := <-fetchDone; err != nil {
-		return fmt.Errorf("IMAP fetch failed: %w", err)
-	}
-	t.accountLog("info", "synced %d new messages (skipped %d duplicates, %d spam)", messageCount, skippedCount, spamCount)
-	if messageCount > spamCount && t.notifyFunc != nil {
+	t.accountLog("info", "synced %d new messages (skipped %d duplicates, %d classified spam) across %d folders",
+		totalNew, totalSkipped, totalSpam, len(jobs))
+	if totalNew > totalSpam && t.notifyFunc != nil {
 		totalMessages, _ := t.database.GetMessageCountByFolder(localInbox.ID)
 		if user, err := t.database.GetUserByID(t.account.UserID); err == nil {
 			t.notifyFunc(user.Username, "INBOX", totalMessages)
@@ -161,18 +169,184 @@ func (t *SyncTask) syncRemoteInbox(ctx context.Context, client *Client, localInb
 	return nil
 }
 
+// syncOneFolder pulls all messages from a single remote mailbox and
+// dispatches them through saveMessageToInbox with the appropriate
+// folder role. Returns (newCount, skippedCount, spamCount).
+func (t *SyncTask) syncOneFolder(ctx context.Context, client *Client, localInbox *models.Folder, name string, class folderClass) (int, int, int, error) {
+	mbox, err := client.SelectFolder(name)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if mbox.Messages == 0 {
+		return 0, 0, 0, nil
+	}
+	uidSet := new(imap.SeqSet)
+	uidSet.AddRange(1, 0)
+	section := &imap.BodySectionName{Peek: true}
+	items := []imap.FetchItem{imap.FetchEnvelope, imap.FetchFlags, imap.FetchUid, section.FetchItem()}
+	messages, fetchDone := client.FetchMessagesByUID(uidSet, items)
+	newCount, skippedCount, spamCount := 0, 0, 0
+	for msg := range messages {
+		if ctx.Err() != nil {
+			return newCount, skippedCount, spamCount, ctx.Err()
+		}
+		saved, isSpam, err := t.saveMessageToInbox(msg, localInbox, name, class)
+		if err != nil {
+			log.Printf("Sync [%s] %s: save failed: %v", t.account.Email, name, err)
+			continue
+		}
+		if saved {
+			newCount++
+			if isSpam {
+				spamCount++
+			}
+		} else {
+			skippedCount++
+		}
+	}
+	if err := <-fetchDone; err != nil {
+		return newCount, skippedCount, spamCount, fmt.Errorf("IMAP fetch on %q failed: %w", name, err)
+	}
+	return newCount, skippedCount, spamCount, nil
+}
+
+// folderClass classifies a remote IMAP mailbox for our sync purposes.
+type folderClass int
+
+const (
+	folderSkip   folderClass = iota // Trash, All-Mail, Noselect containers
+	folderInbox                     // INBOX + user-named (custom) folders
+	folderJunk                      // Spam / Junk
+	folderSent                      // Sent / Отправленные — outgoing
+	folderDrafts                    // Drafts / Черновики
+)
+
+// classifyMailbox decides whether and how to sync a given mailbox.
+// Trash-class folders and Gmail-style "All Mail" duplicates are
+// dropped. Spam-class folders flow through the spam branch in
+// saveMessageToInbox so the user's whitelist can still rescue. Every
+// other selectable mailbox is treated as inbox content — pulling Sent,
+// Drafts, Archive, etc. is part of the "give me everything that isn't
+// in the trash" mandate.
+func classifyMailbox(mb *imap.MailboxInfo) folderClass {
+	if mb == nil || mb.Name == "" {
+		return folderSkip
+	}
+	for _, a := range mb.Attributes {
+		switch {
+		case strings.EqualFold(a, "\\Noselect"):
+			return folderSkip
+		case strings.EqualFold(a, "\\Trash"):
+			return folderSkip
+		case strings.EqualFold(a, "\\All"):
+			// Gmail's "All Mail" is a virtual union of every other
+			// folder — pulling it on top of the rest just doubles
+			// the work and creates duplicate dedup hits.
+			return folderSkip
+		case strings.EqualFold(a, "\\Junk"):
+			return folderJunk
+		case strings.EqualFold(a, "\\Sent"):
+			return folderSent
+		case strings.EqualFold(a, "\\Drafts"):
+			return folderDrafts
+		}
+	}
+	lower := strings.ToLower(mb.Name)
+	if isTrashName(lower) {
+		return folderSkip
+	}
+	if isAllMailName(lower) {
+		return folderSkip
+	}
+	if isJunkName(lower) {
+		return folderJunk
+	}
+	if isSentName(lower) {
+		return folderSent
+	}
+	if isDraftsName(lower) {
+		return folderDrafts
+	}
+	return folderInbox
+}
+
+func isSentName(lower string) bool {
+	switch lower {
+	case "sent", "sent items", "sent messages", "отправленные":
+		return true
+	}
+	if strings.HasSuffix(lower, "/sent") || strings.HasSuffix(lower, "/sent items") {
+		return true
+	}
+	if strings.Contains(lower, "отправленн") {
+		return true
+	}
+	return false
+}
+
+func isDraftsName(lower string) bool {
+	switch lower {
+	case "drafts", "draft", "черновики":
+		return true
+	}
+	if strings.HasSuffix(lower, "/drafts") {
+		return true
+	}
+	if strings.Contains(lower, "черновик") {
+		return true
+	}
+	return false
+}
+
+func isTrashName(lower string) bool {
+	switch lower {
+	case "trash", "deleted messages", "deleted items", "корзина",
+		"удаленные элементы", "удалённые элементы":
+		return true
+	}
+	if strings.HasSuffix(lower, "/trash") || strings.HasSuffix(lower, "/корзина") {
+		return true
+	}
+	return false
+}
+
+func isAllMailName(lower string) bool {
+	return lower == "[gmail]/all mail" || strings.HasSuffix(lower, "/all mail")
+}
+
+func isJunkName(lower string) bool {
+	switch lower {
+	case "spam", "junk", "junk e-mail", "junk email", "bulk mail":
+		return true
+	}
+	if strings.HasSuffix(lower, "/spam") || strings.HasSuffix(lower, "/junk") {
+		return true
+	}
+	if strings.Contains(lower, "нежелательная") || strings.Contains(lower, "спам") {
+		return true
+	}
+	return false
+}
+
 // saveMessageToInbox persists a fetched IMAP message into our local
 // inbox folder, returning `(saved, isSpam, err)`.
 //
 //   - remoteFolderName names the upstream IMAP mailbox the message came
 //     from (e.g. "INBOX" or "[Gmail]/Spam"). Stored on the row so
 //     flag-sync / delete-sync know where to push back.
-//   - treatAsSpam=true is the path for remote spam/junk folders: the
-//     upstream provider has already classified the message as spam, so
-//     we default isSpam=true and skip our own analyzer. A user whitelist
-//     rule (`action="allow"`) still rescues the message — that's the
-//     "false positive on Gmail's side" escape hatch.
-func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folder, remoteFolderName string, treatAsSpam bool) (bool, bool, error) {
+//   - class drives spam-pipeline semantics:
+//   - folderInbox: full pipeline (whitelist → analyzer →
+//     recipient-mismatch check).
+//   - folderJunk: skip analyzer + recipient check, default
+//     is_spam=true; whitelist still rescues.
+//   - folderSent / folderDrafts: bypass the spam pipeline entirely.
+//     These are the user's own outgoing / draft content; running
+//     them through the recipient-mismatch check would (correctly)
+//     trip — Sent has the user as the FROM, not the TO — and
+//     misclassify them as spam.
+func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folder, remoteFolderName string, class folderClass) (bool, bool, error) {
+	treatAsSpam := class == folderJunk
+	bypassSpam := class == folderSent || class == folderDrafts
 	if imapMsg.Envelope == nil {
 		log.Printf("IMAP sync: Skipping message UID %d - no envelope data", imapMsg.Uid)
 		return false, false, nil
@@ -219,8 +393,20 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 			}
 			return false, !rescue, nil
 		}
-		if imapMsg.Uid > 0 {
-			t.database.UpdateMessageRemoteUID(t.account.UserID, messageID, imapMsg.Uid, remoteFolderName)
+		// Inbox path on an already-known row: sync flags from the
+		// remote side and — crucially — drop is_spam if the upstream
+		// is now showing the message in INBOX. Without this branch
+		// the user moving a message out of Junk on iCloud / Yandex /
+		// etc. would never reach us: local is_spam=true keeps it
+		// hidden from the conversation list forever.
+		if err := t.database.RefreshExistingFromRemote(
+			t.account.UserID, messageID, imapMsg.Uid, remoteFolderName,
+			hasFlag(imapMsg.Flags, imap.SeenFlag),
+			hasFlag(imapMsg.Flags, imap.FlaggedFlag),
+			hasFlag(imapMsg.Flags, imap.AnsweredFlag),
+			true, // downgradeSpam: remote-INBOX rescues from prior spam verdict
+		); err != nil {
+			log.Printf("IMAP sync: refresh existing %s failed: %v", messageID, err)
 		}
 		return false, false, nil
 	}
@@ -265,6 +451,14 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 	if ruleErr != nil {
 		log.Printf("IMAP sync: Failed to check spam rules: %v", ruleErr)
 	}
+	// Sent / Drafts bypass: the user's own outgoing content has no
+	// business being put through the spam analyzer (and would trip
+	// recipient-mismatch — the user is in From, not To/Cc). Store
+	// it cleanly with is_spam=false and move on.
+	if bypassSpam {
+		goto buildMessage
+	}
+
 	// Remote spam-folder path: short-circuit our analyzer + recipient
 	// check (the upstream already classified, we just record the
 	// verdict). A whitelist rule still rescues — that's the entire
@@ -358,17 +552,18 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 buildMessage:
 	msg := &models.Message{
 		AccountID: t.account.ID, UserID: t.account.UserID, FolderID: inbox.ID, MessageID: messageID,
-		Subject: parser.SanitizeUTF8(imapMsg.Envelope.Subject), From: fromAddr,
-		To:      parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.To)),
-		Cc:      parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.Cc)),
-		Bcc:     parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.Bcc)),
-		ReplyTo: parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.ReplyTo)),
+		Subject: parser.DecodeMIMEHeader(imapMsg.Envelope.Subject),
+		From:    parser.DecodeMIMEHeader(fromAddr),
+		To:      parser.DecodeMIMEHeader(formatAddressList(imapMsg.Envelope.To)),
+		Cc:      parser.DecodeMIMEHeader(formatAddressList(imapMsg.Envelope.Cc)),
+		Bcc:     parser.DecodeMIMEHeader(formatAddressList(imapMsg.Envelope.Bcc)),
+		ReplyTo: parser.DecodeMIMEHeader(formatAddressList(imapMsg.Envelope.ReplyTo)),
 		Date:    msgDateMs, Body: parser.SanitizeUTF8(body), BodyHTML: parser.SanitizeUTF8(bodyHTML),
 		RawEmail: rawData,
 		UID:      localUID, Seen: hasFlag(imapMsg.Flags, imap.SeenFlag),
 		Flagged:   hasFlag(imapMsg.Flags, imap.FlaggedFlag),
 		Answered:  hasFlag(imapMsg.Flags, imap.AnsweredFlag),
-		Draft:     hasFlag(imapMsg.Flags, imap.DraftFlag),
+		Draft:     class == folderDrafts || hasFlag(imapMsg.Flags, imap.DraftFlag),
 		Deleted:   hasFlag(imapMsg.Flags, imap.DeletedFlag),
 		InReplyTo: parser.SanitizeUTF8(imapMsg.Envelope.InReplyTo),
 		RemoteUID: imapMsg.Uid, RemoteFolder: remoteFolderName,
@@ -395,111 +590,6 @@ buildMessage:
 		t.database.UpdateMessageAttachmentCount(msg.ID, attachmentCount)
 	}
 	return true, isSpam, nil
-}
-
-// syncRemoteSpamFolders pulls messages from upstream Spam/Junk
-// folders into our local inbox, tagged `is_spam=true` by default. A
-// user whitelist rule (`action="allow"` for that sender or domain) can
-// still flip it to non-spam — that's the entire reason we bother
-// pulling: catch upstream false positives where the remote provider
-// classified something as spam that the user actually wants.
-//
-// Folder discovery: prefer the IMAP SPECIAL-USE `\Junk` attribute
-// (modern servers — Gmail, Yandex, Fastmail, Dovecot — all advertise
-// it). Fall back to common folder names for older servers / providers
-// that don't expose SPECIAL-USE.
-func (t *SyncTask) syncRemoteSpamFolders(ctx context.Context, client *Client, localInbox *models.Folder) error {
-	mailboxes, err := client.ListFolders()
-	if err != nil {
-		return fmt.Errorf("list folders: %w", err)
-	}
-
-	var spamFolders []string
-	for _, mb := range mailboxes {
-		if mb == nil || mb.Name == "" {
-			continue
-		}
-		if isJunkMailbox(mb) {
-			spamFolders = append(spamFolders, mb.Name)
-		}
-	}
-	if len(spamFolders) == 0 {
-		return nil
-	}
-	log.Printf("Sync [%s]: discovered %d spam folder(s): %v", t.account.Email, len(spamFolders), spamFolders)
-
-	totalSaved, totalSkipped, totalRescued := 0, 0, 0
-	for _, name := range spamFolders {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		mbox, err := client.SelectFolder(name)
-		if err != nil {
-			log.Printf("Sync [%s]: failed to select %q: %v", t.account.Email, name, err)
-			continue
-		}
-		if mbox.Messages == 0 {
-			continue
-		}
-		uidSet := new(imap.SeqSet)
-		uidSet.AddRange(1, 0)
-		section := &imap.BodySectionName{Peek: true}
-		items := []imap.FetchItem{imap.FetchEnvelope, imap.FetchFlags, imap.FetchUid, section.FetchItem()}
-		messages, fetchDone := client.FetchMessagesByUID(uidSet, items)
-		for msg := range messages {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			saved, isSpam, err := t.saveMessageToInbox(msg, localInbox, name, true)
-			if err != nil {
-				log.Printf("Sync [%s]: failed to save spam msg: %v", t.account.Email, err)
-				continue
-			}
-			if saved {
-				totalSaved++
-				if !isSpam {
-					// Whitelist rescue — we pulled from remote spam but
-					// our rule said this sender is fine.
-					totalRescued++
-				}
-			} else {
-				totalSkipped++
-			}
-		}
-		if err := <-fetchDone; err != nil {
-			log.Printf("Sync [%s]: spam fetch on %q failed: %v", t.account.Email, name, err)
-		}
-	}
-	if totalSaved > 0 || totalSkipped > 0 {
-		t.accountLog("info", "spam folders: saved %d (rescued %d), skipped %d duplicates", totalSaved, totalRescued, totalSkipped)
-	}
-	return nil
-}
-
-// isJunkMailbox returns true for mailboxes that the user's upstream
-// provider treats as the spam/junk bin — either via the standardised
-// IMAP SPECIAL-USE `\Junk` attribute (RFC 6154) or a name match against
-// the de-facto conventions of major providers.
-func isJunkMailbox(mb *imap.MailboxInfo) bool {
-	for _, a := range mb.Attributes {
-		if strings.EqualFold(a, "\\Junk") {
-			return true
-		}
-	}
-	lower := strings.ToLower(mb.Name)
-	switch lower {
-	case "spam", "junk", "junk e-mail", "junk email", "bulk mail":
-		return true
-	}
-	// Path-style folder names that Gmail / Outlook hand out, plus the
-	// Russian-language defaults of Yandex / Mail.ru.
-	if strings.HasSuffix(lower, "/spam") || strings.HasSuffix(lower, "/junk") {
-		return true
-	}
-	if strings.Contains(lower, "нежелательная") || strings.Contains(lower, "спам") {
-		return true
-	}
-	return false
 }
 
 // isAuthError returns true if the error looks like an OAuth authentication failure

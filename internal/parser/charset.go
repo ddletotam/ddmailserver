@@ -2,7 +2,11 @@ package parser
 
 import (
 	"bytes"
+	"encoding/base64"
 	"io"
+	"mime"
+	"mime/quotedprintable"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -14,6 +18,95 @@ import (
 	"golang.org/x/text/encoding/traditionalchinese"
 	"golang.org/x/text/encoding/unicode"
 )
+
+// DecodeMIMEHeader unwraps RFC 2047 encoded-words (`=?charset?B?...?=`
+// / `=?charset?Q?...?=`) and returns plain UTF-8. Subjects, display
+// names in From/To/Cc, and any other header values that come back
+// from go-imap's ENVELOPE response are typically still in their
+// wire-format encoded form — the IMAP library doesn't decode them.
+//
+// We first try the stdlib `mime.WordDecoder` (strict, RFC-compliant)
+// for the happy path; when that rejects an encoded-word — e.g.
+// because some sender double-padded the base64 with `===` instead of
+// `==` — we fall back to a lenient regex decoder that fixes up the
+// padding before handing the bytes off to the charset converter.
+// Unknown charsets fall back to a passthrough so an unrecognised
+// label never poisons the whole header.
+func DecodeMIMEHeader(s string) string {
+	if s == "" || !strings.Contains(s, "=?") {
+		return s
+	}
+	// Try stdlib first — it has a slightly broader tokenizer for
+	// pathological inputs. Only accept the result if it actually
+	// changed something: when the input is malformed, stdlib often
+	// returns the original string unchanged AND nil error, which
+	// would otherwise short-circuit our lenient fallback.
+	dec := &mime.WordDecoder{
+		CharsetReader: func(label string, input io.Reader) (io.Reader, error) {
+			return CharsetReader(label, input)
+		},
+	}
+	if out, err := dec.DecodeHeader(s); err == nil && out != s {
+		return SanitizeUTF8(out)
+	}
+	return decodeMIMEHeaderLenient(s)
+}
+
+// encodedWordRe matches a single RFC 2047 encoded-word. Non-greedy on
+// the encoded-text so a `?=` inside the payload doesn't get matched
+// as the terminator.
+var encodedWordRe = regexp.MustCompile(`=\?([^?]+)\?([BbQq])\?([^?]*)\?=`)
+
+func decodeMIMEHeaderLenient(s string) string {
+	return encodedWordRe.ReplaceAllStringFunc(s, func(match string) string {
+		parts := encodedWordRe.FindStringSubmatch(match)
+		if len(parts) != 4 {
+			return match
+		}
+		charsetName := parts[1]
+		enc := strings.ToUpper(parts[2])
+		payload := parts[3]
+
+		var raw []byte
+		switch enc {
+		case "B":
+			// Strip every trailing '=' and re-pad to a length that's a
+			// multiple of 4. Some senders emit one too many padding
+			// chars; stripping + repadding is harmless when the input
+			// is already correct.
+			body := strings.TrimRight(payload, "=")
+			for len(body)%4 != 0 {
+				body += "="
+			}
+			decoded, err := base64.StdEncoding.DecodeString(body)
+			if err != nil {
+				return match
+			}
+			raw = decoded
+		case "Q":
+			// quoted-printable: '_' represents space (RFC 2047 quirk),
+			// and we feed the rest to the standard QP reader.
+			body := strings.ReplaceAll(payload, "_", " ")
+			decoded, err := io.ReadAll(quotedprintable.NewReader(strings.NewReader(body)))
+			if err != nil {
+				return match
+			}
+			raw = decoded
+		default:
+			return match
+		}
+
+		reader, err := CharsetReader(charsetName, bytes.NewReader(raw))
+		if err != nil {
+			return match
+		}
+		out, err := io.ReadAll(reader)
+		if err != nil {
+			return match
+		}
+		return SanitizeUTF8(string(out))
+	})
+}
 
 // CharsetReader returns a reader that converts from the given charset to UTF-8
 func CharsetReader(charset string, input io.Reader) (io.Reader, error) {

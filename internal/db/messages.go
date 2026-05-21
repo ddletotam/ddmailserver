@@ -427,6 +427,64 @@ func (db *DB) ReclassifyMessageFromRemoteSpam(userID int64, messageID string, re
 	return nil
 }
 
+// RefreshExistingFromRemote brings an already-existing local message
+// in line with what the upstream IMAP server currently has:
+//
+//   - remote_uid + remote_folder always get refreshed so flag-sync /
+//     delete-sync continue to target the right path.
+//   - Flags (\Seen / \Flagged / \Answered) are overwritten from the
+//     remote side. The flag_sync worker pushes our local changes
+//     OUT to upstream, and any inbound change we see here is either
+//     the user toggling state on another client or the round-trip
+//     of our own push — either way upstream is authoritative for
+//     "current state".
+//   - If `downgradeSpam` is true and the row was marked is_spam=true
+//     by our analyzer (not by an explicit user spam-rule), clear it
+//     and drop the spam metadata. Used by the inbox-pull path: a
+//     message landing in the upstream INBOX is the strongest possible
+//     "not spam" signal, overriding our prior verdict.
+func (db *DB) RefreshExistingFromRemote(
+	userID int64,
+	messageID string,
+	remoteUID uint32,
+	remoteFolder string,
+	seen, flagged, answered bool,
+	downgradeSpam bool,
+) error {
+	if messageID == "" {
+		return nil
+	}
+	now := timeutil.Now()
+	if downgradeSpam {
+		_, err := db.Exec(
+			`UPDATE messages SET
+			   remote_uid = $1, remote_folder = $2,
+			   seen = $3, flagged = $4, answered = $5,
+			   is_spam = false, spam_status = 'clean',
+			   spam_reasons = '', spam_rule_id = NULL,
+			   updated_at = $6
+			 WHERE user_id = $7 AND message_id = $8`,
+			remoteUID, remoteFolder, seen, flagged, answered, now, userID, messageID,
+		)
+		if err != nil {
+			return fmt.Errorf("refresh + downgrade: %w", err)
+		}
+		return nil
+	}
+	_, err := db.Exec(
+		`UPDATE messages SET
+		   remote_uid = $1, remote_folder = $2,
+		   seen = $3, flagged = $4, answered = $5,
+		   updated_at = $6
+		 WHERE user_id = $7 AND message_id = $8`,
+		remoteUID, remoteFolder, seen, flagged, answered, now, userID, messageID,
+	)
+	if err != nil {
+		return fmt.Errorf("refresh existing: %w", err)
+	}
+	return nil
+}
+
 // UpdateMessageRemoteUID updates the remote_uid and remote_folder for a message that doesn't have them set
 // Returns true if the message was updated, false if it already had remote_uid or doesn't exist
 func (db *DB) UpdateMessageRemoteUID(userID int64, messageID string, remoteUID uint32, remoteFolder string) (bool, error) {
