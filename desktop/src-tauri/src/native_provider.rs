@@ -274,6 +274,17 @@ impl MailProvider for NativeProvider {
         Ok(())
     }
 
+    async fn blacklist_and_purge(&self, domain: &str, address: &str) -> Result<i64, String> {
+        if domain.is_empty() && address.is_empty() {
+            return Err("domain or address required".into());
+        }
+        #[derive(serde::Deserialize)]
+        struct Resp { deleted: i64 }
+        let body = serde_json::json!({ "domain": domain, "address": address });
+        let resp: Resp = self.post("/spam/blacklist-and-purge", &body).await?;
+        Ok(resp.deleted)
+    }
+
     async fn fetch_message_source(
         &self,
         _folder: &str,

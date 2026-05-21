@@ -485,6 +485,72 @@ func (db *DB) RefreshExistingFromRemote(
 	return nil
 }
 
+// BackfillEncodedHeaders runs `decode` over every row whose Subject or
+// address-header column still contains an RFC 2047 encoded-word
+// (`=?charset?B?...?=`-style). Pulled out as a one-shot startup pass:
+// when the decoder gets fixed or extended, this lets us catch up the
+// already-persisted rows without truncating the table. Idempotent —
+// rows whose decode produces the same string are left untouched, and
+// strings that don't contain `=?` are skipped at query time.
+//
+// Caller passes the decoder so the db package doesn't have to import
+// the parser package and risk an import cycle.
+func (db *DB) BackfillEncodedHeaders(decode func(string) string) (int, error) {
+	rows, err := db.Query(`
+		SELECT id, subject, from_addr, to_addr, cc, bcc, reply_to
+		FROM messages
+		WHERE subject  LIKE '%=?%?=%'
+		   OR from_addr LIKE '%=?%?=%'
+		   OR to_addr   LIKE '%=?%?=%'
+		   OR cc        LIKE '%=?%?=%'
+		   OR bcc       LIKE '%=?%?=%'
+		   OR reply_to  LIKE '%=?%?=%'
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("scan encoded rows: %w", err)
+	}
+	defer rows.Close()
+
+	type rowInfo struct {
+		id                                  int64
+		subject, from, to, cc, bcc, replyTo string
+	}
+	var batch []rowInfo
+	for rows.Next() {
+		var r rowInfo
+		if err := rows.Scan(&r.id, &r.subject, &r.from, &r.to, &r.cc, &r.bcc, &r.replyTo); err != nil {
+			return 0, fmt.Errorf("scan row: %w", err)
+		}
+		batch = append(batch, r)
+	}
+	rows.Close()
+
+	updated := 0
+	for _, r := range batch {
+		newSubject := decode(r.subject)
+		newFrom := decode(r.from)
+		newTo := decode(r.to)
+		newCC := decode(r.cc)
+		newBCC := decode(r.bcc)
+		newReplyTo := decode(r.replyTo)
+		if newSubject == r.subject && newFrom == r.from && newTo == r.to &&
+			newCC == r.cc && newBCC == r.bcc && newReplyTo == r.replyTo {
+			continue
+		}
+		if _, err := db.Exec(
+			`UPDATE messages SET
+			   subject = $1, from_addr = $2, to_addr = $3, cc = $4,
+			   bcc = $5, reply_to = $6, updated_at = $7
+			 WHERE id = $8`,
+			newSubject, newFrom, newTo, newCC, newBCC, newReplyTo, timeutil.Now(), r.id,
+		); err != nil {
+			return updated, fmt.Errorf("update row %d: %w", r.id, err)
+		}
+		updated++
+	}
+	return updated, nil
+}
+
 // UpdateMessageRemoteUID updates the remote_uid and remote_folder for a message that doesn't have them set
 // Returns true if the message was updated, false if it already had remote_uid or doesn't exist
 func (db *DB) UpdateMessageRemoteUID(userID int64, messageID string, remoteUID uint32, remoteFolder string) (bool, error) {

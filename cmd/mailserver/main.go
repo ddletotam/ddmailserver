@@ -76,6 +76,22 @@ func main() {
 		log.Fatalf("Failed to migrate unencrypted passwords: %v", err)
 	}
 
+	// One-off backfill: decode RFC 2047 encoded-words in message headers
+	// that were stored before the decoder landed. Runs every startup
+	// because new lenient-decoder fixes might catch more rows; the query
+	// only touches rows that still contain `=?...?=` markers, so an
+	// already-clean DB completes in milliseconds.
+	go func() {
+		n, err := database.BackfillEncodedHeaders(parser.DecodeMIMEHeader)
+		if err != nil {
+			log.Printf("BackfillEncodedHeaders: %v", err)
+			return
+		}
+		if n > 0 {
+			log.Printf("BackfillEncodedHeaders: decoded %d messages", n)
+		}
+	}()
+
 	// One-off: backfill ATTENDEE/ORGANIZER rows on calendar events whose
 	// ical_data was synced before the structured-attendee write-paths landed.
 	// Cheap on every subsequent boot (idempotent, no-op when DB is current).

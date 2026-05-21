@@ -183,6 +183,7 @@ func (s *Server) setupRoutes() {
 	desktopAuthAPI.HandleFunc("/messages/flags", s.HandleDesktopSetFlags).Methods("POST")
 	desktopAuthAPI.HandleFunc("/messages/delete", s.HandleDesktopDeleteMessages).Methods("POST")
 	desktopAuthAPI.HandleFunc("/spam/mark-domain", s.HandleDesktopMarkSpamByDomain).Methods("POST")
+	desktopAuthAPI.HandleFunc("/spam/blacklist-and-purge", s.HandleDesktopBlacklistAndPurge).Methods("POST")
 	desktopAuthAPI.HandleFunc("/identities", s.HandleDesktopIdentities).Methods("GET")
 	desktopAuthAPI.HandleFunc("/send", s.HandleDesktopSend).Methods("POST")
 	desktopAuthAPI.HandleFunc("/calendars", s.HandleDesktopCalendars).Methods("GET")

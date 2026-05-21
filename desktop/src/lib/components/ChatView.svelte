@@ -19,8 +19,58 @@
 
   // Quote-reply (Telegram-style) for the inline quick-reply input
   let replyTo = $state<MessageBody | null>(null);
+  let spamPurging = $state(false);
 
   const conv = $derived(mailStore.activeConversation);
+
+  /// Quick "Spam" action: blacklist the counterpart sender and hard-
+  /// delete every message from them for this user. After server
+  /// confirms, jump to the next conversation in the sidebar (or the
+  /// first one if we were already on the last). Closes the chat view
+  /// if the list is empty afterwards.
+  async function blacklistAndPurge(c: typeof conv) {
+    if (!c) return;
+    const account = accountStore.activeAccount;
+    if (!account) return;
+    const addr = (c.counterparts[0]?.addr ?? "").toLowerCase();
+    if (!addr) return;
+    const at = addr.lastIndexOf("@");
+    const domain = at > 0 ? addr.slice(at + 1) : "";
+    const senderLabel = c.counterparts[0]?.name || addr;
+    if (!confirm(`Удалить все письма от «${senderLabel}» и добавить в чёрный список?`)) return;
+
+    spamPurging = true;
+    try {
+      // Pick the next conversation BEFORE we mutate the list so the
+      // index lookup uses the sorted order the user sees.
+      const sorted = mailStore.conversations;
+      const i = sorted.findIndex(x => x.id === c.id);
+      const next = sorted.length > 1
+        ? sorted[(i + 1) % sorted.length].id === c.id
+          ? sorted[0].id
+          : sorted[(i + 1) % sorted.length].id
+        : null;
+
+      await invoke("v2_blacklist_and_purge", {
+        accountId: account.id,
+        domain,
+        address: addr,
+      });
+
+      // Drop the conversation locally + jump to the next one.
+      mailStore.removeConversation(c.id);
+      if (next) {
+        mailStore.openConversation(account, next);
+      } else {
+        mailStore.closeConversation();
+      }
+    } catch (e) {
+      console.error("[chat-view] blacklist-and-purge failed:", e);
+      alert(`Не удалось: ${e}`);
+    } finally {
+      spamPurging = false;
+    }
+  }
   // Override is_outgoing per the conversation owner: a message is outgoing iff its sender
   // matches the dialog's identity (received_by). Anything else — including mail from one
   // of our other identities — is incoming for THIS conversation.
@@ -671,6 +721,22 @@
         </div>
       </div>
 
+      {#if conv.counterparts[0]?.addr}
+        <button
+          class="btn-spam"
+          onclick={() => blacklistAndPurge(conv)}
+          disabled={spamPurging}
+          title={conv.is_group
+            ? `Удалить все письма от ${conv.counterparts[0]?.name || conv.counterparts[0]?.addr} (первого участника) + чёрный список`
+            : "Удалить все письма этого отправителя + добавить в чёрный список"}
+          aria-label="Spam"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+          </svg>
+        </button>
+      {/if}
     </div>
 
     <!-- Messages -->
@@ -965,6 +1031,19 @@
     cursor: pointer; color: var(--text-secondary); flex-shrink: 0;
   }
   .btn-back:hover { background: var(--bg-hover); }
+
+  .btn-spam {
+    width: 36px; height: 36px;
+    display: flex; align-items: center; justify-content: center;
+    border: none; background: none; border-radius: 50%;
+    cursor: pointer; color: var(--text-secondary); flex-shrink: 0;
+    margin-left: auto;
+  }
+  .btn-spam:hover {
+    background: color-mix(in srgb, #e8616a 18%, transparent);
+    color: #e8616a;
+  }
+  .btn-spam:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .chat-info { flex: 1; min-width: 0; }
   .chat-name {

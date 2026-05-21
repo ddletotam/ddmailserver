@@ -301,6 +301,19 @@ pub async fn v2_mark_spam_by_domain(
 }
 
 #[tauri::command]
+pub async fn v2_blacklist_and_purge(
+    registry: tauri::State<'_, ProviderRegistry>,
+    account_id: String,
+    domain: String,
+    address: String,
+) -> Result<i64, String> {
+    get_provider(&registry, &account_id)
+        .await?
+        .blacklist_and_purge(&domain, &address)
+        .await
+}
+
+#[tauri::command]
 pub async fn v2_fetch_inline_part(
     registry: tauri::State<'_, ProviderRegistry>,
     account_id: String,
