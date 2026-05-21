@@ -31,22 +31,57 @@
     return Number.isFinite(n) && n >= SIDEBAR_MIN && n <= SIDEBAR_MAX ? n : 380;
   }
   let sidebarWidth = $state(loadSidebarWidth());
+  let layoutEl: HTMLElement | undefined = $state();
 
+  // Push sidebarWidth → --sidebar-width via direct DOM property. Svelte 5
+  // has an intermittent quirk with reactively updating custom CSS
+  // properties in templated `style=` attributes (state changes, the
+  // string interpolation doesn't re-emit), and the `style:--var=` form
+  // has bit us in the past with the whole rule getting stripped by the
+  // scoped-CSS pass. Direct setProperty is the boring-and-works path.
+  $effect(() => {
+    if (layoutEl) {
+      layoutEl.style.setProperty("--sidebar-width", `${sidebarWidth}px`);
+    }
+  });
+
+  // Drag the sidebar splitter. WebKitGTK in Tauri is finicky about
+  // both window-level mousemove (drops events once the cursor leaves
+  // the 4-px splitter) and setPointerCapture (which silently no-ops on
+  // some builds). Attaching the move/up listeners on `document` in the
+  // capture phase routes events through reliably regardless of which
+  // intermediate element the cursor passes over.
   function startDragSplitter(e: MouseEvent) {
     e.preventDefault();
     const startX = e.clientX;
     const startW = sidebarWidth;
+    let moved = false;
+
     const onMove = (ev: MouseEvent) => {
       const dx = ev.clientX - startX;
+      // Ignore sub-pixel jitter that fires from just pressing the
+      // mouse button — otherwise a "non-drag" click slowly inflates
+      // the sidebar over many sessions.
+      if (Math.abs(dx) < 2) return;
+      moved = true;
       sidebarWidth = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startW + dx));
     };
     const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      try { localStorage.setItem(SIDEBAR_KEY, String(sidebarWidth)); } catch {}
+      document.removeEventListener("mousemove", onMove, true);
+      document.removeEventListener("mouseup", onUp, true);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      if (moved) {
+        try { localStorage.setItem(SIDEBAR_KEY, String(sidebarWidth)); } catch {}
+      }
     };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    document.addEventListener("mousemove", onMove, true);
+    document.addEventListener("mouseup", onUp, true);
+    // Force a global drag cursor + suppress text selection while
+    // dragging so the user gets clean feedback even when crossing over
+    // text content in the chat / sidebar.
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
   }
 
   $effect(() => {
@@ -171,7 +206,7 @@
 {:else if showLogin}
   <LoginScreen onSuccess={handleAccountAdded} />
 {:else}
-  <div class="app-layout" style="--sidebar-width: {sidebarWidth}px">
+  <div class="app-layout" bind:this={layoutEl}>
     <Sidebar />
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="splitter" onmousedown={startDragSplitter} role="separator" aria-orientation="vertical" tabindex="-1"></div>

@@ -102,6 +102,8 @@ html, body, #app {
   cursor: col-resize;
   background: transparent;
   transition: background 0.1s;
+  touch-action: none;
+  user-select: none;
 }
 .splitter:hover,
 .splitter:active {
