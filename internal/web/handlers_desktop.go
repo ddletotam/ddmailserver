@@ -959,16 +959,26 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 	}
 	quotas := []folderQuota{}
 	for _, f := range folders {
-		if !subscribed[f.ID] {
-			continue
-		}
 		switch f.Type {
 		case "inbox":
+			// Inbox subscription is the user-visible toggle: a second
+			// account's inbox the user hasn't opted into stays out of
+			// the chat list.
+			if !subscribed[f.ID] {
+				continue
+			}
 			quotas = append(quotas, folderQuota{f.ID, limit})
-		case "sent":
-			quotas = append(quotas, folderQuota{f.ID, limit / 2})
-		case "drafts":
-			quotas = append(quotas, folderQuota{f.ID, limit / 4})
+		case "sent", "drafts":
+			// Sent/Drafts are the user's own outgoing. Without these
+			// the conversation view shows incoming replies but no
+			// matching outgoing bubble — the user's own message is
+			// only visible as the quoted-history block inside the
+			// reply's HTML. Subscription doesn't apply.
+			quota := limit / 2
+			if f.Type == "drafts" {
+				quota = limit / 4
+			}
+			quotas = append(quotas, folderQuota{f.ID, quota})
 		}
 	}
 
