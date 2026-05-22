@@ -1038,12 +1038,17 @@ fn open_in_default_app(path: &std::path::Path) {
     let path_str = path.to_string_lossy();
     eprintln!("[attachment] opening: {path_str}");
 
-    // On Windows `cmd /C start` has quoting issues with paths that contain
-    // spaces. `rundll32 url.dll,FileProtocolHandler` opens any local file
-    // with its registered default handler and handles spaces correctly.
+    // PowerShell Invoke-Item is the exact equivalent of double-clicking in
+    // Explorer — it calls ShellExecuteW with the registered default verb.
+    // rundll32/url.dll only handles URL schemes, not arbitrary file types.
     #[cfg(target_os = "windows")]
-    let result = std::process::Command::new("rundll32.exe")
-        .args(["url.dll,FileProtocolHandler", &*path_str])
+    let result = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!("Invoke-Item '{}'", path_str.replace('\'', "''")),
+        ])
         .spawn();
 
     #[cfg(target_os = "macos")]
