@@ -371,9 +371,14 @@ pub async fn v2_download_attachment(
     std::fs::write(&target, &bytes).map_err(|e| format!("write: {e}"))?;
     eprintln!("[attachment] saved to: {}", target.display());
 
-    crate::imap::open_in_default_app_pub(&target);
+    // Shell plugin routes through ShellExecuteW on Windows — same as double-click.
+    use tauri_plugin_shell::ShellExt;
+    let path_str = target.to_str().ok_or_else(|| "non-UTF8 path".to_string())?;
+    if let Err(e) = app.shell().open(path_str, None) {
+        eprintln!("[attachment] open failed: {e}");
+    }
 
-    target.to_str().map(|s| s.to_string()).ok_or_else(|| "non-UTF8 path".into())
+    Ok(path_str.to_string())
 }
 
 /// Save an attachment to an explicit path chosen by the caller (JS passes the
