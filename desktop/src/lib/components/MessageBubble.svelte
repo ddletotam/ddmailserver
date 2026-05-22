@@ -2,7 +2,7 @@
   import { accountStore } from "../stores/accounts.svelte";
   import { permissionStore } from "../stores/permissions.svelte";
   import { themeStore } from "../stores/theme.svelte";
-  import { fetchMessageSource, downloadAttachment, saveAttachmentToPath } from "../api/imap";
+  import { fetchMessageSource, downloadAttachment, saveAttachmentToPath, openAttachmentWith } from "../api/imap";
   import { save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { formatDateTime, formatSize, hashColor } from "../utils/format";
   import { resolveDisplayContent, extractBlockedDomains, extractEmailDomains, type DisplayMode, type ContentPermissions } from "../utils/html";
@@ -170,7 +170,13 @@
 
   async function openInDefaultApp(att: Attachment) {
     attContextMenu = null;
-    await openAttachment(att);
+    const account = accountStore.activeAccount;
+    if (!account) return;
+    try {
+      await openAttachmentWith(account, message.folder, message.uid, att.index, att.filename);
+    } catch (e) {
+      console.error("open-with failed:", e);
+    }
   }
 
   const displayContent = $derived(resolveDisplayContent(message.text, message.html, displayMode));

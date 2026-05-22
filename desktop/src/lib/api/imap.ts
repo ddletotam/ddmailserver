@@ -24,6 +24,23 @@ export async function fetchMessageSource(
   });
 }
 
+/** Download attachment and show OS "Open with" dialog to choose the program. */
+export async function openAttachmentWith(
+  account: Account,
+  folder: string,
+  uid: number,
+  index: number,
+  filename: string,
+): Promise<void> {
+  return invoke<void>("v2_open_attachment_with", {
+    accountId: account.id,
+    folder,
+    uid,
+    index,
+    filename,
+  });
+}
+
 /** Save an attachment to an explicit path (from a save-file dialog); returns final path. */
 export async function saveAttachmentToPath(
   account: Account,

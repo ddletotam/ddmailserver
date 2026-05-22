@@ -381,6 +381,51 @@ pub async fn v2_download_attachment(
     Ok(path_str.to_string())
 }
 
+/// Download attachment and show the OS "Open with" dialog so the user can
+/// choose which program to open it with.
+#[tauri::command]
+pub async fn v2_open_attachment_with(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, ProviderRegistry>,
+    account_id: String,
+    folder: String,
+    uid: u32,
+    index: usize,
+    filename: String,
+) -> Result<(), String> {
+    use tauri::Manager;
+
+    let provider = get_provider(&registry, &account_id).await?;
+    let (bytes, _mime) = provider.fetch_attachment(&folder, uid, index).await?;
+
+    let dir = app.path().download_dir().map_err(|e| format!("download dir: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+    let decoded = decode_mime_header_value(&filename);
+    let safe = crate::imap::sanitize_filename_pub(&decoded);
+    let target = crate::imap::unique_path_pub(&dir, &safe);
+    std::fs::write(&target, &bytes).map_err(|e| format!("write: {e}"))?;
+
+    let path_str = target.to_string_lossy().to_string();
+    eprintln!("[attachment] open-with dialog for: {path_str}");
+
+    // Windows: rundll32 shell32.dll,OpenAs_RunDLL shows the "Open with" chooser.
+    // Other platforms: fall back to default app (no universal "open with" CLI).
+    #[cfg(target_os = "windows")]
+    std::process::Command::new("rundll32.exe")
+        .arg("shell32.dll,OpenAs_RunDLL")
+        .arg(&path_str)
+        .spawn()
+        .map_err(|e| format!("rundll32: {e}"))?;
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        use tauri_plugin_shell::ShellExt;
+        let _ = app.shell().open(&path_str, None);
+    }
+
+    Ok(())
+}
+
 /// Save an attachment to an explicit path chosen by the caller (JS passes the
 /// path from a native save-file dialog). Returns the final path on success.
 #[tauri::command]
