@@ -408,14 +408,17 @@ pub async fn v2_open_attachment_with(
     let path_str = target.to_string_lossy().to_string();
     eprintln!("[attachment] open-with dialog for: {path_str}");
 
-    // Windows: rundll32 shell32.dll,OpenAs_RunDLL shows the "Open with" chooser.
-    // Other platforms: fall back to default app (no universal "open with" CLI).
+    // Windows 10/11: openwith.exe is the built-in "How do you want to open
+    // this file?" dialog. More reliable than the deprecated rundll32 approach.
     #[cfg(target_os = "windows")]
-    std::process::Command::new("rundll32.exe")
-        .arg("shell32.dll,OpenAs_RunDLL")
-        .arg(&path_str)
-        .spawn()
-        .map_err(|e| format!("rundll32: {e}"))?;
+    {
+        let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        let openwith = format!("{sysroot}\\System32\\openwith.exe");
+        std::process::Command::new(&openwith)
+            .arg(&path_str)
+            .spawn()
+            .map_err(|e| format!("openwith.exe: {e}"))?;
+    }
 
     #[cfg(not(target_os = "windows"))]
     {
