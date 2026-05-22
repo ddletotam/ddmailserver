@@ -1022,51 +1022,46 @@ where
     String::from_utf8(body.to_vec()).map_err(|_| "Non-UTF8 source".into())
 }
 
-// ── Attachment download ──
+pub(crate) fn open_in_default_app_pub(path: &std::path::Path) {
+    open_in_default_app(path);
+}
 
-#[tauri::command]
-pub async fn download_attachment(
-    app: tauri::AppHandle,
-    host: String, port: u16, username: String, password: String, use_tls: bool,
-    folder: String, uid: u32, index: usize, filename: String,
-) -> Result<String, String> {
-    use tauri::Manager;
+pub(crate) fn sanitize_filename_pub(name: &str) -> String {
+    sanitize_filename(name)
+}
 
-    let raw = if use_tls {
-        let mut session = connect_tls(&host, port, &username, &password).await?;
-        let r = fetch_raw_message(&mut session, &folder, uid).await;
-        session.logout().await.ok();
-        r?
-    } else {
-        let mut session = connect_plain(&host, port, &username, &password).await?;
-        let r = fetch_raw_message(&mut session, &folder, uid).await;
-        session.logout().await.ok();
-        r?
-    };
-
-    let parsed = mailparse::parse_mail(&raw).map_err(|e| format!("parse mail: {e}"))?;
-    let bytes = find_attachment_bytes(&parsed, index, &mut 0)
-        .ok_or_else(|| format!("attachment {index} not found"))?;
-
-    let dir = app.path().download_dir().map_err(|e| format!("download dir: {e}"))?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
-
-    let safe = sanitize_filename(&filename);
-    let target = unique_path(&dir, &safe);
-    std::fs::write(&target, &bytes).map_err(|e| format!("write: {e}"))?;
-
-    open_in_default_app(&target);
-
-    target.to_str().map(|s| s.to_string()).ok_or_else(|| "non-UTF8 path".into())
+pub(crate) fn unique_path_pub(dir: &std::path::Path, filename: &str) -> std::path::PathBuf {
+    unique_path(dir, filename)
 }
 
 fn open_in_default_app(path: &std::path::Path) {
+    let path_str = path.to_string_lossy();
+    eprintln!("[attachment] opening: {path_str}");
+
     #[cfg(target_os = "windows")]
-    { let _ = std::process::Command::new("cmd").args(["/C", "start", "", &path.to_string_lossy()]).spawn(); }
+    let result = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &path_str])
+        .spawn();
+
     #[cfg(target_os = "macos")]
-    { let _ = std::process::Command::new("open").arg(path).spawn(); }
+    let result = std::process::Command::new("open").arg(path).spawn();
+
+    // On Linux prefer `xdg-open`. Detach by spawning it: if no default
+    // handler is registered, xdg-open opens its own MIME-association
+    // chooser (which is the "choose app" dialog the user expects when
+    // there's nothing set). If even that fails we fall back to `gio
+    // open` and finally just log the failure — there's nowhere good
+    // to surface it from this synchronous helper.
     #[cfg(target_os = "linux")]
-    { let _ = std::process::Command::new("xdg-open").arg(path).spawn(); }
+    let result = std::process::Command::new("xdg-open")
+        .arg(path)
+        .spawn()
+        .or_else(|_| std::process::Command::new("gio").args(["open", &path_str]).spawn());
+
+    match result {
+        Ok(_) => {}
+        Err(e) => eprintln!("[attachment] open failed: {e}"),
+    }
 }
 
 pub(crate) async fn fetch_raw_message<T>(
@@ -1084,19 +1079,25 @@ where
     Ok(body.to_vec())
 }
 
-fn find_attachment_bytes(part: &mailparse::ParsedMail, target: usize, idx: &mut usize) -> Option<Vec<u8>> {
+pub(crate) fn find_attachment(
+    part: &mailparse::ParsedMail,
+    target: usize,
+    idx: &mut usize,
+) -> Option<(Vec<u8>, String)> {
     if part.subparts.is_empty() {
         let disp = part.get_content_disposition();
         if matches!(disp.disposition, mailparse::DispositionType::Attachment) {
             if *idx == target {
-                return part.get_body_raw().ok();
+                let bytes = part.get_body_raw().ok()?;
+                let mime = part.ctype.mimetype.clone();
+                return Some((bytes, mime));
             }
             *idx += 1;
         }
         return None;
     }
     for sub in &part.subparts {
-        if let Some(b) = find_attachment_bytes(sub, target, idx) { return Some(b); }
+        if let Some(b) = find_attachment(sub, target, idx) { return Some(b); }
     }
     None
 }
