@@ -142,6 +142,7 @@ fn main() {
             commands::v2_blacklist_and_purge,
             commands::v2_fetch_message_source,
             commands::v2_download_attachment,
+            commands::v2_save_attachment_to_path,
             commands::v2_fetch_inline_part,
             commands::v2_fetch_identities,
             commands::v2_send_message,

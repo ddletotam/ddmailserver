@@ -24,6 +24,23 @@ export async function fetchMessageSource(
   });
 }
 
+/** Save an attachment to an explicit path (from a save-file dialog); returns final path. */
+export async function saveAttachmentToPath(
+  account: Account,
+  folder: string,
+  uid: number,
+  index: number,
+  savePath: string,
+): Promise<string> {
+  return invoke<string>("v2_save_attachment_to_path", {
+    accountId: account.id,
+    folder,
+    uid,
+    index,
+    savePath,
+  });
+}
+
 /** Download an attachment to the user's Downloads folder; returns absolute file path.
  *  Routes through the provider abstraction: native accounts hit the
  *  /messages/{id}/attachments/{index} HTTP endpoint, IMAP accounts pull the
