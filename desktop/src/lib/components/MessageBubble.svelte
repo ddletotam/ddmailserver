@@ -2,7 +2,8 @@
   import { accountStore } from "../stores/accounts.svelte";
   import { permissionStore } from "../stores/permissions.svelte";
   import { themeStore } from "../stores/theme.svelte";
-  import { fetchMessageSource, downloadAttachment } from "../api/imap";
+  import { fetchMessageSource, downloadAttachment, saveAttachmentToPath } from "../api/imap";
+  import { save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { formatDateTime, formatSize, hashColor } from "../utils/format";
   import { resolveDisplayContent, extractBlockedDomains, extractEmailDomains, type DisplayMode, type ContentPermissions } from "../utils/html";
   import { t } from "../i18n/index.svelte";
@@ -132,6 +133,8 @@
   }
 
   let downloadingIndex = $state<number | null>(null);
+  let attContextMenu = $state<{ x: number; y: number; att: Attachment } | null>(null);
+
   async function openAttachment(att: Attachment) {
     if (isPending) return;
     const account = accountStore.activeAccount;
@@ -146,10 +149,34 @@
     }
   }
 
+  function handleAttachmentContextMenu(e: MouseEvent, att: Attachment) {
+    e.preventDefault();
+    e.stopPropagation();
+    attContextMenu = { x: e.clientX, y: e.clientY, att };
+  }
+
+  async function saveAs(att: Attachment) {
+    attContextMenu = null;
+    const account = accountStore.activeAccount;
+    if (!account) return;
+    const path = await saveDialog({ defaultPath: att.filename });
+    if (!path) return;
+    try {
+      await saveAttachmentToPath(account, message.folder, message.uid, att.index, path);
+    } catch (e) {
+      console.error("attachment save-as failed:", e);
+    }
+  }
+
+  async function openInDefaultApp(att: Attachment) {
+    attContextMenu = null;
+    await openAttachment(att);
+  }
+
   const displayContent = $derived(resolveDisplayContent(message.text, message.html, displayMode));
 </script>
 
-<svelte:window onclick={closeContextMenu} />
+<svelte:window onclick={() => { closeContextMenu(); attContextMenu = null; }} />
 
 <div
   class="bubble-wrap"
@@ -206,6 +233,7 @@
             class:loading={downloadingIndex === att.index}
             disabled={isPending || (downloadingIndex !== null && downloadingIndex !== att.index)}
             onclick={() => openAttachment(att)}
+            oncontextmenu={(e) => handleAttachmentContextMenu(e, att)}
             title={att.filename}
           >
             <div class="att-icon">
@@ -317,6 +345,18 @@
         {/if}
       {/if}
     {/if}
+  </div>
+{/if}
+
+<!-- Attachment context menu -->
+{#if attContextMenu}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="ctx-menu att-ctx-menu"
+    style:left="{Math.min(attContextMenu.x, window.innerWidth - 200)}px"
+    style:top="{Math.min(attContextMenu.y, window.innerHeight - 90)}px"
+    onclick={(e) => e.stopPropagation()}>
+    <button onclick={() => saveAs(attContextMenu!.att)}>{t("att.saveAs")}</button>
+    <button onclick={() => openInDefaultApp(attContextMenu!.att)}>{t("att.openIn")}</button>
   </div>
 {/if}
 

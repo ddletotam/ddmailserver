@@ -25,6 +25,10 @@ export default {
   "chat.noResults": "No results",
   "chat.messages": "Messages",
 
+  // Attachment context menu
+  "att.saveAs": "Save as...",
+  "att.openIn": "Open in...",
+
   // Source modal
   "source.title": "Message source",
 

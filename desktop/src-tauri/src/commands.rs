@@ -376,6 +376,23 @@ pub async fn v2_download_attachment(
     target.to_str().map(|s| s.to_string()).ok_or_else(|| "non-UTF8 path".into())
 }
 
+/// Save an attachment to an explicit path chosen by the caller (JS passes the
+/// path from a native save-file dialog). Returns the final path on success.
+#[tauri::command]
+pub async fn v2_save_attachment_to_path(
+    registry: tauri::State<'_, ProviderRegistry>,
+    account_id: String,
+    folder: String,
+    uid: u32,
+    index: usize,
+    save_path: String,
+) -> Result<String, String> {
+    let provider = get_provider(&registry, &account_id).await?;
+    let (bytes, _mime) = provider.fetch_attachment(&folder, uid, index).await?;
+    std::fs::write(&save_path, &bytes).map_err(|e| format!("write: {e}"))?;
+    Ok(save_path)
+}
+
 fn decode_mime_header_value(s: &str) -> String {
     let fake = format!("X: {s}");
     match mailparse::parse_header(fake.as_bytes()) {
