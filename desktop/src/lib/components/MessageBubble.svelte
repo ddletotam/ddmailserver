@@ -140,12 +140,14 @@
     const account = accountStore.activeAccount;
     if (!account || downloadingIndex !== null) return;
     downloadingIndex = att.index;
+    document.body.style.cursor = "wait";
     try {
       await downloadAttachment(account, message.folder, message.uid, att.index, att.filename);
     } catch (e) {
       console.error("attachment download/open failed:", e);
     } finally {
       downloadingIndex = null;
+      document.body.style.cursor = "";
     }
   }
 
@@ -172,10 +174,13 @@
     attContextMenu = null;
     const account = accountStore.activeAccount;
     if (!account) return;
+    document.body.style.cursor = "wait";
     try {
       await openAttachmentWith(account, message.folder, message.uid, att.index, att.filename);
     } catch (e) {
       console.error("open-with failed:", e);
+    } finally {
+      document.body.style.cursor = "";
     }
   }
 
