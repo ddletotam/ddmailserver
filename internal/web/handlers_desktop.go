@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/parser"
 	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
@@ -307,6 +309,58 @@ func (s *Server) HandleDesktopMessagePart(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Cache-Control", "private, max-age=3600")
 	w.Header().Set("Content-Length", strconv.Itoa(len(att.Data)))
 	w.Write(att.Data)
+}
+
+// HandleDesktopAttachment streams the binary content of a non-inline
+// attachment by its index — the same index the client received from
+// HandleDesktopConversationMessages, which is the position in the
+// `attachments` rows ordered by id. The endpoint sets a Content-
+// Disposition so HTTP clients that follow the header get a sensible
+// default filename (Rust side overrides this anyway).
+func (s *Server) HandleDesktopAttachment(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		respondError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	msgID, err := strconv.ParseInt(mux.Vars(r)["id"], 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid message id")
+		return
+	}
+	index, err := strconv.Atoi(mux.Vars(r)["index"])
+	if err != nil || index < 0 {
+		respondError(w, http.StatusBadRequest, "invalid index")
+		return
+	}
+
+	msg, err := s.database.GetMessageByID(msgID)
+	if err != nil || msg.UserID != user.ID {
+		respondError(w, http.StatusNotFound, "message not found")
+		return
+	}
+
+	atts, err := s.database.GetAttachmentsByMessageID(msgID)
+	if err != nil || index >= len(atts) {
+		respondError(w, http.StatusNotFound, "attachment not found")
+		return
+	}
+	meta := atts[index]
+	full, err := s.database.GetAttachmentByID(meta.ID)
+	if err != nil || full == nil || len(full.Data) == 0 {
+		respondError(w, http.StatusNotFound, "attachment data missing")
+		return
+	}
+
+	w.Header().Set("Content-Type", full.ContentType)
+	w.Header().Set("Content-Length", strconv.Itoa(len(full.Data)))
+	// RFC 5987 encoding for non-ASCII filenames (e.g. Cyrillic). Mail
+	// attachments routinely have Russian names — encoding via the
+	// `filename*` param keeps them intact through any HTTP middleware.
+	displayName := parser.DecodeMIMEHeader(full.Filename)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename*=UTF-8''%s`, url.PathEscape(displayName)))
+	w.Write(full.Data)
 }
 
 // HandleDesktopSetFlags updates flags on messages.
@@ -1332,7 +1386,7 @@ func (s *Server) HandleDesktopConversationMessages(w http.ResponseWriter, r *htt
 					continue
 				}
 				atts = append(atts, DesktopAttachment{
-					Filename: a.Filename,
+					Filename: parser.DecodeMIMEHeader(a.Filename),
 					MimeType: a.ContentType,
 					Size:     a.Size,
 					Index:    i,

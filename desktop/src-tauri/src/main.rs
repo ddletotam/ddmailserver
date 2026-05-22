@@ -59,6 +59,19 @@ fn main() {
     env_logger::init();
 
     tauri::Builder::default()
+        // Single-instance guard: a second `ddmail` launch hands its CLI
+        // args to the running process and exits. We use that signal to
+        // raise/focus the existing main window so the user gets the
+        // familiar "click again to bring it forward" behaviour instead
+        // of a duplicate WebView, duplicate IMAP sessions, and racing
+        // reminder schedulers.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(
             // Default builder has no state flags set, so the plugin loads
             // but doesn't persist anything. Enable the full set: position,
@@ -105,7 +118,6 @@ fn main() {
             imap::set_flags,
             imap::set_flags_batch,
             imap::fetch_message_source,
-            imap::download_attachment,
             imap::fetch_identities,
             imap::start_watching,
             smtp::send_message,
@@ -129,6 +141,7 @@ fn main() {
             commands::v2_mark_spam_by_domain,
             commands::v2_blacklist_and_purge,
             commands::v2_fetch_message_source,
+            commands::v2_download_attachment,
             commands::v2_fetch_inline_part,
             commands::v2_fetch_identities,
             commands::v2_send_message,

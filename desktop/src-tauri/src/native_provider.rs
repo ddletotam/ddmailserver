@@ -329,6 +329,31 @@ impl MailProvider for NativeProvider {
             .map_err(|e| format!("Read body: {e}"))
     }
 
+    async fn fetch_attachment(
+        &self,
+        _folder: &str,
+        uid: u32,
+        index: usize,
+    ) -> Result<(Vec<u8>, String), String> {
+        // `uid` here is messages.id in native mode (see comment on
+        // fetch_message_source).
+        let url = self.api_url(&format!("/messages/{uid}/attachments/{index}"));
+        let resp = self
+            .send_authed(|http, token| http.get(&url).bearer_auth(token))
+            .await?;
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+        let mime = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.split(';').next().unwrap_or("").trim().to_string())
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        let bytes = resp.bytes().await.map_err(|e| format!("read: {e}"))?;
+        Ok((bytes.to_vec(), mime))
+    }
+
     async fn fetch_identities(&self) -> Result<Vec<Identity>, String> {
         self.get("/identities").await
     }

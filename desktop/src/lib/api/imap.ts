@@ -25,8 +25,9 @@ export async function fetchMessageSource(
 }
 
 /** Download an attachment to the user's Downloads folder; returns absolute file path.
- *  NOTE: download_attachment stays on v1 — it does MIME parsing locally which
- *  the provider abstraction doesn't handle yet. */
+ *  Routes through the provider abstraction: native accounts hit the
+ *  /messages/{id}/attachments/{index} HTTP endpoint, IMAP accounts pull the
+ *  raw message and extract via mailparse. */
 export async function downloadAttachment(
   account: Account,
   folder: string,
@@ -34,8 +35,8 @@ export async function downloadAttachment(
   index: number,
   filename: string,
 ): Promise<string> {
-  return invoke<string>("download_attachment", {
-    ...imapArgs(account),
+  return invoke<string>("v2_download_attachment", {
+    accountId: account.id,
     folder,
     uid,
     index,

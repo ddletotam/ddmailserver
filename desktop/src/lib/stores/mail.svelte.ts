@@ -45,6 +45,12 @@ let loadingMessages = $state(false);
 let error = $state<string | null>(null);
 let pinnedIds = $state<Set<string>>(loadPinned());
 
+// Multi-select for bulk delete. Anchor is the row Shift+click uses as the
+// other end of the range. Cleared whenever the user makes a normal click,
+// hits Esc, or the list reloads.
+let selectedIds = $state<Set<string>>(new Set());
+let selectionAnchor = $state<string | null>(null);
+
 // Connection
 let connectionState = $state<"disconnected" | "connecting" | "connected" | "error">("disconnected");
 let connectionError = $state<string | null>(null);
@@ -253,6 +259,84 @@ export const mailStore = {
 
   isPinned(id: string): boolean {
     return pinnedIds.has(id);
+  },
+
+  // ── Selection (multi-delete) ──
+  get selectedIds(): Set<string> {
+    return selectedIds;
+  },
+  isSelected(id: string): boolean {
+    return selectedIds.has(id);
+  },
+  toggleSelected(id: string) {
+    const next = new Set(selectedIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    selectedIds = next;
+    selectionAnchor = id;
+  },
+  /** Shift+click range. Selects every row between the anchor and `id`,
+   *  inclusive, in current sorted order. Anchor stays put so the user
+   *  can extend the range further. */
+  selectRangeTo(id: string) {
+    const list = getSortedConversations();
+    if (!selectionAnchor) {
+      this.toggleSelected(id);
+      return;
+    }
+    const a = list.findIndex((c) => c.id === selectionAnchor);
+    const b = list.findIndex((c) => c.id === id);
+    if (a < 0 || b < 0) {
+      this.toggleSelected(id);
+      return;
+    }
+    const [lo, hi] = a < b ? [a, b] : [b, a];
+    const next = new Set(selectedIds);
+    for (let i = lo; i <= hi; i++) next.add(list[i].id);
+    selectedIds = next;
+  },
+  clearSelection() {
+    if (selectedIds.size === 0) return;
+    selectedIds = new Set();
+    selectionAnchor = null;
+  },
+  /** Bulk-delete every selected conversation in one server round-trip. */
+  async deleteSelected(account: Account) {
+    if (selectedIds.size === 0) return;
+    const ids = [...selectedIds];
+    const refs: MessageRef[] = [];
+    const convs = conversations.filter((c) => selectedIds.has(c.id));
+    for (const conv of convs) refs.push(...conv.messages);
+    if (refs.length === 0) {
+      selectedIds = new Set();
+      selectionAnchor = null;
+      return;
+    }
+    const wasActiveSelected = activeConversationId !== null && selectedIds.has(activeConversationId);
+    try {
+      await invoke("v2_delete_messages", { accountId: account.id, messages: refs });
+    } catch (e) {
+      console.error("[mail] bulk delete failed:", e);
+      throw e;
+    }
+    conversations = conversations.filter((c) => !selectedIds.has(c.id));
+    if (pinnedIds.size > 0) {
+      const nextPinned = new Set(pinnedIds);
+      for (const id of ids) nextPinned.delete(id);
+      pinnedIds = nextPinned;
+      savePinned(pinnedIds);
+    }
+    selectedIds = new Set();
+    selectionAnchor = null;
+    if (wasActiveSelected) {
+      const next = conversations[0]?.id ?? null;
+      if (next) await this.openConversation(account, next);
+      else {
+        activeConversationId = null;
+        conversationMessages = [];
+        draftMessage = null;
+      }
+    }
   },
 
   togglePin(id: string) {

@@ -102,6 +102,16 @@ pub trait MailProvider: Send + Sync {
         uid: u32,
     ) -> Result<Vec<u8>, String>;
 
+    /// Fetch one non-inline attachment by index. Returns the raw bytes and
+    /// a best-effort MIME type — the caller is responsible for choosing
+    /// a filename and writing to disk.
+    async fn fetch_attachment(
+        &self,
+        folder: &str,
+        uid: u32,
+        index: usize,
+    ) -> Result<(Vec<u8>, String), String>;
+
     /// Fetch user identities (email aliases).
     async fn fetch_identities(&self) -> Result<Vec<Identity>, String>;
 

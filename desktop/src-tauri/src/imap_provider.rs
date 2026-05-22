@@ -156,6 +156,21 @@ impl MailProvider for ImapProvider {
         })
     }
 
+    async fn fetch_attachment(
+        &self,
+        folder: &str,
+        uid: u32,
+        index: usize,
+    ) -> Result<(Vec<u8>, String), String> {
+        let raw = with_session!(self, |session| {
+            imap::fetch_raw_message(&mut session, folder, uid).await
+        })?;
+        let parsed = mailparse::parse_mail(&raw).map_err(|e| format!("parse mail: {e}"))?;
+        let (bytes, mime) = imap::find_attachment(&parsed, index, &mut 0)
+            .ok_or_else(|| format!("attachment {index} not found"))?;
+        Ok((bytes, mime))
+    }
+
     async fn fetch_identities(&self) -> Result<Vec<Identity>, String> {
         with_session!(self, |session| {
             imap::fetch_identities_impl(&mut session).await

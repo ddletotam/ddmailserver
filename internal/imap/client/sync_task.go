@@ -394,21 +394,41 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 			return false, !rescue, nil
 		}
 		// Inbox path on an already-known row: sync flags from the
-		// remote side and — crucially — drop is_spam if the upstream
-		// is now showing the message in INBOX. Without this branch
-		// the user moving a message out of Junk on iCloud / Yandex /
-		// etc. would never reach us: local is_spam=true keeps it
-		// hidden from the conversation list forever.
+		// remote side AND decide is_spam based on the user's current
+		// spam rules. Earlier this branch unconditionally downgraded
+		// is_spam=false (to handle "user moved out of upstream Junk
+		// back into INBOX") — which silently killed blacklisting:
+		// the next sync after a Spam-button click would resurrect
+		// every previously-blocked message because it sat in upstream
+		// INBOX. We now re-evaluate the rule on every dedup hit so
+		// blacklist verdicts stick across re-syncs and whitelist /
+		// no-rule cases still rescue.
+		fromAddrCheck := parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.From))
+		ruleAction, ruleMatched, ruleErr := t.database.CheckSpamRules(t.account.UserID, fromAddrCheck)
+		if ruleErr != nil {
+			log.Printf("IMAP sync: check spam rules on existing %s: %v", messageID, ruleErr)
+		}
+		downgrade := ruleAction != "spam" // spam-rule keeps is_spam=true; allow / no-rule lets remote INBOX rescue
 		if err := t.database.RefreshExistingFromRemote(
 			t.account.UserID, messageID, imapMsg.Uid, remoteFolderName,
 			hasFlag(imapMsg.Flags, imap.SeenFlag),
 			hasFlag(imapMsg.Flags, imap.FlaggedFlag),
 			hasFlag(imapMsg.Flags, imap.AnsweredFlag),
-			true, // downgradeSpam: remote-INBOX rescues from prior spam verdict
+			downgrade,
 		); err != nil {
 			log.Printf("IMAP sync: refresh existing %s failed: %v", messageID, err)
 		}
-		return false, false, nil
+		if !downgrade && ruleMatched != nil {
+			// Make sure the row is actually flagged spam and that
+			// spam_rule_id points at the rule. Cheap UPDATE; if the
+			// row is already in this state, RowsAffected is 0.
+			if err := t.database.ReclassifyMessageFromRemoteSpam(
+				t.account.UserID, messageID, imapMsg.Uid, remoteFolderName, true,
+			); err != nil {
+				log.Printf("IMAP sync: re-flag spam on existing %s: %v", messageID, err)
+			}
+		}
+		return false, ruleAction == "spam", nil
 	}
 	var body, bodyHTML string
 	var attachments []parser.ParsedAttachment

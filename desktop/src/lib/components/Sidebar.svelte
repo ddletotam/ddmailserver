@@ -190,6 +190,52 @@
     }
   }
 
+  // Click router: Ctrl/Cmd+click toggles selection (Telegram-style bulk
+  // mode); Shift+click extends to a range; plain click opens — but if
+  // any rows are already selected, plain click toggles too so the user
+  // doesn't have to keep holding Ctrl.
+  function handleConvClick(e: MouseEvent, id: string) {
+    if (e.shiftKey) {
+      e.preventDefault();
+      mailStore.selectRangeTo(id);
+      return;
+    }
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      mailStore.toggleSelected(id);
+      return;
+    }
+    if (mailStore.selectedIds.size > 0) {
+      e.preventDefault();
+      mailStore.toggleSelected(id);
+      return;
+    }
+    const account = accountStore.activeAccount;
+    if (account) mailStore.openConversation(account, id);
+  }
+
+  async function handleBulkDelete() {
+    const n = mailStore.selectedIds.size;
+    if (n === 0) return;
+    if (!confirm(`Удалить ${n} ${ruPlural(n, ["диалог", "диалога", "диалогов"])}?`)) return;
+    const account = accountStore.activeAccount;
+    if (!account) return;
+    try {
+      await mailStore.deleteSelected(account);
+    } catch (err) {
+      alert(`Не удалось удалить: ${err}`);
+    }
+  }
+
+  function ruPlural(n: number, forms: [string, string, string]): string {
+    const mod10 = n % 10;
+    const mod100 = n % 100;
+    if (mod100 >= 11 && mod100 <= 14) return forms[2];
+    if (mod10 === 1) return forms[0];
+    if (mod10 >= 2 && mod10 <= 4) return forms[1];
+    return forms[2];
+  }
+
   // Keyboard navigation for the conversation list.
   // - ArrowUp / ArrowDown: move selection (also opens the conv so the right
   //   pane stays in sync — same UX as the Telegram desktop client).
@@ -208,6 +254,13 @@
 
   async function handleListShortcut(e: KeyboardEvent) {
     if (isEditableTarget(e.target)) return;
+    // Esc clears the multi-select even when focus is on something
+    // ignorable like the body — quick way out of selection mode.
+    if (e.key === "Escape" && mailStore.selectedIds.size > 0) {
+      e.preventDefault();
+      mailStore.clearSelection();
+      return;
+    }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     const list = mailStore.conversations;
     if (list.length === 0) return;
@@ -305,6 +358,14 @@
     </div>
   </div>
 
+  {#if mailStore.selectedIds.size > 0}
+    <div class="selection-bar">
+      <span class="sel-count">Выбрано: {mailStore.selectedIds.size}</span>
+      <button class="sel-btn danger" onclick={handleBulkDelete}>Удалить</button>
+      <button class="sel-btn" onclick={() => mailStore.clearSelection()}>Отмена</button>
+    </div>
+  {/if}
+
   <!-- Conversations list -->
   <div class="conversation-list">
     {#if mailStore.loading && mailStore.conversations.length === 0}
@@ -320,10 +381,8 @@
           conversation={conv}
           active={mailStore.activeConversationId === conv.id}
           pinned={mailStore.isPinned(conv.id)}
-          onclick={() => {
-            const account = accountStore.activeAccount;
-            if (account) mailStore.openConversation(account, conv.id);
-          }}
+          selected={mailStore.isSelected(conv.id)}
+          onclick={(e) => handleConvClick(e, conv.id)}
           oncontextmenu={(e) => handleContextMenu(e, conv.id)}
         />
       {/each}
@@ -496,4 +555,35 @@
     background: var(--border-color);
     margin: 4px 0;
   }
+
+  .selection-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: color-mix(in srgb, var(--bg-active) 12%, var(--bg-sidebar));
+    border-bottom: 1px solid var(--border-color);
+    flex-shrink: 0;
+  }
+  .sel-count {
+    font-size: var(--font-size-sm);
+    color: var(--text-primary);
+    font-weight: 500;
+    flex: 1;
+  }
+  .sel-btn {
+    padding: 4px 12px;
+    border: none;
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: var(--font-size-sm);
+    cursor: pointer;
+  }
+  .sel-btn:hover { background: var(--bg-hover); }
+  .sel-btn.danger {
+    background: #e8616a;
+    color: white;
+  }
+  .sel-btn.danger:hover { background: #d44a52; }
 </style>

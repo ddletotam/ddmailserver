@@ -341,6 +341,50 @@ pub async fn v2_fetch_message_source(
 }
 
 #[tauri::command]
+pub async fn v2_download_attachment(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, ProviderRegistry>,
+    account_id: String,
+    folder: String,
+    uid: u32,
+    index: usize,
+    filename: String,
+) -> Result<String, String> {
+    use tauri::Manager;
+
+    eprintln!("[attachment] download requested: account={account_id} folder={folder} uid={uid} index={index} filename={filename}");
+
+    let provider = get_provider(&registry, &account_id).await?;
+    let (bytes, _mime) = provider.fetch_attachment(&folder, uid, index).await?;
+    eprintln!("[attachment] fetched: {} bytes", bytes.len());
+
+    let dir = app.path().download_dir().map_err(|e| format!("download dir: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    // Filename may arrive as an RFC 2047 encoded word (=?charset?B?…?=) when
+    // the server forwarded the raw MIME `name=` parameter without decoding.
+    // Run it through mailparse's header decoder before sanitising — keeps
+    // Cyrillic / non-ASCII names readable on disk.
+    let decoded = decode_mime_header_value(&filename);
+    let safe = crate::imap::sanitize_filename_pub(&decoded);
+    let target = crate::imap::unique_path_pub(&dir, &safe);
+    std::fs::write(&target, &bytes).map_err(|e| format!("write: {e}"))?;
+    eprintln!("[attachment] saved to: {}", target.display());
+
+    crate::imap::open_in_default_app_pub(&target);
+
+    target.to_str().map(|s| s.to_string()).ok_or_else(|| "non-UTF8 path".into())
+}
+
+fn decode_mime_header_value(s: &str) -> String {
+    let fake = format!("X: {s}");
+    match mailparse::parse_header(fake.as_bytes()) {
+        Ok((h, _)) => h.get_value(),
+        Err(_) => s.to_string(),
+    }
+}
+
+#[tauri::command]
 pub async fn v2_fetch_identities(
     registry: tauri::State<'_, ProviderRegistry>,
     cache: tauri::State<'_, std::sync::Arc<Cache>>,

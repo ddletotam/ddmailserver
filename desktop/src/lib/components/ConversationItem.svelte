@@ -8,10 +8,11 @@
     conversation: Conversation;
     active: boolean;
     pinned: boolean;
-    onclick: () => void;
+    selected?: boolean;
+    onclick: (e: MouseEvent) => void;
     oncontextmenu: (e: MouseEvent) => void;
   }
-  let { conversation, active, pinned, onclick, oncontextmenu }: Props = $props();
+  let { conversation, active, pinned, selected = false, onclick, oncontextmenu }: Props = $props();
 
   const c = $derived(conversation);
   const cp = $derived(c.counterparts[0]);
@@ -29,6 +30,7 @@
 <button
   class="conv-item"
   class:active
+  class:selected
   class:unread={c.unread_count > 0}
   style:--identity-color={identityColor}
   title={tooltip}
@@ -99,6 +101,12 @@
   .conv-item:not(.active):hover,
   :global(html.dark) .conv-item:not(.active):hover { background: var(--bg-hover); }
   .conv-item.active { background: var(--bg-active); }
+  .conv-item.selected:not(.active) {
+    background: color-mix(in srgb, var(--bg-active) 22%, transparent);
+  }
+  .conv-item.selected:not(.active):hover {
+    background: color-mix(in srgb, var(--bg-active) 30%, transparent);
+  }
   .conv-item.active .label,
   .conv-item.active .subject,
   .conv-item.active .date { color: var(--text-on-active); }
