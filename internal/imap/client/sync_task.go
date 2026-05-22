@@ -355,6 +355,9 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 		log.Printf("IMAP sync: Skipping message UID %d - empty envelope", imapMsg.Uid)
 		return false, false, nil
 	}
+	if hasFlag(imapMsg.Flags, imap.DeletedFlag) {
+		return false, false, nil
+	}
 	messageID := imapMsg.Envelope.MessageId
 	if messageID == "" {
 		h := sha256.New()
