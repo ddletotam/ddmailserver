@@ -340,6 +340,41 @@ pub async fn v2_fetch_message_source(
         .await
 }
 
+/// Resolve the local path for an attachment: return cached copy from Downloads
+/// if it already exists; otherwise fetch from the provider and save it.
+/// This avoids re-downloading on every open/open-with action.
+async fn resolve_attachment_path(
+    app: &tauri::AppHandle,
+    registry: &tauri::State<'_, ProviderRegistry>,
+    account_id: &str,
+    folder: &str,
+    uid: u32,
+    index: usize,
+    filename: &str,
+) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+
+    let dir = app.path().download_dir().map_err(|e| format!("download dir: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    // Filename may arrive as an RFC 2047 encoded word (=?charset?B?…?=).
+    let decoded = decode_mime_header_value(filename);
+    let safe = crate::imap::sanitize_filename_pub(&decoded);
+    let cached = dir.join(&safe);
+
+    if cached.exists() {
+        eprintln!("[attachment] cache hit: {}", cached.display());
+        return Ok(cached);
+    }
+
+    let provider = get_provider(registry, account_id).await?;
+    let (bytes, _mime) = provider.fetch_attachment(folder, uid, index).await?;
+    eprintln!("[attachment] fetched: {} bytes", bytes.len());
+    std::fs::write(&cached, &bytes).map_err(|e| format!("write: {e}"))?;
+    eprintln!("[attachment] saved to: {}", cached.display());
+    Ok(cached)
+}
+
 #[tauri::command]
 pub async fn v2_download_attachment(
     app: tauri::AppHandle,
@@ -350,34 +385,13 @@ pub async fn v2_download_attachment(
     index: usize,
     filename: String,
 ) -> Result<String, String> {
-    use tauri::Manager;
-
-    eprintln!("[attachment] download requested: account={account_id} folder={folder} uid={uid} index={index} filename={filename}");
-
-    let provider = get_provider(&registry, &account_id).await?;
-    let (bytes, _mime) = provider.fetch_attachment(&folder, uid, index).await?;
-    eprintln!("[attachment] fetched: {} bytes", bytes.len());
-
-    let dir = app.path().download_dir().map_err(|e| format!("download dir: {e}"))?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
-
-    // Filename may arrive as an RFC 2047 encoded word (=?charset?B?…?=) when
-    // the server forwarded the raw MIME `name=` parameter without decoding.
-    // Run it through mailparse's header decoder before sanitising — keeps
-    // Cyrillic / non-ASCII names readable on disk.
-    let decoded = decode_mime_header_value(&filename);
-    let safe = crate::imap::sanitize_filename_pub(&decoded);
-    let target = crate::imap::unique_path_pub(&dir, &safe);
-    std::fs::write(&target, &bytes).map_err(|e| format!("write: {e}"))?;
-    eprintln!("[attachment] saved to: {}", target.display());
-
-    // Shell plugin routes through ShellExecuteW on Windows — same as double-click.
-    use tauri_plugin_shell::ShellExt;
+    let target = resolve_attachment_path(&app, &registry, &account_id, &folder, uid, index, &filename).await?;
     let path_str = target.to_str().ok_or_else(|| "non-UTF8 path".to_string())?;
+
+    use tauri_plugin_shell::ShellExt;
     if let Err(e) = app.shell().open(path_str, None) {
         eprintln!("[attachment] open failed: {e}");
     }
-
     Ok(path_str.to_string())
 }
 
@@ -393,28 +407,15 @@ pub async fn v2_open_attachment_with(
     index: usize,
     filename: String,
 ) -> Result<(), String> {
-    use tauri::Manager;
-
-    let provider = get_provider(&registry, &account_id).await?;
-    let (bytes, _mime) = provider.fetch_attachment(&folder, uid, index).await?;
-
-    let dir = app.path().download_dir().map_err(|e| format!("download dir: {e}"))?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
-    let decoded = decode_mime_header_value(&filename);
-    let safe = crate::imap::sanitize_filename_pub(&decoded);
-    let target = crate::imap::unique_path_pub(&dir, &safe);
-    std::fs::write(&target, &bytes).map_err(|e| format!("write: {e}"))?;
-
+    let target = resolve_attachment_path(&app, &registry, &account_id, &folder, uid, index, &filename).await?;
     let path_str = target.to_string_lossy().to_string();
     eprintln!("[attachment] open-with dialog for: {path_str}");
 
-    // Windows 10/11: openwith.exe is the built-in "How do you want to open
-    // this file?" dialog. More reliable than the deprecated rundll32 approach.
+    // Windows 10/11: openwith.exe is the built-in "How do you want to open this file?" dialog.
     #[cfg(target_os = "windows")]
     {
         let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
-        let openwith = format!("{sysroot}\\System32\\openwith.exe");
-        std::process::Command::new(&openwith)
+        std::process::Command::new(format!("{sysroot}\\System32\\openwith.exe"))
             .arg(&path_str)
             .spawn()
             .map_err(|e| format!("openwith.exe: {e}"))?;
