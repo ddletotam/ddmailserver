@@ -5,7 +5,7 @@
   import { fetchMessageSource, downloadAttachment, saveAttachmentToPath, openAttachmentWith } from "../api/imap";
   import { save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { formatDateTime, formatSize, hashColor } from "../utils/format";
-  import { resolveDisplayContent, extractBlockedDomains, extractEmailDomains, type DisplayMode, type ContentPermissions } from "../utils/html";
+  import { resolveDisplayContent, extractBlockedDomains, extractEmailDomains, stripQuotedHTML, stripQuotedText, MIN_USEFUL_STRIPPED_LEN, type DisplayMode, type ContentPermissions } from "../utils/html";
   import { t } from "../i18n/index.svelte";
   import SandboxedEmail from "./SandboxedEmail.svelte";
   import type { MessageBody, Attachment } from "../types/mail";
@@ -185,6 +185,33 @@
   }
 
   const displayContent = $derived(resolveDisplayContent(message.text, message.html, displayMode));
+
+  // Quoted-history stripping. We strip by default; the user can expand to
+  // see the full thread via the "Показать переписку" toggle. Bail out and
+  // show the original if stripping leaves almost no content — usually a
+  // misdetection (the whole body was a quote, or the heuristic over-cut).
+  let showFull = $state(false);
+  const stripped = $derived.by(() => {
+    if (displayContent.type === "html") {
+      const r = stripQuotedHTML(displayContent.content);
+      if (!r.cut) return null;
+      const textLen = r.stripped.replace(/<[^>]+>/g, "").trim().length;
+      if (textLen < MIN_USEFUL_STRIPPED_LEN) return null;
+      return r;
+    }
+    if (displayContent.type === "text") {
+      const r = stripQuotedText(displayContent.content);
+      if (!r.cut) return null;
+      if (r.stripped.trim().length < MIN_USEFUL_STRIPPED_LEN) return null;
+      return r;
+    }
+    return null;
+  });
+  const renderContent = $derived(
+    stripped && !showFull
+      ? { type: displayContent.type, content: stripped.stripped }
+      : displayContent,
+  );
 </script>
 
 <svelte:window onclick={() => { closeContextMenu(); attContextMenu = null; }} />
@@ -222,17 +249,23 @@
       </div>
     {/if}
 
-    {#if displayContent.type === "html"}
+    {#if renderContent.type === "html"}
       <SandboxedEmail
-        html={displayContent.content}
+        html={renderContent.content}
         isDark={themeStore.isDark}
         permissions={contentPermissions}
         messageUid={message.uid}
       />
-    {:else if displayContent.type === "text"}
-      <div class="text-body text-plain">{displayContent.content}</div>
+    {:else if renderContent.type === "text"}
+      <div class="text-body text-plain">{renderContent.content}</div>
     {:else}
       <div class="text-body empty">{t("empty")}</div>
+    {/if}
+
+    {#if stripped}
+      <button type="button" class="quote-toggle" onclick={(e) => { e.stopPropagation(); showFull = !showFull; }}>
+        {showFull ? "Скрыть переписку" : "Показать переписку"}
+      </button>
     {/if}
 
     {#if message.attachments.length > 0}
@@ -582,4 +615,18 @@
     white-space: pre-wrap; word-break: break-all;
     color: var(--text-primary); background: var(--bg-secondary);
   }
+  .quote-toggle {
+    align-self: flex-start;
+    margin-top: 6px;
+    padding: 2px 8px;
+    border: none;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: var(--font-size-xs);
+    cursor: pointer;
+  }
+  .quote-toggle:hover { background: var(--bg-hover); color: var(--text-primary); }
+  .bubble.outgoing .quote-toggle { color: color-mix(in srgb, var(--text-primary) 60%, transparent); }
+  .bubble.outgoing .quote-toggle:hover { background: color-mix(in srgb, var(--text-primary) 8%, transparent); }
 </style>
