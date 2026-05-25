@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/emersion/go-imap"
+	"github.com/yourusername/mailserver/internal/calendar"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/parser"
@@ -612,6 +613,27 @@ buildMessage:
 		msg.Attachments = attachmentCount
 		t.database.UpdateMessageAttachmentCount(msg.ID, attachmentCount)
 	}
+
+	// iTIP: if this message is purely a calendar invite (REQUEST/CANCEL/REPLY/
+	// COUNTER), route it into the calendar pipeline and hard-delete the row.
+	// We use the account's primary email as the "recipient identity" — the
+	// per-folder sync doesn't track which alias the original recipient used,
+	// and external Sent/Drafts pulls would never arrive at us anyway.
+	if parsed != nil && t.account.Email != "" {
+		identities := append([]string{t.account.Email}, t.account.GetAliases()...)
+		handler := calendar.NewIncomingHandler(t.database)
+		if processed, perr := handler.ProcessAndDispatch(parsed, t.account.UserID, t.account.ID, identities); perr != nil {
+			log.Printf("IMAP sync: ICS dispatch on msg %d: %v", msg.ID, perr)
+		} else if processed {
+			if delErr := t.database.HardDeleteMessage(msg.ID); delErr != nil {
+				log.Printf("IMAP sync: failed to drop iTIP-consumed msg %d: %v", msg.ID, delErr)
+			} else {
+				log.Printf("IMAP sync: msg %d consumed by iTIP handler, deleted", msg.ID)
+				return false, isSpam, nil
+			}
+		}
+	}
+
 	return true, isSpam, nil
 }
 

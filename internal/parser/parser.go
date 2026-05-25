@@ -240,6 +240,23 @@ func (p *Parser) handleInlinePart(h *gomail.InlineHeader, body io.Reader, msg *P
 		if msg.BodyHTML == "" {
 			msg.BodyHTML = decodedBody
 		}
+	case strings.HasPrefix(contentType, "text/calendar"),
+		strings.HasPrefix(contentType, "application/ics"):
+		// Inline iTIP body (Outlook/Yandex etc. send REQUEST/CANCEL this way
+		// in multipart/alternative, no Content-Disposition: attachment).
+		// Surface as a synthetic attachment so the calendar pipeline can
+		// pick it up via msg.Attachments regardless of disposition.
+		filename := params["name"]
+		if filename == "" {
+			filename = "invite.ics"
+		}
+		msg.Attachments = append(msg.Attachments, ParsedAttachment{
+			Filename:    filename,
+			ContentType: contentType,
+			Size:        int64(len(bodyBytes)),
+			Data:        bodyBytes,
+			IsInline:    true,
+		})
 	}
 
 	return nil
