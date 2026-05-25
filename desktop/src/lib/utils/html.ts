@@ -289,6 +289,150 @@ export function extractEmailDomains(html: string): EmailDomains {
   };
 }
 
+// ── Quoted-history stripping ──
+//
+// Reply emails carry the previous correspondence as a quoted block inside
+// the body. In a chat-bubble UI that's redundant — the prior messages are
+// already their own bubbles. We try to detect the quote boundary and cut
+// from there to the end, leaving just the new reply. If the result looks
+// suspiciously empty (whole body was quotation, or detection misfired) the
+// caller falls back to the original.
+
+const QUOTE_CONTAINER_SELECTORS = [
+  "blockquote",
+  // Gmail
+  ".gmail_quote", ".gmail_attr",
+  // Yahoo
+  ".yahoo_quoted",
+  // Outlook desktop / OWA / Outlook 365
+  ".OutlookMessageHeader",
+  "[id^='divRpl']",
+  "[id^='x_divRpl']",
+  // Yandex Mail ("Предыдущая переписка")
+  ".ya-q-block", ".js-helper-bar", "[data-zone-name='lastMessage']",
+  // ProtonMail
+  ".protonmail_quote",
+  // Apple Mail (signature/attribution lines wrap in this on some versions)
+  ".AppleMailSignature",
+  // Generic catch-alls
+  "[class*='quote' i]:not(:has(blockquote))",
+];
+
+const QUOTE_TEXT_HEADERS = [
+  // English: "On <date>, <name> wrote:"
+  /^[\s>]*on\b.*\bwrote:?\s*$/i,
+  // English: "From: <addr>" Outlook-style attribution
+  /^[\s>]*from:\s*.+/i,
+  // Russian: "В <date> <name> писал(а):"
+  /^[\s>]*в\s+.+(писал[а]?|написал[а]?):?\s*$/i,
+  // Russian Yandex marker we've seen
+  /^[\s>]*предыдущая переписка\s*$/i,
+  // "------ Original Message ------" / "--- Пересланное сообщение ---"
+  /^-{2,}\s*(original message|forwarded message|пересланное сообщение|исходное сообщение)\s*-{2,}\s*$/i,
+];
+
+/** Strip quoted history from an HTML email body. Returns the stripped HTML
+ *  AND a boolean indicating whether anything was actually cut. */
+export function stripQuotedHTML(html: string): { stripped: string; cut: boolean } {
+  if (!html) return { stripped: html, cut: false };
+  let doc: Document;
+  try {
+    doc = new DOMParser().parseFromString(html, "text/html");
+  } catch {
+    return { stripped: html, cut: false };
+  }
+  if (!doc.body) return { stripped: html, cut: false };
+
+  let cut = false;
+
+  // Phase 1: known quote containers — remove the element AND everything
+  // after it in document order. The "everything after" is the important
+  // part: clients often put the attribution line ("On <date> wrote:")
+  // BEFORE the blockquote as a separate <p>, and we want that gone too.
+  for (const sel of QUOTE_CONTAINER_SELECTORS) {
+    const el = doc.body.querySelector(sel);
+    if (!el) continue;
+    removeFromElementOnward(el);
+    cut = true;
+    break;
+  }
+
+  // Phase 2: text-based attribution headers, walked top-to-bottom across
+  // text nodes. If we find one, drop everything from its parent onward.
+  if (!cut) {
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      const t = (node.nodeValue ?? "").trim();
+      if (!t) continue;
+      if (QUOTE_TEXT_HEADERS.some((re) => re.test(t))) {
+        // Find the topmost block-level ancestor inside body so we drop the
+        // whole attribution line, not just the text node.
+        let anchor: Element | null = node.parentElement;
+        while (anchor && anchor.parentElement && anchor.parentElement !== doc.body) {
+          anchor = anchor.parentElement;
+        }
+        if (anchor) {
+          removeFromElementOnward(anchor);
+          cut = true;
+        }
+        break;
+      }
+    }
+  }
+
+  if (!cut) return { stripped: html, cut: false };
+  return { stripped: doc.body.innerHTML, cut: true };
+}
+
+function removeFromElementOnward(el: Element) {
+  let cursor: Element | null = el;
+  while (cursor) {
+    const next: Element | null = cursor.nextElementSibling;
+    cursor.remove();
+    cursor = next;
+  }
+}
+
+/** Strip quoted history from a plain-text body. */
+export function stripQuotedText(text: string): { stripped: string; cut: boolean } {
+  if (!text) return { stripped: text, cut: false };
+  const lines = text.split(/\r?\n/);
+  let cutAt = -1;
+
+  // First pass: contiguous block of `> ` lines that goes to the end.
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s{0,3}>/.test(lines[i])) {
+      // Walk back over blank lines + the line just above (often the "On X wrote:" header).
+      let start = i;
+      let blanks = 0;
+      while (start > 0 && lines[start - 1].trim() === "" && blanks < 2) {
+        start--; blanks++;
+      }
+      if (start > 0 && QUOTE_TEXT_HEADERS.some((re) => re.test(lines[start - 1].trim()))) {
+        start--;
+      }
+      cutAt = start;
+      break;
+    }
+    if (QUOTE_TEXT_HEADERS.some((re) => re.test(lines[i].trim()))) {
+      cutAt = i;
+      break;
+    }
+  }
+
+  if (cutAt < 0) return { stripped: text, cut: false };
+  const kept = lines.slice(0, cutAt).join("\n").replace(/\s+$/g, "");
+  return { stripped: kept, cut: kept !== text };
+}
+
+// Bail-out: when the stripped result is so short it's probably misdetection
+// (the whole bubble would render essentially blank), the caller should fall
+// back to the original. 30 chars is a soft threshold tuned to "barely a
+// sentence" — covers "OK", emoji-only replies stay below, but anything
+// substantive stays above.
+export const MIN_USEFUL_STRIPPED_LEN = 30;
+
 // ── Display content resolution ──
 
 export type DisplayMode = "html" | "text" | "auto";
