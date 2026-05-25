@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/emersion/go-smtp"
+	"github.com/yourusername/mailserver/internal/calendar"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/notify"
@@ -351,6 +352,22 @@ func (s *Session) Data(r io.Reader) error {
 			if s.calendarSyncTrigger != nil && s.hasCalendarInvite(parsed) {
 				log.Printf("MX: Calendar invite detected, triggering sync for user %d", recipient.Mailbox.UserID)
 				go s.calendarSyncTrigger(recipient.Mailbox.UserID)
+			}
+
+			// iTIP processing: REQUEST/CANCEL/REPLY/COUNTER attached as .ics
+			// shouldn't surface in the conversation list. If the dispatch
+			// returns processed=true the message + its attachments go away.
+			// Local MX delivery has no account_id (=0) — FindUserCalendarForInvites
+			// falls back to "any enabled calendar" for the user, which is fine.
+			handler := calendar.NewIncomingHandler(s.database)
+			if processed, perr := handler.ProcessAndDispatch(parsed, recipient.Mailbox.UserID, 0, []string{recipient.Email}); perr != nil {
+				log.Printf("MX: ICS dispatch error for msg %d: %v", msg.ID, perr)
+			} else if processed {
+				if delErr := s.database.HardDeleteMessage(msg.ID); delErr != nil {
+					log.Printf("MX: failed to drop iTIP-consumed msg %d: %v", msg.ID, delErr)
+				} else {
+					log.Printf("MX: msg %d consumed by iTIP handler, deleted", msg.ID)
+				}
 			}
 		}
 	}
