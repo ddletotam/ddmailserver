@@ -66,7 +66,9 @@
     const mm = pad(d.getMonth() + 1);
     const dd = pad(d.getDate());
     if (isDateOnly) return `${yyyy}-${mm}-${dd}`;
-    return `${yyyy}-${mm}-${dd}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    // Space separator (not "T") so the seeded value matches the placeholder
+    // the user sees — `Date.parse` accepts both forms.
+    return `${yyyy}-${mm}-${dd} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }
 
   // wasDateOnly param controls how we parse — datetime-local strings include
@@ -189,22 +191,29 @@
         <input type="checkbox" bind:checked={allDay} />
       </label>
 
+      <!-- Type=text instead of date/datetime-local because WebKitGTK
+           (Tauri/Linux) ships a broken native picker for those: the
+           popup opens but lacks OK/Cancel and the value never commits.
+           Date.parse handles both `YYYY-MM-DD` and `YYYY-MM-DDTHH:MM`,
+           so the on-save parse path is unchanged. -->
       <div class="field-pair">
         <label class="field">
           <span class="label">Начало</span>
-          {#if allDay}
-            <input type="date" bind:value={startStr} />
-          {:else}
-            <input type="datetime-local" bind:value={startStr} />
-          {/if}
+          <input
+            type="text"
+            inputmode="numeric"
+            placeholder={allDay ? "ГГГГ-ММ-ДД" : "ГГГГ-ММ-ДД ЧЧ:ММ"}
+            bind:value={startStr}
+          />
         </label>
         <label class="field">
           <span class="label">Окончание</span>
-          {#if allDay}
-            <input type="date" bind:value={endStr} />
-          {:else}
-            <input type="datetime-local" bind:value={endStr} />
-          {/if}
+          <input
+            type="text"
+            inputmode="numeric"
+            placeholder={allDay ? "ГГГГ-ММ-ДД" : "ГГГГ-ММ-ДД ЧЧ:ММ"}
+            bind:value={endStr}
+          />
         </label>
       </div>
 
