@@ -1020,66 +1020,10 @@
   }
 
   /* ── Header ── */
-  .chat-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 8px 16px;
-    background: var(--bg-primary);
-    border-bottom: 1px solid var(--border-color);
-    min-height: var(--header-height);
-  }
-
-  .btn-back {
-    width: 36px; height: 36px;
-    display: flex; align-items: center; justify-content: center;
-    border: none; background: none; border-radius: 50%;
-    cursor: pointer; color: var(--text-secondary); flex-shrink: 0;
-  }
-  .btn-back:hover { background: var(--bg-hover); }
-
-  .btn-spam {
-    width: 36px; height: 36px;
-    display: flex; align-items: center; justify-content: center;
-    border: none; background: none; border-radius: 50%;
-    cursor: pointer; color: var(--text-secondary); flex-shrink: 0;
-  }
-  .btn-spam:hover {
-    background: color-mix(in srgb, #e8616a 18%, transparent);
-    color: #e8616a;
-  }
-  .btn-spam:disabled { opacity: 0.5; cursor: not-allowed; }
-
-  .chat-info { flex: 1; min-width: 0; }
-  .chat-name {
-    font-weight: 600; font-size: var(--font-size);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .chat-meta {
-    display: flex; align-items: center; gap: 6px;
-    font-size: var(--font-size-xs); color: var(--text-secondary);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  /* Group conversations: list every participant. Wrap to up to 2 lines, then
-     ellipsis — full list is on hover via the `title` attribute. */
-  .chat-meta.multi {
-    display: block;
-    white-space: normal;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
-    line-height: 1.3;
-  }
-  .chat-meta.multi .participants { word-break: break-word; }
-
-  .chat-identity {
-    color: var(--text-accent);
-    font-size: var(--font-size-xs);
-    margin-left: 2px;
-  }
+  /* Chat-header styles live in app.css (global) — Svelte 5's scoped CSS
+     pass intermittently drops the `.chat-header` rules from this file,
+     leaving back button + name + spam button stacked as plain block
+     elements. Global file is immune to that scoping bug. */
 
   .chat-actions { display: flex; gap: 4px; }
   .btn-icon {

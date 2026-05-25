@@ -109,3 +109,64 @@ html, body, #app {
 .splitter:active {
   background: var(--text-accent);
 }
+
+/* Chat header lives here for the same reason `.app-layout` does — Svelte 5's
+   scoped-CSS pass intermittently drops `.chat-header { display: flex }` from
+   ChatView's output, leaving the back button + name + spam button stacked as
+   plain block elements. Global file is immune to that scoping bug. */
+.chat-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-color);
+  min-height: var(--header-height);
+}
+.chat-header .btn-back,
+.chat-header .btn-spam {
+  width: 36px; height: 36px;
+  display: flex; align-items: center; justify-content: center;
+  border: none; background: none; border-radius: 50%;
+  cursor: pointer; color: var(--text-secondary); flex-shrink: 0;
+}
+.chat-header .btn-back:hover { background: var(--bg-hover); }
+.chat-header .btn-spam:hover {
+  background: color-mix(in srgb, #e8616a 18%, transparent);
+  color: #e8616a;
+}
+.chat-header .btn-spam:disabled { opacity: 0.5; cursor: not-allowed; }
+.chat-header .chat-info { flex: 1; min-width: 0; }
+.chat-header .chat-name {
+  font-weight: 600;
+  font-size: var(--font-size);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-header .chat-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-header .chat-meta.multi {
+  display: -webkit-box;
+  white-space: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-height: 1.3;
+}
+.chat-header .chat-meta.multi .participants { word-break: break-word; }
+.chat-header .chat-identity {
+  color: var(--text-accent);
+  font-size: var(--font-size-xs);
+  margin-left: 2px;
+}
