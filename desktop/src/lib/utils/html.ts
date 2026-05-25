@@ -310,12 +310,16 @@ const QUOTE_CONTAINER_SELECTORS = [
   "[id^='x_divRpl']",
   // Yandex Mail ("Предыдущая переписка")
   ".ya-q-block", ".js-helper-bar", "[data-zone-name='lastMessage']",
+  // Planfix CRM injection (ships "Предыдущая переписка" + avatar bubbles)
+  ".planfix-last-actions",
   // ProtonMail
   ".protonmail_quote",
   // Apple Mail (signature/attribution lines wrap in this on some versions)
   ".AppleMailSignature",
-  // Generic catch-alls
-  "[class*='quote' i]:not(:has(blockquote))",
+  // Generic catch-all by class name — :has() left out because WebKitGTK
+  // support is uneven and a throw from querySelector would skip the whole
+  // strip pass.
+  "[class*='quote' i]",
 ];
 
 const QUOTE_TEXT_HEADERS = [
@@ -350,7 +354,8 @@ export function stripQuotedHTML(html: string): { stripped: string; cut: boolean 
   // part: clients often put the attribution line ("On <date> wrote:")
   // BEFORE the blockquote as a separate <p>, and we want that gone too.
   for (const sel of QUOTE_CONTAINER_SELECTORS) {
-    const el = doc.body.querySelector(sel);
+    let el: Element | null = null;
+    try { el = doc.body.querySelector(sel); } catch { continue; }
     if (!el) continue;
     removeFromElementOnward(el);
     cut = true;
