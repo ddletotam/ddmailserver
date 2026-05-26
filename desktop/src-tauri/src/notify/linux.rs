@@ -2,10 +2,13 @@
 //!
 //! We use `notify-rust`, which speaks the fdo spec directly. The
 //! reminder is rendered as a critical-urgency, resident notification with
-//! three actions:
+//! up to three actions:
 //!   * `default`        — body-click; opens the event in-app.
 //!   * `ack`            — "Игнорировать".
 //!   * `snooze-window`  — "Отложить…"; spawns the snooze-config webview.
+//!                       Only attached to EARLY reminders (fire-time
+//!                       before event start). Once the event has begun,
+//!                       "snooze" makes no sense and we drop the button.
 //!
 //! `default` is part of the fdo contract — every server invokes it on
 //! body clicks even when it isn't rendered as a button. The explicit
@@ -35,10 +38,15 @@ pub(super) fn show_reminder<R: Runtime>(
     };
     let body = format_body(row);
 
-    // `notify-rust` consumes the builder into a NotificationHandle on
-    // .show(); the handle holds the connection we need for
-    // wait_for_action.
-    let handle = Notification::new()
+    // Snooze only makes sense BEFORE the event starts. If the reminder
+    // fires at-or-after occurrence_start_ms (lead=0, or the scheduler
+    // woke up late), we drop the "Отложить…" button — there's nothing
+    // left to delay.
+    let now_ms = chrono::Local::now().timestamp_millis();
+    let snooze_allowed = now_ms < row.occurrence_start_ms;
+
+    let mut builder = Notification::new();
+    builder
         .summary(&summary)
         .body(&body)
         .appname("DDMail")
@@ -49,13 +57,17 @@ pub(super) fn show_reminder<R: Runtime>(
         // snooze even if they were AFK when it fired.
         .hint(Hint::Resident(true))
         .hint(Hint::Category("im.received".into()))
-        // Two real actions; the rich snooze UX lives in a dedicated
-        // webview spawned by `snooze-window`. `default` is kept as the
-        // implicit body-click that opens the event — every fdo server
-        // honours it even without rendering it as a button.
+        // `default` is the implicit body-click target every fdo server
+        // honours, even without rendering it as a button.
         .action("default", "Открыть событие")
-        .action("ack", "Игнорировать")
-        .action("snooze-window", "Отложить…")
+        .action("ack", "Игнорировать");
+    if snooze_allowed {
+        builder.action("snooze-window", "Отложить…");
+    }
+    // `notify-rust` consumes the builder into a NotificationHandle on
+    // .show(); the handle holds the connection we need for
+    // wait_for_action.
+    let handle = builder
         .show()
         .map_err(|e| format!("notify show: {e}"))?;
 
