@@ -5,7 +5,7 @@
   import { fetchMessageSource, downloadAttachment, saveAttachmentToPath, openAttachmentWith } from "../api/imap";
   import { save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { formatDateTime, formatSize, hashColor } from "../utils/format";
-  import { resolveDisplayContent, extractBlockedDomains, extractEmailDomains, stripQuotedHTML, stripQuotedText, MIN_USEFUL_STRIPPED_LEN, type DisplayMode, type ContentPermissions } from "../utils/html";
+  import { resolveDisplayContent, extractBlockedDomains, extractEmailDomains, stripQuotedHTML, stripQuotedText, stripSignatureHTML, stripSignatureText, MIN_USEFUL_STRIPPED_LEN, type DisplayMode, type ContentPermissions } from "../utils/html";
   import { t } from "../i18n/index.svelte";
   import SandboxedEmail from "./SandboxedEmail.svelte";
   import type { MessageBody, Attachment } from "../types/mail";
@@ -193,17 +193,19 @@
   let showFull = $state(false);
   const stripped = $derived.by(() => {
     if (displayContent.type === "html") {
-      const r = stripQuotedHTML(displayContent.content);
-      if (!r.cut) return null;
-      const textLen = r.stripped.replace(/<[^>]+>/g, "").trim().length;
+      const q = stripQuotedHTML(displayContent.content);
+      const s = stripSignatureHTML(q.stripped);
+      if (!q.cut && !s.cut) return null;
+      const textLen = s.stripped.replace(/<[^>]+>/g, "").trim().length;
       if (textLen < MIN_USEFUL_STRIPPED_LEN) return null;
-      return r;
+      return { stripped: s.stripped, cut: true };
     }
     if (displayContent.type === "text") {
-      const r = stripQuotedText(displayContent.content);
-      if (!r.cut) return null;
-      if (r.stripped.trim().length < MIN_USEFUL_STRIPPED_LEN) return null;
-      return r;
+      const q = stripQuotedText(displayContent.content);
+      const s = stripSignatureText(q.stripped);
+      if (!q.cut && !s.cut) return null;
+      if (s.stripped.trim().length < MIN_USEFUL_STRIPPED_LEN) return null;
+      return { stripped: s.stripped, cut: true };
     }
     return null;
   });

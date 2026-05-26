@@ -298,8 +298,10 @@ export function extractEmailDomains(html: string): EmailDomains {
 // suspiciously empty (whole body was quotation, or detection misfired) the
 // caller falls back to the original.
 
+// Order matters: specific wrappers first, generic `blockquote`/`[class*='quote']`
+// last. Planfix nests `<blockquote>` inside `.planfix-last-actions`, so the
+// generic selector would otherwise win and only trim half the history.
 const QUOTE_CONTAINER_SELECTORS = [
-  "blockquote",
   // Gmail
   ".gmail_quote", ".gmail_attr",
   // Yahoo
@@ -316,9 +318,8 @@ const QUOTE_CONTAINER_SELECTORS = [
   ".protonmail_quote",
   // Apple Mail (signature/attribution lines wrap in this on some versions)
   ".AppleMailSignature",
-  // Generic catch-all by class name — :has() left out because WebKitGTK
-  // support is uneven and a throw from querySelector would skip the whole
-  // strip pass.
+  // Generic catch-all — left for last so it doesn't shadow specific wrappers.
+  "blockquote",
   "[class*='quote' i]",
 ];
 
@@ -397,6 +398,131 @@ function removeFromElementOnward(el: Element) {
     cursor.remove();
     cursor = next;
   }
+}
+
+// ── Signature stripping ──
+//
+// Independent of quote stripping. Signatures have stronger anchors than
+// quote boundaries (RFC 3676 "-- " delimiter, closing greetings like
+// "С уважением,", well-known wrapper classes), and once you find the
+// start of the signature everything below is disposable in a chat-bubble
+// view: contact info, logos, legal disclaimers, the lot. We run this
+// AFTER the quote pass so a reply that contains both signature and
+// quoted history loses both.
+
+const SIGNATURE_CONTAINER_SELECTORS = [
+  ".gmail_signature",
+  ".AppleMailSignature",
+  ".protonmail_signature_block",
+  "[class*='signature' i]",
+  "[id*='signature' i]",
+];
+
+// JS regex `\b` is ASCII-only — it doesn't fire between Cyrillic and
+// punctuation, so we use a Unicode-aware lookahead `(?![\p{L}\p{N}])` with
+// the `u` flag instead.
+const NB = "(?![\\p{L}\\p{N}])";
+const SIGNATURE_TEXT_HEADERS = [
+  // RFC 3676 sig-dash delimiter (clients drop the trailing space half the time).
+  /^[\s>]*--\s*$/,
+  // Russian closings.
+  new RegExp(`^[\\s>]*с\\s+уважением${NB}`, "iu"),
+  new RegExp(`^[\\s>]*с\\s+наилучшими\\s+пожеланиями${NB}`, "iu"),
+  new RegExp(`^[\\s>]*с\\s+благодарностью${NB}`, "iu"),
+  /^[\s>]*заранее\s+спасибо[,.!]?\s*$/iu,
+  /^[\s>]*спасибо[,.!]?\s*$/iu,
+  /^[\s>]*благодарю[,.!]?\s*$/iu,
+  // English closings — line-anchored with optional trailing punctuation only,
+  // so prose like "Thanks for the doc" doesn't trip the match.
+  new RegExp(`^[\\s>]*best\\s+regards${NB}`, "iu"),
+  new RegExp(`^[\\s>]*kind(?:est)?\\s+regards${NB}`, "iu"),
+  new RegExp(`^[\\s>]*warm\\s+regards${NB}`, "iu"),
+  /^[\s>]*regards[,.!]?\s*$/iu,
+  /^[\s>]*sincerely(?:\s+yours)?[,.!]?\s*$/iu,
+  /^[\s>]*yours\s+truly[,.!]?\s*$/iu,
+  /^[\s>]*cheers[,.!]?\s*$/iu,
+  /^[\s>]*thanks[,.!]?\s*$/iu,
+  /^[\s>]*thank\s+you[,.!]?\s*$/iu,
+];
+
+/** Strip signature + everything below from an HTML body. */
+export function stripSignatureHTML(html: string): { stripped: string; cut: boolean } {
+  if (!html) return { stripped: html, cut: false };
+  let doc: Document;
+  try {
+    doc = new DOMParser().parseFromString(html, "text/html");
+  } catch {
+    return { stripped: html, cut: false };
+  }
+  if (!doc.body) return { stripped: html, cut: false };
+
+  let cut = false;
+
+  // Phase 1: well-known wrapper classes/ids. The first match wins.
+  for (const sel of SIGNATURE_CONTAINER_SELECTORS) {
+    let el: Element | null = null;
+    try { el = doc.body.querySelector(sel); } catch { continue; }
+    if (!el) continue;
+    removeFromElementOnward(el);
+    cut = true;
+    break;
+  }
+
+  // Phase 2: closing-greeting in a text node. Require the match to sit past
+  // the first ~30% of body text so a reply that opens with "Спасибо за
+  // письмо" doesn't lose its body.
+  if (!cut) {
+    const totalText = (doc.body.textContent ?? "").length;
+    const minOffset = Math.min(120, Math.floor(totalText * 0.3));
+    let seenText = 0;
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      const raw = node.nodeValue ?? "";
+      const before = seenText;
+      seenText += raw.length;
+      const t = raw.trim();
+      if (!t) continue;
+      if (before < minOffset) continue;
+      if (!SIGNATURE_TEXT_HEADERS.some((re) => re.test(t))) continue;
+      let anchor: Element | null = node.parentElement;
+      while (anchor && anchor.parentElement && anchor.parentElement !== doc.body) {
+        anchor = anchor.parentElement;
+      }
+      if (anchor) {
+        removeFromElementOnward(anchor);
+        cut = true;
+      }
+      break;
+    }
+  }
+
+  if (!cut) return { stripped: html, cut: false };
+  return { stripped: doc.body.innerHTML, cut: true };
+}
+
+/** Strip signature + everything below from a plain-text body. */
+export function stripSignatureText(text: string): { stripped: string; cut: boolean } {
+  if (!text) return { stripped: text, cut: false };
+  const lines = text.split(/\r?\n/);
+  const totalChars = text.length;
+  const minChars = Math.min(120, Math.floor(totalChars * 0.3));
+  let runningChars = 0;
+  let cutAt = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const before = runningChars;
+    runningChars += line.length + 1;
+    if (before < minChars) continue;
+    if (SIGNATURE_TEXT_HEADERS.some((re) => re.test(line))) {
+      cutAt = i;
+      break;
+    }
+  }
+  if (cutAt < 0) return { stripped: text, cut: false };
+  while (cutAt > 0 && lines[cutAt - 1].trim() === "") cutAt--;
+  const kept = lines.slice(0, cutAt).join("\n").replace(/\s+$/g, "");
+  return { stripped: kept, cut: kept !== text };
 }
 
 /** Strip quoted history from a plain-text body. */
