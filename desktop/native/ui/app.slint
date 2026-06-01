@@ -1,0 +1,223 @@
+import { ListView } from "std-widgets.slint";
+
+struct ConvItem {
+    name: string,
+    preview: string,
+    initials: string,
+    color: brush,
+    time: string,
+}
+
+// Each message row is a full-width image rendered by Blitz (bubble, alignment,
+// formatting and network images all done in HTML/CSS inside Blitz).
+struct RowItem {
+    img: image,
+    h: length,
+}
+
+export component MainWindow inherits Window {
+    title: "Spike 1 — Slint shell + Blitz bubbles";
+    preferred-width: 1100px;
+    preferred-height: 760px;
+    min-width: 1080px;
+    min-height: 600px;
+
+    in property <[ConvItem]> conversations;
+    in property <[RowItem]> messages;
+    in-out property <int> selected: 0;
+    in property <string> active-name;
+    in property <string> active-initials;
+    in property <brush> active-color;
+    callback select(int);
+    callback hit-test(int, length, length);
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        // ---------- Sidebar ----------
+        Rectangle {
+            width: 320px;
+            background: #f7f8fa;
+            VerticalLayout {
+                Rectangle {
+                    height: 56px;
+                    Rectangle {
+                        x: 10px;
+                        y: 10px;
+                        width: parent.width - 20px;
+                        height: 36px;
+                        background: #eceef0;
+                        border-radius: 18px;
+                        Text {
+                            x: 14px;
+                            width: parent.width - 14px;
+                            height: parent.height;
+                            text: "Поиск…";
+                            color: #8b95a1;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                ListView {
+                    for conv[idx] in root.conversations: Rectangle {
+                        height: 64px;
+                        background: idx == root.selected ? #2f80ed : transparent;
+                        TouchArea {
+                            clicked => { root.select(idx); }
+                        }
+                        HorizontalLayout {
+                            padding: 9px;
+                            spacing: 12px;
+                            Rectangle {
+                                width: 46px;
+                                height: 46px;
+                                border-radius: 23px;
+                                background: conv.color;
+                                Text {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    text: conv.initials;
+                                    color: white;
+                                    font-weight: 700;
+                                    font-size: 16px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Text {
+                                    text: conv.name;
+                                    font-weight: 700;
+                                    font-size: 15px;
+                                    color: idx == root.selected ? white : #0f1419;
+                                }
+                                Text {
+                                    text: conv.preview;
+                                    font-size: 13px;
+                                    color: idx == root.selected ? #e8f0fe : #8b95a1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---------- Main ----------
+        VerticalLayout {
+            Rectangle {
+                height: 60px;
+                background: white;
+                HorizontalLayout {
+                    padding: 12px;
+                    spacing: 10px;
+                    alignment: start;
+                    Rectangle {
+                        width: 40px;
+                        height: 40px;
+                        border-radius: 20px;
+                        background: root.active-color;
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: root.active-initials;
+                            color: white;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Text { text: root.active-name; font-weight: 700; font-size: 16px; }
+                        Text { text: "был(а) недавно"; color: #8b95a1; font-size: 13px; }
+                    }
+                }
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+                background: #e9eef5;
+                ListView {
+                    for msg[idx] in root.messages: Rectangle {
+                        height: msg.h;
+                        // Fixed-width strip (centered). Image + link overlay share its origin.
+                        Rectangle {
+                            width: 740px;
+                            height: msg.h;
+                            cma := ContextMenuArea {
+                                Menu {
+                                    MenuItem { title: "Ответить"; }
+                                    MenuItem { title: "Переслать"; }
+                                    MenuItem { title: "Копировать текст"; }
+                                    MenuSeparator { }
+                                    MenuItem { title: "Удалить"; }
+                                }
+                                Image {
+                                    x: 0;
+                                    y: 0;
+                                    width: 740px;
+                                    height: msg.h;
+                                    source: msg.img;
+                                    image-fit: contain;
+                                    image-rendering: smooth;
+                                }
+                            }
+                            // Whole-bubble pointer handling: left click → hit-test in
+                            // Blitz for a link; right click → open the native menu.
+                            TouchArea {
+                                width: 740px;
+                                height: msg.h;
+                                clicked => { root.hit-test(idx, self.mouse-x, self.mouse-y); }
+                                pointer-event(e) => {
+                                    if (e.button == PointerEventButton.right
+                                        && e.kind == PointerEventKind.down) {
+                                        cma.show({ x: self.mouse-x, y: self.mouse-y });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 64px;
+                background: white;
+                HorizontalLayout {
+                    padding: 12px;
+                    spacing: 12px;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: #f0f2f5;
+                        border-radius: 20px;
+                        Text {
+                            x: 16px;
+                            width: parent.width - 16px;
+                            height: parent.height;
+                            text: "Написать сообщение…";
+                            color: #8b95a1;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Rectangle {
+                        width: 42px;
+                        height: 42px;
+                        border-radius: 21px;
+                        background: #2f80ed;
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: "→";
+                            color: white;
+                            font-size: 20px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
