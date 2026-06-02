@@ -81,6 +81,7 @@ func (t *ICSSyncTask) doSync(ctx context.Context) error {
 			Color:    t.source.Color,
 			Timezone: "UTC",
 			CanWrite: false, // Read-only for ICS URL sources
+			Enabled:  true,  // Without this, Go's bool zero-value lands as soft-deleted on insert
 		}
 		if err := t.database.CreateCalendar(calendar); err != nil {
 			return fmt.Errorf("failed to create calendar: %w", err)
