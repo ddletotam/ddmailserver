@@ -1,111 +1,83 @@
-//! Blitz helpers: render an HTML row to a fixed-size RGBA texture, and hit-test
-//! a point against a row's HTML to find a clicked <a href> (links stay inline).
+//! Ultralight (WebKit) body renderer. Owns one Renderer; renders each message
+//! body's HTML to an offscreen RGBA bitmap, cropped to its content height.
+//! Lives entirely on the worker thread (Ultralight is single-threaded).
 
-use std::sync::Arc;
+use std::ffi::CString;
 
-use anyrender::render_to_buffer;
-use anyrender_vello_cpu::VelloCpuImageRenderer;
-use blitz_dom::{local_name, DocumentConfig};
-use blitz_html::HtmlDocument;
-use blitz_net::Provider;
-use blitz_paint::paint_scene;
-use blitz_traits::shell::{ColorScheme, Viewport};
+use ultralight::sys::{ulCreateString, ulDestroyString, ulViewLoadHTML, ULView};
+use ultralight::{Config, Renderer, View, ViewConfig};
 
-pub struct Rendered {
+const MAX_H: u32 = 6000; // per-bubble render canvas height cap
+
+pub struct Bitmap {
     pub rgba: Vec<u8>,
     pub width: u32,
     pub height: u32,
 }
 
-pub fn render_html_fixed(html: &str, w_logical: u32, h_logical: u32, scale: f64) -> Rendered {
-    let net = Arc::new(Provider::new(None));
-    let rw = (w_logical as f64 * scale) as u32;
-    let rh = (h_logical as f64 * scale) as u32;
+pub struct Engine {
+    renderer: Renderer,
+    // Keep the current conversation's views alive (for future hit-testing).
+    views: Vec<View>,
+}
 
-    let mut document = HtmlDocument::from_html(
-        html,
-        DocumentConfig {
-            net_provider: Some(Arc::clone(&net) as _),
-            viewport: Some(Viewport::new(rw, rh, scale as f32, ColorScheme::Light)),
-            ..Default::default()
-        },
-    );
-
-    let mut tries = 0;
-    loop {
-        document.as_mut().resolve(0.0);
-        if net.is_empty() || tries > 50 {
-            break;
+impl Engine {
+    pub fn new() -> Self {
+        let assets = format!("{}/assets", env!("CARGO_MANIFEST_DIR"));
+        ultralight::init(assets, None);
+        let mut config = Config::default();
+        config.set_resource_path_prefix("resources/".to_owned());
+        let renderer = Renderer::new(&config);
+        Engine {
+            renderer,
+            views: Vec::new(),
         }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        tries += 1;
     }
 
-    let buffer = render_to_buffer::<VelloCpuImageRenderer, _>(
-        |scene| {
-            paint_scene(scene, document.as_mut(), scale, rw, rh, 0, 0);
-        },
-        rw,
-        rh,
-    );
+    /// Render each HTML body to a bitmap cropped to its content height.
+    pub fn render_bodies(&mut self, htmls: &[String], width: u32) -> Vec<Bitmap> {
+        self.views.clear();
+        let mut out = Vec::with_capacity(htmls.len());
 
-    Rendered {
-        rgba: buffer,
-        width: rw,
-        height: rh,
-    }
-}
+        for html in htmls {
+            let view = self.renderer.create_view(width, MAX_H, &ViewConfig::default());
 
-/// Resolve `html` at `w_logical` (layout only) and return its content height in
-/// CSS px. Used to size message bubbles before the texture is painted.
-pub fn measure_height(html: &str, w_logical: u32) -> u32 {
-    let net = Arc::new(Provider::new(None));
-    let mut document = HtmlDocument::from_html(
-        html,
-        DocumentConfig {
-            net_provider: Some(Arc::clone(&net) as _),
-            viewport: Some(Viewport::new(w_logical, 12000, 1.0, ColorScheme::Light)),
-            ..Default::default()
-        },
-    );
-    document.as_mut().resolve(0.0);
-    document
-        .as_ref()
-        .root_element()
-        .final_layout
-        .size
-        .height
-        .ceil()
-        .max(1.0) as u32
-}
+            let c = CString::new(html.as_str())
+                .unwrap_or_else(|_| CString::new("<p>bad html</p>").unwrap());
+            unsafe {
+                let s = ulCreateString(c.as_ptr());
+                let v: ULView = (&view).into();
+                ulViewLoadHTML(v, s);
+                ulDestroyString(s);
+            }
 
-/// Resolve the row's HTML (layout only, scale 1) and hit-test (x, y) in CSS px.
-/// Returns the href of the <a> under the point, walking up the DOM.
-pub fn hit_test_link(html: &str, w_logical: u32, h_logical: u32, x: f32, y: f32) -> Option<String> {
-    let net = Arc::new(Provider::new(None));
-    let mut document = HtmlDocument::from_html(
-        html,
-        DocumentConfig {
-            net_provider: Some(Arc::clone(&net) as _),
-            viewport: Some(Viewport::new(w_logical, h_logical, 1.0, ColorScheme::Light)),
-            ..Default::default()
-        },
-    );
-    document.as_mut().resolve(0.0);
-
-    let doc = document.as_ref();
-    let hit = doc.hit(x, y)?;
-    let mut id = Some(hit.node_id);
-    while let Some(nid) = id {
-        let node = doc.get_node(nid)?;
-        if let Some(el) = node.element_data() {
-            if el.name.local == local_name!("a") {
-                if let Some(href) = el.attr(local_name!("href")) {
-                    return Some(href.to_string());
+            let t = std::time::Instant::now();
+            loop {
+                self.renderer.update();
+                if view.is_ready() || t.elapsed().as_millis() > 3000 {
+                    break;
                 }
             }
+            self.renderer.render();
+
+            let (bw, bh) = view.bitmap_size();
+            // Content height = bottom of the painted (dirty) region.
+            let db = view.dirty_bounds(); // [left, right, top, bottom]
+            let content_h = if db[3] > 0 && db[3] <= bh { db[3] } else { bh };
+
+            // get_image() returns full bw×bh RGBA; keep the top content_h rows.
+            let raw = view.get_image().into_raw();
+            let row_bytes = (bw * 4) as usize;
+            let keep = (content_h as usize) * row_bytes;
+            let rgba = raw[..keep.min(raw.len())].to_vec();
+
+            out.push(Bitmap {
+                rgba,
+                width: bw,
+                height: content_h,
+            });
+            self.views.push(view);
         }
-        id = node.parent;
+        out
     }
-    None
 }

@@ -1,20 +1,17 @@
-//! ddmail-native — Slint shell + Blitz texture islands.
+//! ddmail-native — Slint shell + Ultralight (WebKit) body rendering.
 //! Sidebar = real conversations from the desktop cache; selecting one renders
-//! its real cached message bodies as Blitz bubbles (single worker for all Blitz
-//! work; click-time hit-testing for links; native context menu).
+//! its real message bodies as Ultralight bitmaps composited as Slint images.
 
 slint::include_modules!();
 
 mod render;
 
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
 
-use slint::{Image, Model, ModelNotify, ModelRc, Rgba8Pixel, SharedPixelBuffer};
+use slint::{Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
 use ddmail_core::cache::Cache;
 use ddmail_core::types::{Conversation, MessageBody};
@@ -29,9 +26,7 @@ const NAMES: [&str; 25] = [
 ];
 const PALETTE: [&str; 6] = ["#2f80ed", "#27ae60", "#eb5757", "#9b51e0", "#f2994a", "#11998e"];
 
-const ROW_W: u32 = 740;
-const CACHE_CAP: usize = 200;
-const WORKERS: usize = 1; // Blitz/stylo is not safe to run concurrently.
+const DEFAULT_WIDTH: u32 = 740;
 
 fn initials(name: &str) -> String {
     name.split_whitespace()
@@ -62,7 +57,6 @@ fn cache_db_path() -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(appdata).join("ru.letotam.ddmail").join("cache.db"))
 }
 
-/// Open the desktop cache and load the first account's conversations.
 fn open_account() -> Option<(Cache, String, Vec<Conversation>)> {
     let path = cache_db_path()?;
     if !path.exists() {
@@ -125,7 +119,7 @@ fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// Wrap a message body (its own HTML, or escaped plain text) in a chat bubble.
+/// Bubble wrapper + email-HTML normalization (tames ugly notification emails).
 fn build_body_html(b: &MessageBody) -> String {
     let side = if b.is_outgoing { "out" } else { "in" };
     let bg = if b.is_outgoing { "#cfe6ff" } else { "#ffffff" };
@@ -140,7 +134,7 @@ fn build_body_html(b: &MessageBody) -> String {
         r#"<!DOCTYPE html><html><head><style>
         html, body {{ margin: 0; padding: 0; background: #e9eef5; }}
         body {{ font-family: 'Segoe UI', system-ui, sans-serif; }}
-        .row {{ display: flex; padding: 4px 60px; }}
+        .row {{ display: flex; padding: 6px 60px; }}
         .row.out {{ justify-content: flex-end; }}
         .row.in  {{ justify-content: flex-start; }}
         .bubble {{
@@ -150,119 +144,40 @@ fn build_body_html(b: &MessageBody) -> String {
         }}
         .row.out .bubble {{ border-bottom-right-radius: 4px; }}
         .row.in  .bubble {{ border-bottom-left-radius: 4px; }}
-        .bubble img {{ max-width: 100%; height: auto; }}
+        .bubble * {{ max-width: 100% !important; border: 0 !important; background-image: none !important; }}
+        .bubble table, .bubble td, .bubble th {{ border-collapse: collapse !important; }}
+        .bubble img {{ max-width: 100% !important; height: auto !important; }}
         a {{ color: #2f80ed; }}
         </style></head>
         <body><div class="row {side}"><div class="bubble">{inner}</div></div></body></html>"#
     )
 }
 
-/// Work for the single Blitz worker. Render, hit-test and conversation set-up
-/// all share one thread (Blitz/stylo cannot run concurrently).
 enum Job {
     SetConversation { bodies: Vec<MessageBody>, width: u32 },
-    Render { row: usize, html: String, h: u32 },
-    HitTest { row: usize, html: String, x: f32, y: f32 },
 }
 
-thread_local! {
-    static MODEL: RefCell<Option<Rc<ConvModel>>> = const { RefCell::new(None) };
-}
-
-static RENDER_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-/// Lazy, per-conversation model: htmls/heights are replaced on every selection;
-/// textures render in the background and land in an LRU cache.
-struct ConvModel {
-    htmls: RefCell<Vec<String>>,
-    heights: RefCell<Vec<u32>>,
-    cache: RefCell<HashMap<usize, RowItem>>,
-    order: RefCell<VecDeque<usize>>,
-    requested: RefCell<HashSet<usize>>,
-    placeholder: Image,
+/// UI-thread state shared by the select + resize callbacks.
+struct Shared {
+    account: Option<(Cache, String, Vec<Conversation>)>,
+    current: Cell<usize>,
+    width: Cell<u32>,
     tx: mpsc::Sender<Job>,
-    notify: ModelNotify,
 }
 
-impl ConvModel {
-    fn placeholder_row(&self, h: u32) -> RowItem {
-        RowItem {
-            img: self.placeholder.clone(),
-            h: h as f32,
+fn open_conversation(sh: &Shared, idx: usize) {
+    sh.current.set(idx);
+    if let Some((cache, key, convs)) = &sh.account {
+        if let Some(c) = convs.get(idx) {
+            let bodies = cache.load_message_bodies(key, &c.messages).unwrap_or_default();
+            let _ = sh.tx.send(Job::SetConversation { bodies, width: sh.width.get() });
         }
-    }
-
-    /// Swap in a new conversation's rows (called on the UI thread).
-    fn set_conversation(&self, htmls: Vec<String>, heights: Vec<u32>) {
-        *self.htmls.borrow_mut() = htmls;
-        *self.heights.borrow_mut() = heights;
-        self.cache.borrow_mut().clear();
-        self.order.borrow_mut().clear();
-        self.requested.borrow_mut().clear();
-        self.notify.reset();
-    }
-
-    fn fulfill(&self, row: usize, r: render::Rendered) {
-        let Some(&h) = self.heights.borrow().get(row) else { return };
-        let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&r.rgba, r.width, r.height);
-        let item = RowItem {
-            img: Image::from_rgba8(buf),
-            h: h as f32,
-        };
-        self.cache.borrow_mut().insert(row, item);
-        self.order.borrow_mut().push_back(row);
-        self.requested.borrow_mut().remove(&row);
-        self.notify.row_changed(row);
-
-        while self.cache.borrow().len() > CACHE_CAP {
-            let victim = self.order.borrow_mut().pop_front();
-            if let Some(v) = victim {
-                if v != row {
-                    self.cache.borrow_mut().remove(&v);
-                    self.requested.borrow_mut().remove(&v);
-                    self.notify.row_changed(v);
-                }
-            } else {
-                break;
-            }
-        }
-    }
-}
-
-impl Model for ConvModel {
-    type Data = RowItem;
-
-    fn row_count(&self) -> usize {
-        self.heights.borrow().len()
-    }
-
-    fn row_data(&self, row: usize) -> Option<RowItem> {
-        let h = *self.heights.borrow().get(row)?;
-        if let Some(item) = self.cache.borrow().get(&row) {
-            return Some(item.clone());
-        }
-        if self.requested.borrow_mut().insert(row) {
-            let html = self.htmls.borrow()[row].clone();
-            let _ = self.tx.send(Job::Render { row, html, h });
-        }
-        Some(self.placeholder_row(h))
-    }
-
-    fn model_tracker(&self) -> &dyn slint::ModelTracker {
-        &self.notify
     }
 }
 
 fn main() {
     let ui = MainWindow::new().unwrap();
 
-    let native = ui.window().scale_factor() as f64;
-    let native = if native < 0.5 { 1.0 } else { native };
-    const SSAA: f64 = 2.0;
-    let scale = native * SSAA;
-    println!("Native scale_factor = {native}, render scale = {scale}");
-
-    // ----- Real account from cache (or synthetic fallback) -----
     let account = open_account();
     let displays = match &account {
         Some((_, _, convs)) => displays_from(convs),
@@ -279,137 +194,89 @@ fn main() {
             time: "".into(),
         })
         .collect();
-    ui.set_conversations(ModelRc::new(slint::VecModel::from(convs)));
+    ui.set_conversations(ModelRc::new(VecModel::from(convs)));
     if let Some(d0) = displays.first() {
         ui.set_active_name(d0.name.clone().into());
         ui.set_active_initials(d0.initials.clone().into());
         ui.set_active_color(slint::Brush::SolidColor(hex(&d0.color)));
     }
 
-    // ----- Single Blitz worker -----
+    // ----- Ultralight render worker -----
     let (tx, rx) = mpsc::channel::<Job>();
     let rx = Arc::new(Mutex::new(rx));
-    for _ in 0..WORKERS {
+    let ui_weak = ui.as_weak();
+    {
         let rx = Arc::clone(&rx);
+        let ui_weak = ui_weak.clone();
         std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let _guard = rt.enter();
+            let mut engine = render::Engine::new();
             loop {
                 let job = {
                     let lock = rx.lock().unwrap();
                     lock.recv()
                 };
-                let Ok(job) = job else { break };
-                match job {
-                    Job::SetConversation { bodies, width } => {
-                        let mut htmls = Vec::with_capacity(bodies.len());
-                        let mut heights = Vec::with_capacity(bodies.len());
-                        for b in &bodies {
-                            let html = build_body_html(b);
-                            let h = render::measure_height(&html, width).clamp(28, 8000);
-                            htmls.push(html);
-                            heights.push(h);
-                        }
-                        println!("conversation set: {} messages", bodies.len());
-                        let _ = slint::invoke_from_event_loop(move || {
-                            MODEL.with(|m| {
-                                if let Some(m) = m.borrow().as_ref() {
-                                    m.set_conversation(htmls, heights);
-                                }
-                            });
-                        });
-                    }
-                    Job::Render { row, html, h } => {
-                        let t = Instant::now();
-                        let r = render::render_html_fixed(&html, ROW_W, h, scale);
-                        let n = RENDER_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-                        println!("render row {row} in {} ms (total {n})", t.elapsed().as_millis());
-                        let _ = slint::invoke_from_event_loop(move || {
-                            MODEL.with(|m| {
-                                if let Some(m) = m.borrow().as_ref() {
-                                    m.fulfill(row, r);
-                                }
-                            });
-                        });
-                    }
-                    Job::HitTest { row, html, x, y } => {
-                        match render::hit_test_link(&html, ROW_W, 12000, x, y) {
-                            Some(url) => {
-                                println!("link click row {row} -> {url}");
-                                let _ = std::process::Command::new("cmd")
-                                    .args(["/C", "start", "", &url])
-                                    .spawn();
+                let Ok(Job::SetConversation { bodies, width }) = job else { break };
+
+                let htmls: Vec<String> = bodies.iter().map(build_body_html).collect();
+                let t = Instant::now();
+                let bitmaps = engine.render_bodies(&htmls, width);
+                println!(
+                    "rendered {} bodies @ {width}px in {} ms",
+                    bitmaps.len(),
+                    t.elapsed().as_millis()
+                );
+
+                let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+                    let rows: Vec<RowItem> = bitmaps
+                        .into_iter()
+                        .map(|b| {
+                            let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                                &b.rgba, b.width, b.height,
+                            );
+                            RowItem {
+                                img: Image::from_rgba8(buf),
+                                h: b.height as f32,
                             }
-                            None => println!("click row {row} @({x:.0},{y:.0}) — no link"),
-                        }
-                    }
-                }
+                        })
+                        .collect();
+                    ui.set_messages(ModelRc::new(VecModel::from(rows)));
+                });
             }
         });
     }
 
-    // ----- Message model -----
-    let placeholder = Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::new(1, 1));
-    let model = Rc::new(ConvModel {
-        htmls: RefCell::new(Vec::new()),
-        heights: RefCell::new(Vec::new()),
-        cache: RefCell::new(HashMap::new()),
-        order: RefCell::new(VecDeque::new()),
-        requested: RefCell::new(HashSet::new()),
-        placeholder,
-        tx: tx.clone(),
-        notify: ModelNotify::default(),
+    // ----- Shared state + callbacks -----
+    let shared = Rc::new(Shared {
+        account,
+        current: Cell::new(0),
+        width: Cell::new(DEFAULT_WIDTH),
+        tx,
     });
-    MODEL.with(|m| *m.borrow_mut() = Some(model.clone()));
-    ui.set_messages(ModelRc::from(model.clone()));
 
-    // Open the first conversation that actually has cached message bodies
-    // (the body cache is only populated for threads opened in the old client).
-    if let Some((cache, key, convs)) = &account {
-        let mut found = false;
+    // Open the first conversation that has cached bodies.
+    if let Some((cache, key, convs)) = &shared.account {
         for (i, c) in convs.iter().enumerate() {
             let bodies = cache.load_message_bodies(key, &c.messages).unwrap_or_default();
             if bodies.is_empty() {
                 continue;
             }
-            println!("opening conversation {i} with {} cached bodies", bodies.len());
+            shared.current.set(i);
             ui.set_selected(i as i32);
             if let Some(d) = displays.get(i) {
                 ui.set_active_name(d.name.clone().into());
                 ui.set_active_initials(d.initials.clone().into());
                 ui.set_active_color(slint::Brush::SolidColor(hex(&d.color)));
             }
-            let _ = tx.send(Job::SetConversation { bodies, width: ROW_W });
-            found = true;
+            let _ = shared.tx.send(Job::SetConversation { bodies, width: shared.width.get() });
             break;
-        }
-        if !found {
-            println!("no conversation has cached bodies yet — open one in the old client first");
         }
     }
 
-    // ----- Callbacks -----
-    // Left click on a bubble → hit-test for a link.
-    let model_hit = model.clone();
-    ui.on_hit_test(move |row, x, y| {
-        let i = row as usize;
-        if let Some(html) = model_hit.htmls.borrow().get(i) {
-            let _ = model_hit.tx.send(Job::HitTest {
-                row: i,
-                html: html.clone(),
-                x,
-                y,
-            });
-        }
-    });
-
-    // Conversation selection: update header + load that conversation's bodies.
-    let ui_weak = ui.as_weak();
+    let ui_weak2 = ui.as_weak();
     let displays_sel = displays.clone();
-    let account_sel = account;
-    let tx_sel = tx.clone();
+    let sh_sel = shared.clone();
     ui.on_select(move |idx| {
-        let Some(ui) = ui_weak.upgrade() else { return };
+        let Some(ui) = ui_weak2.upgrade() else { return };
         let i = idx as usize;
         if let Some(d) = displays_sel.get(i) {
             ui.set_selected(idx);
@@ -417,13 +284,17 @@ fn main() {
             ui.set_active_initials(d.initials.clone().into());
             ui.set_active_color(slint::Brush::SolidColor(hex(&d.color)));
         }
-        if let Some((cache, key, convs)) = &account_sel {
-            if let Some(c) = convs.get(i) {
-                if let Ok(bodies) = cache.load_message_bodies(key, &c.messages) {
-                    let _ = tx_sel.send(Job::SetConversation { bodies, width: ROW_W });
-                }
-            }
+        open_conversation(&sh_sel, i);
+    });
+
+    let sh_rs = shared.clone();
+    ui.on_viewport_resized(move |w| {
+        let neww = (w as u32).max(240);
+        if (neww as i32 - sh_rs.width.get() as i32).abs() < 24 {
+            return;
         }
+        sh_rs.width.set(neww);
+        open_conversation(&sh_rs, sh_rs.current.get());
     });
 
     ui.run().unwrap();

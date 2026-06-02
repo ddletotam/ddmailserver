@@ -16,7 +16,7 @@ struct RowItem {
 }
 
 export component MainWindow inherits Window {
-    title: "Spike 1 — Slint shell + Blitz bubbles";
+    title: "ddmail";
     preferred-width: 1100px;
     preferred-height: 760px;
     min-width: 1080px;
@@ -30,6 +30,7 @@ export component MainWindow inherits Window {
     in property <brush> active-color;
     callback select(int);
     callback hit-test(int, length, length);
+    callback viewport-resized(length);
 
     HorizontalLayout {
         spacing: 0px;
@@ -139,42 +140,39 @@ export component MainWindow inherits Window {
             Rectangle {
                 vertical-stretch: 1;
                 background: #e9eef5;
+                // Tell Rust the chat width so Blitz re-renders rows to fill it.
+                changed width => { root.viewport-resized(self.width); }
                 ListView {
                     for msg[idx] in root.messages: Rectangle {
                         height: msg.h;
-                        // Fixed-width strip (centered). Image + link overlay share its origin.
-                        Rectangle {
-                            width: 740px;
-                            height: msg.h;
-                            cma := ContextMenuArea {
-                                Menu {
-                                    MenuItem { title: "Ответить"; }
-                                    MenuItem { title: "Переслать"; }
-                                    MenuItem { title: "Копировать текст"; }
-                                    MenuSeparator { }
-                                    MenuItem { title: "Удалить"; }
-                                }
-                                Image {
-                                    x: 0;
-                                    y: 0;
-                                    width: 740px;
-                                    height: msg.h;
-                                    source: msg.img;
-                                    image-fit: contain;
-                                    image-rendering: smooth;
-                                }
+                        cma := ContextMenuArea {
+                            Menu {
+                                MenuItem { title: "Ответить"; }
+                                MenuItem { title: "Переслать"; }
+                                MenuItem { title: "Копировать текст"; }
+                                MenuSeparator { }
+                                MenuItem { title: "Удалить"; }
                             }
-                            // Whole-bubble pointer handling: left click → hit-test in
-                            // Blitz for a link; right click → open the native menu.
-                            TouchArea {
-                                width: 740px;
+                            Image {
+                                x: 0;
+                                y: 0;
+                                width: parent.width;
                                 height: msg.h;
-                                clicked => { root.hit-test(idx, self.mouse-x, self.mouse-y); }
-                                pointer-event(e) => {
-                                    if (e.button == PointerEventButton.right
-                                        && e.kind == PointerEventKind.down) {
-                                        cma.show({ x: self.mouse-x, y: self.mouse-y });
-                                    }
+                                source: msg.img;
+                                image-fit: contain;
+                                image-rendering: smooth;
+                            }
+                        }
+                        // Whole-bubble pointer handling: left click → hit-test in
+                        // Blitz for a link; right click → open the native menu.
+                        TouchArea {
+                            width: parent.width;
+                            height: msg.h;
+                            clicked => { root.hit-test(idx, self.mouse-x, self.mouse-y); }
+                            pointer-event(e) => {
+                                if (e.button == PointerEventButton.right
+                                    && e.kind == PointerEventKind.down) {
+                                    cma.show({ x: self.mouse-x, y: self.mouse-y });
                                 }
                             }
                         }
