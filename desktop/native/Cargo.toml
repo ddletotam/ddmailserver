@@ -13,23 +13,10 @@ slint-build = "1.13"
 [dependencies]
 slint = "1.13"
 
-# Blitz HTML renderer — path-dep into the cloned workspace (exact API we read).
-blitz-dom = { path = "../../../ui-spikes/_ref_blitz/packages/blitz-dom" }
-blitz-html = { path = "../../../ui-spikes/_ref_blitz/packages/blitz-html" }
-blitz-net = { path = "../../../ui-spikes/_ref_blitz/packages/blitz-net" }
-blitz-paint = { path = "../../../ui-spikes/_ref_blitz/packages/blitz-paint" }
-blitz-traits = { path = "../../../ui-spikes/_ref_blitz/packages/blitz-traits" }
-
-# Renderer + 2D types — versions must match what blitz-paint pulls (from the workspace).
-anyrender = "0.10.0"
-anyrender_vello_cpu = "0.12.1"
-peniko = "0.6.0"
-
-# Needed because blitz-net's Provider fetches assets on a tokio runtime.
-tokio = { version = "1.42", features = ["rt-multi-thread", "time"] }
-
-# Feature unification: enable image decoders so network JPEG/PNG render in blitz-dom.
-image = { version = "=0.25.6", default-features = false, features = ["jpeg", "png"] }
+# HTML body renderer: Ultralight (WebKit) → offscreen bitmap. Windows-only crate
+# for now (Linux needs its own FFI against the official SDK).
+ultralight = { version = "0.1.7", features = ["requires_dll", "image"] }
+png = "0.17"
 
 # Shared engine (data model + cache reader).
 ddmail-core = { path = "../core" }
