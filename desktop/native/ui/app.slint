@@ -31,6 +31,7 @@ export component MainWindow inherits Window {
     callback select(int);
     callback hit-test(int, length, length);
     callback viewport-resized(length);
+    callback send(string);
 
     HorizontalLayout {
         spacing: 0px;
@@ -190,9 +191,21 @@ export component MainWindow inherits Window {
                         horizontal-stretch: 1;
                         background: #f0f2f5;
                         border-radius: 20px;
-                        Text {
+                        ti := TextInput {
                             x: 16px;
-                            width: parent.width - 16px;
+                            width: parent.width - 32px;
+                            height: parent.height;
+                            vertical-alignment: center;
+                            color: #0f1419;
+                            font-size: 15px;
+                            single-line: true;
+                            accepted => {
+                                if (self.text != "") { root.send(self.text); self.text = ""; }
+                            }
+                        }
+                        if ti.text == "": Text {
+                            x: 16px;
+                            width: parent.width - 32px;
                             height: parent.height;
                             text: "Написать сообщение…";
                             color: #8b95a1;
@@ -212,6 +225,11 @@ export component MainWindow inherits Window {
                             font-size: 20px;
                             horizontal-alignment: center;
                             vertical-alignment: center;
+                        }
+                        TouchArea {
+                            clicked => {
+                                if (ti.text != "") { root.send(ti.text); ti.text = ""; }
+                            }
                         }
                     }
                 }
