@@ -4,9 +4,10 @@
 
 slint::include_modules!();
 
+mod engine;
 mod render;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
@@ -57,15 +58,19 @@ fn cache_db_path() -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(appdata).join("ru.letotam.ddmail").join("cache.db"))
 }
 
-fn open_account() -> Option<(Cache, String, Vec<Conversation>)> {
+fn open_cache() -> Option<Arc<Cache>> {
+    let path = cache_db_path()?;
+    let dir = path.parent()?.to_path_buf();
+    Cache::new(dir).ok().map(Arc::new)
+}
+
+fn open_account() -> Option<(Arc<Cache>, String, Vec<Conversation>)> {
     let path = cache_db_path()?;
     if !path.exists() {
         println!("cache.db not found at {}", path.display());
         return None;
     }
-    // Cache::new takes the app data dir (it appends cache.db).
-    let dir = path.parent()?.to_path_buf();
-    let cache = Cache::new(dir).ok()?;
+    let cache = open_cache()?;
     let key = cache.account_keys().ok()?.into_iter().next()?;
     let convs = cache.load_conversations(&key).ok()?;
     if convs.is_empty() {
@@ -160,22 +165,55 @@ enum Job {
     HitTest { row: usize, x: f32, y: f32 },
 }
 
-/// UI-thread state shared by the select + resize callbacks.
+/// UI-thread state shared by the select/resize/engine-result paths. All mail
+/// state is interior-mutable so the live engine refresh can replace it.
 struct Shared {
-    account: Option<(Cache, String, Vec<Conversation>)>,
+    cache: Option<Arc<Cache>>,
+    key: String,
+    convs: RefCell<Vec<Conversation>>,
+    displays: RefCell<Vec<Disp>>,
     current: Cell<usize>,
     width: Cell<u32>,
     tx: mpsc::Sender<Job>,
+    engine_tx: RefCell<Option<mpsc::Sender<engine::EngineCmd>>>,
 }
 
+thread_local! {
+    /// Set once on the UI thread so engine-result closures (posted via
+    /// invoke_from_event_loop, which must be Send + 'static and can't capture
+    /// the Rc) can reach the shared state.
+    static SHARED: RefCell<Option<Rc<Shared>>> = const { RefCell::new(None) };
+}
+
+/// Open a conversation by index: show cached bodies immediately, and (if a live
+/// engine is running) fire a background fetch to refresh them.
 fn open_conversation(sh: &Shared, idx: usize) {
     sh.current.set(idx);
-    if let Some((cache, key, convs)) = &sh.account {
-        if let Some(c) = convs.get(idx) {
-            let bodies = cache.load_message_bodies(key, &c.messages).unwrap_or_default();
+    let convs = sh.convs.borrow();
+    let Some(c) = convs.get(idx) else { return };
+    if let (Some(cache), key) = (&sh.cache, &sh.key) {
+        let bodies = cache.load_message_bodies(key, &c.messages).unwrap_or_default();
+        if !bodies.is_empty() {
             let _ = sh.tx.send(Job::SetConversation { bodies, width: sh.width.get() });
         }
     }
+    if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+        let _ = etx.send(engine::EngineCmd::FetchMessages { messages: c.messages.clone() });
+    }
+}
+
+/// Rebuild the sidebar ConvItem list from displays.
+fn sidebar_items(displays: &[Disp]) -> Vec<ConvItem> {
+    displays
+        .iter()
+        .map(|d| ConvItem {
+            name: d.name.clone().into(),
+            preview: d.preview.clone().into(),
+            initials: d.initials.clone().into(),
+            color: slint::Brush::SolidColor(hex(&d.color)),
+            time: "".into(),
+        })
+        .collect()
 }
 
 fn main() {
@@ -259,18 +297,32 @@ fn main() {
         });
     }
 
-    // ----- Shared state + callbacks -----
+    // ----- Shared state -----
+    let (cache, key, init_convs) = match account {
+        Some((c, k, convs)) => (Some(c), k, convs),
+        None => (None, String::new(), Vec::new()),
+    };
     let shared = Rc::new(Shared {
-        account,
+        cache,
+        key,
+        convs: RefCell::new(init_convs),
+        displays: RefCell::new(displays.clone()),
         current: Cell::new(0),
         width: Cell::new(DEFAULT_WIDTH),
         tx,
+        engine_tx: RefCell::new(None),
     });
+    SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
 
     // Open the first conversation that has cached bodies.
-    if let Some((cache, key, convs)) = &shared.account {
+    {
+        let convs = shared.convs.borrow();
         for (i, c) in convs.iter().enumerate() {
-            let bodies = cache.load_message_bodies(key, &c.messages).unwrap_or_default();
+            let bodies = shared
+                .cache
+                .as_ref()
+                .and_then(|cache| cache.load_message_bodies(&shared.key, &c.messages).ok())
+                .unwrap_or_default();
             if bodies.is_empty() {
                 continue;
             }
@@ -286,13 +338,25 @@ fn main() {
         }
     }
 
+    // ----- Live engine (config from env) -----
+    if let Some(cfg) = engine::AccountConfig::from_env() {
+        if let Some(cache) = open_cache() {
+            let ui_weak_eng = ui.as_weak();
+            let etx = engine::spawn(cfg, cache, move |res| {
+                let _ = ui_weak_eng.upgrade_in_event_loop(move |ui| handle_engine_result(&ui, res));
+            });
+            let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
+            *shared.engine_tx.borrow_mut() = Some(etx);
+        }
+    }
+
+    // ----- Callbacks -----
     let ui_weak2 = ui.as_weak();
-    let displays_sel = displays.clone();
     let sh_sel = shared.clone();
     ui.on_select(move |idx| {
         let Some(ui) = ui_weak2.upgrade() else { return };
         let i = idx as usize;
-        if let Some(d) = displays_sel.get(i) {
+        if let Some(d) = sh_sel.displays.borrow().get(i) {
             ui.set_selected(idx);
             ui.set_active_name(d.name.clone().into());
             ui.set_active_initials(d.initials.clone().into());
@@ -311,11 +375,38 @@ fn main() {
         open_conversation(&sh_rs, sh_rs.current.get());
     });
 
-    // Left click on a bubble → hit-test the row's view for a link.
     let tx_hit = shared.tx.clone();
     ui.on_hit_test(move |row, x, y| {
         let _ = tx_hit.send(Job::HitTest { row: row as usize, x, y });
     });
 
     ui.run().unwrap();
+}
+
+/// Apply an engine result on the UI thread (reaches Shared via the thread-local).
+fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
+    match res {
+        engine::EngineResult::Conversations(convs) => {
+            println!("engine: {} live conversations", convs.len());
+            let displays = displays_from(&convs);
+            ui.set_conversations(ModelRc::new(VecModel::from(sidebar_items(&displays))));
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    *sh.convs.borrow_mut() = convs;
+                    *sh.displays.borrow_mut() = displays;
+                }
+            });
+        }
+        engine::EngineResult::Messages(bodies) => {
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    let _ = sh.tx.send(Job::SetConversation {
+                        bodies,
+                        width: sh.width.get(),
+                    });
+                }
+            });
+        }
+        engine::EngineResult::Error(e) => eprintln!("engine error: {e}"),
+    }
 }

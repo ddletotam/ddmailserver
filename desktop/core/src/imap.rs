@@ -15,7 +15,7 @@ pub(crate) fn gravatar_hash(email: &str) -> String {
     format!("{:x}", hash)
 }
 
-pub(crate) fn account_key(host: &str, username: &str) -> String {
+pub fn account_key(host: &str, username: &str) -> String {
     format!("{username}@{host}")
 }
 
