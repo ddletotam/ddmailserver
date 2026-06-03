@@ -3,12 +3,27 @@ name = "ddmail-core"
 version = "0.1.0"
 edition = "2024"
 
-# UI-agnostic engine shared by the native client. Today: data model + cache
-# reader. Will grow to hold the IMAP/SMTP/provider engine extracted from the
-# (retired) Tauri crate.
+# UI-agnostic mail engine (data model, cache, IMAP/SMTP/native providers),
+# extracted from the retired Tauri crate. No UI/Tauri dependencies.
 
 [dependencies]
-rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+async-native-tls = "0.5"
+async-imap = "0.10"
+futures = "0.3"
+tokio-util = { version = "0.7", features = ["compat"] }
+lettre = { version = "0.11", features = ["tokio1-native-tls", "builder"] }
+mailparse = "0.15"
+chrono = { version = "0.4", features = ["serde"] }
+log = "0.4"
+thiserror = "2"
+rusqlite = { version = "0.31", features = ["bundled"] }
+md-5 = "0.10"
+reqwest = { version = "0.12", features = ["native-tls", "json"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+url = "2"
+urlencoding = "2"
 base64 = "0.22"
+async-trait = "0.1"
