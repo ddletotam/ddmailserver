@@ -34,6 +34,7 @@ export component MainWindow inherits Window {
     callback hit-test(int, length, length);
     callback viewport-resized(length);
     callback send(string);
+    callback msg-action(int, string);
 
     HorizontalLayout {
         spacing: 0px;
@@ -157,11 +158,12 @@ export component MainWindow inherits Window {
                         height: msg.h;
                         cma := ContextMenuArea {
                             Menu {
-                                MenuItem { title: "Ответить"; }
-                                MenuItem { title: "Переслать"; }
-                                MenuItem { title: "Копировать текст"; }
+                                MenuItem { title: "Ответить"; activated => { root.msg-action(idx, "reply"); } }
+                                MenuItem { title: "Прочитано"; activated => { root.msg-action(idx, "read"); } }
+                                MenuItem { title: "Не прочитано"; activated => { root.msg-action(idx, "unread"); } }
+                                MenuItem { title: "Копировать текст"; activated => { root.msg-action(idx, "copy"); } }
                                 MenuSeparator { }
-                                MenuItem { title: "Удалить"; }
+                                MenuItem { title: "Удалить"; activated => { root.msg-action(idx, "delete"); } }
                             }
                             Image {
                                 x: 0;

@@ -16,7 +16,7 @@ use std::time::Instant;
 use slint::{Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
 use ddmail_core::cache::Cache;
-use ddmail_core::types::{Conversation, MessageBody};
+use ddmail_core::types::{Conversation, MessageBody, MessageRef};
 
 const NAMES: [&str; 25] = [
     "Анна Соколова", "Команда AppSec", "Дмитрий П.", "Поддержка letotam",
@@ -177,6 +177,8 @@ struct Shared {
     convs: RefCell<Vec<Conversation>>,
     displays: RefCell<Vec<Disp>>,
     avatars: RefCell<HashMap<String, Image>>,
+    /// Message refs for the currently rendered rows (row index → message).
+    current_msgs: RefCell<Vec<MessageRef>>,
     current: Cell<usize>,
     width: Cell<u32>,
     tx: mpsc::Sender<Job>,
@@ -199,6 +201,8 @@ fn open_conversation(sh: &Shared, idx: usize) {
     if let (Some(cache), key) = (&sh.cache, &sh.key) {
         let bodies = cache.load_message_bodies(key, &c.messages).unwrap_or_default();
         if !bodies.is_empty() {
+            *sh.current_msgs.borrow_mut() =
+                bodies.iter().map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid }).collect();
             let _ = sh.tx.send(Job::SetConversation { bodies, width: sh.width.get() });
         }
     }
@@ -308,6 +312,7 @@ fn main() {
         convs: RefCell::new(init_convs),
         displays: RefCell::new(displays.clone()),
         avatars: RefCell::new(HashMap::new()),
+        current_msgs: RefCell::new(Vec::new()),
         current: Cell::new(0),
         width: Cell::new(DEFAULT_WIDTH),
         tx,
@@ -431,6 +436,39 @@ fn main() {
         }
     });
 
+    // Context-menu actions on a message row.
+    let sh_act = shared.clone();
+    ui.on_msg_action(move |row, action| {
+        let row = row as usize;
+        let action = action.to_string();
+        let msg = sh_act.current_msgs.borrow().get(row).cloned();
+        let Some(msg) = msg else { return };
+        let Some(etx) = sh_act.engine_tx.borrow().clone() else {
+            eprintln!("msg-action: no live engine");
+            return;
+        };
+        match action.as_str() {
+            "delete" => {
+                let _ = etx.send(engine::EngineCmd::Delete { messages: vec![msg] });
+            }
+            "read" => {
+                let _ = etx.send(engine::EngineCmd::SetFlags {
+                    messages: vec![msg],
+                    flags: "\\Seen".into(),
+                    add: true,
+                });
+            }
+            "unread" => {
+                let _ = etx.send(engine::EngineCmd::SetFlags {
+                    messages: vec![msg],
+                    flags: "\\Seen".into(),
+                    add: false,
+                });
+            }
+            other => println!("msg-action {other} (not wired yet)"),
+        }
+    });
+
     ui.run().unwrap();
 }
 
@@ -475,10 +513,31 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
         engine::EngineResult::Messages(bodies) => {
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
+                    *sh.current_msgs.borrow_mut() = bodies
+                        .iter()
+                        .map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid })
+                        .collect();
                     let _ = sh.tx.send(Job::SetConversation {
                         bodies,
                         width: sh.width.get(),
                     });
+                }
+            });
+        }
+        engine::EngineResult::Done(what) => {
+            println!("engine: {what} done — refreshing");
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                        let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
+                        // Reopen current conversation to refresh its bodies.
+                        let cur = sh.current.get();
+                        if let Some(c) = sh.convs.borrow().get(cur) {
+                            let _ = etx.send(engine::EngineCmd::FetchMessages {
+                                messages: c.messages.clone(),
+                            });
+                        }
+                    }
                 }
             });
         }
