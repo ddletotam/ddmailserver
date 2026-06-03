@@ -381,6 +381,55 @@ fn main() {
         let _ = tx_hit.send(Job::HitTest { row: row as usize, x, y });
     });
 
+    // Composer → reply to the current conversation's counterpart.
+    let sh_send = shared.clone();
+    ui.on_send(move |text| {
+        let text = text.to_string();
+        if text.trim().is_empty() {
+            return;
+        }
+        let convs = sh_send.convs.borrow();
+        let Some(c) = convs.get(sh_send.current.get()) else { return };
+        let to: Vec<String> = c
+            .counterparts
+            .iter()
+            .map(|cp| cp.addr.clone())
+            .filter(|a| !a.is_empty())
+            .collect();
+        if to.is_empty() {
+            eprintln!("send: no recipient for this conversation");
+            return;
+        }
+        let subject = if c.last_subject.to_lowercase().starts_with("re:") {
+            c.last_subject.clone()
+        } else {
+            format!("Re: {}", c.last_subject)
+        };
+        // Best-effort threading headers from the most recent cached body.
+        let (in_reply_to, references) = sh_send
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.load_message_bodies(&sh_send.key, &c.messages).ok())
+            .and_then(|bodies| {
+                bodies.last().map(|b| {
+                    let irt = (!b.message_id.is_empty()).then(|| b.message_id.clone());
+                    let mut refs = b.references.clone();
+                    if !b.message_id.is_empty() {
+                        refs.push(b.message_id.clone());
+                    }
+                    let refs = (!refs.is_empty()).then(|| refs.join(" "));
+                    (irt, refs)
+                })
+            })
+            .unwrap_or((None, None));
+        if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
+            println!("sending reply to {to:?}");
+            let _ = etx.send(engine::EngineCmd::Send { to, subject, body: text, in_reply_to, references });
+        } else {
+            eprintln!("send: no live engine (set DDMAIL_* env)");
+        }
+    });
+
     ui.run().unwrap();
 }
 
@@ -431,6 +480,16 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     println!("engine event: token refreshed for {account_id}");
                 }
             }
+        }
+        engine::EngineResult::Sent(id) => {
+            println!("engine: message sent ({id}) — refetching conversations");
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                        let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
+                    }
+                }
+            });
         }
         engine::EngineResult::Error(e) => eprintln!("engine error: {e}"),
     }

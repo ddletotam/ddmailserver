@@ -17,7 +17,7 @@ use ddmail_core::imap_provider::ImapProvider;
 use ddmail_core::native_provider::NativeProvider;
 use ddmail_core::provider::MailProvider;
 use ddmail_core::session::SessionPool;
-use ddmail_core::types::{Conversation, MessageBody, MessageRef};
+use ddmail_core::types::{Conversation, MessageBody, MessageRef, OutgoingMessage};
 
 #[derive(Clone)]
 pub struct AccountConfig {
@@ -27,6 +27,8 @@ pub struct AccountConfig {
     pub password: String,
     pub use_tls: bool,
     pub email: String,
+    pub smtp_host: String,
+    pub smtp_port: u16,
     pub native_url: Option<String>,
     pub native_token: Option<String>,
 }
@@ -43,6 +45,11 @@ impl AccountConfig {
             .and_then(|s| s.parse().ok())
             .unwrap_or(993);
         let use_tls = std::env::var("DDMAIL_IMAP_TLS").map(|s| s != "0").unwrap_or(true);
+        let smtp_host = std::env::var("DDMAIL_SMTP_HOST").unwrap_or_else(|_| host.clone());
+        let smtp_port = std::env::var("DDMAIL_SMTP_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(465);
         Some(AccountConfig {
             host,
             port,
@@ -50,6 +57,8 @@ impl AccountConfig {
             password,
             use_tls,
             email,
+            smtp_host,
+            smtp_port,
             native_url: std::env::var("DDMAIL_NATIVE_URL").ok(),
             native_token: std::env::var("DDMAIL_NATIVE_TOKEN").ok(),
         })
@@ -101,6 +110,13 @@ pub enum EngineCmd {
     FetchConversations { limit: u32 },
     FetchMessages { messages: Vec<MessageRef> },
     StartWatching,
+    Send {
+        to: Vec<String>,
+        subject: String,
+        body: String,
+        in_reply_to: Option<String>,
+        references: Option<String>,
+    },
 }
 
 /// Results the engine sends back to the UI.
@@ -109,6 +125,8 @@ pub enum EngineResult {
     Messages(Vec<MessageBody>),
     /// A push event from the provider's background watcher.
     Event(EngineEvent),
+    /// A message was sent (server response / message-id).
+    Sent(String),
     Error(String),
 }
 
@@ -153,6 +171,30 @@ pub fn spawn(
                             cache.save_message_bodies(&key, &bodies).ok();
                             on_result(EngineResult::Messages(bodies));
                         }
+                        Err(e) => on_result(EngineResult::Error(e)),
+                    }
+                }
+                EngineCmd::Send { to, subject, body, in_reply_to, references } => {
+                    let msg = OutgoingMessage {
+                        from: cfg.email.clone(),
+                        to,
+                        cc: Vec::new(),
+                        subject,
+                        html: String::new(),
+                        text: body,
+                        in_reply_to,
+                        references,
+                        attachment_paths: Vec::new(),
+                        inline_paths: Vec::new(),
+                        attachments: Vec::new(),
+                    };
+                    let r = rt.block_on(provider.send_message(
+                        &cfg.smtp_host,
+                        cfg.smtp_port,
+                        &msg,
+                    ));
+                    match r {
+                        Ok(id) => on_result(EngineResult::Sent(id)),
                         Err(e) => on_result(EngineResult::Error(e)),
                     }
                 }
