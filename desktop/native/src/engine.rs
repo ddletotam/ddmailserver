@@ -111,6 +111,8 @@ pub enum EngineCmd {
     FetchMessages { messages: Vec<MessageRef> },
     StartWatching,
     FetchAvatar { email: String },
+    SetFlags { messages: Vec<MessageRef>, flags: String, add: bool },
+    Delete { messages: Vec<MessageRef> },
     Send {
         to: Vec<String>,
         subject: String,
@@ -128,6 +130,8 @@ pub enum EngineResult {
     Event(EngineEvent),
     /// A message was sent (server response / message-id).
     Sent(String),
+    /// A mutating op (flags/delete) finished; UI should refresh.
+    Done(String),
     /// A decoded avatar (RGBA) for an email address.
     Avatar { email: String, rgba: Vec<u8>, w: u32, h: u32 },
     Error(String),
@@ -200,6 +204,18 @@ pub fn spawn(
                                 h,
                             });
                         }
+                    }
+                }
+                EngineCmd::SetFlags { messages, flags, add } => {
+                    match rt.block_on(provider.set_flags_batch(&messages, &flags, add)) {
+                        Ok(()) => on_result(EngineResult::Done("flags".into())),
+                        Err(e) => on_result(EngineResult::Error(e)),
+                    }
+                }
+                EngineCmd::Delete { messages } => {
+                    match rt.block_on(provider.delete_messages(&messages)) {
+                        Ok(()) => on_result(EngineResult::Done("delete".into())),
+                        Err(e) => on_result(EngineResult::Error(e)),
                     }
                 }
                 EngineCmd::Send { to, subject, body, in_reply_to, references } => {
