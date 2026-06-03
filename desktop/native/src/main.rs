@@ -155,6 +155,7 @@ fn build_body_html(b: &MessageBody) -> String {
 
 enum Job {
     SetConversation { bodies: Vec<MessageBody>, width: u32 },
+    HitTest { row: usize, x: f32, y: f32 },
 }
 
 /// UI-thread state shared by the select + resize callbacks.
@@ -215,32 +216,43 @@ fn main() {
                     let lock = rx.lock().unwrap();
                     lock.recv()
                 };
-                let Ok(Job::SetConversation { bodies, width }) = job else { break };
-
-                let htmls: Vec<String> = bodies.iter().map(build_body_html).collect();
-                let t = Instant::now();
-                let bitmaps = engine.render_bodies(&htmls, width);
-                println!(
-                    "rendered {} bodies @ {width}px in {} ms",
-                    bitmaps.len(),
-                    t.elapsed().as_millis()
-                );
-
-                let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                    let rows: Vec<RowItem> = bitmaps
-                        .into_iter()
-                        .map(|b| {
-                            let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
-                                &b.rgba, b.width, b.height,
-                            );
-                            RowItem {
-                                img: Image::from_rgba8(buf),
-                                h: b.height as f32,
-                            }
-                        })
-                        .collect();
-                    ui.set_messages(ModelRc::new(VecModel::from(rows)));
-                });
+                let Ok(job) = job else { break };
+                match job {
+                    Job::SetConversation { bodies, width } => {
+                        let htmls: Vec<String> = bodies.iter().map(build_body_html).collect();
+                        let t = Instant::now();
+                        let bitmaps = engine.render_bodies(&htmls, width);
+                        println!(
+                            "rendered {} bodies @ {width}px in {} ms",
+                            bitmaps.len(),
+                            t.elapsed().as_millis()
+                        );
+                        let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+                            let rows: Vec<RowItem> = bitmaps
+                                .into_iter()
+                                .map(|b| {
+                                    let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                                        &b.rgba, b.width, b.height,
+                                    );
+                                    RowItem {
+                                        img: Image::from_rgba8(buf),
+                                        h: b.height as f32,
+                                    }
+                                })
+                                .collect();
+                            ui.set_messages(ModelRc::new(VecModel::from(rows)));
+                        });
+                    }
+                    Job::HitTest { row, x, y } => match engine.hit(row, x, y) {
+                        Some(url) => {
+                            println!("link click -> {url}");
+                            let _ = std::process::Command::new("cmd")
+                                .args(["/C", "start", "", &url])
+                                .spawn();
+                        }
+                        None => println!("click row {row} @({x:.0},{y:.0}) — no link"),
+                    },
+                }
             }
         });
     }
@@ -295,6 +307,12 @@ fn main() {
         }
         sh_rs.width.set(neww);
         open_conversation(&sh_rs, sh_rs.current.get());
+    });
+
+    // Left click on a bubble → hit-test the row's view for a link.
+    let tx_hit = shared.tx.clone();
+    ui.on_hit_test(move |row, x, y| {
+        let _ = tx_hit.send(Job::HitTest { row: row as usize, x, y });
     });
 
     ui.run().unwrap();
