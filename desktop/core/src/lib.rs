@@ -1,2 +1,10 @@
 pub mod cache;
+pub mod event;
+pub mod imap;
+pub mod imap_provider;
+pub mod native_provider;
+pub mod provider;
+pub mod registry;
+pub mod session;
+pub mod smtp;
 pub mod types;

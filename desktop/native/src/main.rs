@@ -63,7 +63,9 @@ fn open_account() -> Option<(Cache, String, Vec<Conversation>)> {
         println!("cache.db not found at {}", path.display());
         return None;
     }
-    let cache = Cache::open(&path).ok()?;
+    // Cache::new takes the app data dir (it appends cache.db).
+    let dir = path.parent()?.to_path_buf();
+    let cache = Cache::new(dir).ok()?;
     let key = cache.account_keys().ok()?.into_iter().next()?;
     let convs = cache.load_conversations(&key).ok()?;
     if convs.is_empty() {
