@@ -113,6 +113,7 @@ pub enum EngineCmd {
     FetchAvatar { email: String },
     SetFlags { messages: Vec<MessageRef>, flags: String, add: bool },
     Delete { messages: Vec<MessageRef> },
+    Search { query: String },
     Send {
         to: Vec<String>,
         subject: String,
@@ -215,6 +216,22 @@ pub fn spawn(
                 EngineCmd::Delete { messages } => {
                     match rt.block_on(provider.delete_messages(&messages)) {
                         Ok(()) => on_result(EngineResult::Done("delete".into())),
+                        Err(e) => on_result(EngineResult::Error(e)),
+                    }
+                }
+                EngineCmd::Search { query } => {
+                    match rt.block_on(provider.search_messages(&cfg.email, &query)) {
+                        Ok(envs) => {
+                            let refs: Vec<MessageRef> = envs
+                                .iter()
+                                .map(|e| MessageRef { folder: e.folder.clone(), uid: e.uid })
+                                .collect();
+                            let our = resolve_our_addrs(&cache, &cfg);
+                            match rt.block_on(provider.fetch_conversation_messages(&our, &refs)) {
+                                Ok(bodies) => on_result(EngineResult::Messages(bodies)),
+                                Err(e) => on_result(EngineResult::Error(e)),
+                            }
+                        }
                         Err(e) => on_result(EngineResult::Error(e)),
                     }
                 }

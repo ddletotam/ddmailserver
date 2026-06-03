@@ -35,6 +35,7 @@ export component MainWindow inherits Window {
     callback viewport-resized(length);
     callback send(string);
     callback msg-action(int, string);
+    callback search(string);
 
     HorizontalLayout {
         spacing: 0px;
@@ -53,9 +54,21 @@ export component MainWindow inherits Window {
                         height: 36px;
                         background: #eceef0;
                         border-radius: 18px;
-                        Text {
+                        si := TextInput {
                             x: 14px;
-                            width: parent.width - 14px;
+                            width: parent.width - 28px;
+                            height: parent.height;
+                            vertical-alignment: center;
+                            color: #0f1419;
+                            font-size: 14px;
+                            single-line: true;
+                            accepted => {
+                                if (self.text != "") { root.search(self.text); }
+                            }
+                        }
+                        if si.text == "": Text {
+                            x: 14px;
+                            width: parent.width - 28px;
                             height: parent.height;
                             text: "Поиск…";
                             color: #8b95a1;
