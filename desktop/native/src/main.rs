@@ -436,6 +436,21 @@ fn main() {
         }
     });
 
+    // Search: server-side search → render matching message bodies in the pane.
+    let sh_search = shared.clone();
+    ui.on_search(move |query| {
+        let q = query.to_string();
+        if q.trim().is_empty() {
+            return;
+        }
+        if let Some(etx) = sh_search.engine_tx.borrow().as_ref() {
+            println!("search: {q}");
+            let _ = etx.send(engine::EngineCmd::Search { query: q });
+        } else {
+            eprintln!("search: no live engine");
+        }
+    });
+
     // Context-menu actions on a message row.
     let sh_act = shared.clone();
     ui.on_msg_action(move |row, action| {
