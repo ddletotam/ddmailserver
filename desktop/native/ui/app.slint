@@ -6,6 +6,8 @@ struct ConvItem {
     initials: string,
     color: brush,
     time: string,
+    avatar: image,
+    has-avatar: bool,
 }
 
 // Each message row is a full-width image rendered by Blitz (bubble, alignment,
@@ -75,7 +77,8 @@ export component MainWindow inherits Window {
                                 height: 46px;
                                 border-radius: 23px;
                                 background: conv.color;
-                                Text {
+                                clip: true;
+                                if !conv.has-avatar: Text {
                                     width: parent.width;
                                     height: parent.height;
                                     text: conv.initials;
@@ -84,6 +87,12 @@ export component MainWindow inherits Window {
                                     font-size: 16px;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
+                                }
+                                if conv.has-avatar: Image {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    source: conv.avatar;
+                                    image-fit: cover;
                                 }
                             }
                             VerticalLayout {

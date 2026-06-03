@@ -21,3 +21,6 @@ png = "0.17"
 # Shared engine (data model, cache, IMAP/SMTP/native providers).
 ddmail-core = { path = "../core" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
+
+# Decode avatar bytes (png/jpeg/…) to RGBA for Slint.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }

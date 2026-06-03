@@ -110,6 +110,7 @@ pub enum EngineCmd {
     FetchConversations { limit: u32 },
     FetchMessages { messages: Vec<MessageRef> },
     StartWatching,
+    FetchAvatar { email: String },
     Send {
         to: Vec<String>,
         subject: String,
@@ -127,6 +128,8 @@ pub enum EngineResult {
     Event(EngineEvent),
     /// A message was sent (server response / message-id).
     Sent(String),
+    /// A decoded avatar (RGBA) for an email address.
+    Avatar { email: String, rgba: Vec<u8>, w: u32, h: u32 },
     Error(String),
 }
 
@@ -172,6 +175,31 @@ pub fn spawn(
                             on_result(EngineResult::Messages(bodies));
                         }
                         Err(e) => on_result(EngineResult::Error(e)),
+                    }
+                }
+                EngineCmd::FetchAvatar { email } => {
+                    // Cache first, else fetch from the provider and cache it.
+                    let bytes = match cache.get_avatar(&email) {
+                        Some((b, _)) if !b.is_empty() => b,
+                        _ => match rt.block_on(provider.fetch_avatar(&email)) {
+                            Ok((b, m)) if !b.is_empty() => {
+                                cache.save_avatar(&email, &b, &m).ok();
+                                b
+                            }
+                            _ => Vec::new(),
+                        },
+                    };
+                    if !bytes.is_empty() {
+                        if let Ok(img) = image::load_from_memory(&bytes) {
+                            let rgba = img.to_rgba8();
+                            let (w, h) = (rgba.width(), rgba.height());
+                            on_result(EngineResult::Avatar {
+                                email,
+                                rgba: rgba.into_raw(),
+                                w,
+                                h,
+                            });
+                        }
                     }
                 }
                 EngineCmd::Send { to, subject, body, in_reply_to, references } => {
