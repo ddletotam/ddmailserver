@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 
 use ddmail_core::cache::Cache;
-use ddmail_core::event::noop_notifier;
+use ddmail_core::event::{noop_notifier, EngineEvent, Notifier};
 use ddmail_core::imap;
 use ddmail_core::imap_provider::ImapProvider;
 use ddmail_core::native_provider::NativeProvider;
@@ -100,23 +100,27 @@ fn resolve_our_addrs(cache: &Cache, cfg: &AccountConfig) -> Vec<String> {
 pub enum EngineCmd {
     FetchConversations { limit: u32 },
     FetchMessages { messages: Vec<MessageRef> },
+    StartWatching,
 }
 
 /// Results the engine sends back to the UI.
 pub enum EngineResult {
     Conversations(Vec<Conversation>),
     Messages(Vec<MessageBody>),
+    /// A push event from the provider's background watcher.
+    Event(EngineEvent),
     Error(String),
 }
 
 /// Spawn the engine thread. Returns a command sender; results arrive via `on_result`
-/// (called on the engine thread — forward to the UI loop yourself).
+/// (called from background threads — forward to the UI loop yourself).
 pub fn spawn(
     cfg: AccountConfig,
     cache: Arc<Cache>,
-    on_result: impl Fn(EngineResult) + Send + 'static,
+    on_result: impl Fn(EngineResult) + Send + Sync + 'static,
 ) -> mpsc::Sender<EngineCmd> {
     let (tx, rx) = mpsc::channel::<EngineCmd>();
+    let on_result = Arc::new(on_result);
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
@@ -150,6 +154,17 @@ pub fn spawn(
                             on_result(EngineResult::Messages(bodies));
                         }
                         Err(e) => on_result(EngineResult::Error(e)),
+                    }
+                }
+                EngineCmd::StartWatching => {
+                    // Bridge provider events into EngineResult::Event. The
+                    // multi-threaded runtime keeps the spawned watcher alive
+                    // while this thread blocks on the next command.
+                    let sink = on_result.clone();
+                    let notifier: Notifier =
+                        Arc::new(move |ev| sink(EngineResult::Event(ev)));
+                    if let Err(e) = rt.block_on(provider.start_watching(notifier)) {
+                        on_result(EngineResult::Error(format!("watch: {e}")));
                     }
                 }
             }

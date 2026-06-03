@@ -346,6 +346,7 @@ fn main() {
                 let _ = ui_weak_eng.upgrade_in_event_loop(move |ui| handle_engine_result(&ui, res));
             });
             let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
+            let _ = etx.send(engine::EngineCmd::StartWatching);
             *shared.engine_tx.borrow_mut() = Some(etx);
         }
     }
@@ -406,6 +407,30 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     });
                 }
             });
+        }
+        engine::EngineResult::Event(ev) => {
+            use ddmail_core::event::EngineEvent;
+            match ev {
+                EngineEvent::NewMail { folder, count } => {
+                    println!("engine event: new mail in {folder} (+{count}) — refetching");
+                    SHARED.with(|s| {
+                        if let Some(sh) = s.borrow().as_ref() {
+                            if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                                let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
+                            }
+                        }
+                    });
+                }
+                EngineEvent::ConnectionState { state, message } => {
+                    println!("engine connection: {state} {}", message.unwrap_or_default());
+                }
+                EngineEvent::CalendarUpdated { calendar_id } => {
+                    println!("engine event: calendar {calendar_id} updated");
+                }
+                EngineEvent::TokenRefreshed { account_id, .. } => {
+                    println!("engine event: token refreshed for {account_id}");
+                }
+            }
         }
         engine::EngineResult::Error(e) => eprintln!("engine error: {e}"),
     }
