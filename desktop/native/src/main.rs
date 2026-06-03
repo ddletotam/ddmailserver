@@ -8,6 +8,7 @@ mod engine;
 mod render;
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
@@ -51,6 +52,7 @@ struct Disp {
     initials: String,
     color: String,
     preview: String,
+    email: String,
 }
 
 fn cache_db_path() -> Option<std::path::PathBuf> {
@@ -106,6 +108,7 @@ fn displays_from(convs: &[Conversation]) -> Vec<Disp> {
                 } else {
                     c.last_subject.clone()
                 },
+                email: c.counterparts.first().map(|cp| cp.addr.clone()).unwrap_or_default(),
             }
         })
         .collect()
@@ -118,6 +121,7 @@ fn synthetic_displays() -> Vec<Disp> {
             initials: initials(NAMES[i]),
             color: PALETTE[i % PALETTE.len()].to_string(),
             preview: "Последнее сообщение в диалоге…".to_string(),
+            email: String::new(),
         })
         .collect()
 }
@@ -172,6 +176,7 @@ struct Shared {
     key: String,
     convs: RefCell<Vec<Conversation>>,
     displays: RefCell<Vec<Disp>>,
+    avatars: RefCell<HashMap<String, Image>>,
     current: Cell<usize>,
     width: Cell<u32>,
     tx: mpsc::Sender<Job>,
@@ -202,16 +207,21 @@ fn open_conversation(sh: &Shared, idx: usize) {
     }
 }
 
-/// Rebuild the sidebar ConvItem list from displays.
-fn sidebar_items(displays: &[Disp]) -> Vec<ConvItem> {
+/// Rebuild the sidebar ConvItem list from displays + the avatar map.
+fn sidebar_items(displays: &[Disp], avatars: &HashMap<String, Image>) -> Vec<ConvItem> {
     displays
         .iter()
-        .map(|d| ConvItem {
-            name: d.name.clone().into(),
-            preview: d.preview.clone().into(),
-            initials: d.initials.clone().into(),
-            color: slint::Brush::SolidColor(hex(&d.color)),
-            time: "".into(),
+        .map(|d| {
+            let avatar = avatars.get(&d.email).cloned();
+            ConvItem {
+                name: d.name.clone().into(),
+                preview: d.preview.clone().into(),
+                initials: d.initials.clone().into(),
+                color: slint::Brush::SolidColor(hex(&d.color)),
+                time: "".into(),
+                has_avatar: avatar.is_some(),
+                avatar: avatar.unwrap_or_default(),
+            }
         })
         .collect()
 }
@@ -225,17 +235,7 @@ fn main() {
         None => synthetic_displays(),
     };
 
-    let convs: Vec<ConvItem> = displays
-        .iter()
-        .map(|d| ConvItem {
-            name: d.name.clone().into(),
-            preview: d.preview.clone().into(),
-            initials: d.initials.clone().into(),
-            color: slint::Brush::SolidColor(hex(&d.color)),
-            time: "".into(),
-        })
-        .collect();
-    ui.set_conversations(ModelRc::new(VecModel::from(convs)));
+    ui.set_conversations(ModelRc::new(VecModel::from(sidebar_items(&displays, &HashMap::new()))));
     if let Some(d0) = displays.first() {
         ui.set_active_name(d0.name.clone().into());
         ui.set_active_initials(d0.initials.clone().into());
@@ -307,6 +307,7 @@ fn main() {
         key,
         convs: RefCell::new(init_convs),
         displays: RefCell::new(displays.clone()),
+        avatars: RefCell::new(HashMap::new()),
         current: Cell::new(0),
         width: Cell::new(DEFAULT_WIDTH),
         tx,
@@ -439,11 +440,35 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
         engine::EngineResult::Conversations(convs) => {
             println!("engine: {} live conversations", convs.len());
             let displays = displays_from(&convs);
-            ui.set_conversations(ModelRc::new(VecModel::from(sidebar_items(&displays))));
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
+                    let items = sidebar_items(&displays, &sh.avatars.borrow());
+                    ui.set_conversations(ModelRc::new(VecModel::from(items)));
+                    // Request avatars for unique counterpart emails not yet cached.
+                    if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                        let mut seen = std::collections::HashSet::new();
+                        for d in &displays {
+                            if d.email.is_empty() || sh.avatars.borrow().contains_key(&d.email) {
+                                continue;
+                            }
+                            if seen.insert(d.email.clone()) {
+                                let _ = etx.send(engine::EngineCmd::FetchAvatar { email: d.email.clone() });
+                            }
+                        }
+                    }
                     *sh.convs.borrow_mut() = convs;
                     *sh.displays.borrow_mut() = displays;
+                }
+            });
+        }
+        engine::EngineResult::Avatar { email, rgba, w, h } => {
+            let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&rgba, w, h);
+            let img = Image::from_rgba8(buf);
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    sh.avatars.borrow_mut().insert(email, img);
+                    let items = sidebar_items(&sh.displays.borrow(), &sh.avatars.borrow());
+                    ui.set_conversations(ModelRc::new(VecModel::from(items)));
                 }
             });
         }
