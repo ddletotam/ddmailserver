@@ -1143,6 +1143,7 @@ dependencies = [
 name = "ddmail-native"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "ddmail-core",
  "image",
  "png 0.17.16",
