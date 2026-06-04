@@ -83,12 +83,16 @@ func (db *DB) MarkCalendarEventSyncFailed(id int64, errMsg string) error {
 		errMsg = errMsg[:1024] + "…"
 	}
 	now := timeutil.Now()
+	// $2 is cast to bigint explicitly: pq's parameter-type inference can
+	// otherwise deduce different types for the same placeholder when it
+	// appears in two arithmetic contexts (assign vs. add-then-assign),
+	// failing the prepare with "inconsistent types deduced for parameter $2".
 	query := `
 		UPDATE calendar_event_sync_queue
 		SET retry_count = retry_count + 1,
 		    last_error = $1,
-		    last_attempt_at = $2,
-		    next_attempt_at = $2 + CASE
+		    last_attempt_at = $2::bigint,
+		    next_attempt_at = $2::bigint + CASE
 		        WHEN retry_count + 1 = 1 THEN 60000
 		        WHEN retry_count + 1 = 2 THEN 300000
 		        WHEN retry_count + 1 = 3 THEN 1800000
