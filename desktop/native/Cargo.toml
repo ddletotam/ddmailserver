@@ -24,3 +24,8 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 
 # Decode avatar bytes (png/jpeg/…) to RGBA for Slint.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+
+# "Today / DD.MM / DD.MM.YY" date formatter for the search-dropdown rows.
+# ddmail-core already pulls chrono; we declare it explicitly here too so
+# the dependency is honest in our crate manifest.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

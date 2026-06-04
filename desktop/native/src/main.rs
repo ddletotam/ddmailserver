@@ -16,7 +16,7 @@ use std::time::Instant;
 use slint::{Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
 use ddmail_core::cache::Cache;
-use ddmail_core::types::{Conversation, MessageBody, MessageRef};
+use ddmail_core::types::{Contact, Conversation, MessageBody, MessageEnvelope, MessageRef};
 
 const NAMES: [&str; 25] = [
     "Анна Соколова", "Команда AppSec", "Дмитрий П.", "Поддержка letotam",
@@ -56,8 +56,36 @@ struct Disp {
 }
 
 fn cache_db_path() -> Option<std::path::PathBuf> {
-    let appdata = std::env::var("APPDATA").ok()?;
-    Some(std::path::PathBuf::from(appdata).join("ru.letotam.ddmail").join("cache.db"))
+    // Pick the per-OS location of the (Tauri-era) cache dir so the new
+    // client reads the same cache.db the user already has.
+    //   * Windows: %APPDATA%\ru.letotam.ddmail\cache.db
+    //   * macOS:   ~/Library/Application Support/ru.letotam.ddmail/cache.db
+    //   * Linux:   $XDG_DATA_HOME/ru.letotam.ddmail/cache.db,
+    //              or ~/.local/share/ru.letotam.ddmail/cache.db
+    #[cfg(target_os = "windows")]
+    {
+        let appdata = std::env::var("APPDATA").ok()?;
+        return Some(std::path::PathBuf::from(appdata).join("ru.letotam.ddmail").join("cache.db"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").ok()?;
+        return Some(
+            std::path::PathBuf::from(home)
+                .join("Library/Application Support/ru.letotam.ddmail/cache.db"),
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let base = std::env::var("XDG_DATA_HOME").ok()
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var("HOME").ok().map(|h|
+                std::path::PathBuf::from(h).join(".local/share")
+            ))?;
+        return Some(base.join("ru.letotam.ddmail").join("cache.db"));
+    }
+    #[allow(unreachable_code)]
+    None
 }
 
 fn open_cache() -> Option<Arc<Cache>> {
@@ -130,6 +158,93 @@ fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
+/// "Looks like an email" check for the live-dropdown compose-new row.
+/// Matches the spec from svelte's SearchDropdown (EMAIL_RE): something
+/// before @, something between @ and the last dot, something after.
+/// Pulled into Rust so the Slint side stays declarative.
+fn parse_email_like(q: &str) -> Option<String> {
+    let s = q.trim();
+    if s.contains(|c: char| c.is_whitespace() || c == '<' || c == '>' || c == '"' || c == ',') {
+        return None;
+    }
+    let at = s.find('@')?;
+    let local = &s[..at];
+    let domain = &s[at + 1..];
+    if local.is_empty() || domain.is_empty() { return None; }
+    let dot = domain.find('.')?;
+    if dot == 0 || dot == domain.len() - 1 { return None; }
+    Some(s.to_lowercase())
+}
+
+/// Short "HH:MM" / "DD.MM" / "DD.MM.YY" formatter for the dropdown
+/// message rows — matches svelte's formatDateShort behaviour closely
+/// enough for the right-aligned date hint.
+fn fmt_short_date(ts_ms: i64) -> String {
+    if ts_ms <= 0 { return String::new(); }
+    use chrono::{DateTime, Datelike, Local, TimeZone, Timelike};
+    let dt: DateTime<Local> = match Local.timestamp_millis_opt(ts_ms).single() {
+        Some(d) => d,
+        None => return String::new(),
+    };
+    let now = Local::now();
+    if dt.year() == now.year() && dt.ordinal() == now.ordinal() {
+        return format!("{:02}:{:02}", dt.hour(), dt.minute());
+    }
+    if dt.year() == now.year() {
+        return format!("{:02}.{:02}", dt.day(), dt.month());
+    }
+    format!("{:02}.{:02}.{:02}", dt.day(), dt.month(), dt.year() % 100)
+}
+
+fn contact_items(contacts: &[Contact]) -> Vec<ContactItem> {
+    contacts
+        .iter()
+        .map(|c| ContactItem {
+            name: c.name.clone().into(),
+            email: c.email.clone().into(),
+        })
+        .collect()
+}
+
+/// Shared logic for "enter transient compose mode". Pins the chat header
+/// to the new recipient, blanks the bubble list, deselects the sidebar
+/// row (none of the existing conversations match), and stashes the
+/// target email on `Shared.pending_compose` for `on_send` to pick up.
+fn enter_compose_mode(sh: &Shared, ui: &MainWindow, email: &str) {
+    let email = email.trim().to_lowercase();
+    *sh.pending_compose.borrow_mut() = Some(email.clone());
+    sh.current_msgs.borrow_mut().clear();
+    let initial = email
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_default();
+    ui.set_active_name(email.clone().into());
+    ui.set_active_initials(initial.into());
+    ui.set_active_color(slint::Brush::SolidColor(hex("#2f80ed")));
+    ui.set_messages(ModelRc::new(VecModel::from(Vec::<RowItem>::new())));
+    ui.set_search_open(false);
+    ui.set_search_query("".into());
+    ui.set_search_selected_row(-1);
+    ui.set_search_compose_email("".into());
+    ui.set_search_contacts(ModelRc::new(VecModel::from(Vec::<ContactItem>::new())));
+    ui.set_search_messages(ModelRc::new(VecModel::from(Vec::<MessageHit>::new())));
+    // Prepend the synthetic "new chat" row and pull focus to the input.
+    refresh_sidebar(sh, ui);
+    ui.invoke_focus_composer();
+}
+
+fn message_hits(envs: &[MessageEnvelope]) -> Vec<MessageHit> {
+    envs.iter()
+        .map(|e| MessageHit {
+            from: if e.from.is_empty() { e.from_addr.clone() } else { e.from.clone() }.into(),
+            subject: e.subject.clone().into(),
+            date: fmt_short_date(e.date_ts).into(),
+        })
+        .collect()
+}
+
+
 /// Bubble wrapper + email-HTML normalization (tames ugly notification emails).
 fn build_body_html(b: &MessageBody) -> String {
     let side = if b.is_outgoing { "out" } else { "in" };
@@ -183,6 +298,23 @@ struct Shared {
     width: Cell<u32>,
     tx: mpsc::Sender<Job>,
     engine_tx: RefCell<Option<mpsc::Sender<engine::EngineCmd>>>,
+    /// Last search query we asked the engine for. Engine echoes the
+    /// query back in `SearchDropdown`; we drop results that don't match
+    /// — handles the race where typing outruns the engine.
+    search_query_inflight: RefCell<String>,
+    /// Latest rows in the dropdown (parallel to the Slint model order),
+    /// so callbacks can resolve `search-select-contact(idx)` and
+    /// `search-select-message(idx)` back to their domain objects.
+    search_contacts: RefCell<Vec<Contact>>,
+    search_messages: RefCell<Vec<MessageEnvelope>>,
+    /// "Transient compose" target — set when the user picks a fresh
+    /// recipient via the search dropdown ("Написать xxx@yyy" or a
+    /// contact with no existing conversation). While Some, the chat
+    /// pane shows an empty bubble list with the recipient pinned in
+    /// the header; `on_send` routes the outgoing message to this
+    /// address instead of the (irrelevant) sidebar-selected
+    /// conversation. Cleared by EngineResult::Sent.
+    pending_compose: RefCell<Option<String>>,
 }
 
 thread_local! {
@@ -228,6 +360,45 @@ fn sidebar_items(displays: &[Disp], avatars: &HashMap<String, Image>) -> Vec<Con
             }
         })
         .collect()
+}
+
+/// One row representing the transient-compose target — rendered at the
+/// very top of the sidebar so the user sees "a chat" with the new
+/// recipient before any message has been sent. Telegram does the same.
+fn pending_compose_item(target: &str) -> ConvItem {
+    let initials = target
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_default();
+    ConvItem {
+        name: target.to_string().into(),
+        preview: "Новое сообщение".into(),
+        initials: initials.into(),
+        color: slint::Brush::SolidColor(hex("#2f80ed")),
+        time: "".into(),
+        has_avatar: false,
+        avatar: Image::default(),
+    }
+}
+
+/// Push the latest displays + pending-compose state into the Slint
+/// sidebar model. When `pending_compose` is Some, prepend a synthetic
+/// "new chat" row at index 0 and select it.
+fn refresh_sidebar(sh: &Shared, ui: &MainWindow) {
+    let displays = sh.displays.borrow();
+    let avatars = sh.avatars.borrow();
+    let pending = sh.pending_compose.borrow().clone();
+
+    let mut items = Vec::with_capacity(displays.len() + 1);
+    if let Some(target) = pending.as_ref() {
+        items.push(pending_compose_item(target));
+    }
+    items.extend(sidebar_items(&displays, &avatars));
+    ui.set_conversations(ModelRc::new(VecModel::from(items)));
+    if pending.is_some() {
+        ui.set_selected(0);
+    }
 }
 
 fn main() {
@@ -317,6 +488,10 @@ fn main() {
         width: Cell::new(DEFAULT_WIDTH),
         tx,
         engine_tx: RefCell::new(None),
+        search_query_inflight: RefCell::new(String::new()),
+        search_contacts: RefCell::new(Vec::new()),
+        search_messages: RefCell::new(Vec::new()),
+        pending_compose: RefCell::new(None),
     });
     SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
 
@@ -344,17 +519,50 @@ fn main() {
         }
     }
 
-    // ----- Live engine (config from env) -----
-    if let Some(cfg) = engine::AccountConfig::from_env() {
-        if let Some(cache) = open_cache() {
-            let ui_weak_eng = ui.as_weak();
-            let etx = engine::spawn(cfg, cache, move |res| {
-                let _ = ui_weak_eng.upgrade_in_event_loop(move |ui| handle_engine_result(&ui, res));
-            });
+    // ----- Live engine (config from env, with cache-only fallback) -----
+    //
+    // When DDMAIL_IMAP_* env vars are set we spawn a fully live engine and
+    // fire the initial FetchConversations + StartWatching. When they're
+    // not, we still spawn an engine with a placeholder config so that
+    // `SearchDropdown` (the live-dropdown lookup) keeps working — it
+    // only needs the cache for contacts; the provider call is wrapped in
+    // unwrap_or_default and silently returns empty messages.
+    if let Some(cache) = open_cache() {
+        let live_cfg = engine::AccountConfig::from_env();
+        let cfg = live_cfg.clone().unwrap_or_else(|| {
+            // No live config: reconstruct just enough so that the engine's
+            // `key = cfg.account_key()` matches what's already in the cache
+            // (`{username}@{host}` format). Anything provider-touching
+            // stays empty / unreachable; only cache-backed reads make sense.
+            let key = shared.key.clone();
+            let (username, host) = key
+                .rsplit_once('@')
+                .map(|(u, h)| (u.to_string(), h.to_string()))
+                .unwrap_or_else(|| (key.clone(), String::new()));
+            engine::AccountConfig {
+                host: host.clone(),
+                port: 993,
+                username,
+                password: String::new(),
+                use_tls: true,
+                email: key,
+                smtp_host: host,
+                smtp_port: 465,
+                native_url: None,
+                native_token: None,
+            }
+        });
+        let ui_weak_eng = ui.as_weak();
+        let etx = engine::spawn(cfg, cache, move |res| {
+            let _ = ui_weak_eng.upgrade_in_event_loop(move |ui| handle_engine_result(&ui, res));
+        });
+        if live_cfg.is_some() {
             let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
             let _ = etx.send(engine::EngineCmd::StartWatching);
-            *shared.engine_tx.borrow_mut() = Some(etx);
+        } else {
+            println!("engine: DDMAIL_IMAP_* not set — live IMAP disabled, cache-only mode");
         }
+        *shared.engine_tx.borrow_mut() = Some(etx);
     }
 
     // ----- Callbacks -----
@@ -362,14 +570,29 @@ fn main() {
     let sh_sel = shared.clone();
     ui.on_select(move |idx| {
         let Some(ui) = ui_weak2.upgrade() else { return };
-        let i = idx as usize;
-        if let Some(d) = sh_sel.displays.borrow().get(i) {
-            ui.set_selected(idx);
+        let model_idx = idx as usize;
+        // While in transient-compose mode the first row is the synthetic
+        // "new chat" — clicking it is a no-op (we're already there).
+        let pending = sh_sel.pending_compose.borrow().is_some();
+        if pending && model_idx == 0 {
+            return;
+        }
+        // Real-conversation rows: when a transient row is present we
+        // need to subtract one to map model index → displays index.
+        let real_idx = if pending { model_idx - 1 } else { model_idx };
+        // Picking any real conversation leaves transient-compose mode.
+        let was_pending = sh_sel.pending_compose.borrow_mut().take().is_some();
+        if let Some(d) = sh_sel.displays.borrow().get(real_idx) {
             ui.set_active_name(d.name.clone().into());
             ui.set_active_initials(d.initials.clone().into());
             ui.set_active_color(slint::Brush::SolidColor(hex(&d.color)));
         }
-        open_conversation(&sh_sel, i);
+        if was_pending {
+            refresh_sidebar(&sh_sel, &ui);
+        }
+        // Highlight the real row at its post-refresh model index.
+        ui.set_selected(real_idx as i32);
+        open_conversation(&sh_sel, real_idx);
     });
 
     let sh_rs = shared.clone();
@@ -387,13 +610,32 @@ fn main() {
         let _ = tx_hit.send(Job::HitTest { row: row as usize, x, y });
     });
 
-    // Composer → reply to the current conversation's counterpart.
+    // Composer → reply to the current conversation's counterpart, OR
+    // brand-new send when we're in "transient compose" mode (entered via
+    // the search dropdown: compose-row click or contact-with-no-conv).
     let sh_send = shared.clone();
     ui.on_send(move |text| {
         let text = text.to_string();
         if text.trim().is_empty() {
             return;
         }
+        // Branch 1: transient compose target set via the search dropdown.
+        if let Some(target) = sh_send.pending_compose.borrow().clone() {
+            if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
+                println!("sending new message to {target}");
+                let _ = etx.send(engine::EngineCmd::Send {
+                    to: vec![target],
+                    subject: "Новое сообщение".to_string(),
+                    body: text,
+                    in_reply_to: None,
+                    references: None,
+                });
+            } else {
+                eprintln!("send: no live engine (set DDMAIL_* env)");
+            }
+            return;
+        }
+        // Branch 2: implicit reply within the currently selected conversation.
         let convs = sh_send.convs.borrow();
         let Some(c) = convs.get(sh_send.current.get()) else { return };
         let to: Vec<String> = c
@@ -436,18 +678,122 @@ fn main() {
         }
     });
 
-    // Search: server-side search → render matching message bodies in the pane.
-    let sh_search = shared.clone();
-    ui.on_search(move |query| {
+    // ── Search-as-compose dropdown wiring ──
+    //
+    // Each keystroke fires `search-typed` → we cache the latest query on
+    // Shared, kick the engine for both contacts+messages in one call, and
+    // immediately update the "Написать xxx@yyy" compose-row from the
+    // client-side email regex. Debouncing is unnecessary here: the
+    // engine result is keyed by the query string and the UI drops stale
+    // answers in `handle_engine_result`.
+    let ui_weak_st = ui.as_weak();
+    let sh_typed = shared.clone();
+    ui.on_search_typed(move |query| {
         let q = query.to_string();
-        if q.trim().is_empty() {
-            return;
+        let trimmed = q.trim().to_string();
+        *sh_typed.search_query_inflight.borrow_mut() = trimmed.clone();
+        // Compose-row visibility is local to the UI thread — no engine
+        // round-trip needed.
+        if let Some(ui) = ui_weak_st.upgrade() {
+            ui.set_search_compose_email(parse_email_like(&trimmed).unwrap_or_default().into());
+            ui.set_search_loading(true);
         }
-        if let Some(etx) = sh_search.engine_tx.borrow().as_ref() {
-            println!("search: {q}");
-            let _ = etx.send(engine::EngineCmd::Search { query: q });
+        if let Some(etx) = sh_typed.engine_tx.borrow().as_ref() {
+            let _ = etx.send(engine::EngineCmd::SearchDropdown { query: trimmed, limit: 12 });
+        }
+    });
+
+    let ui_weak_sc = ui.as_weak();
+    let sh_clr = shared.clone();
+    ui.on_search_cleared(move || {
+        *sh_clr.search_query_inflight.borrow_mut() = String::new();
+        sh_clr.search_contacts.borrow_mut().clear();
+        sh_clr.search_messages.borrow_mut().clear();
+        if let Some(ui) = ui_weak_sc.upgrade() {
+            ui.set_search_contacts(ModelRc::new(VecModel::from(Vec::<ContactItem>::new())));
+            ui.set_search_messages(ModelRc::new(VecModel::from(Vec::<MessageHit>::new())));
+            ui.set_search_compose_email("".into());
+            ui.set_search_loading(false);
+        }
+    });
+
+    let ui_weak_cn = ui.as_weak();
+    let sh_cn = shared.clone();
+    ui.on_search_compose_new(move |email| {
+        let Some(ui) = ui_weak_cn.upgrade() else { return };
+        enter_compose_mode(&sh_cn, &ui, email.as_str());
+    });
+
+    let ui_weak_sel_c = ui.as_weak();
+    let sh_sel_c = shared.clone();
+    ui.on_search_select_contact(move |idx| {
+        let i = idx as usize;
+        let contact = sh_sel_c.search_contacts.borrow().get(i).cloned();
+        let Some(contact) = contact else { return };
+        // Find any conversation with this counterpart; prefer the most recent.
+        let convs = sh_sel_c.convs.borrow();
+        let target_lc = contact.email.to_lowercase();
+        let best = convs.iter().enumerate().filter(|(_, c)| {
+            c.counterparts.first()
+                .map(|cp| cp.addr.to_lowercase() == target_lc)
+                .unwrap_or(false)
+        }).max_by_key(|(_, c)| c.last_date_ts);
+        if let Some((conv_idx, _)) = best {
+            drop(convs);
+            let _ = sh_sel_c.search_query_inflight.borrow_mut().clear();
+            if let Some(ui) = ui_weak_sel_c.upgrade() {
+                ui.set_search_open(false);
+                ui.set_search_query("".into());
+                if let Some(d) = sh_sel_c.displays.borrow().get(conv_idx) {
+                    ui.set_selected(conv_idx as i32);
+                    ui.set_active_name(d.name.clone().into());
+                    ui.set_active_initials(d.initials.clone().into());
+                    ui.set_active_color(slint::Brush::SolidColor(hex(&d.color)));
+                }
+            }
+            open_conversation(&sh_sel_c, conv_idx);
         } else {
-            eprintln!("search: no live engine");
+            // No existing conv with this counterpart → enter transient
+            // compose mode pointed at this contact's email.
+            drop(convs);
+            if let Some(ui) = ui_weak_sel_c.upgrade() {
+                enter_compose_mode(&sh_sel_c, &ui, &contact.email);
+            }
+        }
+    });
+
+    let ui_weak_sel_m = ui.as_weak();
+    let sh_sel_m = shared.clone();
+    ui.on_search_select_message(move |idx| {
+        let i = idx as usize;
+        let env = sh_sel_m.search_messages.borrow().get(i).cloned();
+        let Some(env) = env else { return };
+        // The conversation that owns this message is the one whose
+        // messages list contains the (folder, uid) pair.
+        let convs = sh_sel_m.convs.borrow();
+        let conv_idx = convs.iter().position(|c| {
+            c.messages.iter().any(|m| m.folder == env.folder && m.uid == env.uid)
+        });
+        if let Some(conv_idx) = conv_idx {
+            drop(convs);
+            if let Some(ui) = ui_weak_sel_m.upgrade() {
+                ui.set_search_open(false);
+                ui.set_search_query("".into());
+                if let Some(d) = sh_sel_m.displays.borrow().get(conv_idx) {
+                    ui.set_selected(conv_idx as i32);
+                    ui.set_active_name(d.name.clone().into());
+                    ui.set_active_initials(d.initials.clone().into());
+                    ui.set_active_color(slint::Brush::SolidColor(hex(&d.color)));
+                }
+            }
+            open_conversation(&sh_sel_m, conv_idx);
+        } else {
+            // Message is on the server but not in any local conversation —
+            // out of scope for v1 of the dropdown.
+            println!("search-select-message: no local conv contains {}/{}", env.folder, env.uid);
+            if let Some(ui) = ui_weak_sel_m.upgrade() {
+                ui.set_search_open(false);
+            }
         }
     });
 
@@ -584,9 +930,36 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             println!("engine: message sent ({id}) — refetching conversations");
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
+                    // Leaving transient-compose mode now that the message
+                    // landed; the new conversation row will appear on the
+                    // next FetchConversations and the user can pick it up
+                    // from the sidebar.
+                    let was_pending = sh.pending_compose.borrow_mut().take().is_some();
+                    if was_pending {
+                        refresh_sidebar(sh, ui);
+                    }
                     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
                         let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
                     }
+                }
+            });
+        }
+        engine::EngineResult::SearchDropdown { query, contacts, messages } => {
+            // Drop stale answers: the user has typed past this query, no
+            // point updating the dropdown with results for a string they
+            // no longer see.
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    if *sh.search_query_inflight.borrow() != query {
+                        return;
+                    }
+                    let c_items = contact_items(&contacts);
+                    let m_items = message_hits(&messages);
+                    *sh.search_contacts.borrow_mut() = contacts;
+                    *sh.search_messages.borrow_mut() = messages;
+                    ui.set_search_contacts(ModelRc::new(VecModel::from(c_items)));
+                    ui.set_search_messages(ModelRc::new(VecModel::from(m_items)));
+                    ui.set_search_loading(false);
                 }
             });
         }

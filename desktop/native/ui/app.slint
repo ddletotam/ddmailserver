@@ -1,5 +1,19 @@
 import { ListView } from "std-widgets.slint";
 
+// Live-dropdown rows. We keep contacts and messages as separate models
+// so the Slint side can render them in their own sections — see
+// search-contacts / search-messages on MainWindow.
+struct ContactItem {
+    name: string,
+    email: string,
+}
+
+struct MessageHit {
+    from: string,
+    subject: string,
+    date: string,
+}
+
 struct ConvItem {
     name: string,
     preview: string,
@@ -30,18 +44,46 @@ export component MainWindow inherits Window {
     in property <string> active-name;
     in property <string> active-initials;
     in property <brush> active-color;
+
+    // Search-as-compose state. The Rust side debounces typing → fires
+    // `search-typed(query)` → fills these three properties from the
+    // engine result. `search-compose-email` is the parsed email when the
+    // raw query looks like one (regex done on the Rust side), shown as a
+    // "Написать xxx@yyy" row at the top of the dropdown.
+    in property <[ContactItem]> search-contacts;
+    in property <[MessageHit]> search-messages;
+    in property <bool> search-loading: false;
+    in property <string> search-compose-email: "";
+    in-out property <bool> search-open: false;
+    in-out property <string> search-query: "";
+    // Keyboard nav: -1 = focus is in the input (no row hovered); >= 0 = an
+    // explicit row index in the dropdown. Row order: optional compose-row
+    // first (when search-compose-email != ""), then contacts, then messages.
+    in-out property <int> search-selected-row: -1;
+
     callback select(int);
     callback hit-test(int, length, length);
     callback viewport-resized(length);
     callback send(string);
     callback msg-action(int, string);
-    callback search(string);
+    // Live-dropdown wiring.
+    callback search-typed(string);
+    callback search-cleared();
+    callback search-compose-new(string);
+    callback search-select-contact(int);
+    callback search-select-message(int);
+
+    // Pull keyboard focus to the bottom-of-chat composer input. Used after
+    // entering transient-compose mode so the user can immediately type.
+    public function focus-composer() {
+        ti.focus();
+    }
 
     HorizontalLayout {
         spacing: 0px;
 
         // ---------- Sidebar ----------
-        Rectangle {
+        sidebar := Rectangle {
             width: 320px;
             background: #f7f8fa;
             VerticalLayout {
@@ -62,17 +104,123 @@ export component MainWindow inherits Window {
                             color: #0f1419;
                             font-size: 14px;
                             single-line: true;
-                            accepted => {
-                                if (self.text != "") { root.search(self.text); }
+                            // Two-way binding to MainWindow.search-query so the
+                            // Rust side can clear / pre-fill the input.
+                            text <=> root.search-query;
+                            edited => {
+                                root.search-open = self.text != "";
+                                root.search-selected-row = -1;
+                                if (self.text == "") {
+                                    root.search-cleared();
+                                } else {
+                                    root.search-typed(self.text);
+                                }
+                            }
+                            key-pressed(ev) => {
+                                // Esc — close, keep text.
+                                if (ev.text == Key.Escape) {
+                                    root.search-open = false;
+                                    root.search-selected-row = -1;
+                                    return accept;
+                                }
+                                // ↓ — step into the dropdown or move down.
+                                // Index math is inlined because Slint does not
+                                // support local `:=` bindings inside callbacks.
+                                if (ev.text == Key.DownArrow) {
+                                    if (root.search-open
+                                        && ((root.search-compose-email != "" ? 1 : 0)
+                                            + root.search-contacts.length
+                                            + root.search-messages.length) > 0) {
+                                        root.search-selected-row =
+                                            root.search-selected-row + 1
+                                                >= (root.search-compose-email != "" ? 1 : 0)
+                                                   + root.search-contacts.length
+                                                   + root.search-messages.length
+                                            ? (root.search-compose-email != "" ? 1 : 0)
+                                              + root.search-contacts.length
+                                              + root.search-messages.length - 1
+                                            : root.search-selected-row + 1;
+                                    }
+                                    return accept;
+                                }
+                                // ↑ — move up, eventually returning to the input.
+                                if (ev.text == Key.UpArrow) {
+                                    root.search-selected-row = root.search-selected-row > 0
+                                        ? root.search-selected-row - 1
+                                        : -1;
+                                    return accept;
+                                }
+                                // Enter — activate selected row, or compose-row
+                                // when nothing's selected but the query is an
+                                // email address.
+                                if (ev.text == Key.Return) {
+                                    // No row selected → fire compose-row if it's the
+                                    // only thing in the dropdown.
+                                    if (root.search-selected-row < 0) {
+                                        if (root.search-compose-email != "") {
+                                            root.search-compose-new(root.search-compose-email);
+                                            return accept;
+                                        }
+                                        return reject;
+                                    }
+                                    // compose-row at index 0 when visible
+                                    if (root.search-compose-email != ""
+                                        && root.search-selected-row == 0) {
+                                        root.search-compose-new(root.search-compose-email);
+                                        return accept;
+                                    }
+                                    // contacts segment: [cv .. cv+contacts.length)
+                                    if (root.search-selected-row >= (root.search-compose-email != "" ? 1 : 0)
+                                        && root.search-selected-row < (root.search-compose-email != "" ? 1 : 0)
+                                                                     + root.search-contacts.length) {
+                                        root.search-select-contact(
+                                            root.search-selected-row - (root.search-compose-email != "" ? 1 : 0));
+                                        return accept;
+                                    }
+                                    // messages segment: [cv+contacts.length .. end)
+                                    if (root.search-selected-row >= (root.search-compose-email != "" ? 1 : 0)
+                                                                   + root.search-contacts.length
+                                        && root.search-selected-row < (root.search-compose-email != "" ? 1 : 0)
+                                                                     + root.search-contacts.length
+                                                                     + root.search-messages.length) {
+                                        root.search-select-message(
+                                            root.search-selected-row
+                                            - (root.search-compose-email != "" ? 1 : 0)
+                                            - root.search-contacts.length);
+                                        return accept;
+                                    }
+                                    return reject;
+                                }
+                                return reject;
                             }
                         }
                         if si.text == "": Text {
                             x: 14px;
                             width: parent.width - 28px;
                             height: parent.height;
-                            text: "Поиск…";
+                            text: "Поиск или новый адресат…";
                             color: #8b95a1;
                             vertical-alignment: center;
+                        }
+                        if si.text != "": TouchArea {
+                            x: parent.width - 30px;
+                            y: 6px;
+                            width: 24px;
+                            height: 24px;
+                            clicked => {
+                                root.search-query = "";
+                                root.search-open = false;
+                                root.search-cleared();
+                            }
+                            Text {
+                                width: parent.width;
+                                height: parent.height;
+                                text: "×";
+                                color: #8b95a1;
+                                font-size: 18px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
                         }
                     }
                 }
@@ -122,6 +270,179 @@ export component MainWindow inherits Window {
                                     font-size: 13px;
                                     color: idx == root.selected ? #e8f0fe : #8b95a1;
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---------- Search dropdown (overlay) ----------
+            // Lives inside `sidebar` as a sibling of the VerticalLayout so
+            // it renders on top of the conversation list. Visibility is
+            // driven by `search-open` (set true on text-edited, false on
+            // clear / Escape / explicit close).
+            if root.search-open: Rectangle {
+                x: 10px;
+                y: 50px;
+                width: parent.width - 20px;
+                height: min(420px, body.preferred-height);
+                background: white;
+                border-color: #d8dde6;
+                border-width: 1px;
+                border-radius: 10px;
+                drop-shadow-blur: 18px;
+                drop-shadow-color: #00000022;
+                drop-shadow-offset-y: 4px;
+
+                body := VerticalLayout {
+                    padding: 4px;
+
+                    // "Написать xxx@yyy" — appears when the typed text
+                    // parses as an email AND nothing more specific has been
+                    // selected. Rust side computes the regex.
+                    if root.search-compose-email != "": Rectangle {
+                        height: 40px;
+                        background: (root.search-selected-row == 0 || cn-ta.has-hover) ? #e6efff : transparent;
+                        border-radius: 8px;
+                        cn-ta := TouchArea {
+                            clicked => { root.search-compose-new(root.search-compose-email); }
+                        }
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 8px;
+                            alignment: start;
+                            Text {
+                                width: 18px;
+                                text: "✎";
+                                color: #2f80ed;
+                                font-size: 14px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                text: "Написать по адресу: " + root.search-compose-email;
+                                color: #2f80ed;
+                                font-size: 14px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+
+                    // Loading / empty / sections
+                    if root.search-loading && root.search-contacts.length == 0 && root.search-messages.length == 0
+                        && root.search-compose-email == "": Text {
+                        height: 32px;
+                        text: "Ищу…";
+                        color: #8b95a1;
+                        font-size: 13px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    if !root.search-loading
+                        && root.search-contacts.length == 0
+                        && root.search-messages.length == 0
+                        && root.search-compose-email == "": Text {
+                        height: 32px;
+                        text: "Ничего не найдено";
+                        color: #8b95a1;
+                        font-size: 13px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    // Contacts section
+                    if root.search-contacts.length > 0: Rectangle {
+                        height: 22px;
+                        Text {
+                            x: 12px;
+                            text: "КОНТАКТЫ";
+                            color: #8b95a1;
+                            font-size: 11px;
+                            font-weight: 700;
+                            letter-spacing: 0.5px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    for c[ci] in root.search-contacts: Rectangle {
+                        height: 44px;
+                        background: (root.search-selected-row == (root.search-compose-email != "" ? 1 : 0) + ci
+                                     || c-ta.has-hover) ? #e6efff : transparent;
+                        border-radius: 8px;
+                        c-ta := TouchArea {
+                            clicked => { root.search-select-contact(ci); }
+                        }
+                        VerticalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            padding-top: 4px;
+                            padding-bottom: 4px;
+                            alignment: center;
+                            Text {
+                                text: c.name == "" ? c.email : c.name;
+                                color: #0f1419;
+                                font-size: 14px;
+                                font-weight: 500;
+                                overflow: elide;
+                            }
+                            if c.name != "": Text {
+                                text: c.email;
+                                color: #8b95a1;
+                                font-size: 12px;
+                                overflow: elide;
+                            }
+                        }
+                    }
+
+                    // Messages section
+                    if root.search-messages.length > 0: Rectangle {
+                        height: 22px;
+                        Text {
+                            x: 12px;
+                            text: "СООБЩЕНИЯ";
+                            color: #8b95a1;
+                            font-size: 11px;
+                            font-weight: 700;
+                            letter-spacing: 0.5px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    for m[mi] in root.search-messages: Rectangle {
+                        height: 50px;
+                        background: (root.search-selected-row == (root.search-compose-email != "" ? 1 : 0)
+                                                                 + root.search-contacts.length + mi
+                                     || m-ta.has-hover) ? #e6efff : transparent;
+                        border-radius: 8px;
+                        m-ta := TouchArea {
+                            clicked => { root.search-select-message(mi); }
+                        }
+                        VerticalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            padding-top: 4px;
+                            padding-bottom: 4px;
+                            alignment: center;
+                            HorizontalLayout {
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: m.from;
+                                    color: #0f1419;
+                                    font-size: 14px;
+                                    font-weight: 500;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: m.date;
+                                    color: #8b95a1;
+                                    font-size: 12px;
+                                }
+                            }
+                            Text {
+                                text: m.subject == "" ? "(без темы)" : m.subject;
+                                color: #8b95a1;
+                                font-size: 12px;
+                                overflow: elide;
                             }
                         }
                     }

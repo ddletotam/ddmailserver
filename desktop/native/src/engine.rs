@@ -17,7 +17,7 @@ use ddmail_core::imap_provider::ImapProvider;
 use ddmail_core::native_provider::NativeProvider;
 use ddmail_core::provider::MailProvider;
 use ddmail_core::session::SessionPool;
-use ddmail_core::types::{Conversation, MessageBody, MessageRef, OutgoingMessage};
+use ddmail_core::types::{Contact, Conversation, MessageBody, MessageEnvelope, MessageRef, OutgoingMessage};
 
 #[derive(Clone)]
 pub struct AccountConfig {
@@ -114,6 +114,11 @@ pub enum EngineCmd {
     SetFlags { messages: Vec<MessageRef>, flags: String, add: bool },
     Delete { messages: Vec<MessageRef> },
     Search { query: String },
+    /// Live dropdown lookup for the search-as-compose bar: matching contacts
+    /// (name/email) AND matching messages (subject/body) in one round-trip.
+    /// The query is echoed back in the result so the UI can drop stale answers
+    /// when typing faster than the engine answers.
+    SearchDropdown { query: String, limit: u32 },
     Send {
         to: Vec<String>,
         subject: String,
@@ -127,6 +132,13 @@ pub enum EngineCmd {
 pub enum EngineResult {
     Conversations(Vec<Conversation>),
     Messages(Vec<MessageBody>),
+    /// Live-dropdown answer. `query` lets the UI drop responses for an old
+    /// query string when the user has typed past it.
+    SearchDropdown {
+        query: String,
+        contacts: Vec<Contact>,
+        messages: Vec<MessageEnvelope>,
+    },
     /// A push event from the provider's background watcher.
     Event(EngineEvent),
     /// A message was sent (server response / message-id).
@@ -234,6 +246,23 @@ pub fn spawn(
                         }
                         Err(e) => on_result(EngineResult::Error(e)),
                     }
+                }
+                EngineCmd::SearchDropdown { query, limit } => {
+                    // Contacts come from the local cache (instant); messages
+                    // hit the provider. Failures on either side degrade
+                    // gracefully so a missing contact index doesn't blank
+                    // the dropdown.
+                    let contacts = cache
+                        .search_contacts(&key, &query, limit)
+                        .unwrap_or_default();
+                    let messages = rt
+                        .block_on(provider.search_messages(&cfg.email, &query))
+                        .unwrap_or_default();
+                    on_result(EngineResult::SearchDropdown {
+                        query,
+                        contacts,
+                        messages,
+                    });
                 }
                 EngineCmd::Send { to, subject, body, in_reply_to, references } => {
                     let msg = OutgoingMessage {
