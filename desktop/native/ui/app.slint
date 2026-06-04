@@ -61,6 +61,14 @@ export component MainWindow inherits Window {
     // first (when search-compose-email != ""), then contacts, then messages.
     in-out property <int> search-selected-row: -1;
 
+    // Telegram-style quote ribbon above the composer input. Visible when
+    // the user has explicitly hit "Ответить" on a bubble; cancelled via
+    // the × button or implicitly when the message is sent.
+    in property <bool> reply-ribbon-visible: false;
+    in property <string> reply-ribbon-from: "";
+    in property <string> reply-ribbon-preview: "";
+    callback reply-ribbon-cancel();
+
     callback select(int);
     callback hit-test(int, length, length);
     callback viewport-resized(length);
@@ -521,6 +529,61 @@ export component MainWindow inherits Window {
                                     cma.show({ x: self.mouse-x, y: self.mouse-y });
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            // Telegram-style reply ribbon — only visible when the user
+            // hit "Ответить" on a specific bubble. Cancellable via ×;
+            // also implicitly cancelled by Send.
+            if root.reply-ribbon-visible: Rectangle {
+                height: 50px;
+                background: white;
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 8px;
+                    padding-top: 6px;
+                    padding-bottom: 6px;
+                    spacing: 10px;
+                    Rectangle {
+                        width: 3px;
+                        background: #2f80ed;
+                        border-radius: 1px;
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        Text {
+                            text: root.reply-ribbon-from;
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #2f80ed;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: root.reply-ribbon-preview;
+                            font-size: 13px;
+                            color: #5f6770;
+                            overflow: elide;
+                        }
+                    }
+                    Rectangle {
+                        width: 32px;
+                        height: 32px;
+                        border-radius: 16px;
+                        background: rx-ta.has-hover ? #f0f2f5 : transparent;
+                        rx-ta := TouchArea {
+                            clicked => { root.reply-ribbon-cancel(); }
+                        }
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: "×";
+                            color: #8b95a1;
+                            font-size: 18px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
                         }
                     }
                 }
