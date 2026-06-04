@@ -146,7 +146,6 @@ pub enum EngineCmd {
     SetFlags { messages: Vec<MessageRef>, flags: String, add: bool },
     Delete { messages: Vec<MessageRef> },
     DownloadAttachment { folder: String, uid: u32, index: usize, filename: String },
-    Search { query: String },
     /// Live dropdown lookup for the search-as-compose bar: matching contacts
     /// (name/email) AND matching messages (subject/body) in one round-trip.
     /// The query is echoed back in the result so the UI can drop stale answers
@@ -289,22 +288,6 @@ pub fn spawn(
                             Ok(path) => on_result(EngineResult::AttachmentSaved(path)),
                             Err(e) => on_result(EngineResult::Error(e)),
                         },
-                        Err(e) => on_result(EngineResult::Error(e)),
-                    }
-                }
-                EngineCmd::Search { query } => {
-                    match rt.block_on(provider.search_messages(&cfg.email, &query)) {
-                        Ok(envs) => {
-                            let refs: Vec<MessageRef> = envs
-                                .iter()
-                                .map(|e| MessageRef { folder: e.folder.clone(), uid: e.uid })
-                                .collect();
-                            let our = resolve_our_addrs(&cache, &cfg);
-                            match rt.block_on(provider.fetch_conversation_messages(&our, &refs)) {
-                                Ok(bodies) => on_result(EngineResult::Messages(bodies)),
-                                Err(e) => on_result(EngineResult::Error(e)),
-                            }
-                        }
                         Err(e) => on_result(EngineResult::Error(e)),
                     }
                 }
