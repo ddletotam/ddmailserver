@@ -613,7 +613,7 @@ fn main() {
     // only needs the cache for contacts; the provider call is wrapped in
     // unwrap_or_default and silently returns empty messages.
     if let Some(cache) = open_cache() {
-        let live_cfg = engine::AccountConfig::from_env();
+        let live_cfg = engine::AccountConfig::load();
         let cfg = live_cfg.clone().unwrap_or_else(|| {
             // No live config: reconstruct just enough so that the engine's
             // `key = cfg.account_key()` matches what's already in the cache

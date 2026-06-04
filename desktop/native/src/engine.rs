@@ -64,6 +64,38 @@ impl AccountConfig {
         })
     }
 
+    /// Load from `%APPDATA%/ru.letotam.ddmail/account.json` (fallback when env
+    /// isn't set). Plaintext for now — same trust level as the env approach;
+    /// a real login screen + keyring comes later.
+    pub fn from_file() -> Option<Self> {
+        let base = std::env::var("APPDATA").or_else(|_| std::env::var("HOME")).ok()?;
+        let path = std::path::Path::new(&base).join("ru.letotam.ddmail").join("account.json");
+        let data = std::fs::read_to_string(&path).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+        let host = v.get("host")?.as_str()?.to_string();
+        let username = v.get("username")?.as_str()?.to_string();
+        let password = v.get("password")?.as_str()?.to_string();
+        let email = v.get("email").and_then(|x| x.as_str()).unwrap_or(&username).to_string();
+        let smtp_host = v.get("smtp_host").and_then(|x| x.as_str()).unwrap_or(&host).to_string();
+        Some(AccountConfig {
+            host,
+            port: v.get("port").and_then(|x| x.as_u64()).unwrap_or(993) as u16,
+            username,
+            password,
+            use_tls: v.get("use_tls").and_then(|x| x.as_bool()).unwrap_or(true),
+            email,
+            smtp_host,
+            smtp_port: v.get("smtp_port").and_then(|x| x.as_u64()).unwrap_or(465) as u16,
+            native_url: v.get("native_url").and_then(|x| x.as_str()).map(String::from),
+            native_token: v.get("native_token").and_then(|x| x.as_str()).map(String::from),
+        })
+    }
+
+    /// Env first (handy for dev), then the on-disk config file.
+    pub fn load() -> Option<Self> {
+        Self::from_env().or_else(Self::from_file)
+    }
+
     pub fn account_key(&self) -> String {
         imap::account_key(&self.host, &self.username)
     }
