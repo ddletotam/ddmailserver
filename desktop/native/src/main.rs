@@ -206,6 +206,62 @@ fn contact_items(contacts: &[Contact]) -> Vec<ContactItem> {
         .collect()
 }
 
+/// Pull a short single-line preview out of a message body — first the
+/// plain-text part, then collapsing HTML tags out of html when text is
+/// missing. Whitespace squashed, capped at ~80 chars for the ribbon.
+fn body_preview(body: &MessageBody) -> String {
+    let raw = body
+        .text
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            body.html.as_deref().map(|h| {
+                // Cheap tag strip — the ribbon needs at most a sentence.
+                let mut out = String::with_capacity(h.len());
+                let mut in_tag = false;
+                for ch in h.chars() {
+                    match ch {
+                        '<' => in_tag = true,
+                        '>' => in_tag = false,
+                        _ if !in_tag => out.push(ch),
+                        _ => {}
+                    }
+                }
+                out
+            })
+        })
+        .unwrap_or_default();
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= 80 {
+        collapsed
+    } else {
+        let cut: String = collapsed.chars().take(80).collect();
+        format!("{cut}…")
+    }
+}
+
+fn enter_reply_mode(sh: &Shared, ui: &MainWindow, body: MessageBody) {
+    let display_from = if body.from.is_empty() {
+        body.from_addr.clone()
+    } else {
+        body.from.clone()
+    };
+    let preview = body_preview(&body);
+    *sh.pending_reply.borrow_mut() = Some(body);
+    ui.set_reply_ribbon_from(display_from.into());
+    ui.set_reply_ribbon_preview(preview.into());
+    ui.set_reply_ribbon_visible(true);
+    ui.invoke_focus_composer();
+}
+
+fn exit_reply_mode(sh: &Shared, ui: &MainWindow) {
+    *sh.pending_reply.borrow_mut() = None;
+    ui.set_reply_ribbon_visible(false);
+    ui.set_reply_ribbon_from("".into());
+    ui.set_reply_ribbon_preview("".into());
+}
+
 /// Shared logic for "enter transient compose mode". Pins the chat header
 /// to the new recipient, blanks the bubble list, deselects the sidebar
 /// row (none of the existing conversations match), and stashes the
@@ -213,6 +269,9 @@ fn contact_items(contacts: &[Contact]) -> Vec<ContactItem> {
 fn enter_compose_mode(sh: &Shared, ui: &MainWindow, email: &str) {
     let email = email.trim().to_lowercase();
     *sh.pending_compose.borrow_mut() = Some(email.clone());
+    // Any staged explicit-reply target is invalidated by jumping into
+    // a fresh compose: the new conversation has no bubble to quote.
+    exit_reply_mode(sh, ui);
     sh.current_msgs.borrow_mut().clear();
     let initial = email
         .chars()
@@ -315,6 +374,11 @@ struct Shared {
     /// address instead of the (irrelevant) sidebar-selected
     /// conversation. Cleared by EngineResult::Sent.
     pending_compose: RefCell<Option<String>>,
+    /// Explicit-reply target — set when the user hits "Ответить" on a
+    /// specific bubble. Drives the quote ribbon above the input and,
+    /// at send time, the Re: subject + In-Reply-To / References
+    /// threading. Cleared by Send or by the ribbon's × button.
+    pending_reply: RefCell<Option<MessageBody>>,
 }
 
 thread_local! {
@@ -492,6 +556,7 @@ fn main() {
         search_contacts: RefCell::new(Vec::new()),
         search_messages: RefCell::new(Vec::new()),
         pending_compose: RefCell::new(None),
+        pending_reply: RefCell::new(None),
     });
     SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
 
@@ -580,8 +645,11 @@ fn main() {
         // Real-conversation rows: when a transient row is present we
         // need to subtract one to map model index → displays index.
         let real_idx = if pending { model_idx - 1 } else { model_idx };
-        // Picking any real conversation leaves transient-compose mode.
+        // Picking any real conversation leaves transient-compose mode AND
+        // drops any staged explicit-reply target — both are tied to the
+        // previous context.
         let was_pending = sh_sel.pending_compose.borrow_mut().take().is_some();
+        exit_reply_mode(&sh_sel, &ui);
         if let Some(d) = sh_sel.displays.borrow().get(real_idx) {
             ui.set_active_name(d.name.clone().into());
             ui.set_active_initials(d.initials.clone().into());
@@ -610,9 +678,11 @@ fn main() {
         let _ = tx_hit.send(Job::HitTest { row: row as usize, x, y });
     });
 
-    // Composer → reply to the current conversation's counterpart, OR
-    // brand-new send when we're in "transient compose" mode (entered via
-    // the search dropdown: compose-row click or contact-with-no-conv).
+    // Composer → three branches depending on staged intent:
+    //   1. Transient compose target (search dropdown).
+    //   2. Explicit reply to a specific bubble (quote ribbon).
+    //   3. Implicit reply to the currently open conversation.
+    let ui_weak_send = ui.as_weak();
     let sh_send = shared.clone();
     ui.on_send(move |text| {
         let text = text.to_string();
@@ -635,7 +705,75 @@ fn main() {
             }
             return;
         }
-        // Branch 2: implicit reply within the currently selected conversation.
+        // Branch 2: explicit reply via quote ribbon.
+        if let Some(reply_body) = sh_send.pending_reply.borrow().clone() {
+            // Reply-all in groups: the current convs entry tells us
+            // group-ness; in 1:1 conversations the counterpart is the
+            // sender anyway. The recipients are the source's from + to
+            // + cc minus our identities (mirrored from svelte's
+            // ChatView.svelte:478-501).
+            let our_lc: std::collections::HashSet<String> =
+                std::iter::once(sh_send.key.to_lowercase()).collect();
+            let extract_addr = |raw: &str| -> String {
+                let lt = raw.find('<');
+                let gt = lt.and_then(|i| raw[i..].find('>').map(|j| i + j));
+                if let (Some(i), Some(j)) = (lt, gt) {
+                    raw[i + 1..j].trim().to_lowercase()
+                } else {
+                    raw.trim().to_lowercase()
+                }
+            };
+            let mut to: Vec<String> = Vec::new();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut push = |a: String| {
+                if a.is_empty() || our_lc.contains(&a) || !seen.insert(a.clone()) {
+                    return;
+                }
+                to.push(a);
+            };
+            push(reply_body.from_addr.to_lowercase());
+            let is_group = sh_send
+                .convs
+                .borrow()
+                .get(sh_send.current.get())
+                .map(|c| c.is_group)
+                .unwrap_or(false);
+            if is_group {
+                for a in reply_body.to.iter().chain(reply_body.cc.iter()) {
+                    push(extract_addr(a));
+                }
+            }
+            if to.is_empty() {
+                eprintln!("reply: no recipient resolved");
+                return;
+            }
+            let subject = if reply_body.subject.to_lowercase().starts_with("re:") {
+                reply_body.subject.clone()
+            } else {
+                format!("Re: {}", reply_body.subject)
+            };
+            let in_reply_to = (!reply_body.message_id.is_empty())
+                .then(|| reply_body.message_id.clone());
+            let mut refs = reply_body.references.clone();
+            if !reply_body.message_id.is_empty() {
+                refs.push(reply_body.message_id.clone());
+            }
+            let references = (!refs.is_empty()).then(|| refs.join(" "));
+            if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
+                println!("sending explicit reply to {to:?}");
+                let _ = etx.send(engine::EngineCmd::Send {
+                    to, subject, body: text, in_reply_to, references,
+                });
+            } else {
+                eprintln!("send: no live engine (set DDMAIL_* env)");
+            }
+            // Quote ribbon goes away once the message is staged for send.
+            if let Some(ui) = ui_weak_send.upgrade() {
+                exit_reply_mode(&sh_send, &ui);
+            }
+            return;
+        }
+        // Branch 3: implicit reply within the currently selected conversation.
         let convs = sh_send.convs.borrow();
         let Some(c) = convs.get(sh_send.current.get()) else { return };
         let to: Vec<String> = c
@@ -648,26 +786,35 @@ fn main() {
             eprintln!("send: no recipient for this conversation");
             return;
         }
-        let subject = if c.last_subject.to_lowercase().starts_with("re:") {
-            c.last_subject.clone()
-        } else {
-            format!("Re: {}", c.last_subject)
-        };
-        // Best-effort threading headers from the most recent cached body.
-        let (in_reply_to, references) = sh_send
+        // Subject mirrors the *last incoming* message per the spec — that's
+        // the one the user is replying to, even if our own outgoing came
+        // after it. Fall back to conversation last_subject if cache is
+        // unavailable.
+        let cached = sh_send
             .cache
             .as_ref()
             .and_then(|cache| cache.load_message_bodies(&sh_send.key, &c.messages).ok())
-            .and_then(|bodies| {
-                bodies.last().map(|b| {
-                    let irt = (!b.message_id.is_empty()).then(|| b.message_id.clone());
-                    let mut refs = b.references.clone();
-                    if !b.message_id.is_empty() {
-                        refs.push(b.message_id.clone());
-                    }
-                    let refs = (!refs.is_empty()).then(|| refs.join(" "));
-                    (irt, refs)
-                })
+            .unwrap_or_default();
+        let last_incoming = cached.iter().rev().find(|b| !b.is_outgoing);
+        let base_subject = last_incoming
+            .map(|b| b.subject.clone())
+            .unwrap_or_else(|| c.last_subject.clone());
+        let subject = if base_subject.to_lowercase().starts_with("re:") {
+            base_subject
+        } else {
+            format!("Re: {base_subject}")
+        };
+        // Threading headers from the same last-incoming we used for the subject.
+        let (in_reply_to, references) = last_incoming
+            .or_else(|| cached.last())
+            .map(|b| {
+                let irt = (!b.message_id.is_empty()).then(|| b.message_id.clone());
+                let mut refs = b.references.clone();
+                if !b.message_id.is_empty() {
+                    refs.push(b.message_id.clone());
+                }
+                let refs = (!refs.is_empty()).then(|| refs.join(" "));
+                (irt, refs)
             })
             .unwrap_or((None, None));
         if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
@@ -798,12 +945,32 @@ fn main() {
     });
 
     // Context-menu actions on a message row.
+    let ui_weak_act = ui.as_weak();
     let sh_act = shared.clone();
     ui.on_msg_action(move |row, action| {
         let row = row as usize;
         let action = action.to_string();
         let msg = sh_act.current_msgs.borrow().get(row).cloned();
         let Some(msg) = msg else { return };
+        // Reply doesn't need the live engine — we just stage the bubble's
+        // body into the quote ribbon and let the next Send pick up the
+        // subject + threading headers.
+        if action == "reply" {
+            let body_opt = sh_act
+                .cache
+                .as_ref()
+                .and_then(|cache| cache.load_message_bodies(&sh_act.key, &[msg.clone()]).ok())
+                .and_then(|mut v| v.pop());
+            let Some(body) = body_opt else {
+                eprintln!("reply: body not cached for {msg:?}");
+                return;
+            };
+            if let Some(ui) = ui_weak_act.upgrade() {
+                enter_reply_mode(&sh_act, &ui, body);
+            }
+            return;
+        }
+        // Everything else (delete / read / unread) goes through the engine.
         let Some(etx) = sh_act.engine_tx.borrow().clone() else {
             eprintln!("msg-action: no live engine");
             return;
@@ -827,6 +994,15 @@ fn main() {
                 });
             }
             other => println!("msg-action {other} (not wired yet)"),
+        }
+    });
+
+    // × on the reply ribbon — drop the staged reply target without sending.
+    let ui_weak_rc = ui.as_weak();
+    let sh_rc = shared.clone();
+    ui.on_reply_ribbon_cancel(move || {
+        if let Some(ui) = ui_weak_rc.upgrade() {
+            exit_reply_mode(&sh_rc, &ui);
         }
     });
 
