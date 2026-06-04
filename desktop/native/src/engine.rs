@@ -113,6 +113,7 @@ pub enum EngineCmd {
     FetchAvatar { email: String },
     SetFlags { messages: Vec<MessageRef>, flags: String, add: bool },
     Delete { messages: Vec<MessageRef> },
+    DownloadAttachment { folder: String, uid: u32, index: usize, filename: String },
     Search { query: String },
     /// Live dropdown lookup for the search-as-compose bar: matching contacts
     /// (name/email) AND matching messages (subject/body) in one round-trip.
@@ -147,7 +148,26 @@ pub enum EngineResult {
     Done(String),
     /// A decoded avatar (RGBA) for an email address.
     Avatar { email: String, rgba: Vec<u8>, w: u32, h: u32 },
+    /// An attachment was downloaded and saved at this path; UI opens it.
+    AttachmentSaved(String),
     Error(String),
+}
+
+/// Save attachment bytes into the user's Downloads dir (sanitized filename).
+fn save_download(filename: &str, bytes: &[u8]) -> Result<String, String> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map_err(|_| "no home dir".to_string())?;
+    let dir = std::path::Path::new(&home).join("Downloads");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+    let safe: String = filename
+        .chars()
+        .map(|c| if "\\/:*?\"<>|".contains(c) { '_' } else { c })
+        .collect();
+    let safe = if safe.trim().is_empty() { "attachment".to_string() } else { safe };
+    let path = dir.join(&safe);
+    std::fs::write(&path, bytes).map_err(|e| format!("write: {e}"))?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 /// Spawn the engine thread. Returns a command sender; results arrive via `on_result`
@@ -228,6 +248,15 @@ pub fn spawn(
                 EngineCmd::Delete { messages } => {
                     match rt.block_on(provider.delete_messages(&messages)) {
                         Ok(()) => on_result(EngineResult::Done("delete".into())),
+                        Err(e) => on_result(EngineResult::Error(e)),
+                    }
+                }
+                EngineCmd::DownloadAttachment { folder, uid, index, filename } => {
+                    match rt.block_on(provider.fetch_attachment(&folder, uid, index)) {
+                        Ok((bytes, _mime)) => match save_download(&filename, &bytes) {
+                            Ok(path) => on_result(EngineResult::AttachmentSaved(path)),
+                            Err(e) => on_result(EngineResult::Error(e)),
+                        },
                         Err(e) => on_result(EngineResult::Error(e)),
                     }
                 }

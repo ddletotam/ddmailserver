@@ -315,6 +315,24 @@ fn build_body_html(b: &MessageBody) -> String {
             html_escape(b.text.as_deref().unwrap_or(""))
         ),
     };
+    // Attachment chips — clickable via the link hit-test using an internal
+    // `ddmail-attach:` scheme decoded on the UI thread (see handle_link).
+    let attachments = if b.attachments.is_empty() {
+        String::new()
+    } else {
+        let mut s = String::from("<div class=\"atts\">");
+        for a in &b.attachments {
+            let href = format!("ddmail-attach:{}|{}|{}|{}", b.folder, b.uid, a.index, a.filename);
+            s.push_str(&format!(
+                "<a class=\"att\" href=\"{}\">\u{1F4CE} {} · {} \u{041A}\u{0411}</a>",
+                html_escape(&href),
+                html_escape(&a.filename),
+                (a.size / 1024).max(1)
+            ));
+        }
+        s.push_str("</div>");
+        s
+    };
     format!(
         r#"<!DOCTYPE html><html><head><style>
         html, body {{ margin: 0; padding: 0; background: #e9eef5; }}
@@ -333,8 +351,12 @@ fn build_body_html(b: &MessageBody) -> String {
         .bubble table, .bubble td, .bubble th {{ border-collapse: collapse !important; }}
         .bubble img {{ max-width: 100% !important; height: auto !important; }}
         a {{ color: #2f80ed; }}
+        .atts {{ margin-top: 8px; }}
+        .att {{ display: inline-block; background: rgba(0,0,0,0.06); border-radius: 8px;
+                padding: 4px 10px; margin: 2px 4px 2px 0; color: #2f80ed;
+                text-decoration: none; font-size: 13px; }}
         </style></head>
-        <body><div class="row {side}"><div class="bubble">{inner}</div></div></body></html>"#
+        <body><div class="row {side}"><div class="bubble">{inner}{attachments}</div></div></body></html>"#
     )
 }
 
@@ -522,15 +544,13 @@ fn main() {
                             ui.set_messages(ModelRc::new(VecModel::from(rows)));
                         });
                     }
-                    Job::HitTest { row, x, y } => match engine.hit(row, x, y) {
-                        Some(url) => {
-                            println!("link click -> {url}");
-                            let _ = std::process::Command::new("cmd")
-                                .args(["/C", "start", "", &url])
-                                .spawn();
+                    Job::HitTest { row, x, y } => {
+                        if let Some(url) = engine.hit(row, x, y) {
+                            // Decide on the UI thread: an internal attachment
+                            // link vs a real URL (and engine access for downloads).
+                            let _ = ui_weak.upgrade_in_event_loop(move |ui| handle_link(&ui, url));
                         }
-                        None => println!("click row {row} @({x:.0},{y:.0}) — no link"),
-                    },
+                    }
                 }
             }
         });
@@ -1139,6 +1159,48 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                 }
             });
         }
+        engine::EngineResult::AttachmentSaved(path) => {
+            println!("attachment saved: {path} — opening");
+            let _ = std::process::Command::new("cmd")
+                .args(["/C", "start", "", &path])
+                .spawn();
+        }
         engine::EngineResult::Error(e) => eprintln!("engine error: {e}"),
     }
+}
+
+/// Handle a clicked link from a bubble (UI thread). Internal `ddmail-attach:`
+/// links trigger an attachment download via the engine; everything else opens
+/// in the system browser.
+fn handle_link(_ui: &MainWindow, url: String) {
+    if let Some(rest) = url.strip_prefix("ddmail-attach:") {
+        // folder|uid|index|filename
+        let parts: Vec<&str> = rest.splitn(4, '|').collect();
+        if parts.len() == 4 {
+            if let (Ok(uid), Ok(index)) = (parts[1].parse::<u32>(), parts[2].parse::<usize>()) {
+                let folder = parts[0].to_string();
+                let filename = parts[3].to_string();
+                SHARED.with(|s| {
+                    if let Some(sh) = s.borrow().as_ref() {
+                        if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                            println!("download attachment: {filename}");
+                            let _ = etx.send(engine::EngineCmd::DownloadAttachment {
+                                folder,
+                                uid,
+                                index,
+                                filename,
+                            });
+                        } else {
+                            eprintln!("attachment: no live engine");
+                        }
+                    }
+                });
+            }
+        }
+        return;
+    }
+    println!("link click -> {url}");
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &url])
+        .spawn();
 }
