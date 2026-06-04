@@ -1147,6 +1147,7 @@ dependencies = [
  "ddmail-core",
  "image",
  "png 0.17.16",
+ "serde_json",
  "slint",
  "slint-build",
  "tokio",
