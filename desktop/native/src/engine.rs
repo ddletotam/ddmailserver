@@ -17,7 +17,10 @@ use ddmail_core::imap_provider::ImapProvider;
 use ddmail_core::native_provider::NativeProvider;
 use ddmail_core::provider::MailProvider;
 use ddmail_core::session::SessionPool;
-use ddmail_core::types::{Contact, Conversation, MessageBody, MessageEnvelope, MessageRef, OutgoingMessage};
+use ddmail_core::types::{
+    Contact, Conversation, DesktopCalendar, DesktopCalendarEvent, MessageBody, MessageEnvelope,
+    MessageRef, OutgoingMessage,
+};
 
 #[derive(Clone)]
 pub struct AccountConfig {
@@ -151,6 +154,17 @@ pub enum EngineCmd {
     /// The query is echoed back in the result so the UI can drop stale answers
     /// when typing faster than the engine answers.
     SearchDropdown { query: String, limit: u32 },
+    /// Calendar list — populates the calendar-view sidebar. Cheap when
+    /// the native provider is in use; ImapProvider returns an empty
+    /// list (no calendar support there).
+    FetchCalendars,
+    /// Events overlapping `[from_ms, to_ms)`. `calendar_ids` empty =
+    /// fetch from all the user's calendars (the engine-default).
+    FetchCalendarEvents {
+        from_ms: i64,
+        to_ms: i64,
+        calendar_ids: Vec<i64>,
+    },
     Send {
         to: Vec<String>,
         cc: Vec<String>,
@@ -182,6 +196,11 @@ pub enum EngineResult {
     Avatar { email: String, rgba: Vec<u8>, w: u32, h: u32 },
     /// An attachment was downloaded and saved at this path; UI opens it.
     AttachmentSaved(String),
+    /// Calendar list (sidebar) — echoed back from FetchCalendars.
+    Calendars(Vec<DesktopCalendar>),
+    /// Events for the currently displayed week — echoed back from
+    /// FetchCalendarEvents.
+    CalendarEvents(Vec<DesktopCalendarEvent>),
     Error(String),
 }
 
@@ -308,6 +327,18 @@ pub fn spawn(
                         contacts,
                         messages,
                     });
+                }
+                EngineCmd::FetchCalendars => {
+                    match rt.block_on(provider.list_calendars()) {
+                        Ok(cals) => on_result(EngineResult::Calendars(cals)),
+                        Err(e) => on_result(EngineResult::Error(format!("list_calendars: {e}"))),
+                    }
+                }
+                EngineCmd::FetchCalendarEvents { from_ms, to_ms, calendar_ids } => {
+                    match rt.block_on(provider.fetch_calendar_events(from_ms, to_ms, &calendar_ids)) {
+                        Ok(events) => on_result(EngineResult::CalendarEvents(events)),
+                        Err(e) => on_result(EngineResult::Error(format!("fetch_calendar_events: {e}"))),
+                    }
                 }
                 EngineCmd::Send { to, cc, subject, body, in_reply_to, references } => {
                     let msg = OutgoingMessage {
