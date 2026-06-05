@@ -153,6 +153,7 @@ pub enum EngineCmd {
     SearchDropdown { query: String, limit: u32 },
     Send {
         to: Vec<String>,
+        cc: Vec<String>,
         subject: String,
         body: String,
         in_reply_to: Option<String>,
@@ -308,11 +309,11 @@ pub fn spawn(
                         messages,
                     });
                 }
-                EngineCmd::Send { to, subject, body, in_reply_to, references } => {
+                EngineCmd::Send { to, cc, subject, body, in_reply_to, references } => {
                     let msg = OutgoingMessage {
                         from: cfg.email.clone(),
                         to,
-                        cc: Vec::new(),
+                        cc,
                         subject,
                         html: String::new(),
                         text: body,

@@ -69,6 +69,26 @@ export component MainWindow inherits Window {
     in property <string> reply-ribbon-preview: "";
     callback reply-ribbon-cancel();
 
+    // Composer chevron — hides subject / cc behind a single toggle so the
+    // base UX matches Telegram (no headers visible by default). Concept
+    // spec: only the rare user-driven cases reveal these fields.
+    // Auto-derived values are shown as placeholders so users see what
+    // would be used when the override is empty.
+    in-out property <bool> composer-expanded: false;
+    in-out property <string> composer-subject: "";
+    in-out property <string> composer-cc: "";
+    in property <string> composer-subject-auto: "";
+
+    // Render progress: while a conversation's bubbles stream in from
+    // Ultralight, a thin bar above the bubble list shows "M of N done".
+    // Visible when total > 0 AND progress < total.
+    in property <int> render-progress: 0;
+    in property <int> render-total: 0;
+
+    // Sidebar width — adjustable via the draggable handle between the
+    // sidebar and the chat pane. Clamped on the drag callback.
+    in-out property <length> sidebar-width: 320px;
+
     callback select(int);
     callback hit-test(int, length, length);
     callback viewport-resized(length);
@@ -92,7 +112,7 @@ export component MainWindow inherits Window {
 
         // ---------- Sidebar ----------
         sidebar := Rectangle {
-            width: 320px;
+            width: root.sidebar-width;
             background: #f7f8fa;
             VerticalLayout {
                 Rectangle {
@@ -272,11 +292,15 @@ export component MainWindow inherits Window {
                                     font-weight: 700;
                                     font-size: 15px;
                                     color: idx == root.selected ? white : #0f1419;
+                                    overflow: elide;
+                                    wrap: no-wrap;
                                 }
                                 Text {
                                     text: conv.preview;
                                     font-size: 13px;
                                     color: idx == root.selected ? #e8f0fe : #8b95a1;
+                                    overflow: elide;
+                                    wrap: no-wrap;
                                 }
                             }
                         }
@@ -458,6 +482,29 @@ export component MainWindow inherits Window {
             }
         }
 
+        // ---------- Splitter ----------
+        //
+        // Draggable handle between the sidebar and the chat pane.
+        // The trick: each `moved` event applies the cursor's offset
+        // from the handle's centre as a delta to `sidebar-width`. Once
+        // the layout reflows, the handle follows the cursor and the
+        // delta tends back to zero — effectively tracking absolute
+        // mouse motion with at most a few pixels of "wobble" equal to
+        // the handle width.
+        Rectangle {
+            width: 4px;
+            background: spl-ta.has-hover || spl-ta.pressed ? #d2dbe4 : #e6ecf2;
+            spl-ta := TouchArea {
+                mouse-cursor: ew-resize;
+                moved => {
+                    if (self.pressed) {
+                        root.sidebar-width = max(180px, min(640px,
+                            root.sidebar-width + self.mouse-x - 2px));
+                    }
+                }
+            }
+        }
+
         // ---------- Main ----------
         VerticalLayout {
             Rectangle {
@@ -495,6 +542,40 @@ export component MainWindow inherits Window {
                 background: #e9eef5;
                 // Tell Rust the chat width so Blitz re-renders rows to fill it.
                 changed width => { root.viewport-resized(self.width); }
+
+                // Thin loader bar overlaid at the top while Ultralight is
+                // still chewing through the conversation's bubbles. Becomes
+                // invisible the moment progress catches up with total.
+                if root.render-total > 0 && root.render-progress < root.render-total: Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: 28px;
+                    background: #2f80ed11;
+                    border-color: #2f80ed44;
+                    border-width: 0px;
+                    z: 10;
+                    // Progress bar fill — proportional.
+                    Rectangle {
+                        x: 0;
+                        y: parent.height - 3px;
+                        width: parent.width * (root.render-total > 0
+                            ? root.render-progress / root.render-total
+                            : 0);
+                        height: 3px;
+                        background: #2f80ed;
+                    }
+                    Text {
+                        width: parent.width;
+                        height: parent.height - 3px;
+                        text: "Загружаю " + root.render-progress + " из " + root.render-total + "…";
+                        color: #2f80ed;
+                        font-size: 12px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
                 ListView {
                     for msg[idx] in root.messages: Rectangle {
                         height: msg.h;
@@ -504,6 +585,18 @@ export component MainWindow inherits Window {
                                 MenuItem { title: "Прочитано"; activated => { root.msg-action(idx, "read"); } }
                                 MenuItem { title: "Не прочитано"; activated => { root.msg-action(idx, "unread"); } }
                                 MenuItem { title: "Копировать текст"; activated => { root.msg-action(idx, "copy"); } }
+                                MenuSeparator { }
+                                Menu {
+                                    title: "Внешний контент";
+                                    MenuItem {
+                                        title: "Картинки от отправителя (вкл/выкл)";
+                                        activated => { root.msg-action(idx, "toggle-media"); }
+                                    }
+                                    MenuItem {
+                                        title: "Скрипты от отправителя (вкл/выкл)";
+                                        activated => { root.msg-action(idx, "toggle-scripts"); }
+                                    }
+                                }
                                 MenuSeparator { }
                                 MenuItem { title: "Удалить"; activated => { root.msg-action(idx, "delete"); } }
                             }
@@ -528,6 +621,95 @@ export component MainWindow inherits Window {
                                     && e.kind == PointerEventKind.down) {
                                     cma.show({ x: self.mouse-x, y: self.mouse-y });
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Composer header — Subject + Cc fields, hidden by default.
+            // Toggled by the chevron button next to the input. Auto-
+            // derived values appear as placeholders, so leaving them
+            // empty falls back to the auto behaviour at send time.
+            if root.composer-expanded: Rectangle {
+                height: 78px;
+                background: white;
+                VerticalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    padding-top: 6px;
+                    padding-bottom: 4px;
+                    spacing: 4px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            width: 50px;
+                            text: "Тема:";
+                            color: #8b95a1;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            background: #f0f2f5;
+                            border-radius: 8px;
+                            height: 30px;
+                            si-subj := TextInput {
+                                x: 10px;
+                                width: parent.width - 20px;
+                                height: parent.height;
+                                vertical-alignment: center;
+                                color: #0f1419;
+                                font-size: 13px;
+                                single-line: true;
+                                text <=> root.composer-subject;
+                            }
+                            if si-subj.text == "": Text {
+                                x: 10px;
+                                width: parent.width - 20px;
+                                height: parent.height;
+                                text: root.composer-subject-auto != ""
+                                    ? root.composer-subject-auto
+                                    : "(тема не указана)";
+                                color: #b5bcc6;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            width: 50px;
+                            text: "Cc:";
+                            color: #8b95a1;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            background: #f0f2f5;
+                            border-radius: 8px;
+                            height: 30px;
+                            si-cc := TextInput {
+                                x: 10px;
+                                width: parent.width - 20px;
+                                height: parent.height;
+                                vertical-alignment: center;
+                                color: #0f1419;
+                                font-size: 13px;
+                                single-line: true;
+                                text <=> root.composer-cc;
+                            }
+                            if si-cc.text == "": Text {
+                                x: 10px;
+                                width: parent.width - 20px;
+                                height: parent.height;
+                                text: "address1@…, address2@…";
+                                color: #b5bcc6;
+                                font-size: 13px;
+                                vertical-alignment: center;
                             }
                         }
                     }
@@ -638,6 +820,26 @@ export component MainWindow inherits Window {
                             clicked => {
                                 if (ti.text != "") { root.send(ti.text); ti.text = ""; }
                             }
+                        }
+                    }
+                    // Chevron toggle — reveals the subject + cc panel.
+                    // Placed last so it sits at the right edge, after send.
+                    Rectangle {
+                        width: 42px;
+                        height: 42px;
+                        border-radius: 21px;
+                        background: chv-ta.has-hover ? #eef0f4 : transparent;
+                        chv-ta := TouchArea {
+                            clicked => { root.composer-expanded = !root.composer-expanded; }
+                        }
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: root.composer-expanded ? "⌃" : "⌄";
+                            color: #6b7480;
+                            font-size: 18px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
                         }
                     }
                 }

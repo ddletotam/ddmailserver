@@ -5,7 +5,10 @@
 slint::include_modules!();
 
 mod engine;
+mod policy;
 mod render;
+mod sanitize;
+mod window_state;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -305,36 +308,64 @@ fn message_hits(envs: &[MessageEnvelope]) -> Vec<MessageHit> {
 
 
 /// Bubble wrapper + email-HTML normalization (tames ugly notification emails).
-fn build_body_html(b: &MessageBody) -> String {
-    let side = if b.is_outgoing { "out" } else { "in" };
-    let bg = if b.is_outgoing { "#cfe6ff" } else { "#ffffff" };
+/// External-resource blocking is applied here per the current `Policy` —
+/// images / stylesheets / `url(...)` references to non-allowlisted hosts
+/// are replaced with empty `src=""` (kept as `data-blocked-src` for the
+/// future "show domain X" UX).
+fn build_body_html(b: &MessageBody, policy: &policy::Policy) -> String {
     let inner = match b.html.as_deref() {
-        Some(h) if !h.trim().is_empty() => h.to_string(),
+        Some(h) if !h.trim().is_empty() => {
+            let sanitized = sanitize::sanitize_email_html(h);
+            sanitize::block_external(&sanitized, policy, &b.from_addr).html
+        }
         _ => format!(
             "<div style=\"white-space:pre-wrap\">{}</div>",
             html_escape(b.text.as_deref().unwrap_or(""))
         ),
     };
-    // Attachment chips — clickable via the link hit-test using an internal
-    // `ddmail-attach:` scheme decoded on the UI thread (see handle_link).
-    let attachments = if b.attachments.is_empty() {
-        String::new()
-    } else {
-        let mut s = String::from("<div class=\"atts\">");
-        for a in &b.attachments {
-            let href = format!("ddmail-attach:{}|{}|{}|{}", b.folder, b.uid, a.index, a.filename);
-            s.push_str(&format!(
-                "<a class=\"att\" href=\"{}\">\u{1F4CE} {} · {} \u{041A}\u{0411}</a>",
-                html_escape(&href),
-                html_escape(&a.filename),
-                (a.size / 1024).max(1)
-            ));
-        }
-        s.push_str("</div>");
-        s
-    };
+    bubble_template(b.is_outgoing, &format!("{inner}{}", attachment_chips(b)))
+}
+
+/// Text-only bubble — the fallback we render when WebKit chokes on an
+/// HTML body (timeout or empty paint). Preserves linebreaks via
+/// `white-space: pre-wrap`, and still appends attachment chips.
+fn build_text_only_html(b: &MessageBody) -> String {
+    let escaped = html_escape(b.text.as_deref().unwrap_or(""));
+    let inner = format!("<div style=\"white-space:pre-wrap\">{escaped}</div>");
+    bubble_template(b.is_outgoing, &format!("{inner}{}", attachment_chips(b)))
+}
+
+/// Attachment-chip HTML appended below every bubble's main body.
+/// Clickable via the link hit-test (currently disabled after the
+/// WebKit migration — see render.rs) using an internal
+/// `ddmail-attach:folder|uid|index|filename` scheme decoded on the
+/// UI thread.
+fn attachment_chips(b: &MessageBody) -> String {
+    if b.attachments.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("<div class=\"atts\">");
+    for a in &b.attachments {
+        let href = format!(
+            "ddmail-attach:{}|{}|{}|{}",
+            b.folder, b.uid, a.index, a.filename
+        );
+        s.push_str(&format!(
+            "<a class=\"att\" href=\"{}\">\u{1F4CE} {} · {} \u{041A}\u{0411}</a>",
+            html_escape(&href),
+            html_escape(&a.filename),
+            (a.size / 1024).max(1)
+        ));
+    }
+    s.push_str("</div>");
+    s
+}
+
+fn bubble_template(is_outgoing: bool, inner: &str) -> String {
+    let side = if is_outgoing { "out" } else { "in" };
+    let bg = if is_outgoing { "#cfe6ff" } else { "#ffffff" };
     format!(
-        r#"<!DOCTYPE html><html><head><style>
+        r#"<!DOCTYPE html><html><head><meta charset="utf-8"><style>
         html, body {{ margin: 0; padding: 0; background: #e9eef5; }}
         body {{ font-family: 'Segoe UI', system-ui, sans-serif; }}
         .row {{ display: flex; padding: 6px 60px; }}
@@ -356,12 +387,19 @@ fn build_body_html(b: &MessageBody) -> String {
                 padding: 4px 10px; margin: 2px 4px 2px 0; color: #2f80ed;
                 text-decoration: none; font-size: 13px; }}
         </style></head>
-        <body><div class="row {side}"><div class="bubble">{inner}{attachments}</div></div></body></html>"#
+        <body><div class="row {side}"><div class="bubble">{inner}</div></div></body></html>"#
     )
 }
 
 enum Job {
-    SetConversation { bodies: Vec<MessageBody>, width: u32 },
+    SetConversation {
+        bodies: Vec<MessageBody>,
+        width: u32,
+        policy: policy::Policy,
+        /// Bumped whenever the policy mutates so the body_cache knows
+        /// to miss for entries rendered under a stale policy.
+        policy_gen: u64,
+    },
     HitTest { row: usize, x: f32, y: f32 },
 }
 
@@ -401,6 +439,15 @@ struct Shared {
     /// at send time, the Re: subject + In-Reply-To / References
     /// threading. Cleared by Send or by the ribbon's × button.
     pending_reply: RefCell<Option<MessageBody>>,
+    /// Content-permission policy (per-sender media/scripts, per-domain
+    /// allowlist) — port of the svelte permissionStore. Persisted to
+    /// disk on every toggle.
+    policy: RefCell<policy::Policy>,
+    /// Monotonic generation counter, bumped each time the policy
+    /// mutates. Render worker uses it as part of the bitmap cache key
+    /// so toggling a permission invalidates exactly the relevant
+    /// cached rows.
+    policy_gen: Cell<u64>,
 }
 
 thread_local! {
@@ -413,15 +460,38 @@ thread_local! {
 /// Open a conversation by index: show cached bodies immediately, and (if a live
 /// engine is running) fire a background fetch to refresh them.
 fn open_conversation(sh: &Shared, idx: usize) {
+    let t0 = Instant::now();
     sh.current.set(idx);
     let convs = sh.convs.borrow();
     let Some(c) = convs.get(idx) else { return };
+    let conv_label = c.label.clone();
+    let msg_count = c.messages.len();
     if let (Some(cache), key) = (&sh.cache, &sh.key) {
+        let t_load_start = Instant::now();
         let bodies = cache.load_message_bodies(key, &c.messages).unwrap_or_default();
+        let load_ms = t_load_start.elapsed().as_millis();
         if !bodies.is_empty() {
             *sh.current_msgs.borrow_mut() =
                 bodies.iter().map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid }).collect();
-            let _ = sh.tx.send(Job::SetConversation { bodies, width: sh.width.get() });
+            println!(
+                "[perf] open_conversation idx={idx} label={conv_label:?} \
+                 messages={msg_count} bodies={} cache_load={load_ms}ms enqueue@{:?}",
+                bodies.len(),
+                t0.elapsed()
+            );
+            let policy = sh.policy.borrow().clone();
+            let policy_gen = sh.policy_gen.get();
+            let _ = sh.tx.send(Job::SetConversation {
+                bodies,
+                width: sh.width.get(),
+                policy,
+                policy_gen,
+            });
+        } else {
+            println!(
+                "[perf] open_conversation idx={idx} label={conv_label:?} \
+                 messages={msg_count} cache_miss (no cached bodies) cache_load={load_ms}ms"
+            );
         }
     }
     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
@@ -490,6 +560,33 @@ fn refresh_sidebar(sh: &Shared, ui: &MainWindow) {
 fn main() {
     let ui = MainWindow::new().unwrap();
 
+    // Restore the persisted window size + sidebar width before the
+    // first paint, so the UI opens where the user left it instead of
+    // at the hard-coded defaults.
+    let saved = window_state::load();
+    ui.window().set_size(slint::LogicalSize::new(saved.width, saved.height));
+    ui.set_sidebar_width(saved.sidebar_width);
+
+    // Save on close — the only reliable trigger Slint gives us for
+    // "window is going away" on a clean exit. See the
+    // [[window-state-save-on-close]] memory note for the matching Tauri
+    // behaviour we're replicating.
+    let ui_weak_close = ui.as_weak();
+    ui.window().on_close_requested(move || {
+        if let Some(ui) = ui_weak_close.upgrade() {
+            let win = ui.window();
+            let scale = win.scale_factor().max(0.1);
+            let physical = win.size();
+            let state = window_state::WindowState {
+                width: physical.width as f32 / scale,
+                height: physical.height as f32 / scale,
+                sidebar_width: ui.get_sidebar_width(),
+            };
+            window_state::save(&state);
+        }
+        slint::CloseRequestResponse::HideWindow
+    });
+
     let account = open_account();
     let displays = match &account {
         Some((_, _, convs)) => displays_from(convs),
@@ -504,6 +601,21 @@ fn main() {
     }
 
     // ----- Ultralight render worker -----
+    //
+    // Holds two pieces of state across jobs:
+    //   * `body_cache` — finished Slint `RowItem`s keyed by
+    //     (folder, uid, width). Re-opening a conversation reuses the
+    //     bitmaps instead of re-rendering them through Ultralight, which
+    //     is what dominates the latency budget (Notion 21 msgs: ~6.4 s
+    //     cold vs ~0 ms warm). Pack-to-Image (memcpy of RGBA into a
+    //     `SharedPixelBuffer`) runs on THIS thread now, so the UI thread
+    //     stays responsive — previously it spent ~1 s per heavy
+    //     conversation just packing.
+    //   * `row_view_indices` — parallel to the rendered rows, mapping
+    //     a row index to its Ultralight `View` inside the engine for
+    //     hit-testing. `None` means the row was served from cache and
+    //     has no live view; link clicks on those rows are ignored until
+    //     a future iteration that caches views too.
     let (tx, rx) = mpsc::channel::<Job>();
     let rx = Arc::new(Mutex::new(rx));
     let ui_weak = ui.as_weak();
@@ -512,6 +624,16 @@ fn main() {
         let ui_weak = ui_weak.clone();
         std::thread::spawn(move || {
             let mut engine = render::Engine::new();
+            // Cache holds the (already-packed) RGBA pixel buffer + height
+            // per (folder, uid, width). `SharedPixelBuffer<Rgba8Pixel>` is
+            // Send + Sync (unlike Slint's `Image`, which is UI-thread-only),
+            // so we can build it here on the render thread and ship the
+            // result across to the UI without doing any more memcpy work
+            // on the hot path. UI-thread cost shrinks to just wrapping
+            // each buffer in an `Image`.
+            let mut body_cache: HashMap<(String, u32, u32, u64),
+                (SharedPixelBuffer<Rgba8Pixel>, f32)> = HashMap::new();
+            let mut row_view_indices: Vec<Option<usize>> = Vec::new();
             loop {
                 let job = {
                     let lock = rx.lock().unwrap();
@@ -519,36 +641,120 @@ fn main() {
                 };
                 let Ok(job) = job else { break };
                 match job {
-                    Job::SetConversation { bodies, width } => {
-                        let htmls: Vec<String> = bodies.iter().map(build_body_html).collect();
-                        let t = Instant::now();
-                        let bitmaps = engine.render_bodies(&htmls, width);
+                    Job::SetConversation { bodies, width, policy, policy_gen } => {
+                        let t_wall = Instant::now();
+                        let n = bodies.len();
+                        engine.clear_views();
+                        row_view_indices.clear();
+
+                        // Tell the UI to show the progress bar.
+                        let n_total = n as i32;
+                        let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+                            ui.set_render_total(n_total);
+                            ui.set_render_progress(0);
+                        });
+
+                        let mut packs: Vec<(SharedPixelBuffer<Rgba8Pixel>, f32)> =
+                            Vec::with_capacity(n);
+                        let mut next_view_idx: usize = 0;
+                        let mut cache_hits = 0usize;
+                        let mut fallback_used = 0usize;
+                        let mut render_ms_total = 0u128;
+                        let mut pack_ms_total = 0u128;
+                        for (i, body) in bodies.iter().enumerate() {
+                            let key = (body.folder.clone(), body.uid, width, policy_gen);
+                            let mut had_view = false;
+                            let pack_entry = if let Some(cached) = body_cache.get(&key) {
+                                cache_hits += 1;
+                                cached.clone()
+                            } else {
+                                // First render: try the full HTML. If WebKit
+                                // doesn't manage to paint anything we retry with
+                                // the text-only bubble — keeps "missing bubble"
+                                // failures from being silent.
+                                let html = build_body_html(body, &policy);
+                                let t_r = Instant::now();
+                                let mut result = engine.render_one(&html, width);
+                                let text_available = body
+                                    .text
+                                    .as_deref()
+                                    .map(|s| !s.trim().is_empty())
+                                    .unwrap_or(false);
+                                if !result.successful() && text_available {
+                                    fallback_used += 1;
+                                    let text_html = build_text_only_html(body);
+                                    result = engine.render_one(&text_html, width);
+                                }
+                                render_ms_total += t_r.elapsed().as_millis();
+                                let bitmap = result.bitmap;
+                                let t_p = Instant::now();
+                                let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                                    &bitmap.rgba, bitmap.width, bitmap.height,
+                                );
+                                pack_ms_total += t_p.elapsed().as_millis();
+                                let entry = (buf, bitmap.height as f32);
+                                println!(
+                                    "[perf]   body uid={} h={}px painted={} ready={}",
+                                    body.uid, bitmap.height, result.painted_height, result.view_ready
+                                );
+                                body_cache.insert(key, entry.clone());
+                                had_view = true;
+                                entry
+                            };
+                            packs.push(pack_entry);
+                            if had_view {
+                                row_view_indices.push(Some(next_view_idx));
+                                next_view_idx += 1;
+                            } else {
+                                row_view_indices.push(None);
+                            }
+                            // Push progress to the UI — one event per body.
+                            let done = (i + 1) as i32;
+                            let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+                                ui.set_render_progress(done);
+                            });
+                        }
                         println!(
-                            "rendered {} bodies @ {width}px in {} ms",
-                            bitmaps.len(),
-                            t.elapsed().as_millis()
+                            "[perf] render N={n} width={width}px cache_hits={cache_hits} \
+                             fallback={fallback_used} ultralight={render_ms_total}ms \
+                             pack={pack_ms_total}ms total_job={}ms",
+                            t_wall.elapsed().as_millis()
                         );
                         let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                            let rows: Vec<RowItem> = bitmaps
+                            // Wrap each SharedPixelBuffer in an Image —
+                            // this is cheap (refcount bump, no memcpy)
+                            // and is the only step that has to run on
+                            // the UI thread.
+                            let rows: Vec<RowItem> = packs
                                 .into_iter()
-                                .map(|b| {
-                                    let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
-                                        &b.rgba, b.width, b.height,
-                                    );
-                                    RowItem {
-                                        img: Image::from_rgba8(buf),
-                                        h: b.height as f32,
-                                    }
+                                .map(|(buf, h)| RowItem {
+                                    img: Image::from_rgba8(buf),
+                                    h,
                                 })
                                 .collect();
                             ui.set_messages(ModelRc::new(VecModel::from(rows)));
+                            // Hide the progress bar.
+                            ui.set_render_total(0);
+                            ui.set_render_progress(0);
                         });
                     }
                     Job::HitTest { row, x, y } => {
-                        if let Some(url) = engine.hit(row, x, y) {
-                            // Decide on the UI thread: an internal attachment
-                            // link vs a real URL (and engine access for downloads).
-                            let _ = ui_weak.upgrade_in_event_loop(move |ui| handle_link(&ui, url));
+                        // Row → view_idx mapping accounts for the body
+                        // cache: cached rows have no live view, so we
+                        // skip them. Real-render rows are walked into
+                        // the engine; resolved URLs (incl. internal
+                        // ddmail-attach:* schemes) are handed off to
+                        // handle_link on the UI thread.
+                        let view_idx = row_view_indices.get(row).copied().flatten();
+                        let Some(view_idx) = view_idx else {
+                            println!("hit-test row {row}: served from cache, links disabled");
+                            continue;
+                        };
+                        match engine.hit(view_idx, x, y) {
+                            Some(url) => {
+                                let _ = ui_weak.upgrade_in_event_loop(move |ui| handle_link(&ui, url));
+                            }
+                            None => println!("click row {row} @({x:.0},{y:.0}) — no link"),
                         }
                     }
                 }
@@ -577,6 +783,8 @@ fn main() {
         search_messages: RefCell::new(Vec::new()),
         pending_compose: RefCell::new(None),
         pending_reply: RefCell::new(None),
+        policy: RefCell::new(policy::load()),
+        policy_gen: Cell::new(0),
     });
     SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
 
@@ -599,7 +807,14 @@ fn main() {
                 ui.set_active_initials(d.initials.clone().into());
                 ui.set_active_color(slint::Brush::SolidColor(hex(&d.color)));
             }
-            let _ = shared.tx.send(Job::SetConversation { bodies, width: shared.width.get() });
+            let policy = shared.policy.borrow().clone();
+            let policy_gen = shared.policy_gen.get();
+            let _ = shared.tx.send(Job::SetConversation {
+                bodies,
+                width: shared.width.get(),
+                policy,
+                policy_gen,
+            });
             break;
         }
     }
@@ -709,17 +924,51 @@ fn main() {
         if text.trim().is_empty() {
             return;
         }
+        // Read chevron-panel overrides up front. Non-empty subject
+        // override wins over the per-branch auto-derivation; cc is
+        // parsed once and passed through to the engine in every
+        // branch.
+        let ui_now = ui_weak_send.upgrade();
+        let subject_override = ui_now
+            .as_ref()
+            .map(|u| u.get_composer_subject().to_string().trim().to_string())
+            .unwrap_or_default();
+        let cc: Vec<String> = ui_now
+            .as_ref()
+            .map(|u| u.get_composer_cc().to_string())
+            .unwrap_or_default()
+            .split(|c: char| c == ',' || c == ';')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        // After a successful staging the override fields reset so the
+        // next message starts blank again. Keeps the chevron panel from
+        // silently inheriting last message's headers.
+        let clear_overrides = || {
+            if let Some(u) = ui_weak_send.upgrade() {
+                u.set_composer_subject("".into());
+                u.set_composer_cc("".into());
+            }
+        };
+
         // Branch 1: transient compose target set via the search dropdown.
         if let Some(target) = sh_send.pending_compose.borrow().clone() {
+            let subject = if !subject_override.is_empty() {
+                subject_override.clone()
+            } else {
+                "Новое сообщение".to_string()
+            };
             if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
                 println!("sending new message to {target}");
                 let _ = etx.send(engine::EngineCmd::Send {
                     to: vec![target],
-                    subject: "Новое сообщение".to_string(),
+                    cc: cc.clone(),
+                    subject,
                     body: text,
                     in_reply_to: None,
                     references: None,
                 });
+                clear_overrides();
             } else {
                 eprintln!("send: no live engine (set DDMAIL_* env)");
             }
@@ -767,7 +1016,9 @@ fn main() {
                 eprintln!("reply: no recipient resolved");
                 return;
             }
-            let subject = if reply_body.subject.to_lowercase().starts_with("re:") {
+            let subject = if !subject_override.is_empty() {
+                subject_override.clone()
+            } else if reply_body.subject.to_lowercase().starts_with("re:") {
                 reply_body.subject.clone()
             } else {
                 format!("Re: {}", reply_body.subject)
@@ -782,8 +1033,9 @@ fn main() {
             if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
                 println!("sending explicit reply to {to:?}");
                 let _ = etx.send(engine::EngineCmd::Send {
-                    to, subject, body: text, in_reply_to, references,
+                    to, cc: cc.clone(), subject, body: text, in_reply_to, references,
                 });
+                clear_overrides();
             } else {
                 eprintln!("send: no live engine (set DDMAIL_* env)");
             }
@@ -819,7 +1071,9 @@ fn main() {
         let base_subject = last_incoming
             .map(|b| b.subject.clone())
             .unwrap_or_else(|| c.last_subject.clone());
-        let subject = if base_subject.to_lowercase().starts_with("re:") {
+        let subject = if !subject_override.is_empty() {
+            subject_override.clone()
+        } else if base_subject.to_lowercase().starts_with("re:") {
             base_subject
         } else {
             format!("Re: {base_subject}")
@@ -839,7 +1093,10 @@ fn main() {
             .unwrap_or((None, None));
         if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
             println!("sending reply to {to:?}");
-            let _ = etx.send(engine::EngineCmd::Send { to, subject, body: text, in_reply_to, references });
+            let _ = etx.send(engine::EngineCmd::Send {
+                to, cc, subject, body: text, in_reply_to, references,
+            });
+            clear_overrides();
         } else {
             eprintln!("send: no live engine (set DDMAIL_* env)");
         }
@@ -972,6 +1229,33 @@ fn main() {
         let action = action.to_string();
         let msg = sh_act.current_msgs.borrow().get(row).cloned();
         let Some(msg) = msg else { return };
+        // Toggle per-sender media/scripts allowance. Cache-aware: bumps
+        // policy_gen so the body_cache misses for entries rendered
+        // under the old policy, and re-fires SetConversation so the
+        // bubbles repaint immediately.
+        if action == "toggle-media" || action == "toggle-scripts" {
+            let body_opt = sh_act
+                .cache
+                .as_ref()
+                .and_then(|cache| cache.load_message_bodies(&sh_act.key, &[msg.clone()]).ok())
+                .and_then(|mut v| v.pop());
+            let Some(b) = body_opt else { return };
+            let sender = b.from_addr.clone();
+            let mut p = sh_act.policy.borrow_mut();
+            if action == "toggle-media" {
+                let now_on = p.toggle_media(&sender);
+                println!("[policy] media for {sender}: {}", if now_on { "ON" } else { "OFF" });
+            } else {
+                let now_on = p.toggle_scripts(&sender);
+                println!("[policy] scripts for {sender}: {}", if now_on { "ON" } else { "OFF" });
+            }
+            policy::save(&p);
+            drop(p);
+            sh_act.policy_gen.set(sh_act.policy_gen.get() + 1);
+            open_conversation(&sh_act, sh_act.current.get());
+            return;
+        }
+
         // Reply doesn't need the live engine — we just stage the bubble's
         // body into the quote ribbon and let the next Send pick up the
         // subject + threading headers.
@@ -1077,6 +1361,8 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     let _ = sh.tx.send(Job::SetConversation {
                         bodies,
                         width: sh.width.get(),
+                        policy: sh.policy.borrow().clone(),
+                        policy_gen: sh.policy_gen.get(),
                     });
                 }
             });
