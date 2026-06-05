@@ -31,6 +31,27 @@ struct RowItem {
     h: length,
 }
 
+// Calendar list row in the calendar-mode sidebar.
+struct CalendarItem {
+    id: int,
+    name: string,
+    color: color,
+    visible: bool,
+}
+
+// One event block on the week grid. (day-col, top, h, color, title, time)
+// are all computed Rust-side — Slint just places the rectangles.
+struct EventBlock {
+    id: int,
+    day: int,            // 0..days-shown - 1
+    top: length,
+    h: length,
+    color: color,
+    title: string,
+    time: string,
+    all-day: bool,
+}
+
 export component MainWindow inherits Window {
     title: "ddmail";
     preferred-width: 1100px;
@@ -89,6 +110,42 @@ export component MainWindow inherits Window {
     // sidebar and the chat pane. Clamped on the drag callback.
     in-out property <length> sidebar-width: 320px;
 
+    // ── View mode ──
+    //
+    // 0 = Mail (default — chat-like dialog list + chat pane).
+    // 1 = Calendar (week-grid with the calendar-list sidebar).
+    // Wired to the left-rail icons; Rust side mirrors it for state
+    // restoration.
+    in-out property <int> view-mode: 0;
+
+    // ── Calendar state ──
+    in property <[CalendarItem]> calendars;
+    in property <[EventBlock]> events;
+    in property <string> week-title: "";
+    in-out property <bool> workdays-only: false;
+    in-out property <bool> show-non-work-hours: false;
+    // The number of day columns we draw (5 or 7).
+    in property <int> day-count: 7;
+    // True while we're waiting on the engine for events / calendars.
+    // Drives a thin "Загрузка…" pill in the calendar topbar.
+    in property <bool> calendar-loading: false;
+    // Pixels per hour — UI uses this to position event blocks.
+    in property <length> hour-height: 48px;
+    // Range of hours shown vertically: [hour-start, hour-end).
+    in property <int> hour-start: 0;
+    in property <int> hour-end: 24;
+    // Day-of-week labels Rust fills, parallel to the day columns.
+    in property <[string]> day-headers;
+
+    callback view-changed(int);
+    callback calendar-prev();
+    callback calendar-next();
+    callback calendar-today();
+    callback calendar-toggle-workdays();
+    callback calendar-toggle-non-work-hours();
+    callback calendar-toggle-visibility(int);
+    callback event-clicked(int);
+
     callback select(int);
     callback hit-test(int, length, length);
     callback viewport-resized(length);
@@ -103,15 +160,81 @@ export component MainWindow inherits Window {
 
     // Pull keyboard focus to the bottom-of-chat composer input. Used after
     // entering transient-compose mode so the user can immediately type.
+    // Currently a no-op because `ti` lives inside the mail-view
+    // conditional and isn't reachable from the root scope; revisit when
+    // we split the mail layout into its own component.
     public function focus-composer() {
-        ti.focus();
+        // TODO: route via a forward-focus property once mail-view is a
+        // dedicated component.
     }
 
     HorizontalLayout {
         spacing: 0px;
 
-        // ---------- Sidebar ----------
-        sidebar := Rectangle {
+        // ---------- Left nav rail ----------
+        //
+        // Always-visible icon strip on the very left. Two icons for now
+        // (Mail and Calendar); future buttons (Settings, Contacts) land
+        // here too. Click swaps the rest of the window between the
+        // mail and the calendar trees below.
+        Rectangle {
+            width: 48px;
+            background: #f0f2f5;
+            VerticalLayout {
+                padding-top: 10px;
+                spacing: 4px;
+                alignment: start;
+                // Mail button
+                Rectangle {
+                    height: 40px;
+                    width: 36px;
+                    x: 6px;
+                    border-radius: 10px;
+                    background: root.view-mode == 0 ? #2f80ed : (m-nav.has-hover ? #e1e6ee : transparent);
+                    m-nav := TouchArea {
+                        clicked => {
+                            root.view-mode = 0;
+                            root.view-changed(0);
+                        }
+                    }
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "✉";
+                        color: root.view-mode == 0 ? white : #6b7480;
+                        font-size: 18px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                // Calendar button
+                Rectangle {
+                    height: 40px;
+                    width: 36px;
+                    x: 6px;
+                    border-radius: 10px;
+                    background: root.view-mode == 1 ? #2f80ed : (c-nav.has-hover ? #e1e6ee : transparent);
+                    c-nav := TouchArea {
+                        clicked => {
+                            root.view-mode = 1;
+                            root.view-changed(1);
+                        }
+                    }
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "📅";
+                        color: root.view-mode == 1 ? white : #6b7480;
+                        font-size: 17px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // ---------- Sidebar (mail view) ----------
+        if root.view-mode == 0: Rectangle {
             width: root.sidebar-width;
             background: #f7f8fa;
             VerticalLayout {
@@ -482,7 +605,7 @@ export component MainWindow inherits Window {
             }
         }
 
-        // ---------- Splitter ----------
+        // ---------- Splitter (mail view) ----------
         //
         // Draggable handle between the sidebar and the chat pane.
         // The trick: each `moved` event applies the cursor's offset
@@ -491,7 +614,7 @@ export component MainWindow inherits Window {
         // delta tends back to zero — effectively tracking absolute
         // mouse motion with at most a few pixels of "wobble" equal to
         // the handle width.
-        Rectangle {
+        if root.view-mode == 0: Rectangle {
             width: 4px;
             background: spl-ta.has-hover || spl-ta.pressed ? #d2dbe4 : #e6ecf2;
             spl-ta := TouchArea {
@@ -505,8 +628,8 @@ export component MainWindow inherits Window {
             }
         }
 
-        // ---------- Main ----------
-        VerticalLayout {
+        // ---------- Main (mail view) ----------
+        if root.view-mode == 0: VerticalLayout {
             Rectangle {
                 height: 60px;
                 background: white;
@@ -840,6 +963,293 @@ export component MainWindow inherits Window {
                             font-size: 18px;
                             horizontal-alignment: center;
                             vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ========== Calendar view ==========
+
+        // Calendar sidebar — same width as the mail sidebar, sharing the
+        // splitter handle position.
+        if root.view-mode == 1: Rectangle {
+            width: root.sidebar-width;
+            background: #f7f8fa;
+            VerticalLayout {
+                // Top nav: prev / today / next + week title underneath.
+                Rectangle {
+                    height: 80px;
+                    background: white;
+                    VerticalLayout {
+                        padding-top: 8px;
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 4px;
+                        HorizontalLayout {
+                            spacing: 4px;
+                            alignment: stretch;
+                            Rectangle {
+                                width: 32px;
+                                height: 32px;
+                                border-radius: 16px;
+                                background: prv-ta.has-hover ? #eef0f4 : transparent;
+                                prv-ta := TouchArea { clicked => { root.calendar-prev(); } }
+                                Text {
+                                    width: parent.width; height: parent.height;
+                                    text: "‹"; color: #6b7480; font-size: 18px;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 32px;
+                                border-radius: 16px;
+                                background: tdy-ta.has-hover ? #eef0f4 : transparent;
+                                tdy-ta := TouchArea { clicked => { root.calendar-today(); } }
+                                Text {
+                                    width: parent.width; height: parent.height;
+                                    text: "Сегодня"; font-weight: 700; font-size: 13px;
+                                    color: #0f1419;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                            }
+                            Rectangle {
+                                width: 32px;
+                                height: 32px;
+                                border-radius: 16px;
+                                background: nxt-ta.has-hover ? #eef0f4 : transparent;
+                                nxt-ta := TouchArea { clicked => { root.calendar-next(); } }
+                                Text {
+                                    width: parent.width; height: parent.height;
+                                    text: "›"; color: #6b7480; font-size: 18px;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                            }
+                        }
+                        Text {
+                            text: root.week-title;
+                            font-weight: 700; font-size: 14px;
+                            color: #0f1419;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+                // Section header
+                Rectangle {
+                    height: 28px;
+                    Text {
+                        x: 14px;
+                        y: 8px;
+                        text: "КАЛЕНДАРИ";
+                        color: #8b95a1;
+                        font-size: 11px;
+                        font-weight: 700;
+                        letter-spacing: 0.5px;
+                    }
+                }
+                ListView {
+                    for c[ci] in root.calendars: Rectangle {
+                        height: 32px;
+                        background: cl-ta.has-hover ? #eef0f4 : transparent;
+                        cl-ta := TouchArea {
+                            clicked => { root.calendar-toggle-visibility(c.id); }
+                        }
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 12px;
+                            spacing: 10px;
+                            alignment: stretch;
+                            Rectangle {
+                                width: 14px;
+                                height: 14px;
+                                y: (parent.height - self.height) / 2;
+                                border-radius: 4px;
+                                background: c.visible ? c.color : transparent;
+                                border-color: c.color;
+                                border-width: c.visible ? 0px : 1.5px;
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                text: c.name;
+                                font-size: 13px;
+                                color: c.visible ? #0f1419 : #8b95a1;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                wrap: no-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Splitter (calendar view)
+        if root.view-mode == 1: Rectangle {
+            width: 4px;
+            background: spl-ta-cal.has-hover || spl-ta-cal.pressed ? #d2dbe4 : #e6ecf2;
+            spl-ta-cal := TouchArea {
+                mouse-cursor: ew-resize;
+                moved => {
+                    if (self.pressed) {
+                        root.sidebar-width = max(180px, min(640px,
+                            root.sidebar-width + self.mouse-x - 2px));
+                    }
+                }
+            }
+        }
+
+        // Calendar main pane (week grid)
+        if root.view-mode == 1: VerticalLayout {
+            // Topbar with view toggles
+            Rectangle {
+                height: 50px;
+                background: white;
+                HorizontalLayout {
+                    padding: 8px;
+                    spacing: 8px;
+                    alignment: stretch;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        if root.calendar-loading: Rectangle {
+                            width: parent.width;
+                            height: parent.height;
+                            HorizontalLayout {
+                                alignment: start;
+                                padding-left: 8px;
+                                Rectangle {
+                                    width: 110px;
+                                    height: 26px;
+                                    border-radius: 13px;
+                                    background: #2f80ed22;
+                                    y: (parent.height - self.height) / 2;
+                                    Text {
+                                        width: parent.width; height: parent.height;
+                                        text: "Загрузка…";
+                                        color: #2f80ed;
+                                        font-size: 12px;
+                                        font-weight: 700;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 90px;
+                        height: 30px;
+                        border-radius: 15px;
+                        background: root.workdays-only ? #2f80ed : #f0f2f5;
+                        tg-wd := TouchArea {
+                            clicked => { root.calendar-toggle-workdays(); }
+                        }
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: root.workdays-only ? "5 дней" : "7 дней";
+                            color: root.workdays-only ? white : #6b7480;
+                            font-size: 12px; font-weight: 700;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                    }
+                    Rectangle {
+                        width: 90px;
+                        height: 30px;
+                        border-radius: 15px;
+                        background: root.show-non-work-hours ? #2f80ed : #f0f2f5;
+                        tg-hr := TouchArea {
+                            clicked => { root.calendar-toggle-non-work-hours(); }
+                        }
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: root.show-non-work-hours ? "0–24" : "8–18";
+                            color: root.show-non-work-hours ? white : #6b7480;
+                            font-size: 12px; font-weight: 700;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            // Day header row
+            Rectangle {
+                height: 32px;
+                background: white;
+                border-color: #eef0f4;
+                border-width: 0px;
+                HorizontalLayout {
+                    spacing: 0px;
+                    Rectangle { width: 48px; }
+                    for h[d] in root.day-headers: Rectangle {
+                        horizontal-stretch: 1;
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: h;
+                            font-weight: 700; font-size: 12px;
+                            color: #6b7480;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            // Scrollable grid body
+            Rectangle {
+                vertical-stretch: 1;
+                background: #f7f8fa;
+                clip: true;
+                Flickable {
+                    width: parent.width;
+                    height: parent.height;
+                    viewport-width: parent.width;
+                    viewport-height: (root.hour-end - root.hour-start) * root.hour-height;
+
+                    // Per-hour horizontal rules across the full row.
+                    for i in (root.hour-end - root.hour-start): Rectangle {
+                        x: 48px;
+                        y: i * root.hour-height;
+                        width: parent.viewport-width - 48px;
+                        height: 1px;
+                        background: #eef0f4;
+                    }
+                    // Time labels in the left gutter.
+                    for i in (root.hour-end - root.hour-start): Text {
+                        x: 0;
+                        y: i * root.hour-height - 8px;
+                        width: 44px;
+                        height: 16px;
+                        text: (root.hour-start + i) + ":00";
+                        color: #8b95a1;
+                        font-size: 11px;
+                        horizontal-alignment: right;
+                    }
+                    // Day-column dividers.
+                    for h[d] in root.day-headers: Rectangle {
+                        x: 48px + d * (parent.viewport-width - 48px) / root.day-count;
+                        y: 0;
+                        width: 1px;
+                        height: parent.viewport-height;
+                        background: #eef0f4;
+                    }
+                    // Event blocks.
+                    for ev[ei] in root.events: Rectangle {
+                        x: 48px + ev.day * (parent.viewport-width - 48px) / root.day-count + 2px;
+                        y: ev.top;
+                        width: (parent.viewport-width - 48px) / root.day-count - 4px;
+                        height: ev.h;
+                        background: ev.color;
+                        border-radius: 4px;
+                        ev-ta := TouchArea {
+                            clicked => { root.event-clicked(ev.id); }
+                        }
+                        Text {
+                            x: 4px; y: 2px;
+                            width: parent.width - 8px;
+                            height: parent.height - 4px;
+                            text: ev.title;
+                            color: white;
+                            font-size: 11px;
+                            font-weight: 700;
+                            overflow: elide;
+                            wrap: word-wrap;
                         }
                     }
                 }

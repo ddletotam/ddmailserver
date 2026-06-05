@@ -448,6 +448,20 @@ struct Shared {
     /// so toggling a permission invalidates exactly the relevant
     /// cached rows.
     policy_gen: Cell<u64>,
+    /// Calendars list as the engine last reported it; we hold them so
+    /// the visibility map can resolve names/colors when the user
+    /// toggles checkboxes.
+    calendars: RefCell<Vec<ddmail_core::types::DesktopCalendar>>,
+    /// Per-calendar visibility, keyed by id. Defaults to true the first
+    /// time a calendar shows up.
+    calendar_visible: RefCell<HashMap<i64, bool>>,
+    /// Latest events from the engine, kept so toggling visibility /
+    /// changing hour-range can re-layout without a server round-trip.
+    calendar_events: RefCell<Vec<ddmail_core::types::DesktopCalendarEvent>>,
+    /// First day of the currently displayed week (Monday) in local
+    /// time, as days since the unix epoch. Stored as i64 so the
+    /// timezone-conversion math is straightforward.
+    calendar_week_start_days: Cell<i64>,
 }
 
 thread_local! {
@@ -557,6 +571,203 @@ fn refresh_sidebar(sh: &Shared, ui: &MainWindow) {
     }
 }
 
+/// Days-since-epoch for the Monday of the calendar week containing
+/// "today" (local time).
+fn week_start_days_today() -> i64 {
+    use chrono::{Datelike, Duration, Local};
+    let today = Local::now().date_naive();
+    let from_mon = today.weekday().num_days_from_monday() as i64;
+    let monday = today - Duration::days(from_mon);
+    monday
+        .signed_duration_since(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
+        .num_days()
+}
+
+/// Compute the [from_ms, to_ms) range covering the displayed week
+/// (5 or 7 days, full 24h regardless of hour-toggle).
+fn week_range_ms(week_start_days: i64, day_count: i32) -> (i64, i64) {
+    let day_ms: i64 = 24 * 60 * 60 * 1000;
+    let from = week_start_days * day_ms;
+    let to = from + day_count as i64 * day_ms;
+    (from, to)
+}
+
+fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
+    use chrono::{Datelike, Duration, NaiveDate};
+    let workdays = ui.get_workdays_only();
+    let day_count = if workdays { 5 } else { 7 } as i32;
+    let week_days = sh.calendar_week_start_days.get();
+    let monday = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()
+        + Duration::days(week_days);
+    let headers: Vec<slint::SharedString> = (0..day_count as i64)
+        .map(|i| {
+            let d = monday + Duration::days(i);
+            const NAMES: [&str; 7] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+            let n = NAMES[d.weekday().num_days_from_monday() as usize];
+            format!("{n}, {:02}.{:02}", d.day(), d.month()).into()
+        })
+        .collect();
+    ui.set_day_headers(slint::ModelRc::new(slint::VecModel::from(headers)));
+    ui.set_day_count(day_count);
+    let title = {
+        const MONTHS: [&str; 12] = [
+            "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+            "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+        ];
+        format!("{} {}", MONTHS[(monday.month() - 1) as usize], monday.year())
+    };
+    ui.set_week_title(title.into());
+    ui.set_hour_height(48.0);
+    let non_work = ui.get_show_non_work_hours();
+    ui.set_hour_start(if non_work { 0 } else { 8 });
+    ui.set_hour_end(if non_work { 24 } else { 18 });
+
+    // Sidebar — calendar list. Sorted by name for stability.
+    let cal_items: Vec<CalendarItem> = {
+        let cals = sh.calendars.borrow();
+        let visibility = sh.calendar_visible.borrow();
+        let mut v: Vec<&ddmail_core::types::DesktopCalendar> = cals.iter().collect();
+        v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        v.into_iter()
+            .map(|c| CalendarItem {
+                id: c.id as i32,
+                name: c.name.clone().into(),
+                color: hex(if c.color.is_empty() { "#3788d8" } else { &c.color }).into(),
+                visible: *visibility.get(&c.id).unwrap_or(&true),
+            })
+            .collect()
+    };
+    ui.set_calendars(slint::ModelRc::new(slint::VecModel::from(cal_items)));
+
+    // Place event blocks.
+    let day_ms: i64 = 24 * 60 * 60 * 1000;
+    let week_start_ms = week_days * day_ms;
+    let hour_height: f32 = ui.get_hour_height();
+    let hour_start = ui.get_hour_start();
+    let hour_end = ui.get_hour_end();
+    let visible_top_ms = hour_start as i64 * 60 * 60 * 1000;
+    let visible_bottom_ms = hour_end as i64 * 60 * 60 * 1000;
+    let blocks: Vec<EventBlock> = {
+        let events = sh.calendar_events.borrow();
+        let visibility = sh.calendar_visible.borrow();
+        let cals = sh.calendars.borrow();
+        let color_for = |cal_id: i64| -> String {
+            cals.iter()
+                .find(|c| c.id == cal_id)
+                .map(|c| if c.color.is_empty() { "#3788d8".to_string() } else { c.color.clone() })
+                .unwrap_or_else(|| "#3788d8".to_string())
+        };
+        events
+            .iter()
+            .filter(|e| *visibility.get(&e.calendar_id).unwrap_or(&true))
+            .filter_map(|e| {
+                let end_ms = e.dtend.unwrap_or(e.dtstart + 30 * 60 * 1000);
+                let day = ((e.dtstart - week_start_ms) / day_ms) as i32;
+                if day < 0 || day >= day_count {
+                    return None;
+                }
+                let day_start_ms = week_start_ms + day as i64 * day_ms;
+                let start_off_ms = (e.dtstart - day_start_ms).max(0);
+                let end_off_ms = (end_ms - day_start_ms).min(day_ms);
+                // Clip to visible hour range.
+                let top_ms = start_off_ms.max(visible_top_ms);
+                let bot_ms = end_off_ms.min(visible_bottom_ms);
+                if bot_ms <= top_ms {
+                    return None;
+                }
+                let to_px = |ms: i64| -> f32 {
+                    let hours = (ms - visible_top_ms) as f32 / (60.0 * 60.0 * 1000.0);
+                    hours * hour_height
+                };
+                let top = to_px(top_ms);
+                let h = (to_px(bot_ms) - top).max(18.0);
+                let fmt_hm = |abs_ms: i64| -> String {
+                    use chrono::{Local, TimeZone, Timelike};
+                    let dt = Local.timestamp_millis_opt(abs_ms).single();
+                    match dt {
+                        Some(d) => format!("{:02}:{:02}", d.hour(), d.minute()),
+                        None => "??:??".into(),
+                    }
+                };
+                let time = if e.all_day {
+                    "весь день".to_string()
+                } else {
+                    format!("{} – {}", fmt_hm(e.dtstart), fmt_hm(end_ms))
+                };
+                Some(EventBlock {
+                    id: e.id as i32,
+                    day,
+                    top,
+                    h,
+                    color: hex(&color_for(e.calendar_id)).into(),
+                    title: e.summary.clone().into(),
+                    time: time.into(),
+                    all_day: e.all_day,
+                })
+            })
+            .collect()
+    };
+    ui.set_events(slint::ModelRc::new(slint::VecModel::from(blocks)));
+}
+
+/// Re-fire FetchCalendarEvents for the currently displayed week. Also
+/// flips `calendar-loading` on so the topbar shows a "Загрузка…" pill
+/// until the result lands.
+fn refetch_calendar_events(ui: &MainWindow, sh: &Shared) {
+    let workdays = ui.get_workdays_only();
+    let day_count = if workdays { 5 } else { 7 };
+    let (from_ms, to_ms) = week_range_ms(sh.calendar_week_start_days.get(), day_count);
+    if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+        ui.set_calendar_loading(true);
+        let _ = etx.send(engine::EngineCmd::FetchCalendarEvents {
+            from_ms,
+            to_ms,
+            calendar_ids: Vec::new(),
+        });
+    }
+}
+
+/// Seed the calendar view's read-only state from the current toggles
+/// (workdays-only, non-work-hours). Day labels are filled in based on
+/// the current week; events / calendars stay empty until the engine
+/// produces them.
+fn apply_calendar_defaults(ui: &MainWindow) {
+    use chrono::{Datelike, Duration, Local};
+    let workdays = ui.get_workdays_only();
+    let day_count = if workdays { 5 } else { 7 } as i32;
+    let now = Local::now();
+    // Week starts on Monday (ISO).
+    let weekday_from_mon = now.weekday().num_days_from_monday() as i64;
+    let monday = now.date_naive() - Duration::days(weekday_from_mon);
+    let headers: Vec<slint::SharedString> = (0..day_count as i64)
+        .map(|i| {
+            let d = monday + Duration::days(i);
+            const NAMES: [&str; 7] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+            let n = NAMES[d.weekday().num_days_from_monday() as usize];
+            format!("{n}, {:02}.{:02}", d.day(), d.month()).into()
+        })
+        .collect();
+    ui.set_day_headers(slint::ModelRc::new(slint::VecModel::from(headers)));
+    ui.set_day_count(day_count);
+    let title = {
+        use chrono::Datelike as _;
+        const MONTHS: [&str; 12] = [
+            "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+            "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+        ];
+        format!("{} {}", MONTHS[(monday.month() - 1) as usize], monday.year())
+    };
+    ui.set_week_title(title.into());
+    ui.set_hour_height(48.0);
+    if ui.get_hour_end() == 0 {
+        ui.set_hour_start(8);
+        ui.set_hour_end(18);
+    }
+    // Empty models so the for-loops don't trip on undefined.
+    ui.set_calendars(slint::ModelRc::new(slint::VecModel::from(Vec::<CalendarItem>::new())));
+    ui.set_events(slint::ModelRc::new(slint::VecModel::from(Vec::<EventBlock>::new())));
+}
+
 fn main() {
     let ui = MainWindow::new().unwrap();
 
@@ -566,6 +777,11 @@ fn main() {
     let saved = window_state::load();
     ui.window().set_size(slint::LogicalSize::new(saved.width, saved.height));
     ui.set_sidebar_width(saved.sidebar_width);
+
+    // Seed calendar view with sane defaults so the grid lays itself out
+    // even before the engine produces any real data. Real `events` and
+    // `calendars` arrive via FetchCalendars / FetchEvents.
+    apply_calendar_defaults(&ui);
 
     // Save on close — the only reliable trigger Slint gives us for
     // "window is going away" on a clean exit. See the
@@ -785,6 +1001,10 @@ fn main() {
         pending_reply: RefCell::new(None),
         policy: RefCell::new(policy::load()),
         policy_gen: Cell::new(0),
+        calendars: RefCell::new(Vec::new()),
+        calendar_visible: RefCell::new(HashMap::new()),
+        calendar_events: RefCell::new(Vec::new()),
+        calendar_week_start_days: Cell::new(week_start_days_today()),
     });
     SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
 
@@ -1310,6 +1530,76 @@ fn main() {
         }
     });
 
+    // ── Calendar callbacks ──
+    //
+    // Switching into the calendar view triggers the initial fetch of
+    // both calendars + this-week events. Navigation buttons (prev /
+    // today / next) and the workdays/non-work-hours toggles all push
+    // the week-start forward/backward and re-fetch.
+    let ui_weak_view = ui.as_weak();
+    let sh_view = shared.clone();
+    ui.on_view_changed(move |mode| {
+        if let Some(ui) = ui_weak_view.upgrade() {
+            if mode == 1 {
+                apply_calendar_view(&ui, &sh_view);
+                if let Some(etx) = sh_view.engine_tx.borrow().as_ref() {
+                    let _ = etx.send(engine::EngineCmd::FetchCalendars);
+                }
+                refetch_calendar_events(&ui, &sh_view);
+            }
+        }
+    });
+    // If we start straight in calendar mode (e.g. saved state), kick
+    // off the same fetch. (Not yet persisted, but trivial when it is.)
+
+    let nav = |delta_days: i64| {
+        let ui_weak = ui.as_weak();
+        let sh = shared.clone();
+        move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let new_start = if delta_days == 0 {
+                week_start_days_today()
+            } else {
+                sh.calendar_week_start_days.get() + delta_days
+            };
+            sh.calendar_week_start_days.set(new_start);
+            apply_calendar_view(&ui, &sh);
+            refetch_calendar_events(&ui, &sh);
+        }
+    };
+    ui.on_calendar_prev(nav(-7));
+    ui.on_calendar_next(nav(7));
+    ui.on_calendar_today(nav(0));
+
+    let ui_weak_wd = ui.as_weak();
+    let sh_wd = shared.clone();
+    ui.on_calendar_toggle_workdays(move || {
+        if let Some(ui) = ui_weak_wd.upgrade() {
+            ui.set_workdays_only(!ui.get_workdays_only());
+            apply_calendar_view(&ui, &sh_wd);
+            refetch_calendar_events(&ui, &sh_wd);
+        }
+    });
+    let ui_weak_nw = ui.as_weak();
+    let sh_nw = shared.clone();
+    ui.on_calendar_toggle_non_work_hours(move || {
+        if let Some(ui) = ui_weak_nw.upgrade() {
+            ui.set_show_non_work_hours(!ui.get_show_non_work_hours());
+            apply_calendar_view(&ui, &sh_nw);
+        }
+    });
+    let ui_weak_vis = ui.as_weak();
+    let sh_vis = shared.clone();
+    ui.on_calendar_toggle_visibility(move |cal_id| {
+        if let Some(ui) = ui_weak_vis.upgrade() {
+            let id = cal_id as i64;
+            let cur = *sh_vis.calendar_visible.borrow().get(&id).unwrap_or(&true);
+            sh_vis.calendar_visible.borrow_mut().insert(id, !cur);
+            apply_calendar_view(&ui, &sh_vis);
+        }
+    });
+    ui.on_event_clicked(|id| println!("event clicked {id} (TODO: open event-detail popup)"));
+
     ui.run().unwrap();
 }
 
@@ -1450,6 +1740,31 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             let _ = std::process::Command::new("cmd")
                 .args(["/C", "start", "", &path])
                 .spawn();
+        }
+        engine::EngineResult::Calendars(cals) => {
+            println!("engine: {} calendars", cals.len());
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    {
+                        let mut vis = sh.calendar_visible.borrow_mut();
+                        for c in &cals {
+                            vis.entry(c.id).or_insert(true);
+                        }
+                    }
+                    *sh.calendars.borrow_mut() = cals;
+                    apply_calendar_view(ui, sh);
+                }
+            });
+        }
+        engine::EngineResult::CalendarEvents(events) => {
+            println!("engine: {} calendar events", events.len());
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    *sh.calendar_events.borrow_mut() = events;
+                    apply_calendar_view(ui, sh);
+                }
+            });
+            ui.set_calendar_loading(false);
         }
         engine::EngineResult::Error(e) => eprintln!("engine error: {e}"),
     }
