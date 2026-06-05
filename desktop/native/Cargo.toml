@@ -13,10 +13,15 @@ slint-build = "1.13"
 [dependencies]
 slint = "1.13"
 
-# HTML body renderer: Ultralight (WebKit) → offscreen bitmap. Windows-only crate
-# for now (Linux needs its own FFI against the official SDK).
-ultralight = { version = "0.1.7", features = ["requires_dll", "image"] }
-png = "0.17"
+# HTML body renderer: real WebKitGTK (libwebkit2gtk-4.1) → offscreen
+# snapshot → RGBA. Replaces the retired Ultralight path, which lost
+# bubbles on contemporary email HTML. macOS/Windows backends are TODO.
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
+gtk = "0.18"
+glib = "0.18"
+gio = "0.18"
+cairo-rs = "0.18"
+javascriptcore-rs = "1"
 
 # Shared engine (data model, cache, IMAP/SMTP/native providers).
 ddmail-core = { path = "../core" }
@@ -30,3 +35,14 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # ddmail-core already pulls chrono; we declare it explicitly here too so
 # the dependency is honest in our crate manifest.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# Regex passes for sanitizing inbound email HTML before it reaches the
+# Ultralight renderer (strip <script>, <iframe>, MS Outlook conditionals,
+# event handlers — they confuse the old WebKit fork and cost us bubbles
+# that quietly render blank).
+regex = "1"
+
+# Persisted content-permission policy (per-sender media/scripts toggles,
+# allow-listed domains). Stored as JSON via serde_json (declared above)
+# next to the cache db; serde-derive used for the policy/window-state structs.
+serde = { version = "1", features = ["derive"] }
