@@ -64,10 +64,11 @@ func (m *Mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error) {
 
 	status := imap.NewMailboxStatus(m.name, items)
 
-	// Get messages from folder
-	messages, err := m.database.GetMessagesByFolder(m.folderID, 10000, 0)
+	// Count messages via a single COUNT query — never load bodies just to count.
+	yesterdayMs := timeutil.Now() - 24*60*60*1000
+	total, unseen, recent, err := m.database.GetFolderStatusCounts(m.folderID, yesterdayMs)
 	if err != nil {
-		log.Printf("Failed to get messages: %v", err)
+		log.Printf("Failed to get folder status counts: %v", err)
 		return nil, err
 	}
 
@@ -76,7 +77,7 @@ func (m *Mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error) {
 	if err != nil {
 		log.Printf("Failed to get folder: %v", err)
 		// Fallback to calculated values
-		status.UidNext = uint32(len(messages) + 1)
+		status.UidNext = total + 1
 		status.UidValidity = 1
 	} else {
 		status.UidNext = folder.UIDNext
@@ -87,26 +88,9 @@ func (m *Mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error) {
 		}
 	}
 
-	status.Messages = uint32(len(messages))
-
-	// Count unseen messages
-	unseenCount := uint32(0)
-	for _, msg := range messages {
-		if !msg.Seen {
-			unseenCount++
-		}
-	}
-	status.Unseen = unseenCount
-
-	// Count recent messages (last 24 hours)
-	recentCount := uint32(0)
-	yesterdayMs := timeutil.Now() - 24*60*60*1000
-	for _, msg := range messages {
-		if msg.CreatedAt > yesterdayMs {
-			recentCount++
-		}
-	}
-	status.Recent = recentCount
+	status.Messages = total
+	status.Unseen = unseen
+	status.Recent = recent
 
 	// Set flags that this mailbox supports
 	status.Flags = []string{imap.SeenFlag, imap.AnsweredFlag, imap.FlaggedFlag, imap.DeletedFlag, imap.DraftFlag}
@@ -147,29 +131,70 @@ func (m *Mailbox) ListMessages(uid bool, seqSet *imap.SeqSet, items []imap.Fetch
 
 	log.Printf("Listing messages for mailbox %s (uid: %v, seqset: %v)", m.name, uid, seqSet)
 
-	// Get messages from folder
-	messages, err := m.database.GetMessagesByFolder(m.folderID, 10000, 0)
+	// Load lightweight metadata for the whole folder (no body/body_html). We need
+	// the full ordered list to assign sequence numbers and evaluate seqSet, but
+	// loading every body here is what makes per-message FETCH O(N²).
+	metas, err := m.database.GetMessagesByFolderMeta(m.folderID, 10000, 0)
 	if err != nil {
 		log.Printf("Failed to get messages: %v", err)
 		return err
 	}
 
-	log.Printf("Found %d messages in mailbox %s (folder %d)", len(messages), m.name, m.folderID)
+	// Does this FETCH actually need the message body? Only body sections and
+	// RFC822/BODYSTRUCTURE variants do; FLAGS/UID/ENVELOPE/SIZE/INTERNALDATE
+	// are served entirely from metadata.
+	needsBody := false
+	for _, it := range items {
+		switch it {
+		case imap.FetchUid, imap.FetchFlags, imap.FetchInternalDate, imap.FetchRFC822Size, imap.FetchEnvelope:
+			// metadata-only
+		default:
+			needsBody = true
+		}
+	}
 
-	// Convert to IMAP messages and send to channel
-	for seqNum, msg := range messages {
-		// Check if this message matches the sequence set
+	// Select the messages the seqSet actually requests.
+	type selected struct {
+		seqNum int
+		msg    *models.Message
+	}
+	var picks []selected
+	var pickedIDs []int64
+	for seqNum, msg := range metas {
 		id := uint32(seqNum + 1)
 		if uid {
 			id = msg.UID
 		}
-
 		if !seqSet.Contains(id) {
 			continue
 		}
+		picks = append(picks, selected{seqNum, msg})
+		pickedIDs = append(pickedIDs, msg.ID)
+	}
 
-		imapMsg := m.convertToIMAPMessage(msg, uint32(seqNum+1), items)
-		ch <- imapMsg
+	log.Printf("Found %d messages in mailbox %s (folder %d), %d selected (needsBody=%v)",
+		len(metas), m.name, m.folderID, len(picks), needsBody)
+
+	// Load full bodies only for the selected subset, only when needed.
+	if needsBody && len(pickedIDs) > 0 {
+		full, ferr := m.database.GetMessagesByIDs(pickedIDs)
+		if ferr != nil {
+			log.Printf("Failed to load message bodies: %v", ferr)
+		} else {
+			byID := make(map[int64]*models.Message, len(full))
+			for _, fm := range full {
+				byID[fm.ID] = fm
+			}
+			for i := range picks {
+				if fm, ok := byID[picks[i].msg.ID]; ok {
+					picks[i].msg = fm
+				}
+			}
+		}
+	}
+
+	for _, p := range picks {
+		ch <- m.convertToIMAPMessage(p.msg, uint32(p.seqNum+1), items)
 	}
 
 	return nil
@@ -209,7 +234,7 @@ func (m *Mailbox) SearchMessages(uid bool, criteria *imap.SearchCriteria) ([]uin
 		messages, err = m.database.GetMessagesByIDs(ids)
 	} else {
 		// No text query — pull the whole folder so non-text criteria can filter it.
-		messages, err = m.database.GetMessagesByFolder(m.folderID, 10000, 0)
+		messages, err = m.database.GetMessagesByFolderMeta(m.folderID, 10000, 0)
 	}
 
 	if err != nil {
@@ -253,7 +278,7 @@ func (m *Mailbox) SearchMessages(uid bool, criteria *imap.SearchCriteria) ([]uin
 // uidSeqMap returns a UID → 1-based sequence-number map for the entire mailbox,
 // ordered by UID ascending (which is the standard IMAP sequence ordering).
 func (m *Mailbox) uidSeqMap() (map[uint32]uint32, error) {
-	all, err := m.database.GetMessagesByFolder(m.folderID, 1000000, 0)
+	all, err := m.database.GetMessagesByFolderMeta(m.folderID, 1000000, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -421,7 +446,7 @@ func (m *Mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, operation i
 		m.name, uid, seqSet, operation, flags)
 
 	// Get messages from folder
-	messages, err := m.database.GetMessagesByFolder(m.folderID, 10000, 0)
+	messages, err := m.database.GetMessagesByFolderMeta(m.folderID, 10000, 0)
 	if err != nil {
 		return err
 	}
@@ -600,7 +625,7 @@ func (m *Mailbox) CopyMessagesUID(uid bool, seqSet *imap.SeqSet, destName string
 		return 0, nil, nil, fmt.Errorf("failed to get destination folder: %w", err)
 	}
 
-	messages, err := m.database.GetMessagesByFolder(m.folderID, 10000, 0)
+	messages, err := m.database.GetMessagesByFolderMeta(m.folderID, 10000, 0)
 	if err != nil {
 		return 0, nil, nil, err
 	}
@@ -641,7 +666,7 @@ func (m *Mailbox) MoveMessagesUID(uid bool, seqSet *imap.SeqSet, destName string
 		return 0, nil, nil, fmt.Errorf("failed to get destination folder: %w", err)
 	}
 
-	messages, err := m.database.GetMessagesByFolder(m.folderID, 10000, 0)
+	messages, err := m.database.GetMessagesByFolderMeta(m.folderID, 10000, 0)
 	if err != nil {
 		return 0, nil, nil, err
 	}
@@ -694,7 +719,7 @@ func (m *Mailbox) CopyMessages(uid bool, seqSet *imap.SeqSet, destName string) e
 	}
 
 	// Get messages from source folder
-	messages, err := m.database.GetMessagesByFolder(m.folderID, 10000, 0)
+	messages, err := m.database.GetMessagesByFolderMeta(m.folderID, 10000, 0)
 	if err != nil {
 		log.Printf("CopyMessages: failed to get messages from source folder: %v", err)
 		return err
@@ -741,7 +766,7 @@ func (m *Mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string) e
 	}
 
 	// Get messages from source folder
-	messages, err := m.database.GetMessagesByFolder(m.folderID, 10000, 0)
+	messages, err := m.database.GetMessagesByFolderMeta(m.folderID, 10000, 0)
 	if err != nil {
 		log.Printf("MoveMessages: failed to get messages from source folder: %v", err)
 		return err

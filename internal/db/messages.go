@@ -100,6 +100,54 @@ func (db *DB) GetMessagesByFolder(folderID int64, limit, offset int) ([]*models.
 	return scanMessages(rows)
 }
 
+// GetMessagesByFolderMeta is like GetMessagesByFolder but DOES NOT load the
+// heavy body/body_html columns (they come back as empty strings). Use it for
+// anything that only needs metadata — sequence-number mapping, flag updates,
+// copy/move, and FETCHes that don't request a body. Loading full bodies for
+// the whole folder on every FETCH is O(folder) per call and turns a per-message
+// sync into O(N²); this keeps those paths cheap.
+func (db *DB) GetMessagesByFolderMeta(folderID int64, limit, offset int) ([]*models.Message, error) {
+	query := `
+		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
+		       date, '' AS body, '' AS body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
+		       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
+		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at
+		FROM messages
+		WHERE folder_id = $1 AND deleted = false AND (soft_deleted = false OR soft_deleted IS NULL)
+		      AND (is_spam = false OR is_spam IS NULL)
+		ORDER BY uid ASC
+		LIMIT $2 OFFSET $3
+	`
+
+	rows, err := db.Query(query, folderID, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get folder message metadata: %w", err)
+	}
+	defer rows.Close()
+
+	return scanMessages(rows)
+}
+
+// GetFolderStatusCounts returns the total, unseen and recent message counts for
+// a folder in a single COUNT query — used by IMAP STATUS so we don't load every
+// message body just to count. recentSinceMs is the cutoff for the RECENT count
+// (messages created after it).
+func (db *DB) GetFolderStatusCounts(folderID int64, recentSinceMs int64) (total, unseen, recent uint32, err error) {
+	query := `
+		SELECT COUNT(*),
+		       COUNT(*) FILTER (WHERE seen = false),
+		       COUNT(*) FILTER (WHERE created_at > $2)
+		FROM messages
+		WHERE folder_id = $1 AND deleted = false AND (soft_deleted = false OR soft_deleted IS NULL)
+		      AND (is_spam = false OR is_spam IS NULL)
+	`
+	var t, u, r int64
+	if err = db.QueryRow(query, folderID, recentSinceMs).Scan(&t, &u, &r); err != nil {
+		return 0, 0, 0, fmt.Errorf("failed to get folder status counts: %w", err)
+	}
+	return uint32(t), uint32(u), uint32(r), nil
+}
+
 // GetMessagesByUser retrieves all messages for a user (excludes spam)
 func (db *DB) GetMessagesByUser(userID int64, limit, offset int) ([]*models.Message, error) {
 	query := `
