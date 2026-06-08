@@ -44,6 +44,7 @@ type Scheduler struct {
 	analyzer                 *parser.Analyzer
 	spamCleanupLastRun       time.Time
 	accountLogCleanupLastRun time.Time
+	vaultCleanupLastRun      time.Time
 }
 
 // NewScheduler creates a new task scheduler with all dependencies wired up.
@@ -178,6 +179,9 @@ func (s *Scheduler) scheduleAllAccounts() {
 
 	// Run account log cleanup (delete logs older than 5 days)
 	s.runAccountLogCleanup()
+
+	// Run vault cleanup (permanently delete soft-deleted messages older than 30 days)
+	s.runVaultCleanup()
 
 	imapQueueLen, smtpQueueLen := s.pool.QueueLength()
 	log.Printf("Current queue lengths - IMAP: %d, SMTP: %d", imapQueueLen, smtpQueueLen)
@@ -581,4 +585,28 @@ func (s *Scheduler) runAccountLogCleanup() {
 	}
 
 	s.accountLogCleanupLastRun = time.Now()
+}
+
+// runVaultCleanup permanently deletes soft-deleted ("vault") messages older
+// than the retention window. The vault is the recoverable store for messages
+// expunged from non-Trash folders; without a purge it grows unbounded (it was
+// the bulk of the rows bloating per-folder scans). Only runs once per day.
+const vaultRetention = 30 * 24 * time.Hour
+
+func (s *Scheduler) runVaultCleanup() {
+	if time.Since(s.vaultCleanupLastRun) < 24*time.Hour {
+		return
+	}
+
+	deleted, err := s.database.PurgeVaultMessages(vaultRetention)
+	if err != nil {
+		log.Printf("Failed to cleanup vault messages: %v", err)
+		return
+	}
+
+	if deleted > 0 {
+		log.Printf("Vault cleanup: purged %d soft-deleted messages older than 30 days", deleted)
+	}
+
+	s.vaultCleanupLastRun = time.Now()
 }
