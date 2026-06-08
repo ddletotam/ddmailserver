@@ -17,6 +17,7 @@ type User struct {
 	userID         int64
 	database       *db.DB
 	searchIndexer  *search.Indexer
+	bodyCache      *bodyCache
 	foldersEnsured bool
 }
 
@@ -68,6 +69,7 @@ func (u *User) ListMailboxes(subscribed bool) ([]backend.Mailbox, error) {
 			database:      u.database,
 			folderID:      folder.ID,
 			searchIndexer: u.searchIndexer,
+			bodyCache:     u.bodyCache,
 		}
 
 		// INBOX goes first
@@ -96,6 +98,7 @@ func (u *User) GetMailbox(name string) (backend.Mailbox, error) {
 			database:      u.database,
 			folderID:      folder.ID,
 			searchIndexer: u.searchIndexer,
+			bodyCache:     u.bodyCache,
 		}, nil
 	}
 
@@ -112,6 +115,7 @@ func (u *User) GetMailbox(name string) (backend.Mailbox, error) {
 			database:      u.database,
 			folderID:      inbox.ID,
 			searchIndexer: u.searchIndexer,
+			bodyCache:     u.bodyCache,
 		}, nil
 	}
 
