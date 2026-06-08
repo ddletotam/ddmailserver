@@ -1023,21 +1023,36 @@ func (m *Mailbox) convertToIMAPMessage(msg *models.Message, seqNum uint32, items
 			// Handle RFC822 fetches
 			section, _ := imap.ParseBodySectionName(item)
 			if section != nil {
-				literal := m.buildMessageLiteral(msg, section)
-				imapMsg.Body[section] = literal
+				imapMsg.Body[section] = applyPartial(section, m.buildMessageLiteral(msg, section))
 			}
 
 		default:
 			// Handle BODY[] section requests
 			section, err := imap.ParseBodySectionName(item)
 			if err == nil && section != nil {
-				literal := m.buildMessageLiteral(msg, section)
-				imapMsg.Body[section] = literal
+				imapMsg.Body[section] = applyPartial(section, m.buildMessageLiteral(msg, section))
 			}
 		}
 	}
 
 	return imapMsg
+}
+
+// applyPartial honors a BODY[]<from.length> partial fetch. go-imap emits the
+// <from> origin in the response header but does NOT truncate the literal we
+// supply — the backend must do it. Without this, a client that fetches a large
+// message in chunks (iOS Mail uses <0.393216>) gets the entire message instead
+// of the requested window, can't reconcile it, drops the connection and retries
+// forever — looking like "server unavailable" on one big message.
+func applyPartial(section *imap.BodySectionName, lit imap.Literal) imap.Literal {
+	if section == nil || len(section.Partial) != 2 || lit == nil {
+		return lit
+	}
+	data, err := io.ReadAll(lit)
+	if err != nil {
+		return lit
+	}
+	return bytes.NewReader(section.ExtractPartial(data))
 }
 
 // encodeHeader encodes a header value using RFC 2047 if it contains non-ASCII
