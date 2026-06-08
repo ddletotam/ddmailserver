@@ -20,22 +20,25 @@ type Backend struct {
 	hub           *notify.Hub
 	updates       chan backend.Update
 	searchIndexer *search.Indexer
+	bodyCache     *bodyCache
 }
 
 // NewBackend creates a new IMAP backend
 func NewBackend(database *db.DB) *Backend {
 	return &Backend{
-		database: database,
-		updates:  make(chan backend.Update, 100),
+		database:  database,
+		updates:   make(chan backend.Update, 100),
+		bodyCache: newBodyCache(),
 	}
 }
 
 // NewBackendWithHub creates a new IMAP backend with notification hub for IDLE support
 func NewBackendWithHub(database *db.DB, hub *notify.Hub) *Backend {
 	b := &Backend{
-		database: database,
-		hub:      hub,
-		updates:  make(chan backend.Update, 100),
+		database:  database,
+		hub:       hub,
+		updates:   make(chan backend.Update, 100),
+		bodyCache: newBodyCache(),
 	}
 
 	// Start listening for notifications if hub is provided
@@ -131,5 +134,6 @@ func (b *Backend) Login(connInfo *imap.ConnInfo, username, password string) (bac
 		userID:        user.ID,
 		database:      b.database,
 		searchIndexer: b.searchIndexer,
+		bodyCache:     b.bodyCache,
 	}, nil
 }

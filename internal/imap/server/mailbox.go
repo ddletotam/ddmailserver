@@ -26,6 +26,7 @@ type Mailbox struct {
 	database      *db.DB
 	folderID      int64 // Local folder ID
 	searchIndexer *search.Indexer
+	bodyCache     *bodyCache
 }
 
 // Name returns the mailbox name
@@ -1096,18 +1097,8 @@ func splitMIME(ct string) (string, string) {
 	return "application", "octet-stream"
 }
 
-// buildMessageLiteral creates a literal for body section requests.
-// Handles section paths like BODY[2] to return individual MIME parts.
-func (m *Mailbox) buildMessageLiteral(msg *models.Message, section *imap.BodySectionName) imap.Literal {
-	// Handle section path requests (e.g. BODY[2] for attachment)
-	if len(section.Path) > 0 {
-		return m.buildSectionLiteral(msg, section)
-	}
-
-	// Full message — build RFC822
-	var buf bytes.Buffer
-
-	// Write headers with proper RFC 2047 encoding
+// writeMessageHeaders writes the synthetic RFC822 header block for a stored message.
+func writeMessageHeaders(buf *bytes.Buffer, msg *models.Message) {
 	buf.WriteString(fmt.Sprintf("From: %s\r\n", encodeAddressHeader(msg.From)))
 	buf.WriteString(fmt.Sprintf("To: %s\r\n", encodeAddressHeader(msg.To)))
 	if msg.Cc != "" {
@@ -1117,10 +1108,50 @@ func (m *Mailbox) buildMessageLiteral(msg *models.Message, section *imap.BodySec
 	buf.WriteString(fmt.Sprintf("Date: %s\r\n", timeutil.FromMs(msg.Date).Format("Mon, 02 Jan 2006 15:04:05 -0700")))
 	buf.WriteString(fmt.Sprintf("Message-ID: %s\r\n", msg.MessageID))
 	buf.WriteString("MIME-Version: 1.0\r\n")
+}
 
-	// Write body (unless only headers requested)
-	specifier := section.Specifier
-	if specifier != imap.HeaderSpecifier {
+// buildMessageLiteral creates a literal for body section requests.
+// Handles section paths like BODY[2] to return individual MIME parts.
+func (m *Mailbox) buildMessageLiteral(msg *models.Message, section *imap.BodySectionName) imap.Literal {
+	// Handle section path requests (e.g. BODY[2] for attachment)
+	if len(section.Path) > 0 {
+		return m.buildSectionLiteral(msg, section)
+	}
+
+	// Headers only — cheap, build directly.
+	if section.Specifier == imap.HeaderSpecifier {
+		var buf bytes.Buffer
+		writeMessageHeaders(&buf, msg)
+		buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+		buf.WriteString("\r\n")
+		return bytes.NewReader(buf.Bytes())
+	}
+
+	// Entire message — expensive to assemble (loads + base64-encodes every
+	// attachment). Clients fetch large messages in many BODY[]<from.length>
+	// windows, so memoize the assembled RFC822 and serve every window from cache.
+	return bytes.NewReader(m.entireMessageBytes(msg))
+}
+
+// entireMessageBytes returns the full assembled RFC822 for a message, using the
+// per-message body cache. A delivered message's content is immutable, so cached
+// bytes never need invalidation — eviction is purely size-bounded.
+func (m *Mailbox) entireMessageBytes(msg *models.Message) []byte {
+	if data, ok := m.bodyCache.get(msg.ID); ok {
+		return data
+	}
+	data := m.buildEntireMessageBytes(msg)
+	m.bodyCache.put(msg.ID, data)
+	return data
+}
+
+// buildEntireMessageBytes assembles the complete RFC822 representation
+// (headers + body + attachments) for a stored message.
+func (m *Mailbox) buildEntireMessageBytes(msg *models.Message) []byte {
+	var buf bytes.Buffer
+	writeMessageHeaders(&buf, msg)
+
+	{
 		hasPlain := msg.Body != ""
 		hasHTML := msg.BodyHTML != ""
 
@@ -1239,13 +1270,9 @@ func (m *Mailbox) buildMessageLiteral(msg *models.Message, section *imap.BodySec
 			// No regular attachments — write body directly
 			buf.Write(bodyBuf.Bytes())
 		}
-	} else {
-		// Headers only
-		buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
-		buf.WriteString("\r\n")
 	}
 
-	return bytes.NewReader(buf.Bytes())
+	return buf.Bytes()
 }
 
 // buildSectionLiteral returns a specific MIME part for section path requests.
