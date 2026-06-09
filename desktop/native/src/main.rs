@@ -1820,6 +1820,19 @@ fn main() {
         }
     });
 
+    // Delete event from the detail popup.
+    let ui_weak_del = ui.as_weak();
+    let sh_del = shared.clone();
+    ui.on_detail_delete(move || {
+        let Some(ui) = ui_weak_del.upgrade() else { return };
+        let id = ui.get_detail_event_id() as i64;
+        if let Some(etx) = sh_del.engine_tx.borrow().as_ref() {
+            println!("delete event {id}");
+            let _ = etx.send(engine::EngineCmd::DeleteEvent { event_id: id });
+        }
+        ui.set_detail_visible(false);
+    });
+
     // Create / edit event form.
     let ui_weak_new = ui.as_weak();
     let sh_new = shared.clone();
