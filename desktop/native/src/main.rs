@@ -7,6 +7,7 @@ slint::include_modules!();
 mod engine;
 mod notify;
 mod policy;
+mod reminders;
 mod render_common;
 #[cfg(windows)]
 mod tray;
@@ -1866,6 +1867,32 @@ fn main() {
         }
     });
 
+    // Calendar reminders: a UI-thread timer scans the persisted reminder
+    // table every interval and toasts whatever just came due. Runs on the
+    // Slint event loop, which keeps ticking while hidden to tray — so we
+    // don't need the background Tokio task the old build relied on. Bound
+    // to a name (not bare `_`) so it lives for the loop's lifetime.
+    let _reminder_timer = slint::Timer::default();
+    _reminder_timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_secs(reminders::SCAN_INTERVAL_SECS),
+        || {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let due = SHARED.with(|s| {
+                s.borrow()
+                    .as_ref()
+                    .and_then(|sh| sh.cache.as_ref().map(|c| reminders::scan(c, now_ms)))
+                    .unwrap_or_default()
+            });
+            for row in due {
+                notify::notify(
+                    &format!("\u{23f0} {}", row.summary),
+                    &reminders::body_for(&row, now_ms),
+                );
+            }
+        },
+    );
+
     // System tray (Windows): left-click / "Открыть" re-shows the window,
     // "Выход" quits. Kept alive until the event loop ends.
     #[cfg(windows)]
@@ -2056,6 +2083,10 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             println!("engine: {} calendar events", events.len());
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    if let Some(c) = sh.cache.as_ref() {
+                        reminders::seed(c, &events, now_ms);
+                    }
                     *sh.calendar_events.borrow_mut() = events;
                     apply_calendar_view(ui, sh);
                 }
