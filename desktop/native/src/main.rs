@@ -5,6 +5,7 @@
 slint::include_modules!();
 
 mod engine;
+mod notify;
 mod policy;
 mod render_common;
 #[cfg(target_os = "linux")]
@@ -1678,6 +1679,12 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             match ev {
                 EngineEvent::NewMail { folder, count } => {
                     println!("engine event: new mail in {folder} (+{count}) — refetching");
+                    let body = if count > 1 {
+                        format!("{count} новых писем в {folder}")
+                    } else {
+                        format!("Новое письмо в {folder}")
+                    };
+                    notify::notify("ddmail", &body);
                     SHARED.with(|s| {
                         if let Some(sh) = s.borrow().as_ref() {
                             if let Some(etx) = sh.engine_tx.borrow().as_ref() {
