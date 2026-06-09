@@ -146,6 +146,17 @@ export component MainWindow inherits Window {
     callback calendar-toggle-visibility(int);
     callback event-clicked(int);
 
+    // Event-detail popup (Phase B, read-only). Populated by the Rust side on
+    // event-clicked; shown as a modal overlay.
+    in-out property <bool> detail-visible: false;
+    in property <string> detail-title;
+    in property <string> detail-when;
+    in property <string> detail-location;
+    in property <string> detail-organizer;
+    in property <string> detail-attendees;
+    in property <string> detail-description;
+    callback detail-close();
+
     callback select(int);
     callback hit-test(int, length, length);
     callback viewport-resized(length);
@@ -1252,6 +1263,67 @@ export component MainWindow inherits Window {
                             font-size: 11px;
                             font-weight: 700;
                             overflow: elide;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------- Event-detail modal overlay ----------
+    if root.detail-visible: TouchArea {
+        // Backdrop: click outside the card closes the popup.
+        clicked => { root.detail-close(); }
+        Rectangle {
+            background: #00000066;
+            card := Rectangle {
+                width: min(520px, root.width - 80px);
+                height: min(440px, root.height - 80px);
+                background: white;
+                border-radius: 14px;
+                drop-shadow-blur: 24px;
+                drop-shadow-color: #00000044;
+                // Swallow clicks on the card so they don't hit the backdrop.
+                TouchArea {}
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 10px;
+                    HorizontalLayout {
+                        Text {
+                            text: root.detail-title;
+                            font-size: 18px;
+                            font-weight: 700;
+                            color: #0f1419;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        Rectangle {
+                            width: 28px; height: 28px; border-radius: 14px;
+                            background: x-ta.has-hover ? #e1e6ee : transparent;
+                            Text { text: "✕"; color: #6b7480; font-size: 16px;
+                                   horizontal-alignment: center; vertical-alignment: center; }
+                            x-ta := TouchArea { clicked => { root.detail-close(); } }
+                        }
+                    }
+                    Text { text: root.detail-when; font-size: 14px; color: #2f80ed; }
+                    if root.detail-location != "": Text {
+                        text: "📍 " + root.detail-location; font-size: 13px; color: #4a5560; wrap: word-wrap;
+                    }
+                    if root.detail-organizer != "": Text {
+                        text: "Организатор: " + root.detail-organizer; font-size: 13px; color: #4a5560; wrap: word-wrap;
+                    }
+                    if root.detail-attendees != "": Text {
+                        text: "Участники: " + root.detail-attendees; font-size: 13px; color: #4a5560; wrap: word-wrap;
+                    }
+                    Flickable {
+                        vertical-stretch: 1;
+                        viewport-height: desc.preferred-height;
+                        desc := Text {
+                            width: parent.width;
+                            text: root.detail-description;
+                            font-size: 13px;
+                            color: #2b3640;
                             wrap: word-wrap;
                         }
                     }

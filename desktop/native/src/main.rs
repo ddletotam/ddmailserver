@@ -1610,7 +1610,76 @@ fn main() {
             apply_calendar_view(&ui, &sh_vis);
         }
     });
-    ui.on_event_clicked(|id| println!("event clicked {id} (TODO: open event-detail popup)"));
+    // Event click → populate + show the detail popup (Phase B, read-only).
+    let ui_weak_ev = ui.as_weak();
+    let sh_ev = shared.clone();
+    ui.on_event_clicked(move |id| {
+        use chrono::{Datelike, Local, TimeZone, Timelike};
+        let Some(ui) = ui_weak_ev.upgrade() else { return };
+        let events = sh_ev.calendar_events.borrow();
+        let Some(ev) = events.iter().find(|e| e.id as i32 == id) else { return };
+
+        let date_of = |ms: i64| {
+            Local
+                .timestamp_millis_opt(ms)
+                .single()
+                .map(|d| format!("{:02}.{:02}.{}", d.day(), d.month(), d.year()))
+                .unwrap_or_default()
+        };
+        let dt = |ms: i64| {
+            Local
+                .timestamp_millis_opt(ms)
+                .single()
+                .map(|d| format!("{:02}.{:02} {:02}:{:02}", d.day(), d.month(), d.hour(), d.minute()))
+                .unwrap_or_default()
+        };
+        let tm = |ms: i64| {
+            Local
+                .timestamp_millis_opt(ms)
+                .single()
+                .map(|d| format!("{:02}:{:02}", d.hour(), d.minute()))
+                .unwrap_or_default()
+        };
+        let when = if ev.all_day {
+            format!("{} · весь день", date_of(ev.dtstart))
+        } else if let Some(end) = ev.dtend {
+            format!("{} – {}", dt(ev.dtstart), tm(end))
+        } else {
+            dt(ev.dtstart)
+        };
+
+        let organizer = match (ev.organizer_name.is_empty(), ev.organizer_email.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => ev.organizer_email.clone(),
+            (false, true) => ev.organizer_name.clone(),
+            (false, false) => format!("{} <{}>", ev.organizer_name, ev.organizer_email),
+        };
+        let attendees = ev
+            .attendees
+            .iter()
+            .map(|a| {
+                let n = if a.name.is_empty() { a.email.clone() } else { a.name.clone() };
+                if a.partstat.is_empty() { n } else { format!("{n} ({})", a.partstat) }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        ui.set_detail_title(
+            if ev.summary.is_empty() { "(без названия)".into() } else { ev.summary.clone() }.into(),
+        );
+        ui.set_detail_when(when.into());
+        ui.set_detail_location(ev.location.clone().into());
+        ui.set_detail_organizer(organizer.into());
+        ui.set_detail_attendees(attendees.into());
+        ui.set_detail_description(ev.description.clone().into());
+        ui.set_detail_visible(true);
+    });
+    let ui_weak_dc = ui.as_weak();
+    ui.on_detail_close(move || {
+        if let Some(ui) = ui_weak_dc.upgrade() {
+            ui.set_detail_visible(false);
+        }
+    });
 
     // System tray (Windows): left-click / "Открыть" re-shows the window,
     // "Выход" quits. Kept alive until the event loop ends.
