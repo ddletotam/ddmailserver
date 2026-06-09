@@ -8,6 +8,8 @@ mod engine;
 mod notify;
 mod policy;
 mod render_common;
+#[cfg(windows)]
+mod tray;
 #[cfg(target_os = "linux")]
 #[path = "render_webkit.rs"]
 mod render;
@@ -1599,6 +1601,21 @@ fn main() {
         }
     });
     ui.on_event_clicked(|id| println!("event clicked {id} (TODO: open event-detail popup)"));
+
+    // System tray (Windows): left-click / "Открыть" re-shows the window,
+    // "Выход" quits. Kept alive until the event loop ends.
+    #[cfg(windows)]
+    let _tray = {
+        let ui_open = ui.as_weak();
+        tray::setup(
+            move || {
+                if let Some(ui) = ui_open.upgrade() {
+                    let _ = ui.show();
+                }
+            },
+            || slint::quit_event_loop().unwrap(),
+        )
+    };
 
     ui.run().unwrap();
 }

@@ -54,6 +54,10 @@ javascriptcore-rs = "1"
 
 # Windows: WebView2 (Edge/Chromium) → offscreen CapturePreview(PNG) → RGBA.
 [target.'cfg(windows)'.dependencies]
+# System-tray icon + menu (Linux tray deferred — it needs gtk on the main
+# thread, which conflicts with our render worker's gtk; the Linux dev wires
+# it separately).
+tray-icon = "0.19"
 webview2-com = "0.33"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
