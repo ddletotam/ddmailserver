@@ -706,9 +706,8 @@ impl Cache {
 }
 
 /// A scheduled reminder row, denormalised enough that the notifier can
-/// render the toast without touching any other table. Serialize so the
-/// snooze window (separate webview) can pull the row by id through a
-/// Tauri command — keeps the URL params shallow.
+/// render the toast without touching any other table. Serializable so a
+/// reminder row can be pulled by id and shipped to the UI cheaply.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReminderRow {
     pub event_id: i64,

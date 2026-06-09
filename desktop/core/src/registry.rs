@@ -6,8 +6,8 @@ use crate::provider::MailProvider;
 
 /// Maps account_id → provider instance.
 ///
-/// Registered as Tauri managed state. Providers are created when an
-/// account is activated and looked up by subsequent commands.
+/// Providers are created when an account is activated and looked up by
+/// subsequent engine calls.
 pub struct ProviderRegistry {
     providers: RwLock<HashMap<String, Arc<dyn MailProvider>>>,
 }
