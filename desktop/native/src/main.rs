@@ -1672,12 +1672,24 @@ fn main() {
         ui.set_detail_organizer(organizer.into());
         ui.set_detail_attendees(attendees.into());
         ui.set_detail_description(ev.description.clone().into());
+        ui.set_detail_event_id(ev.id as i32);
         ui.set_detail_visible(true);
     });
     let ui_weak_dc = ui.as_weak();
     ui.on_detail_close(move || {
         if let Some(ui) = ui_weak_dc.upgrade() {
             ui.set_detail_visible(false);
+        }
+    });
+    // RSVP from the detail popup → set PARTSTAT on the server, then refresh.
+    let sh_rsvp = shared.clone();
+    ui.on_rsvp(move |id, partstat| {
+        if let Some(etx) = sh_rsvp.engine_tx.borrow().as_ref() {
+            println!("rsvp event {id} -> {partstat}");
+            let _ = etx.send(engine::EngineCmd::Rsvp {
+                event_id: id as i64,
+                partstat: partstat.to_string(),
+            });
         }
     });
 
@@ -1755,6 +1767,15 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
         }
         engine::EngineResult::Done(what) => {
             println!("engine: {what} done — refreshing");
+            if what == "rsvp" {
+                // Calendar mutation → refresh the visible week's events.
+                SHARED.with(|s| {
+                    if let Some(sh) = s.borrow().as_ref() {
+                        refetch_calendar_events(ui, sh);
+                    }
+                });
+                return;
+            }
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
                     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
