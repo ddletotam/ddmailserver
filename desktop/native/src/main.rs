@@ -778,6 +778,16 @@ fn apply_calendar_defaults(ui: &MainWindow) {
 }
 
 fn main() {
+    // Single-instance guard: a second launch exits instead of opening a
+    // duplicate window. (Focusing the existing window needs IPC — TODO.)
+    let _instance = single_instance::SingleInstance::new("ddmail-native-single").ok();
+    if let Some(inst) = &_instance {
+        if !inst.is_single() {
+            eprintln!("ddmail is already running");
+            return;
+        }
+    }
+
     let ui = MainWindow::new().unwrap();
 
     // Restore the persisted window size + sidebar width before the

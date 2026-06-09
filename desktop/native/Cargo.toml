@@ -30,6 +30,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # macOS NSUserNotification) behind one API — fired on new-mail events.
 notify-rust = "4"
 
+# Single-instance guard (named mutex on Windows / lock file on Linux) so a
+# second launch exits instead of opening a duplicate window.
+single-instance = "0.3"
+
 # Regex passes for sanitizing inbound email HTML before it reaches the
 # Ultralight renderer (strip <script>, <iframe>, MS Outlook conditionals,
 # event handlers — they confuse the old WebKit fork and cost us bubbles
