@@ -165,6 +165,8 @@ pub enum EngineCmd {
         to_ms: i64,
         calendar_ids: Vec<i64>,
     },
+    /// Set the requesting user's PARTSTAT on an event (ACCEPTED/TENTATIVE/DECLINED).
+    Rsvp { event_id: i64, partstat: String },
     Send {
         to: Vec<String>,
         cc: Vec<String>,
@@ -338,6 +340,12 @@ pub fn spawn(
                     match rt.block_on(provider.fetch_calendar_events(from_ms, to_ms, &calendar_ids)) {
                         Ok(events) => on_result(EngineResult::CalendarEvents(events)),
                         Err(e) => on_result(EngineResult::Error(format!("fetch_calendar_events: {e}"))),
+                    }
+                }
+                EngineCmd::Rsvp { event_id, partstat } => {
+                    match rt.block_on(provider.rsvp_event(event_id, &partstat)) {
+                        Ok(_) => on_result(EngineResult::Done("rsvp".into())),
+                        Err(e) => on_result(EngineResult::Error(format!("rsvp: {e}"))),
                     }
                 }
                 EngineCmd::Send { to, cc, subject, body, in_reply_to, references } => {

@@ -155,7 +155,9 @@ export component MainWindow inherits Window {
     in property <string> detail-organizer;
     in property <string> detail-attendees;
     in property <string> detail-description;
+    in-out property <int> detail-event-id;
     callback detail-close();
+    callback rsvp(int, string);
 
     callback select(int);
     callback hit-test(int, length, length);
@@ -1315,6 +1317,42 @@ export component MainWindow inherits Window {
                     }
                     if root.detail-attendees != "": Text {
                         text: "Участники: " + root.detail-attendees; font-size: 13px; color: #4a5560; wrap: word-wrap;
+                    }
+                    // RSVP row — shown when the event has attendees. Wrapped in
+                    // a fixed-height Rectangle so the VerticalLayout reserves the
+                    // row (a bare nested layout collapsed to 0).
+                    if root.detail-attendees != "": Rectangle {
+                        height: 36px;
+                        HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle {
+                            border-radius: 8px;
+                            background: ac-ta.has-hover ? #1f8b4c : #27ae60;
+                            Text { text: "Принять"; color: white; font-size: 13px; font-weight: 600;
+                                   horizontal-alignment: center; vertical-alignment: center; }
+                            ac-ta := TouchArea {
+                                clicked => { root.rsvp(root.detail-event-id, "ACCEPTED"); root.detail-close(); }
+                            }
+                        }
+                        Rectangle {
+                            border-radius: 8px;
+                            background: tn-ta.has-hover ? #d98324 : #f2994a;
+                            Text { text: "Возможно"; color: white; font-size: 13px; font-weight: 600;
+                                   horizontal-alignment: center; vertical-alignment: center; }
+                            tn-ta := TouchArea {
+                                clicked => { root.rsvp(root.detail-event-id, "TENTATIVE"); root.detail-close(); }
+                            }
+                        }
+                        Rectangle {
+                            border-radius: 8px;
+                            background: dc-ta.has-hover ? #d63d3d : #eb5757;
+                            Text { text: "Отклонить"; color: white; font-size: 13px; font-weight: 600;
+                                   horizontal-alignment: center; vertical-alignment: center; }
+                            dc-ta := TouchArea {
+                                clicked => { root.rsvp(root.detail-event-id, "DECLINED"); root.detail-close(); }
+                            }
+                        }
+                        }
                     }
                     Flickable {
                         vertical-stretch: 1;
