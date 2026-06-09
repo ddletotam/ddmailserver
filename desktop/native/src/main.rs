@@ -6,6 +6,11 @@ slint::include_modules!();
 
 mod engine;
 mod policy;
+#[cfg(target_os = "linux")]
+#[path = "render_webkit.rs"]
+mod render;
+#[cfg(windows)]
+#[path = "render_webview2.rs"]
 mod render;
 mod sanitize;
 mod window_state;

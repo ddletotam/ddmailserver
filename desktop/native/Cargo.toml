@@ -13,16 +13,6 @@ slint-build = "1.13"
 [dependencies]
 slint = "1.13"
 
-# HTML body renderer: real WebKitGTK (libwebkit2gtk-4.1) → offscreen
-# snapshot → RGBA. Replaces the retired Ultralight path, which lost
-# bubbles on contemporary email HTML. macOS/Windows backends are TODO.
-webkit2gtk = { version = "2.0", features = ["v2_40"] }
-gtk = "0.18"
-glib = "0.18"
-gio = "0.18"
-cairo-rs = "0.18"
-javascriptcore-rs = "1"
-
 # Shared engine (data model, cache, IMAP/SMTP/native providers).
 ddmail-core = { path = "../core" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
@@ -46,3 +36,27 @@ regex = "1"
 # allow-listed domains). Stored as JSON via serde_json (declared above)
 # next to the cache db; serde-derive used for the policy/window-state structs.
 serde = { version = "1", features = ["derive"] }
+
+# ── Platform body-render backends (only render_* differs per OS) ──
+
+# Linux: real WebKitGTK (libwebkit2gtk-4.1) → offscreen snapshot → RGBA.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
+gtk = "0.18"
+glib = "0.18"
+gio = "0.18"
+cairo-rs = "0.18"
+javascriptcore-rs = "1"
+
+# Windows: WebView2 (Edge/Chromium) → offscreen CapturePreview(PNG) → RGBA.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.33"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_WinRT",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+] }
