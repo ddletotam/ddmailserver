@@ -1,4 +1,4 @@
-import { ListView } from "std-widgets.slint";
+import { ListView, LineEdit, ComboBox, CheckBox, Button } from "std-widgets.slint";
 
 // Live-dropdown rows. We keep contacts and messages as separate models
 // so the Slint side can render them in their own sections — see
@@ -158,6 +158,22 @@ export component MainWindow inherits Window {
     in-out property <int> detail-event-id;
     callback detail-close();
     callback rsvp(int, string);
+    callback detail-edit();
+
+    // Event create/edit form (Phase B). Two-way bound to the Rust side.
+    in-out property <bool> edit-visible: false;
+    in property <bool> edit-is-create: true;
+    in-out property <string> edit-title;
+    in-out property <string> edit-start;       // "YYYY-MM-DD HH:MM" (or date if all-day)
+    in-out property <string> edit-end;
+    in-out property <string> edit-location;
+    in-out property <string> edit-description;
+    in-out property <bool> edit-all-day: false;
+    in property <[string]> edit-calendars;     // writable calendar names
+    in-out property <int> edit-calendar-idx: 0;
+    callback edit-save();
+    callback edit-cancel();
+    callback new-event();
 
     callback select(int);
     callback hit-test(int, length, length);
@@ -1051,6 +1067,19 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
+                // New-event button
+                Rectangle {
+                    height: 40px;
+                    Rectangle {
+                        x: 10px; y: 6px;
+                        width: parent.width - 20px; height: 32px;
+                        border-radius: 8px;
+                        background: ne-ta.has-hover ? #2670d8 : #2f80ed;
+                        Text { text: "+ Событие"; color: white; font-size: 13px; font-weight: 600;
+                               horizontal-alignment: center; vertical-alignment: center; }
+                        ne-ta := TouchArea { clicked => { root.new-event(); } }
+                    }
+                }
                 // Section header
                 Rectangle {
                     height: 28px;
@@ -1301,6 +1330,14 @@ export component MainWindow inherits Window {
                             wrap: word-wrap;
                         }
                         Rectangle {
+                            width: 90px; height: 28px; border-radius: 8px;
+                            background: e-ta.has-hover ? #e1e6ee : #f0f2f5;
+                            Text { text: "Изменить"; color: #2f80ed; font-size: 13px; font-weight: 600;
+                                   horizontal-alignment: center; vertical-alignment: center; }
+                            e-ta := TouchArea { clicked => { root.detail-edit(); } }
+                        }
+                        Rectangle { width: 6px; }
+                        Rectangle {
                             width: 28px; height: 28px; border-radius: 14px;
                             background: x-ta.has-hover ? #e1e6ee : transparent;
                             Text { text: "✕"; color: #6b7480; font-size: 16px;
@@ -1364,6 +1401,45 @@ export component MainWindow inherits Window {
                             color: #2b3640;
                             wrap: word-wrap;
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------- Event create/edit modal ----------
+    if root.edit-visible: TouchArea {
+        clicked => { root.edit-cancel(); }
+        Rectangle {
+            background: #00000066;
+            Rectangle {
+                width: min(520px, root.width - 80px);
+                height: min(540px, root.height - 80px);
+                background: white;
+                border-radius: 14px;
+                drop-shadow-blur: 24px;
+                drop-shadow-color: #00000044;
+                TouchArea {}
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 10px;
+                    Text {
+                        text: root.edit-is-create ? "Новое событие" : "Изменить событие";
+                        font-size: 18px; font-weight: 700; color: #0f1419;
+                    }
+                    LineEdit { placeholder-text: "Тема"; text <=> root.edit-title; }
+                    ComboBox { model: root.edit-calendars; current-index <=> root.edit-calendar-idx; }
+                    CheckBox { text: "Весь день"; checked <=> root.edit-all-day; }
+                    LineEdit { placeholder-text: "Начало (ГГГГ-ММ-ДД ЧЧ:ММ)"; text <=> root.edit-start; }
+                    LineEdit { placeholder-text: "Конец (ГГГГ-ММ-ДД ЧЧ:ММ)"; text <=> root.edit-end; }
+                    LineEdit { placeholder-text: "Место"; text <=> root.edit-location; }
+                    LineEdit { placeholder-text: "Описание"; text <=> root.edit-description; }
+                    Rectangle { vertical-stretch: 1; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle { horizontal-stretch: 1; }
+                        Button { text: "Отмена"; clicked => { root.edit-cancel(); } }
+                        Button { text: "Сохранить"; primary: true; clicked => { root.edit-save(); } }
                     }
                 }
             }

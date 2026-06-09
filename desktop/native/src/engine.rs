@@ -167,6 +167,10 @@ pub enum EngineCmd {
     },
     /// Set the requesting user's PARTSTAT on an event (ACCEPTED/TENTATIVE/DECLINED).
     Rsvp { event_id: i64, partstat: String },
+    /// Create a calendar event from a server-shaped JSON body.
+    CreateEvent { body: serde_json::Value },
+    /// Patch an existing event (body carries the changed fields + scope).
+    PatchEvent { event_id: i64, body: serde_json::Value },
     Send {
         to: Vec<String>,
         cc: Vec<String>,
@@ -346,6 +350,18 @@ pub fn spawn(
                     match rt.block_on(provider.rsvp_event(event_id, &partstat)) {
                         Ok(_) => on_result(EngineResult::Done("rsvp".into())),
                         Err(e) => on_result(EngineResult::Error(format!("rsvp: {e}"))),
+                    }
+                }
+                EngineCmd::CreateEvent { body } => {
+                    match rt.block_on(provider.create_event(body)) {
+                        Ok(_) => on_result(EngineResult::Done("rsvp".into())),
+                        Err(e) => on_result(EngineResult::Error(format!("create_event: {e}"))),
+                    }
+                }
+                EngineCmd::PatchEvent { event_id, body } => {
+                    match rt.block_on(provider.patch_event(event_id, body)) {
+                        Ok(_) => on_result(EngineResult::Done("rsvp".into())),
+                        Err(e) => on_result(EngineResult::Error(format!("patch_event: {e}"))),
                     }
                 }
                 EngineCmd::Send { to, cc, subject, body, in_reply_to, references } => {

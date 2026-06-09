@@ -471,6 +471,10 @@ struct Shared {
     /// time, as days since the unix epoch. Stored as i64 so the
     /// timezone-conversion math is straightforward.
     calendar_week_start_days: Cell<i64>,
+    /// Event being edited (0 in create mode).
+    editing_event_id: Cell<i64>,
+    /// Writable calendar ids, parallel to the edit-form's ComboBox model.
+    edit_cal_ids: RefCell<Vec<i64>>,
 }
 
 thread_local! {
@@ -734,6 +738,127 @@ fn refetch_calendar_events(ui: &MainWindow, sh: &Shared) {
             calendar_ids: Vec::new(),
         });
     }
+}
+
+/// Parse a form date/time string ("YYYY-MM-DD HH:MM", or "YYYY-MM-DD" when
+/// all-day) as LOCAL time → ms since epoch. None on parse failure.
+fn parse_form_ms(s: &str, all_day: bool) -> Option<i64> {
+    use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
+    let s = s.trim();
+    let naive = if all_day {
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?.and_hms_opt(0, 0, 0)?
+    } else {
+        NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").ok()?
+    };
+    Local.from_local_datetime(&naive).single().map(|d| d.timestamp_millis())
+}
+
+/// Format ms → form string (date-only when all-day).
+fn fmt_form(ms: i64, all_day: bool) -> String {
+    use chrono::{Datelike, Local, TimeZone, Timelike};
+    match chrono::Local.timestamp_millis_opt(ms).single() {
+        Some(d) if all_day => format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day()),
+        Some(d) => format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}",
+            d.year(), d.month(), d.day(), d.hour(), d.minute()
+        ),
+        None => String::new(),
+    }
+}
+
+/// Populate the edit-form's writable-calendar ComboBox; returns the ids
+/// parallel to the model so the save step can map index → calendar_id.
+fn fill_writable_calendars(ui: &MainWindow, sh: &Shared) -> Vec<i64> {
+    let cals = sh.calendars.borrow();
+    let mut ids = Vec::new();
+    let mut names: Vec<slint::SharedString> = Vec::new();
+    for c in cals.iter().filter(|c| c.can_write) {
+        ids.push(c.id);
+        names.push(c.name.clone().into());
+    }
+    ui.set_edit_calendars(slint::ModelRc::new(slint::VecModel::from(names)));
+    ids
+}
+
+/// Open the create form (blank, default now → +1h, first writable calendar).
+fn open_create_form(ui: &MainWindow, sh: &Shared) {
+    let ids = fill_writable_calendars(ui, sh);
+    *sh.edit_cal_ids.borrow_mut() = ids;
+    sh.editing_event_id.set(0);
+    let now = chrono::Local::now().timestamp_millis();
+    ui.set_edit_is_create(true);
+    ui.set_edit_title("".into());
+    ui.set_edit_all_day(false);
+    ui.set_edit_start(fmt_form(now, false).into());
+    ui.set_edit_end(fmt_form(now + 3_600_000, false).into());
+    ui.set_edit_location("".into());
+    ui.set_edit_description("".into());
+    ui.set_edit_calendar_idx(0);
+    ui.set_edit_visible(true);
+}
+
+/// Open the edit form populated from an existing event.
+fn open_edit_form(ui: &MainWindow, sh: &Shared, ev: &ddmail_core::types::DesktopCalendarEvent) {
+    let ids = fill_writable_calendars(ui, sh);
+    let idx = ids.iter().position(|&id| id == ev.calendar_id).unwrap_or(0) as i32;
+    *sh.edit_cal_ids.borrow_mut() = ids;
+    sh.editing_event_id.set(ev.id);
+    ui.set_edit_is_create(false);
+    ui.set_edit_title(ev.summary.clone().into());
+    ui.set_edit_all_day(ev.all_day);
+    ui.set_edit_start(fmt_form(ev.dtstart, ev.all_day).into());
+    ui.set_edit_end(fmt_form(ev.dtend.unwrap_or(ev.dtstart), ev.all_day).into());
+    ui.set_edit_location(ev.location.clone().into());
+    ui.set_edit_description(ev.description.clone().into());
+    ui.set_edit_calendar_idx(idx);
+    ui.set_edit_visible(true);
+}
+
+/// Validate the form and dispatch Create or Patch to the engine.
+fn save_edit_form(ui: &MainWindow, sh: &Shared) {
+    let all_day = ui.get_edit_all_day();
+    let Some(start) = parse_form_ms(&ui.get_edit_start(), all_day) else {
+        eprintln!("edit: bad start time");
+        return;
+    };
+    let end = parse_form_ms(&ui.get_edit_end(), all_day);
+    let title = ui.get_edit_title().to_string();
+    let location = ui.get_edit_location().to_string();
+    let description = ui.get_edit_description().to_string();
+    let Some(etx) = sh.engine_tx.borrow().clone() else { return };
+
+    let editing = sh.editing_event_id.get();
+    if editing == 0 {
+        let idx = ui.get_edit_calendar_idx() as usize;
+        let Some(&cal_id) = sh.edit_cal_ids.borrow().get(idx) else {
+            eprintln!("edit: no writable calendar selected");
+            return;
+        };
+        let mut body = serde_json::json!({
+            "calendar_id": cal_id,
+            "summary": title,
+            "description": description,
+            "location": location,
+            "all_day": all_day,
+            "dtstart": start,
+        });
+        if let Some(e) = end {
+            body["dtend"] = e.into();
+        }
+        let _ = etx.send(engine::EngineCmd::CreateEvent { body });
+    } else {
+        let mut body = serde_json::json!({
+            "scope": "all",
+            "summary": title,
+            "description": description,
+            "location": location,
+            "all_day": all_day,
+            "dtstart": start,
+        });
+        body["dtend"] = end.unwrap_or(0).into(); // explicit 0 ⇒ clear on server
+        let _ = etx.send(engine::EngineCmd::PatchEvent { event_id: editing, body });
+    }
+    ui.set_edit_visible(false);
 }
 
 /// Seed the calendar view's read-only state from the current toggles
@@ -1017,6 +1142,8 @@ fn main() {
         calendar_visible: RefCell::new(HashMap::new()),
         calendar_events: RefCell::new(Vec::new()),
         calendar_week_start_days: Cell::new(week_start_days_today()),
+        editing_event_id: Cell::new(0),
+        edit_cal_ids: RefCell::new(Vec::new()),
     });
     SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
 
@@ -1690,6 +1817,39 @@ fn main() {
                 event_id: id as i64,
                 partstat: partstat.to_string(),
             });
+        }
+    });
+
+    // Create / edit event form.
+    let ui_weak_new = ui.as_weak();
+    let sh_new = shared.clone();
+    ui.on_new_event(move || {
+        if let Some(ui) = ui_weak_new.upgrade() {
+            open_create_form(&ui, &sh_new);
+        }
+    });
+    let ui_weak_ee = ui.as_weak();
+    let sh_ee = shared.clone();
+    ui.on_detail_edit(move || {
+        let Some(ui) = ui_weak_ee.upgrade() else { return };
+        let id = ui.get_detail_event_id();
+        let events = sh_ee.calendar_events.borrow();
+        if let Some(ev) = events.iter().find(|e| e.id as i32 == id) {
+            ui.set_detail_visible(false);
+            open_edit_form(&ui, &sh_ee, ev);
+        }
+    });
+    let ui_weak_es = ui.as_weak();
+    let sh_es = shared.clone();
+    ui.on_edit_save(move || {
+        if let Some(ui) = ui_weak_es.upgrade() {
+            save_edit_form(&ui, &sh_es);
+        }
+    });
+    let ui_weak_ec = ui.as_weak();
+    ui.on_edit_cancel(move || {
+        if let Some(ui) = ui_weak_ec.upgrade() {
+            ui.set_edit_visible(false);
         }
     });
 
