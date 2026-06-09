@@ -729,7 +729,10 @@ export component MainWindow inherits Window {
                                 width: parent.width;
                                 height: msg.h;
                                 source: msg.img;
-                                image-fit: contain;
+                                // `fill` (not contain) so the bubble maps linearly
+                                // onto the bitmap with no letterbox — keeps click
+                                // (x,y) aligned with the extracted link rects.
+                                image-fit: fill;
                                 image-rendering: smooth;
                             }
                         }
