@@ -1,6 +1,6 @@
-//! UI-agnostic engine events. Replaces the Tauri `AppHandle::emit` coupling:
-//! the engine pushes `EngineEvent`s into a `Notifier` closure that the UI layer
-//! provides (the native client forwards them onto the Slint event loop).
+//! UI-agnostic engine events: the engine pushes `EngineEvent`s into a
+//! `Notifier` closure that the UI layer provides (the native client forwards
+//! them onto the Slint event loop). No UI framework is referenced here.
 
 use std::sync::Arc;
 

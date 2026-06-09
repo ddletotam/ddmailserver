@@ -1,15 +1,12 @@
-//! Persistent window-state (size + sidebar width) — port of the
-//! Tauri-era `tauri-plugin-window-state`.
+//! Persistent window-state: window size + sidebar width, restored on launch.
 //!
 //! Stored as JSON at `$XDG_CONFIG_HOME/ru.letotam.ddmail/window.json`
 //! (Linux), `%APPDATA%\ru.letotam.ddmail\window.json` (Windows), or
 //! `~/Library/Application Support/ru.letotam.ddmail/window.json`
 //! (macOS).
 //!
-//! Per the memory note `window-state-save-on-close`, the Tauri plugin
-//! writes the file only on app Exit, which can be lost on hard kills.
-//! We save the same way (close-requested) but the JSON is cheap, so
-//! adding more save points is easy if it bites.
+//! We save on close-requested; the JSON is cheap, so adding more save
+//! points is easy if a hard-kill loses the last state.
 
 use std::fs;
 use std::path::PathBuf;

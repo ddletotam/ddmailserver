@@ -20,7 +20,7 @@ fn make_message_id(from_email: &str) -> String {
     format!("<{nanos:x}.{counter:x}@{domain}>")
 }
 
-/// Core send logic, reusable by both the Tauri command and ImapProvider.
+/// Core send logic, reusable by the `send_message` wrapper and ImapProvider.
 pub(crate) async fn send_message_impl(
     host: &str, port: u16, username: &str, password: &str, use_tls: bool,
     message: &OutgoingMessage,

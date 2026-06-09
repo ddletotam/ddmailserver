@@ -68,8 +68,8 @@ struct Disp {
 }
 
 fn cache_db_path() -> Option<std::path::PathBuf> {
-    // Pick the per-OS location of the (Tauri-era) cache dir so the new
-    // client reads the same cache.db the user already has.
+    // Pick the per-OS location of the existing cache dir so the client
+    // reads the same cache.db the user already has.
     //   * Windows: %APPDATA%\ru.letotam.ddmail\cache.db
     //   * macOS:   ~/Library/Application Support/ru.letotam.ddmail/cache.db
     //   * Linux:   $XDG_DATA_HOME/ru.letotam.ddmail/cache.db,
@@ -929,8 +929,8 @@ fn main() {
 
     // Save on close — the only reliable trigger Slint gives us for
     // "window is going away" on a clean exit. See the
-    // [[window-state-save-on-close]] memory note for the matching Tauri
-    // behaviour we're replicating.
+    // [[window-state-save-on-close]] memory note for the behaviour
+    // we're replicating.
     let ui_weak_close = ui.as_weak();
     ui.window().on_close_requested(move || {
         if let Some(ui) = ui_weak_close.upgrade() {
