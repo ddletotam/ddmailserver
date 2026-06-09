@@ -26,6 +26,8 @@ use gtk::prelude::*;
 use javascriptcore::ValueExt;
 use webkit2gtk::{LoadEvent, SnapshotOptions, SnapshotRegion, WebView, WebViewExt};
 
+use crate::render_common::{parse_link_rects, LinkRect, LINK_RECTS_JS};
+
 /// Per-bubble canvas cap. WebKitGTK happily renders the whole document
 /// regardless, but downstream we still want a sane upper bound on the
 /// bitmap dimensions we paint into.
@@ -52,6 +54,7 @@ pub struct RenderResult {
     pub bitmap: Bitmap,
     pub view_ready: bool,
     pub painted_height: u32,
+    pub links: Vec<LinkRect>,
 }
 
 impl RenderResult {
@@ -97,6 +100,7 @@ impl Engine {
                 bitmap: empty_bitmap(width),
                 view_ready: false,
                 painted_height: 0,
+                links: Vec::new(),
             };
         }
 
@@ -110,8 +114,11 @@ impl Engine {
                 bitmap: empty_bitmap(width),
                 view_ready: true,
                 painted_height: 0,
+                links: Vec::new(),
             };
         }
+
+        let links = self.extract_links();
 
         // Grow the viewport to fit the content so the snapshot has
         // somewhere to land. Cap at MAX_H to keep GBM happy.
@@ -128,7 +135,34 @@ impl Engine {
             bitmap,
             view_ready,
             painted_height,
+            links,
         }
+    }
+
+    /// Extract `<a href>` rects (document-relative CSS px) via JS. Mirrors
+    /// measure_content_height: run the script, wait, read the value as JSON.
+    fn extract_links(&self) -> Vec<LinkRect> {
+        let done = Rc::new(Cell::new(false));
+        let json = Rc::new(RefCell::new(String::new()));
+        let done_cb = done.clone();
+        let json_cb = json.clone();
+        self.view.run_javascript(
+            LINK_RECTS_JS,
+            None::<&gio::Cancellable>,
+            move |res| {
+                if let Ok(jsr) = res {
+                    if let Some(value) = jsr.js_value() {
+                        if let Some(s) = value.to_json(0) {
+                            *json_cb.borrow_mut() = s.to_string();
+                        }
+                    }
+                }
+                done_cb.set(true);
+            },
+        );
+        wait_until(&done, 2000);
+        let s = json.borrow();
+        parse_link_rects(&s)
     }
 
     /// Reset the cached `View` state — placeholder kept for API parity

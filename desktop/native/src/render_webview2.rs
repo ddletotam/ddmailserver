@@ -31,6 +31,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
+use crate::render_common::{parse_link_rects, LinkRect, LINK_RECTS_JS};
+
 /// Plain pass-through window procedure (the off-screen host needs no logic).
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     DefWindowProcW(hwnd, msg, wp, lp)
@@ -49,6 +51,7 @@ pub struct RenderResult {
     pub bitmap: Bitmap,
     pub view_ready: bool,
     pub painted_height: u32,
+    pub links: Vec<LinkRect>,
 }
 
 impl RenderResult {
@@ -162,6 +165,7 @@ impl Engine {
                     bitmap: empty_bitmap(width),
                     view_ready: false,
                     painted_height: 0,
+                    links: Vec::new(),
                 };
             }
 
@@ -171,8 +175,11 @@ impl Engine {
                     bitmap: empty_bitmap(width),
                     view_ready: true,
                     painted_height: 0,
+                    links: Vec::new(),
                 };
             }
+
+            let links = self.extract_links();
 
             // Grow viewport to fit content so CapturePreview covers it all.
             let _ = self.controller.SetBounds(RECT {
@@ -191,8 +198,35 @@ impl Engine {
                 bitmap,
                 view_ready,
                 painted_height,
+                links,
             }
         }
+    }
+
+    /// Extract `<a href>` rects via JS (document-relative CSS px), JSON.
+    unsafe fn extract_links(&self) -> Vec<LinkRect> {
+        let (tx, rx) = mpsc::channel::<String>();
+        let script = wide(LINK_RECTS_JS);
+        let _ = self.webview.ExecuteScript(
+            PCWSTR(script.as_ptr()),
+            &ExecuteScriptCompletedHandler::create(Box::new(move |_hr, json| {
+                let _ = tx.send(json);
+                Ok(())
+            })),
+        );
+        let start = std::time::Instant::now();
+        let raw = loop {
+            if let Ok(s) = rx.try_recv() {
+                break s;
+            }
+            if start.elapsed().as_millis() > 2000 {
+                return Vec::new();
+            }
+            pump_a_bit();
+        };
+        // ExecuteScript JSON-encodes its result; LINK_RECTS_JS evaluates to an
+        // array, so `raw` is already the array JSON.
+        parse_link_rects(&raw)
     }
 
     pub fn clear_views(&mut self) {}

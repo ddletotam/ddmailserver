@@ -6,6 +6,7 @@ slint::include_modules!();
 
 mod engine;
 mod policy;
+mod render_common;
 #[cfg(target_os = "linux")]
 #[path = "render_webkit.rs"]
 mod render;
@@ -853,8 +854,10 @@ fn main() {
             // on the hot path. UI-thread cost shrinks to just wrapping
             // each buffer in an `Image`.
             let mut body_cache: HashMap<(String, u32, u32, u64),
-                (SharedPixelBuffer<Rgba8Pixel>, f32)> = HashMap::new();
-            let mut row_view_indices: Vec<Option<usize>> = Vec::new();
+                (SharedPixelBuffer<Rgba8Pixel>, f32, Vec<render_common::LinkRect>)> = HashMap::new();
+            // Per-row clickable link rects (CSS px), parallel to the rendered
+            // rows. Renderer-agnostic; the click is a pure point-in-rect test.
+            let mut row_links: Vec<Vec<render_common::LinkRect>> = Vec::new();
             loop {
                 let job = {
                     let lock = rx.lock().unwrap();
@@ -866,7 +869,7 @@ fn main() {
                         let t_wall = Instant::now();
                         let n = bodies.len();
                         engine.clear_views();
-                        row_view_indices.clear();
+                        row_links.clear();
 
                         // Tell the UI to show the progress bar.
                         let n_total = n as i32;
@@ -877,15 +880,13 @@ fn main() {
 
                         let mut packs: Vec<(SharedPixelBuffer<Rgba8Pixel>, f32)> =
                             Vec::with_capacity(n);
-                        let mut next_view_idx: usize = 0;
                         let mut cache_hits = 0usize;
                         let mut fallback_used = 0usize;
                         let mut render_ms_total = 0u128;
                         let mut pack_ms_total = 0u128;
                         for (i, body) in bodies.iter().enumerate() {
                             let key = (body.folder.clone(), body.uid, width, policy_gen);
-                            let mut had_view = false;
-                            let pack_entry = if let Some(cached) = body_cache.get(&key) {
+                            let (buf, h, links) = if let Some(cached) = body_cache.get(&key) {
                                 cache_hits += 1;
                                 cached.clone()
                             } else {
@@ -913,22 +914,17 @@ fn main() {
                                     &bitmap.rgba, bitmap.width, bitmap.height,
                                 );
                                 pack_ms_total += t_p.elapsed().as_millis();
-                                let entry = (buf, bitmap.height as f32);
+                                let entry = (buf, bitmap.height as f32, result.links);
                                 println!(
-                                    "[perf]   body uid={} h={}px painted={} ready={}",
-                                    body.uid, bitmap.height, result.painted_height, result.view_ready
+                                    "[perf]   body uid={} h={}px painted={} ready={} links={}",
+                                    body.uid, bitmap.height, result.painted_height,
+                                    result.view_ready, entry.2.len()
                                 );
                                 body_cache.insert(key, entry.clone());
-                                had_view = true;
                                 entry
                             };
-                            packs.push(pack_entry);
-                            if had_view {
-                                row_view_indices.push(Some(next_view_idx));
-                                next_view_idx += 1;
-                            } else {
-                                row_view_indices.push(None);
-                            }
+                            packs.push((buf, h));
+                            row_links.push(links);
                             // Push progress to the UI — one event per body.
                             let done = (i + 1) as i32;
                             let _ = ui_weak.upgrade_in_event_loop(move |ui| {
@@ -960,18 +956,16 @@ fn main() {
                         });
                     }
                     Job::HitTest { row, x, y } => {
-                        // Row → view_idx mapping accounts for the body
-                        // cache: cached rows have no live view, so we
-                        // skip them. Real-render rows are walked into
-                        // the engine; resolved URLs (incl. internal
-                        // ddmail-attach:* schemes) are handed off to
+                        // Renderer-agnostic hit-test: pure point-in-rect against
+                        // the link rects extracted at render time (works for
+                        // both cached and freshly-rendered rows). Resolved URLs
+                        // (incl. internal ddmail-attach:* schemes) go to
                         // handle_link on the UI thread.
-                        let view_idx = row_view_indices.get(row).copied().flatten();
-                        let Some(view_idx) = view_idx else {
-                            println!("hit-test row {row}: served from cache, links disabled");
-                            continue;
-                        };
-                        match engine.hit(view_idx, x, y) {
+                        let hit = row_links
+                            .get(row)
+                            .and_then(|links| links.iter().find(|l| l.contains(x, y)))
+                            .map(|l| l.href.clone());
+                        match hit {
                             Some(url) => {
                                 let _ = ui_weak.upgrade_in_event_loop(move |ui| handle_link(&ui, url));
                             }
