@@ -159,6 +159,7 @@ export component MainWindow inherits Window {
     callback detail-close();
     callback rsvp(int, string);
     callback detail-edit();
+    callback detail-delete();
 
     // Event create/edit form (Phase B). Two-way bound to the Rust side.
     in-out property <bool> edit-visible: false;
@@ -1335,6 +1336,14 @@ export component MainWindow inherits Window {
                             Text { text: "Изменить"; color: #2f80ed; font-size: 13px; font-weight: 600;
                                    horizontal-alignment: center; vertical-alignment: center; }
                             e-ta := TouchArea { clicked => { root.detail-edit(); } }
+                        }
+                        Rectangle { width: 6px; }
+                        Rectangle {
+                            width: 84px; height: 28px; border-radius: 8px;
+                            background: del-ta.has-hover ? #f7d7d7 : #f0f2f5;
+                            Text { text: "Удалить"; color: #eb5757; font-size: 13px; font-weight: 600;
+                                   horizontal-alignment: center; vertical-alignment: center; }
+                            del-ta := TouchArea { clicked => { root.detail-delete(); } }
                         }
                         Rectangle { width: 6px; }
                         Rectangle {

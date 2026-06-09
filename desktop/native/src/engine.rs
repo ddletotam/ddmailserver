@@ -171,6 +171,8 @@ pub enum EngineCmd {
     CreateEvent { body: serde_json::Value },
     /// Patch an existing event (body carries the changed fields + scope).
     PatchEvent { event_id: i64, body: serde_json::Value },
+    /// Delete an event.
+    DeleteEvent { event_id: i64 },
     Send {
         to: Vec<String>,
         cc: Vec<String>,
@@ -362,6 +364,12 @@ pub fn spawn(
                     match rt.block_on(provider.patch_event(event_id, body)) {
                         Ok(_) => on_result(EngineResult::Done("rsvp".into())),
                         Err(e) => on_result(EngineResult::Error(format!("patch_event: {e}"))),
+                    }
+                }
+                EngineCmd::DeleteEvent { event_id } => {
+                    match rt.block_on(provider.delete_event(event_id)) {
+                        Ok(_) => on_result(EngineResult::Done("rsvp".into())),
+                        Err(e) => on_result(EngineResult::Error(format!("delete_event: {e}"))),
                     }
                 }
                 EngineCmd::Send { to, cc, subject, body, in_reply_to, references } => {
