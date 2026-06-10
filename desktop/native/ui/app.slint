@@ -52,6 +52,23 @@ struct EventBlock {
     all-day: bool,
 }
 
+// One all-day chip in the band above the hour grid. Multi-day all-day
+// events expand to one chip per day touched; `row` stacks chips that share
+// a day so they don't overprint.
+struct AllDayBlock {
+    id: int,
+    day: int,            // 0..days-shown - 1
+    row: int,            // vertical slot within the band
+    color: color,
+    title: string,
+}
+
+// One staged attachment chip in the composer. `name` is the basename shown
+// to the user; the Rust side keeps the full path parallel to this model.
+struct AttachChip {
+    name: string,
+}
+
 export component MainWindow inherits Window {
     title: "ddmail";
     preferred-width: 1100px;
@@ -99,6 +116,9 @@ export component MainWindow inherits Window {
     in-out property <string> composer-subject: "";
     in-out property <string> composer-cc: "";
     in property <string> composer-subject-auto: "";
+    // Staged attachments for the next outgoing message. Filled by the Rust
+    // side after the native file dialog; cleared once the message is staged.
+    in property <[AttachChip]> composer-attachments;
 
     // Render progress: while a conversation's bubbles stream in from
     // Ultralight, a thin bar above the bubble list shows "M of N done".
@@ -121,6 +141,10 @@ export component MainWindow inherits Window {
     // ── Calendar state ──
     in property <[CalendarItem]> calendars;
     in property <[EventBlock]> events;
+    // All-day chips for the band above the hour grid, plus how many rows
+    // the band needs to stack same-day chips (0 = no band).
+    in property <[AllDayBlock]> all-day-events;
+    in property <int> all-day-rows: 0;
     in property <string> week-title: "";
     in-out property <bool> workdays-only: false;
     in-out property <bool> show-non-work-hours: false;
@@ -180,6 +204,9 @@ export component MainWindow inherits Window {
     callback hit-test(int, length, length);
     callback viewport-resized(length);
     callback send(string);
+    // Open the native file picker to stage attachments; remove one by index.
+    callback attach-files();
+    callback remove-attachment(int);
     callback msg-action(int, string);
     // Live-dropdown wiring.
     callback search-typed(string);
@@ -927,12 +954,75 @@ export component MainWindow inherits Window {
                 }
             }
 
+            // Staged-attachment chips, shown above the input while files
+            // are queued for the next message. Each chip removes itself via ×.
+            if root.composer-attachments.length > 0: Rectangle {
+                height: 36px;
+                background: white;
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    padding-top: 4px;
+                    padding-bottom: 4px;
+                    spacing: 6px;
+                    alignment: start;
+                    for a[ai] in root.composer-attachments: Rectangle {
+                        height: 28px;
+                        background: #eef3fb;
+                        border-radius: 14px;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 4px;
+                            spacing: 2px;
+                            Text {
+                                text: a.name;
+                                color: #2f80ed;
+                                font-size: 12px;
+                                font-weight: 600;
+                                max-width: 170px;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                width: 20px;
+                                rm-ta := TouchArea { clicked => { root.remove-attachment(ai); } }
+                                Text {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    text: "×";
+                                    color: rm-ta.has-hover ? #e23b3b : #8b95a1;
+                                    font-size: 15px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             Rectangle {
                 height: 64px;
                 background: white;
                 HorizontalLayout {
                     padding: 12px;
                     spacing: 12px;
+                    // Attach files — opens the native picker.
+                    Rectangle {
+                        width: 42px;
+                        height: 42px;
+                        border-radius: 21px;
+                        background: att-ta.has-hover ? #eef0f4 : transparent;
+                        att-ta := TouchArea { clicked => { root.attach-files(); } }
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: "📎";
+                            font-size: 18px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
                     Rectangle {
                         horizontal-stretch: 1;
                         background: #f0f2f5;
@@ -1235,6 +1325,48 @@ export component MainWindow inherits Window {
                             horizontal-alignment: center; vertical-alignment: center;
                         }
                     }
+                }
+            }
+            // All-day band — chips above the hour grid, one per day touched.
+            // Hidden entirely when there are no all-day events this week.
+            if root.all-day-rows > 0: Rectangle {
+                height: root.all-day-rows * 20px + 8px;
+                background: white;
+                Text {
+                    x: 0; y: 0;
+                    width: 44px; height: parent.height;
+                    text: "весь\nдень";
+                    color: #8b95a1;
+                    font-size: 9px;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+                for ev[ei] in root.all-day-events: Rectangle {
+                    x: 48px + ev.day * (parent.width - 48px) / root.day-count + 2px;
+                    y: ev.row * 20px + 4px;
+                    width: (parent.width - 48px) / root.day-count - 4px;
+                    height: 18px;
+                    background: ev.color;
+                    border-radius: 4px;
+                    TouchArea {
+                        clicked => { root.event-clicked(ev.id); }
+                    }
+                    Text {
+                        x: 4px; y: 0;
+                        width: parent.width - 8px;
+                        height: parent.height;
+                        text: ev.title;
+                        color: white;
+                        font-size: 10px;
+                        font-weight: 700;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                }
+                Rectangle {
+                    y: parent.height - 1px;
+                    x: 0; width: parent.width; height: 1px;
+                    background: #eef0f4;
                 }
             }
             // Scrollable grid body

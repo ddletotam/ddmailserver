@@ -11,7 +11,9 @@ path = "src/main.rs"
 slint-build = "1.13"
 
 [dependencies]
-slint = "1.13"
+# raw-window-handle-06 exposes the OS window handle (HasWindowHandle), which
+# we hand to rfd's set_parent so the file dialog opens in front + modal.
+slint = { version = "1.13", features = ["raw-window-handle-06"] }
 
 # Shared engine (data model, cache, IMAP/SMTP/native providers).
 ddmail-core = { path = "../core" }
@@ -34,6 +36,12 @@ notify-rust = "4"
 # second launch exits instead of opening a duplicate window.
 single-instance = "0.3"
 
+# Native file-open dialog for the composer's attach button. We call the
+# blocking API on the UI thread — the OS dialog is modal anyway. Windows uses
+# the built-in Win32 backend (no feature needed); Linux needs the gtk3 backend
+# for the sync API (declared in the linux target block below).
+rfd = { version = "0.15", default-features = false }
+
 # Regex passes for sanitizing inbound email HTML before it reaches the
 # Ultralight renderer (strip <script>, <iframe>, MS Outlook conditionals,
 # event handlers — they confuse the old WebKit fork and cost us bubbles
@@ -49,6 +57,9 @@ serde = { version = "1", features = ["derive"] }
 
 # Linux: real WebKitGTK (libwebkit2gtk-4.1) → offscreen snapshot → RGBA.
 [target.'cfg(target_os = "linux")'.dependencies]
+# Sync file dialog on Linux needs the gtk3 backend (default xdg-portal is
+# async-only). gtk 0.18 already in our Linux deps, so no new toolkit.
+rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
 webkit2gtk = { version = "2.0", features = ["v2_40"] }
 gtk = "0.18"
 glib = "0.18"

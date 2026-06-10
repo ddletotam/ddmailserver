@@ -7,6 +7,7 @@ slint::include_modules!();
 mod engine;
 mod notify;
 mod policy;
+mod recurrence;
 mod reminders;
 mod render_common;
 #[cfg(windows)]
@@ -306,6 +307,23 @@ fn enter_compose_mode(sh: &Shared, ui: &MainWindow, email: &str) {
     ui.invoke_focus_composer();
 }
 
+/// Mirror the staged attachment basenames into the composer's chip model.
+fn refresh_attachment_chips(ui: &MainWindow, sh: &Shared) {
+    let chips: Vec<AttachChip> = sh
+        .compose_attachments
+        .borrow()
+        .iter()
+        .map(|p| AttachChip {
+            name: p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.to_string_lossy().into_owned())
+                .into(),
+        })
+        .collect();
+    ui.set_composer_attachments(slint::ModelRc::new(slint::VecModel::from(chips)));
+}
+
 fn message_hits(envs: &[MessageEnvelope]) -> Vec<MessageHit> {
     envs.iter()
         .map(|e| MessageHit {
@@ -476,6 +494,10 @@ struct Shared {
     editing_event_id: Cell<i64>,
     /// Writable calendar ids, parallel to the edit-form's ComboBox model.
     edit_cal_ids: RefCell<Vec<i64>>,
+    /// Files staged for the next outgoing message, picked via the composer's
+    /// attach button. Parallel to the `composer-attachments` Slint model
+    /// (which holds just the basenames). Cleared once a message is staged.
+    compose_attachments: RefCell<Vec<std::path::PathBuf>>,
 }
 
 thread_local! {
@@ -653,75 +675,112 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
     };
     ui.set_calendars(slint::ModelRc::new(slint::VecModel::from(cal_items)));
 
-    // Place event blocks.
+    // Place event blocks. Recurring masters are expanded into the visible
+    // week here (the server sends the master + its EXDATEs and leaves the
+    // expansion to us); an occurrence that crosses midnight is split into
+    // one block per day it touches. All-day events are routed out of the
+    // hour grid into the band above it.
     let day_ms: i64 = 24 * 60 * 60 * 1000;
     let week_start_ms = week_days * day_ms;
+    let week_end_ms = week_start_ms + day_count as i64 * day_ms;
     let hour_height: f32 = ui.get_hour_height();
     let hour_start = ui.get_hour_start();
     let hour_end = ui.get_hour_end();
     let visible_top_ms = hour_start as i64 * 60 * 60 * 1000;
     let visible_bottom_ms = hour_end as i64 * 60 * 60 * 1000;
-    let blocks: Vec<EventBlock> = {
+    let (blocks, all_day_blocks, all_day_rows): (Vec<EventBlock>, Vec<AllDayBlock>, i32) = {
         let events = sh.calendar_events.borrow();
         let visibility = sh.calendar_visible.borrow();
         let cals = sh.calendars.borrow();
-        let color_for = |cal_id: i64| -> String {
-            cals.iter()
+        let color_for = |cal_id: i64| -> slint::Color {
+            let c = cals
+                .iter()
                 .find(|c| c.id == cal_id)
-                .map(|c| if c.color.is_empty() { "#3788d8".to_string() } else { c.color.clone() })
-                .unwrap_or_else(|| "#3788d8".to_string())
+                .map(|c| if c.color.is_empty() { "#3788d8" } else { c.color.as_str() })
+                .unwrap_or("#3788d8");
+            hex(c)
         };
-        events
-            .iter()
-            .filter(|e| *visibility.get(&e.calendar_id).unwrap_or(&true))
-            .filter_map(|e| {
-                let end_ms = e.dtend.unwrap_or(e.dtstart + 30 * 60 * 1000);
-                let day = ((e.dtstart - week_start_ms) / day_ms) as i32;
-                if day < 0 || day >= day_count {
-                    return None;
-                }
-                let day_start_ms = week_start_ms + day as i64 * day_ms;
-                let start_off_ms = (e.dtstart - day_start_ms).max(0);
-                let end_off_ms = (end_ms - day_start_ms).min(day_ms);
-                // Clip to visible hour range.
-                let top_ms = start_off_ms.max(visible_top_ms);
-                let bot_ms = end_off_ms.min(visible_bottom_ms);
-                if bot_ms <= top_ms {
-                    return None;
-                }
-                let to_px = |ms: i64| -> f32 {
-                    let hours = (ms - visible_top_ms) as f32 / (60.0 * 60.0 * 1000.0);
-                    hours * hour_height
-                };
-                let top = to_px(top_ms);
-                let h = (to_px(bot_ms) - top).max(18.0);
-                let fmt_hm = |abs_ms: i64| -> String {
-                    use chrono::{Local, TimeZone, Timelike};
-                    let dt = Local.timestamp_millis_opt(abs_ms).single();
-                    match dt {
-                        Some(d) => format!("{:02}:{:02}", d.hour(), d.minute()),
-                        None => "??:??".into(),
+        let to_px = |ms: i64| -> f32 {
+            let hours = (ms - visible_top_ms) as f32 / (60.0 * 60.0 * 1000.0);
+            hours * hour_height
+        };
+        let fmt_hm = |abs_ms: i64| -> String {
+            use chrono::{Local, TimeZone, Timelike};
+            match Local.timestamp_millis_opt(abs_ms).single() {
+                Some(d) => format!("{:02}:{:02}", d.hour(), d.minute()),
+                None => "??:??".into(),
+            }
+        };
+
+        let mut blocks: Vec<EventBlock> = Vec::new();
+        let mut all_day_blocks: Vec<AllDayBlock> = Vec::new();
+        // How many all-day chips already sit in each day column, so
+        // overlapping all-day events stack instead of overprinting.
+        let mut all_day_fill = vec![0i32; day_count.max(0) as usize];
+
+        for e in events.iter() {
+            if !*visibility.get(&e.calendar_id).unwrap_or(&true) {
+                continue;
+            }
+            let color = color_for(e.calendar_id);
+            let occ = recurrence::expand(
+                e.dtstart,
+                e.dtend,
+                &e.rrule,
+                &e.exdates,
+                week_start_ms,
+                week_end_ms,
+            );
+            for o in occ {
+                // Day range the occurrence touches. `end_ms - 1` so an event
+                // ending exactly on midnight doesn't bleed into the next day.
+                let first = ((o.start_ms - week_start_ms) / day_ms) as i32;
+                let last = (((o.end_ms - 1) - week_start_ms) / day_ms) as i32;
+                if e.all_day {
+                    for day in first.max(0)..=last.min(day_count - 1) {
+                        let idx = day as usize;
+                        let row = all_day_fill[idx];
+                        all_day_fill[idx] += 1;
+                        all_day_blocks.push(AllDayBlock {
+                            id: e.id as i32,
+                            day,
+                            row,
+                            color,
+                            title: e.summary.clone().into(),
+                        });
                     }
-                };
-                let time = if e.all_day {
-                    "весь день".to_string()
-                } else {
-                    format!("{} – {}", fmt_hm(e.dtstart), fmt_hm(end_ms))
-                };
-                Some(EventBlock {
-                    id: e.id as i32,
-                    day,
-                    top,
-                    h,
-                    color: hex(&color_for(e.calendar_id)).into(),
-                    title: e.summary.clone().into(),
-                    time: time.into(),
-                    all_day: e.all_day,
-                })
-            })
-            .collect()
+                    continue;
+                }
+                for day in first.max(0)..=last.min(day_count - 1) {
+                    let day_start_ms = week_start_ms + day as i64 * day_ms;
+                    let seg_start = (o.start_ms - day_start_ms).max(0);
+                    let seg_end = (o.end_ms - day_start_ms).min(day_ms);
+                    let top_ms = seg_start.max(visible_top_ms);
+                    let bot_ms = seg_end.min(visible_bottom_ms);
+                    if bot_ms <= top_ms {
+                        continue;
+                    }
+                    let top = to_px(top_ms);
+                    let h = (to_px(bot_ms) - top).max(18.0);
+                    blocks.push(EventBlock {
+                        id: e.id as i32,
+                        day,
+                        top,
+                        h,
+                        color,
+                        title: e.summary.clone().into(),
+                        time: format!("{} – {}", fmt_hm(o.start_ms), fmt_hm(o.end_ms)).into(),
+                        all_day: false,
+                    });
+                }
+            }
+        }
+        let rows = *all_day_fill.iter().max().unwrap_or(&0);
+        (blocks, all_day_blocks, rows)
     };
     ui.set_events(slint::ModelRc::new(slint::VecModel::from(blocks)));
+    ui.set_all_day_events(slint::ModelRc::new(slint::VecModel::from(all_day_blocks)));
+    ui.set_all_day_rows(all_day_rows);
 }
 
 /// Re-fire FetchCalendarEvents for the currently displayed week. Also
@@ -1145,6 +1204,7 @@ fn main() {
         calendar_week_start_days: Cell::new(week_start_days_today()),
         editing_event_id: Cell::new(0),
         edit_cal_ids: RefCell::new(Vec::new()),
+        compose_attachments: RefCell::new(Vec::new()),
     });
     SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
 
@@ -1301,13 +1361,23 @@ fn main() {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        // After a successful staging the override fields reset so the
-        // next message starts blank again. Keeps the chevron panel from
-        // silently inheriting last message's headers.
+        // Staged attachment paths for this send, snapshotted up front so the
+        // per-branch Send commands all carry the same list.
+        let attachments: Vec<String> = sh_send
+            .compose_attachments
+            .borrow()
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        // After a successful staging the override fields + attachments reset
+        // so the next message starts blank again. Keeps the chevron panel
+        // from silently inheriting last message's headers.
         let clear_overrides = || {
+            sh_send.compose_attachments.borrow_mut().clear();
             if let Some(u) = ui_weak_send.upgrade() {
                 u.set_composer_subject("".into());
                 u.set_composer_cc("".into());
+                refresh_attachment_chips(&u, &sh_send);
             }
         };
 
@@ -1327,6 +1397,7 @@ fn main() {
                     body: text,
                     in_reply_to: None,
                     references: None,
+                    attachments: attachments.clone(),
                 });
                 clear_overrides();
             } else {
@@ -1394,6 +1465,7 @@ fn main() {
                 println!("sending explicit reply to {to:?}");
                 let _ = etx.send(engine::EngineCmd::Send {
                     to, cc: cc.clone(), subject, body: text, in_reply_to, references,
+                    attachments: attachments.clone(),
                 });
                 clear_overrides();
             } else {
@@ -1455,10 +1527,50 @@ fn main() {
             println!("sending reply to {to:?}");
             let _ = etx.send(engine::EngineCmd::Send {
                 to, cc, subject, body: text, in_reply_to, references,
+                attachments,
             });
             clear_overrides();
         } else {
             eprintln!("send: no live engine (set DDMAIL_* env)");
+        }
+    });
+
+    // ── Composer attachments ──
+    //
+    // The attach button opens the native file picker (blocking — the OS
+    // dialog is modal, so the event loop has nothing to do meanwhile) and
+    // appends the chosen paths to the staged set. `on_send` snapshots that
+    // set into each outgoing message and clears it afterwards.
+    let ui_weak_att = ui.as_weak();
+    let sh_att = shared.clone();
+    ui.on_attach_files(move || {
+        let Some(u) = ui_weak_att.upgrade() else { return };
+        // Parent the dialog to our window so it opens in front and is truly
+        // modal — without an owner Win32 can surface it behind the app. The
+        // raw-window-handle-06 feature gives us window_handle(); bind it so it
+        // outlives pick_files().
+        let handle = u.window().window_handle();
+        let picked = rfd::FileDialog::new().set_parent(&handle).pick_files();
+        if let Some(paths) = picked {
+            if paths.is_empty() {
+                return;
+            }
+            sh_att.compose_attachments.borrow_mut().extend(paths);
+            refresh_attachment_chips(&u, &sh_att);
+        }
+    });
+    let ui_weak_rm = ui.as_weak();
+    let sh_rm = shared.clone();
+    ui.on_remove_attachment(move |idx| {
+        {
+            let mut atts = sh_rm.compose_attachments.borrow_mut();
+            let i = idx as usize;
+            if i < atts.len() {
+                atts.remove(i);
+            }
+        }
+        if let Some(u) = ui_weak_rm.upgrade() {
+            refresh_attachment_chips(&u, &sh_rm);
         }
     });
 
