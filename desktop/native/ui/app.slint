@@ -115,6 +115,9 @@ export component MainWindow inherits Window {
     in-out property <bool> composer-expanded: false;
     in-out property <string> composer-subject: "";
     in-out property <string> composer-cc: "";
+    // Two-way mirror of the composer input text, so the Rust side can
+    // prefill it (e.g. a forwarded message body) and clear it after send.
+    in-out property <string> composer-text: "";
     in property <string> composer-subject-auto: "";
     // Staged attachments for the next outgoing message. Filled by the Rust
     // side after the native file dialog; cleared once the message is staged.
@@ -762,6 +765,7 @@ export component MainWindow inherits Window {
                         cma := ContextMenuArea {
                             Menu {
                                 MenuItem { title: "Ответить"; activated => { root.msg-action(idx, "reply"); } }
+                                MenuItem { title: "Переслать"; activated => { root.msg-action(idx, "forward"); } }
                                 MenuItem { title: "Прочитано"; activated => { root.msg-action(idx, "read"); } }
                                 MenuItem { title: "Не прочитано"; activated => { root.msg-action(idx, "unread"); } }
                                 MenuItem { title: "Копировать текст"; activated => { root.msg-action(idx, "copy"); } }
@@ -1002,7 +1006,10 @@ export component MainWindow inherits Window {
             }
 
             Rectangle {
-                height: 64px;
+                // Grows with the message up to a cap: Shift+Enter adds a
+                // newline, Enter sends. Single-line messages stay at 64px.
+                min-height: 64px;
+                max-height: 160px;
                 background: white;
                 HorizontalLayout {
                     padding: 12px;
@@ -1027,16 +1034,30 @@ export component MainWindow inherits Window {
                         horizontal-stretch: 1;
                         background: #f0f2f5;
                         border-radius: 20px;
-                        ti := TextInput {
-                            x: 16px;
-                            width: parent.width - 32px;
-                            height: parent.height;
-                            vertical-alignment: center;
-                            color: #0f1419;
-                            font-size: 15px;
-                            single-line: true;
-                            accepted => {
-                                if (self.text != "") { root.send(self.text); self.text = ""; }
+                        // VerticalLayout lets the TextInput size to its content
+                        // (no fixed height ⇒ it reports its wrapped preferred
+                        // height), so the whole composer grows line by line.
+                        VerticalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            padding-top: 8px;
+                            padding-bottom: 8px;
+                            alignment: center;
+                            ti := TextInput {
+                                text <=> root.composer-text;
+                                color: #0f1419;
+                                font-size: 15px;
+                                single-line: false;
+                                wrap: word-wrap;
+                                // Enter sends; Shift+Enter inserts a newline
+                                // (Telegram-style, matching the rest of the UI).
+                                key-pressed(event) => {
+                                    if (event.text == Key.Return && !event.modifiers.shift) {
+                                        if (self.text != "") { root.send(self.text); self.text = ""; }
+                                        return EventResult.accept;
+                                    }
+                                    return EventResult.reject;
+                                }
                             }
                         }
                         if ti.text == "": Text {
