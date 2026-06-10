@@ -19,7 +19,7 @@ use ddmail_core::provider::MailProvider;
 use ddmail_core::session::SessionPool;
 use ddmail_core::types::{
     Contact, Conversation, DesktopCalendar, DesktopCalendarEvent, MessageBody, MessageEnvelope,
-    MessageRef, OutgoingMessage,
+    MessageRef, OutgoingAttachment, OutgoingMessage,
 };
 
 #[derive(Clone)]
@@ -180,6 +180,9 @@ pub enum EngineCmd {
         body: String,
         in_reply_to: Option<String>,
         references: Option<String>,
+        /// Filesystem paths of files the user attached in the composer.
+        /// Resolved to bytes (and a guessed MIME type) just before sending.
+        attachments: Vec<String>,
     },
 }
 
@@ -227,6 +230,65 @@ fn save_download(filename: &str, bytes: &[u8]) -> Result<String, String> {
     let path = dir.join(&safe);
     std::fs::write(&path, bytes).map_err(|e| format!("write: {e}"))?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+/// Read each staged path into an `OutgoingAttachment`, guessing the MIME
+/// type from the extension. Unreadable paths are logged and skipped rather
+/// than failing the whole send.
+fn resolve_attachments(paths: &[String]) -> Vec<OutgoingAttachment> {
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        let path = std::path::Path::new(p);
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                let filename = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "attachment".to_string());
+                out.push(OutgoingAttachment {
+                    filename,
+                    mime_type: guess_mime(path),
+                    content: bytes,
+                    content_id: None,
+                });
+            }
+            Err(e) => eprintln!("attachment: failed to read {p}: {e}"),
+        }
+    }
+    out
+}
+
+/// Best-effort MIME type from a file extension. Falls back to the generic
+/// binary type — the receiving MUA can still save the file by name.
+fn guess_mime(path: &std::path::Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "txt" | "log" | "md" => "text/plain",
+        "html" | "htm" => "text/html",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "zip" => "application/zip",
+        "gz" | "tgz" => "application/gzip",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        _ => "application/octet-stream",
+    }
+    .to_string()
 }
 
 /// Spawn the engine thread. Returns a command sender; results arrive via `on_result`
@@ -372,7 +434,7 @@ pub fn spawn(
                         Err(e) => on_result(EngineResult::Error(format!("delete_event: {e}"))),
                     }
                 }
-                EngineCmd::Send { to, cc, subject, body, in_reply_to, references } => {
+                EngineCmd::Send { to, cc, subject, body, in_reply_to, references, attachments } => {
                     let msg = OutgoingMessage {
                         from: cfg.email.clone(),
                         to,
@@ -384,7 +446,7 @@ pub fn spawn(
                         references,
                         attachment_paths: Vec::new(),
                         inline_paths: Vec::new(),
-                        attachments: Vec::new(),
+                        attachments: resolve_attachments(&attachments),
                     };
                     let r = rt.block_on(provider.send_message(
                         &cfg.smtp_host,
