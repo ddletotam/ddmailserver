@@ -1746,6 +1746,54 @@ fn main() {
             }
             return;
         }
+        // Forward: prefill the composer with the quoted original + a "Fwd:"
+        // subject, then let the user pick a recipient via search (same path
+        // as any new message). Attachments aren't carried yet — noted inline.
+        if action == "forward" {
+            let body_opt = sh_act
+                .cache
+                .as_ref()
+                .and_then(|cache| cache.load_message_bodies(&sh_act.key, &[msg.clone()]).ok())
+                .and_then(|mut v| v.pop());
+            let Some(body) = body_opt else {
+                eprintln!("forward: body not cached for {msg:?}");
+                return;
+            };
+            let from = if body.from.is_empty() {
+                body.from_addr.clone()
+            } else {
+                format!("{} <{}>", body.from, body.from_addr)
+            };
+            let orig = body
+                .text
+                .clone()
+                .unwrap_or_else(|| "(сообщение без текстовой части — откройте оригинал)".to_string());
+            let note = if body.attachments.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n[вложения оригинала ({}) не пересылаются]", body.attachments.len())
+            };
+            let fwd = format!(
+                "\n\n---------- Пересланное сообщение ----------\n\
+                 От: {from}\nДата: {}\nТема: {}\n\n{}{}",
+                body.date, body.subject, orig, note
+            );
+            let subj_lc = body.subject.to_lowercase();
+            let subject = if subj_lc.starts_with("fwd:") || subj_lc.starts_with("fw:") {
+                body.subject.clone()
+            } else {
+                format!("Fwd: {}", body.subject)
+            };
+            if let Some(ui) = ui_weak_act.upgrade() {
+                // A forward is a fresh message — clear any pending reply state.
+                exit_reply_mode(&sh_act, &ui);
+                ui.set_composer_subject(subject.into());
+                ui.set_composer_text(fwd.into());
+                // Reveal the subject/cc panel so the "Fwd:" subject is visible.
+                ui.set_composer_expanded(true);
+            }
+            return;
+        }
         // Everything else (delete / read / unread) goes through the engine.
         let Some(etx) = sh_act.engine_tx.borrow().clone() else {
             eprintln!("msg-action: no live engine");
