@@ -503,6 +503,12 @@ func (db *DB) RefreshExistingFromRemote(
 		return nil
 	}
 	now := timeutil.Now()
+	// No-op guard: this runs for EVERY existing message on EVERY sync
+	// cycle. Writing unconditionally rewrote the whole mailbox each cycle
+	// and bumped updated_at on unchanged rows — which both churns the DB
+	// and poisons updated_at as a change signal (the desktop delta sync
+	// saw every conversation as "changed" every cycle). Only write when
+	// something actually differs.
 	if downgradeSpam {
 		_, err := db.Exec(
 			`UPDATE messages SET
@@ -511,7 +517,13 @@ func (db *DB) RefreshExistingFromRemote(
 			   is_spam = false, spam_status = 'clean',
 			   spam_reasons = '', spam_rule_id = NULL,
 			   updated_at = $6
-			 WHERE user_id = $7 AND message_id = $8`,
+			 WHERE user_id = $7 AND message_id = $8
+			   AND (remote_uid IS DISTINCT FROM $1
+			     OR remote_folder IS DISTINCT FROM $2
+			     OR seen IS DISTINCT FROM $3
+			     OR flagged IS DISTINCT FROM $4
+			     OR answered IS DISTINCT FROM $5
+			     OR is_spam IS DISTINCT FROM false)`,
 			remoteUID, remoteFolder, seen, flagged, answered, now, userID, messageID,
 		)
 		if err != nil {
@@ -524,7 +536,12 @@ func (db *DB) RefreshExistingFromRemote(
 		   remote_uid = $1, remote_folder = $2,
 		   seen = $3, flagged = $4, answered = $5,
 		   updated_at = $6
-		 WHERE user_id = $7 AND message_id = $8`,
+		 WHERE user_id = $7 AND message_id = $8
+		   AND (remote_uid IS DISTINCT FROM $1
+		     OR remote_folder IS DISTINCT FROM $2
+		     OR seen IS DISTINCT FROM $3
+		     OR flagged IS DISTINCT FROM $4
+		     OR answered IS DISTINCT FROM $5)`,
 		remoteUID, remoteFolder, seen, flagged, answered, now, userID, messageID,
 	)
 	if err != nil {

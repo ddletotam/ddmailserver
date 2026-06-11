@@ -864,6 +864,10 @@ type DesktopContactInfo struct {
 type DesktopMessageRef struct {
 	Folder string `json:"folder"`
 	UID    int64  `json:"uid"` // messages.id in native mode
+	// Seen lets the client scroll to the first unread message and decide
+	// what to mark read on open — kept fresh by the ?since= delta (flag
+	// changes bump updated_at).
+	Seen bool `json:"seen"`
 }
 
 // DesktopConversation matches the client's Conversation type.
@@ -881,6 +885,9 @@ type DesktopConversation struct {
 	TotalCount   int                  `json:"total_count"`
 	Messages     []DesktopMessageRef  `json:"messages"`
 	Draft        *DesktopMessageRef   `json:"draft"`
+	// Max updated_at (ms, server clock) across the conversation's messages —
+	// drives the ?since= delta below: flag changes bump it too.
+	UpdatedAt int64 `json:"updated_at"`
 }
 
 type msgEntry struct {
@@ -908,6 +915,18 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 	limit := 5000
 	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 20000 {
 		limit = n
+	}
+
+	// Delta mode: ?since=<ms, server clock> returns only conversations whose
+	// max message updated_at is newer, wrapped with server_now_ms so the
+	// client stores a server-clock watermark (no client-clock skew issues).
+	// since=0 is a valid "full sync via the delta envelope". Without the
+	// param the legacy bare-array response is served unchanged.
+	sinceMs := int64(-1)
+	if v := r.URL.Query().Get("since"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			sinceMs = n
+		}
 	}
 
 	identities := s.collectIdentities(user.ID)
@@ -1119,15 +1138,22 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 
 		// Stats from regular messages
 		unread := 0
+		var maxUpdated int64
 		var firstMsg, lastMsg *msgEntry
 		for i := range regular {
 			if !regular[i].msg.Seen {
 				unread++
 			}
+			if regular[i].msg.UpdatedAt > maxUpdated {
+				maxUpdated = regular[i].msg.UpdatedAt
+			}
 			if firstMsg == nil {
 				firstMsg = &regular[i]
 			}
 			lastMsg = &regular[i]
+		}
+		if lastDraft != nil && lastDraft.msg.UpdatedAt > maxUpdated {
+			maxUpdated = lastDraft.msg.UpdatedAt
 		}
 		if lastMsg == nil && lastDraft != nil {
 			lastMsg = lastDraft
@@ -1173,6 +1199,7 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 			msgRefs = append(msgRefs, DesktopMessageRef{
 				Folder: e.folderName,
 				UID:    e.msg.ID,
+				Seen:   e.msg.Seen,
 			})
 		}
 
@@ -1181,6 +1208,7 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 			draftRef = &DesktopMessageRef{
 				Folder: lastDraft.folderName,
 				UID:    lastDraft.msg.ID,
+				Seen:   true,
 			}
 		}
 
@@ -1202,14 +1230,31 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 			TotalCount:   len(regular),
 			Messages:     msgRefs,
 			Draft:        draftRef,
+			UpdatedAt:    maxUpdated,
 		}
 		convs = append(convs, conv)
 	}
 
-	// Sort by last_date_ts DESC and limit
+	// Sort by last_date_ts DESC and limit. The limit is applied BEFORE the
+	// since-filter on purpose: the client's world is "top-N by date", so a
+	// conversation that changed but sits below the cap is irrelevant to it.
 	sortConversationsByDate(convs)
 	if len(convs) > limit {
 		convs = convs[:limit]
+	}
+
+	if sinceMs >= 0 {
+		changed := make([]DesktopConversation, 0, len(convs))
+		for _, c := range convs {
+			if c.UpdatedAt > sinceMs {
+				changed = append(changed, c)
+			}
+		}
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"server_now_ms": timeutil.Now(),
+			"conversations": changed,
+		})
+		return
 	}
 
 	respondJSON(w, http.StatusOK, convs)
