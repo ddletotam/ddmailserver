@@ -71,6 +71,10 @@ struct EventBlock {
     // Rust-side; non-overlapping blocks get xf=0, wf=1.
     xf: float,
     wf: float,
+    // Tauri-era card content: attendee count (badge shown when >= 2) and
+    // the "unanswered meeting" look (invited, no RSVP yet → lighter).
+    count: int,
+    tentative: bool,
 }
 
 // One all-day chip in the band above the hour grid. Multi-day all-day
@@ -260,11 +264,17 @@ export component MainWindow inherits Window {
     // plain binding would be destroyed by the user's first manual scroll.)
     in-out property <length> chat-scroll-y: 0;
     in-out property <int> chat-scroll-seq: 0;
-    // Delete-conversation confirmation modal.
+    // Confirmation modal (delete conversation / spam-purge — the Rust side
+    // dispatches by its own mode flag).
     in-out property <bool> confirm-delete-visible: false;
+    in property <string> confirm-delete-title: "Удалить диалог?";
     in property <string> confirm-delete-text: "";
     callback delete-conversation();           // Delete key pressed
-    callback delete-conversation-confirmed(); // user clicked «Удалить»
+    callback delete-conversation-confirmed(); // user clicked the red button
+    // Header: identity tint + Tauri-era meta line + spam action.
+    in property <brush> active-ident-color: white;
+    in property <string> active-meta: "";
+    callback spam-conversation();
     // Read-only source viewer («Показать → Заголовки / Исходник …»).
     in-out property <bool> source-view-visible: false;
     in property <string> source-view-title: "";
@@ -749,11 +759,11 @@ export component MainWindow inherits Window {
         if root.view-mode == 0: VerticalLayout {
             Rectangle {
                 height: 60px;
-                background: white;
+                // Same identity tint as the conversation's sidebar row.
+                background: root.active-ident-color;
                 HorizontalLayout {
                     padding: 12px;
                     spacing: 10px;
-                    alignment: start;
                     Rectangle {
                         width: 40px;
                         height: 40px;
@@ -771,8 +781,49 @@ export component MainWindow inherits Window {
                     }
                     VerticalLayout {
                         alignment: center;
-                        Text { text: root.active-name; font-weight: 700; font-size: 16px; }
-                        Text { text: "был(а) недавно"; color: #8b95a1; font-size: 13px; }
+                        horizontal-stretch: 1;
+                        Text {
+                            text: root.active-name;
+                            font-weight: 700;
+                            font-size: 16px;
+                            overflow: elide;
+                        }
+                        // Tauri-era meta: counterpart address (or group
+                        // participants) + " → receiving identity".
+                        Text {
+                            text: root.active-meta;
+                            color: #69737e;
+                            font-size: 13px;
+                            overflow: elide;
+                        }
+                    }
+                    // «Спам»: blacklist the counterpart + purge all their
+                    // mail (with confirmation) — restored from Tauri.
+                    Rectangle {
+                        width: 36px;
+                        height: 36px;
+                        border-radius: 18px;
+                        background: spam-ta.has-hover ? #fbe3e5 : transparent;
+                        Rectangle {
+                            x: 8px; y: 8px;
+                            width: 20px; height: 20px;
+                            border-radius: 10px;
+                            border-width: 2px;
+                            border-color: spam-ta.has-hover ? #e8616a : #8b95a1;
+                            Path {
+                                width: parent.width;
+                                height: parent.height;
+                                viewbox-width: 20;
+                                viewbox-height: 20;
+                                stroke: spam-ta.has-hover ? #e8616a : #8b95a1;
+                                stroke-width: 2px;
+                                MoveTo { x: 5.5; y: 14.5; }
+                                LineTo { x: 14.5; y: 5.5; }
+                            }
+                        }
+                        spam-ta := TouchArea {
+                            clicked => { root.spam-conversation(); }
+                        }
                     }
                 }
             }
@@ -1621,7 +1672,13 @@ export component MainWindow inherits Window {
                     y: ev.row * 20px + 4px;
                     width: (parent.width - 48px) / root.day-count - 4px;
                     height: 18px;
-                    background: ev.color;
+                    background: @linear-gradient(180deg,
+                        ev.color.brighter(0.10) 0%,
+                        ev.color 45%,
+                        ev.color.darker(0.06) 100%);
+                    drop-shadow-blur: 2px;
+                    drop-shadow-offset-y: 1px;
+                    drop-shadow-color: #0000002b;
                     border-radius: 4px;
                     TouchArea {
                         clicked => { root.event-clicked(ev.id); }
@@ -1669,7 +1726,7 @@ export component MainWindow inherits Window {
                         y: i * root.hour-height;
                         width: parent.viewport-width - 48px;
                         height: 1px;
-                        background: #eef0f4;
+                        background: #d8dee7;
                     }
                     // Time labels in the left gutter.
                     for i in (root.hour-end - root.hour-start): Text {
@@ -1688,7 +1745,7 @@ export component MainWindow inherits Window {
                         y: 0;
                         width: 1px;
                         height: parent.viewport-height;
-                        background: #eef0f4;
+                        background: #d8dee7;
                     }
                     // Event blocks. Overlapping events share the column via
                     // xf/wf lane fractions computed Rust-side.
@@ -1697,14 +1754,27 @@ export component MainWindow inherits Window {
                         y: ev.top;
                         width: (parent.viewport-width - 48px) / root.day-count * ev.wf - 4px;
                         height: ev.h;
-                        background: ev.color;
+                        // Subtle depth: top-lit gradient + a soft 1px drop
+                        // shadow. Deliberately restrained. Unanswered
+                        // meetings (tentative) render lighter — "needs RSVP"
+                        // at a glance, as in the Tauri client.
+                        background: @linear-gradient(180deg,
+                            ev.color.brighter(0.10) 0%,
+                            ev.color 45%,
+                            ev.color.darker(0.06) 100%);
+                        opacity: ev.tentative ? 0.55 : 1.0;
+                        border-width: ev.tentative ? 1px : 0px;
+                        border-color: white.transparentize(0.45);
+                        drop-shadow-blur: 3px;
+                        drop-shadow-offset-y: 1px;
+                        drop-shadow-color: #00000033;
                         border-radius: 4px;
                         ev-ta := TouchArea {
                             clicked => { root.event-clicked(ev.id); }
                         }
                         Text {
                             x: 4px; y: 2px;
-                            width: parent.width - 8px;
+                            width: parent.width - 8px - (ev.count >= 2 ? 18px : 0px);
                             height: parent.height - 4px;
                             text: ev.title;
                             color: white;
@@ -1712,6 +1782,25 @@ export component MainWindow inherits Window {
                             font-weight: 700;
                             overflow: elide;
                             wrap: word-wrap;
+                        }
+                        // Attendee-count badge, upper-right (meetings only).
+                        if ev.count >= 2: Rectangle {
+                            x: parent.width - self.width - 3px;
+                            y: 2px;
+                            width: max(16px, cnt-t.preferred-width + 10px);
+                            height: 14px;
+                            border-radius: 7px;
+                            background: #00000038;
+                            cnt-t := Text {
+                                width: parent.width;
+                                height: parent.height;
+                                text: ev.count;
+                                color: white;
+                                font-size: 9px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
                         }
                     }
                     // Now-line: current time across today's column, with a
@@ -2114,7 +2203,7 @@ export component MainWindow inherits Window {
                     padding: 20px;
                     spacing: 16px;
                     Text {
-                        text: "Удалить диалог?";
+                        text: root.confirm-delete-title;
                         font-size: 17px; font-weight: 700; color: #0f1419;
                     }
                     Text {

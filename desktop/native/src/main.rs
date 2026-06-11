@@ -45,13 +45,23 @@ const NAMES: [&str; 25] = [
 ];
 const PALETTE: [&str; 6] = ["#2f80ed", "#27ae60", "#eb5757", "#9b51e0", "#f2994a", "#11998e"];
 
-/// Vivid colours for calendar event blocks / list chips. Starts with the
-/// avatar PALETTE (so calendar colours echo the identity colours used
-/// elsewhere) then extends it for the larger calendar count. All saturated
-/// enough to carry white event-title text.
+/// Calendar palette, modelled on Google Calendar's event colours — the
+/// reference design for "distinct, calm, and readable with white text on
+/// event blocks". Their Banana yellow is swapped for a darker amber (white
+/// text drowns on yellow).
 const CAL_PALETTE: [&str; 12] = [
-    "#2f80ed", "#27ae60", "#eb5757", "#9b51e0", "#f2994a", "#11998e",
-    "#e84393", "#0984e3", "#6ab04c", "#e67e22", "#8e44ad", "#16a085",
+    "#D50000", // tomato
+    "#E67C73", // flamingo
+    "#F4511E", // tangerine
+    "#F09300", // amber
+    "#33B679", // sage
+    "#0B8043", // basil
+    "#039BE5", // peacock
+    "#3F51B5", // blueberry
+    "#7986CB", // lavender
+    "#8E24AA", // grape
+    "#616161", // graphite
+    "#009688", // teal
 ];
 
 /// Stable default colour for a calendar that the server gave no colour for.
@@ -402,6 +412,8 @@ fn enter_compose_mode(sh: &Shared, ui: &MainWindow, email: &str) {
     ui.set_active_name(email.clone().into());
     ui.set_active_initials(initial.into());
     ui.set_active_color(slint::Brush::SolidColor(hex("#2f80ed")));
+    ui.set_active_meta("".into());
+    ui.set_active_ident_color(slint::Brush::SolidColor(hex("#ffffff")));
     ui.set_messages(ModelRc::new(VecModel::from(Vec::<RowItem>::new())));
     ui.set_search_open(false);
     ui.set_search_query("".into());
@@ -609,6 +621,9 @@ struct Shared {
     /// own copy for click hit-testing; this one answers synchronous
     /// hover-binding queries without a worker round-trip.
     row_links: RefCell<Vec<Vec<render_common::LinkRect>>>,
+    /// What the shared confirmation modal confirms: 1 = удалить диалог,
+    /// 2 = спам (blacklist + purge отправителя).
+    confirm_mode: Cell<u8>,
     /// Render-job sequence shared with the render worker (see Job::seq).
     render_seq: Arc<AtomicU64>,
     current: Cell<usize>,
@@ -746,6 +761,43 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
             });
         }
     }
+}
+
+/// Tauri-era header meta line: counterpart address (1:1) or participants
+/// (group), plus " → receiving identity".
+fn conv_meta(c: &Conversation) -> String {
+    let mut m = if c.is_group {
+        c.counterparts
+            .iter()
+            .map(|cp| if cp.name.is_empty() { cp.addr.clone() } else { cp.name.clone() })
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        c.counterparts.first().map(|cp| cp.addr.clone()).unwrap_or_default()
+    };
+    if !c.received_by.is_empty() {
+        m.push_str(" → ");
+        m.push_str(&c.received_by);
+    }
+    m
+}
+
+/// Set every header property for conversation `idx` in one place: name,
+/// initials, avatar colour, identity tint and the meta line. Replaces the
+/// four hand-synced copies the review flagged.
+fn apply_active_header(ui: &MainWindow, sh: &Shared, idx: usize) {
+    if let Some(d) = sh.displays.borrow().get(idx) {
+        ui.set_active_name(d.name.clone().into());
+        ui.set_active_initials(d.initials.clone().into());
+        ui.set_active_color(slint::Brush::SolidColor(hex(&d.color)));
+        ui.set_active_ident_color(if d.ident_color.is_empty() {
+            slint::Brush::SolidColor(hex("#ffffff"))
+        } else {
+            slint::Brush::SolidColor(hex(&d.ident_color))
+        });
+    }
+    let meta = sh.convs.borrow().get(idx).map(conv_meta).unwrap_or_default();
+    ui.set_active_meta(meta.into());
 }
 
 /// Mirror the policy's global «Медиа…» switches into root properties so
@@ -1086,11 +1138,30 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
         // overlapping all-day events stack instead of overprinting.
         let mut all_day_fill = vec![0i32; day_count.max(0) as usize];
 
+        // "My" addresses for the unanswered-meeting check (Tauri's
+        // isUnansweredMeeting): account key + every known identity.
+        let idents = sh.identity_colors.borrow();
+        let me_key = sh.key.to_lowercase();
+
         for e in events.iter() {
             if !*visibility.get(&e.calendar_id).unwrap_or(&true) {
                 continue;
             }
             let color = color_for(e.calendar_id);
+            let att_count = e.attendees.len() as i32;
+            let tentative = att_count >= 2
+                && e
+                    .attendees
+                    .iter()
+                    .find(|a| {
+                        let lc = a.email.to_lowercase();
+                        lc == me_key || idents.contains_key(&lc)
+                    })
+                    .map(|a| {
+                        let ps = a.partstat.to_uppercase();
+                        ps.is_empty() || ps == "NEEDS-ACTION"
+                    })
+                    .unwrap_or(false);
             let occ = recurrence::expand(
                 e.dtstart,
                 e.dtend,
@@ -1149,11 +1220,17 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
                         top,
                         h,
                         color,
-                        title: e.summary.clone().into(),
+                        title: if e.summary.is_empty() {
+                            "(без названия)".into()
+                        } else {
+                            e.summary.clone().into()
+                        },
                         time: format!("{} – {}", fmt_hm(o.start_ms), fmt_hm(o.end_ms)).into(),
                         all_day: false,
                         xf: 0.0,
                         wf: 1.0,
+                        count: att_count,
+                        tentative,
                     });
                 }
             }
@@ -1774,6 +1851,7 @@ fn main() {
         pending_source_view: Cell::new(0),
         identity_colors: RefCell::new(startup_ident_colors),
         row_links: RefCell::new(Vec::new()),
+        confirm_mode: Cell::new(0),
         render_seq,
         current: Cell::new(0),
         width: Cell::new(DEFAULT_WIDTH),
@@ -1822,11 +1900,7 @@ fn main() {
             }
             shared.current.set(i);
             ui.set_selected(i as i32);
-            if let Some(d) = displays.get(i) {
-                ui.set_active_name(d.name.clone().into());
-                ui.set_active_initials(d.initials.clone().into());
-                ui.set_active_color(slint::Brush::SolidColor(hex(&d.color)));
-            }
+            apply_active_header(&ui, &shared, i);
             // Seed the row refs/bodies too — context-menu actions on the
             // startup conversation resolve rows through these.
             *shared.current_msgs.borrow_mut() = bodies
@@ -1914,11 +1988,7 @@ fn main() {
         // previous context.
         let was_pending = sh_sel.pending_compose.borrow_mut().take().is_some();
         exit_reply_mode(&sh_sel, &ui);
-        if let Some(d) = sh_sel.displays.borrow().get(real_idx) {
-            ui.set_active_name(d.name.clone().into());
-            ui.set_active_initials(d.initials.clone().into());
-            ui.set_active_color(slint::Brush::SolidColor(hex(&d.color)));
-        }
+        apply_active_header(&ui, &sh_sel, real_idx);
         if was_pending {
             refresh_sidebar(&sh_sel, &ui);
         }
@@ -1943,6 +2013,8 @@ fn main() {
         }
         let convs = sh_delc.convs.borrow();
         let Some(c) = convs.get(sh_delc.current.get()) else { return };
+        sh_delc.confirm_mode.set(1);
+        ui.set_confirm_delete_title("Удалить диалог?".into());
         ui.set_confirm_delete_text(
             format!(
                 "«{}» — сообщений: {}. Все письма диалога, включая ваши ответы, \
@@ -1954,19 +2026,65 @@ fn main() {
         );
         ui.set_confirm_delete_visible(true);
     });
+
+    // «Спам» in the chat header: blacklist the counterpart's domain and
+    // purge every message from them (Tauri-era behaviour), confirmed
+    // through the same modal as conversation deletion.
+    let ui_weak_spam = ui.as_weak();
+    let sh_spam = shared.clone();
+    ui.on_spam_conversation(move || {
+        let Some(ui) = ui_weak_spam.upgrade() else { return };
+        if sh_spam.pending_compose.borrow().is_some() {
+            return;
+        }
+        let convs = sh_spam.convs.borrow();
+        let Some(c) = convs.get(sh_spam.current.get()) else { return };
+        let Some(cp) = c.counterparts.first().filter(|cp| !cp.addr.is_empty()) else { return };
+        let label = if cp.name.is_empty() { cp.addr.clone() } else { cp.name.clone() };
+        sh_spam.confirm_mode.set(2);
+        ui.set_confirm_delete_title("В спам?".into());
+        ui.set_confirm_delete_text(
+            format!("Удалить все письма от «{label}» и добавить отправителя в чёрный список?")
+                .into(),
+        );
+        ui.set_confirm_delete_visible(true);
+    });
     let ui_weak_delk = ui.as_weak();
     let sh_delk = shared.clone();
     ui.on_delete_conversation_confirmed(move || {
         let Some(ui) = ui_weak_delk.upgrade() else { return };
         let cur = sh_delk.current.get();
-        let (conv_id, refs) = {
+        let mode = sh_delk.confirm_mode.get();
+        sh_delk.confirm_mode.set(0);
+        let (conv_id, refs, cp_addr) = {
             let convs = sh_delk.convs.borrow();
             let Some(c) = convs.get(cur) else { return };
-            (c.id.clone(), c.messages.clone())
+            (
+                c.id.clone(),
+                c.messages.clone(),
+                c.counterparts.first().map(|cp| cp.addr.to_lowercase()).unwrap_or_default(),
+            )
         };
-        println!("delete conversation {conv_id} ({} messages)", refs.len());
         if let Some(etx) = sh_delk.engine_tx.borrow().as_ref() {
-            let _ = etx.send(engine::EngineCmd::Delete { messages: refs });
+            if mode == 2 {
+                // Spam: domain blacklist + purge everything from the sender;
+                // the conversation's own rows go by id so outgoing-from-us
+                // threads disappear too.
+                if cp_addr.is_empty() {
+                    return;
+                }
+                let domain = cp_addr.split('@').nth(1).unwrap_or("").to_string();
+                let ids: Vec<i64> = refs.iter().map(|m| m.uid as i64).collect();
+                println!("spam purge {cp_addr} (domain {domain}, {} rows)", ids.len());
+                let _ = etx.send(engine::EngineCmd::BlacklistAndPurge {
+                    domain,
+                    address: cp_addr,
+                    message_ids: ids,
+                });
+            } else {
+                println!("delete conversation {conv_id} ({} messages)", refs.len());
+                let _ = etx.send(engine::EngineCmd::Delete { messages: refs });
+            }
         }
         // Optimistic local removal; the engine resets the full-sync stamp on
         // success, so the Done-triggered refetch reconciles with the server.
@@ -1994,11 +2112,7 @@ fn main() {
         // Show the neighbour (same index now points at the next conversation).
         let next = cur.min(len - 1);
         ui.set_selected(next as i32);
-        if let Some(d) = sh_delk.displays.borrow().get(next) {
-            ui.set_active_name(d.name.clone().into());
-            ui.set_active_initials(d.initials.clone().into());
-            ui.set_active_color(slint::Brush::SolidColor(hex(&d.color)));
-        }
+        apply_active_header(&ui, &sh_delk, next);
         open_conversation(&ui, &sh_delk, next);
     });
 
@@ -2436,12 +2550,8 @@ fn main() {
             if let Some(ui) = ui_weak_sel_c.upgrade() {
                 ui.set_search_open(false);
                 ui.set_search_query("".into());
-                if let Some(d) = sh_sel_c.displays.borrow().get(conv_idx) {
-                    ui.set_selected(conv_idx as i32);
-                    ui.set_active_name(d.name.clone().into());
-                    ui.set_active_initials(d.initials.clone().into());
-                    ui.set_active_color(slint::Brush::SolidColor(hex(&d.color)));
-                }
+                ui.set_selected(conv_idx as i32);
+                apply_active_header(&ui, &sh_sel_c, conv_idx);
                 open_conversation(&ui, &sh_sel_c, conv_idx);
             }
         } else {
@@ -2471,12 +2581,8 @@ fn main() {
             if let Some(ui) = ui_weak_sel_m.upgrade() {
                 ui.set_search_open(false);
                 ui.set_search_query("".into());
-                if let Some(d) = sh_sel_m.displays.borrow().get(conv_idx) {
-                    ui.set_selected(conv_idx as i32);
-                    ui.set_active_name(d.name.clone().into());
-                    ui.set_active_initials(d.initials.clone().into());
-                    ui.set_active_color(slint::Brush::SolidColor(hex(&d.color)));
-                }
+                ui.set_selected(conv_idx as i32);
+                apply_active_header(&ui, &sh_sel_m, conv_idx);
                 open_conversation(&ui, &sh_sel_m, conv_idx);
             }
         } else {
