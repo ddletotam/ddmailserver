@@ -20,6 +20,23 @@ pub trait MailProvider: Send + Sync {
         limit: u32,
     ) -> Result<Vec<Conversation>, String>;
 
+    /// Delta variant: conversations changed since `since_ms` (SERVER clock
+    /// watermark from a previous call). Returns (conversations,
+    /// server_now_ms, partial). `partial == true` means the list contains
+    /// only changed conversations and the caller must merge, not replace.
+    ///
+    /// Default falls back to a full fetch (partial=false, no watermark) so
+    /// plain-IMAP providers degrade gracefully.
+    async fn fetch_conversations_delta(
+        &self,
+        our_addrs: &[String],
+        limit: u32,
+        _since_ms: i64,
+    ) -> Result<(Vec<Conversation>, i64, bool), String> {
+        let convs = self.fetch_conversations(our_addrs, limit).await?;
+        Ok((convs, 0, false))
+    }
+
     /// Fetch full message bodies for the given refs.
     async fn fetch_conversation_messages(
         &self,

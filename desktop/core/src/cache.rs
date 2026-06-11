@@ -152,9 +152,17 @@ impl Cache {
             );
             CREATE INDEX IF NOT EXISTS idx_reminders_fire
                 ON event_reminders(fire_at_ms);
+
+            -- Small key/value store for sync bookkeeping (delta watermarks,
+            -- last-full-sync timestamps). One row per key.
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT ''
+            );
         ").map_err(|e| format!("SQLite init: {e}"))?;
 
         // Migrations for existing databases
+        conn.execute("ALTER TABLE conversation_messages ADD COLUMN seen INTEGER NOT NULL DEFAULT 1", []).ok();
         conn.execute("ALTER TABLE conversations ADD COLUMN avatar_hash TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE conversations ADD COLUMN received_by TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE conversations ADD COLUMN last_subject TEXT NOT NULL DEFAULT ''", []).ok();
@@ -239,8 +247,8 @@ impl Cache {
 
             for mr in &conv.messages {
                 tx.execute(
-                    "INSERT OR IGNORE INTO conversation_messages (conversation_id, folder, uid) VALUES (?1, ?2, ?3)",
-                    params![conv.id, mr.folder, mr.uid],
+                    "INSERT OR IGNORE INTO conversation_messages (conversation_id, folder, uid, seen) VALUES (?1, ?2, ?3, ?4)",
+                    params![conv.id, mr.folder, mr.uid, mr.seen as i32],
                 ).map_err(|e| format!("ins msg ref: {e}"))?;
             }
 
@@ -260,6 +268,108 @@ impl Cache {
 
         tx.commit().map_err(|e| format!("commit: {e}"))?;
         Ok(())
+    }
+
+    /// Upsert a partial set of conversations (delta sync): each conversation
+    /// is replaced/inserted by id, its message refs rewritten; everything
+    /// else stays untouched. Use save_conversations for a full replace.
+    pub fn upsert_conversations(&self, account_key: &str, conversations: &[Conversation]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        let now = chrono::Utc::now().timestamp();
+        let tx = conn.unchecked_transaction().map_err(|e| format!("tx: {e}"))?;
+
+        for conv in conversations {
+            let cp_name = conv.counterparts.first().map(|c| c.name.as_str()).unwrap_or("");
+            let cp_addr = conv.counterparts.first().map(|c| c.addr.as_str()).unwrap_or("");
+            let cps_json = serde_json::to_string(&conv.counterparts)
+                .map_err(|e| format!("serialize counterparts: {e}"))?;
+
+            tx.execute(
+                "INSERT OR REPLACE INTO conversations (id, account_key, label, avatar_hash, received_by, counterpart_name, \
+                 counterpart_addr, counterparts_json, is_group, last_date, last_date_ts, last_subject, unread_count, \
+                 total_count, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    conv.id, account_key, conv.label, conv.avatar_hash, conv.received_by, cp_name, cp_addr,
+                    cps_json, conv.is_group as i32, conv.last_date, conv.last_date_ts,
+                    conv.last_subject, conv.unread_count, conv.total_count, now
+                ],
+            ).map_err(|e| format!("upsert conv: {e}"))?;
+
+            tx.execute(
+                "DELETE FROM conversation_messages WHERE conversation_id = ?1",
+                params![conv.id],
+            ).map_err(|e| format!("del msg refs: {e}"))?;
+            for mr in &conv.messages {
+                tx.execute(
+                    "INSERT OR IGNORE INTO conversation_messages (conversation_id, folder, uid, seen) VALUES (?1, ?2, ?3, ?4)",
+                    params![conv.id, mr.folder, mr.uid, mr.seen as i32],
+                ).map_err(|e| format!("ins msg ref: {e}"))?;
+            }
+        }
+
+        tx.commit().map_err(|e| format!("commit: {e}"))
+    }
+
+    /// Remove a conversation and everything that belongs to it: the row,
+    /// its message refs, and the cached bodies of those refs. Used by the
+    /// desktop "delete conversation" action so a restart can't resurrect
+    /// the deleted thread from cache.
+    pub fn delete_conversation(&self, account_key: &str, conversation_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        let tx = conn.unchecked_transaction().map_err(|e| format!("tx: {e}"))?;
+        tx.execute(
+            "DELETE FROM message_bodies WHERE account_key = ?1 AND (folder, uid) IN \
+             (SELECT folder, uid FROM conversation_messages WHERE conversation_id = ?2)",
+            params![account_key, conversation_id],
+        ).map_err(|e| format!("del bodies: {e}"))?;
+        tx.execute(
+            "DELETE FROM conversation_messages WHERE conversation_id = ?1",
+            params![conversation_id],
+        ).map_err(|e| format!("del refs: {e}"))?;
+        tx.execute(
+            "DELETE FROM conversations WHERE account_key = ?1 AND id = ?2",
+            params![account_key, conversation_id],
+        ).map_err(|e| format!("del conv: {e}"))?;
+        tx.commit().map_err(|e| format!("commit: {e}"))
+    }
+
+    /// Read a sync-bookkeeping value (see the `meta` table).
+    pub fn get_meta(&self, key: &str) -> Option<String> {
+        let conn = self.conn.lock().ok()?;
+        conn.query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![key],
+            |r| r.get::<_, String>(0),
+        ).ok()
+    }
+
+    /// Write a sync-bookkeeping value.
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            params![key, value],
+        ).map_err(|e| format!("set meta: {e}"))?;
+        Ok(())
+    }
+
+    /// Which of `refs` already have a cached body. Used by the engine's
+    /// missing-only fetch: bodies are immutable, so a cached (folder, uid)
+    /// never needs refetching.
+    pub fn cached_body_refs(&self, account_key: &str, refs: &[MessageRef]) -> Result<Vec<MessageRef>, String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT 1 FROM message_bodies WHERE folder = ?1 AND uid = ?2 AND account_key = ?3"
+        ).map_err(|e| format!("prepare: {e}"))?;
+        let mut out = Vec::new();
+        for mr in refs {
+            let hit: Result<i32, _> = stmt.query_row(params![mr.folder, mr.uid, account_key], |r| r.get(0));
+            if hit.is_ok() {
+                out.push(mr.clone());
+            }
+        }
+        Ok(out)
     }
 
     /// Distinct account keys present in the conversations table.
@@ -317,10 +427,14 @@ impl Cache {
 
             // Load message refs
             let mut msg_stmt = conn.prepare(
-                "SELECT folder, uid FROM conversation_messages WHERE conversation_id = ?1"
+                "SELECT folder, uid, COALESCE(seen, 1) FROM conversation_messages WHERE conversation_id = ?1"
             ).map_err(|e| format!("prepare msgs: {e}"))?;
             let messages: Vec<MessageRef> = msg_stmt.query_map(params![id], |r| {
-                Ok(MessageRef { folder: r.get(0)?, uid: r.get(1)? })
+                Ok(MessageRef {
+                    folder: r.get(0)?,
+                    uid: r.get(1)?,
+                    seen: r.get::<_, i32>(2)? != 0,
+                })
             }).map_err(|e| format!("query msgs: {e}"))?
             .filter_map(|r| r.ok())
             .collect();

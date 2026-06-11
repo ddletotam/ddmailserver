@@ -27,18 +27,65 @@ use serde::{Deserialize, Serialize};
 pub struct Policy {
     pub allow_media: HashSet<String>,
     pub allow_scripts: HashSet<String>,
+    /// Legacy shared per-host allow-list (pre-«Медиа…» menu). Read as a
+    /// synonym of media_hosts; new toggles write media_hosts/script_hosts.
     pub allow_domains: HashSet<String>,
+    /// Monotonic generation, bumped on every mutation and persisted with
+    /// the policy. Part of the rendered-texture cache key (RAM and disk),
+    /// so it must stay monotonic ACROSS restarts — a session-local counter
+    /// would resurrect textures rendered under a pre-restart policy.
+    pub generation: u64,
+    /// «Разрешить всё» — master switch, overrides everything below.
+    pub allow_all: bool,
+    /// «Изображения → разрешить все» / «Скрипты → разрешить все».
+    pub allow_all_media: bool,
+    pub allow_all_scripts: bool,
+    /// Per-host allow-lists, split by resource class.
+    pub media_hosts: HashSet<String>,
+    pub script_hosts: HashSet<String>,
 }
 
 impl Policy {
     pub fn media_allowed(&self, sender: &str) -> bool {
-        self.allow_media.contains(&sender.to_lowercase())
+        self.allow_all || self.allow_all_media || self.allow_media.contains(&sender.to_lowercase())
     }
     pub fn scripts_allowed(&self, sender: &str) -> bool {
-        self.allow_scripts.contains(&sender.to_lowercase())
+        self.allow_all
+            || self.allow_all_scripts
+            || self.allow_scripts.contains(&sender.to_lowercase())
     }
+    /// Image/CSS resources from this host may load.
     pub fn domain_allowed(&self, host: &str) -> bool {
-        self.allow_domains.contains(&host.to_lowercase())
+        if self.allow_all || self.allow_all_media {
+            return true;
+        }
+        let k = host.to_lowercase();
+        self.media_hosts.contains(&k) || self.allow_domains.contains(&k)
+    }
+    /// External <script src> from this host may survive sanitization.
+    pub fn script_host_allowed(&self, host: &str) -> bool {
+        self.allow_all || self.allow_all_scripts || self.script_hosts.contains(&host.to_lowercase())
+    }
+
+    pub fn toggle_media_host(&mut self, host: &str) -> bool {
+        let k = host.to_lowercase();
+        // Migrate a legacy allow_domains entry into media_hosts on touch.
+        if self.allow_domains.remove(&k) || self.media_hosts.remove(&k) {
+            false
+        } else {
+            self.media_hosts.insert(k);
+            true
+        }
+    }
+
+    pub fn toggle_script_host(&mut self, host: &str) -> bool {
+        let k = host.to_lowercase();
+        if self.script_hosts.remove(&k) {
+            false
+        } else {
+            self.script_hosts.insert(k);
+            true
+        }
     }
 
     pub fn toggle_media(&mut self, sender: &str) -> bool {

@@ -104,6 +104,53 @@ impl AccountConfig {
     }
 }
 
+/// Replace `cid:` inline-image references with `data:` URLs by pulling the
+/// MIME parts from the provider. Runs once per body — the substituted HTML
+/// is saved back to the cache, so the cost never repeats. Returns how many
+/// bodies were rewritten. Provider errors leave the ref as-is (IMAP mode
+/// doesn't implement inline parts yet).
+fn resolve_inline_parts(
+    rt: &tokio::runtime::Runtime,
+    provider: &dyn MailProvider,
+    bodies: &mut [MessageBody],
+) -> usize {
+    use std::sync::OnceLock;
+    static CID_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = CID_RE.get_or_init(|| {
+        regex::Regex::new(r#"(?i)cid:([^"'\s>)]+)"#).unwrap()
+    });
+
+    let mut rewritten = 0usize;
+    for b in bodies.iter_mut() {
+        let Some(html) = b.html.clone() else { continue };
+        if !html.contains("cid:") {
+            continue;
+        }
+        let cids: std::collections::HashSet<String> = re
+            .captures_iter(&html)
+            .map(|c| c[1].to_string())
+            .collect();
+        let mut replaced = html.clone();
+        let mut any = false;
+        for cid in cids {
+            match rt.block_on(provider.fetch_inline_part(b.uid, &cid)) {
+                Ok(part) => {
+                    let data_url =
+                        format!("data:{};base64,{}", part.mime_type, part.content_b64);
+                    replaced = replaced.replace(&format!("cid:{cid}"), &data_url);
+                    any = true;
+                }
+                Err(e) => eprintln!("inline part cid:{cid} (uid {}): {e}", b.uid),
+            }
+        }
+        if any {
+            b.html = Some(replaced);
+            rewritten += 1;
+        }
+    }
+    rewritten
+}
+
 fn build_provider(cfg: &AccountConfig) -> Arc<dyn MailProvider> {
     if let (Some(url), Some(token)) = (&cfg.native_url, &cfg.native_token) {
         Arc::new(NativeProvider::new(
@@ -151,6 +198,9 @@ pub enum EngineCmd {
     FetchAvatar { email: String },
     SetFlags { messages: Vec<MessageRef>, flags: String, add: bool },
     Delete { messages: Vec<MessageRef> },
+    /// Raw RFC-822 source of one message — feeds the «Показать →
+    /// Заголовки / Исходник сообщения» views.
+    FetchSource { folder: String, uid: u32 },
     DownloadAttachment { folder: String, uid: u32, index: usize, filename: String },
     /// Live dropdown lookup for the search-as-compose bar: matching contacts
     /// (name/email) AND matching messages (subject/body) in one round-trip.
@@ -186,12 +236,17 @@ pub enum EngineCmd {
         /// Filesystem paths of files the user attached in the composer.
         /// Resolved to bytes (and a guessed MIME type) just before sending.
         attachments: Vec<String>,
+        /// Forward mode: re-attach every attachment of this original
+        /// message (downloaded from the provider) to the outgoing one.
+        forward_attachments: Option<MessageRef>,
     },
 }
 
 /// Results the engine sends back to the UI.
 pub enum EngineResult {
-    Conversations(Vec<Conversation>),
+    /// `partial == true`: only changed conversations (delta sync) — merge
+    /// into the existing list instead of replacing it.
+    Conversations { list: Vec<Conversation>, partial: bool },
     /// `generation` echoes FetchMessages' (stale-answer guard).
     Messages { bodies: Vec<MessageBody>, generation: u64 },
     /// Live-dropdown answer. `query` lets the UI drop responses for an old
@@ -211,6 +266,8 @@ pub enum EngineResult {
     Avatar { email: String, rgba: Vec<u8>, w: u32, h: u32 },
     /// An attachment was downloaded and saved at this path; UI opens it.
     AttachmentSaved(String),
+    /// Raw RFC-822 source for a FetchSource request.
+    Source { uid: u32, raw: String },
     /// Calendar list (sidebar) — echoed back from FetchCalendars.
     Calendars(Vec<DesktopCalendar>),
     /// Events for the currently displayed week — echoed back from
@@ -368,21 +425,92 @@ pub fn spawn(
             match cmd {
                 EngineCmd::FetchConversations { limit } => {
                     let our = resolve_our_addrs(&cache, &cfg);
-                    let r = rt.block_on(provider.fetch_conversations(&our, limit));
+                    // Delta sync (native provider): ask only for conversations
+                    // changed since the stored server-clock watermark. A full
+                    // resync runs on first start and every 24h — that's what
+                    // picks up deleted conversations, so the delta path
+                    // doesn't need tombstones. Plain IMAP ignores `since`
+                    // (trait default) and always comes back full.
+                    let since_key = format!("conv_since:{key}");
+                    let full_key = format!("conv_full_ts:{key}");
+                    let now_s = chrono::Utc::now().timestamp();
+                    let last_full: i64 = cache
+                        .get_meta(&full_key)
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    let since: i64 = if now_s - last_full > 24 * 3600 {
+                        0
+                    } else {
+                        cache.get_meta(&since_key).and_then(|v| v.parse().ok()).unwrap_or(0)
+                    };
+                    let r = rt.block_on(provider.fetch_conversations_delta(&our, limit, since));
                     match r {
-                        Ok(convs) => {
-                            cache.save_conversations(&key, &convs).ok();
-                            on_result(EngineResult::Conversations(convs));
+                        Ok((convs, server_now, partial)) => {
+                            let partial = partial && since > 0;
+                            if partial {
+                                cache.upsert_conversations(&key, &convs).ok();
+                            } else {
+                                cache.save_conversations(&key, &convs).ok();
+                                cache.set_meta(&full_key, &now_s.to_string()).ok();
+                            }
+                            if server_now > 0 {
+                                cache.set_meta(&since_key, &server_now.to_string()).ok();
+                            }
+                            on_result(EngineResult::Conversations { list: convs, partial });
                         }
                         Err(e) => on_result(EngineResult::Error(e)),
                     }
                 }
                 EngineCmd::FetchMessages { messages, generation } => {
+                    // Bodies are immutable: a cached (folder, uid) never needs
+                    // refetching, so only the refs missing from SQLite go out
+                    // on the wire. Fully-cached conversation = no network at all.
+                    let mut cached =
+                        cache.load_message_bodies(&key, &messages).unwrap_or_default();
+                    // Heal pre-substitution cache entries: bodies cached before
+                    // cid:-resolution keep broken inline-image refs forever
+                    // (they never refetch) — resolve them in place and re-save.
+                    let healed = resolve_inline_parts(&rt, provider.as_ref(), &mut cached);
+                    if healed > 0 {
+                        println!("engine: resolved inline parts in {healed} cached bodies");
+                        cache.save_message_bodies(&key, &cached).ok();
+                    }
+                    let have: std::collections::HashSet<(String, u32)> = cached
+                        .iter()
+                        .map(|b| (b.folder.clone(), b.uid))
+                        .collect();
+                    let missing: Vec<MessageRef> = messages
+                        .iter()
+                        .filter(|m| !have.contains(&(m.folder.clone(), m.uid)))
+                        .cloned()
+                        .collect();
+                    if missing.is_empty() {
+                        if healed > 0 {
+                            // Re-emit so the UI re-renders the healed bodies.
+                            on_result(EngineResult::Messages { bodies: cached, generation });
+                        } else {
+                            // The UI already rendered the cached bodies on open.
+                            println!(
+                                "engine: conversation fully cached ({} bodies) — no fetch",
+                                messages.len()
+                            );
+                        }
+                        continue;
+                    }
+                    println!(
+                        "engine: fetching {}/{} missing bodies",
+                        missing.len(),
+                        messages.len()
+                    );
                     let our = resolve_our_addrs(&cache, &cfg);
-                    let r = rt.block_on(provider.fetch_conversation_messages(&our, &messages));
+                    let r = rt.block_on(provider.fetch_conversation_messages(&our, &missing));
                     match r {
-                        Ok(bodies) => {
-                            cache.save_message_bodies(&key, &bodies).ok();
+                        Ok(mut fetched) => {
+                            resolve_inline_parts(&rt, provider.as_ref(), &mut fetched);
+                            cache.save_message_bodies(&key, &fetched).ok();
+                            // Hand the UI the merged full set (cache now has it all).
+                            let bodies =
+                                cache.load_message_bodies(&key, &messages).unwrap_or(fetched);
                             on_result(EngineResult::Messages { bodies, generation });
                         }
                         Err(e) => on_result(EngineResult::Error(e)),
@@ -419,7 +547,20 @@ pub fn spawn(
                 }
                 EngineCmd::Delete { messages } => {
                     match rt.block_on(provider.delete_messages(&messages)) {
-                        Ok(()) => on_result(EngineResult::Done("delete".into())),
+                        Ok(()) => {
+                            // The conversations delta can only report CHANGED
+                            // conversations — a fully-deleted one just vanishes
+                            // from the full list. Reset the full-sync stamp so
+                            // the refetch triggered by Done runs full.
+                            cache.set_meta(&format!("conv_full_ts:{key}"), "0").ok();
+                            on_result(EngineResult::Done("delete".into()));
+                        }
+                        Err(e) => on_result(EngineResult::Error(e)),
+                    }
+                }
+                EngineCmd::FetchSource { folder, uid } => {
+                    match rt.block_on(provider.fetch_message_source(&folder, uid)) {
+                        Ok(raw) => on_result(EngineResult::Source { uid, raw }),
                         Err(e) => on_result(EngineResult::Error(e)),
                     }
                 }
@@ -485,7 +626,37 @@ pub fn spawn(
                         Err(e) => on_result(EngineResult::Error(format!("delete_event: {e}"))),
                     }
                 }
-                EngineCmd::Send { to, cc, subject, body, in_reply_to, references, attachments } => {
+                EngineCmd::Send { to, cc, subject, body, in_reply_to, references, attachments, forward_attachments } => {
+                    let mut outgoing = resolve_attachments(&attachments);
+                    // Forward mode: pull the original's attachments from the
+                    // provider and re-attach them as-is. Failures of single
+                    // parts are logged, not fatal — the text still goes out.
+                    if let Some(orig) = forward_attachments {
+                        let metas = cache
+                            .load_message_bodies(&key, std::slice::from_ref(&orig))
+                            .ok()
+                            .and_then(|mut v| v.pop())
+                            .map(|b| b.attachments)
+                            .unwrap_or_default();
+                        for meta in metas.iter() {
+                            match rt.block_on(provider.fetch_attachment(&orig.folder, orig.uid, meta.index)) {
+                                Ok((bytes, mime)) => outgoing.push(OutgoingAttachment {
+                                    filename: meta.filename.clone(),
+                                    mime_type: if mime.is_empty() {
+                                        "application/octet-stream".into()
+                                    } else {
+                                        mime
+                                    },
+                                    content: bytes,
+                                    content_id: None,
+                                }),
+                                Err(e) => eprintln!(
+                                    "forward: attachment {} ({}) failed: {e}",
+                                    meta.index, meta.filename
+                                ),
+                            }
+                        }
+                    }
                     let msg = OutgoingMessage {
                         from: cfg.email.clone(),
                         to,
@@ -497,7 +668,7 @@ pub fn spawn(
                         references,
                         attachment_paths: Vec::new(),
                         inline_paths: Vec::new(),
-                        attachments: resolve_attachments(&attachments),
+                        attachments: outgoing,
                     };
                     let r = rt.block_on(provider.send_message(
                         &cfg.smtp_host,
