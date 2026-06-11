@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/emersion/go-ical"
+	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
@@ -269,6 +271,78 @@ type DesktopCalendarEvent struct {
 	AlarmLeadMin int `json:"alarm_lead_min,omitempty"`
 }
 
+// overridesFromICal pulls RECURRENCE-ID override VEVENTs out of a recurring
+// master's raw iCal blob. CalDAV stores a whole series as ONE resource
+// (master VEVENT + one VEVENT per modified instance), and our sync keeps one
+// DB row per resource — so moved/edited instances exist ONLY inside
+// ical_data. Without this, a meeting dragged to another day silently
+// disappears from the desktop client.
+//
+// Returns the overridden original instants (the master's expansion must skip
+// them — RFC 5545: an override REPLACES its RECURRENCE-ID instance) and the
+// override instances as standalone one-off events.
+func overridesFromICal(master *models.CalendarEvent) ([]int64, []DesktopCalendarEvent) {
+	if master.ICalData == "" || !strings.Contains(master.ICalData, "RECURRENCE-ID") {
+		return nil, nil
+	}
+	cal, err := ical.NewDecoder(strings.NewReader(master.ICalData)).Decode()
+	if err != nil {
+		return nil, nil
+	}
+	var excluded []int64
+	var out []DesktopCalendarEvent
+	for _, ev := range cal.Events() {
+		recProp := ev.Props.Get(ical.PropRecurrenceID)
+		if recProp == nil {
+			continue // the master itself
+		}
+		recT, err := recProp.DateTime(nil)
+		if err != nil {
+			continue
+		}
+		excluded = append(excluded, timeutil.ToMs(recT))
+
+		o := DesktopCalendarEvent{
+			ID:           master.ID,
+			CalendarID:   master.CalendarID,
+			UID:          master.UID,
+			Summary:      master.Summary,
+			Location:     master.Location,
+			Status:       master.Status,
+			RecurrenceID: recProp.Value,
+		}
+		if p := ev.Props.Get(ical.PropSummary); p != nil {
+			if v, err := p.Text(); err == nil && v != "" {
+				o.Summary = v
+			}
+		}
+		if p := ev.Props.Get(ical.PropLocation); p != nil {
+			if v, err := p.Text(); err == nil && v != "" {
+				o.Location = v
+			}
+		}
+		if p := ev.Props.Get(ical.PropDateTimeStart); p != nil {
+			if t, err := p.DateTime(nil); err == nil {
+				o.DTStart = timeutil.ToMs(t)
+			}
+			if p.Params.Get(ical.ParamValue) == "DATE" {
+				o.AllDay = true
+			}
+		}
+		if o.DTStart == 0 {
+			continue // unusable override, but its exclusion still applies
+		}
+		if p := ev.Props.Get(ical.PropDateTimeEnd); p != nil {
+			if t, err := p.DateTime(nil); err == nil {
+				ms := timeutil.ToMs(t)
+				o.DTEnd = &ms
+			}
+		}
+		out = append(out, o)
+	}
+	return excluded, out
+}
+
 // HandleDesktopCalendars returns all of the user's calendars (enabled + disabled).
 // The client decides which to display via local visibility settings; server-side
 // "enabled" is the soft-delete flag rather than a UI preference.
@@ -370,6 +444,15 @@ func (s *Server) HandleDesktopCalendarEvents(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// UID+RECURRENCE-ID pairs already present as their own DB rows — those
+	// must not be duplicated by the synthetic overrides below.
+	storedOverrides := make(map[string]bool)
+	for _, e := range events {
+		if e.RecurrenceID != "" {
+			storedOverrides[e.UID+"|"+e.RecurrenceID] = true
+		}
+	}
+
 	out := make([]DesktopCalendarEvent, 0, len(events))
 	for _, e := range events {
 		atts, _ := s.database.GetAttendeesByEventID(e.ID)
@@ -385,6 +468,25 @@ func (s *Server) HandleDesktopCalendarEvents(w http.ResponseWriter, r *http.Requ
 		var exDates []int64
 		if e.RRule != "" {
 			exDates = parseExDates(e.ICalData)
+			// Moved/edited instances: exclude their original instants from
+			// the master expansion and serve the overrides themselves as
+			// one-off events when they land in the requested window.
+			overriddenStarts, overrides := overridesFromICal(e)
+			exDates = append(exDates, overriddenStarts...)
+			for _, o := range overrides {
+				if storedOverrides[o.UID+"|"+o.RecurrenceID] {
+					continue
+				}
+				oEnd := o.DTStart + 30*60*1000
+				if o.DTEnd != nil {
+					oEnd = *o.DTEnd
+				}
+				if o.DTStart < toMs && oEnd > fromMs {
+					o.Attendees = dtos
+					o.AlarmLeadMin = parseAlarmLeadMin(e.ICalData)
+					out = append(out, o)
+				}
+			}
 		}
 		out = append(out, DesktopCalendarEvent{
 			ID:             e.ID,
