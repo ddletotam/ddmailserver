@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -163,9 +164,11 @@ func (s *Server) CORSMiddleware(next http.Handler) http.Handler {
 				isAllowed = true
 			}
 
-			// Check if origin matches actual host (handles reverse proxy)
+			// Check if origin's host EQUALS the actual host (handles reverse
+			// proxy). Substring matching is not enough: with Allow-Credentials
+			// it would accept e.g. https://mail.example.com.evil.com.
 			hostWithoutPort := strings.Split(host, ":")[0]
-			if strings.Contains(origin, hostWithoutPort) {
+			if originURL, err := url.Parse(origin); err == nil && originURL.Hostname() == hostWithoutPort {
 				isAllowed = true
 			}
 

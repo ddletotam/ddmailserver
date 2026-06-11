@@ -18,12 +18,27 @@ type User struct {
 	database       *db.DB
 	searchIndexer  *search.Indexer
 	bodyCache      *bodyCache
+	backend        *Backend
 	foldersEnsured bool
 }
 
 // Username returns the username
 func (u *User) Username() string {
 	return u.username
+}
+
+// mailbox builds a Mailbox bound to this user's session dependencies.
+func (u *User) mailbox(name, folderType string, folderID int64) *Mailbox {
+	return &Mailbox{
+		name:          name,
+		folderType:    folderType,
+		user:          u,
+		database:      u.database,
+		folderID:      folderID,
+		searchIndexer: u.searchIndexer,
+		bodyCache:     u.bodyCache,
+		backend:       u.backend,
+	}
 }
 
 // ListMailboxes returns a list of mailboxes
@@ -62,15 +77,7 @@ func (u *User) ListMailboxes(subscribed bool) ([]backend.Mailbox, error) {
 			continue
 		}
 
-		mb := &Mailbox{
-			name:          folder.Name,
-			folderType:    folder.Type,
-			user:          u,
-			database:      u.database,
-			folderID:      folder.ID,
-			searchIndexer: u.searchIndexer,
-			bodyCache:     u.bodyCache,
-		}
+		mb := u.mailbox(folder.Name, folder.Type, folder.ID)
 
 		// INBOX goes first
 		if folder.Type == "inbox" {
@@ -91,15 +98,7 @@ func (u *User) GetMailbox(name string) (backend.Mailbox, error) {
 	// Try to find local folder by name
 	folder, err := u.database.GetLocalFolderByName(u.userID, name)
 	if err == nil {
-		return &Mailbox{
-			name:          folder.Name,
-			folderType:    folder.Type,
-			user:          u,
-			database:      u.database,
-			folderID:      folder.ID,
-			searchIndexer: u.searchIndexer,
-			bodyCache:     u.bodyCache,
-		}, nil
+		return u.mailbox(folder.Name, folder.Type, folder.ID), nil
 	}
 
 	// INBOX auto-create
@@ -108,15 +107,7 @@ func (u *User) GetMailbox(name string) (backend.Mailbox, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &Mailbox{
-			name:          "INBOX",
-			folderType:    "inbox",
-			user:          u,
-			database:      u.database,
-			folderID:      inbox.ID,
-			searchIndexer: u.searchIndexer,
-			bodyCache:     u.bodyCache,
-		}, nil
+		return u.mailbox("INBOX", "inbox", inbox.ID), nil
 	}
 
 	return nil, backend.ErrNoSuchMailbox
