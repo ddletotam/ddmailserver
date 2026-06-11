@@ -27,6 +27,82 @@ type Mailbox struct {
 	folderID      int64 // Local folder ID
 	searchIndexer *search.Indexer
 	bodyCache     *bodyCache
+	backend       *Backend // for pushing untagged EXPUNGE/FETCH updates to sessions
+}
+
+// clientSeqNums maps the given UIDs (any order) to their 1-based positions
+// in the client-facing sequence of this folder: the UID-ordered union of
+// visible and \Deleted-flagged (not yet expunged) messages. The visible
+// list alone is wrong here — clients still count \Deleted-flagged rows
+// until they receive EXPUNGE. Returned seqnums are ascending.
+func (m *Mailbox) clientSeqNums(uids []uint32) []uint32 {
+	want := make(map[uint32]bool, len(uids))
+	for _, u := range uids {
+		want[u] = true
+	}
+
+	visible, err := m.database.GetMessagesByFolderMeta(m.folderID, 1000000, 0)
+	if err != nil {
+		log.Printf("clientSeqNums: failed to load visible messages: %v", err)
+		return nil
+	}
+	flagged, err := m.database.GetDeletedMessagesByFolder(m.folderID)
+	if err != nil {
+		log.Printf("clientSeqNums: failed to load deleted-flagged messages: %v", err)
+		return nil
+	}
+
+	// Merge the two UID-ascending lists, recording positions of wanted UIDs.
+	seqNums := make([]uint32, 0, len(uids))
+	i, j := 0, 0
+	var pos uint32
+	for i < len(visible) || j < len(flagged) {
+		pos++
+		var uid uint32
+		if j >= len(flagged) || (i < len(visible) && visible[i].UID < flagged[j].UID) {
+			uid = visible[i].UID
+			i++
+		} else {
+			uid = flagged[j].UID
+			j++
+		}
+		if want[uid] {
+			seqNums = append(seqNums, pos)
+		}
+	}
+	return seqNums
+}
+
+// notifyExpungeDesc pushes untagged EXPUNGE updates for ascending seqnums,
+// sending them in descending order so each seqnum stays valid while the
+// client applies the preceding (higher) ones.
+func (m *Mailbox) notifyExpungeDesc(seqNumsAsc []uint32) {
+	if m.backend == nil || len(seqNumsAsc) == 0 {
+		return
+	}
+	desc := make([]uint32, 0, len(seqNumsAsc))
+	for i := len(seqNumsAsc) - 1; i >= 0; i-- {
+		desc = append(desc, seqNumsAsc[i])
+	}
+	m.backend.notifyExpunge(m.user.username, m.name, desc)
+}
+
+// flagList converts stored flag booleans to an IMAP flag list.
+func flagList(seen, flagged, answered, deleted bool) []string {
+	var flags []string
+	if seen {
+		flags = append(flags, imap.SeenFlag)
+	}
+	if flagged {
+		flags = append(flags, imap.FlaggedFlag)
+	}
+	if answered {
+		flags = append(flags, imap.AnsweredFlag)
+	}
+	if deleted {
+		flags = append(flags, imap.DeletedFlag)
+	}
+	return flags
 }
 
 // Name returns the mailbox name
@@ -510,6 +586,14 @@ func (m *Mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, operation i
 			log.Printf("Updated flags for message %d: seen=%v, flagged=%v, answered=%v, deleted=%v",
 				msg.ID, seen, flagged, answered, deleted)
 
+			// Push untagged FETCH (FLAGS) so other sessions — and the
+			// non-silent originator — see the change (go-imap suppresses
+			// its own FETCH responses when a backend Updates channel exists).
+			if m.backend != nil {
+				m.backend.notifyFlags(m.user.username, m.name, uint32(seqNum+1), msg.UID,
+					flagList(seen, flagged, answered, deleted))
+			}
+
 			// Queue for reverse sync to external IMAP server (if applicable)
 			// Only queue if message has remote UID (external account, not local delivery)
 			if msg.AccountID > 0 && msg.RemoteUID > 0 {
@@ -692,6 +776,11 @@ func (m *Mailbox) MoveMessagesUID(uid bool, seqSet *imap.SeqSet, destName string
 		movedMsgIDs = append(movedMsgIDs, msg.ID)
 	}
 
+	// Map UIDs to client-facing seqnums while the source rows still exist,
+	// then notify all sessions after the deletes (same as MoveMessages).
+	expungeSeqNums := m.clientSeqNums(srcUIDs)
+	defer m.notifyExpungeDesc(expungeSeqNums)
+
 	for _, msgID := range movedMsgIDs {
 		if delErr := m.database.DeleteMessage(msgID); delErr != nil {
 			log.Printf("MoveMessagesUID: failed to delete original message %d: %v", msgID, delErr)
@@ -776,6 +865,7 @@ func (m *Mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string) e
 	// Move matching messages
 	movedCount := 0
 	var movedMsgIDs []int64
+	var movedUIDs []uint32
 	for seqNum, msg := range messages {
 		id := uint32(seqNum + 1)
 		if uid {
@@ -794,6 +884,7 @@ func (m *Mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string) e
 		}
 
 		movedMsgIDs = append(movedMsgIDs, msg.ID)
+		movedUIDs = append(movedUIDs, msg.UID)
 		movedCount++
 		log.Printf("MoveMessages: moved message %d (UID %d) to folder %s with new UID %d",
 			msg.ID, msg.UID, destName, newUID)
@@ -801,11 +892,17 @@ func (m *Mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string) e
 
 	// Delete original messages from source folder
 	if len(movedMsgIDs) > 0 {
+		// Map UIDs to client-facing seqnums while the rows still exist.
+		expungeSeqNums := m.clientSeqNums(movedUIDs)
 		for _, msgID := range movedMsgIDs {
 			if err := m.database.DeleteMessage(msgID); err != nil {
 				log.Printf("MoveMessages: failed to delete original message %d: %v", msgID, err)
 			}
 		}
+		// Untagged EXPUNGE for the source mailbox — without it, other live
+		// sessions (and the originator: go-imap generates nothing for MOVE
+		// when a backend Updates channel exists) keep showing moved messages.
+		m.notifyExpungeDesc(expungeSeqNums)
 	}
 
 	log.Printf("MoveMessages: moved %d messages to %s", movedCount, destName)
@@ -844,6 +941,11 @@ func (m *Mailbox) Expunge() error {
 		return nil
 	}
 
+	// Compute the seqnums clients will expunge BEFORE deleting (the mapping
+	// is gone once the rows are). On mapping failure we still expunge and
+	// just skip the untagged updates.
+	expungeSeqNums := m.clientSeqNums(deletedUIDs)
+
 	if isTrash {
 		// Trash folder: hard delete permanently
 		count, err := m.database.HardDeleteMessagesByUIDs(m.folderID, deletedUIDs)
@@ -861,6 +963,11 @@ func (m *Mailbox) Expunge() error {
 		}
 		log.Printf("Soft deleted %d messages to vault from mailbox %s", count, m.name)
 	}
+
+	// Untagged EXPUNGE to every session on this mailbox, originator included
+	// (go-imap only auto-generates expunge responses when no backend Updates
+	// channel exists — with one, it is the backend's job).
+	m.notifyExpungeDesc(expungeSeqNums)
 
 	return nil
 }

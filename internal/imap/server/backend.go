@@ -104,6 +104,43 @@ func (b *Backend) SetSearchIndexer(indexer *search.Indexer) {
 	b.searchIndexer = indexer
 }
 
+// sendUpdate pushes an update to connected sessions. go-imap routes it to
+// every connection of the matching user with the matching mailbox selected —
+// including the originator, which is what RFC 3501 expects for untagged
+// EXPUNGE/FETCH (the server core suppresses its own responses whenever a
+// backend exposes an Updates() channel, so the backend MUST emit these).
+func (b *Backend) sendUpdate(update backend.Update) {
+	select {
+	case b.updates <- update:
+	case <-time.After(5 * time.Second):
+		log.Printf("IMAP Backend: update channel not consumed, dropping %T", update)
+	}
+}
+
+// notifyExpunge sends untagged EXPUNGE updates for the given sequence
+// numbers. seqNums MUST be in descending order so each value stays valid
+// while earlier (higher) ones are being applied by the client.
+func (b *Backend) notifyExpunge(username, mailbox string, seqNums []uint32) {
+	for _, n := range seqNums {
+		b.sendUpdate(&backend.ExpungeUpdate{
+			Update: backend.NewUpdate(username, mailbox),
+			SeqNum: n,
+		})
+	}
+}
+
+// notifyFlags sends an untagged FETCH (FLAGS UID) update after a flag change
+// so every session of the user — and the non-silent originator — sees it.
+func (b *Backend) notifyFlags(username, mailbox string, seqNum, uid uint32, flags []string) {
+	msg := imap.NewMessage(seqNum, []imap.FetchItem{imap.FetchFlags, imap.FetchUid})
+	msg.Flags = flags
+	msg.Uid = uid
+	b.sendUpdate(&backend.MessageUpdate{
+		Update:  backend.NewUpdate(username, mailbox),
+		Message: msg,
+	})
+}
+
 // Login authenticates a user
 func (b *Backend) Login(connInfo *imap.ConnInfo, username, password string) (backend.User, error) {
 	log.Printf("IMAP login attempt for user: %s", username)
@@ -135,5 +172,6 @@ func (b *Backend) Login(connInfo *imap.ConnInfo, username, password string) (bac
 		database:      b.database,
 		searchIndexer: b.searchIndexer,
 		bodyCache:     b.bodyCache,
+		backend:       b,
 	}, nil
 }

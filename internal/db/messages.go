@@ -931,27 +931,25 @@ func (db *DB) GetMessageUIDByMessageID(folderID int64, messageID string) (uint32
 	return uid, err
 }
 
-// CopyMessageToFolder copies a message to another folder with a new UID
+// CopyMessageToFolder copies a message to another folder with a new UID.
+// UID assignment and the row insert run in one transaction with an atomic
+// uid_next claim — concurrent COPY/MOVE/APPEND into the same folder must
+// never hand out the same UID (RFC 3501 §2.3.1.1).
 func (db *DB) CopyMessageToFolder(msgID, destFolderID int64) (uint32, error) {
-	// Verify source message exists
-	_, err := db.GetMessageByID(msgID)
+	tx, err := db.Begin()
 	if err != nil {
-		return 0, fmt.Errorf("failed to get source message: %w", err)
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	defer tx.Rollback()
 
-	// Get destination folder for UID assignment
-	destFolder, err := db.GetFolderByID(destFolderID)
+	// Claim the next UID atomically (same pattern as GetNextUIDForFolder).
+	var newUID uint32
+	err = tx.QueryRow(
+		`UPDATE folders SET uid_next = uid_next + 1 WHERE id = $1 RETURNING uid_next - 1`,
+		destFolderID,
+	).Scan(&newUID)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get destination folder: %w", err)
-	}
-
-	// Assign new UID
-	newUID := destFolder.UIDNext
-	destFolder.UIDNext++
-
-	// Update folder's UIDNext
-	if err := db.UpdateFolderUIDInfo(destFolderID, destFolder.UIDNext, destFolder.UIDValidity); err != nil {
-		return 0, fmt.Errorf("failed to update folder UID: %w", err)
+		return 0, fmt.Errorf("failed to claim UID in destination folder: %w", err)
 	}
 
 	// Create copy in destination folder. Carry raw_email along.
@@ -971,11 +969,16 @@ func (db *DB) CopyMessageToFolder(msgID, destFolderID int64) (uint32, error) {
 	`
 
 	var newMsgID int64
-	err = db.QueryRow(query, destFolderID, newUID, now, msgID).Scan(&newMsgID)
+	err = tx.QueryRow(query, destFolderID, newUID, now, msgID).Scan(&newMsgID)
 	if err != nil {
-		return 0, fmt.Errorf("failed to copy message: %w", err)
+		// sql.ErrNoRows here means the source message vanished — surface it
+		// as a missing-source error rather than a generic copy failure.
+		return 0, fmt.Errorf("failed to copy message %d: %w", msgID, err)
 	}
 
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit message copy: %w", err)
+	}
 	return newUID, nil
 }
 

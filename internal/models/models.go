@@ -310,6 +310,8 @@ type FlagSyncEntry struct {
 	Answered     bool   `json:"answered"`
 	Deleted      bool   `json:"deleted"`
 	CreatedAt    int64  `json:"created_at"`
+	RetryCount   int    `json:"retry_count"`
+	LastError    string `json:"last_error"`
 }
 
 // ContactSyncEntry represents a pending contact change to sync to remote CardDAV server

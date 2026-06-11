@@ -56,13 +56,18 @@ func (t *FlagSyncTask) Execute(ctx context.Context) error {
 
 	log.Printf("Flag sync: %d pending entries for %s", len(entries), t.account.Email)
 
-	// Create and connect IMAP client
+	// Create and connect IMAP client. A connect failure counts as a failed
+	// attempt for every fetched entry — without the backoff bump the
+	// scheduler would retry the full connect+LOGIN on its very next tick,
+	// forever, while the source server is down or the password is stale.
 	client, err := imapclient.New(t.account)
 	if err != nil {
+		t.markAllFailed(entries, err)
 		return fmt.Errorf("failed to create IMAP client: %w", err)
 	}
 
 	if err := client.Connect(); err != nil {
+		t.markAllFailed(entries, err)
 		return fmt.Errorf("failed to connect to IMAP server: %w", err)
 	}
 	defer client.Disconnect()
@@ -98,8 +103,14 @@ func (t *FlagSyncTask) Execute(ctx context.Context) error {
 		}
 
 		if err != nil {
-			log.Printf("Flag sync failed for message %d (remote UID %d, deleted=%v): %v",
-				entry.MessageID, entry.RemoteUID, entry.Deleted, err)
+			log.Printf("Flag sync failed for message %d (remote UID %d, deleted=%v, retry %d): %v",
+				entry.MessageID, entry.RemoteUID, entry.Deleted, entry.RetryCount, err)
+			// Persist failure for backoff: without it the entry is retried
+			// on every scheduler tick. Best-effort — a bookkeeping error
+			// must not abort the remaining entries.
+			if markErr := t.database.MarkFlagSyncFailed(entry.ID, err.Error()); markErr != nil {
+				log.Printf("Failed to mark flag sync failure for entry %d: %v", entry.ID, markErr)
+			}
 			failCount++
 			// Continue with other entries, don't abort
 			continue
@@ -117,4 +128,15 @@ func (t *FlagSyncTask) Execute(ctx context.Context) error {
 		t.account.Email, successCount, failCount)
 
 	return nil
+}
+
+// markAllFailed records a shared failure (e.g. connect refused) against every
+// entry so each one's backoff advances and the account stops being picked up
+// by the scheduler until next_attempt_at.
+func (t *FlagSyncTask) markAllFailed(entries []*models.FlagSyncEntry, cause error) {
+	for _, entry := range entries {
+		if err := t.database.MarkFlagSyncFailed(entry.ID, cause.Error()); err != nil {
+			log.Printf("Failed to mark flag sync failure for entry %d: %v", entry.ID, err)
+		}
+	}
 }
