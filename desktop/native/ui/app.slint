@@ -140,6 +140,11 @@ export component MainWindow inherits Window {
     // Wired to the left-rail icons; Rust side mirrors it for state
     // restoration.
     in-out property <int> view-mode: 0;
+    // Burger menu (top-left) open state — replaces the old always-on nav rail.
+    in-out property <bool> view-menu-open: false;
+    // When true the calendar's left panel (+ Событие / КАЛЕНДАРИ) is hidden,
+    // giving the week grid the full width.
+    in-out property <bool> calendar-panel-collapsed: false;
 
     // ── Calendar state ──
     in property <[CalendarItem]> calendars;
@@ -163,6 +168,10 @@ export component MainWindow inherits Window {
     in property <int> hour-end: 24;
     // Day-of-week labels Rust fills, parallel to the day columns.
     in property <[string]> day-headers;
+    // Column index of "today" within the displayed week (-1 = not shown).
+    in property <int> today-col: -1;
+    // Current local time as fractional hours (e.g. 14.5) for the now-line.
+    in property <float> now-hour: -1;
 
     callback view-changed(int);
     callback calendar-prev();
@@ -171,7 +180,16 @@ export component MainWindow inherits Window {
     callback calendar-toggle-workdays();
     callback calendar-toggle-non-work-hours();
     callback calendar-toggle-visibility(int);
+    // Fired right after the panel collapsed/expanded so Rust persists it.
+    callback calendar-panel-toggled();
+    // (calendar id, palette index) from the colour-picker popup.
+    callback calendar-set-color(int, int);
     callback event-clicked(int);
+
+    // Colour-picker popup state: which calendar's colour is being edited
+    // (-1 = closed), plus the palette swatches mirrored from Rust.
+    in-out property <int> color-picker-cal: -1;
+    in property <[color]> cal-palette;
 
     // Event-detail popup (Phase B, read-only). Populated by the Rust side on
     // event-clicked; shown as a modal overlay.
@@ -231,67 +249,9 @@ export component MainWindow inherits Window {
     HorizontalLayout {
         spacing: 0px;
 
-        // ---------- Left nav rail ----------
-        //
-        // Always-visible icon strip on the very left. Two icons for now
-        // (Mail and Calendar); future buttons (Settings, Contacts) land
-        // here too. Click swaps the rest of the window between the
-        // mail and the calendar trees below.
-        Rectangle {
-            width: 48px;
-            background: #f0f2f5;
-            VerticalLayout {
-                padding-top: 10px;
-                spacing: 4px;
-                alignment: start;
-                // Mail button
-                Rectangle {
-                    height: 40px;
-                    width: 36px;
-                    x: 6px;
-                    border-radius: 10px;
-                    background: root.view-mode == 0 ? #2f80ed : (m-nav.has-hover ? #e1e6ee : transparent);
-                    m-nav := TouchArea {
-                        clicked => {
-                            root.view-mode = 0;
-                            root.view-changed(0);
-                        }
-                    }
-                    Text {
-                        width: parent.width;
-                        height: parent.height;
-                        text: "✉";
-                        color: root.view-mode == 0 ? white : #6b7480;
-                        font-size: 18px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-                // Calendar button
-                Rectangle {
-                    height: 40px;
-                    width: 36px;
-                    x: 6px;
-                    border-radius: 10px;
-                    background: root.view-mode == 1 ? #2f80ed : (c-nav.has-hover ? #e1e6ee : transparent);
-                    c-nav := TouchArea {
-                        clicked => {
-                            root.view-mode = 1;
-                            root.view-changed(1);
-                        }
-                    }
-                    Text {
-                        width: parent.width;
-                        height: parent.height;
-                        text: "📅";
-                        color: root.view-mode == 1 ? white : #6b7480;
-                        font-size: 17px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-        }
+        // The old always-on nav rail was removed to reclaim horizontal
+        // space; the view switcher now lives in a burger (☰) at each
+        // sidebar's top-left, opening the menu overlay (view-menu-open).
 
         // ---------- Sidebar (mail view) ----------
         if root.view-mode == 0: Rectangle {
@@ -300,10 +260,31 @@ export component MainWindow inherits Window {
             VerticalLayout {
                 Rectangle {
                     height: 56px;
+                    // Burger — opens the view-switcher menu (Почта/Календарь).
                     Rectangle {
                         x: 10px;
                         y: 10px;
-                        width: parent.width - 20px;
+                        width: 36px;
+                        height: 36px;
+                        border-radius: 10px;
+                        background: burger-m.has-hover ? #e1e6ee : transparent;
+                        burger-m := TouchArea { clicked => { root.view-menu-open = !root.view-menu-open; } }
+                        // Drawn burger — the ☰ glyph is missing from the
+                        // default font on Windows, so we draw three bars.
+                        VerticalLayout {
+                            padding-left: 9px;
+                            padding-right: 9px;
+                            spacing: 4px;
+                            alignment: center;
+                            Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
+                            Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
+                            Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
+                        }
+                    }
+                    Rectangle {
+                        x: 54px;
+                        y: 10px;
+                        width: parent.width - 64px;
                         height: 36px;
                         background: #eceef0;
                         border-radius: 18px;
@@ -1099,14 +1080,17 @@ export component MainWindow inherits Window {
                         chv-ta := TouchArea {
                             clicked => { root.composer-expanded = !root.composer-expanded; }
                         }
-                        Text {
-                            width: parent.width;
-                            height: parent.height;
-                            text: root.composer-expanded ? "⌃" : "⌄";
-                            color: #6b7480;
-                            font-size: 18px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                        // Drawn chevron — the ⌃/⌄ glyphs are missing from the
+                        // default font on Windows (same story as the burger).
+                        Path {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 12px;
+                            height: 7px;
+                            commands: root.composer-expanded ? "M 0 7 L 6 0 L 12 7" : "M 0 0 L 6 7 L 12 0";
+                            stroke: #6b7480;
+                            stroke-width: 2px;
+                            fill: transparent;
                         }
                     }
                 }
@@ -1117,7 +1101,7 @@ export component MainWindow inherits Window {
 
         // Calendar sidebar — same width as the mail sidebar, sharing the
         // splitter handle position.
-        if root.view-mode == 1: Rectangle {
+        if root.view-mode == 1 && !root.calendar-panel-collapsed: Rectangle {
             width: root.sidebar-width;
             background: #f7f8fa;
             VerticalLayout {
@@ -1133,6 +1117,25 @@ export component MainWindow inherits Window {
                         HorizontalLayout {
                             spacing: 4px;
                             alignment: stretch;
+                            // Burger — keeps the same top-left spot as the
+                            // mail view; when the panel is collapsed the
+                            // main topbar shows it instead.
+                            Rectangle {
+                                width: 32px;
+                                height: 32px;
+                                border-radius: 10px;
+                                background: burger-p.has-hover ? #eef0f4 : transparent;
+                                burger-p := TouchArea { clicked => { root.view-menu-open = !root.view-menu-open; } }
+                                VerticalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    spacing: 4px;
+                                    alignment: center;
+                                    Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
+                                    Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
+                                    Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
+                                }
+                            }
                             Rectangle {
                                 width: 32px;
                                 height: 32px;
@@ -1225,6 +1228,12 @@ export component MainWindow inherits Window {
                                 background: c.visible ? c.color : transparent;
                                 border-color: c.color;
                                 border-width: c.visible ? 0px : 1.5px;
+                                // Clicking the swatch edits this calendar's
+                                // colour (the row click still toggles
+                                // visibility — this TouchArea wins inside).
+                                TouchArea {
+                                    clicked => { root.color-picker-cal = c.id; }
+                                }
                             }
                             Text {
                                 horizontal-stretch: 1;
@@ -1241,8 +1250,8 @@ export component MainWindow inherits Window {
             }
         }
 
-        // Splitter (calendar view)
-        if root.view-mode == 1: Rectangle {
+        // Splitter (calendar view) — hidden when the panel is collapsed.
+        if root.view-mode == 1 && !root.calendar-panel-collapsed: Rectangle {
             width: 4px;
             background: spl-ta-cal.has-hover || spl-ta-cal.pressed ? #d2dbe4 : #e6ecf2;
             spl-ta-cal := TouchArea {
@@ -1266,6 +1275,49 @@ export component MainWindow inherits Window {
                     padding: 8px;
                     spacing: 8px;
                     alignment: stretch;
+                    // Burger — only when the panel is collapsed; with the
+                    // panel open the burger lives inside it (same top-left
+                    // spot either way, predictability beats decoration).
+                    if root.calendar-panel-collapsed: Rectangle {
+                        width: 34px;
+                        height: 34px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 10px;
+                        background: burger-c.has-hover ? #eef0f4 : transparent;
+                        burger-c := TouchArea { clicked => { root.view-menu-open = !root.view-menu-open; } }
+                        // Drawn burger — ☰ glyph missing from the default font.
+                        VerticalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 4px;
+                            alignment: center;
+                            Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
+                            Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
+                            Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
+                        }
+                    }
+                    // Collapse / reveal the calendar list panel.
+                    Rectangle {
+                        width: 34px;
+                        height: 34px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 10px;
+                        background: panel-tg.has-hover ? #eef0f4 : transparent;
+                        panel-tg := TouchArea {
+                            clicked => {
+                                root.calendar-panel-collapsed = !root.calendar-panel-collapsed;
+                                root.calendar-panel-toggled();
+                            }
+                        }
+                        // "‹"/"›" — same glyphs as the week prev/next buttons,
+                        // known to render in the default font (unlike «/»).
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: root.calendar-panel-collapsed ? "››" : "‹‹";
+                            color: #6b7480; font-size: 15px; font-weight: 700;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                    }
                     Rectangle {
                         horizontal-stretch: 1;
                         if root.calendar-loading: Rectangle {
@@ -1319,7 +1371,7 @@ export component MainWindow inherits Window {
                         }
                         Text {
                             width: parent.width; height: parent.height;
-                            text: root.show-non-work-hours ? "0–24" : "8–18";
+                            text: root.show-non-work-hours ? "0–24" : "8–19";
                             color: root.show-non-work-hours ? white : #6b7480;
                             font-size: 12px; font-weight: 700;
                             horizontal-alignment: center; vertical-alignment: center;
@@ -1338,11 +1390,20 @@ export component MainWindow inherits Window {
                     Rectangle { width: 48px; }
                     for h[d] in root.day-headers: Rectangle {
                         horizontal-stretch: 1;
+                        // Today gets a blue pill behind its label.
+                        if d == root.today-col: Rectangle {
+                            x: (parent.width - self.width) / 2;
+                            y: 3px;
+                            width: min(parent.width - 8px, 96px);
+                            height: parent.height - 6px;
+                            border-radius: (parent.height - 6px) / 2;
+                            background: #2f80ed18;
+                        }
                         Text {
                             width: parent.width; height: parent.height;
                             text: h;
                             font-weight: 700; font-size: 12px;
-                            color: #6b7480;
+                            color: d == root.today-col ? #2f80ed : #6b7480;
                             horizontal-alignment: center; vertical-alignment: center;
                         }
                     }
@@ -1401,6 +1462,14 @@ export component MainWindow inherits Window {
                     viewport-width: parent.width;
                     viewport-height: (root.hour-end - root.hour-start) * root.hour-height;
 
+                    // Today's column — light tint behind everything else.
+                    if root.today-col >= 0: Rectangle {
+                        x: 48px + root.today-col * (parent.viewport-width - 48px) / root.day-count;
+                        y: 0;
+                        width: (parent.viewport-width - 48px) / root.day-count;
+                        height: parent.viewport-height;
+                        background: #2f80ed0a;
+                    }
                     // Per-hour horizontal rules across the full row.
                     for i in (root.hour-end - root.hour-start): Rectangle {
                         x: 48px;
@@ -1449,6 +1518,129 @@ export component MainWindow inherits Window {
                             font-weight: 700;
                             overflow: elide;
                             wrap: word-wrap;
+                        }
+                    }
+                    // Now-line: current time across today's column, with a
+                    // dot at its left edge. Drawn above the events.
+                    if root.today-col >= 0
+                        && root.now-hour >= root.hour-start
+                        && root.now-hour <= root.hour-end: Rectangle {
+                        x: 48px + root.today-col * (parent.viewport-width - 48px) / root.day-count;
+                        y: (root.now-hour - root.hour-start) * root.hour-height - 1px;
+                        width: (parent.viewport-width - 48px) / root.day-count;
+                        height: 2px;
+                        background: #eb5757;
+                        Rectangle {
+                            x: -3px;
+                            y: -2px;
+                            width: 6px;
+                            height: 6px;
+                            border-radius: 3px;
+                            background: #eb5757;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------- View switcher (burger) overlay ----------
+    // Backdrop catches outside clicks; the little menu sits under the
+    // top-left burger and switches between Почта / Календарь.
+    if root.view-menu-open: TouchArea {
+        clicked => { root.view-menu-open = false; }
+        Rectangle {
+            x: 10px;
+            y: 54px;
+            width: 200px;
+            height: 88px;
+            background: white;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: #e6ecf2;
+            drop-shadow-blur: 18px;
+            drop-shadow-color: #00000022;
+            VerticalLayout {
+                padding: 6px;
+                spacing: 2px;
+                Rectangle {
+                    height: 36px;
+                    border-radius: 8px;
+                    background: root.view-mode == 0 ? #eaf2fe : (vm-mail.has-hover ? #f0f2f5 : transparent);
+                    vm-mail := TouchArea {
+                        clicked => { root.view-mode = 0; root.view-changed(0); root.view-menu-open = false; }
+                    }
+                    HorizontalLayout {
+                        padding-left: 12px; spacing: 10px; alignment: start;
+                        Text { text: "✉"; font-size: 16px; color: #2f80ed; vertical-alignment: center; }
+                        Text { text: "Почта"; font-size: 14px; font-weight: 600; color: #0f1419; vertical-alignment: center; }
+                    }
+                }
+                Rectangle {
+                    height: 36px;
+                    border-radius: 8px;
+                    background: root.view-mode == 1 ? #eaf2fe : (vm-cal.has-hover ? #f0f2f5 : transparent);
+                    vm-cal := TouchArea {
+                        clicked => { root.view-mode = 1; root.view-changed(1); root.view-menu-open = false; }
+                    }
+                    HorizontalLayout {
+                        padding-left: 12px; spacing: 10px; alignment: start;
+                        Text { text: "📅"; font-size: 16px; vertical-alignment: center; }
+                        Text { text: "Календарь"; font-size: 14px; font-weight: 600; color: #0f1419; vertical-alignment: center; }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------- Calendar colour-picker overlay ----------
+    // Two rows of palette swatches; click assigns the colour to the
+    // calendar whose swatch opened the popup.
+    if root.color-picker-cal >= 0: TouchArea {
+        clicked => { root.color-picker-cal = -1; }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 6 * 32px + 5 * 8px + 28px;
+            height: 2 * 32px + 8px + 28px;
+            background: white;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: #e6ecf2;
+            drop-shadow-blur: 18px;
+            drop-shadow-color: #00000022;
+            // Swallow clicks on the card body so only the backdrop closes.
+            TouchArea { }
+            VerticalLayout {
+                padding: 14px;
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    for i in 6: Rectangle {
+                        width: 32px;
+                        height: 32px;
+                        border-radius: 16px;
+                        background: root.cal-palette[i];
+                        TouchArea {
+                            clicked => {
+                                root.calendar-set-color(root.color-picker-cal, i);
+                                root.color-picker-cal = -1;
+                            }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    for i in 6: Rectangle {
+                        width: 32px;
+                        height: 32px;
+                        border-radius: 16px;
+                        background: root.cal-palette[i + 6];
+                        TouchArea {
+                            clicked => {
+                                root.calendar-set-color(root.color-picker-cal, i + 6);
+                                root.color-picker-cal = -1;
+                            }
                         }
                     }
                 }
