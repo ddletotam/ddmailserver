@@ -201,6 +201,13 @@ pub enum EngineCmd {
     /// Raw RFC-822 source of one message — feeds the «Показать →
     /// Заголовки / Исходник сообщения» views.
     FetchSource { folder: String, uid: u32 },
+    /// «Спам»: blacklist the sender (domain rule) and purge all their
+    /// messages, including the given conversation rows.
+    BlacklistAndPurge {
+        domain: String,
+        address: String,
+        message_ids: Vec<i64>,
+    },
     DownloadAttachment { folder: String, uid: u32, index: usize, filename: String },
     /// Live dropdown lookup for the search-as-compose bar: matching contacts
     /// (name/email) AND matching messages (subject/body) in one round-trip.
@@ -561,6 +568,18 @@ pub fn spawn(
                 EngineCmd::FetchSource { folder, uid } => {
                     match rt.block_on(provider.fetch_message_source(&folder, uid)) {
                         Ok(raw) => on_result(EngineResult::Source { uid, raw }),
+                        Err(e) => on_result(EngineResult::Error(e)),
+                    }
+                }
+                EngineCmd::BlacklistAndPurge { domain, address, message_ids } => {
+                    match rt.block_on(provider.blacklist_and_purge(&domain, &address, &message_ids)) {
+                        Ok(n) => {
+                            println!("engine: spam purge of {address} removed {n} messages");
+                            // Conversations vanish — force the next list
+                            // refetch to run full (same as Delete).
+                            cache.set_meta(&format!("conv_full_ts:{key}"), "0").ok();
+                            on_result(EngineResult::Done("delete".into()));
+                        }
                         Err(e) => on_result(EngineResult::Error(e)),
                     }
                 }
