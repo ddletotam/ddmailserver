@@ -686,11 +686,80 @@ fn week_start_days_today() -> i64 {
         .num_days()
 }
 
+/// Side-by-side lanes for overlapping blocks within a day column: events
+/// that share time split the column into equal-width lanes, like every
+/// desktop calendar. Without this, same-time events from different
+/// calendars paint over each other and only the topmost stays visible.
+fn assign_overlap_lanes(blocks: &mut [EventBlock], day_count: i32) {
+    // Assign greedy lanes within one cluster of transitively-overlapping
+    // blocks, then split the column between the lanes used.
+    fn flush(blocks: &mut [EventBlock], cluster: &mut Vec<usize>) {
+        if cluster.is_empty() {
+            return;
+        }
+        let mut lane_ends: Vec<f32> = Vec::new();
+        let mut lane_of: Vec<usize> = Vec::with_capacity(cluster.len());
+        for &i in cluster.iter() {
+            let top = blocks[i].top;
+            let lane = match lane_ends.iter().position(|&e| e <= top) {
+                Some(l) => l,
+                None => {
+                    lane_ends.push(f32::MIN);
+                    lane_ends.len() - 1
+                }
+            };
+            lane_ends[lane] = top + blocks[i].h;
+            lane_of.push(lane);
+        }
+        let n = lane_ends.len() as f32;
+        for (k, &i) in cluster.iter().enumerate() {
+            blocks[i].xf = lane_of[k] as f32 / n;
+            blocks[i].wf = 1.0 / n;
+        }
+        cluster.clear();
+    }
+
+    for day in 0..day_count {
+        let mut idx: Vec<usize> = (0..blocks.len()).filter(|&i| blocks[i].day == day).collect();
+        idx.sort_by(|&a, &b| {
+            blocks[a]
+                .top
+                .partial_cmp(&blocks[b].top)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut cluster: Vec<usize> = Vec::new();
+        let mut cluster_end = f32::MIN;
+        for i in idx {
+            if !cluster.is_empty() && blocks[i].top >= cluster_end {
+                flush(blocks, &mut cluster);
+                cluster_end = f32::MIN;
+            }
+            cluster_end = cluster_end.max(blocks[i].top + blocks[i].h);
+            cluster.push(i);
+        }
+        flush(blocks, &mut cluster);
+    }
+}
+
+/// Absolute ms of local midnight for the given calendar date. None only if
+/// the local timezone genuinely has no midnight that day (DST gap).
+fn local_midnight_ms(date: chrono::NaiveDate) -> Option<i64> {
+    use chrono::{Local, TimeZone};
+    Local
+        .from_local_datetime(&date.and_hms_opt(0, 0, 0)?)
+        .single()
+        .map(|d| d.timestamp_millis())
+}
+
 /// Compute the [from_ms, to_ms) range covering the displayed week
-/// (5 or 7 days, full 24h regardless of hour-toggle).
+/// (5 or 7 days, full 24h regardless of hour-toggle), anchored to LOCAL
+/// Monday midnight — must match apply_calendar_view's window.
 fn week_range_ms(week_start_days: i64, day_count: i32) -> (i64, i64) {
+    use chrono::Duration;
     let day_ms: i64 = 24 * 60 * 60 * 1000;
-    let from = week_start_days * day_ms;
+    let monday = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()
+        + Duration::days(week_start_days);
+    let from = local_midnight_ms(monday).unwrap_or(week_start_days * day_ms);
     let to = from + day_count as i64 * day_ms;
     (from, to)
 }
@@ -788,14 +857,18 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
     // one block per day it touches. All-day events are routed out of the
     // hour grid into the band above it.
     let day_ms: i64 = 24 * 60 * 60 * 1000;
-    let week_start_ms = week_days * day_ms;
+    // Week window in LOCAL time: the grid's day columns are local days, so
+    // the window must start at local Monday midnight, not UTC midnight —
+    // otherwise every event shifts by the UTC offset (+3 here) and
+    // midnight-adjacent ones land in the wrong column.
+    let week_start_ms = local_midnight_ms(monday).unwrap_or(week_days * day_ms);
     let week_end_ms = week_start_ms + day_count as i64 * day_ms;
     let hour_height: f32 = ui.get_hour_height();
     let hour_start = ui.get_hour_start();
     let hour_end = ui.get_hour_end();
     let visible_top_ms = hour_start as i64 * 60 * 60 * 1000;
     let visible_bottom_ms = hour_end as i64 * 60 * 60 * 1000;
-    let (blocks, all_day_blocks, all_day_rows): (Vec<EventBlock>, Vec<AllDayBlock>, i32) = {
+    let (mut blocks, all_day_blocks, all_day_rows): (Vec<EventBlock>, Vec<AllDayBlock>, i32) = {
         let events = sh.calendar_events.borrow();
         let visibility = sh.calendar_visible.borrow();
         let cals = sh.calendars.borrow();
@@ -840,6 +913,19 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
                 week_start_ms,
                 week_end_ms,
             );
+            // Diagnostics: a recurring master that expands to nothing this
+            // week is either legitimately out of window or an expand() bug
+            // — log it so missing-event reports are checkable from the log.
+            if occ.is_empty() && !e.rrule.is_empty() {
+                println!(
+                    "[cal] no-occurrence: id={} dtstart={} rrule={:?} exdates={} {:?}",
+                    e.id,
+                    e.dtstart,
+                    e.rrule,
+                    e.exdates.len(),
+                    e.summary.chars().take(30).collect::<String>()
+                );
+            }
             for o in occ {
                 // Day range the occurrence touches. `end_ms - 1` so an event
                 // ending exactly on midnight doesn't bleed into the next day.
@@ -880,13 +966,31 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
                         title: e.summary.clone().into(),
                         time: format!("{} – {}", fmt_hm(o.start_ms), fmt_hm(o.end_ms)).into(),
                         all_day: false,
+                        xf: 0.0,
+                        wf: 1.0,
                     });
                 }
             }
         }
         let rows = *all_day_fill.iter().max().unwrap_or(&0);
+        println!(
+            "[cal] layout: events_total={} blocks={} all_day={} week_start_ms={} \
+             window=[{}..{}) sample={:?}",
+            events.len(),
+            blocks.len(),
+            all_day_blocks.len(),
+            week_start_ms,
+            week_start_ms,
+            week_end_ms,
+            events
+                .iter()
+                .take(3)
+                .map(|e| (e.id, e.calendar_id, e.dtstart, e.all_day, e.rrule.clone()))
+                .collect::<Vec<_>>()
+        );
         (blocks, all_day_blocks, rows)
     };
+    assign_overlap_lanes(&mut blocks, day_count);
     ui.set_events(slint::ModelRc::new(slint::VecModel::from(blocks)));
     ui.set_all_day_events(slint::ModelRc::new(slint::VecModel::from(all_day_blocks)));
     ui.set_all_day_rows(all_day_rows);
