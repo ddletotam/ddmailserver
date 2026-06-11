@@ -50,6 +50,11 @@ struct EventBlock {
     title: string,
     time: string,
     all-day: bool,
+    // Horizontal lane within the day column for overlapping events:
+    // x-fraction and width-fraction of the column (0..1). Computed
+    // Rust-side; non-overlapping blocks get xf=0, wf=1.
+    xf: float,
+    wf: float,
 }
 
 // One all-day chip in the band above the hour grid. Multi-day all-day
@@ -1497,11 +1502,12 @@ export component MainWindow inherits Window {
                         height: parent.viewport-height;
                         background: #eef0f4;
                     }
-                    // Event blocks.
+                    // Event blocks. Overlapping events share the column via
+                    // xf/wf lane fractions computed Rust-side.
                     for ev[ei] in root.events: Rectangle {
-                        x: 48px + ev.day * (parent.viewport-width - 48px) / root.day-count + 2px;
+                        x: 48px + (ev.day + ev.xf) * (parent.viewport-width - 48px) / root.day-count + 2px;
                         y: ev.top;
-                        width: (parent.viewport-width - 48px) / root.day-count - 4px;
+                        width: (parent.viewport-width - 48px) / root.day-count * ev.wf - 4px;
                         height: ev.h;
                         background: ev.color;
                         border-radius: 4px;
