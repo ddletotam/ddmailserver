@@ -33,6 +33,7 @@ Thumbs.db
 
 # Private Claude settings (not committed)
 CLAUDE.local.md
+desktop/.claude/
 
 # Database
 *.db
