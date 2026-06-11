@@ -4,6 +4,7 @@
 
 slint::include_modules!();
 
+mod calendar_settings;
 mod engine;
 mod notify;
 mod policy;
@@ -24,6 +25,7 @@ mod window_state;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
 
@@ -42,7 +44,41 @@ const NAMES: [&str; 25] = [
 ];
 const PALETTE: [&str; 6] = ["#2f80ed", "#27ae60", "#eb5757", "#9b51e0", "#f2994a", "#11998e"];
 
+/// Vivid colours for calendar event blocks / list chips. Starts with the
+/// avatar PALETTE (so calendar colours echo the identity colours used
+/// elsewhere) then extends it for the larger calendar count. All saturated
+/// enough to carry white event-title text.
+const CAL_PALETTE: [&str; 12] = [
+    "#2f80ed", "#27ae60", "#eb5757", "#9b51e0", "#f2994a", "#11998e",
+    "#e84393", "#0984e3", "#6ab04c", "#e67e22", "#8e44ad", "#16a085",
+];
+
+/// Stable default colour for a calendar that the server gave no colour for.
+/// Keyed on the calendar id via a multiplicative hash so the mapping is
+/// deterministic across sessions and spreads ids across the palette.
+fn default_cal_color(id: i64) -> &'static str {
+    let idx = ((id.unsigned_abs().wrapping_mul(2_654_435_761)) >> 16) as usize % CAL_PALETTE.len();
+    CAL_PALETTE[idx]
+}
+
+/// Colour to actually paint a calendar with. The CalDAV import stamps most
+/// calendars with the generic placeholder `#3788d8`, so we treat that (and
+/// an empty value) as "no real colour" and fall back to our distinct
+/// per-calendar palette; a genuinely customised colour is kept.
+fn cal_color(id: i64, server_color: &str) -> String {
+    if server_color.is_empty() || server_color.eq_ignore_ascii_case("#3788d8") {
+        default_cal_color(id).to_string()
+    } else {
+        server_color.to_string()
+    }
+}
+
 const DEFAULT_WIDTH: u32 = 740;
+
+/// Default workday bounds (local hours). The calendar's work-hours view
+/// shows one hour either side of these.
+const WORKDAY_START: i32 = 9;
+const WORKDAY_END: i32 = 18;
 
 fn initials(name: &str) -> String {
     name.split_whitespace()
@@ -427,6 +463,11 @@ enum Job {
         /// Bumped whenever the policy mutates so the body_cache knows
         /// to miss for entries rendered under a stale policy.
         policy_gen: u64,
+        /// Monotonic job sequence (latest wins). The render worker skips
+        /// any job older than the newest one enqueued, and aborts
+        /// mid-render when a newer one arrives — so a drag-resize or a
+        /// fast conversation switch never renders bubbles nobody will see.
+        seq: u64,
     },
     HitTest { row: usize, x: f32, y: f32 },
 }
@@ -441,6 +482,17 @@ struct Shared {
     avatars: RefCell<HashMap<String, Image>>,
     /// Message refs for the currently rendered rows (row index → message).
     current_msgs: RefCell<Vec<MessageRef>>,
+    /// Bodies of the open conversation, kept in memory (parallel to
+    /// `current_msgs`) so resize / reply / forward / policy-toggle /
+    /// send-subject paths never re-read SQLite on the UI thread.
+    current_bodies: RefCell<Vec<MessageBody>>,
+    /// Conversation-open generation. Bumped on every open_conversation;
+    /// FetchMessages echoes it back so an answer for a conversation the
+    /// user already left is dropped instead of overwriting the screen
+    /// (same pattern as `search_query_inflight`).
+    open_gen: Cell<u64>,
+    /// Render-job sequence shared with the render worker (see Job::seq).
+    render_seq: Arc<AtomicU64>,
     current: Cell<usize>,
     width: Cell<u32>,
     tx: mpsc::Sender<Job>,
@@ -483,6 +535,9 @@ struct Shared {
     /// Per-calendar visibility, keyed by id. Defaults to true the first
     /// time a calendar shows up.
     calendar_visible: RefCell<HashMap<i64, bool>>,
+    /// User-picked colour overrides (id → "#rrggbb"); wins over the server
+    /// colour and the palette default. Persisted in calendar.json.
+    calendar_colors: RefCell<HashMap<i64, String>>,
     /// Latest events from the engine, kept so toggling visibility /
     /// changing hour-range can re-layout without a server round-trip.
     calendar_events: RefCell<Vec<ddmail_core::types::DesktopCalendarEvent>>,
@@ -512,6 +567,10 @@ thread_local! {
 fn open_conversation(sh: &Shared, idx: usize) {
     let t0 = Instant::now();
     sh.current.set(idx);
+    // New conversation generation: any in-flight FetchMessages answer for
+    // the previously open conversation will be dropped on arrival.
+    let generation = sh.open_gen.get() + 1;
+    sh.open_gen.set(generation);
     let convs = sh.convs.borrow();
     let Some(c) = convs.get(idx) else { return };
     let conv_label = c.label.clone();
@@ -523,20 +582,14 @@ fn open_conversation(sh: &Shared, idx: usize) {
         if !bodies.is_empty() {
             *sh.current_msgs.borrow_mut() =
                 bodies.iter().map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid }).collect();
+            *sh.current_bodies.borrow_mut() = bodies.clone();
             println!(
                 "[perf] open_conversation idx={idx} label={conv_label:?} \
                  messages={msg_count} bodies={} cache_load={load_ms}ms enqueue@{:?}",
                 bodies.len(),
                 t0.elapsed()
             );
-            let policy = sh.policy.borrow().clone();
-            let policy_gen = sh.policy_gen.get();
-            let _ = sh.tx.send(Job::SetConversation {
-                bodies,
-                width: sh.width.get(),
-                policy,
-                policy_gen,
-            });
+            send_render_job(sh, bodies);
         } else {
             println!(
                 "[perf] open_conversation idx={idx} label={conv_label:?} \
@@ -545,8 +598,22 @@ fn open_conversation(sh: &Shared, idx: usize) {
         }
     }
     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
-        let _ = etx.send(engine::EngineCmd::FetchMessages { messages: c.messages.clone() });
+        let _ = etx.send(engine::EngineCmd::FetchMessages { messages: c.messages.clone(), generation });
     }
+}
+
+/// Enqueue a (re)render of `bodies` at the current width/policy. Bumps the
+/// shared render sequence so any older queued job becomes a no-op and a
+/// mid-render older job aborts (latest wins).
+fn send_render_job(sh: &Shared, bodies: Vec<MessageBody>) {
+    let seq = sh.render_seq.fetch_add(1, Ordering::SeqCst) + 1;
+    let _ = sh.tx.send(Job::SetConversation {
+        bodies,
+        width: sh.width.get(),
+        policy: sh.policy.borrow().clone(),
+        policy_gen: sh.policy_gen.get(),
+        seq,
+    });
 }
 
 /// Rebuild the sidebar ConvItem list from displays + the avatar map.
@@ -628,6 +695,26 @@ fn week_range_ms(week_start_days: i64, day_count: i32) -> (i64, i64) {
     (from, to)
 }
 
+/// Snapshot the current calendar-view preferences into calendar.json.
+/// Called immediately after every change (visibility / colour / panel /
+/// day- and hour-range toggles) — never deferred to exit.
+fn save_calendar_settings(ui: &MainWindow, sh: &Shared) {
+    let hidden: Vec<i64> = sh
+        .calendar_visible
+        .borrow()
+        .iter()
+        .filter(|(_, visible)| !**visible)
+        .map(|(id, _)| *id)
+        .collect();
+    calendar_settings::save(&calendar_settings::CalendarSettings {
+        hidden,
+        colors: sh.calendar_colors.borrow().clone(),
+        panel_collapsed: ui.get_calendar_panel_collapsed(),
+        workdays_only: ui.get_workdays_only(),
+        show_non_work_hours: ui.get_show_non_work_hours(),
+    });
+}
+
 fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
     use chrono::{Datelike, Duration, NaiveDate};
     let workdays = ui.get_workdays_only();
@@ -645,6 +732,18 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
         .collect();
     ui.set_day_headers(slint::ModelRc::new(slint::VecModel::from(headers)));
     ui.set_day_count(day_count);
+    // Mark "today" when it falls inside the displayed week: its column
+    // index drives the header highlight + column tint, and the current
+    // local time drives the now-line.
+    {
+        let now = chrono::Local::now();
+        let today_days = (now.date_naive() - NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()).num_days();
+        let col = today_days - week_days;
+        let in_view = (0..day_count as i64).contains(&col);
+        ui.set_today_col(if in_view { col as i32 } else { -1 });
+        use chrono::Timelike;
+        ui.set_now_hour(now.hour() as f32 + now.minute() as f32 / 60.0);
+    }
     let title = {
         const MONTHS: [&str; 12] = [
             "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
@@ -654,21 +753,29 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
     };
     ui.set_week_title(title.into());
     ui.set_hour_height(48.0);
+    // Work-hours view spans one hour either side of the workday (9–18 by
+    // default → 8–19); the toggle expands to the full 0–24.
     let non_work = ui.get_show_non_work_hours();
-    ui.set_hour_start(if non_work { 0 } else { 8 });
-    ui.set_hour_end(if non_work { 24 } else { 18 });
+    ui.set_hour_start(if non_work { 0 } else { WORKDAY_START - 1 });
+    ui.set_hour_end(if non_work { 24 } else { WORKDAY_END + 1 });
 
-    // Sidebar — calendar list. Sorted by name for stability.
+    // Sidebar — calendar list. Sorted by name for stability. User-picked
+    // colour overrides win over server colour / palette default.
     let cal_items: Vec<CalendarItem> = {
         let cals = sh.calendars.borrow();
         let visibility = sh.calendar_visible.borrow();
+        let overrides = sh.calendar_colors.borrow();
         let mut v: Vec<&ddmail_core::types::DesktopCalendar> = cals.iter().collect();
         v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         v.into_iter()
             .map(|c| CalendarItem {
                 id: c.id as i32,
                 name: c.name.clone().into(),
-                color: hex(if c.color.is_empty() { "#3788d8" } else { &c.color }).into(),
+                color: hex(&overrides
+                    .get(&c.id)
+                    .cloned()
+                    .unwrap_or_else(|| cal_color(c.id, &c.color)))
+                .into(),
                 visible: *visibility.get(&c.id).unwrap_or(&true),
             })
             .collect()
@@ -692,13 +799,15 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
         let events = sh.calendar_events.borrow();
         let visibility = sh.calendar_visible.borrow();
         let cals = sh.calendars.borrow();
+        let overrides = sh.calendar_colors.borrow();
         let color_for = |cal_id: i64| -> slint::Color {
-            let c = cals
-                .iter()
-                .find(|c| c.id == cal_id)
-                .map(|c| if c.color.is_empty() { "#3788d8" } else { c.color.as_str() })
-                .unwrap_or("#3788d8");
-            hex(c)
+            let raw = overrides.get(&cal_id).cloned().unwrap_or_else(|| {
+                cals.iter()
+                    .find(|c| c.id == cal_id)
+                    .map(|c| cal_color(c.id, &c.color))
+                    .unwrap_or_else(|| "#3788d8".to_string())
+            });
+            hex(&raw)
         };
         let to_px = |ms: i64| -> f32 {
             let hours = (ms - visible_top_ms) as f32 / (60.0 * 60.0 * 1000.0);
@@ -975,37 +1084,70 @@ fn main() {
 
     let ui = MainWindow::new().unwrap();
 
-    // Restore the persisted window size + sidebar width before the
-    // first paint, so the UI opens where the user left it instead of
-    // at the hard-coded defaults.
+    // Restore the persisted window geometry + sidebar width before the
+    // first paint, so the UI opens exactly where the user left it instead
+    // of at the hard-coded defaults.
     let saved = window_state::load();
     ui.window().set_size(slint::LogicalSize::new(saved.width, saved.height));
+    if saved.has_position() {
+        ui.window().set_position(slint::PhysicalPosition::new(saved.x, saved.y));
+    }
     ui.set_sidebar_width(saved.sidebar_width);
+
+    // Restore persisted calendar-view preferences (panel state + view
+    // toggles now; the per-calendar maps are seeded into Shared below).
+    let cal_set = calendar_settings::load();
+    ui.set_calendar_panel_collapsed(cal_set.panel_collapsed);
+    ui.set_workdays_only(cal_set.workdays_only);
+    ui.set_show_non_work_hours(cal_set.show_non_work_hours);
+    // Palette for the colour-picker popup, mirroring CAL_PALETTE.
+    ui.set_cal_palette(ModelRc::new(VecModel::from(
+        CAL_PALETTE.iter().map(|c| hex(c)).collect::<Vec<slint::Color>>(),
+    )));
 
     // Seed calendar view with sane defaults so the grid lays itself out
     // even before the engine produces any real data. Real `events` and
     // `calendars` arrive via FetchCalendars / FetchEvents.
     apply_calendar_defaults(&ui);
 
-    // Save on close — the only reliable trigger Slint gives us for
-    // "window is going away" on a clean exit. See the
-    // [[window-state-save-on-close]] memory note for the behaviour
-    // we're replicating.
-    let ui_weak_close = ui.as_weak();
-    ui.window().on_close_requested(move || {
-        if let Some(ui) = ui_weak_close.upgrade() {
+    ui.window().on_close_requested(move || slint::CloseRequestResponse::HideWindow);
+
+    // Persist geometry continuously: Slint exposes no moved/resized
+    // callbacks, so a UI-thread timer polls twice a second and writes the
+    // state whenever position / size / sidebar changed. This survives a
+    // hard kill (saving only on close used to lose the last state) and
+    // skips while maximized so the file always holds the last NORMAL
+    // geometry — the app must never reopen maximized.
+    let ui_weak_geom = ui.as_weak();
+    let last_geom = std::cell::Cell::new((0i32, 0i32, 0u32, 0u32, 0.0f32));
+    let geometry_saver = slint::Timer::default();
+    geometry_saver.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(500),
+        move || {
+            let Some(ui) = ui_weak_geom.upgrade() else { return };
             let win = ui.window();
+            if win.is_maximized() || win.is_minimized() {
+                return;
+            }
+            let pos = win.position();
+            let size = win.size();
+            let sidebar = ui.get_sidebar_width();
+            let snapshot = (pos.x, pos.y, size.width, size.height, sidebar);
+            if last_geom.get() == snapshot {
+                return;
+            }
+            last_geom.set(snapshot);
             let scale = win.scale_factor().max(0.1);
-            let physical = win.size();
-            let state = window_state::WindowState {
-                width: physical.width as f32 / scale,
-                height: physical.height as f32 / scale,
-                sidebar_width: ui.get_sidebar_width(),
-            };
-            window_state::save(&state);
-        }
-        slint::CloseRequestResponse::HideWindow
-    });
+            window_state::save(&window_state::WindowState {
+                width: size.width as f32 / scale,
+                height: size.height as f32 / scale,
+                sidebar_width: sidebar,
+                x: pos.x,
+                y: pos.y,
+            });
+        },
+    );
 
     let account = open_account();
     let displays = match &account {
@@ -1038,9 +1180,13 @@ fn main() {
     //     a future iteration that caches views too.
     let (tx, rx) = mpsc::channel::<Job>();
     let rx = Arc::new(Mutex::new(rx));
+    // Shared with Job::SetConversation senders (send_render_job): holds the
+    // seq of the newest enqueued job so the worker can skip/abort stale ones.
+    let render_seq = Arc::new(AtomicU64::new(0));
     let ui_weak = ui.as_weak();
     {
         let rx = Arc::clone(&rx);
+        let latest_seq = Arc::clone(&render_seq);
         let ui_weak = ui_weak.clone();
         std::thread::spawn(move || {
             let mut engine = render::Engine::new();
@@ -1063,7 +1209,14 @@ fn main() {
                 };
                 let Ok(job) = job else { break };
                 match job {
-                    Job::SetConversation { bodies, width, policy, policy_gen } => {
+                    Job::SetConversation { bodies, width, policy, policy_gen, seq } => {
+                        // Latest-wins: a newer conversation/relayout job is
+                        // already queued behind this one — rendering it would
+                        // produce frames nobody will ever see.
+                        if seq < latest_seq.load(Ordering::SeqCst) {
+                            println!("[perf] render job seq={seq} superseded — skipped");
+                            continue;
+                        }
                         let t_wall = Instant::now();
                         let n = bodies.len();
                         engine.clear_views();
@@ -1082,7 +1235,15 @@ fn main() {
                         let mut fallback_used = 0usize;
                         let mut render_ms_total = 0u128;
                         let mut pack_ms_total = 0u128;
+                        let mut aborted = false;
                         for (i, body) in bodies.iter().enumerate() {
+                            // Cheap mid-render cancellation: a newer job
+                            // arrived (conversation switch, next resize step)
+                            // — stop burning WebView time on this one.
+                            if seq < latest_seq.load(Ordering::SeqCst) {
+                                aborted = true;
+                                break;
+                            }
                             let key = (body.folder.clone(), body.uid, width, policy_gen);
                             let (buf, h, links) = if let Some(cached) = body_cache.get(&key) {
                                 cache_hits += 1;
@@ -1128,6 +1289,20 @@ fn main() {
                             let _ = ui_weak.upgrade_in_event_loop(move |ui| {
                                 ui.set_render_progress(done);
                             });
+                        }
+                        if aborted {
+                            println!(
+                                "[perf] render job seq={seq} aborted mid-render \
+                                 ({}/{n} done) — newer job queued",
+                                packs.len()
+                            );
+                            // Hide the progress bar; the superseding job
+                            // re-seeds it with its own totals.
+                            let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+                                ui.set_render_total(0);
+                                ui.set_render_progress(0);
+                            });
+                            continue;
                         }
                         println!(
                             "[perf] render N={n} width={width}px cache_hits={cache_hits} \
@@ -1187,6 +1362,9 @@ fn main() {
         displays: RefCell::new(displays.clone()),
         avatars: RefCell::new(HashMap::new()),
         current_msgs: RefCell::new(Vec::new()),
+        current_bodies: RefCell::new(Vec::new()),
+        open_gen: Cell::new(0),
+        render_seq,
         current: Cell::new(0),
         width: Cell::new(DEFAULT_WIDTH),
         tx,
@@ -1200,6 +1378,7 @@ fn main() {
         policy_gen: Cell::new(0),
         calendars: RefCell::new(Vec::new()),
         calendar_visible: RefCell::new(HashMap::new()),
+        calendar_colors: RefCell::new(HashMap::new()),
         calendar_events: RefCell::new(Vec::new()),
         calendar_week_start_days: Cell::new(week_start_days_today()),
         editing_event_id: Cell::new(0),
@@ -1207,6 +1386,16 @@ fn main() {
         compose_attachments: RefCell::new(Vec::new()),
     });
     SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
+
+    // Seed the persisted per-calendar maps (visibility deny-list + colour
+    // overrides) now that Shared exists.
+    {
+        let mut vis = shared.calendar_visible.borrow_mut();
+        for id in &cal_set.hidden {
+            vis.insert(*id, false);
+        }
+        *shared.calendar_colors.borrow_mut() = cal_set.colors.clone();
+    }
 
     // Open the first conversation that has cached bodies.
     {
@@ -1227,14 +1416,14 @@ fn main() {
                 ui.set_active_initials(d.initials.clone().into());
                 ui.set_active_color(slint::Brush::SolidColor(hex(&d.color)));
             }
-            let policy = shared.policy.borrow().clone();
-            let policy_gen = shared.policy_gen.get();
-            let _ = shared.tx.send(Job::SetConversation {
-                bodies,
-                width: shared.width.get(),
-                policy,
-                policy_gen,
-            });
+            // Seed the row refs/bodies too — context-menu actions on the
+            // startup conversation resolve rows through these.
+            *shared.current_msgs.borrow_mut() = bodies
+                .iter()
+                .map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid })
+                .collect();
+            *shared.current_bodies.borrow_mut() = bodies.clone();
+            send_render_job(&shared, bodies);
             break;
         }
     }
@@ -1318,14 +1507,29 @@ fn main() {
         open_conversation(&sh_sel, real_idx);
     });
 
+    // Resize = pure relayout: re-render the in-memory bodies at the new
+    // width after the drag settles. No SQLite, no network — the contents
+    // didn't change, only the pixels. Debounce coalesces the drag stream;
+    // the render seq additionally kills any still-queued older job.
     let sh_rs = shared.clone();
+    let resize_debounce = Rc::new(slint::Timer::default());
     ui.on_viewport_resized(move |w| {
         let neww = (w as u32).max(240);
-        if (neww as i32 - sh_rs.width.get() as i32).abs() < 24 {
+        if neww == sh_rs.width.get() {
             return;
         }
         sh_rs.width.set(neww);
-        open_conversation(&sh_rs, sh_rs.current.get());
+        let sh2 = sh_rs.clone();
+        resize_debounce.start(
+            slint::TimerMode::SingleShot,
+            std::time::Duration::from_millis(150),
+            move || {
+                let bodies = sh2.current_bodies.borrow().clone();
+                if !bodies.is_empty() {
+                    send_render_job(&sh2, bodies);
+                }
+            },
+        );
     });
 
     let tx_hit = shared.tx.clone();
@@ -1492,13 +1696,9 @@ fn main() {
         }
         // Subject mirrors the *last incoming* message per the spec — that's
         // the one the user is replying to, even if our own outgoing came
-        // after it. Fall back to conversation last_subject if cache is
-        // unavailable.
-        let cached = sh_send
-            .cache
-            .as_ref()
-            .and_then(|cache| cache.load_message_bodies(&sh_send.key, &c.messages).ok())
-            .unwrap_or_default();
+        // after it. Bodies of the open conversation are already in memory;
+        // fall back to conversation last_subject when there are none.
+        let cached = sh_send.current_bodies.borrow();
         let last_incoming = cached.iter().rev().find(|b| !b.is_outgoing);
         let base_subject = last_incoming
             .map(|b| b.subject.clone())
@@ -1706,11 +1906,7 @@ fn main() {
         // under the old policy, and re-fires SetConversation so the
         // bubbles repaint immediately.
         if action == "toggle-media" || action == "toggle-scripts" {
-            let body_opt = sh_act
-                .cache
-                .as_ref()
-                .and_then(|cache| cache.load_message_bodies(&sh_act.key, &[msg.clone()]).ok())
-                .and_then(|mut v| v.pop());
+            let body_opt = sh_act.current_bodies.borrow().get(row).cloned();
             let Some(b) = body_opt else { return };
             let sender = b.from_addr.clone();
             let mut p = sh_act.policy.borrow_mut();
@@ -1724,7 +1920,10 @@ fn main() {
             policy::save(&p);
             drop(p);
             sh_act.policy_gen.set(sh_act.policy_gen.get() + 1);
-            open_conversation(&sh_act, sh_act.current.get());
+            // Repaint the in-memory bodies under the new policy — no SQLite
+            // reload and no network refetch for a permission toggle.
+            let bodies = sh_act.current_bodies.borrow().clone();
+            send_render_job(&sh_act, bodies);
             return;
         }
 
@@ -1732,13 +1931,9 @@ fn main() {
         // body into the quote ribbon and let the next Send pick up the
         // subject + threading headers.
         if action == "reply" {
-            let body_opt = sh_act
-                .cache
-                .as_ref()
-                .and_then(|cache| cache.load_message_bodies(&sh_act.key, &[msg.clone()]).ok())
-                .and_then(|mut v| v.pop());
+            let body_opt = sh_act.current_bodies.borrow().get(row).cloned();
             let Some(body) = body_opt else {
-                eprintln!("reply: body not cached for {msg:?}");
+                eprintln!("reply: body not in memory for {msg:?}");
                 return;
             };
             if let Some(ui) = ui_weak_act.upgrade() {
@@ -1750,13 +1945,9 @@ fn main() {
         // subject, then let the user pick a recipient via search (same path
         // as any new message). Attachments aren't carried yet — noted inline.
         if action == "forward" {
-            let body_opt = sh_act
-                .cache
-                .as_ref()
-                .and_then(|cache| cache.load_message_bodies(&sh_act.key, &[msg.clone()]).ok())
-                .and_then(|mut v| v.pop());
+            let body_opt = sh_act.current_bodies.borrow().get(row).cloned();
             let Some(body) = body_opt else {
-                eprintln!("forward: body not cached for {msg:?}");
+                eprintln!("forward: body not in memory for {msg:?}");
                 return;
             };
             let from = if body.from.is_empty() {
@@ -1878,6 +2069,7 @@ fn main() {
             ui.set_workdays_only(!ui.get_workdays_only());
             apply_calendar_view(&ui, &sh_wd);
             refetch_calendar_events(&ui, &sh_wd);
+            save_calendar_settings(&ui, &sh_wd);
         }
     });
     let ui_weak_nw = ui.as_weak();
@@ -1886,6 +2078,7 @@ fn main() {
         if let Some(ui) = ui_weak_nw.upgrade() {
             ui.set_show_non_work_hours(!ui.get_show_non_work_hours());
             apply_calendar_view(&ui, &sh_nw);
+            save_calendar_settings(&ui, &sh_nw);
         }
     });
     let ui_weak_vis = ui.as_weak();
@@ -1896,6 +2089,30 @@ fn main() {
             let cur = *sh_vis.calendar_visible.borrow().get(&id).unwrap_or(&true);
             sh_vis.calendar_visible.borrow_mut().insert(id, !cur);
             apply_calendar_view(&ui, &sh_vis);
+            save_calendar_settings(&ui, &sh_vis);
+        }
+    });
+    // Panel collapse/expand — the property flips on the Slint side; this
+    // callback just persists the new state immediately.
+    let ui_weak_pt = ui.as_weak();
+    let sh_pt = shared.clone();
+    ui.on_calendar_panel_toggled(move || {
+        if let Some(ui) = ui_weak_pt.upgrade() {
+            save_calendar_settings(&ui, &sh_pt);
+        }
+    });
+    // Colour picked in the per-calendar palette popup.
+    let ui_weak_cc = ui.as_weak();
+    let sh_cc = shared.clone();
+    ui.on_calendar_set_color(move |cal_id, palette_idx| {
+        let Some(ui) = ui_weak_cc.upgrade() else { return };
+        if let Some(hex_color) = CAL_PALETTE.get(palette_idx as usize) {
+            sh_cc
+                .calendar_colors
+                .borrow_mut()
+                .insert(cal_id as i64, (*hex_color).to_string());
+            apply_calendar_view(&ui, &sh_cc);
+            save_calendar_settings(&ui, &sh_cc);
         }
     });
     // Event click → populate + show the detail popup (Phase B, read-only).
@@ -2109,19 +2326,26 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                 }
             });
         }
-        engine::EngineResult::Messages(bodies) => {
+        engine::EngineResult::Messages { bodies, generation } => {
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
+                    // Stale-fetch guard: the user may have switched
+                    // conversations while this answer was in flight — an
+                    // old answer must not overwrite the new screen (same
+                    // pattern as the search dropdown's query echo).
+                    if generation != sh.open_gen.get() {
+                        println!(
+                            "engine: dropping stale Messages (gen {generation} != {})",
+                            sh.open_gen.get()
+                        );
+                        return;
+                    }
                     *sh.current_msgs.borrow_mut() = bodies
                         .iter()
                         .map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid })
                         .collect();
-                    let _ = sh.tx.send(Job::SetConversation {
-                        bodies,
-                        width: sh.width.get(),
-                        policy: sh.policy.borrow().clone(),
-                        policy_gen: sh.policy_gen.get(),
-                    });
+                    *sh.current_bodies.borrow_mut() = bodies.clone();
+                    send_render_job(sh, bodies);
                 }
             });
         }
@@ -2145,6 +2369,7 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         if let Some(c) = sh.convs.borrow().get(cur) {
                             let _ = etx.send(engine::EngineCmd::FetchMessages {
                                 messages: c.messages.clone(),
+                                generation: sh.open_gen.get(),
                             });
                         }
                     }

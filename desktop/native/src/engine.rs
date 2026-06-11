@@ -143,7 +143,10 @@ fn resolve_our_addrs(cache: &Cache, cfg: &AccountConfig) -> Vec<String> {
 /// Commands the UI sends to the engine thread.
 pub enum EngineCmd {
     FetchConversations { limit: u32 },
-    FetchMessages { messages: Vec<MessageRef> },
+    /// `generation` is the UI's conversation-open generation; it is echoed
+    /// back in `EngineResult::Messages` so the UI can drop answers that
+    /// arrive after the user already switched to another conversation.
+    FetchMessages { messages: Vec<MessageRef>, generation: u64 },
     StartWatching,
     FetchAvatar { email: String },
     SetFlags { messages: Vec<MessageRef>, flags: String, add: bool },
@@ -189,7 +192,8 @@ pub enum EngineCmd {
 /// Results the engine sends back to the UI.
 pub enum EngineResult {
     Conversations(Vec<Conversation>),
-    Messages(Vec<MessageBody>),
+    /// `generation` echoes FetchMessages' (stale-answer guard).
+    Messages { bodies: Vec<MessageBody>, generation: u64 },
     /// Live-dropdown answer. `query` lets the UI drop responses for an old
     /// query string when the user has typed past it.
     SearchDropdown {
@@ -230,6 +234,55 @@ fn save_download(filename: &str, bytes: &[u8]) -> Result<String, String> {
     let path = dir.join(&safe);
     std::fs::write(&path, bytes).map_err(|e| format!("write: {e}"))?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+/// Decode avatar bytes into straight-alpha RGBA. Raster formats go through
+/// the `image` crate (incl. ico/bmp — the server's avatar chain ends at
+/// /favicon.ico); SVG (BIMI brand logos) is rasterized via resvg at 96px.
+/// The old Tauri build delegated all of this to Chromium's <img>, so the
+/// native decoder has to match that breadth or avatars degrade to initials.
+fn decode_avatar(bytes: &[u8], mime: &str) -> Option<(Vec<u8>, u32, u32)> {
+    let looks_svg = mime.contains("svg")
+        || bytes
+            .get(..512)
+            .map(|head| {
+                let head = String::from_utf8_lossy(head);
+                head.contains("<svg")
+            })
+            .unwrap_or(false);
+    if looks_svg {
+        return rasterize_svg(bytes, 96.0);
+    }
+    let img = image::load_from_memory(bytes).ok()?;
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    Some((rgba.into_raw(), w, h))
+}
+
+/// Render an SVG to RGBA at most `target` px on its longer side.
+fn rasterize_svg(bytes: &[u8], target: f32) -> Option<(Vec<u8>, u32, u32)> {
+    let opt = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_data(bytes, &opt).ok()?;
+    let size = tree.size();
+    if size.width() <= 0.0 || size.height() <= 0.0 {
+        return None;
+    }
+    let scale = target / size.width().max(size.height());
+    let w = (size.width() * scale).ceil().max(1.0) as u32;
+    let h = (size.height() * scale).ceil().max(1.0) as u32;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    // tiny-skia stores premultiplied RGBA; Slint expects straight alpha.
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for p in pixmap.pixels() {
+        let c = p.demultiply();
+        rgba.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
+    }
+    Some((rgba, w, h))
 }
 
 /// Read each staged path into an `OutgoingAttachment`, guessing the MIME
@@ -324,39 +377,37 @@ pub fn spawn(
                         Err(e) => on_result(EngineResult::Error(e)),
                     }
                 }
-                EngineCmd::FetchMessages { messages } => {
+                EngineCmd::FetchMessages { messages, generation } => {
                     let our = resolve_our_addrs(&cache, &cfg);
                     let r = rt.block_on(provider.fetch_conversation_messages(&our, &messages));
                     match r {
                         Ok(bodies) => {
                             cache.save_message_bodies(&key, &bodies).ok();
-                            on_result(EngineResult::Messages(bodies));
+                            on_result(EngineResult::Messages { bodies, generation });
                         }
                         Err(e) => on_result(EngineResult::Error(e)),
                     }
                 }
                 EngineCmd::FetchAvatar { email } => {
-                    // Cache first, else fetch from the provider and cache it.
-                    let bytes = match cache.get_avatar(&email) {
-                        Some((b, _)) if !b.is_empty() => b,
-                        _ => match rt.block_on(provider.fetch_avatar(&email)) {
-                            Ok((b, m)) if !b.is_empty() => {
-                                cache.save_avatar(&email, &b, &m).ok();
-                                b
-                            }
-                            _ => Vec::new(),
-                        },
+                    // Cache first — a Some(empty) is a valid negative entry
+                    // (the cache expires those after a day itself), so it
+                    // must NOT trigger a refetch. On a miss, fetch and save
+                    // whatever came back, empty included.
+                    let (bytes, mime) = match cache.get_avatar(&email) {
+                        Some(hit) => hit,
+                        None => {
+                            let (b, m) = rt
+                                .block_on(provider.fetch_avatar(&email))
+                                .unwrap_or_default();
+                            cache.save_avatar(&email, &b, &m).ok();
+                            (b, m)
+                        }
                     };
                     if !bytes.is_empty() {
-                        if let Ok(img) = image::load_from_memory(&bytes) {
-                            let rgba = img.to_rgba8();
-                            let (w, h) = (rgba.width(), rgba.height());
-                            on_result(EngineResult::Avatar {
-                                email,
-                                rgba: rgba.into_raw(),
-                                w,
-                                h,
-                            });
+                        if let Some((rgba, w, h)) = decode_avatar(&bytes, &mime) {
+                            on_result(EngineResult::Avatar { email, rgba, w, h });
+                        } else {
+                            eprintln!("avatar: undecodable image for {email} (mime {mime})");
                         }
                     }
                 }
