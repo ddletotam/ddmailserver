@@ -56,6 +56,15 @@ pub struct Contact {
 pub struct MessageRef {
     pub folder: String,
     pub uid: u32,
+    /// Read state at conversation-list time. Defaults to true ("read") for
+    /// sources that don't track it (IMAP fallback, old cache rows) — the
+    /// scroll-to-unread feature then degrades to scroll-to-end.
+    #[serde(default = "default_seen")]
+    pub seen: bool,
+}
+
+fn default_seen() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

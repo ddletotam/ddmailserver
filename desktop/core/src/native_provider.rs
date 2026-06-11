@@ -193,6 +193,27 @@ impl MailProvider for NativeProvider {
         self.get(&format!("/conversations?limit={limit}")).await
     }
 
+    async fn fetch_conversations_delta(
+        &self,
+        _our_addrs: &[String],
+        limit: u32,
+        since_ms: i64,
+    ) -> Result<(Vec<Conversation>, i64, bool), String> {
+        // ?since= switches the server to the delta envelope: only changed
+        // conversations + server_now_ms watermark for the next call.
+        // since=0 is a full sync that still yields a watermark.
+        #[derive(serde::Deserialize)]
+        struct DeltaResp {
+            server_now_ms: i64,
+            conversations: Vec<Conversation>,
+        }
+        let since = since_ms.max(0);
+        let resp: DeltaResp = self
+            .get(&format!("/conversations?limit={limit}&since={since}"))
+            .await?;
+        Ok((resp.conversations, resp.server_now_ms, since > 0))
+    }
+
     async fn fetch_conversation_messages(
         &self,
         _our_addrs: &[String],

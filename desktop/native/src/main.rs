@@ -20,10 +20,11 @@ mod render;
 #[path = "render_webview2.rs"]
 mod render;
 mod sanitize;
+mod texture_cache;
 mod window_state;
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -103,6 +104,38 @@ struct Disp {
     color: String,
     preview: String,
     email: String,
+    /// Sidebar row tint — colour of the identity that received the
+    /// conversation (см. identity_color_map). Empty = no tint.
+    ident_color: String,
+}
+
+/// Pastel palette for identities lacking a server-side colour. Mirrors the
+/// old Tauri identityStore + imap.rs::fetch_identities_impl so both
+/// connection modes look identical.
+const IDENT_PASTEL: [&str; 15] = [
+    "#FFE4E1", "#E8F5E9", "#E3F2FD", "#FFF9C4", "#F3E5F5",
+    "#E0F7FA", "#FBE9E7", "#F1F8E9", "#EDE7F6", "#E8EAF6",
+    "#FCE4EC", "#E0F2F1", "#FFF3E0", "#F9FBE7", "#EFEBE9",
+];
+/// «Ugly gray» for conversations received by an unknown alias.
+const IDENT_UNKNOWN: &str = "#d5d5d0";
+
+/// email(lowercase) → row tint for every known identity.
+fn identity_color_map(cache: &Cache, key: &str) -> HashMap<String, String> {
+    cache
+        .load_identities(key)
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .map(|(i, id)| {
+            let color = if id.color.trim().is_empty() {
+                IDENT_PASTEL[i % IDENT_PASTEL.len()].to_string()
+            } else {
+                id.color
+            };
+            (id.email.to_lowercase(), color)
+        })
+        .collect()
 }
 
 fn cache_db_path() -> Option<std::path::PathBuf> {
@@ -171,12 +204,16 @@ fn conv_name(c: &Conversation) -> String {
     }
 }
 
-fn displays_from(convs: &[Conversation]) -> Vec<Disp> {
+fn displays_from(convs: &[Conversation], ident_colors: &HashMap<String, String>) -> Vec<Disp> {
     convs
         .iter()
         .enumerate()
         .map(|(i, c)| {
             let name = conv_name(c);
+            let ident_color = ident_colors
+                .get(&c.received_by.to_lowercase())
+                .cloned()
+                .unwrap_or_else(|| IDENT_UNKNOWN.to_string());
             Disp {
                 initials: initials(&name),
                 name,
@@ -187,6 +224,7 @@ fn displays_from(convs: &[Conversation]) -> Vec<Disp> {
                     c.last_subject.clone()
                 },
                 email: c.counterparts.first().map(|cp| cp.addr.clone()).unwrap_or_default(),
+                ident_color,
             }
         })
         .collect()
@@ -200,6 +238,7 @@ fn synthetic_displays() -> Vec<Disp> {
             color: PALETTE[i % PALETTE.len()].to_string(),
             preview: "Последнее сообщение в диалоге…".to_string(),
             email: String::new(),
+            ident_color: String::new(),
         })
         .collect()
 }
@@ -307,9 +346,41 @@ fn enter_reply_mode(sh: &Shared, ui: &MainWindow, body: MessageBody) {
 
 fn exit_reply_mode(sh: &Shared, ui: &MainWindow) {
     *sh.pending_reply.borrow_mut() = None;
+    *sh.pending_forward.borrow_mut() = None;
     ui.set_reply_ribbon_visible(false);
     ui.set_reply_ribbon_from("".into());
     ui.set_reply_ribbon_preview("".into());
+    ui.set_composer_to("".into());
+}
+
+/// «Переслать» — Telegram-style: the original is pinned above the input as
+/// a non-editable ribbon, the recipients panel unfolds with EMPTY Кому/Cc
+/// and focus lands in «Кому». The composer text stays free for the user's
+/// covering note; at send time the original's text goes below it after a
+/// separator and its attachments are re-attached as-is (engine-side).
+fn enter_forward_mode(sh: &Shared, ui: &MainWindow, body: MessageBody) {
+    exit_reply_mode(sh, ui); // a forward replaces any staged reply
+    let display_from = if body.from.is_empty() {
+        body.from_addr.clone()
+    } else {
+        body.from.clone()
+    };
+    let subj_lc = body.subject.to_lowercase();
+    let subject = if subj_lc.starts_with("fwd:") || subj_lc.starts_with("fw:") {
+        body.subject.clone()
+    } else {
+        format!("Fwd: {}", body.subject)
+    };
+    let preview = body_preview(&body);
+    *sh.pending_forward.borrow_mut() = Some(body);
+    ui.set_reply_ribbon_from(format!("Переслать: {display_from}").into());
+    ui.set_reply_ribbon_preview(preview.into());
+    ui.set_reply_ribbon_visible(true);
+    ui.set_composer_subject(subject.into());
+    ui.set_composer_to("".into());
+    ui.set_composer_cc("".into());
+    ui.set_composer_expanded(true);
+    ui.set_focus_to_seq(ui.get_focus_to_seq() + 1);
 }
 
 /// Shared logic for "enter transient compose mode". Pins the chat header
@@ -379,7 +450,7 @@ fn message_hits(envs: &[MessageEnvelope]) -> Vec<MessageHit> {
 fn build_body_html(b: &MessageBody, policy: &policy::Policy) -> String {
     let inner = match b.html.as_deref() {
         Some(h) if !h.trim().is_empty() => {
-            let sanitized = sanitize::sanitize_email_html(h);
+            let sanitized = sanitize::sanitize_email_html_for(h, policy, &b.from_addr);
             sanitize::block_external(&sanitized, policy, &b.from_addr).html
         }
         _ => format!(
@@ -468,8 +539,30 @@ enum Job {
         /// mid-render when a newer one arrives — so a drag-resize or a
         /// fast conversation switch never renders bubbles nobody will see.
         seq: u64,
+        /// After the rows land: None = keep scroll position (resize,
+        /// policy toggle), Some(-1) = scroll to the end, Some(r) =
+        /// scroll so row r (first unread) is at the top.
+        scroll_to: Option<i32>,
+        /// Per-body render mode, parallel to `bodies`: 0 = auto
+        /// (HTML when present), 1 = force the text-only bubble.
+        modes: Vec<u8>,
     },
     HitTest { row: usize, x: f32, y: f32 },
+}
+
+/// Everything the render worker knows about a row besides its bitmap —
+/// shipped to the UI thread to fill RowItem (context-menu data included).
+struct RowMeta {
+    h: f32,
+    has_html: bool,
+    viewing_html: bool,
+    sender: String,
+    media_host: String,
+    script_host: String,
+    m_sender_on: bool,
+    s_sender_on: bool,
+    m_host_on: bool,
+    s_host_on: bool,
 }
 
 /// UI-thread state shared by the select/resize/engine-result paths. All mail
@@ -491,6 +584,31 @@ struct Shared {
     /// user already left is dropped instead of overwriting the screen
     /// (same pattern as `search_query_inflight`).
     open_gen: Cell<u64>,
+    /// (folder, uid) of the messages that were UNREAD when the current
+    /// conversation was opened — the scroll anchor survives the
+    /// mark-as-read that fires right after open.
+    open_unread: RefCell<HashSet<(String, u32)>>,
+    /// True until the first render after open has applied its scroll;
+    /// lets the network Messages path scroll when the cache had nothing.
+    scroll_pending: Cell<bool>,
+    /// Per-message render-view override: present = force the text-only
+    /// bubble even when an HTML part exists («Показать → Текстовую
+    /// версию»). Session-scoped on purpose.
+    body_view_text: RefCell<HashSet<(String, u32)>>,
+    /// Forward target — set by «Переслать»; on Send the original's text
+    /// goes below the typed text and its attachments are re-attached.
+    pending_forward: RefCell<Option<MessageBody>>,
+    /// Which source view a pending FetchSource should open:
+    /// 1 = заголовки, 2 = полный исходник.
+    pending_source_view: Cell<u8>,
+    /// email(lowercase) → пастельный цвет айдентики (подкраска строк
+    /// сайдбара по received_by). Обновляется при каждом списке диалогов.
+    identity_colors: RefCell<HashMap<String, String>>,
+    /// UI-thread copy of the per-row link rects (CSS px, bubble-relative) —
+    /// drives the pointer cursor over links. The render worker keeps its
+    /// own copy for click hit-testing; this one answers synchronous
+    /// hover-binding queries without a worker round-trip.
+    row_links: RefCell<Vec<Vec<render_common::LinkRect>>>,
     /// Render-job sequence shared with the render worker (see Job::seq).
     render_seq: Arc<AtomicU64>,
     current: Cell<usize>,
@@ -564,7 +682,7 @@ thread_local! {
 
 /// Open a conversation by index: show cached bodies immediately, and (if a live
 /// engine is running) fire a background fetch to refresh them.
-fn open_conversation(sh: &Shared, idx: usize) {
+fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
     let t0 = Instant::now();
     sh.current.set(idx);
     // New conversation generation: any in-flight FetchMessages answer for
@@ -575,13 +693,31 @@ fn open_conversation(sh: &Shared, idx: usize) {
     let Some(c) = convs.get(idx) else { return };
     let conv_label = c.label.clone();
     let msg_count = c.messages.len();
+
+    // The right pane clears IMMEDIATELY: stale bubbles from the previous
+    // conversation must never linger while this one loads. The progress
+    // bar appears right away (seeded with the ref count; the render job
+    // re-seeds it with the real body count when it starts).
+    ui.set_messages(ModelRc::new(VecModel::from(Vec::<RowItem>::new())));
+    ui.set_render_total(msg_count.max(1) as i32);
+    ui.set_render_progress(0);
+    sh.current_msgs.borrow_mut().clear();
+    sh.current_bodies.borrow_mut().clear();
+
+    // Unread snapshot BEFORE we mark anything read — it anchors the
+    // scroll (first unread at top; none unread → scroll to the end).
+    let unread: Vec<MessageRef> = c.messages.iter().filter(|m| !m.seen).cloned().collect();
+    *sh.open_unread.borrow_mut() =
+        unread.iter().map(|m| (m.folder.clone(), m.uid)).collect();
+    sh.scroll_pending.set(true);
+
     if let (Some(cache), key) = (&sh.cache, &sh.key) {
         let t_load_start = Instant::now();
         let bodies = cache.load_message_bodies(key, &c.messages).unwrap_or_default();
         let load_ms = t_load_start.elapsed().as_millis();
         if !bodies.is_empty() {
             *sh.current_msgs.borrow_mut() =
-                bodies.iter().map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid }).collect();
+                bodies.iter().map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid, seen: true }).collect();
             *sh.current_bodies.borrow_mut() = bodies.clone();
             println!(
                 "[perf] open_conversation idx={idx} label={conv_label:?} \
@@ -589,7 +725,8 @@ fn open_conversation(sh: &Shared, idx: usize) {
                 bodies.len(),
                 t0.elapsed()
             );
-            send_render_job(sh, bodies);
+            let scroll = take_scroll_target(sh, &bodies);
+            send_render_job(sh, bodies, scroll);
         } else {
             println!(
                 "[perf] open_conversation idx={idx} label={conv_label:?} \
@@ -599,20 +736,63 @@ fn open_conversation(sh: &Shared, idx: usize) {
     }
     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
         let _ = etx.send(engine::EngineCmd::FetchMessages { messages: c.messages.clone(), generation });
+        // Opening a conversation reads it: push \Seen for everything that
+        // was unread. The scroll anchor above is already snapshotted.
+        if !unread.is_empty() {
+            let _ = etx.send(engine::EngineCmd::SetFlags {
+                messages: unread,
+                flags: "\\Seen".into(),
+                add: true,
+            });
+        }
     }
+}
+
+/// Mirror the policy's global «Медиа…» switches into root properties so
+/// the menu's checkmarks and enabled-states stay live.
+fn sync_media_globals(ui: &MainWindow, p: &policy::Policy) {
+    ui.set_media_allow_all_on(p.allow_all);
+    ui.set_media_all_images_on(p.allow_all_media);
+    ui.set_media_all_scripts_on(p.allow_all_scripts);
+}
+
+/// Consume the pending post-open scroll: row index of the first unread
+/// body (top-aligned), or -1 for "scroll to the end" when everything was
+/// already read. None when this render isn't the first one after open.
+fn take_scroll_target(sh: &Shared, bodies: &[MessageBody]) -> Option<i32> {
+    if !sh.scroll_pending.get() {
+        return None;
+    }
+    sh.scroll_pending.set(false);
+    let unread = sh.open_unread.borrow();
+    Some(
+        bodies
+            .iter()
+            .position(|b| unread.contains(&(b.folder.clone(), b.uid)))
+            .map(|r| r as i32)
+            .unwrap_or(-1),
+    )
 }
 
 /// Enqueue a (re)render of `bodies` at the current width/policy. Bumps the
 /// shared render sequence so any older queued job becomes a no-op and a
 /// mid-render older job aborts (latest wins).
-fn send_render_job(sh: &Shared, bodies: Vec<MessageBody>) {
+fn send_render_job(sh: &Shared, bodies: Vec<MessageBody>, scroll_to: Option<i32>) {
     let seq = sh.render_seq.fetch_add(1, Ordering::SeqCst) + 1;
+    let overrides = sh.body_view_text.borrow();
+    let modes: Vec<u8> = bodies
+        .iter()
+        .map(|b| u8::from(overrides.contains(&(b.folder.clone(), b.uid))))
+        .collect();
+    drop(overrides);
     let _ = sh.tx.send(Job::SetConversation {
         bodies,
         width: sh.width.get(),
         policy: sh.policy.borrow().clone(),
         policy_gen: sh.policy_gen.get(),
         seq,
+        scroll_to,
+        modes,
     });
 }
 
@@ -630,6 +810,11 @@ fn sidebar_items(displays: &[Disp], avatars: &HashMap<String, Image>) -> Vec<Con
                 time: "".into(),
                 has_avatar: avatar.is_some(),
                 avatar: avatar.unwrap_or_default(),
+                ident_color: if d.ident_color.is_empty() {
+                    slint::Brush::SolidColor(slint::Color::from_argb_u8(0, 0, 0, 0))
+                } else {
+                    slint::Brush::SolidColor(hex(&d.ident_color))
+                },
             }
         })
         .collect()
@@ -652,6 +837,7 @@ fn pending_compose_item(target: &str) -> ConvItem {
         time: "".into(),
         has_avatar: false,
         avatar: Image::default(),
+        ident_color: slint::Brush::SolidColor(slint::Color::from_argb_u8(0, 0, 0, 0)),
     }
 }
 
@@ -1254,8 +1440,12 @@ fn main() {
     );
 
     let account = open_account();
+    let startup_ident_colors = match &account {
+        Some((c, k, _)) => identity_color_map(c, k),
+        None => HashMap::new(),
+    };
     let displays = match &account {
-        Some((_, _, convs)) => displays_from(convs),
+        Some((_, _, convs)) => displays_from(convs, &startup_ident_colors),
         None => synthetic_displays(),
     };
 
@@ -1287,6 +1477,11 @@ fn main() {
     // Shared with Job::SetConversation senders (send_render_job): holds the
     // seq of the newest enqueued job so the worker can skip/abort stale ones.
     let render_seq = Arc::new(AtomicU64::new(0));
+    // Disk layer under the RAM texture cache — survives restarts, so warm
+    // conversations skip the WebView entirely after a relaunch.
+    let tex_disk = cache_db_path()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .and_then(texture_cache::TextureDiskCache::open);
     let ui_weak = ui.as_weak();
     {
         let rx = Arc::clone(&rx);
@@ -1301,8 +1496,13 @@ fn main() {
             // result across to the UI without doing any more memcpy work
             // on the hot path. UI-thread cost shrinks to just wrapping
             // each buffer in an `Image`.
-            let mut body_cache: HashMap<(String, u32, u32, u64),
+            let mut body_cache: HashMap<(String, u32, u32, u64, u8, u64),
                 (SharedPixelBuffer<Rgba8Pixel>, f32, Vec<render_common::LinkRect>)> = HashMap::new();
+            // FIFO insertion order for the RAM cache: bitmaps are megabytes
+            // each, so cap the entry count and drop the oldest (the disk
+            // layer below still has them — eviction only costs a PNG decode).
+            const RAM_CAP: usize = 400;
+            let mut ram_order: Vec<(String, u32, u32, u64, u8, u64)> = Vec::new();
             // Per-row clickable link rects (CSS px), parallel to the rendered
             // rows. Renderer-agnostic; the click is a pure point-in-rect test.
             let mut row_links: Vec<Vec<render_common::LinkRect>> = Vec::new();
@@ -1313,7 +1513,7 @@ fn main() {
                 };
                 let Ok(job) = job else { break };
                 match job {
-                    Job::SetConversation { bodies, width, policy, policy_gen, seq } => {
+                    Job::SetConversation { bodies, width, policy, policy_gen, seq, scroll_to, modes } => {
                         // Latest-wins: a newer conversation/relayout job is
                         // already queued behind this one — rendering it would
                         // produce frames nobody will ever see.
@@ -1333,9 +1533,10 @@ fn main() {
                             ui.set_render_progress(0);
                         });
 
-                        let mut packs: Vec<(SharedPixelBuffer<Rgba8Pixel>, f32)> =
+                        let mut packs: Vec<(SharedPixelBuffer<Rgba8Pixel>, RowMeta)> =
                             Vec::with_capacity(n);
                         let mut cache_hits = 0usize;
+                        let mut disk_hits = 0usize;
                         let mut fallback_used = 0usize;
                         let mut render_ms_total = 0u128;
                         let mut pack_ms_total = 0u128;
@@ -1348,16 +1549,54 @@ fn main() {
                                 aborted = true;
                                 break;
                             }
-                            let key = (body.folder.clone(), body.uid, width, policy_gen);
+                            // Mode 1 = «Текстовая версия» override for this body.
+                            let mode = modes.get(i).copied().unwrap_or(0);
+                            let has_html =
+                                body.html.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+                            let force_text = mode == 1 && has_html;
+                            // Content fingerprint: bodies are mostly immutable,
+                            // but cid:→data: healing rewrites the HTML — the
+                            // texture must miss when the content changed.
+                            let fp = texture_cache::fnv1a(body.html.as_deref().unwrap_or(""));
+                            let key = (body.folder.clone(), body.uid, width, policy_gen, mode, fp);
+                            let mut remember =
+                                |key: &(String, u32, u32, u64, u8, u64),
+                                 entry: &(SharedPixelBuffer<Rgba8Pixel>, f32, Vec<render_common::LinkRect>),
+                                 body_cache: &mut HashMap<_, _>,
+                                 ram_order: &mut Vec<(String, u32, u32, u64, u8, u64)>| {
+                                    body_cache.insert(key.clone(), entry.clone());
+                                    ram_order.push(key.clone());
+                                    if ram_order.len() > RAM_CAP {
+                                        let oldest = ram_order.remove(0);
+                                        body_cache.remove(&oldest);
+                                    }
+                                };
                             let (buf, h, links) = if let Some(cached) = body_cache.get(&key) {
                                 cache_hits += 1;
                                 cached.clone()
+                            } else if let Some(de) = tex_disk.as_ref().and_then(|t| {
+                                t.load(&body.folder, body.uid, width, policy_gen, mode, fp)
+                            }) {
+                                // Disk layer: rendered in a previous session —
+                                // a PNG decode instead of a WebView pass.
+                                disk_hits += 1;
+                                let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                                    &de.rgba, de.width, de.height,
+                                );
+                                let entry = (buf, de.h, de.links);
+                                remember(&key, &entry, &mut body_cache, &mut ram_order);
+                                entry
                             } else {
-                                // First render: try the full HTML. If WebKit
-                                // doesn't manage to paint anything we retry with
-                                // the text-only bubble — keeps "missing bubble"
-                                // failures from being silent.
-                                let html = build_body_html(body, &policy);
+                                // First render: try the full HTML (unless the
+                                // text view is forced). If WebKit doesn't manage
+                                // to paint anything we retry with the text-only
+                                // bubble — keeps "missing bubble" failures from
+                                // being silent.
+                                let html = if force_text {
+                                    build_text_only_html(body)
+                                } else {
+                                    build_body_html(body, &policy)
+                                };
                                 let t_r = Instant::now();
                                 let mut result = engine.render_one(&html, width);
                                 let text_available = body
@@ -1365,7 +1604,7 @@ fn main() {
                                     .as_deref()
                                     .map(|s| !s.trim().is_empty())
                                     .unwrap_or(false);
-                                if !result.successful() && text_available {
+                                if !result.successful() && text_available && !force_text {
                                     fallback_used += 1;
                                     let text_html = build_text_only_html(body);
                                     result = engine.render_one(&text_html, width);
@@ -1383,10 +1622,38 @@ fn main() {
                                     body.uid, bitmap.height, result.painted_height,
                                     result.view_ready, entry.2.len()
                                 );
-                                body_cache.insert(key, entry.clone());
+                                if let Some(t) = tex_disk.as_ref() {
+                                    t.store(
+                                        &body.folder, body.uid, width, policy_gen, mode, fp,
+                                        &bitmap.rgba, bitmap.width, bitmap.height,
+                                        entry.1, &entry.2,
+                                    );
+                                }
+                                remember(&key, &entry, &mut body_cache, &mut ram_order);
                                 entry
                             };
-                            packs.push((buf, h));
+                            // Context-menu data: per-sender / per-host
+                            // checkbox states reflect the policy this job
+                            // rendered under (a toggle re-renders anyway).
+                            let sender_lc = body.from_addr.to_lowercase();
+                            let (media_host, script_host) = sanitize::first_external_hosts(
+                                body.html.as_deref().unwrap_or(""),
+                            );
+                            packs.push((buf, RowMeta {
+                                h,
+                                has_html,
+                                viewing_html: has_html && !force_text,
+                                m_sender_on: policy.allow_media.contains(&sender_lc),
+                                s_sender_on: policy.allow_scripts.contains(&sender_lc),
+                                m_host_on: !media_host.is_empty()
+                                    && (policy.media_hosts.contains(&media_host)
+                                        || policy.allow_domains.contains(&media_host)),
+                                s_host_on: !script_host.is_empty()
+                                    && policy.script_hosts.contains(&script_host),
+                                sender: body.from_addr.clone(),
+                                media_host,
+                                script_host,
+                            }));
                             row_links.push(links);
                             // Push progress to the UI — one event per body.
                             let done = (i + 1) as i32;
@@ -1410,26 +1677,57 @@ fn main() {
                         }
                         println!(
                             "[perf] render N={n} width={width}px cache_hits={cache_hits} \
-                             fallback={fallback_used} ultralight={render_ms_total}ms \
-                             pack={pack_ms_total}ms total_job={}ms",
+                             disk_hits={disk_hits} fallback={fallback_used} \
+                             ultralight={render_ms_total}ms pack={pack_ms_total}ms total_job={}ms",
                             t_wall.elapsed().as_millis()
                         );
+                        // UI-thread link rects for the pointer cursor (the
+                        // worker keeps its own copy for click hit-testing).
+                        let links_for_ui = row_links.clone();
                         let _ = ui_weak.upgrade_in_event_loop(move |ui| {
                             // Wrap each SharedPixelBuffer in an Image —
                             // this is cheap (refcount bump, no memcpy)
                             // and is the only step that has to run on
                             // the UI thread.
+                            SHARED.with(|s| {
+                                if let Some(sh) = s.borrow().as_ref() {
+                                    *sh.row_links.borrow_mut() = links_for_ui;
+                                }
+                            });
                             let rows: Vec<RowItem> = packs
                                 .into_iter()
-                                .map(|(buf, h)| RowItem {
+                                .map(|(buf, m)| RowItem {
                                     img: Image::from_rgba8(buf),
-                                    h,
+                                    h: m.h,
+                                    has_html: m.has_html,
+                                    viewing_html: m.viewing_html,
+                                    sender: m.sender.into(),
+                                    media_host: m.media_host.into(),
+                                    script_host: m.script_host.into(),
+                                    m_sender_on: m.m_sender_on,
+                                    s_sender_on: m.s_sender_on,
+                                    m_host_on: m.m_host_on,
+                                    s_host_on: m.s_host_on,
                                 })
                                 .collect();
+                            // Post-open scroll target: y offset of the first
+                            // unread row, or "very far down" for scroll-to-end
+                            // (the Slint bridge clamps to the content range).
+                            let scroll_y: Option<f32> = scroll_to.map(|sr| {
+                                if sr < 0 {
+                                    1.0e9
+                                } else {
+                                    rows.iter().take(sr as usize).map(|r| r.h).sum()
+                                }
+                            });
                             ui.set_messages(ModelRc::new(VecModel::from(rows)));
                             // Hide the progress bar.
                             ui.set_render_total(0);
                             ui.set_render_progress(0);
+                            if let Some(y) = scroll_y {
+                                ui.set_chat_scroll_y(y);
+                                ui.set_chat_scroll_seq(ui.get_chat_scroll_seq() + 1);
+                            }
                         });
                     }
                     Job::HitTest { row, x, y } => {
@@ -1459,6 +1757,7 @@ fn main() {
         Some((c, k, convs)) => (Some(c), k, convs),
         None => (None, String::new(), Vec::new()),
     };
+    let loaded_policy = policy::load();
     let shared = Rc::new(Shared {
         cache,
         key,
@@ -1468,6 +1767,13 @@ fn main() {
         current_msgs: RefCell::new(Vec::new()),
         current_bodies: RefCell::new(Vec::new()),
         open_gen: Cell::new(0),
+        open_unread: RefCell::new(HashSet::new()),
+        scroll_pending: Cell::new(false),
+        body_view_text: RefCell::new(HashSet::new()),
+        pending_forward: RefCell::new(None),
+        pending_source_view: Cell::new(0),
+        identity_colors: RefCell::new(startup_ident_colors),
+        row_links: RefCell::new(Vec::new()),
         render_seq,
         current: Cell::new(0),
         width: Cell::new(DEFAULT_WIDTH),
@@ -1478,8 +1784,8 @@ fn main() {
         search_messages: RefCell::new(Vec::new()),
         pending_compose: RefCell::new(None),
         pending_reply: RefCell::new(None),
-        policy: RefCell::new(policy::load()),
-        policy_gen: Cell::new(0),
+        policy_gen: Cell::new(loaded_policy.generation),
+        policy: RefCell::new(loaded_policy),
         calendars: RefCell::new(Vec::new()),
         calendar_visible: RefCell::new(HashMap::new()),
         calendar_colors: RefCell::new(HashMap::new()),
@@ -1490,6 +1796,7 @@ fn main() {
         compose_attachments: RefCell::new(Vec::new()),
     });
     SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
+    sync_media_globals(&ui, &shared.policy.borrow());
 
     // Seed the persisted per-calendar maps (visibility deny-list + colour
     // overrides) now that Shared exists.
@@ -1524,10 +1831,19 @@ fn main() {
             // startup conversation resolve rows through these.
             *shared.current_msgs.borrow_mut() = bodies
                 .iter()
-                .map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid })
+                .map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid, seen: true })
                 .collect();
             *shared.current_bodies.borrow_mut() = bodies.clone();
-            send_render_job(&shared, bodies);
+            // Startup scroll: same first-unread/end anchoring as a click.
+            *shared.open_unread.borrow_mut() = c
+                .messages
+                .iter()
+                .filter(|m| !m.seen)
+                .map(|m| (m.folder.clone(), m.uid))
+                .collect();
+            shared.scroll_pending.set(true);
+            let scroll = take_scroll_target(&shared, &bodies);
+            send_render_job(&shared, bodies, scroll);
             break;
         }
     }
@@ -1608,7 +1924,82 @@ fn main() {
         }
         // Highlight the real row at its post-refresh model index.
         ui.set_selected(real_idx as i32);
-        open_conversation(&sh_sel, real_idx);
+        // Re-grab the window-level key sink so Delete works right after a
+        // click (typing in the composer moves focus there as usual).
+        ui.invoke_grab_key_focus();
+        open_conversation(&ui, &sh_sel, real_idx);
+    });
+
+    // Delete key → confirm modal → delete the whole conversation (every
+    // message incl. the user's own replies from Sent). The server handler
+    // soft-deletes locally AND queues flag-sync deleted=true, so the worker
+    // pushes STORE \Deleted + UID EXPUNGE to the source IMAP server.
+    let ui_weak_delc = ui.as_weak();
+    let sh_delc = shared.clone();
+    ui.on_delete_conversation(move || {
+        let Some(ui) = ui_weak_delc.upgrade() else { return };
+        if sh_delc.pending_compose.borrow().is_some() {
+            return; // transient compose has no conversation to delete
+        }
+        let convs = sh_delc.convs.borrow();
+        let Some(c) = convs.get(sh_delc.current.get()) else { return };
+        ui.set_confirm_delete_text(
+            format!(
+                "«{}» — сообщений: {}. Все письма диалога, включая ваши ответы, \
+                 будут удалены и на сервере.",
+                c.label,
+                c.messages.len()
+            )
+            .into(),
+        );
+        ui.set_confirm_delete_visible(true);
+    });
+    let ui_weak_delk = ui.as_weak();
+    let sh_delk = shared.clone();
+    ui.on_delete_conversation_confirmed(move || {
+        let Some(ui) = ui_weak_delk.upgrade() else { return };
+        let cur = sh_delk.current.get();
+        let (conv_id, refs) = {
+            let convs = sh_delk.convs.borrow();
+            let Some(c) = convs.get(cur) else { return };
+            (c.id.clone(), c.messages.clone())
+        };
+        println!("delete conversation {conv_id} ({} messages)", refs.len());
+        if let Some(etx) = sh_delk.engine_tx.borrow().as_ref() {
+            let _ = etx.send(engine::EngineCmd::Delete { messages: refs });
+        }
+        // Optimistic local removal; the engine resets the full-sync stamp on
+        // success, so the Done-triggered refetch reconciles with the server.
+        if let Some(cache) = &sh_delk.cache {
+            cache.delete_conversation(&sh_delk.key, &conv_id).ok();
+        }
+        {
+            let mut convs = sh_delk.convs.borrow_mut();
+            if cur < convs.len() {
+                convs.remove(cur);
+            }
+            let displays = displays_from(&convs, &sh_delk.identity_colors.borrow());
+            let items = sidebar_items(&displays, &sh_delk.avatars.borrow());
+            ui.set_conversations(ModelRc::new(VecModel::from(items)));
+            *sh_delk.displays.borrow_mut() = displays;
+        }
+        let len = sh_delk.convs.borrow().len();
+        if len == 0 {
+            ui.set_messages(ModelRc::new(VecModel::from(Vec::<RowItem>::new())));
+            ui.set_render_total(0);
+            sh_delk.current_msgs.borrow_mut().clear();
+            sh_delk.current_bodies.borrow_mut().clear();
+            return;
+        }
+        // Show the neighbour (same index now points at the next conversation).
+        let next = cur.min(len - 1);
+        ui.set_selected(next as i32);
+        if let Some(d) = sh_delk.displays.borrow().get(next) {
+            ui.set_active_name(d.name.clone().into());
+            ui.set_active_initials(d.initials.clone().into());
+            ui.set_active_color(slint::Brush::SolidColor(hex(&d.color)));
+        }
+        open_conversation(&ui, &sh_delk, next);
     });
 
     // Resize = pure relayout: re-render the in-memory bodies at the new
@@ -1618,8 +2009,10 @@ fn main() {
     let sh_rs = shared.clone();
     let resize_debounce = Rc::new(slint::Timer::default());
     ui.on_viewport_resized(move |w| {
-        let neww = (w as u32).max(240);
-        if neww == sh_rs.width.get() {
+        let neww = w as u32;
+        // Sub-minimum widths are layout transients (chat pane hidden in
+        // calendar mode, first frame) — rendering at them would be junk.
+        if neww < 240 || neww == sh_rs.width.get() {
             return;
         }
         sh_rs.width.set(neww);
@@ -1630,15 +2023,47 @@ fn main() {
             move || {
                 let bodies = sh2.current_bodies.borrow().clone();
                 if !bodies.is_empty() {
-                    send_render_job(&sh2, bodies);
+                    send_render_job(&sh2, bodies, None);
                 }
             },
         );
     });
 
+    // Slint's `changed width` does NOT fire for the initial layout pass, so
+    // after a restart the render width silently stayed at DEFAULT_WIDTH and
+    // every bubble stretched to the real (wider) column. This watcher feeds
+    // the actual chat-column width through the same resize path — covering
+    // the first frame and any future missed events (DPI change, etc.).
+    let ui_weak_ww = ui.as_weak();
+    let width_watcher = slint::Timer::default();
+    width_watcher.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(500),
+        move || {
+            if let Some(ui) = ui_weak_ww.upgrade() {
+                let w = ui.get_chat_width();
+                if w > 0.0 {
+                    ui.invoke_viewport_resized(w);
+                }
+            }
+        },
+    );
+
     let tx_hit = shared.tx.clone();
     ui.on_hit_test(move |row, x, y| {
         let _ = tx_hit.send(Job::HitTest { row: row as usize, x, y });
+    });
+
+    // Pointer-cursor hover query — pure point-in-rect against the UI-thread
+    // copy of the link rects, re-evaluated by the binding on every move.
+    let sh_hover = shared.clone();
+    ui.on_hover_link(move |row, x, y| {
+        sh_hover
+            .row_links
+            .borrow()
+            .get(row as usize)
+            .map(|links| links.iter().any(|l| l.contains(x, y)))
+            .unwrap_or(false)
     });
 
     // Composer → three branches depending on staged intent:
@@ -1689,6 +2114,70 @@ fn main() {
             }
         };
 
+        // Branch 0: forward — explicit recipients from the «Кому» field;
+        // the typed text is the covering note, the original's text goes
+        // below it after a separator, attachments re-attach engine-side.
+        if let Some(orig) = sh_send.pending_forward.borrow().clone() {
+            let to: Vec<String> = ui_now
+                .as_ref()
+                .map(|u| u.get_composer_to().to_string())
+                .unwrap_or_default()
+                .split(|c: char| c == ',' || c == ';')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if to.is_empty() {
+                eprintln!("forward: адресат не указан — заполните «Кому»");
+                if let Some(u) = ui_now.as_ref() {
+                    u.set_composer_expanded(true);
+                    u.set_focus_to_seq(u.get_focus_to_seq() + 1);
+                }
+                return;
+            }
+            // enter_forward_mode pre-filled composer-subject with «Fwd: …»,
+            // so the override carries it; fall back defensively anyway.
+            let subject = if !subject_override.is_empty() {
+                subject_override.clone()
+            } else {
+                format!("Fwd: {}", orig.subject)
+            };
+            let from_line = if orig.from.is_empty() {
+                orig.from_addr.clone()
+            } else {
+                orig.from.clone()
+            };
+            let orig_text = orig.text.clone().unwrap_or_default();
+            let body_text = format!(
+                "{text}\n\n---------- Пересланное сообщение ----------\n\
+                 От: {from_line}\nДата: {}\nТема: {}\n\n{orig_text}",
+                orig.date, orig.subject
+            );
+            if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
+                println!("forwarding {}/{} to {to:?}", orig.folder, orig.uid);
+                let _ = etx.send(engine::EngineCmd::Send {
+                    to,
+                    cc: cc.clone(),
+                    subject,
+                    body: body_text,
+                    in_reply_to: None,
+                    references: None,
+                    attachments: attachments.clone(),
+                    forward_attachments: Some(MessageRef {
+                        folder: orig.folder.clone(),
+                        uid: orig.uid,
+                        seen: true,
+                    }),
+                });
+                clear_overrides();
+                if let Some(u) = ui_now.as_ref() {
+                    exit_reply_mode(&sh_send, u);
+                    u.set_composer_expanded(false);
+                }
+            } else {
+                eprintln!("send: no live engine (set DDMAIL_* env)");
+            }
+            return;
+        }
         // Branch 1: transient compose target set via the search dropdown.
         if let Some(target) = sh_send.pending_compose.borrow().clone() {
             let subject = if !subject_override.is_empty() {
@@ -1706,6 +2195,7 @@ fn main() {
                     in_reply_to: None,
                     references: None,
                     attachments: attachments.clone(),
+                    forward_attachments: None,
                 });
                 clear_overrides();
             } else {
@@ -1774,6 +2264,7 @@ fn main() {
                 let _ = etx.send(engine::EngineCmd::Send {
                     to, cc: cc.clone(), subject, body: text, in_reply_to, references,
                     attachments: attachments.clone(),
+                    forward_attachments: None,
                 });
                 clear_overrides();
             } else {
@@ -1832,6 +2323,7 @@ fn main() {
             let _ = etx.send(engine::EngineCmd::Send {
                 to, cc, subject, body: text, in_reply_to, references,
                 attachments,
+                forward_attachments: None,
             });
             clear_overrides();
         } else {
@@ -1950,8 +2442,8 @@ fn main() {
                     ui.set_active_initials(d.initials.clone().into());
                     ui.set_active_color(slint::Brush::SolidColor(hex(&d.color)));
                 }
+                open_conversation(&ui, &sh_sel_c, conv_idx);
             }
-            open_conversation(&sh_sel_c, conv_idx);
         } else {
             // No existing conv with this counterpart → enter transient
             // compose mode pointed at this contact's email.
@@ -1985,8 +2477,8 @@ fn main() {
                     ui.set_active_initials(d.initials.clone().into());
                     ui.set_active_color(slint::Brush::SolidColor(hex(&d.color)));
                 }
+                open_conversation(&ui, &sh_sel_m, conv_idx);
             }
-            open_conversation(&sh_sel_m, conv_idx);
         } else {
             // Message is on the server but not in any local conversation —
             // out of scope for v1 of the dropdown.
@@ -2009,25 +2501,59 @@ fn main() {
         // policy_gen so the body_cache misses for entries rendered
         // under the old policy, and re-fires SetConversation so the
         // bubbles repaint immediately.
-        if action == "toggle-media" || action == "toggle-scripts" {
+        // «Медиа…» menu: every item toggles one policy switch, persists it
+        // immediately, and repaints (the policy generation is part of the
+        // texture cache key, so the re-render is guaranteed to miss).
+        if action.starts_with("media-") {
             let body_opt = sh_act.current_bodies.borrow().get(row).cloned();
             let Some(b) = body_opt else { return };
             let sender = b.from_addr.clone();
-            let mut p = sh_act.policy.borrow_mut();
-            if action == "toggle-media" {
-                let now_on = p.toggle_media(&sender);
-                println!("[policy] media for {sender}: {}", if now_on { "ON" } else { "OFF" });
-            } else {
-                let now_on = p.toggle_scripts(&sender);
-                println!("[policy] scripts for {sender}: {}", if now_on { "ON" } else { "OFF" });
+            let (media_host, script_host) =
+                sanitize::first_external_hosts(b.html.as_deref().unwrap_or(""));
+            {
+                let mut p = sh_act.policy.borrow_mut();
+                match action.as_str() {
+                    "media-allow-all" => p.allow_all = !p.allow_all,
+                    "media-scripts-all" => p.allow_all_scripts = !p.allow_all_scripts,
+                    "media-scripts-sender" => {
+                        p.toggle_scripts(&sender);
+                    }
+                    "media-scripts-host" => {
+                        if script_host.is_empty() {
+                            return;
+                        }
+                        p.toggle_script_host(&script_host);
+                    }
+                    "media-images-all" => p.allow_all_media = !p.allow_all_media,
+                    "media-images-sender" => {
+                        p.toggle_media(&sender);
+                    }
+                    "media-images-host" => {
+                        if media_host.is_empty() {
+                            return;
+                        }
+                        p.toggle_media_host(&media_host);
+                    }
+                    other => {
+                        println!("media action {other} — not wired");
+                        return;
+                    }
+                }
+                println!("[policy] {action} (sender={sender}, img={media_host}, js={script_host})");
+                // Bump the persisted generation BEFORE saving: the texture
+                // cache key must change atomically with the policy.
+                p.generation += 1;
+                let gen_now = p.generation;
+                policy::save(&p);
+                sh_act.policy_gen.set(gen_now);
             }
-            policy::save(&p);
-            drop(p);
-            sh_act.policy_gen.set(sh_act.policy_gen.get() + 1);
+            if let Some(ui) = ui_weak_act.upgrade() {
+                sync_media_globals(&ui, &sh_act.policy.borrow());
+            }
             // Repaint the in-memory bodies under the new policy — no SQLite
             // reload and no network refetch for a permission toggle.
             let bodies = sh_act.current_bodies.borrow().clone();
-            send_render_job(&sh_act, bodies);
+            send_render_job(&sh_act, bodies, None);
             return;
         }
 
@@ -2054,39 +2580,51 @@ fn main() {
                 eprintln!("forward: body not in memory for {msg:?}");
                 return;
             };
-            let from = if body.from.is_empty() {
-                body.from_addr.clone()
-            } else {
-                format!("{} <{}>", body.from, body.from_addr)
-            };
-            let orig = body
-                .text
-                .clone()
-                .unwrap_or_else(|| "(сообщение без текстовой части — откройте оригинал)".to_string());
-            let note = if body.attachments.is_empty() {
-                String::new()
-            } else {
-                format!("\n\n[вложения оригинала ({}) не пересылаются]", body.attachments.len())
-            };
-            let fwd = format!(
-                "\n\n---------- Пересланное сообщение ----------\n\
-                 От: {from}\nДата: {}\nТема: {}\n\n{}{}",
-                body.date, body.subject, orig, note
-            );
-            let subj_lc = body.subject.to_lowercase();
-            let subject = if subj_lc.starts_with("fwd:") || subj_lc.starts_with("fw:") {
-                body.subject.clone()
-            } else {
-                format!("Fwd: {}", body.subject)
-            };
             if let Some(ui) = ui_weak_act.upgrade() {
-                // A forward is a fresh message — clear any pending reply state.
-                exit_reply_mode(&sh_act, &ui);
-                ui.set_composer_subject(subject.into());
-                ui.set_composer_text(fwd.into());
-                // Reveal the subject/cc panel so the "Fwd:" subject is visible.
-                ui.set_composer_expanded(true);
+                enter_forward_mode(&sh_act, &ui, body);
             }
+            return;
+        }
+        // «Показать → Заголовки / Исходник сообщения» — fetch the raw
+        // RFC-822 source; the result handler opens the viewer with the
+        // requested slice.
+        if action == "show-headers" || action == "show-source" {
+            sh_act
+                .pending_source_view
+                .set(if action == "show-headers" { 1 } else { 2 });
+            if let Some(etx) = sh_act.engine_tx.borrow().as_ref() {
+                let _ = etx.send(engine::EngineCmd::FetchSource {
+                    folder: msg.folder.clone(),
+                    uid: msg.uid,
+                });
+            }
+            return;
+        }
+        // «Исходник тела» — the HTML part is already in memory.
+        if action == "show-body-source" {
+            let body_opt = sh_act.current_bodies.borrow().get(row).cloned();
+            let Some(body) = body_opt else { return };
+            if let Some(ui) = ui_weak_act.upgrade() {
+                ui.set_source_view_title(format!("Исходник тела — {}", body.subject).into());
+                ui.set_source_view_text(body.html.unwrap_or_default().into());
+                ui.set_source_view_visible(true);
+            }
+            return;
+        }
+        // Per-message text/HTML view toggle. The render-mode is part of the
+        // texture cache key, so this is a guaranteed re-render of that row.
+        if action == "view-text" || action == "view-html" {
+            let key = (msg.folder.clone(), msg.uid);
+            {
+                let mut ov = sh_act.body_view_text.borrow_mut();
+                if action == "view-text" {
+                    ov.insert(key);
+                } else {
+                    ov.remove(&key);
+                }
+            }
+            let bodies = sh_act.current_bodies.borrow().clone();
+            send_render_job(&sh_act, bodies, None);
             return;
         }
         // Everything else (delete / read / unread) goes through the engine.
@@ -2395,11 +2933,40 @@ fn main() {
 /// Apply an engine result on the UI thread (reaches Shared via the thread-local).
 fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
     match res {
-        engine::EngineResult::Conversations(convs) => {
-            println!("engine: {} live conversations", convs.len());
-            let displays = displays_from(&convs);
+        engine::EngineResult::Conversations { mut list, partial } => {
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
+                    if partial && list.is_empty() {
+                        println!("engine: conversations delta — no changes");
+                        return;
+                    }
+                    // Remember the open conversation's identity: merging or a
+                    // refetch can reorder the list and shift its index.
+                    let current_id = sh.convs.borrow().get(sh.current.get()).map(|c| c.id.clone());
+                    let merged: Vec<Conversation> = if partial {
+                        let mut all = sh.convs.borrow().clone();
+                        for nc in list.drain(..) {
+                            match all.iter_mut().find(|c| c.id == nc.id) {
+                                Some(slot) => *slot = nc,
+                                None => all.push(nc),
+                            }
+                        }
+                        all.sort_by(|a, b| b.last_date_ts.cmp(&a.last_date_ts));
+                        all
+                    } else {
+                        list
+                    };
+                    println!(
+                        "engine: {} conversations (delta={})",
+                        merged.len(),
+                        if partial { "merge" } else { "full" }
+                    );
+                    // Identities may have been (re)synced alongside the
+                    // conversations — refresh the row-tint map from cache.
+                    if let Some(cache) = &sh.cache {
+                        *sh.identity_colors.borrow_mut() = identity_color_map(cache, &sh.key);
+                    }
+                    let displays = displays_from(&merged, &sh.identity_colors.borrow());
                     let items = sidebar_items(&displays, &sh.avatars.borrow());
                     ui.set_conversations(ModelRc::new(VecModel::from(items)));
                     // Request avatars for unique counterpart emails not yet cached.
@@ -2414,8 +2981,20 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                             }
                         }
                     }
-                    *sh.convs.borrow_mut() = convs;
+                    *sh.convs.borrow_mut() = merged;
                     *sh.displays.borrow_mut() = displays;
+                    // Re-locate the selection by id (skip in transient-compose
+                    // mode, where the sidebar has a synthetic first row).
+                    if sh.pending_compose.borrow().is_none() {
+                        if let Some(id) = current_id {
+                            if let Some(idx) = sh.convs.borrow().iter().position(|c| c.id == id) {
+                                if idx != sh.current.get() {
+                                    sh.current.set(idx);
+                                    ui.set_selected(idx as i32);
+                                }
+                            }
+                        }
+                    }
                 }
             });
         }
@@ -2446,10 +3025,13 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     }
                     *sh.current_msgs.borrow_mut() = bodies
                         .iter()
-                        .map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid })
+                        .map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid, seen: true })
                         .collect();
                     *sh.current_bodies.borrow_mut() = bodies.clone();
-                    send_render_job(sh, bodies);
+                    // First render after open may be THIS one (conversation
+                    // wasn't cached) — apply the pending scroll if so.
+                    let scroll = take_scroll_target(sh, &bodies);
+                    send_render_job(sh, bodies, scroll);
                 }
             });
         }
@@ -2552,6 +3134,27 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             let _ = std::process::Command::new("cmd")
                 .args(["/C", "start", "", &path])
                 .spawn();
+        }
+        engine::EngineResult::Source { uid, raw } => {
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    let what = sh.pending_source_view.get();
+                    sh.pending_source_view.set(0);
+                    let (title, text) = if what == 1 {
+                        // Header block = up to the first blank line.
+                        let end = raw
+                            .find("\r\n\r\n")
+                            .or_else(|| raw.find("\n\n"))
+                            .unwrap_or(raw.len());
+                        (format!("Заголовки (id {uid})"), raw[..end].to_string())
+                    } else {
+                        (format!("Исходник сообщения (id {uid})"), raw)
+                    };
+                    ui.set_source_view_title(title.into());
+                    ui.set_source_view_text(text.into());
+                    ui.set_source_view_visible(true);
+                }
+            });
         }
         engine::EngineResult::Calendars(cals) => {
             println!("engine: {} calendars", cals.len());

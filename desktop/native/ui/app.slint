@@ -22,6 +22,9 @@ struct ConvItem {
     time: string,
     avatar: image,
     has-avatar: bool,
+    // Row tint = pastel colour of the identity that RECEIVED the
+    // conversation (transparent for the synthetic compose row).
+    ident-color: brush,
 }
 
 // Each message row is a full-width image rendered by Blitz (bubble, alignment,
@@ -29,6 +32,19 @@ struct ConvItem {
 struct RowItem {
     img: image,
     h: length,
+    // Drives the context menu's «Показать…» items: whether an HTML part
+    // exists for this message, and whether it's the currently shown view.
+    has-html: bool,
+    viewing-html: bool,
+    // «Медиа…» menu data: sender address, first external image/script
+    // hosts (empty = none), and the per-sender/per-host checkbox states.
+    sender: string,
+    media-host: string,
+    script-host: string,
+    m-sender-on: bool,
+    s-sender-on: bool,
+    m-host-on: bool,
+    s-host-on: bool,
 }
 
 // Calendar list row in the calendar-mode sidebar.
@@ -228,7 +244,40 @@ export component MainWindow inherits Window {
 
     callback select(int);
     callback hit-test(int, length, length);
+    // Hover query for the pointer cursor: true when (x, y) inside row
+    // `idx` sits on a link rect. Pure — it's evaluated from a binding.
+    pure callback hover-link(int, length, length) -> bool;
     callback viewport-resized(length);
+    // Live chat-column width, assigned by the chat Rectangle's changed/init
+    // handlers (its id is scoped inside a conditional branch, so a binding
+    // can't reach it). Rust polls this to seed the first render width —
+    // the assignment runs Slint-side even when the change event fires
+    // before the Rust callback is registered.
+    in-out property <length> chat-width: 0;
+    // Programmatic chat scroll: Rust sets chat-scroll-y (positive offset
+    // from the top) then bumps chat-scroll-seq; the bridge element next to
+    // the ListView reacts to the seq change and assigns viewport-y. (A
+    // plain binding would be destroyed by the user's first manual scroll.)
+    in-out property <length> chat-scroll-y: 0;
+    in-out property <int> chat-scroll-seq: 0;
+    // Delete-conversation confirmation modal.
+    in-out property <bool> confirm-delete-visible: false;
+    in property <string> confirm-delete-text: "";
+    callback delete-conversation();           // Delete key pressed
+    callback delete-conversation-confirmed(); // user clicked «Удалить»
+    // Read-only source viewer («Показать → Заголовки / Исходник …»).
+    in-out property <bool> source-view-visible: false;
+    in property <string> source-view-title: "";
+    in property <string> source-view-text: "";
+    // Forward mode: explicit «Кому» recipients (composer panel).
+    in-out property <string> composer-to: "";
+    // Global «Медиа…» switches, mirrored from the Rust policy.
+    in property <bool> media-allow-all-on: false;
+    in property <bool> media-all-images-on: false;
+    in property <bool> media-all-scripts-on: false;
+    // Bump to pull keyboard focus into the «Кому» field (bridge inside
+    // the composer panel scope — same pattern as chat-scroll-seq).
+    in-out property <int> focus-to-seq: 0;
     callback send(string);
     // Open the native file picker to stage attachments; remove one by index.
     callback attach-files();
@@ -250,6 +299,24 @@ export component MainWindow inherits Window {
         // TODO: route via a forward-focus property once mail-view is a
         // dedicated component.
     }
+
+    // Window-level key sink: Delete = delete the open conversation. 0×0 —
+    // it only exists to hold keyboard focus; Rust re-grabs it via
+    // grab-key-focus() after each conversation click, so typing in the
+    // composer (which holds its own focus) keeps Delete as text editing.
+    kb := FocusScope {
+        width: 0;
+        height: 0;
+        init => { self.focus(); }
+        key-pressed(ev) => {
+            if (ev.text == Key.Delete && !root.confirm-delete-visible) {
+                root.delete-conversation();
+                return accept;
+            }
+            reject
+        }
+    }
+    public function grab-key-focus() { kb.focus(); }
 
     HorizontalLayout {
         spacing: 0px;
@@ -424,8 +491,12 @@ export component MainWindow inherits Window {
                 ListView {
                     for conv[idx] in root.conversations: Rectangle {
                         height: 64px;
-                        background: idx == root.selected ? #2f80ed : transparent;
-                        TouchArea {
+                        // Identity tint on idle rows (Tauri-era behaviour):
+                        // selection and hover override it.
+                        background: idx == root.selected ? #2f80ed
+                            : conv-ta.has-hover ? #e8ecf1
+                            : conv.ident-color;
+                        conv-ta := TouchArea {
                             clicked => { root.select(idx); }
                         }
                         HorizontalLayout {
@@ -706,11 +777,19 @@ export component MainWindow inherits Window {
                 }
             }
 
-            Rectangle {
+            chat-area := Rectangle {
                 vertical-stretch: 1;
                 background: #e9eef5;
                 // Tell Rust the chat width so Blitz re-renders rows to fill it.
-                changed width => { root.viewport-resized(self.width); }
+                // Also mirror it into root.chat-width: the change event can
+                // fire during setup BEFORE Rust registers the callback, and
+                // the initial layout pass may not fire it at all — the
+                // Rust-side watcher polls the mirrored value to recover.
+                init => { root.chat-width = self.width; }
+                changed width => {
+                    root.chat-width = self.width;
+                    root.viewport-resized(self.width);
+                }
 
                 // Thin loader bar overlaid at the top while Ultralight is
                 // still chewing through the conversation's bubbles. Becomes
@@ -745,26 +824,87 @@ export component MainWindow inherits Window {
                         vertical-alignment: center;
                     }
                 }
-                ListView {
+                // Programmatic scroll bridge: reacts to chat-scroll-seq bumps
+                // from Rust and assigns lv.viewport-y imperatively (clamped
+                // to the content range). Invisible, zero-size — children of a
+                // plain Rectangle are absolutely positioned, so it doesn't
+                // affect layout.
+                Rectangle {
+                    visible: false;
+                    width: 0;
+                    height: 0;
+                    x: root.chat-scroll-seq * 1px;
+                    changed x => {
+                        lv.viewport-y = -max(0px, min(root.chat-scroll-y,
+                            lv.viewport-height - lv.height));
+                    }
+                }
+                lv := ListView {
                     for msg[idx] in root.messages: Rectangle {
                         height: msg.h;
                         cma := ContextMenuArea {
                             Menu {
                                 MenuItem { title: "Ответить"; activated => { root.msg-action(idx, "reply"); } }
                                 MenuItem { title: "Переслать"; activated => { root.msg-action(idx, "forward"); } }
-                                MenuItem { title: "Прочитано"; activated => { root.msg-action(idx, "read"); } }
-                                MenuItem { title: "Не прочитано"; activated => { root.msg-action(idx, "unread"); } }
-                                MenuItem { title: "Копировать текст"; activated => { root.msg-action(idx, "copy"); } }
                                 MenuSeparator { }
                                 Menu {
-                                    title: "Внешний контент";
-                                    MenuItem {
-                                        title: "Картинки от отправителя (вкл/выкл)";
-                                        activated => { root.msg-action(idx, "toggle-media"); }
+                                    title: "Показать…";
+                                    MenuItem { title: "Заголовки"; activated => { root.msg-action(idx, "show-headers"); } }
+                                    MenuItem { title: "Исходник сообщения"; activated => { root.msg-action(idx, "show-source"); } }
+                                    if msg.has-html && msg.viewing-html: MenuItem {
+                                        title: "Исходник тела (HTML)";
+                                        activated => { root.msg-action(idx, "show-body-source"); }
                                     }
+                                    if msg.has-html && msg.viewing-html: MenuItem {
+                                        title: "Текстовую версию";
+                                        activated => { root.msg-action(idx, "view-text"); }
+                                    }
+                                    if msg.has-html && !msg.viewing-html: MenuItem {
+                                        title: "HTML-версию";
+                                        activated => { root.msg-action(idx, "view-html"); }
+                                    }
+                                }
+                                Menu {
+                                    title: "Медиа…";
                                     MenuItem {
-                                        title: "Скрипты от отправителя (вкл/выкл)";
-                                        activated => { root.msg-action(idx, "toggle-scripts"); }
+                                        title: (root.media-allow-all-on ? "✓ " : "") + "Разрешить всё";
+                                        activated => { root.msg-action(idx, "media-allow-all"); }
+                                    }
+                                    Menu {
+                                        title: "Скрипты…";
+                                        enabled: !root.media-allow-all-on;
+                                        MenuItem {
+                                            title: (root.media-all-scripts-on ? "✓ " : "") + "Разрешить все";
+                                            activated => { root.msg-action(idx, "media-scripts-all"); }
+                                        }
+                                        MenuItem {
+                                            title: (msg.s-sender-on ? "✓ " : "") + "Разрешить все от " + msg.sender;
+                                            enabled: !root.media-all-scripts-on;
+                                            activated => { root.msg-action(idx, "media-scripts-sender"); }
+                                        }
+                                        if msg.script-host != "": MenuItem {
+                                            title: (msg.s-host-on ? "✓ " : "") + "Разрешить все для " + msg.script-host;
+                                            enabled: !root.media-all-scripts-on;
+                                            activated => { root.msg-action(idx, "media-scripts-host"); }
+                                        }
+                                    }
+                                    Menu {
+                                        title: "Изображения…";
+                                        enabled: !root.media-allow-all-on;
+                                        MenuItem {
+                                            title: (root.media-all-images-on ? "✓ " : "") + "Разрешить все";
+                                            activated => { root.msg-action(idx, "media-images-all"); }
+                                        }
+                                        MenuItem {
+                                            title: (msg.m-sender-on ? "✓ " : "") + "Разрешить все от " + msg.sender;
+                                            enabled: !root.media-all-images-on;
+                                            activated => { root.msg-action(idx, "media-images-sender"); }
+                                        }
+                                        if msg.media-host != "": MenuItem {
+                                            title: (msg.m-host-on ? "✓ " : "") + "Разрешить все для " + msg.media-host;
+                                            enabled: !root.media-all-images-on;
+                                            activated => { root.msg-action(idx, "media-images-host"); }
+                                        }
                                     }
                                 }
                                 MenuSeparator { }
@@ -785,9 +925,14 @@ export component MainWindow inherits Window {
                         }
                         // Whole-bubble pointer handling: left click → hit-test in
                         // Blitz for a link; right click → open the native menu.
+                        // The cursor flips to a pointer over link rects so it's
+                        // obvious a click opens the browser.
                         TouchArea {
                             width: parent.width;
                             height: msg.h;
+                            mouse-cursor: self.has-hover
+                                && root.hover-link(idx, self.mouse-x, self.mouse-y)
+                                ? MouseCursor.pointer : MouseCursor.default;
                             clicked => { root.hit-test(idx, self.mouse-x, self.mouse-y); }
                             pointer-event(e) => {
                                 if (e.button == PointerEventButton.right
@@ -805,14 +950,57 @@ export component MainWindow inherits Window {
             // derived values appear as placeholders, so leaving them
             // empty falls back to the auto behaviour at send time.
             if root.composer-expanded: Rectangle {
-                height: 78px;
+                height: 112px;
                 background: white;
+                // Focus bridge: Rust bumps focus-to-seq → grab the «Кому»
+                // input (its id is scoped here, unreachable from root).
+                Rectangle {
+                    visible: false;
+                    width: 0; height: 0;
+                    x: root.focus-to-seq * 1px;
+                    changed x => { si-to.focus(); }
+                }
                 VerticalLayout {
                     padding-left: 14px;
                     padding-right: 14px;
                     padding-top: 6px;
                     padding-bottom: 4px;
                     spacing: 4px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            width: 50px;
+                            text: "Кому:";
+                            color: #8b95a1;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            background: #f0f2f5;
+                            border-radius: 8px;
+                            height: 30px;
+                            si-to := TextInput {
+                                x: 10px;
+                                width: parent.width - 20px;
+                                height: parent.height;
+                                vertical-alignment: center;
+                                color: #0f1419;
+                                font-size: 13px;
+                                single-line: true;
+                                text <=> root.composer-to;
+                            }
+                            if si-to.text == "": Text {
+                                x: 10px;
+                                width: parent.width - 20px;
+                                height: parent.height;
+                                text: "(текущий диалог)";
+                                color: #b5bcc6;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
                     HorizontalLayout {
                         spacing: 8px;
                         Text {
@@ -1658,6 +1846,12 @@ export component MainWindow inherits Window {
     if root.detail-visible: TouchArea {
         // Backdrop: click outside the card closes the popup.
         clicked => { root.detail-close(); }
+        FocusScope {
+            init => { self.focus(); }
+            key-pressed(ev) => {
+                if (ev.text == Key.Escape) { root.detail-close(); kb.focus(); return accept; }
+                reject
+            }
         Rectangle {
             background: #00000066;
             card := Rectangle {
@@ -1765,11 +1959,18 @@ export component MainWindow inherits Window {
                 }
             }
         }
+        }
     }
 
     // ---------- Event create/edit modal ----------
     if root.edit-visible: TouchArea {
         clicked => { root.edit-cancel(); }
+        FocusScope {
+            init => { self.focus(); }
+            key-pressed(ev) => {
+                if (ev.text == Key.Escape) { root.edit-cancel(); kb.focus(); return accept; }
+                reject
+            }
         Rectangle {
             background: #00000066;
             Rectangle {
@@ -1803,6 +2004,147 @@ export component MainWindow inherits Window {
                     }
                 }
             }
+        }
+        }
+    }
+
+    // ---------- Source viewer («Показать → …», read-only) ----------
+    if root.source-view-visible: TouchArea {
+        clicked => { root.source-view-visible = false; kb.focus(); }
+        FocusScope {
+            init => { self.focus(); }
+            key-pressed(ev) => {
+                if (ev.text == Key.Escape || ev.text == Key.Return) {
+                    root.source-view-visible = false;
+                    kb.focus();
+                    return accept;
+                }
+                reject
+            }
+        Rectangle {
+            background: #00000066;
+            Rectangle {
+                width: min(860px, root.width - 80px);
+                height: min(640px, root.height - 80px);
+                background: white;
+                border-radius: 14px;
+                drop-shadow-blur: 24px;
+                drop-shadow-color: #00000044;
+                TouchArea {}
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 10px;
+                    HorizontalLayout {
+                        Text {
+                            text: root.source-view-title;
+                            font-size: 16px; font-weight: 700; color: #0f1419;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        Rectangle {
+                            width: 28px; height: 28px; border-radius: 8px;
+                            background: sv-x.has-hover ? #e1e6ee : transparent;
+                            Text { text: "✕"; color: #6b7480; font-size: 14px;
+                                   horizontal-alignment: center; vertical-alignment: center; }
+                            sv-x := TouchArea {
+                                clicked => { root.source-view-visible = false; kb.focus(); }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: #f7f8fa;
+                        border-radius: 8px;
+                        clip: true;
+                        Flickable {
+                            width: parent.width;
+                            height: parent.height;
+                            viewport-height: sv-text.preferred-height + 24px;
+                            sv-text := Text {
+                                x: 12px;
+                                y: 12px;
+                                width: parent.width - 24px;
+                                text: root.source-view-text;
+                                font-family: "Consolas";
+                                font-size: 12px;
+                                color: #2b3640;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        }
+    }
+
+    // ---------- Delete-conversation confirmation (modal) ----------
+    if root.confirm-delete-visible: TouchArea {
+        // Swallows clicks behind the dialog; clicking the dimmed area cancels.
+        clicked => { root.confirm-delete-visible = false; kb.focus(); }
+        // Enter = подтвердить, Escape = отмена. The scope grabs focus on
+        // open and hands it back to the window key-sink on close.
+        FocusScope {
+            init => { self.focus(); }
+            key-pressed(ev) => {
+                if (ev.text == Key.Escape) {
+                    root.confirm-delete-visible = false;
+                    kb.focus();
+                    return accept;
+                }
+                if (ev.text == Key.Return) {
+                    root.confirm-delete-visible = false;
+                    kb.focus();
+                    root.delete-conversation-confirmed();
+                    return accept;
+                }
+                reject
+            }
+        Rectangle {
+            background: #00000066;
+            Rectangle {
+                width: min(440px, root.width - 80px);
+                height: cd-body.preferred-height + 40px;
+                background: white;
+                border-radius: 14px;
+                drop-shadow-blur: 24px;
+                drop-shadow-color: #00000044;
+                TouchArea {} // keep clicks inside the card from closing it
+                cd-body := VerticalLayout {
+                    padding: 20px;
+                    spacing: 16px;
+                    Text {
+                        text: "Удалить диалог?";
+                        font-size: 17px; font-weight: 700; color: #0f1419;
+                    }
+                    Text {
+                        text: root.confirm-delete-text;
+                        wrap: word-wrap;
+                        font-size: 14px;
+                        color: #2b3640;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle { horizontal-stretch: 1; }
+                        Button { text: "Отмена"; clicked => { root.confirm-delete-visible = false; kb.focus(); } }
+                        Rectangle {
+                            width: 110px; height: 34px;
+                            border-radius: 8px;
+                            background: cd-del.has-hover ? #d63d3d : #eb5757;
+                            Text { text: "Удалить"; color: white; font-size: 14px; font-weight: 700;
+                                   horizontal-alignment: center; vertical-alignment: center; }
+                            cd-del := TouchArea {
+                                clicked => {
+                                    root.confirm-delete-visible = false;
+                                    kb.focus();
+                                    root.delete-conversation-confirmed();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         }
     }
 }
