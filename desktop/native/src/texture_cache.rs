@@ -14,7 +14,11 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use crate::render_common::{parse_link_rects, LinkRect};
+use crate::render_common::{parse_link_rects, parse_text_runs, LinkRect, TextRun};
+
+/// Bump when the sidecar format gains fields (part of the filename key):
+/// v2 = + text runs. Old entries simply miss and re-render once.
+const FORMAT_VERSION: u32 = 2;
 
 /// Disk budget. Eviction drops oldest-by-mtime entries until under cap;
 /// runs once at startup (steady-state growth between starts is modest).
@@ -35,13 +39,15 @@ pub struct TextureDiskCache {
     dir: PathBuf,
 }
 
-/// A loaded entry: raw RGBA + pixel dims + logical height + link rects.
+/// A loaded entry: raw RGBA + pixel dims + logical height + link rects +
+/// the per-word text layer for selection.
 pub struct DiskEntry {
     pub rgba: Vec<u8>,
     pub width: u32,
     pub height: u32,
     pub h: f32,
     pub links: Vec<LinkRect>,
+    pub runs: Vec<TextRun>,
 }
 
 impl TextureDiskCache {
@@ -56,7 +62,7 @@ impl TextureDiskCache {
     }
 
     fn base(&self, folder: &str, uid: u32, width: u32, policy_gen: u64, mode: u8, fp: u64) -> PathBuf {
-        let key = format!("{folder}|{uid}|{width}|{policy_gen}|{mode}|{fp}");
+        let key = format!("{folder}|{uid}|{width}|{policy_gen}|{mode}|{fp}|v{FORMAT_VERSION}");
         self.dir.join(format!("{:016x}", fnv1a(&key)))
     }
 
@@ -69,6 +75,10 @@ impl TextureDiskCache {
             .get("links")
             .map(|l| parse_link_rects(&l.to_string()))
             .unwrap_or_default();
+        let runs = meta
+            .get("runs")
+            .map(|r| parse_text_runs(&r.to_string()))
+            .unwrap_or_default();
         let img = image::open(base.with_extension("png")).ok()?.into_rgba8();
         let (width_px, height_px) = img.dimensions();
         Some(DiskEntry {
@@ -77,6 +87,7 @@ impl TextureDiskCache {
             height: height_px,
             h,
             links,
+            runs,
         })
     }
 
@@ -94,6 +105,7 @@ impl TextureDiskCache {
         height_px: u32,
         h: f32,
         links: &[LinkRect],
+        runs: &[TextRun],
     ) {
         if rgba.is_empty() || width_px == 0 || height_px == 0 {
             return;
@@ -107,7 +119,15 @@ impl TextureDiskCache {
                 })
             })
             .collect();
-        let meta = serde_json::json!({ "h": h, "links": links_json });
+        let runs_json: Vec<serde_json::Value> = runs
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "x": r.x, "y": r.y, "w": r.w, "h": r.h, "t": r.text,
+                })
+            })
+            .collect();
+        let meta = serde_json::json!({ "h": h, "links": links_json, "runs": runs_json });
         if image::save_buffer(
             base.with_extension("png"),
             rgba,

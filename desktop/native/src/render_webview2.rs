@@ -31,7 +31,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
-use crate::render_common::{parse_link_rects, LinkRect, LINK_RECTS_JS};
+use crate::render_common::{
+    parse_link_rects, parse_text_runs, LinkRect, TextRun, LINK_RECTS_JS, TEXT_RUNS_JS,
+};
 
 /// Plain pass-through window procedure (the off-screen host needs no logic).
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -52,6 +54,8 @@ pub struct RenderResult {
     pub view_ready: bool,
     pub painted_height: u32,
     pub links: Vec<LinkRect>,
+    /// Per-word text layer for mouse selection (PDF-viewer style).
+    pub runs: Vec<TextRun>,
 }
 
 impl RenderResult {
@@ -166,6 +170,7 @@ impl Engine {
                     view_ready: false,
                     painted_height: 0,
                     links: Vec::new(),
+                    runs: Vec::new(),
                 };
             }
 
@@ -176,10 +181,12 @@ impl Engine {
                     view_ready: true,
                     painted_height: 0,
                     links: Vec::new(),
+                    runs: Vec::new(),
                 };
             }
 
             let links = self.extract_links();
+            let runs = self.extract_text_runs();
 
             // Grow viewport to fit content so CapturePreview covers it all.
             let _ = self.controller.SetBounds(RECT {
@@ -199,14 +206,15 @@ impl Engine {
                 view_ready,
                 painted_height,
                 links,
+                runs,
             }
         }
     }
 
-    /// Extract `<a href>` rects via JS (document-relative CSS px), JSON.
-    unsafe fn extract_links(&self) -> Vec<LinkRect> {
+    /// Run a JS expression and wait (bounded) for its JSON-encoded result.
+    unsafe fn eval_json(&self, js: &str) -> Option<String> {
         let (tx, rx) = mpsc::channel::<String>();
-        let script = wide(LINK_RECTS_JS);
+        let script = wide(js);
         let _ = self.webview.ExecuteScript(
             PCWSTR(script.as_ptr()),
             &ExecuteScriptCompletedHandler::create(Box::new(move |_hr, json| {
@@ -215,18 +223,31 @@ impl Engine {
             })),
         );
         let start = std::time::Instant::now();
-        let raw = loop {
+        loop {
             if let Ok(s) = rx.try_recv() {
-                break s;
+                return Some(s);
             }
             if start.elapsed().as_millis() > 2000 {
-                return Vec::new();
+                return None;
             }
             pump_a_bit();
-        };
+        }
+    }
+
+    /// Extract `<a href>` rects via JS (document-relative CSS px), JSON.
+    unsafe fn extract_links(&self) -> Vec<LinkRect> {
         // ExecuteScript JSON-encodes its result; LINK_RECTS_JS evaluates to an
-        // array, so `raw` is already the array JSON.
-        parse_link_rects(&raw)
+        // array, so the payload is already the array JSON.
+        self.eval_json(LINK_RECTS_JS)
+            .map(|raw| parse_link_rects(&raw))
+            .unwrap_or_default()
+    }
+
+    /// Extract the per-word text layer (selection support).
+    unsafe fn extract_text_runs(&self) -> Vec<TextRun> {
+        self.eval_json(TEXT_RUNS_JS)
+            .map(|raw| parse_text_runs(&raw))
+            .unwrap_or_default()
     }
 
     pub fn clear_views(&mut self) {}

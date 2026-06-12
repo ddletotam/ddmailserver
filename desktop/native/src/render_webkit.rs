@@ -26,7 +26,9 @@ use gtk::prelude::*;
 use javascriptcore::ValueExt;
 use webkit2gtk::{LoadEvent, SnapshotOptions, SnapshotRegion, WebView, WebViewExt};
 
-use crate::render_common::{parse_link_rects, LinkRect, LINK_RECTS_JS};
+use crate::render_common::{
+    parse_link_rects, parse_text_runs, LinkRect, TextRun, LINK_RECTS_JS, TEXT_RUNS_JS,
+};
 
 /// Per-bubble canvas cap. WebKitGTK happily renders the whole document
 /// regardless, but downstream we still want a sane upper bound on the
@@ -55,6 +57,8 @@ pub struct RenderResult {
     pub view_ready: bool,
     pub painted_height: u32,
     pub links: Vec<LinkRect>,
+    /// Per-word text layer for mouse selection (PDF-viewer style).
+    pub runs: Vec<TextRun>,
 }
 
 impl RenderResult {
@@ -101,6 +105,7 @@ impl Engine {
                 view_ready: false,
                 painted_height: 0,
                 links: Vec::new(),
+                runs: Vec::new(),
             };
         }
 
@@ -115,10 +120,12 @@ impl Engine {
                 view_ready: true,
                 painted_height: 0,
                 links: Vec::new(),
+                runs: Vec::new(),
             };
         }
 
         let links = self.extract_links();
+        let runs = self.extract_text_runs();
 
         // Grow the viewport to fit the content so the snapshot has
         // somewhere to land. Cap at MAX_H to keep GBM happy.
@@ -136,6 +143,7 @@ impl Engine {
             view_ready,
             painted_height,
             links,
+            runs,
         }
     }
 
@@ -163,6 +171,32 @@ impl Engine {
         wait_until(&done, 2000);
         let s = json.borrow();
         parse_link_rects(&s)
+    }
+
+    /// Extract the per-word text layer (selection support). Same JS-and-wait
+    /// dance as extract_links.
+    fn extract_text_runs(&self) -> Vec<TextRun> {
+        let done = Rc::new(Cell::new(false));
+        let json = Rc::new(RefCell::new(String::new()));
+        let done_cb = done.clone();
+        let json_cb = json.clone();
+        self.view.run_javascript(
+            TEXT_RUNS_JS,
+            None::<&gio::Cancellable>,
+            move |res| {
+                if let Ok(jsr) = res {
+                    if let Some(value) = jsr.js_value() {
+                        if let Some(s) = value.to_json(0) {
+                            *json_cb.borrow_mut() = s.to_string();
+                        }
+                    }
+                }
+                done_cb.set(true);
+            },
+        );
+        wait_until(&done, 2000);
+        let s = json.borrow();
+        parse_text_runs(&s)
     }
 
     /// Reset the cached `View` state — placeholder kept for API parity

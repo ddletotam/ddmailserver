@@ -624,6 +624,19 @@ struct Shared {
     /// What the shared confirmation modal confirms: 1 = удалить диалог,
     /// 2 = спам (blacklist + purge отправителя).
     confirm_mode: Cell<u8>,
+    /// Per-row text layers (word rects, bubble-relative CSS px) — mouse
+    /// selection. Parallel to the rendered rows, like row_links.
+    row_text_runs: RefCell<Vec<Vec<render_common::TextRun>>>,
+    /// Mouse selection: row index (-1 none) and the anchor/head word
+    /// indices within that row's text layer (inclusive, unordered).
+    sel_row: Cell<i32>,
+    sel_anchor: Cell<usize>,
+    sel_head: Cell<usize>,
+    sel_dragging: Cell<bool>,
+    sel_moved: Cell<bool>,
+    /// Set when a drag-selection just ended — the click that Slint fires
+    /// on release must NOT open a link.
+    sel_suppress_click: Cell<bool>,
     /// Render-job sequence shared with the render worker (see Job::seq).
     render_seq: Arc<AtomicU64>,
     current: Cell<usize>,
@@ -760,6 +773,91 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
                 add: true,
             });
         }
+    }
+}
+
+/// Index of the text run nearest to (x, y): the containing run when there
+/// is one, otherwise the run with the closest centre. None for empty layers.
+fn nearest_run(runs: &[render_common::TextRun], x: f32, y: f32) -> Option<usize> {
+    if let Some(i) = runs.iter().position(|r| r.contains(x, y)) {
+        return Some(i);
+    }
+    runs.iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            let da = (a.x + a.w / 2.0 - x).powi(2) + (a.y + a.h / 2.0 - y).powi(2);
+            let db = (b.x + b.w / 2.0 - x).powi(2) + (b.y + b.h / 2.0 - y).powi(2);
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(i, _)| i)
+}
+
+/// Rebuild the highlight rects for the current selection: consecutive
+/// selected words on the same visual line merge into one rect.
+fn refresh_selection_rects(ui: &MainWindow, sh: &Shared) {
+    let row = sh.sel_row.get();
+    if row < 0 || !sh.sel_moved.get() {
+        ui.set_selection_row(-1);
+        ui.set_selection_rects(ModelRc::new(VecModel::from(Vec::<SelRect>::new())));
+        return;
+    }
+    let runs_all = sh.row_text_runs.borrow();
+    let Some(runs) = runs_all.get(row as usize) else { return };
+    let (a, b) = (sh.sel_anchor.get(), sh.sel_head.get());
+    let (lo, hi) = (a.min(b), a.max(b).min(runs.len().saturating_sub(1)));
+    let mut rects: Vec<SelRect> = Vec::new();
+    for r in &runs[lo..=hi] {
+        match rects.last_mut() {
+            // Same visual line → extend the previous rect.
+            Some(last) if (last.y - r.y).abs() < r.h * 0.6 => {
+                let right = (r.x + r.w).max(last.x + last.w);
+                last.x = last.x.min(r.x);
+                last.w = right - last.x;
+                last.h = last.h.max(r.h);
+            }
+            _ => rects.push(SelRect { x: r.x, y: r.y, w: r.w, h: r.h }),
+        }
+    }
+    ui.set_selection_rects(ModelRc::new(VecModel::from(rects)));
+    ui.set_selection_row(row);
+}
+
+/// Selected words joined back into text: spaces within a line, a newline
+/// when the next word starts a new visual line.
+fn selection_text(sh: &Shared) -> Option<String> {
+    let row = sh.sel_row.get();
+    if row < 0 || !sh.sel_moved.get() {
+        return None;
+    }
+    let runs_all = sh.row_text_runs.borrow();
+    let runs = runs_all.get(row as usize)?;
+    let (a, b) = (sh.sel_anchor.get(), sh.sel_head.get());
+    let (lo, hi) = (a.min(b), a.max(b).min(runs.len().saturating_sub(1)));
+    let mut out = String::new();
+    let mut prev: Option<&render_common::TextRun> = None;
+    for r in &runs[lo..=hi] {
+        if let Some(p) = prev {
+            if (r.y - p.y).abs() > p.h * 0.6 {
+                out.push('\n');
+            } else {
+                out.push(' ');
+            }
+        }
+        out.push_str(&r.text);
+        prev = Some(r);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Put text on the system clipboard (best-effort).
+fn clipboard_set(text: &str) {
+    match arboard::Clipboard::new() {
+        Ok(mut cb) => {
+            if let Err(e) = cb.set_text(text.to_string()) {
+                eprintln!("clipboard: {e}");
+            }
+        }
+        Err(e) => eprintln!("clipboard: {e}"),
     }
 }
 
@@ -1574,7 +1672,7 @@ fn main() {
             // on the hot path. UI-thread cost shrinks to just wrapping
             // each buffer in an `Image`.
             let mut body_cache: HashMap<(String, u32, u32, u64, u8, u64),
-                (SharedPixelBuffer<Rgba8Pixel>, f32, Vec<render_common::LinkRect>)> = HashMap::new();
+                (SharedPixelBuffer<Rgba8Pixel>, f32, Vec<render_common::LinkRect>, Vec<render_common::TextRun>)> = HashMap::new();
             // FIFO insertion order for the RAM cache: bitmaps are megabytes
             // each, so cap the entry count and drop the oldest (the disk
             // layer below still has them — eviction only costs a PNG decode).
@@ -1583,6 +1681,8 @@ fn main() {
             // Per-row clickable link rects (CSS px), parallel to the rendered
             // rows. Renderer-agnostic; the click is a pure point-in-rect test.
             let mut row_links: Vec<Vec<render_common::LinkRect>> = Vec::new();
+            // Per-row text layer (word rects) — mouse selection support.
+            let mut row_runs: Vec<Vec<render_common::TextRun>> = Vec::new();
             loop {
                 let job = {
                     let lock = rx.lock().unwrap();
@@ -1602,6 +1702,7 @@ fn main() {
                         let n = bodies.len();
                         engine.clear_views();
                         row_links.clear();
+                        row_runs.clear();
 
                         // Tell the UI to show the progress bar.
                         let n_total = n as i32;
@@ -1638,7 +1739,7 @@ fn main() {
                             let key = (body.folder.clone(), body.uid, width, policy_gen, mode, fp);
                             let mut remember =
                                 |key: &(String, u32, u32, u64, u8, u64),
-                                 entry: &(SharedPixelBuffer<Rgba8Pixel>, f32, Vec<render_common::LinkRect>),
+                                 entry: &(SharedPixelBuffer<Rgba8Pixel>, f32, Vec<render_common::LinkRect>, Vec<render_common::TextRun>),
                                  body_cache: &mut HashMap<_, _>,
                                  ram_order: &mut Vec<(String, u32, u32, u64, u8, u64)>| {
                                     body_cache.insert(key.clone(), entry.clone());
@@ -1648,7 +1749,7 @@ fn main() {
                                         body_cache.remove(&oldest);
                                     }
                                 };
-                            let (buf, h, links) = if let Some(cached) = body_cache.get(&key) {
+                            let (buf, h, links, runs) = if let Some(cached) = body_cache.get(&key) {
                                 cache_hits += 1;
                                 cached.clone()
                             } else if let Some(de) = tex_disk.as_ref().and_then(|t| {
@@ -1660,7 +1761,7 @@ fn main() {
                                 let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
                                     &de.rgba, de.width, de.height,
                                 );
-                                let entry = (buf, de.h, de.links);
+                                let entry = (buf, de.h, de.links, de.runs);
                                 remember(&key, &entry, &mut body_cache, &mut ram_order);
                                 entry
                             } else {
@@ -1693,17 +1794,17 @@ fn main() {
                                     &bitmap.rgba, bitmap.width, bitmap.height,
                                 );
                                 pack_ms_total += t_p.elapsed().as_millis();
-                                let entry = (buf, bitmap.height as f32, result.links);
+                                let entry = (buf, bitmap.height as f32, result.links, result.runs);
                                 println!(
-                                    "[perf]   body uid={} h={}px painted={} ready={} links={}",
+                                    "[perf]   body uid={} h={}px painted={} ready={} links={} runs={}",
                                     body.uid, bitmap.height, result.painted_height,
-                                    result.view_ready, entry.2.len()
+                                    result.view_ready, entry.2.len(), entry.3.len()
                                 );
                                 if let Some(t) = tex_disk.as_ref() {
                                     t.store(
                                         &body.folder, body.uid, width, policy_gen, mode, fp,
                                         &bitmap.rgba, bitmap.width, bitmap.height,
-                                        entry.1, &entry.2,
+                                        entry.1, &entry.2, &entry.3,
                                     );
                                 }
                                 remember(&key, &entry, &mut body_cache, &mut ram_order);
@@ -1716,6 +1817,7 @@ fn main() {
                             let (media_host, script_host) = sanitize::first_external_hosts(
                                 body.html.as_deref().unwrap_or(""),
                             );
+                            row_runs.push(runs);
                             packs.push((buf, RowMeta {
                                 h,
                                 has_html,
@@ -1758,9 +1860,11 @@ fn main() {
                              ultralight={render_ms_total}ms pack={pack_ms_total}ms total_job={}ms",
                             t_wall.elapsed().as_millis()
                         );
-                        // UI-thread link rects for the pointer cursor (the
-                        // worker keeps its own copy for click hit-testing).
+                        // UI-thread link/text rects for the pointer cursor
+                        // and mouse selection (the worker keeps its own
+                        // copies for click hit-testing).
                         let links_for_ui = row_links.clone();
+                        let runs_for_ui = row_runs.clone();
                         let _ = ui_weak.upgrade_in_event_loop(move |ui| {
                             // Wrap each SharedPixelBuffer in an Image —
                             // this is cheap (refcount bump, no memcpy)
@@ -1769,6 +1873,11 @@ fn main() {
                             SHARED.with(|s| {
                                 if let Some(sh) = s.borrow().as_ref() {
                                     *sh.row_links.borrow_mut() = links_for_ui;
+                                    *sh.row_text_runs.borrow_mut() = runs_for_ui;
+                                    // Rows are being replaced — any active
+                                    // selection now points at stale indices.
+                                    sh.sel_row.set(-1);
+                                    ui.set_selection_row(-1);
                                 }
                             });
                             let rows: Vec<RowItem> = packs
@@ -1852,6 +1961,13 @@ fn main() {
         identity_colors: RefCell::new(startup_ident_colors),
         row_links: RefCell::new(Vec::new()),
         confirm_mode: Cell::new(0),
+        row_text_runs: RefCell::new(Vec::new()),
+        sel_row: Cell::new(-1),
+        sel_anchor: Cell::new(0),
+        sel_head: Cell::new(0),
+        sel_dragging: Cell::new(false),
+        sel_moved: Cell::new(false),
+        sel_suppress_click: Cell::new(false),
         render_seq,
         current: Cell::new(0),
         width: Cell::new(DEFAULT_WIDTH),
@@ -2000,6 +2116,32 @@ fn main() {
         open_conversation(&ui, &sh_sel, real_idx);
     });
 
+    // ↑/↓ over the conversation list: select + open the neighbour and keep
+    // its row visible. Pairs with Delete for sweeping unwanted dialogs.
+    let ui_weak_nav = ui.as_weak();
+    let sh_nav = shared.clone();
+    ui.on_nav_conversation(move |delta| {
+        let Some(ui) = ui_weak_nav.upgrade() else { return };
+        if sh_nav.pending_compose.borrow().is_some() {
+            return;
+        }
+        let len = sh_nav.convs.borrow().len() as i32;
+        if len == 0 {
+            return;
+        }
+        let cur = sh_nav.current.get() as i32;
+        let new = (cur + delta).clamp(0, len - 1);
+        if new == cur {
+            return;
+        }
+        exit_reply_mode(&sh_nav, &ui);
+        ui.set_selected(new);
+        apply_active_header(&ui, &sh_nav, new as usize);
+        open_conversation(&ui, &sh_nav, new as usize);
+        ui.set_sidebar_row_y(new as f32 * 64.0);
+        ui.set_sidebar_scroll_seq(ui.get_sidebar_scroll_seq() + 1);
+    });
+
     // Delete key → confirm modal → delete the whole conversation (every
     // message incl. the user's own replies from Sent). The server handler
     // soft-deletes locally AND queues flag-sync deleted=true, so the worker
@@ -2114,6 +2256,8 @@ fn main() {
         ui.set_selected(next as i32);
         apply_active_header(&ui, &sh_delk, next);
         open_conversation(&ui, &sh_delk, next);
+        ui.set_sidebar_row_y(next as f32 * 64.0);
+        ui.set_sidebar_scroll_seq(ui.get_sidebar_scroll_seq() + 1);
     });
 
     // Resize = pure relayout: re-render the in-memory bodies at the new
@@ -2164,7 +2308,12 @@ fn main() {
     );
 
     let tx_hit = shared.tx.clone();
+    let sh_hit = shared.clone();
     ui.on_hit_test(move |row, x, y| {
+        // A click that ends a drag-selection is not a link click.
+        if sh_hit.sel_suppress_click.replace(false) {
+            return;
+        }
         let _ = tx_hit.send(Job::HitTest { row: row as usize, x, y });
     });
 
@@ -2178,6 +2327,63 @@ fn main() {
             .get(row as usize)
             .map(|links| links.iter().any(|l| l.contains(x, y)))
             .unwrap_or(false)
+    });
+
+    // ── Mouse text selection over bubbles ──
+    let ui_weak_ss = ui.as_weak();
+    let sh_ss = shared.clone();
+    ui.on_sel_start(move |row, x, y| {
+        let Some(ui) = ui_weak_ss.upgrade() else { return };
+        sh_ss.sel_dragging.set(false);
+        sh_ss.sel_moved.set(false);
+        sh_ss.sel_row.set(-1);
+        if let Some(runs) = sh_ss.row_text_runs.borrow().get(row as usize) {
+            if let Some(i) = nearest_run(runs, x, y) {
+                sh_ss.sel_row.set(row);
+                sh_ss.sel_anchor.set(i);
+                sh_ss.sel_head.set(i);
+                sh_ss.sel_dragging.set(true);
+            }
+        }
+        // Clear any previous highlight; Ctrl+C must reach the key sink.
+        refresh_selection_rects(&ui, &sh_ss);
+        ui.invoke_grab_key_focus();
+    });
+    let ui_weak_sm = ui.as_weak();
+    let sh_sm = shared.clone();
+    ui.on_sel_move(move |row, x, y| {
+        if !sh_sm.sel_dragging.get() || sh_sm.sel_row.get() != row {
+            return;
+        }
+        let Some(ui) = ui_weak_sm.upgrade() else { return };
+        let head = sh_sm
+            .row_text_runs
+            .borrow()
+            .get(row as usize)
+            .and_then(|runs| nearest_run(runs, x, y));
+        if let Some(i) = head {
+            if !sh_sm.sel_moved.get() && i == sh_sm.sel_anchor.get() {
+                return; // not an actual drag yet
+            }
+            sh_sm.sel_moved.set(true);
+            sh_sm.sel_head.set(i);
+            refresh_selection_rects(&ui, &sh_sm);
+        }
+    });
+    let sh_se = shared.clone();
+    ui.on_sel_end(move || {
+        sh_se.sel_dragging.set(false);
+        if sh_se.sel_moved.get() {
+            // The release also fires `clicked` — it must not open a link.
+            sh_se.sel_suppress_click.set(true);
+        }
+    });
+    let sh_cs = shared.clone();
+    ui.on_copy_selection(move || {
+        if let Some(text) = selection_text(&sh_cs) {
+            println!("copy selection: {} chars", text.len());
+            clipboard_set(&text);
+        }
     });
 
     // Composer → three branches depending on staged intent:
@@ -2689,6 +2895,18 @@ fn main() {
             if let Some(ui) = ui_weak_act.upgrade() {
                 enter_forward_mode(&sh_act, &ui, body);
             }
+            return;
+        }
+        // «Копировать текст» — the whole message's plain-text part.
+        if action == "copy" {
+            let body_opt = sh_act.current_bodies.borrow().get(row).cloned();
+            let Some(body) = body_opt else { return };
+            let text = body
+                .text
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| "(письмо без текстовой версии)".to_string());
+            println!("copy message text: {} chars", text.len());
+            clipboard_set(&text);
             return;
         }
         // «Показать → Заголовки / Исходник сообщения» — fetch the raw

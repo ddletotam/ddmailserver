@@ -27,6 +27,14 @@ struct ConvItem {
     ident-color: brush,
 }
 
+// One merged selection-highlight rect (bubble-relative CSS px).
+struct SelRect {
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+}
+
 // Each message row is a full-width image rendered by Blitz (bubble, alignment,
 // formatting and network images all done in HTML/CSS inside Blitz).
 struct RowItem {
@@ -251,6 +259,15 @@ export component MainWindow inherits Window {
     // Hover query for the pointer cursor: true when (x, y) inside row
     // `idx` sits on a link rect. Pure — it's evaluated from a binding.
     pure callback hover-link(int, length, length) -> bool;
+    // Text selection over the rendered bubbles (PDF-viewer style):
+    // drag selects words, Ctrl+C copies. Rust owns the model; the UI
+    // just renders the highlight rects for selection-row.
+    in property <int> selection-row: -1;
+    in property <[SelRect]> selection-rects;
+    callback sel-start(int, length, length);
+    callback sel-move(int, length, length);
+    callback sel-end();
+    callback copy-selection();
     callback viewport-resized(length);
     // Live chat-column width, assigned by the chat Rectangle's changed/init
     // handlers (its id is scoped inside a conditional branch, so a binding
@@ -288,6 +305,11 @@ export component MainWindow inherits Window {
     // Bump to pull keyboard focus into the «Кому» field (bridge inside
     // the composer panel scope — same pattern as chat-scroll-seq).
     in-out property <int> focus-to-seq: 0;
+    // Arrow-key navigation over the conversation list: keep the selected
+    // row visible (see the bridge next to the sidebar ListView).
+    in-out property <length> sidebar-row-y: 0;
+    in-out property <int> sidebar-scroll-seq: 0;
+    callback nav-conversation(int); // -1 = вверх, +1 = вниз
     callback send(string);
     // Open the native file picker to stage attachments; remove one by index.
     callback attach-files();
@@ -321,6 +343,22 @@ export component MainWindow inherits Window {
         key-pressed(ev) => {
             if (ev.text == Key.Delete && !root.confirm-delete-visible) {
                 root.delete-conversation();
+                return accept;
+            }
+            // Ctrl+C — copy the bubble text selection. Slint reports the
+            // char as "c" or as ETX depending on platform/backend.
+            if (ev.modifiers.control && (ev.text == "c" || ev.text == "\u{0003}")) {
+                root.copy-selection();
+                return accept;
+            }
+            // ↑/↓ — walk the conversation list (mail view only). Pairs
+            // with Delete for the "курсором вниз, Delete, Delete" sweep.
+            if (root.view-mode == 0 && ev.text == Key.UpArrow) {
+                root.nav-conversation(-1);
+                return accept;
+            }
+            if (root.view-mode == 0 && ev.text == Key.DownArrow) {
+                root.nav-conversation(1);
                 return accept;
             }
             reject
@@ -498,7 +536,7 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
-                ListView {
+                conv-lv := ListView {
                     for conv[idx] in root.conversations: Rectangle {
                         height: 64px;
                         // Identity tint on idle rows (Tauri-era behaviour):
@@ -553,6 +591,22 @@ export component MainWindow inherits Window {
                                     wrap: no-wrap;
                                 }
                             }
+                        }
+                    }
+                }
+                // Scroll bridge: arrow-key navigation bumps the seq and the
+                // handler nudges viewport-y just enough to keep the selected
+                // row (sidebar-row-y, 64px tall) fully visible.
+                Rectangle {
+                    visible: false;
+                    width: 0;
+                    height: 0;
+                    x: root.sidebar-scroll-seq * 1px;
+                    changed x => {
+                        if (root.sidebar-row-y < -conv-lv.viewport-y) {
+                            conv-lv.viewport-y = -root.sidebar-row-y;
+                        } else if (root.sidebar-row-y + 64px > -conv-lv.viewport-y + conv-lv.height) {
+                            conv-lv.viewport-y = -(root.sidebar-row-y + 64px - conv-lv.height);
                         }
                     }
                 }
@@ -897,6 +951,7 @@ export component MainWindow inherits Window {
                             Menu {
                                 MenuItem { title: "Ответить"; activated => { root.msg-action(idx, "reply"); } }
                                 MenuItem { title: "Переслать"; activated => { root.msg-action(idx, "forward"); } }
+                                MenuItem { title: "Копировать текст"; activated => { root.msg-action(idx, "copy"); } }
                                 MenuSeparator { }
                                 Menu {
                                     title: "Показать…";
@@ -974,8 +1029,24 @@ export component MainWindow inherits Window {
                                 image-rendering: smooth;
                             }
                         }
+                        // Selection highlight — merged per-line rects over
+                        // the texture, computed Rust-side. Plain Rectangles:
+                        // they don't intercept pointer events.
+                        if idx == root.selection-row: Rectangle {
+                            width: parent.width;
+                            height: msg.h;
+                            for sr in root.selection-rects: Rectangle {
+                                x: sr.x;
+                                y: sr.y;
+                                width: sr.w;
+                                height: sr.h;
+                                background: #2f80ed3d;
+                                border-radius: 2px;
+                            }
+                        }
                         // Whole-bubble pointer handling: left click → hit-test in
-                        // Blitz for a link; right click → open the native menu.
+                        // Blitz for a link; right click → open the native menu;
+                        // left drag → text selection (Ctrl+C copies).
                         // The cursor flips to a pointer over link rects so it's
                         // obvious a click opens the browser.
                         TouchArea {
@@ -985,10 +1056,22 @@ export component MainWindow inherits Window {
                                 && root.hover-link(idx, self.mouse-x, self.mouse-y)
                                 ? MouseCursor.pointer : MouseCursor.default;
                             clicked => { root.hit-test(idx, self.mouse-x, self.mouse-y); }
+                            moved => {
+                                if (self.pressed) {
+                                    root.sel-move(idx, self.mouse-x, self.mouse-y);
+                                }
+                            }
                             pointer-event(e) => {
                                 if (e.button == PointerEventButton.right
                                     && e.kind == PointerEventKind.down) {
                                     cma.show({ x: self.mouse-x, y: self.mouse-y });
+                                }
+                                if (e.button == PointerEventButton.left) {
+                                    if (e.kind == PointerEventKind.down) {
+                                        root.sel-start(idx, self.mouse-x, self.mouse-y);
+                                    } else if (e.kind == PointerEventKind.up) {
+                                        root.sel-end();
+                                    }
                                 }
                             }
                         }

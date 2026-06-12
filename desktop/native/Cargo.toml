@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "ddmail-native"
 version = "0.1.0"
 edition = "2024"
@@ -22,11 +22,11 @@ serde_json = "1"
 
 # Decode avatar bytes to RGBA for Slint. ico/bmp matter: the server's
 # avatar chain ends at /favicon.ico, and Chromium (the old Tauri webview)
-# happily rendered those — the native decoder must too.
+# happily rendered those вЂ” the native decoder must too.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "ico", "bmp"] }
 
 # Rasterize SVG avatars (BIMI logos are SVG by spec). default-features off
-# drops text shaping / system fonts — brand logos are pure vector shapes.
+# drops text shaping / system fonts вЂ” brand logos are pure vector shapes.
 resvg = { version = "0.44", default-features = false }
 
 # "Today / DD.MM / DD.MM.YY" date formatter for the search-dropdown rows.
@@ -35,7 +35,7 @@ resvg = { version = "0.44", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # Cross-platform desktop notifications (Linux zbus / Windows WinRT toast /
-# macOS NSUserNotification) behind one API — fired on new-mail events.
+# macOS NSUserNotification) behind one API вЂ” fired on new-mail events.
 notify-rust = "4"
 
 # Single-instance guard (named mutex on Windows / lock file on Linux) so a
@@ -43,25 +43,27 @@ notify-rust = "4"
 single-instance = "0.3"
 
 # Native file-open dialog for the composer's attach button. We call the
-# blocking API on the UI thread — the OS dialog is modal anyway. Windows uses
+# blocking API on the UI thread вЂ” the OS dialog is modal anyway. Windows uses
 # the built-in Win32 backend (no feature needed); Linux needs the gtk3 backend
 # for the sync API (declared in the linux target block below).
 rfd = { version = "0.15", default-features = false }
 
 # Regex passes for sanitizing inbound email HTML before it reaches the
 # Ultralight renderer (strip <script>, <iframe>, MS Outlook conditionals,
-# event handlers — they confuse the old WebKit fork and cost us bubbles
+# event handlers вЂ” they confuse the old WebKit fork and cost us bubbles
 # that quietly render blank).
 regex = "1"
+# System clipboard for text selection / context-menu copy.
+arboard = "3"
 
 # Persisted content-permission policy (per-sender media/scripts toggles,
 # allow-listed domains). Stored as JSON via serde_json (declared above)
 # next to the cache db; serde-derive used for the policy/window-state structs.
 serde = { version = "1", features = ["derive"] }
 
-# ── Platform body-render backends (only render_* differs per OS) ──
+# в”Ђв”Ђ Platform body-render backends (only render_* differs per OS) в”Ђв”Ђ
 
-# Linux: real WebKitGTK (libwebkit2gtk-4.1) → offscreen snapshot → RGBA.
+# Linux: real WebKitGTK (libwebkit2gtk-4.1) в†’ offscreen snapshot в†’ RGBA.
 [target.'cfg(target_os = "linux")'.dependencies]
 # Sync file dialog on Linux needs the gtk3 backend (default xdg-portal is
 # async-only). gtk 0.18 already in our Linux deps, so no new toolkit.
@@ -73,9 +75,9 @@ gio = "0.18"
 cairo-rs = "0.18"
 javascriptcore-rs = "1"
 
-# Windows: WebView2 (Edge/Chromium) → offscreen CapturePreview(PNG) → RGBA.
+# Windows: WebView2 (Edge/Chromium) в†’ offscreen CapturePreview(PNG) в†’ RGBA.
 [target.'cfg(windows)'.dependencies]
-# System-tray icon + menu (Linux tray deferred — it needs gtk on the main
+# System-tray icon + menu (Linux tray deferred вЂ” it needs gtk on the main
 # thread, which conflicts with our render worker's gtk; the Linux dev wires
 # it separately).
 tray-icon = "0.19"
