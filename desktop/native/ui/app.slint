@@ -423,8 +423,17 @@ export component MainWindow inherits Window {
     // instead of the raw-text pane (source-view-text).
     in property <bool> source-view-is-headers: false;
     in property <[HeaderRow]> source-view-headers: [];
+    // Source pane rendered as a bitmap (like a message bubble) so selection
+    // reuses the fast text-run layer instead of Slint's slow TextInput.
+    in property <image> source-img;
+    in property <length> source-img-h;
+    in property <[SelRect]> source-selection-rects: [];
+    callback src-sel-start(length, length);
+    callback src-sel-move(length, length);
+    callback src-sel-end();
+    callback src-copy-selection();
     // «Копировать всё» in the viewer — copies the raw source or the full
-    // header block (large sources make manual drag-select slow in Slint).
+    // header block.
     callback source-view-copy();
     // Forward mode: explicit «Кому» recipients (composer panel).
     in-out property <string> composer-to: "";
@@ -512,6 +521,18 @@ export component MainWindow inherits Window {
         height: 0;
         init => { self.focus(); }
         key-pressed(ev) => {
+            // Source/headers viewer is modal: it owns the keyboard while open.
+            if (root.source-view-visible) {
+                if (ev.modifiers.control && (ev.text == "c" || ev.text == "C" || ev.text == "с" || ev.text == "С" || ev.text == "ц" || ev.text == "Ц" || ev.text == "\u{0003}")) {
+                    root.src-copy-selection();
+                    return accept;
+                }
+                if (ev.text == Key.Escape) {
+                    root.source-view-visible = false;
+                    return accept;
+                }
+                return accept;
+            }
             if (ev.text == Key.Delete && !root.confirm-delete-visible) {
                 root.delete-conversation();
                 return accept;
@@ -520,7 +541,7 @@ export component MainWindow inherits Window {
             // layout-independently: Slint reports the produced character, so a
             // Cyrillic (ЙЦУКЕН) layout sends "с" (U+0441), not "c". Also accept
             // ETX, which some backends emit for Ctrl+C.
-            if (ev.modifiers.control && (ev.text == "c" || ev.text == "с" || ev.text == "\u{0003}")) {
+            if (ev.modifiers.control && (ev.text == "c" || ev.text == "C" || ev.text == "с" || ev.text == "С" || ev.text == "ц" || ev.text == "Ц" || ev.text == "\u{0003}")) {
                 root.copy-selection();
                 return accept;
             }
@@ -2575,16 +2596,9 @@ export component MainWindow inherits Window {
     // ---------- Source viewer («Показать → …», read-only) ----------
     if root.source-view-visible: TouchArea {
         clicked => { root.source-view-visible = false; kb.focus(); }
-        FocusScope {
-            init => { self.focus(); }
-            key-pressed(ev) => {
-                if (ev.text == Key.Escape || ev.text == Key.Return) {
-                    root.source-view-visible = false;
-                    kb.focus();
-                    return accept;
-                }
-                reject
-            }
+        Rectangle {
+            // Keyboard for this modal is handled by the main `kb` FocusScope
+            // (its source-view-visible branch) so there's a single focus owner.
         Rectangle {
             background: #00000066;
             Rectangle {
@@ -2649,28 +2663,67 @@ export component MainWindow inherits Window {
                         border-radius: 8px;
                         clip: true;
 
-                        // Raw text (source / body source): a read-only TextInput
-                        // in a ScrollView (scrollbar + selectable/copyable). The
-                        // text is capped in Rust to keep layout fast — Slint
-                        // lays out the whole string (no virtualization), so a
-                        // multi-MB source would be unusable. «Копировать всё»
-                        // copies the full untruncated source.
+                        // Raw text (source / body source): rendered to a bitmap
+                        // by WebKit (like a message bubble), selected via the
+                        // fast Rust text-run layer — Slint's TextInput lays out
+                        // the whole string on every selection event and crawls
+                        // even on small text. «Копировать всё» copies the full
+                        // (untruncated) source.
                         if !root.source-view-is-headers: ScrollView {
                             width: parent.width;
                             height: parent.height;
-                            TextInput {
-                                x: 12px;
-                                y: 12px;
-                                width: parent.visible-width - 24px;
-                                text: root.source-view-text;
-                                read-only: true;
-                                single-line: false;
-                                wrap: word-wrap;
-                                font-family: "Consolas";
-                                font-size: 12px;
-                                color: #2b3640;
-                                selection-background-color: #2f80ed;
-                                selection-foreground-color: white;
+                            // A bare Rectangle reports preferred-height 0, so the
+                            // ScrollView wouldn't know there's anything to scroll
+                            // (and the wheel fell through to the window behind).
+                            // Drive the scrollable area from the bitmap height.
+                            viewport-width: 760px;
+                            viewport-height: root.source-img-h;
+                            vertical-scrollbar-policy: ScrollBarPolicy.always-on;
+                            Rectangle {
+                                // Sized to the rendered bitmap so the ScrollView
+                                // scrolls it; width matches SOURCE_RENDER_W so
+                                // pointer coords map 1:1 onto the word rects.
+                                width: 760px;
+                                height: root.source-img-h;
+                                Image {
+                                    x: 0;
+                                    y: 0;
+                                    width: 760px;
+                                    height: root.source-img-h;
+                                    source: root.source-img;
+                                    image-fit: fill;
+                                    image-rendering: smooth;
+                                }
+                                Rectangle {
+                                    width: 760px;
+                                    height: root.source-img-h;
+                                    for sr in root.source-selection-rects: Rectangle {
+                                        x: sr.x;
+                                        y: sr.y;
+                                        width: sr.w;
+                                        height: sr.h;
+                                        background: #2f80ed3d;
+                                        border-radius: 2px;
+                                    }
+                                }
+                                TouchArea {
+                                    width: 760px;
+                                    height: root.source-img-h;
+                                    moved => {
+                                        if (self.pressed) {
+                                            root.src-sel-move(self.mouse-x, self.mouse-y);
+                                        }
+                                    }
+                                    pointer-event(e) => {
+                                        if (e.button == PointerEventButton.left) {
+                                            if (e.kind == PointerEventKind.down) {
+                                                root.src-sel-start(self.mouse-x, self.mouse-y);
+                                            } else if (e.kind == PointerEventKind.up) {
+                                                root.src-sel-end();
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -2680,6 +2733,7 @@ export component MainWindow inherits Window {
                         if root.source-view-is-headers: ScrollView {
                             width: parent.width;
                             height: parent.height;
+                            vertical-scrollbar-policy: ScrollBarPolicy.always-on;
                             VerticalLayout {
                                 padding-left: 12px;
                                 padding-right: 12px;

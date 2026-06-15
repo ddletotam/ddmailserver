@@ -485,6 +485,25 @@ fn build_text_only_html(b: &MessageBody) -> String {
     bubble_template(b.is_outgoing, &format!("{inner}{}", attachment_chips(b)))
 }
 
+/// Render width (CSS px) for the source/headers viewer bitmap. The Image is
+/// displayed at exactly this width so pointer coords map 1:1 onto the word
+/// rects extracted at render time.
+const SOURCE_RENDER_W: u32 = 760;
+
+/// HTML for the source viewer: the raw text in a monospace, wrapping <pre>.
+/// Verbatim — only HTML-escaped so the markup can't be interpreted.
+fn build_source_html(text: &str) -> String {
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\">\
+         <style>html,body{{margin:0;padding:8px;background:#f7f8fa}}\
+         pre{{margin:0;font-family:Consolas,'DejaVu Sans Mono',monospace;\
+         font-size:12px;line-height:1.4;color:#2b3640;\
+         white-space:pre-wrap;word-break:break-word}}</style></head>\
+         <body><pre>{}</pre></body></html>",
+        html_escape(text)
+    )
+}
+
 /// Attachment-chip HTML appended below every bubble's main body.
 /// Clickable via the link hit-test (currently disabled after the
 /// WebKit migration — see render.rs) using an internal
@@ -563,6 +582,10 @@ enum Job {
         modes: Vec<u8>,
     },
     HitTest { row: usize, x: f32, y: f32 },
+    /// Render the source/headers viewer text to a bitmap + word rects, so the
+    /// modal reuses the fast bubble selection layer instead of Slint's
+    /// (slow-on-large-text) TextInput.
+    RenderSource { text: String, width: u32 },
 }
 
 /// Everything the render worker knows about a row besides its bitmap —
@@ -621,6 +644,13 @@ struct Shared {
     /// shows only a capped slice — see SOURCE_VIEW_MAX). «Копировать всё» reads
     /// this so the clipboard always gets the complete source.
     source_view_full: RefCell<String>,
+    /// Word rects of the rendered source bitmap + its selection state. Mirrors
+    /// the bubble selection layer (row_text_runs/sel_*) but for the modal.
+    src_runs: RefCell<Vec<render_common::TextRun>>,
+    src_sel_anchor: Cell<usize>,
+    src_sel_head: Cell<usize>,
+    src_sel_moved: Cell<bool>,
+    src_sel_dragging: Cell<bool>,
     /// email(lowercase) → пастельный цвет айдентики (подкраска строк
     /// сайдбара по received_by). Обновляется при каждом списке диалогов.
     identity_colors: RefCell<HashMap<String, String>>,
@@ -978,20 +1008,15 @@ fn nearest_run(runs: &[render_common::TextRun], x: f32, y: f32) -> Option<usize>
         .map(|(i, _)| i)
 }
 
-/// Rebuild the highlight rects for the current selection: consecutive
-/// selected words on the same visual line merge into one rect.
-fn refresh_selection_rects(ui: &MainWindow, sh: &Shared) {
-    let row = sh.sel_row.get();
-    if row < 0 || !sh.sel_moved.get() {
-        ui.set_selection_row(-1);
-        ui.set_selection_rects(ModelRc::new(VecModel::from(Vec::<SelRect>::new())));
-        return;
-    }
-    let runs_all = sh.row_text_runs.borrow();
-    let Some(runs) = runs_all.get(row as usize) else { return };
-    let (a, b) = (sh.sel_anchor.get(), sh.sel_head.get());
-    let (lo, hi) = (a.min(b), a.max(b).min(runs.len().saturating_sub(1)));
+/// Merged highlight rects for a run range: consecutive selected words on the
+/// same visual line merge into one rect. Pure — shared by the bubble rows and
+/// the source-viewer modal.
+fn selection_rects_for(runs: &[render_common::TextRun], anchor: usize, head: usize) -> Vec<SelRect> {
     let mut rects: Vec<SelRect> = Vec::new();
+    if runs.is_empty() {
+        return rects;
+    }
+    let (lo, hi) = (anchor.min(head), anchor.max(head).min(runs.len() - 1));
     for r in &runs[lo..=hi] {
         match rects.last_mut() {
             // Same visual line → extend the previous rect.
@@ -1004,21 +1029,16 @@ fn refresh_selection_rects(ui: &MainWindow, sh: &Shared) {
             _ => rects.push(SelRect { x: r.x, y: r.y, w: r.w, h: r.h }),
         }
     }
-    ui.set_selection_rects(ModelRc::new(VecModel::from(rects)));
-    ui.set_selection_row(row);
+    rects
 }
 
-/// Selected words joined back into text: spaces within a line, a newline
-/// when the next word starts a new visual line.
-fn selection_text(sh: &Shared) -> Option<String> {
-    let row = sh.sel_row.get();
-    if row < 0 || !sh.sel_moved.get() {
+/// Selected words joined back into text: spaces within a line, a newline when
+/// the next word starts a new visual line. Pure — shared by rows and modal.
+fn selection_text_for(runs: &[render_common::TextRun], anchor: usize, head: usize) -> Option<String> {
+    if runs.is_empty() {
         return None;
     }
-    let runs_all = sh.row_text_runs.borrow();
-    let runs = runs_all.get(row as usize)?;
-    let (a, b) = (sh.sel_anchor.get(), sh.sel_head.get());
-    let (lo, hi) = (a.min(b), a.max(b).min(runs.len().saturating_sub(1)));
+    let (lo, hi) = (anchor.min(head), anchor.max(head).min(runs.len() - 1));
     let mut out = String::new();
     let mut prev: Option<&render_common::TextRun> = None;
     for r in &runs[lo..=hi] {
@@ -1035,16 +1055,59 @@ fn selection_text(sh: &Shared) -> Option<String> {
     (!out.is_empty()).then_some(out)
 }
 
+/// Rebuild the bubble-row highlight rects for the current selection.
+fn refresh_selection_rects(ui: &MainWindow, sh: &Shared) {
+    let row = sh.sel_row.get();
+    if row < 0 || !sh.sel_moved.get() {
+        ui.set_selection_row(-1);
+        ui.set_selection_rects(ModelRc::new(VecModel::from(Vec::<SelRect>::new())));
+        return;
+    }
+    let runs_all = sh.row_text_runs.borrow();
+    let Some(runs) = runs_all.get(row as usize) else { return };
+    let rects = selection_rects_for(runs, sh.sel_anchor.get(), sh.sel_head.get());
+    ui.set_selection_rects(ModelRc::new(VecModel::from(rects)));
+    ui.set_selection_row(row);
+}
+
+/// Selected bubble-row text (legacy entry point for the row selection).
+fn selection_text(sh: &Shared) -> Option<String> {
+    let row = sh.sel_row.get();
+    if row < 0 || !sh.sel_moved.get() {
+        return None;
+    }
+    let runs_all = sh.row_text_runs.borrow();
+    let runs = runs_all.get(row as usize)?;
+    selection_text_for(runs, sh.sel_anchor.get(), sh.sel_head.get())
+}
+
 /// Put text on the system clipboard (best-effort).
+thread_local! {
+    // Held for the whole session. On X11 the clipboard is served live by the
+    // owning process, so a Clipboard created per-call and dropped immediately
+    // loses ownership the instant it returns — paste then comes back empty.
+    // Keeping one instance alive keeps us the owner so paste actually works.
+    static CLIPBOARD: RefCell<Option<arboard::Clipboard>> = RefCell::new(None);
+}
+
 fn clipboard_set(text: &str) {
-    match arboard::Clipboard::new() {
-        Ok(mut cb) => {
-            if let Err(e) = cb.set_text(text.to_string()) {
-                eprintln!("clipboard: {e}");
+    CLIPBOARD.with(|c| {
+        let mut slot = c.borrow_mut();
+        if slot.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(cb) => *slot = Some(cb),
+                Err(e) => {
+                    eprintln!("clipboard init: {e}");
+                    return;
+                }
             }
         }
-        Err(e) => eprintln!("clipboard: {e}"),
-    }
+        if let Some(cb) = slot.as_mut() {
+            if let Err(e) = cb.set_text(text.to_string()) {
+                eprintln!("clipboard set: {e}");
+            }
+        }
+    });
 }
 
 /// Tauri-era header meta line: counterpart address (1:1) or participants
@@ -2491,6 +2554,37 @@ fn main() {
                             None => println!("click row {row} @({x:.0},{y:.0}) — no link"),
                         }
                     }
+                    Job::RenderSource { text, width } => {
+                        // Render the viewer text the same way as a bubble: a
+                        // bitmap + word rects. The modal then selects via the
+                        // fast Rust text-run layer, not Slint's TextInput.
+                        let html = build_source_html(&text);
+                        let result = engine.render_one(&html, width);
+                        let bmp = result.bitmap;
+                        let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                            &bmp.rgba, bmp.width, bmp.height,
+                        );
+                        let h = bmp.height as f32;
+                        let runs = result.runs;
+                        println!(
+                            "[perf] source render {}x{} runs={}",
+                            bmp.width, bmp.height, runs.len()
+                        );
+                        let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+                            SHARED.with(|s| {
+                                if let Some(sh) = s.borrow().as_ref() {
+                                    *sh.src_runs.borrow_mut() = runs;
+                                    sh.src_sel_moved.set(false);
+                                    sh.src_sel_dragging.set(false);
+                                }
+                            });
+                            ui.set_source_img(Image::from_rgba8(buf));
+                            ui.set_source_img_h(h);
+                            ui.set_source_selection_rects(ModelRc::new(VecModel::from(
+                                Vec::<SelRect>::new(),
+                            )));
+                        });
+                    }
                 }
             }
         });
@@ -2517,6 +2611,11 @@ fn main() {
         pending_forward: RefCell::new(None),
         pending_source_view: Cell::new(0),
         source_view_full: RefCell::new(String::new()),
+        src_runs: RefCell::new(Vec::new()),
+        src_sel_anchor: Cell::new(0),
+        src_sel_head: Cell::new(0),
+        src_sel_moved: Cell::new(false),
+        src_sel_dragging: Cell::new(false),
         identity_colors: RefCell::new(startup_ident_colors),
         row_links: RefCell::new(Vec::new()),
         confirm_mode: Cell::new(0),
@@ -3393,6 +3492,62 @@ fn main() {
                         clipboard_set(&sh.source_view_full.borrow());
                     }
                 });
+            }
+        });
+    }
+
+    // ── Mouse text selection over the rendered source bitmap (modal) ──
+    {
+        let ui_weak = ui.as_weak();
+        let sh1 = shared.clone();
+        ui.on_src_sel_start(move |x, y| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            sh1.src_sel_dragging.set(false);
+            sh1.src_sel_moved.set(false);
+            {
+                let runs = sh1.src_runs.borrow();
+                if let Some(i) = nearest_run(&runs, x, y) {
+                    sh1.src_sel_anchor.set(i);
+                    sh1.src_sel_head.set(i);
+                    sh1.src_sel_dragging.set(true);
+                }
+            }
+            ui.set_source_selection_rects(ModelRc::new(VecModel::from(Vec::<SelRect>::new())));
+            // Keep the key sink focused so Ctrl+C lands in kb's modal branch.
+            ui.invoke_grab_key_focus();
+        });
+        let ui_weak2 = ui.as_weak();
+        let sh2 = shared.clone();
+        ui.on_src_sel_move(move |x, y| {
+            if !sh2.src_sel_dragging.get() {
+                return;
+            }
+            let Some(ui) = ui_weak2.upgrade() else { return };
+            let runs = sh2.src_runs.borrow();
+            if let Some(i) = nearest_run(&runs, x, y) {
+                if !sh2.src_sel_moved.get() && i == sh2.src_sel_anchor.get() {
+                    return; // not an actual drag yet
+                }
+                sh2.src_sel_moved.set(true);
+                sh2.src_sel_head.set(i);
+                let rects = selection_rects_for(&runs, sh2.src_sel_anchor.get(), sh2.src_sel_head.get());
+                ui.set_source_selection_rects(ModelRc::new(VecModel::from(rects)));
+            }
+        });
+        let sh3 = shared.clone();
+        ui.on_src_sel_end(move || {
+            sh3.src_sel_dragging.set(false);
+        });
+        let sh4 = shared.clone();
+        ui.on_src_copy_selection(move || {
+            let runs = sh4.src_runs.borrow();
+            if sh4.src_sel_moved.get() {
+                if let Some(t) =
+                    selection_text_for(&runs, sh4.src_sel_anchor.get(), sh4.src_sel_head.get())
+                {
+                    println!("copy source selection: {} chars", t.len());
+                    clipboard_set(&t);
+                }
             }
         });
     }
@@ -4667,10 +4822,21 @@ fn set_source_text(ui: &MainWindow, sh: &Shared, title: String, full: String) {
         full.clone()
     };
     sh.source_view_full.replace(full);
+    // Reset the modal selection; the render job repopulates src_runs.
+    sh.src_sel_moved.set(false);
+    sh.src_sel_dragging.set(false);
+    sh.src_runs.borrow_mut().clear();
     ui.set_source_view_title(title.into());
-    ui.set_source_view_text(display.into());
     ui.set_source_view_is_headers(false);
+    ui.set_source_img_h(0.0);
+    ui.set_source_selection_rects(ModelRc::new(VecModel::from(Vec::<SelRect>::new())));
     ui.set_source_view_visible(true);
+    // The right-click menu may have taken focus; pull it back to the main key
+    // sink so the modal's Ctrl+C/Escape (handled in kb) reach us.
+    ui.invoke_grab_key_focus();
+    // Render the (capped) text to a bitmap + word rects on the worker thread;
+    // the modal then selects via the fast text-run layer.
+    let _ = sh.tx.send(Job::RenderSource { text: display, width: SOURCE_RENDER_W });
 }
 
 /// Parse the RFC-822 header block into ordered (name, value) pairs.
