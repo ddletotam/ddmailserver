@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 /// Sentinel for "position never saved" (pre-position state files).
 pub const POS_UNSET: i32 = i32::MIN;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowState {
     pub width: f32,
@@ -28,6 +28,9 @@ pub struct WindowState {
     /// Top-left corner in physical (screen) pixels. POS_UNSET = unknown.
     pub x: i32,
     pub y: i32,
+    /// Whether the window was maximized. width/height/x/y always hold the last
+    /// *normal* (un-maximized) geometry, so un-maximizing restores a sane size.
+    pub maximized: bool,
 }
 
 impl Default for WindowState {
@@ -38,6 +41,7 @@ impl Default for WindowState {
             sidebar_width: 320.0,
             x: POS_UNSET,
             y: POS_UNSET,
+            maximized: false,
         }
     }
 }

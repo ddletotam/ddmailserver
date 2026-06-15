@@ -27,7 +27,7 @@ mod window_state;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
 
@@ -570,6 +570,7 @@ enum Job {
 struct RowMeta {
     h: f32,
     has_html: bool,
+    has_text: bool,
     viewing_html: bool,
     sender: String,
     media_host: String,
@@ -2045,11 +2046,38 @@ fn main() {
     // first paint, so the UI opens exactly where the user left it instead
     // of at the hard-coded defaults.
     let saved = window_state::load();
+    // Best-effort before the first paint (reduces the open-then-resize
+    // flicker on backends that honor it).
     ui.window().set_size(slint::LogicalSize::new(saved.width, saved.height));
     if saved.has_position() {
         ui.window().set_position(slint::PhysicalPosition::new(saved.x, saved.y));
     }
     ui.set_sidebar_width(saved.sidebar_width);
+
+    // Re-apply geometry once the window is actually shown. set_size BEFORE the
+    // first paint is unreliable — width falls back to the component's
+    // preferred-width (1100px) while height is honored — but a resize request
+    // on a live window sticks. `restore_done` gates the saver so it can't
+    // persist the transient pre-restore size and clobber the saved geometry.
+    let restore_done = Arc::new(AtomicBool::new(false));
+    {
+        let w = ui.as_weak();
+        let restore_done = restore_done.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = w.upgrade() {
+                ui.window()
+                    .set_size(slint::LogicalSize::new(saved.width, saved.height));
+                if saved.has_position() {
+                    ui.window()
+                        .set_position(slint::PhysicalPosition::new(saved.x, saved.y));
+                }
+                if saved.maximized {
+                    ui.window().set_maximized(true);
+                }
+            }
+            restore_done.store(true, Ordering::Relaxed);
+        });
+    }
 
     // Restore persisted calendar-view preferences (panel state + view
     // toggles now; the per-calendar maps are seeded into Shared below).
@@ -2077,33 +2105,62 @@ fn main() {
     // skips while maximized so the file always holds the last NORMAL
     // geometry — the app must never reopen maximized.
     let ui_weak_geom = ui.as_weak();
-    let last_geom = std::cell::Cell::new((0i32, 0i32, 0u32, 0u32, 0.0f32));
+    // Last *normal* (un-maximized) geometry — seeded from the restored state so
+    // that, while maximized, we keep persisting a sane un-maximize target.
+    let last_normal = std::cell::Cell::new(saved);
+    let last_written =
+        std::cell::Cell::new(None::<(i32, i32, u32, u32, f32, bool)>);
+    let restore_done_saver = restore_done.clone();
     let geometry_saver = slint::Timer::default();
     geometry_saver.start(
         slint::TimerMode::Repeated,
-        std::time::Duration::from_millis(500),
+        std::time::Duration::from_millis(300),
         move || {
             let Some(ui) = ui_weak_geom.upgrade() else { return };
+            // Don't persist anything until the post-show restore has run, or
+            // we'd save the transient pre-restore size and lose the real one.
+            if !restore_done_saver.load(Ordering::Relaxed) {
+                return;
+            }
             let win = ui.window();
-            if win.is_maximized() || win.is_minimized() {
+            if win.is_minimized() {
                 return;
             }
-            let pos = win.position();
-            let size = win.size();
             let sidebar = ui.get_sidebar_width();
-            let snapshot = (pos.x, pos.y, size.width, size.height, sidebar);
-            if last_geom.get() == snapshot {
+            let state = if win.is_maximized() {
+                // Keep the stored normal geometry; only flag maximized.
+                let mut s = last_normal.get();
+                s.sidebar_width = sidebar;
+                s.maximized = true;
+                s
+            } else {
+                let pos = win.position();
+                let size = win.size();
+                let scale = win.scale_factor().max(0.1);
+                let s = window_state::WindowState {
+                    width: size.width as f32 / scale,
+                    height: size.height as f32 / scale,
+                    sidebar_width: sidebar,
+                    x: pos.x,
+                    y: pos.y,
+                    maximized: false,
+                };
+                last_normal.set(s);
+                s
+            };
+            let snapshot = (
+                state.x,
+                state.y,
+                state.width as u32,
+                state.height as u32,
+                state.sidebar_width,
+                state.maximized,
+            );
+            if last_written.get() == Some(snapshot) {
                 return;
             }
-            last_geom.set(snapshot);
-            let scale = win.scale_factor().max(0.1);
-            window_state::save(&window_state::WindowState {
-                width: size.width as f32 / scale,
-                height: size.height as f32 / scale,
-                sidebar_width: sidebar,
-                x: pos.x,
-                y: pos.y,
-            });
+            last_written.set(Some(snapshot));
+            window_state::save(&state);
         },
     );
 
@@ -2224,6 +2281,8 @@ fn main() {
                             let mode = modes.get(i).copied().unwrap_or(0);
                             let has_html =
                                 body.html.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+                            let has_text =
+                                body.text.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
                             let force_text = mode == 1 && has_html;
                             // Content fingerprint: bodies are mostly immutable,
                             // but cid:→data: healing rewrites the HTML — the
@@ -2314,6 +2373,7 @@ fn main() {
                             packs.push((buf, RowMeta {
                                 h,
                                 has_html,
+                                has_text,
                                 viewing_html: has_html && !force_text,
                                 m_sender_on: policy.allow_media.contains(&sender_lc),
                                 s_sender_on: policy.allow_scripts.contains(&sender_lc),
@@ -2379,6 +2439,7 @@ fn main() {
                                     img: Image::from_rgba8(buf),
                                     h: m.h,
                                     has_html: m.has_html,
+                                    has_text: m.has_text,
                                     viewing_html: m.viewing_html,
                                     sender: m.sender.into(),
                                     media_host: m.media_host.into(),
@@ -3433,6 +3494,7 @@ fn main() {
             if let Some(ui) = ui_weak_act.upgrade() {
                 ui.set_source_view_title(format!("Исходник тела — {}", body.subject).into());
                 ui.set_source_view_text(body.html.unwrap_or_default().into());
+                ui.set_source_view_is_headers(false);
                 ui.set_source_view_visible(true);
             }
             return;
@@ -4263,18 +4325,24 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                 if let Some(sh) = s.borrow().as_ref() {
                     let what = sh.pending_source_view.get();
                     sh.pending_source_view.set(0);
-                    let (title, text) = if what == 1 {
-                        // Header block = up to the first blank line.
-                        let end = raw
-                            .find("\r\n\r\n")
-                            .or_else(|| raw.find("\n\n"))
-                            .unwrap_or(raw.len());
-                        (format!("Заголовки (id {uid})"), raw[..end].to_string())
+                    if what == 1 {
+                        // Headers: a name/value table, in message order.
+                        let rows: Vec<HeaderRow> = parse_headers(&raw)
+                            .into_iter()
+                            .map(|(name, value)| HeaderRow {
+                                name: name.into(),
+                                value: value.into(),
+                            })
+                            .collect();
+                        ui.set_source_view_title(format!("Заголовки (id {uid})").into());
+                        ui.set_source_view_headers(ModelRc::new(VecModel::from(rows)));
+                        ui.set_source_view_is_headers(true);
                     } else {
-                        (format!("Исходник сообщения (id {uid})"), raw)
-                    };
-                    ui.set_source_view_title(title.into());
-                    ui.set_source_view_text(text.into());
+                        // Source: the raw RFC-822 bytes, verbatim, no processing.
+                        ui.set_source_view_title(format!("Исходник сообщения (id {uid})").into());
+                        ui.set_source_view_text(raw.into());
+                        ui.set_source_view_is_headers(false);
+                    }
                     ui.set_source_view_visible(true);
                 }
             });
@@ -4544,6 +4612,40 @@ fn handle_link(_ui: &MainWindow, url: String) {
     }
     println!("link click -> {url}");
     open_external(&url);
+}
+
+/// Parse the RFC-822 header block into ordered (name, value) pairs.
+///
+/// Stops at the first blank line (end of headers). Folded values — RFC 5322
+/// continuation lines starting with space/tab — are unfolded into the
+/// preceding header's value. Order is preserved exactly as it appears in the
+/// message. Values are returned raw (not RFC 2047-decoded); the table shows
+/// the message as it is on the wire.
+fn parse_headers(raw: &str) -> Vec<(String, String)> {
+    let end = raw
+        .find("\r\n\r\n")
+        .or_else(|| raw.find("\n\n"))
+        .unwrap_or(raw.len());
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in raw[..end].split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with(' ') || line.starts_with('\t') {
+            // Folded continuation — append to the current header's value.
+            if let Some(last) = out.last_mut() {
+                last.1.push(' ');
+                last.1.push_str(line.trim_start());
+            }
+            continue;
+        }
+        match line.split_once(':') {
+            Some((name, value)) => out.push((name.trim().to_string(), value.trim().to_string())),
+            None => out.push((String::new(), line.trim().to_string())),
+        }
+    }
+    out
 }
 
 /// Open a URL in the system default browser. Per-OS launcher — the previous
