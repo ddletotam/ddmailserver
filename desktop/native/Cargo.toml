@@ -79,6 +79,10 @@ glib = "0.18"
 gio = "0.18"
 cairo-rs = "0.18"
 javascriptcore-rs = "1"
+# System tray via StatusNotifierItem (KDE/Plasma native). ksni runs its own
+# D-Bus service on a background thread and never touches gtk — so, unlike the
+# Windows tray-icon, it doesn't fight the WebKitGTK render worker's gtk loop.
+ksni = "0.2"
 
 # Windows: WebView2 (Edge/Chromium) в†’ offscreen CapturePreview(PNG) в†’ RGBA.
 [target.'cfg(windows)'.dependencies]

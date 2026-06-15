@@ -1,7 +1,18 @@
-//! System-tray icon (Windows). Created on the UI thread before `ui.run()`;
-//! tray + menu events are polled from a Slint timer so we never touch a second
-//! event loop. Linux/macOS trays are deferred (Linux needs gtk on the main
-//! thread, which fights the render worker's gtk).
+//! System-tray icon.
+//!
+//! Windows: tray-icon, created on the UI thread before `ui.run()`; tray + menu
+//! events are polled from a Slint timer so we never touch a second event loop.
+//!
+//! Linux: ksni (StatusNotifierItem), which runs its own D-Bus service on a
+//! background thread and never touches gtk — so, unlike tray-icon, it can't
+//! fight the WebKitGTK render worker's gtk main loop. Its menu/activate
+//! callbacks fire on the ksni thread, so the closures handed in from main.rs
+//! marshal UI work back to the Slint event loop themselves.
+//!
+//! macOS tray is still deferred.
+//!
+//! Both backends expose the same surface: `setup(on_open, on_quit) -> Option<Tray>`
+//! and `Tray::set_unread_dot(bool)`.
 
 #[cfg(windows)]
 pub struct Tray {
@@ -102,6 +113,118 @@ fn dotted_icon_rgba() -> Vec<u8> {
             } else if d2 <= 7.0 * 7.0 {
                 // White ring around it.
                 v[px..px + 4].copy_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+            }
+        }
+    }
+    v
+}
+
+// ─────────────────────────── Linux (ksni / StatusNotifierItem) ──────────────
+
+#[cfg(target_os = "linux")]
+pub struct Tray {
+    handle: ksni::Handle<DdmailTray>,
+}
+
+#[cfg(target_os = "linux")]
+impl Tray {
+    /// Toggle the unread dot. Idempotent. Safe to call from any thread — ksni
+    /// applies the update on its own service thread and redraws the icon.
+    pub fn set_unread_dot(&self, on: bool) {
+        self.handle.update(|t: &mut DdmailTray| t.unread = on);
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct DdmailTray {
+    unread: bool,
+    on_open: Box<dyn Fn() + Send>,
+    on_quit: Box<dyn Fn() + Send>,
+}
+
+#[cfg(target_os = "linux")]
+impl ksni::Tray for DdmailTray {
+    fn id(&self) -> String {
+        "ddmail".into()
+    }
+
+    fn title(&self) -> String {
+        "ddmail".into()
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        vec![ksni::Icon {
+            width: 32,
+            height: 32,
+            data: icon_argb(self.unread),
+        }]
+    }
+
+    // Left-click on the tray icon.
+    fn activate(&mut self, _x: i32, _y: i32) {
+        (self.on_open)();
+    }
+
+    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+        use ksni::menu::{MenuItem, StandardItem};
+        vec![
+            StandardItem {
+                label: "Открыть ddmail".into(),
+                activate: Box::new(|t: &mut DdmailTray| (t.on_open)()),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            StandardItem {
+                label: "Выход".into(),
+                activate: Box::new(|t: &mut DdmailTray| (t.on_quit)()),
+                ..Default::default()
+            }
+            .into(),
+        ]
+    }
+}
+
+/// Build the tray. `on_open` fires on left-click or the "Открыть" item;
+/// `on_quit` on the "Выход" item. Both run on the ksni service thread, so the
+/// closures must be `Send` and marshal any UI work back to the Slint loop.
+#[cfg(target_os = "linux")]
+pub fn setup(
+    on_open: impl Fn() + Send + 'static,
+    on_quit: impl Fn() + Send + 'static,
+) -> Option<Tray> {
+    let service = ksni::TrayService::new(DdmailTray {
+        unread: false,
+        on_open: Box::new(on_open),
+        on_quit: Box::new(on_quit),
+    });
+    let handle = service.handle();
+    service.spawn();
+    Some(Tray { handle })
+}
+
+/// 32×32 brand-blue (#2f80ed) icon in ksni's ARGB32 byte order ([A,R,G,B] per
+/// pixel — network byte order, unlike the Windows RGBA above). With `unread`,
+/// the same bottom-right badge: white ring around a darker-blue core.
+#[cfg(target_os = "linux")]
+fn icon_argb(unread: bool) -> Vec<u8> {
+    let mut v = Vec::with_capacity(32 * 32 * 4);
+    for _ in 0..32 * 32 {
+        v.extend_from_slice(&[0xff, 0x2f, 0x80, 0xed]);
+    }
+    if unread {
+        let (cx, cy) = (24.0f32, 24.0f32);
+        for y in 0..32 {
+            for x in 0..32 {
+                let dx = x as f32 - cx;
+                let dy = y as f32 - cy;
+                let d2 = dx * dx + dy * dy;
+                let px = (y * 32 + x) * 4;
+                if d2 <= 4.5 * 4.5 {
+                    v[px..px + 4].copy_from_slice(&[0xff, 0x15, 0x56, 0xc8]);
+                } else if d2 <= 7.0 * 7.0 {
+                    v[px..px + 4].copy_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+                }
             }
         }
     }
