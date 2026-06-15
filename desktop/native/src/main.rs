@@ -11,7 +11,7 @@ mod policy;
 mod recurrence;
 mod reminders;
 mod render_common;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 mod tray;
 #[cfg(target_os = "linux")]
 #[path = "render_webkit.rs"]
@@ -731,7 +731,7 @@ thread_local! {
     static SHARED: RefCell<Option<Rc<Shared>>> = const { RefCell::new(None) };
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 thread_local! {
     /// The tray handle — kept here so the new-mail path can flip the
     /// unread dot from engine-result handlers.
@@ -766,15 +766,15 @@ fn raise_window(ui: &MainWindow) {
     }
 }
 
-/// Flip the tray unread dot (no-op off Windows).
+/// Flip the tray unread dot (no-op where there's no tray backend).
 fn tray_set_dot(on: bool) {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     TRAY.with(|t| {
         if let Some(tr) = t.borrow().as_ref() {
             tr.set_unread_dot(on);
         }
     });
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     let _ = on;
 }
 
@@ -3928,6 +3928,32 @@ fn main() {
                 tray_set_dot(false);
             },
             || slint::quit_event_loop().unwrap(),
+        );
+        TRAY.with(|t| *t.borrow_mut() = tray);
+    }
+
+    // System tray (Linux / ksni): same behaviour, but callbacks arrive on the
+    // ksni service thread, so each one marshals its UI work back to the Slint
+    // event loop via invoke_from_event_loop.
+    #[cfg(target_os = "linux")]
+    {
+        let ui_open = ui.as_weak();
+        let tray = tray::setup(
+            move || {
+                let ui_open = ui_open.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_open.upgrade() {
+                        raise_window(&ui);
+                    }
+                    // Showing the window acknowledges the unread dot.
+                    tray_set_dot(false);
+                });
+            },
+            || {
+                let _ = slint::invoke_from_event_loop(|| {
+                    let _ = slint::quit_event_loop();
+                });
+            },
         );
         TRAY.with(|t| *t.borrow_mut() = tray);
     }
