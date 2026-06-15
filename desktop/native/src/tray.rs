@@ -5,8 +5,21 @@
 
 #[cfg(windows)]
 pub struct Tray {
-    _icon: tray_icon::TrayIcon,
+    icon: tray_icon::TrayIcon,
     _timer: slint::Timer,
+}
+
+#[cfg(windows)]
+impl Tray {
+    /// Toggle the unread dot in the icon's bottom-right corner. Idempotent —
+    /// callers don't need to track the current state.
+    pub fn set_unread_dot(&self, on: bool) {
+        use tray_icon::Icon;
+        let rgba = if on { dotted_icon_rgba() } else { solid_icon_rgba() };
+        if let Ok(icon) = Icon::from_rgba(rgba, 32, 32) {
+            let _ = self.icon.set_icon(Some(icon));
+        }
+    }
 }
 
 /// Build the tray. `on_open` fires on left-click or the "Открыть" item;
@@ -56,7 +69,7 @@ pub fn setup(
     );
 
     Some(Tray {
-        _icon: tray,
+        icon: tray,
         _timer: timer,
     })
 }
@@ -67,6 +80,30 @@ fn solid_icon_rgba() -> Vec<u8> {
     let mut v = Vec::with_capacity(32 * 32 * 4);
     for _ in 0..32 * 32 {
         v.extend_from_slice(&[0x2f, 0x80, 0xed, 0xff]);
+    }
+    v
+}
+
+/// Solid icon + unread dot bottom-right: a white disc (so the badge reads
+/// against the blue base) with a blue core — «синий кружочек».
+#[cfg(windows)]
+fn dotted_icon_rgba() -> Vec<u8> {
+    let mut v = solid_icon_rgba();
+    let (cx, cy) = (24.0f32, 24.0f32);
+    for y in 0..32 {
+        for x in 0..32 {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            let d2 = dx * dx + dy * dy;
+            let px = (y * 32 + x) * 4;
+            if d2 <= 4.5 * 4.5 {
+                // Blue core.
+                v[px..px + 4].copy_from_slice(&[0x15, 0x56, 0xc8, 0xff]);
+            } else if d2 <= 7.0 * 7.0 {
+                // White ring around it.
+                v[px..px + 4].copy_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+            }
+        }
     }
     v
 }

@@ -22,6 +22,11 @@ type WSEvent struct {
 	Folder     string `json:"folder,omitempty"`      // Mailbox name (mail events)
 	Count      uint32 `json:"count,omitempty"`       // Message count for EXISTS (mail events)
 	CalendarID int64  `json:"calendar_id,omitempty"` // Affected calendar (calendar events)
+	// Toast content for new_message (the LAST new message of a batch).
+	From      string `json:"from,omitempty"`
+	Subject   string `json:"subject,omitempty"`
+	MessageID int64  `json:"message_id,omitempty"` // = the client's native-mode uid
+	NewCount  int    `json:"new_count,omitempty"`
 }
 
 // HandleDesktopWebSocket upgrades to WebSocket and streams push events.
@@ -93,6 +98,10 @@ func (s *Server) HandleDesktopWebSocket(w http.ResponseWriter, r *http.Request) 
 				Folder:     event.Mailbox,
 				Count:      event.Count,
 				CalendarID: event.CalendarID,
+				From:       event.From,
+				Subject:    event.Subject,
+				MessageID:  event.MessageID,
+				NewCount:   event.NewCount,
 			}
 			data, _ := json.Marshal(wsEvent)
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
