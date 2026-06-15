@@ -47,14 +47,24 @@ struct SelRect {
     h: length,
 }
 
+// One row of the «Показать → Заголовки» table: header name + raw value,
+// in the order they appear in the message.
+struct HeaderRow {
+    name: string,
+    value: string,
+}
+
 // Each message row is a full-width image rendered by Blitz (bubble, alignment,
 // formatting and network images all done in HTML/CSS inside Blitz).
 struct RowItem {
     img: image,
     h: length,
-    // Drives the context menu's «Показать…» items: whether an HTML part
-    // exists for this message, and whether it's the currently shown view.
+    // Drives the context menu's «Показать…» items: whether HTML / plain-text
+    // parts exist for this message, and whether HTML is the currently shown
+    // view. has-text / has-html gate the version-switch items so we never
+    // offer to switch to a version that isn't there.
     has-html: bool,
+    has-text: bool,
     viewing-html: bool,
     // «Медиа…» menu data: sender address, first external image/script
     // hosts (empty = none), and the per-sender/per-host checkbox states.
@@ -409,6 +419,10 @@ export component MainWindow inherits Window {
     in-out property <bool> source-view-visible: false;
     in property <string> source-view-title: "";
     in property <string> source-view-text: "";
+    // When true the viewer shows the header name/value table (source-view-headers)
+    // instead of the raw-text pane (source-view-text).
+    in property <bool> source-view-is-headers: false;
+    in property <[HeaderRow]> source-view-headers: [];
     // Forward mode: explicit «Кому» recipients (composer panel).
     in-out property <string> composer-to: "";
     // Global «Медиа…» switches, mirrored from the Rust policy.
@@ -1151,7 +1165,7 @@ export component MainWindow inherits Window {
                                         title: "Исходник тела (HTML)";
                                         activated => { root.msg-action(idx, "show-body-source"); }
                                     }
-                                    if msg.has-html && msg.viewing-html: MenuItem {
+                                    if msg.has-text && msg.viewing-html: MenuItem {
                                         title: "Текстовую версию";
                                         activated => { root.msg-action(idx, "view-text"); }
                                     }
@@ -2613,19 +2627,66 @@ export component MainWindow inherits Window {
                         background: #f7f8fa;
                         border-radius: 8px;
                         clip: true;
-                        Flickable {
+
+                        // Raw text (source / body source): a read-only TextInput
+                        // so it can be selected and copied. Shown verbatim — no
+                        // processing whatsoever.
+                        if !root.source-view-is-headers: Flickable {
                             width: parent.width;
                             height: parent.height;
                             viewport-height: sv-text.preferred-height + 24px;
-                            sv-text := Text {
+                            sv-text := TextInput {
                                 x: 12px;
                                 y: 12px;
                                 width: parent.width - 24px;
                                 text: root.source-view-text;
+                                read-only: true;
+                                single-line: false;
+                                wrap: word-wrap;
                                 font-family: "Consolas";
                                 font-size: 12px;
                                 color: #2b3640;
-                                wrap: word-wrap;
+                                selection-background-color: #2f80ed;
+                                selection-foreground-color: white;
+                            }
+                        }
+
+                        // Headers: name / value table, in message order. Each
+                        // value is a read-only TextInput (selectable/copyable).
+                        if root.source-view-is-headers: Flickable {
+                            width: parent.width;
+                            height: parent.height;
+                            viewport-height: hdr-col.preferred-height + 24px;
+                            hdr-col := VerticalLayout {
+                                x: 12px;
+                                y: 12px;
+                                width: parent.width - 24px;
+                                spacing: 6px;
+                                for h in root.source-view-headers: HorizontalLayout {
+                                    spacing: 12px;
+                                    alignment: start;
+                                    Text {
+                                        text: h.name;
+                                        width: 190px;
+                                        font-family: "Consolas";
+                                        font-size: 12px;
+                                        font-weight: 700;
+                                        color: #0f1419;
+                                        wrap: word-wrap;
+                                    }
+                                    TextInput {
+                                        text: h.value;
+                                        read-only: true;
+                                        single-line: false;
+                                        wrap: word-wrap;
+                                        horizontal-stretch: 1;
+                                        font-family: "Consolas";
+                                        font-size: 12px;
+                                        color: #2b3640;
+                                        selection-background-color: #2f80ed;
+                                        selection-foreground-color: white;
+                                    }
+                                }
                             }
                         }
                     }
