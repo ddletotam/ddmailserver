@@ -1,4 +1,4 @@
-import { ListView, LineEdit, ComboBox, CheckBox, Button, SpinBox } from "std-widgets.slint";
+import { ListView, LineEdit, ComboBox, CheckBox, Button, SpinBox, ScrollView, TextEdit } from "std-widgets.slint";
 
 // Live-dropdown rows. We keep contacts and messages as separate models
 // so the Slint side can render them in their own sections — see
@@ -423,6 +423,9 @@ export component MainWindow inherits Window {
     // instead of the raw-text pane (source-view-text).
     in property <bool> source-view-is-headers: false;
     in property <[HeaderRow]> source-view-headers: [];
+    // «Копировать всё» in the viewer — copies the raw source or the full
+    // header block (large sources make manual drag-select slow in Slint).
+    callback source-view-copy();
     // Forward mode: explicit «Кому» recipients (composer panel).
     in-out property <string> composer-to: "";
     // Global «Медиа…» switches, mirrored from the Rust policy.
@@ -513,9 +516,11 @@ export component MainWindow inherits Window {
                 root.delete-conversation();
                 return accept;
             }
-            // Ctrl+C — copy the bubble text selection. Slint reports the
-            // char as "c" or as ETX depending on platform/backend.
-            if (ev.modifiers.control && (ev.text == "c" || ev.text == "\u{0003}")) {
+            // Ctrl+C — copy the bubble text selection. Match the C key
+            // layout-independently: Slint reports the produced character, so a
+            // Cyrillic (ЙЦУКЕН) layout sends "с" (U+0441), not "c". Also accept
+            // ETX, which some backends emit for Ctrl+C.
+            if (ev.modifiers.control && (ev.text == "c" || ev.text == "с" || ev.text == "\u{0003}")) {
                 root.copy-selection();
                 return accept;
             }
@@ -2594,11 +2599,27 @@ export component MainWindow inherits Window {
                     padding: 16px;
                     spacing: 10px;
                     HorizontalLayout {
+                        spacing: 8px;
                         Text {
                             text: root.source-view-title;
                             font-size: 16px; font-weight: 700; color: #0f1419;
                             horizontal-stretch: 1;
+                            vertical-alignment: center;
                             overflow: elide;
+                        }
+                        Rectangle {
+                            width: sv-copy-txt.preferred-width + 20px;
+                            height: 28px; border-radius: 8px;
+                            background: sv-copy.has-hover ? #d7deea : #e9edf3;
+                            sv-copy-txt := Text {
+                                text: "Копировать всё";
+                                font-size: 12px; font-weight: 600; color: #2b3640;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            sv-copy := TouchArea {
+                                clicked => { root.source-view-copy(); }
+                            }
                         }
                         Rectangle {
                             width: 28px; height: 28px; border-radius: 8px;
@@ -2629,16 +2650,18 @@ export component MainWindow inherits Window {
                         clip: true;
 
                         // Raw text (source / body source): a read-only TextInput
-                        // so it can be selected and copied. Shown verbatim — no
-                        // processing whatsoever.
-                        if !root.source-view-is-headers: Flickable {
+                        // in a ScrollView (scrollbar + selectable/copyable). The
+                        // text is capped in Rust to keep layout fast — Slint
+                        // lays out the whole string (no virtualization), so a
+                        // multi-MB source would be unusable. «Копировать всё»
+                        // copies the full untruncated source.
+                        if !root.source-view-is-headers: ScrollView {
                             width: parent.width;
                             height: parent.height;
-                            viewport-height: sv-text.preferred-height + 24px;
-                            sv-text := TextInput {
+                            TextInput {
                                 x: 12px;
                                 y: 12px;
-                                width: parent.width - 24px;
+                                width: parent.visible-width - 24px;
                                 text: root.source-view-text;
                                 read-only: true;
                                 single-line: false;
@@ -2651,16 +2674,17 @@ export component MainWindow inherits Window {
                             }
                         }
 
-                        // Headers: name / value table, in message order. Each
-                        // value is a read-only TextInput (selectable/copyable).
-                        if root.source-view-is-headers: Flickable {
+                        // Headers: name / value table, in message order, inside a
+                        // ScrollView (real scrollbar). Bottom padding keeps the
+                        // last row clear of the modal's rounded edge.
+                        if root.source-view-is-headers: ScrollView {
                             width: parent.width;
                             height: parent.height;
-                            viewport-height: hdr-col.preferred-height + 24px;
-                            hdr-col := VerticalLayout {
-                                x: 12px;
-                                y: 12px;
-                                width: parent.width - 24px;
+                            VerticalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                padding-top: 12px;
+                                padding-bottom: 16px;
                                 spacing: 6px;
                                 for h in root.source-view-headers: HorizontalLayout {
                                     spacing: 12px;
