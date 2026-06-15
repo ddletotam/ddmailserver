@@ -764,6 +764,67 @@ fn raise_window(ui: &MainWindow) {
             }
         }
     }
+    #[cfg(target_os = "linux")]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let handle = ui.window().window_handle();
+        if let Ok(wh) = handle.window_handle() {
+            if let RawWindowHandle::Xlib(h) = wh.as_raw() {
+                activate_window_x11(h.window);
+            }
+        }
+    }
+}
+
+/// Raise + focus an X11 window the WM-friendly way: send `_NET_ACTIVE_WINDOW`
+/// (EWMH) to the root window. Uses a throwaway display connection so we never
+/// race the winit/Slint event loop's own Xlib connection. Best-effort — failures
+/// (e.g. a Wayland session or a WM ignoring the hint) are silently no-ops.
+#[cfg(target_os = "linux")]
+fn activate_window_x11(window: std::os::raw::c_ulong) {
+    use std::ptr;
+    use x11::xlib;
+    unsafe {
+        let dpy = xlib::XOpenDisplay(ptr::null());
+        if dpy.is_null() {
+            return;
+        }
+        let net_active =
+            xlib::XInternAtom(dpy, c"_NET_ACTIVE_WINDOW".as_ptr(), xlib::False);
+        let root = xlib::XDefaultRootWindow(dpy);
+
+        let mut data = xlib::ClientMessageData::new();
+        // Source indication 2 (pager): the activation is a direct user action
+        // via the tray, so the WM should honor it. Source 1 (application) is
+        // subject to focus-stealing prevention — KWin would only flag the
+        // window as "demands attention" instead of raising + focusing it.
+        data.set_long(0, 2);
+        data.set_long(1, xlib::CurrentTime as std::os::raw::c_long);
+        data.set_long(2, 0); // no "requestor's currently active window"
+
+        let mut ev = xlib::XEvent {
+            client_message: xlib::XClientMessageEvent {
+                type_: xlib::ClientMessage,
+                serial: 0,
+                send_event: xlib::True,
+                display: dpy,
+                window,
+                message_type: net_active,
+                format: 32,
+                data,
+            },
+        };
+        xlib::XSendEvent(
+            dpy,
+            root,
+            xlib::False,
+            xlib::SubstructureRedirectMask | xlib::SubstructureNotifyMask,
+            &mut ev,
+        );
+        xlib::XRaiseWindow(dpy, window);
+        xlib::XFlush(dpy);
+        xlib::XCloseDisplay(dpy);
+    }
 }
 
 /// Flip the tray unread dot (no-op where there's no tray backend).
@@ -3940,6 +4001,7 @@ fn main() {
         let ui_open = ui.as_weak();
         let tray = tray::setup(
             move || {
+                println!("tray: open requested");
                 let ui_open = ui_open.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_open.upgrade() {
