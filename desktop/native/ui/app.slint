@@ -1,4 +1,4 @@
-import { ListView, LineEdit, ComboBox, CheckBox, Button } from "std-widgets.slint";
+import { ListView, LineEdit, ComboBox, CheckBox, Button, SpinBox } from "std-widgets.slint";
 
 // Live-dropdown rows. We keep contacts and messages as separate models
 // so the Slint side can render them in their own sections — see
@@ -25,6 +25,18 @@ struct ConvItem {
     // Row tint = pastel colour of the identity that RECEIVED the
     // conversation (transparent for the synthetic compose row).
     ident-color: brush,
+    // Unread badge value; 0 = no badge (Tauri-era pill).
+    unread: int,
+    // One-second attention flash when new mail lands in this conversation.
+    highlight: bool,
+}
+
+// One attendee row of the event-detail table: display name + localized
+// participation status with its colour.
+struct AttRow {
+    name: string,
+    status: string,
+    color: color,
 }
 
 // One merged selection-highlight rect (bubble-relative CSS px).
@@ -100,6 +112,80 @@ struct AllDayBlock {
 // to the user; the Rust side keeps the full path parallel to this model.
 struct AttachChip {
     name: string,
+}
+
+// A horizontal dashed hairline — Slint has no stroke-dash, so we tile fixed
+// dash segments. `count` (period 24px) comes from Rust, sized to the grid.
+component DashLine inherits Rectangle {
+    in property <int> count: 0;
+    in property <color> seg-color: #cfd6df;
+    height: 1px;
+    for k in root.count: Rectangle {
+        x: k * 24px;
+        width: 13px;
+        height: 1px;
+        background: root.seg-color;
+    }
+}
+
+// iOS-style pill switch used across the settings modal. `on` drives the
+// look; `toggled` fires on click — the parent owns the state.
+component Toggle inherits Rectangle {
+    in property <bool> on: false;
+    in property <bool> enabled: true;
+    callback toggled();
+    width: 42px;
+    height: 24px;
+    border-radius: 12px;
+    background: !root.enabled ? #e6ecf2 : (root.on ? #2f80ed : #c7cdd6);
+    animate background { duration: 120ms; }
+    opacity: root.enabled ? 1.0 : 0.5;
+    Rectangle {
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: white;
+        y: 3px;
+        x: root.on ? parent.width - self.width - 3px : 3px;
+        animate x { duration: 120ms; easing: ease-out; }
+        drop-shadow-blur: 3px;
+        drop-shadow-color: #00000033;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.toggled(); }
+    }
+}
+
+// One labelled settings line: title + optional subtitle on the left, an
+// arbitrary control slotted on the right via `@children`.
+component SettingRow inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    height: subtitle == "" ? 48px : 60px;
+    HorizontalLayout {
+        padding-left: 4px;
+        padding-right: 4px;
+        spacing: 12px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: root.title;
+                font-size: 14px;
+                font-weight: 600;
+                color: #0f1419;
+            }
+            if root.subtitle != "": Text {
+                text: root.subtitle;
+                font-size: 12px;
+                color: #6b7480;
+                wrap: word-wrap;
+            }
+        }
+        @children
+    }
 }
 
 export component MainWindow inherits Window {
@@ -187,18 +273,28 @@ export component MainWindow inherits Window {
     in property <[AllDayBlock]> all-day-events;
     in property <int> all-day-rows: 0;
     in property <string> week-title: "";
-    in-out property <bool> workdays-only: false;
-    in-out property <bool> show-non-work-hours: false;
-    // The number of day columns we draw (5 or 7).
+    // The number of day columns we draw (5 or 7), and the width of one.
     in property <int> day-count: 7;
+    in property <length> col-width: 300px;
+    // Number of 24px dash segments per quarter-hour line (Rust sizes it to
+    // the current grid width, capped for performance).
+    in property <int> dash-count: 0;
     // True while we're waiting on the engine for events / calendars.
     // Drives a thin "Загрузка…" pill in the calendar topbar.
     in property <bool> calendar-loading: false;
     // Pixels per hour — UI uses this to position event blocks.
-    in property <length> hour-height: 48px;
+    in property <length> hour-height: 52px;
     // Range of hours shown vertically: [hour-start, hour-end).
     in property <int> hour-start: 0;
     in property <int> hour-end: 24;
+    // Working-day window (local hours): outside [work-start, work-end) is
+    // shaded as non-work.
+    in property <int> work-start: 8;
+    in property <int> work-end: 19;
+    // Body viewport offset mirrored from the grid Flickable so the frozen
+    // time gutter (vertical) and day-header row (horizontal) track scrolling.
+    in-out property <length> grid-vp-x: 0;
+    in-out property <length> grid-vp-y: 0;
     // Day-of-week labels Rust fills, parallel to the day columns.
     in property <[string]> day-headers;
     // Column index of "today" within the displayed week (-1 = not shown).
@@ -210,14 +306,24 @@ export component MainWindow inherits Window {
     callback calendar-prev();
     callback calendar-next();
     callback calendar-today();
-    callback calendar-toggle-workdays();
-    callback calendar-toggle-non-work-hours();
     callback calendar-toggle-visibility(int);
+    // Grid body on-screen size (drives the layout math in Rust).
+    callback grid-area-resized(length, length);
+    // Ctrl-wheel zoom (hours) / Ctrl-Alt-wheel zoom (day width). Arg = wheel
+    // delta-y; sign chooses direction.
+    callback calendar-zoom-hours(length);
+    callback calendar-zoom-days(length);
+    // Working-day start/end hours from the settings «Календарь» tab.
+    callback set-work-hours(int, int);
     // Fired right after the panel collapsed/expanded so Rust persists it.
     callback calendar-panel-toggled();
     // (calendar id, palette index) from the colour-picker popup.
     callback calendar-set-color(int, int);
     callback event-clicked(int);
+    // Double-click on empty grid → create an event at that day/time. Args:
+    // click x, click y (viewport-content px), and the viewport width — Rust
+    // turns them into a snapped start timestamp.
+    callback grid-create-at(length, length, length);
 
     // Colour-picker popup state: which calendar's colour is being edited
     // (-1 = closed), plus the palette swatches mirrored from Rust.
@@ -231,9 +337,16 @@ export component MainWindow inherits Window {
     in property <string> detail-when;
     in property <string> detail-location;
     in property <string> detail-organizer;
-    in property <string> detail-attendees;
+    // Attendees table rows + my own PARTSTAT (highlights the pressed
+    // RSVP button).
+    in property <[AttRow]> detail-attendee-rows;
+    in property <string> detail-my-partstat: "";
     in property <string> detail-description;
     in-out property <int> detail-event-id;
+    // Every URL found in the event's location/description (plain text
+    // included) — rendered as clickable rows in the card.
+    in property <[string]> detail-links;
+    callback detail-open-link(string);
     callback detail-close();
     callback rsvp(int, string);
     callback detail-edit();
@@ -310,6 +423,47 @@ export component MainWindow inherits Window {
     in-out property <length> sidebar-row-y: 0;
     in-out property <int> sidebar-scroll-seq: 0;
     callback nav-conversation(int); // -1 = вверх, +1 = вниз
+    // Live chat-list scroll state, mirrored from the ListView so Rust can
+    // answer "is the user at the bottom?" for new-mail behaviour.
+    in-out property <length> chat-vp-y: 0;      // viewport-y (negative)
+    in-out property <length> chat-vp-h: 0;      // content height
+    in-out property <length> chat-view-h: 0;    // visible height
+    // New-mail sound toggle (persisted client-side).
+    in-out property <bool> notify-sound-on: true;
+    callback toggle-notify-sound();
+    // Snooze picker for calendar-reminder toasts («Отложить…»).
+    in-out property <bool> snooze-visible: false;
+    in property <string> snooze-summary: "";
+    callback snooze-choice(string); // "5"/"15"/"30"/"60"/"atstart"
+    // ── Settings modal ──
+    in-out property <bool> settings-visible: false;
+    in-out property <int> settings-tab: 0; // 0 Уведомления · 1 Контент · 2 Подключение · 3 Аккаунты
+    callback open-settings();
+    // Connection section — read-only for now (driven from env/config).
+    in property <string> conn-account: "";
+    in property <string> conn-mode: "";
+    in property <string> conn-imap: "";
+    in property <string> conn-smtp: "";
+    in property <string> conn-native: "";
+    // Global media policy (mirrors the per-message «Медиа…» allow-alls).
+    callback set-media-global(string); // "allow-all" / "scripts-all" / "images-all"
+    // ── Event hover tooltip (Tauri-era «HH:MM–HH:MM — summary») ──
+    // No built-in tooltip in Slint, so a chip arms this on hover and a
+    // short timer reveals a floating overlay rendered above the grid.
+    property <bool> tip-armed: false;
+    in-out property <bool> tip-visible: false;
+    in-out property <string> tip-text: "";
+    in-out property <length> tip-x: 0;
+    in-out property <length> tip-y: 0;
+    Timer {
+        interval: 350ms;
+        running: root.tip-armed && !root.tip-visible;
+        triggered => {
+            if (root.tip-armed) {
+                root.tip-visible = true;
+            }
+        }
+    }
     callback send(string);
     // Open the native file picker to stage attachments; remove one by index.
     callback attach-files();
@@ -544,6 +698,15 @@ export component MainWindow inherits Window {
                         background: idx == root.selected ? #2f80ed
                             : conv-ta.has-hover ? #e8ecf1
                             : conv.ident-color;
+                        // New-mail flash: pops on instantly, fades out over
+                        // a second once Rust clears the flag.
+                        Rectangle {
+                            width: parent.width;
+                            height: parent.height;
+                            background: #2f80ed4d;
+                            opacity: conv.highlight ? 1.0 : 0.0;
+                            animate opacity { duration: 900ms; easing: ease-out; }
+                        }
                         conv-ta := TouchArea {
                             clicked => { root.select(idx); }
                         }
@@ -575,6 +738,7 @@ export component MainWindow inherits Window {
                             }
                             VerticalLayout {
                                 alignment: center;
+                                horizontal-stretch: 1;
                                 Text {
                                     text: conv.name;
                                     font-weight: 700;
@@ -589,6 +753,27 @@ export component MainWindow inherits Window {
                                     color: idx == root.selected ? #e8f0fe : #8b95a1;
                                     overflow: elide;
                                     wrap: no-wrap;
+                                }
+                            }
+                            // Unread pill (Tauri-era): blue with white
+                            // count; inverted on the selected row.
+                            if conv.unread > 0: VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: max(18px, ub-t.preferred-width + 12px);
+                                    height: 18px;
+                                    border-radius: 9px;
+                                    background: idx == root.selected ? white : #2f80ed;
+                                    ub-t := Text {
+                                        width: parent.width;
+                                        height: parent.height;
+                                        text: conv.unread;
+                                        color: idx == root.selected ? #2f80ed : white;
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
                                 }
                             }
                         }
@@ -945,6 +1130,11 @@ export component MainWindow inherits Window {
                     }
                 }
                 lv := ListView {
+                    // Mirror scroll state for the Rust-side "at bottom?" check
+                    // (new-mail append behaviour).
+                    changed viewport-y => { root.chat-vp-y = self.viewport-y; }
+                    changed viewport-height => { root.chat-vp-h = self.viewport-height; }
+                    changed height => { root.chat-view-h = self.height; }
                     for msg[idx] in root.messages: Rectangle {
                         height: msg.h;
                         cma := ContextMenuArea {
@@ -1672,88 +1862,48 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
-                    Rectangle {
-                        width: 90px;
-                        height: 30px;
-                        border-radius: 15px;
-                        background: root.workdays-only ? #2f80ed : #f0f2f5;
-                        tg-wd := TouchArea {
-                            clicked => { root.calendar-toggle-workdays(); }
-                        }
-                        Text {
-                            width: parent.width; height: parent.height;
-                            text: root.workdays-only ? "5 дней" : "7 дней";
-                            color: root.workdays-only ? white : #6b7480;
-                            font-size: 12px; font-weight: 700;
-                            horizontal-alignment: center; vertical-alignment: center;
-                        }
-                    }
-                    Rectangle {
-                        width: 90px;
-                        height: 30px;
-                        border-radius: 15px;
-                        background: root.show-non-work-hours ? #2f80ed : #f0f2f5;
-                        tg-hr := TouchArea {
-                            clicked => { root.calendar-toggle-non-work-hours(); }
-                        }
-                        Text {
-                            width: parent.width; height: parent.height;
-                            text: root.show-non-work-hours ? "0–24" : "8–19";
-                            color: root.show-non-work-hours ? white : #6b7480;
-                            font-size: 12px; font-weight: 700;
-                            horizontal-alignment: center; vertical-alignment: center;
-                        }
-                    }
                 }
             }
-            // Day header row
+            // Day header row — frozen vertically, tracks horizontal scroll via
+            // grid-vp-x. Columns are absolutely placed so they line up with the
+            // grid body; a white corner covers the gutter so scrolled-in
+            // columns don't bleed under the time labels.
             Rectangle {
                 height: 32px;
                 background: white;
-                border-color: #eef0f4;
-                border-width: 0px;
-                HorizontalLayout {
-                    spacing: 0px;
-                    Rectangle { width: 48px; }
-                    for h[d] in root.day-headers: Rectangle {
-                        horizontal-stretch: 1;
-                        // Today gets a blue pill behind its label.
-                        if d == root.today-col: Rectangle {
-                            x: (parent.width - self.width) / 2;
-                            y: 3px;
-                            width: min(parent.width - 8px, 96px);
-                            height: parent.height - 6px;
-                            border-radius: (parent.height - 6px) / 2;
-                            background: #2f80ed18;
-                        }
-                        Text {
-                            width: parent.width; height: parent.height;
-                            text: h;
-                            font-weight: 700; font-size: 12px;
-                            color: d == root.today-col ? #2f80ed : #6b7480;
-                            horizontal-alignment: center; vertical-alignment: center;
-                        }
+                clip: true;
+                for h[d] in root.day-headers: Rectangle {
+                    x: 48px + d * root.col-width + root.grid-vp-x;
+                    width: root.col-width;
+                    height: parent.height;
+                    if d == root.today-col: Rectangle {
+                        x: (parent.width - self.width) / 2;
+                        y: 3px;
+                        width: min(parent.width - 8px, 96px);
+                        height: parent.height - 6px;
+                        border-radius: (parent.height - 6px) / 2;
+                        background: #2f80ed18;
+                    }
+                    Text {
+                        width: parent.width; height: parent.height;
+                        text: h;
+                        font-weight: 700; font-size: 12px;
+                        color: d == root.today-col ? #2f80ed : #6b7480;
+                        horizontal-alignment: center; vertical-alignment: center;
                     }
                 }
+                Rectangle { x: 0; width: 48px; height: parent.height; background: white; }
             }
             // All-day band — chips above the hour grid, one per day touched.
             // Hidden entirely when there are no all-day events this week.
             if root.all-day-rows > 0: Rectangle {
                 height: root.all-day-rows * 20px + 8px;
                 background: white;
-                Text {
-                    x: 0; y: 0;
-                    width: 44px; height: parent.height;
-                    text: "весь\nдень";
-                    color: #8b95a1;
-                    font-size: 9px;
-                    horizontal-alignment: right;
-                    vertical-alignment: center;
-                }
+                clip: true;
                 for ev[ei] in root.all-day-events: Rectangle {
-                    x: 48px + ev.day * (parent.width - 48px) / root.day-count + 2px;
+                    x: 48px + ev.day * root.col-width + root.grid-vp-x + 2px;
                     y: ev.row * 20px + 4px;
-                    width: (parent.width - 48px) / root.day-count - 4px;
+                    width: root.col-width - 6px;
                     height: 18px;
                     background: @linear-gradient(180deg,
                         ev.color.brighter(0.10) 0%,
@@ -1763,8 +1913,24 @@ export component MainWindow inherits Window {
                     drop-shadow-offset-y: 1px;
                     drop-shadow-color: #0000002b;
                     border-radius: 4px;
-                    TouchArea {
+                    ad-ta := TouchArea {
                         clicked => { root.event-clicked(ev.id); }
+                        scroll-event(se) => {
+                            if (se.modifiers.control && se.modifiers.alt) { root.calendar-zoom-days(se.delta-y); return accept; }
+                            if (se.modifiers.control) { root.calendar-zoom-hours(se.delta-y); return accept; }
+                            return reject;
+                        }
+                        changed has-hover => {
+                            if (self.has-hover) {
+                                root.tip-text = (ev.title == "" ? "(без названия)" : ev.title) + " · весь день";
+                                root.tip-x = self.absolute-position.x + self.mouse-x + 12px;
+                                root.tip-y = self.absolute-position.y + self.mouse-y + 18px;
+                                root.tip-armed = true;
+                            } else {
+                                root.tip-armed = false;
+                                root.tip-visible = false;
+                            }
+                        }
                     }
                     Text {
                         x: 4px; y: 0;
@@ -1778,69 +1944,109 @@ export component MainWindow inherits Window {
                         vertical-alignment: center;
                     }
                 }
+                // Frozen gutter label, drawn last so scrolled-in chips pass
+                // behind it.
+                Rectangle {
+                    x: 0; width: 48px; height: parent.height; background: white;
+                    Text {
+                        width: 44px; height: parent.height;
+                        text: "весь\nдень";
+                        color: #8b95a1; font-size: 9px;
+                        horizontal-alignment: right; vertical-alignment: center;
+                    }
+                }
                 Rectangle {
                     y: parent.height - 1px;
                     x: 0; width: parent.width; height: 1px;
                     background: #eef0f4;
                 }
             }
-            // Scrollable grid body
-            Rectangle {
+            // ===== Scrollable grid body =====
+            // 2-D Flickable holds the day columns; the time gutter (left) and
+            // day-header row (above) are frozen and follow the body's scroll
+            // via grid-vp-x / grid-vp-y mirrors.
+            gb := Rectangle {
                 vertical-stretch: 1;
                 background: #f7f8fa;
                 clip: true;
-                Flickable {
+                property <length> content-w: 48px + root.day-count * root.col-width;
+                property <length> content-h: (root.hour-end - root.hour-start) * root.hour-height;
+
+                gridflick := Flickable {
                     width: parent.width;
                     height: parent.height;
-                    viewport-width: parent.width;
-                    viewport-height: (root.hour-end - root.hour-start) * root.hour-height;
+                    viewport-width: max(parent.width, gb.content-w);
+                    viewport-height: max(parent.height, gb.content-h);
+                    changed viewport-x => { root.grid-vp-x = self.viewport-x; }
+                    changed viewport-y => { root.grid-vp-y = self.viewport-y; }
 
-                    // Today's column — light tint behind everything else.
+                    // Non-work shading (above work-start / below work-end).
+                    if root.work-start > root.hour-start: Rectangle {
+                        x: 48px; y: 0;
+                        width: root.day-count * root.col-width;
+                        height: (root.work-start - root.hour-start) * root.hour-height;
+                        background: #11182708;
+                    }
+                    if root.work-end < root.hour-end: Rectangle {
+                        x: 48px;
+                        y: (root.work-end - root.hour-start) * root.hour-height;
+                        width: root.day-count * root.col-width;
+                        height: (root.hour-end - root.work-end) * root.hour-height;
+                        background: #11182708;
+                    }
+                    // Today's column tint.
                     if root.today-col >= 0: Rectangle {
-                        x: 48px + root.today-col * (parent.viewport-width - 48px) / root.day-count;
+                        x: 48px + root.today-col * root.col-width;
                         y: 0;
-                        width: (parent.viewport-width - 48px) / root.day-count;
-                        height: parent.viewport-height;
+                        width: root.col-width;
+                        height: gridflick.viewport-height;
                         background: #2f80ed0a;
                     }
-                    // Per-hour horizontal rules across the full row.
-                    for i in (root.hour-end - root.hour-start): Rectangle {
+                    // Quarter-hour rules: :00 normal, :30 thin solid, :15/:45
+                    // thin dashed.
+                    for q in (root.hour-end - root.hour-start) * 4: Rectangle {
                         x: 48px;
-                        y: i * root.hour-height;
-                        width: parent.viewport-width - 48px;
+                        y: q * root.hour-height / 4;
+                        width: root.day-count * root.col-width;
                         height: 1px;
-                        background: #d8dee7;
-                    }
-                    // Time labels in the left gutter.
-                    for i in (root.hour-end - root.hour-start): Text {
-                        x: 0;
-                        y: i * root.hour-height - 8px;
-                        width: 44px;
-                        height: 16px;
-                        text: (root.hour-start + i) + ":00";
-                        color: #8b95a1;
-                        font-size: 11px;
-                        horizontal-alignment: right;
+                        background: Math.mod(q, 4) == 0
+                            ? #c4ccd6
+                            : (Math.mod(q, 4) == 2 ? #dde3ea : transparent);
+                        if Math.mod(q, 4) != 0 && Math.mod(q, 4) != 2: DashLine {
+                            width: parent.width;
+                            count: root.dash-count;
+                        }
                     }
                     // Day-column dividers.
                     for h[d] in root.day-headers: Rectangle {
-                        x: 48px + d * (parent.viewport-width - 48px) / root.day-count;
+                        x: 48px + d * root.col-width;
                         y: 0;
                         width: 1px;
-                        height: parent.viewport-height;
+                        height: gridflick.viewport-height;
                         background: #d8dee7;
                     }
-                    // Event blocks. Overlapping events share the column via
-                    // xf/wf lane fractions computed Rust-side.
+                    // Empty-grid double-click → new event at that slot. Behind
+                    // the chips, so it only fires on free space (incl. the 4px
+                    // strip kept to the right of every chip). Ctrl-/Ctrl-Alt-
+                    // wheel zooms; plain wheel falls through to the Flickable.
+                    grid-bg := TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        double-clicked => {
+                            root.grid-create-at(self.mouse-x, self.mouse-y, gridflick.viewport-width);
+                        }
+                        scroll-event(se) => {
+                            if (se.modifiers.control && se.modifiers.alt) { root.calendar-zoom-days(se.delta-y); return accept; }
+                            if (se.modifiers.control) { root.calendar-zoom-hours(se.delta-y); return accept; }
+                            return reject;
+                        }
+                    }
+                    // Event blocks.
                     for ev[ei] in root.events: Rectangle {
-                        x: 48px + (ev.day + ev.xf) * (parent.viewport-width - 48px) / root.day-count + 2px;
+                        x: 48px + (ev.day + ev.xf) * root.col-width + 2px;
                         y: ev.top;
-                        width: (parent.viewport-width - 48px) / root.day-count * ev.wf - 4px;
+                        width: root.col-width * ev.wf - 6px;
                         height: ev.h;
-                        // Subtle depth: top-lit gradient + a soft 1px drop
-                        // shadow. Deliberately restrained. Unanswered
-                        // meetings (tentative) render lighter — "needs RSVP"
-                        // at a glance, as in the Tauri client.
                         background: @linear-gradient(180deg,
                             ev.color.brighter(0.10) 0%,
                             ev.color 45%,
@@ -1854,6 +2060,22 @@ export component MainWindow inherits Window {
                         border-radius: 4px;
                         ev-ta := TouchArea {
                             clicked => { root.event-clicked(ev.id); }
+                            scroll-event(se) => {
+                                if (se.modifiers.control && se.modifiers.alt) { root.calendar-zoom-days(se.delta-y); return accept; }
+                                if (se.modifiers.control) { root.calendar-zoom-hours(se.delta-y); return accept; }
+                                return reject;
+                            }
+                            changed has-hover => {
+                                if (self.has-hover) {
+                                    root.tip-text = ev.time + " — " + (ev.title == "" ? "(без названия)" : ev.title);
+                                    root.tip-x = self.absolute-position.x + self.mouse-x + 12px;
+                                    root.tip-y = self.absolute-position.y + self.mouse-y + 18px;
+                                    root.tip-armed = true;
+                                } else {
+                                    root.tip-armed = false;
+                                    root.tip-visible = false;
+                                }
+                            }
                         }
                         Text {
                             x: 4px; y: 2px;
@@ -1866,7 +2088,6 @@ export component MainWindow inherits Window {
                             overflow: elide;
                             wrap: word-wrap;
                         }
-                        // Attendee-count badge, upper-right (meetings only).
                         if ev.count >= 2: Rectangle {
                             x: parent.width - self.width - 3px;
                             y: 2px;
@@ -1886,26 +2107,60 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
-                    // Now-line: current time across today's column, with a
-                    // dot at its left edge. Drawn above the events.
+                    // Now-line across today's column.
                     if root.today-col >= 0
                         && root.now-hour >= root.hour-start
                         && root.now-hour <= root.hour-end: Rectangle {
-                        x: 48px + root.today-col * (parent.viewport-width - 48px) / root.day-count;
+                        x: 48px + root.today-col * root.col-width;
                         y: (root.now-hour - root.hour-start) * root.hour-height - 1px;
-                        width: (parent.viewport-width - 48px) / root.day-count;
+                        width: root.col-width;
                         height: 2px;
                         background: #eb5757;
                         Rectangle {
-                            x: -3px;
-                            y: -2px;
-                            width: 6px;
-                            height: 6px;
+                            x: -3px; y: -2px;
+                            width: 6px; height: 6px;
                             border-radius: 3px;
                             background: #eb5757;
                         }
                     }
                 }
+
+                // Frozen time gutter — labels follow vertical scroll only.
+                Rectangle {
+                    x: 0; y: 0; width: 48px; height: parent.height;
+                    background: #f7f8fa;
+                    clip: true;
+                    for i in (root.hour-end - root.hour-start + 1): Text {
+                        x: 0;
+                        y: i * root.hour-height - 8px + root.grid-vp-y;
+                        width: 44px; height: 16px;
+                        text: (root.hour-start + i) + ":00";
+                        color: #8b95a1;
+                        font-size: 11px;
+                        horizontal-alignment: right;
+                    }
+                }
+                // Scroll thumbs (visual; pan via wheel / drag).
+                if gb.content-h > gb.height: Rectangle {
+                    width: 4px;
+                    x: parent.width - 6px;
+                    y: -root.grid-vp-y / gb.content-h * gb.height;
+                    height: max(24px, gb.height / gb.content-h * gb.height);
+                    background: #00000026;
+                    border-radius: 2px;
+                }
+                if gb.content-w > gb.width: Rectangle {
+                    height: 4px;
+                    y: parent.height - 6px;
+                    x: 48px + (-root.grid-vp-x / gb.content-w * gb.width);
+                    width: max(24px, gb.width / gb.content-w * gb.width);
+                    background: #00000026;
+                    border-radius: 2px;
+                }
+                // Report the body size to Rust so the layout math can react.
+                init => { root.grid-area-resized(self.width, self.height); }
+                changed width => { root.grid-area-resized(self.width, self.height); }
+                changed height => { root.grid-area-resized(self.width, self.height); }
             }
         }
     }
@@ -1918,8 +2173,8 @@ export component MainWindow inherits Window {
         Rectangle {
             x: 10px;
             y: 54px;
-            width: 200px;
-            height: 88px;
+            width: 220px;
+            height: 126px;
             background: white;
             border-radius: 10px;
             border-width: 1px;
@@ -1953,6 +2208,23 @@ export component MainWindow inherits Window {
                         padding-left: 12px; spacing: 10px; alignment: start;
                         Text { text: "📅"; font-size: 16px; vertical-alignment: center; }
                         Text { text: "Календарь"; font-size: 14px; font-weight: 600; color: #0f1419; vertical-alignment: center; }
+                    }
+                }
+                Rectangle {
+                    height: 36px;
+                    border-radius: 8px;
+                    background: vm-set.has-hover ? #f0f2f5 : transparent;
+                    vm-set := TouchArea {
+                        clicked => { root.view-menu-open = false; root.open-settings(); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 12px; spacing: 10px; alignment: start;
+                        Text { text: "⚙"; font-size: 16px; color: #6b7480; vertical-alignment: center; }
+                        Text {
+                            text: "Настройки";
+                            font-size: 14px; font-weight: 600; color: #0f1419;
+                            vertical-alignment: center;
+                        }
                     }
                 }
             }
@@ -2028,14 +2300,16 @@ export component MainWindow inherits Window {
             background: #00000066;
             card := Rectangle {
                 width: min(520px, root.width - 80px);
-                height: min(440px, root.height - 80px);
+                // Content-sized: a short event gets a short card; tall
+                // content is capped to the window (inner parts scroll).
+                height: min(root.height - 80px, dd-body.preferred-height + 40px);
                 background: white;
                 border-radius: 14px;
                 drop-shadow-blur: 24px;
                 drop-shadow-color: #00000044;
                 // Swallow clicks on the card so they don't hit the backdrop.
                 TouchArea {}
-                VerticalLayout {
+                dd-body := VerticalLayout {
                     padding: 20px;
                     spacing: 10px;
                     HorizontalLayout {
@@ -2066,66 +2340,165 @@ export component MainWindow inherits Window {
                         Rectangle {
                             width: 28px; height: 28px; border-radius: 14px;
                             background: x-ta.has-hover ? #e1e6ee : transparent;
-                            Text { text: "✕"; color: #6b7480; font-size: 16px;
-                                   horizontal-alignment: center; vertical-alignment: center; }
+                            // Drawn cross — the ✕ glyph is missing from the
+                            // default Windows font (same story as the burger).
+                            Path {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                width: 10px;
+                                height: 10px;
+                                viewbox-width: 10;
+                                viewbox-height: 10;
+                                stroke: #6b7480;
+                                stroke-width: 2px;
+                                MoveTo { x: 1; y: 1; }
+                                LineTo { x: 9; y: 9; }
+                                MoveTo { x: 9; y: 1; }
+                                LineTo { x: 1; y: 9; }
+                            }
                             x-ta := TouchArea { clicked => { root.detail-close(); } }
                         }
                     }
-                    Text { text: root.detail-when; font-size: 14px; color: #2f80ed; }
+                    // Date/time: plain dark text (a blue line here read as
+                    // a hyperlink), humanized by the Rust side.
+                    Text { text: root.detail-when; font-size: 14px; font-weight: 600; color: #0f1419; }
                     if root.detail-location != "": Text {
                         text: "📍 " + root.detail-location; font-size: 13px; color: #4a5560; wrap: word-wrap;
                     }
                     if root.detail-organizer != "": Text {
                         text: "Организатор: " + root.detail-organizer; font-size: 13px; color: #4a5560; wrap: word-wrap;
                     }
-                    if root.detail-attendees != "": Text {
-                        text: "Участники: " + root.detail-attendees; font-size: 13px; color: #4a5560; wrap: word-wrap;
+                    // Attendees — a proper two-column table (name | status),
+                    // scrollable when long.
+                    if root.detail-attendee-rows.length > 0: Rectangle {
+                        height: min(att-col.preferred-height + 12px, 168px);
+                        border-radius: 8px;
+                        background: #f7f8fa;
+                        clip: true;
+                        Flickable {
+                            width: parent.width;
+                            height: parent.height;
+                            viewport-height: att-col.preferred-height + 12px;
+                            att-col := VerticalLayout {
+                                x: 0; y: 6px;
+                                width: parent.width;
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 3px;
+                                for a in root.detail-attendee-rows: HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: a.name;
+                                        font-size: 13px;
+                                        color: #2b3640;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Text {
+                                        text: a.status;
+                                        font-size: 12px;
+                                        font-weight: 700;
+                                        color: a.color;
+                                    }
+                                }
+                            }
+                        }
                     }
-                    // RSVP row — shown when the event has attendees. Wrapped in
-                    // a fixed-height Rectangle so the VerticalLayout reserves the
-                    // row (a bare nested layout collapsed to 0).
-                    if root.detail-attendees != "": Rectangle {
+                    // Links recognised in the event data (location +
+                    // description, plain text included) — one clickable
+                    // row each, opens the system browser.
+                    for lnk in root.detail-links: Rectangle {
+                        height: 24px;
+                        border-radius: 6px;
+                        background: lnk-ta.has-hover ? #e8f0fe : transparent;
+                        lnk-ta := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => { root.detail-open-link(lnk); }
+                        }
+                        Text {
+                            x: 6px;
+                            width: parent.width - 12px;
+                            height: parent.height;
+                            text: "🔗 " + lnk;
+                            font-size: 13px;
+                            color: #2f80ed;
+                            overflow: elide;
+                            vertical-alignment: center;
+                        }
+                    }
+                    if root.detail-description != "": Rectangle {
+                        height: min(desc.preferred-height + 4px, 220px);
+                        clip: true;
+                        Flickable {
+                            width: parent.width;
+                            height: parent.height;
+                            viewport-height: desc.preferred-height;
+                            desc := Text {
+                                width: parent.width;
+                                text: root.detail-description;
+                                font-size: 13px;
+                                color: #2b3640;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                    // RSVP — at the bottom; my current answer is the solid
+                    // button, the alternatives are pale with coloured text.
+                    if root.detail-attendee-rows.length > 0: Rectangle {
                         height: 36px;
                         HorizontalLayout {
                         spacing: 8px;
                         Rectangle {
                             border-radius: 8px;
-                            background: ac-ta.has-hover ? #1f8b4c : #27ae60;
-                            Text { text: "Принять"; color: white; font-size: 13px; font-weight: 600;
-                                   horizontal-alignment: center; vertical-alignment: center; }
+                            border-width: root.detail-my-partstat == "ACCEPTED" ? 2px : 0px;
+                            border-color: #1f8b4c;
+                            background: root.detail-my-partstat == "ACCEPTED"
+                                ? (ac-ta.has-hover ? #1f8b4c : #27ae60)
+                                : (ac-ta.has-hover ? #27ae6033 : #27ae6018);
+                            Text {
+                                text: "Принять";
+                                color: root.detail-my-partstat == "ACCEPTED" ? white : #1f8b4c;
+                                font-size: 13px; font-weight: 700;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
                             ac-ta := TouchArea {
                                 clicked => { root.rsvp(root.detail-event-id, "ACCEPTED"); root.detail-close(); }
                             }
                         }
                         Rectangle {
                             border-radius: 8px;
-                            background: tn-ta.has-hover ? #d98324 : #f2994a;
-                            Text { text: "Возможно"; color: white; font-size: 13px; font-weight: 600;
-                                   horizontal-alignment: center; vertical-alignment: center; }
+                            border-width: root.detail-my-partstat == "TENTATIVE" ? 2px : 0px;
+                            border-color: #d98324;
+                            background: root.detail-my-partstat == "TENTATIVE"
+                                ? (tn-ta.has-hover ? #d98324 : #f2994a)
+                                : (tn-ta.has-hover ? #f2994a33 : #f2994a18);
+                            Text {
+                                text: "Возможно";
+                                color: root.detail-my-partstat == "TENTATIVE" ? white : #c47a1d;
+                                font-size: 13px; font-weight: 700;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
                             tn-ta := TouchArea {
                                 clicked => { root.rsvp(root.detail-event-id, "TENTATIVE"); root.detail-close(); }
                             }
                         }
                         Rectangle {
                             border-radius: 8px;
-                            background: dc-ta.has-hover ? #d63d3d : #eb5757;
-                            Text { text: "Отклонить"; color: white; font-size: 13px; font-weight: 600;
-                                   horizontal-alignment: center; vertical-alignment: center; }
+                            border-width: root.detail-my-partstat == "DECLINED" ? 2px : 0px;
+                            border-color: #d63d3d;
+                            background: root.detail-my-partstat == "DECLINED"
+                                ? (dc-ta.has-hover ? #d63d3d : #eb5757)
+                                : (dc-ta.has-hover ? #eb575733 : #eb575718);
+                            Text {
+                                text: "Отклонить";
+                                color: root.detail-my-partstat == "DECLINED" ? white : #d63d3d;
+                                font-size: 13px; font-weight: 700;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
                             dc-ta := TouchArea {
                                 clicked => { root.rsvp(root.detail-event-id, "DECLINED"); root.detail-close(); }
                             }
                         }
-                        }
-                    }
-                    Flickable {
-                        vertical-stretch: 1;
-                        viewport-height: desc.preferred-height;
-                        desc := Text {
-                            width: parent.width;
-                            text: root.detail-description;
-                            font-size: 13px;
-                            color: #2b3640;
-                            wrap: word-wrap;
                         }
                     }
                 }
@@ -2216,8 +2589,20 @@ export component MainWindow inherits Window {
                         Rectangle {
                             width: 28px; height: 28px; border-radius: 8px;
                             background: sv-x.has-hover ? #e1e6ee : transparent;
-                            Text { text: "✕"; color: #6b7480; font-size: 14px;
-                                   horizontal-alignment: center; vertical-alignment: center; }
+                            Path {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                width: 10px;
+                                height: 10px;
+                                viewbox-width: 10;
+                                viewbox-height: 10;
+                                stroke: #6b7480;
+                                stroke-width: 2px;
+                                MoveTo { x: 1; y: 1; }
+                                LineTo { x: 9; y: 9; }
+                                MoveTo { x: 9; y: 1; }
+                                LineTo { x: 1; y: 9; }
+                            }
                             sv-x := TouchArea {
                                 clicked => { root.source-view-visible = false; kb.focus(); }
                             }
@@ -2312,6 +2697,385 @@ export component MainWindow inherits Window {
                                     root.delete-conversation-confirmed();
                                 }
                             }
+                        }
+                    }
+                }
+            }
+        }
+        }
+    }
+
+    // ---------- Snooze picker for calendar reminders (modal) ----------
+    if root.snooze-visible: TouchArea {
+        // Clicking the dimmed area cancels — the toast stays "fired", so
+        // cancelling here simply drops the snooze.
+        clicked => { root.snooze-visible = false; kb.focus(); }
+        FocusScope {
+            init => { self.focus(); }
+            key-pressed(ev) => {
+                if (ev.text == Key.Escape) {
+                    root.snooze-visible = false;
+                    kb.focus();
+                    return accept;
+                }
+                reject
+            }
+        Rectangle {
+            background: #00000066;
+            Rectangle {
+                width: min(420px, root.width - 80px);
+                height: snz-body.preferred-height + 40px;
+                background: white;
+                border-radius: 14px;
+                drop-shadow-blur: 24px;
+                drop-shadow-color: #00000044;
+                TouchArea {} // keep clicks inside the card from closing it
+                snz-body := VerticalLayout {
+                    padding: 20px;
+                    spacing: 14px;
+                    Text {
+                        text: "Отложить напоминание";
+                        font-size: 17px; font-weight: 700; color: #0f1419;
+                    }
+                    Text {
+                        text: root.snooze-summary;
+                        wrap: word-wrap;
+                        font-size: 14px;
+                        color: #2b3640;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        for opt in ["5", "15", "30", "60"]: Rectangle {
+                            height: 34px;
+                            horizontal-stretch: 1;
+                            border-radius: 8px;
+                            background: snz-min.has-hover ? #1556c8 : #2f80ed;
+                            Text {
+                                text: opt + " мин";
+                                color: white; font-size: 14px; font-weight: 600;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            snz-min := TouchArea {
+                                clicked => {
+                                    root.snooze-visible = false;
+                                    kb.focus();
+                                    root.snooze-choice(opt);
+                                }
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle {
+                            height: 34px;
+                            horizontal-stretch: 1;
+                            border-radius: 8px;
+                            background: snz-at.has-hover ? #e8eef7 : #f0f4fa;
+                            border-width: 1px; border-color: #c8d4e4;
+                            Text {
+                                text: "В момент начала";
+                                color: #1556c8; font-size: 14px; font-weight: 600;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            snz-at := TouchArea {
+                                clicked => {
+                                    root.snooze-visible = false;
+                                    kb.focus();
+                                    root.snooze-choice("atstart");
+                                }
+                            }
+                        }
+                        Button { text: "Отмена"; clicked => { root.snooze-visible = false; kb.focus(); } }
+                    }
+                }
+            }
+        }
+        }
+    }
+
+    // ---------- Event hover tooltip overlay ----------
+    // Floats above the grid (single line, clamped to the window). The chip's
+    // changed-has-hover arms it; the root Timer reveals it after a beat.
+    if root.tip-visible && root.tip-text != "": Rectangle {
+        x: min(root.tip-x, root.width - self.width - 8px);
+        y: min(root.tip-y, root.height - self.height - 8px);
+        width: min(460px, tip-label.preferred-width + 18px);
+        height: tip-label.preferred-height + 10px;
+        background: #1f2733;
+        border-radius: 6px;
+        drop-shadow-blur: 10px;
+        drop-shadow-color: #00000055;
+        tip-label := Text {
+            x: 9px; y: 5px;
+            width: parent.width - 18px;
+            text: root.tip-text;
+            color: white;
+            font-size: 12px;
+            overflow: elide;
+        }
+    }
+
+    // ---------- Settings modal ----------
+    if root.settings-visible: TouchArea {
+        clicked => { root.settings-visible = false; kb.focus(); }
+        FocusScope {
+            init => { self.focus(); }
+            key-pressed(ev) => {
+                if (ev.text == Key.Escape) {
+                    root.settings-visible = false;
+                    kb.focus();
+                    return accept;
+                }
+                reject
+            }
+        Rectangle {
+            background: #00000066;
+            Rectangle {
+                width: min(720px, root.width - 80px);
+                height: min(520px, root.height - 80px);
+                background: white;
+                border-radius: 16px;
+                drop-shadow-blur: 28px;
+                drop-shadow-color: #00000044;
+                clip: true;
+                TouchArea {} // keep clicks inside from closing
+                HorizontalLayout {
+                    // ── Left rail: section tabs ──
+                    Rectangle {
+                        width: 196px;
+                        background: #f7f8fa;
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 4px;
+                            Text {
+                                text: "Настройки";
+                                font-size: 18px; font-weight: 800; color: #0f1419;
+                                horizontal-alignment: left;
+                            }
+                            Rectangle { height: 8px; }
+                            for tab[i] in [
+                                { ico: "🔔", label: "Уведомления" },
+                                { ico: "🖼", label: "Контент" },
+                                { ico: "📅", label: "Календарь" },
+                                { ico: "🔌", label: "Подключение" },
+                                { ico: "👤", label: "Аккаунты" },
+                            ]: Rectangle {
+                                height: 38px;
+                                border-radius: 9px;
+                                background: root.settings-tab == i
+                                    ? #e8f0fe
+                                    : (st-row.has-hover ? #eef1f5 : transparent);
+                                st-row := TouchArea {
+                                    clicked => { root.settings-tab = i; }
+                                }
+                                HorizontalLayout {
+                                    padding-left: 12px; spacing: 10px; alignment: start;
+                                    Text { text: tab.ico; font-size: 15px; vertical-alignment: center; }
+                                    Text {
+                                        text: tab.label;
+                                        font-size: 14px;
+                                        font-weight: root.settings-tab == i ? 700 : 500;
+                                        color: root.settings-tab == i ? #1556c8 : #2b3640;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // ── Right pane: active section ──
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        VerticalLayout {
+                            padding: 22px;
+                            spacing: 6px;
+
+                            // close (✕) in the top-right
+                            Rectangle {
+                                height: 0px;
+                                Rectangle {
+                                    x: parent.width - 26px; y: -4px;
+                                    width: 26px; height: 26px; border-radius: 13px;
+                                    background: sx.has-hover ? #f0f2f5 : transparent;
+                                    Path {
+                                        x: 8px; y: 8px; width: 10px; height: 10px;
+                                        viewbox-width: 10; viewbox-height: 10;
+                                        stroke: #6b7480; stroke-width: 2px;
+                                        MoveTo { x: 1; y: 1; } LineTo { x: 9; y: 9; }
+                                        MoveTo { x: 9; y: 1; } LineTo { x: 1; y: 9; }
+                                    }
+                                    sx := TouchArea {
+                                        clicked => { root.settings-visible = false; kb.focus(); }
+                                    }
+                                }
+                            }
+
+                            // ===== Уведомления =====
+                            if root.settings-tab == 0: VerticalLayout {
+                                spacing: 4px;
+                                Text {
+                                    text: "Уведомления";
+                                    font-size: 16px; font-weight: 700; color: #0f1419;
+                                }
+                                Rectangle { height: 6px; }
+                                SettingRow {
+                                    title: "Звук нового письма";
+                                    subtitle: "Короткий сигнал, когда диалог не открыт";
+                                    Toggle {
+                                        on: root.notify-sound-on;
+                                        toggled => { root.toggle-notify-sound(); }
+                                    }
+                                }
+                                Rectangle { height: 1px; background: #eef1f5; }
+                                Text {
+                                    text: "Тосты, счётчики непрочитанного и точка в трее включены всегда — отдельных переключателей пока нет.";
+                                    font-size: 12px; color: #8b95a1; wrap: word-wrap;
+                                }
+                            }
+
+                            // ===== Контент (media policy) =====
+                            if root.settings-tab == 1: VerticalLayout {
+                                spacing: 4px;
+                                Text {
+                                    text: "Внешний контент по умолчанию";
+                                    font-size: 16px; font-weight: 700; color: #0f1419;
+                                }
+                                Text {
+                                    text: "Глобальные правила. Точечные исключения для отправителя или хоста — в меню «Медиа…» на конкретном письме.";
+                                    font-size: 12px; color: #8b95a1; wrap: word-wrap;
+                                }
+                                Rectangle { height: 8px; }
+                                SettingRow {
+                                    title: "Разрешить весь внешний контент";
+                                    subtitle: "Картинки и скрипты грузятся без спроса";
+                                    Toggle {
+                                        on: root.media-allow-all-on;
+                                        toggled => { root.set-media-global("allow-all"); }
+                                    }
+                                }
+                                Rectangle { height: 1px; background: #eef1f5; }
+                                SettingRow {
+                                    title: "Загружать изображения";
+                                    subtitle: "Внешние картинки во всех письмах";
+                                    Toggle {
+                                        enabled: !root.media-allow-all-on;
+                                        on: root.media-all-images-on || root.media-allow-all-on;
+                                        toggled => { root.set-media-global("images-all"); }
+                                    }
+                                }
+                                Rectangle { height: 1px; background: #eef1f5; }
+                                SettingRow {
+                                    title: "Выполнять скрипты";
+                                    subtitle: "Рискованно: разрешает JS во всех письмах";
+                                    Toggle {
+                                        enabled: !root.media-allow-all-on;
+                                        on: root.media-all-scripts-on || root.media-allow-all-on;
+                                        toggled => { root.set-media-global("scripts-all"); }
+                                    }
+                                }
+                            }
+
+                            // ===== Подключение =====
+                            // ===== Календарь =====
+                            if root.settings-tab == 2: VerticalLayout {
+                                spacing: 4px;
+                                Text {
+                                    text: "Рабочий день";
+                                    font-size: 16px; font-weight: 700; color: #0f1419;
+                                }
+                                Text {
+                                    text: "Часы вне этого окна затеняются; когда все 24 часа не помещаются, видимым держится именно оно (плюс симметричный запас, если влезает).";
+                                    font-size: 12px; color: #8b95a1; wrap: word-wrap;
+                                }
+                                Rectangle { height: 8px; }
+                                SettingRow {
+                                    title: "Начало";
+                                    SpinBox {
+                                        width: 110px;
+                                        minimum: 0; maximum: 23;
+                                        value: root.work-start;
+                                        edited(v) => { root.set-work-hours(v, root.work-end); }
+                                    }
+                                }
+                                Rectangle { height: 1px; background: #eef1f5; }
+                                SettingRow {
+                                    title: "Конец";
+                                    SpinBox {
+                                        width: 110px;
+                                        minimum: 1; maximum: 24;
+                                        value: root.work-end;
+                                        edited(v) => { root.set-work-hours(root.work-start, v); }
+                                    }
+                                }
+                            }
+
+                            // ===== Подключение =====
+                            if root.settings-tab == 3: VerticalLayout {
+                                spacing: 4px;
+                                Text {
+                                    text: "Подключение";
+                                    font-size: 16px; font-weight: 700; color: #0f1419;
+                                }
+                                Rectangle { height: 6px; }
+                                SettingRow { title: "Аккаунт"; Text {
+                                    text: root.conn-account == "" ? "—" : root.conn-account;
+                                    font-size: 14px; color: #2b3640; vertical-alignment: center;
+                                } }
+                                Rectangle { height: 1px; background: #eef1f5; }
+                                SettingRow { title: "Режим"; Text {
+                                    text: root.conn-mode == "" ? "—" : root.conn-mode;
+                                    font-size: 14px; color: #2b3640; vertical-alignment: center;
+                                } }
+                                Rectangle { height: 1px; background: #eef1f5; }
+                                SettingRow { title: "IMAP"; Text {
+                                    text: root.conn-imap == "" ? "—" : root.conn-imap;
+                                    font-size: 13px; font-family: "Consolas"; color: #2b3640; vertical-alignment: center;
+                                } }
+                                Rectangle { height: 1px; background: #eef1f5; }
+                                SettingRow { title: "SMTP"; Text {
+                                    text: root.conn-smtp == "" ? "—" : root.conn-smtp;
+                                    font-size: 13px; font-family: "Consolas"; color: #2b3640; vertical-alignment: center;
+                                } }
+                                Rectangle { height: 1px; background: #eef1f5; }
+                                SettingRow { title: "Сервер (web/native)"; Text {
+                                    text: root.conn-native == "" ? "—" : root.conn-native;
+                                    font-size: 13px; font-family: "Consolas"; color: #2b3640; vertical-alignment: center;
+                                } }
+                                Rectangle { height: 10px; }
+                                Text {
+                                    text: "Параметры заданы при запуске и пока доступны только для чтения. Редактирование и вход из приложения появятся в следующей версии.";
+                                    font-size: 12px; color: #8b95a1; wrap: word-wrap;
+                                }
+                            }
+
+                            // ===== Аккаунты =====
+                            if root.settings-tab == 4: VerticalLayout {
+                                spacing: 10px;
+                                Text {
+                                    text: "Аккаунты";
+                                    font-size: 16px; font-weight: 700; color: #0f1419;
+                                }
+                                Rectangle {
+                                    height: 96px;
+                                    border-radius: 12px;
+                                    background: #f7f8fa;
+                                    border-width: 1px; border-color: #eef1f5;
+                                    VerticalLayout {
+                                        alignment: center; spacing: 4px;
+                                        Text {
+                                            text: "Управление аккаунтами скоро";
+                                            font-size: 14px; font-weight: 600; color: #2b3640;
+                                            horizontal-alignment: center;
+                                        }
+                                        Text {
+                                            text: "Добавление почтовых ящиков, выбор активного, подключение внешних IMAP/SMTP.";
+                                            font-size: 12px; color: #8b95a1; wrap: word-wrap;
+                                            horizontal-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+
+                            Rectangle { vertical-stretch: 1; }
                         }
                     }
                 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 
 	caldavclient "github.com/yourusername/mailserver/internal/caldav/client"
 	"github.com/yourusername/mailserver/internal/db"
@@ -99,6 +100,26 @@ func (t *CalendarEventSyncTask) Execute(ctx context.Context) error {
 		if err != nil {
 			log.Printf("Calendar event sync failed for %s (%s, retry=%d): %v",
 				entry.UID, entry.Operation, entry.RetryCount, err)
+			// Permanent-failure cutoff: a 4xx that survived this many
+			// backoff rounds (the tail is 24h apart) will never succeed.
+			// Canonical case: Google's auto-generated birthday events are
+			// read-only — any PUT gets 400 forever, and the daily retry
+			// kept the warning emails firing daily. Drop the entry and
+			// clear local_modified so the next pull re-adopts the remote
+			// truth instead of shielding the stale local copy.
+			const giveUpAfter = 8
+			if entry.RetryCount+1 >= giveUpAfter && isPermanentSyncError(err) {
+				log.Printf("Calendar event sync: giving up on %s (%s) after %d attempts — dropping; remote state wins",
+					entry.UID, entry.Operation, entry.RetryCount+1)
+				if dbErr := t.database.DeleteCalendarEventSyncEntry(entry.ID); dbErr != nil {
+					log.Printf("drop poisoned sync entry %d: %v", entry.ID, dbErr)
+				}
+				if entry.Operation != "delete" {
+					t.database.MarkEventSynced(entry.EventID, "")
+				}
+				failCount++
+				continue
+			}
 			// Persist failure for backoff + DLQ warning logic. Best-effort:
 			// if we can't update the DB the entry just re-fires on the next
 			// cycle, which is still correct (just chattier).
@@ -123,11 +144,26 @@ func (t *CalendarEventSyncTask) Execute(ctx context.Context) error {
 
 	log.Printf("Calendar event sync completed for %s: %d success, %d failed",
 		t.source.Name, successCount, failCount)
+	return t.finish(failCount)
+}
 
-	// If everything we attempted this round succeeded AND the queue is
-	// completely drained, reset the warning counter — a successful run means
-	// the user must have fixed whatever was broken, so the daily reminder
-	// loop should stop.
+// isPermanentSyncError reports whether the remote rejected the operation in
+// a way that retrying can't fix: client errors except auth-shaped ones
+// (401/407/429 can heal after re-auth or backoff; 5xx is the remote's
+// problem and worth retrying).
+func isPermanentSyncError(err error) bool {
+	s := err.Error()
+	for _, code := range []string{"status 400", "status 403", "status 404", "status 405", "status 409", "status 410", "status 412", "status 415"} {
+		if strings.Contains(s, code) {
+			return true
+		}
+	}
+	return false
+}
+
+// finish resets the warning counter when the round was clean and the queue
+// drained — the daily reminder loop should stop then.
+func (t *CalendarEventSyncTask) finish(failCount int) error {
 	if failCount == 0 {
 		left, _ := t.database.CountPendingCalendarSyncFailures(t.source.ID, 1)
 		if left == 0 {

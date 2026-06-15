@@ -19,10 +19,35 @@ pub struct CalendarSettings {
     /// Takes precedence over both the server colour and the palette default.
     pub colors: HashMap<i64, String>,
     pub panel_collapsed: bool,
-    /// true = 5-day work week.
-    pub workdays_only: bool,
-    /// true = full 0–24 hour range.
-    pub show_non_work_hours: bool,
+    /// Sound on new-mail notifications (the file is de-facto the client
+    /// settings store, calendar name notwithstanding).
+    #[serde(default = "default_true")]
+    pub notify_sound: bool,
+    /// Working-day window (local hours). The grid always models 0–24, but
+    /// when it can't all fit this is the band kept visible; outside it is
+    /// shaded as non-work.
+    #[serde(default = "default_work_start")]
+    pub work_start_hour: i32,
+    #[serde(default = "default_work_end")]
+    pub work_end_hour: i32,
+    /// Manual zoom levels (px). 0 = automatic fit. Set once the user
+    /// ctrl-/ctrl-alt-scrolls; manual zoom then wins over autofit.
+    #[serde(default)]
+    pub manual_hour_height: f32,
+    #[serde(default)]
+    pub manual_col_width: f32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_work_start() -> i32 {
+    8
+}
+
+fn default_work_end() -> i32 {
+    19
 }
 
 fn settings_path() -> Option<PathBuf> {

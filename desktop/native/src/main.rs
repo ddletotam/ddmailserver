@@ -21,6 +21,7 @@ mod render;
 mod render;
 mod sanitize;
 mod texture_cache;
+mod toast;
 mod window_state;
 
 use std::cell::{Cell, RefCell};
@@ -88,8 +89,6 @@ const DEFAULT_WIDTH: u32 = 740;
 
 /// Default workday bounds (local hours). The calendar's work-hours view
 /// shows one hour either side of these.
-const WORKDAY_START: i32 = 9;
-const WORKDAY_END: i32 = 18;
 
 fn initials(name: &str) -> String {
     name.split_whitespace()
@@ -117,6 +116,8 @@ struct Disp {
     /// Sidebar row tint — colour of the identity that received the
     /// conversation (см. identity_color_map). Empty = no tint.
     ident_color: String,
+    /// Unread badge value (0 = no badge).
+    unread: u32,
 }
 
 /// Pastel palette for identities lacking a server-side colour. Mirrors the
@@ -235,6 +236,7 @@ fn displays_from(convs: &[Conversation], ident_colors: &HashMap<String, String>)
                 },
                 email: c.counterparts.first().map(|cp| cp.addr.clone()).unwrap_or_default(),
                 ident_color,
+                unread: c.unread_count,
             }
         })
         .collect()
@@ -249,6 +251,7 @@ fn synthetic_displays() -> Vec<Disp> {
             preview: "Последнее сообщение в диалоге…".to_string(),
             email: String::new(),
             ident_color: String::new(),
+            unread: 0,
         })
         .collect()
 }
@@ -637,6 +640,9 @@ struct Shared {
     /// Set when a drag-selection just ended — the click that Slint fires
     /// on release must NOT open a link.
     sel_suppress_click: Cell<bool>,
+    /// Toast-click navigation: scroll to this (folder, uid) once its body
+    /// is rendered. Takes priority over the unread-anchor logic.
+    pending_open_ref: RefCell<Option<(String, u32)>>,
     /// Render-job sequence shared with the render worker (see Job::seq).
     render_seq: Arc<AtomicU64>,
     current: Cell<usize>,
@@ -691,6 +697,18 @@ struct Shared {
     /// time, as days since the unix epoch. Stored as i64 so the
     /// timezone-conversion math is straightforward.
     calendar_week_start_days: Cell<i64>,
+    /// Live size of the calendar grid body (px), mirrored from Slint so the
+    /// layout math can decide day-count / hour-height / what to hide.
+    grid_canvas_w: Cell<f32>,
+    grid_canvas_h: Cell<f32>,
+    /// Working-day window (local hours) — the band kept visible when 0–24
+    /// can't fit; outside it is shaded. Configurable in settings.
+    work_start: Cell<i32>,
+    work_end: Cell<i32>,
+    /// Manual zoom (px); 0 = automatic fit. Set on ctrl / ctrl-alt scroll,
+    /// after which manual zoom wins over autofit (per spec).
+    manual_hour_h: Cell<f32>,
+    manual_col_w: Cell<f32>,
     /// Event being edited (0 in create mode).
     editing_event_id: Cell<i64>,
     /// Writable calendar ids, parallel to the edit-form's ComboBox model.
@@ -699,6 +717,11 @@ struct Shared {
     /// attach button. Parallel to the `composer-attachments` Slint model
     /// (which holds just the basenames). Cleared once a message is staged.
     compose_attachments: RefCell<Vec<std::path::PathBuf>>,
+    /// Event a reminder toast asked to open (0 = none); consumed once the
+    /// calendar events for its week arrive from the engine.
+    pending_open_event: Cell<i64>,
+    /// (event_id, occurrence_start_ms) the snooze modal is acting on.
+    snooze_ctx: Cell<(i64, i64)>,
 }
 
 thread_local! {
@@ -707,6 +730,57 @@ thread_local! {
     /// the Rc) can reach the shared state.
     static SHARED: RefCell<Option<Rc<Shared>>> = const { RefCell::new(None) };
 }
+
+#[cfg(windows)]
+thread_local! {
+    /// The tray handle — kept here so the new-mail path can flip the
+    /// unread dot from engine-result handlers.
+    static TRAY: RefCell<Option<tray::Tray>> = const { RefCell::new(None) };
+}
+
+/// Show + un-minimize + bring to foreground. Plain `ui.show()` is a no-op
+/// for a window that is minimized or buried under others — tray and toast
+/// clicks must actually surface it. SetForegroundWindow is allowed to
+/// succeed here because the click that got us called counts as user input.
+fn raise_window(ui: &MainWindow) {
+    let _ = ui.show();
+    #[cfg(windows)]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE,
+        };
+        let handle = ui.window().window_handle();
+        if let Ok(wh) = handle.window_handle() {
+            if let RawWindowHandle::Win32(h) = wh.as_raw() {
+                let hwnd =
+                    windows::Win32::Foundation::HWND(h.hwnd.get() as *mut core::ffi::c_void);
+                unsafe {
+                    if IsIconic(hwnd).as_bool() {
+                        let _ = ShowWindow(hwnd, SW_RESTORE);
+                    }
+                    let _ = SetForegroundWindow(hwnd);
+                }
+            }
+        }
+    }
+}
+
+/// Flip the tray unread dot (no-op off Windows).
+fn tray_set_dot(on: bool) {
+    #[cfg(windows)]
+    TRAY.with(|t| {
+        if let Some(tr) = t.borrow().as_ref() {
+            tr.set_unread_dot(on);
+        }
+    });
+    #[cfg(not(windows))]
+    let _ = on;
+}
+
+/// UI weak handle reachable from non-UI threads (toast click callbacks hop
+/// to the event loop through it).
+static UI_WEAK: std::sync::OnceLock<slint::Weak<MainWindow>> = std::sync::OnceLock::new();
 
 /// Open a conversation by index: show cached bodies immediately, and (if a live
 /// engine is running) fire a background fetch to refresh them.
@@ -733,8 +807,9 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
     sh.current_bodies.borrow_mut().clear();
 
     // Unread snapshot BEFORE we mark anything read — it anchors the
-    // scroll (first unread at top; none unread → scroll to the end).
+    // scroll (last unread at top; none unread → scroll to the end).
     let unread: Vec<MessageRef> = c.messages.iter().filter(|m| !m.seen).cloned().collect();
+    let had_unread = !unread.is_empty();
     *sh.open_unread.borrow_mut() =
         unread.iter().map(|m| (m.folder.clone(), m.uid)).collect();
     sh.scroll_pending.set(true);
@@ -763,7 +838,15 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
         }
     }
     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
-        let _ = etx.send(engine::EngineCmd::FetchMessages { messages: c.messages.clone(), generation });
+        // A toast-click target may be newer than the cached conversation
+        // refs — make sure the fetch includes it.
+        let mut fetch_refs = c.messages.clone();
+        if let Some((f, u)) = sh.pending_open_ref.borrow().clone() {
+            if !fetch_refs.iter().any(|m| m.uid == u) {
+                fetch_refs.push(MessageRef { folder: f, uid: u, seen: false });
+            }
+        }
+        let _ = etx.send(engine::EngineCmd::FetchMessages { messages: fetch_refs, generation });
         // Opening a conversation reads it: push \Seen for everything that
         // was unread. The scroll anchor above is already snapshotted.
         if !unread.is_empty() {
@@ -774,6 +857,43 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
             });
         }
     }
+    drop(convs);
+    // Optimistic badge clear: the server-side mark-read lands via the
+    // delta refetch a second later, but the sidebar must not keep showing
+    // an unread pill for the conversation the user is literally reading.
+    if had_unread {
+        if let Some(c) = sh.convs.borrow_mut().get_mut(idx) {
+            c.unread_count = 0;
+            for m in c.messages.iter_mut() {
+                m.seen = true;
+            }
+        }
+        let displays = displays_from(&sh.convs.borrow(), &sh.identity_colors.borrow());
+        *sh.displays.borrow_mut() = displays;
+        refresh_sidebar(sh, ui);
+    }
+}
+
+/// Pull every http(s) URL out of free text (calendar event fields keep
+/// meeting links as plain text more often than not). Trailing punctuation
+/// is trimmed; order preserved, duplicates dropped.
+fn extract_urls(texts: &[&str]) -> Vec<String> {
+    use std::sync::OnceLock;
+    static URL_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = URL_RE.get_or_init(|| {
+        regex::Regex::new(r#"https?://[^\s<>"'\)\]]+"#).unwrap()
+    });
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for t in texts {
+        for m in re.find_iter(t) {
+            let url = m.as_str().trim_end_matches(['.', ',', ';', ':', '!', '?', '»']);
+            if !url.is_empty() && seen.insert(url.to_string()) {
+                out.push(url.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// Index of the text run nearest to (x, y): the containing run when there
@@ -906,7 +1026,7 @@ fn sync_media_globals(ui: &MainWindow, p: &policy::Policy) {
     ui.set_media_all_scripts_on(p.allow_all_scripts);
 }
 
-/// Consume the pending post-open scroll: row index of the first unread
+/// Consume the pending post-open scroll: row index of the LAST unread
 /// body (top-aligned), or -1 for "scroll to the end" when everything was
 /// already read. None when this render isn't the first one after open.
 fn take_scroll_target(sh: &Shared, bodies: &[MessageBody]) -> Option<i32> {
@@ -914,11 +1034,17 @@ fn take_scroll_target(sh: &Shared, bodies: &[MessageBody]) -> Option<i32> {
         return None;
     }
     sh.scroll_pending.set(false);
+    // Toast-click target wins: jump straight to the clicked message.
+    if let Some((_, uid)) = sh.pending_open_ref.borrow_mut().take() {
+        if let Some(r) = bodies.iter().position(|b| b.uid == uid) {
+            return Some(r as i32);
+        }
+    }
     let unread = sh.open_unread.borrow();
     Some(
         bodies
             .iter()
-            .position(|b| unread.contains(&(b.folder.clone(), b.uid)))
+            .rposition(|b| unread.contains(&(b.folder.clone(), b.uid)))
             .map(|r| r as i32)
             .unwrap_or(-1),
     )
@@ -965,6 +1091,8 @@ fn sidebar_items(displays: &[Disp], avatars: &HashMap<String, Image>) -> Vec<Con
                 } else {
                     slint::Brush::SolidColor(hex(&d.ident_color))
                 },
+                unread: d.unread as i32,
+                highlight: false,
             }
         })
         .collect()
@@ -988,7 +1116,40 @@ fn pending_compose_item(target: &str) -> ConvItem {
         has_avatar: false,
         avatar: Image::default(),
         ident_color: slint::Brush::SolidColor(slint::Color::from_argb_u8(0, 0, 0, 0)),
+        unread: 0,
+        highlight: false,
     }
+}
+
+/// One-second attention flash on a sidebar row (model index): flips the
+/// row's highlight on, then off after 150 ms — the Slint side fades the
+/// overlay out over ~a second.
+fn flash_sidebar_row(ui: &MainWindow, model_idx: usize) {
+    use slint::Model;
+    let model = ui.get_conversations();
+    let Some(mut item) = model.row_data(model_idx) else { return };
+    item.highlight = true;
+    model.set_row_data(model_idx, item.clone());
+    let ui_weak = ui.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_millis(150), move || {
+        if let Some(ui) = ui_weak.upgrade() {
+            let model = ui.get_conversations();
+            if let Some(mut item) = model.row_data(model_idx) {
+                item.highlight = false;
+                model.set_row_data(model_idx, item);
+            }
+        }
+    });
+}
+
+/// Extract a bare lowercase address from a "Name <addr>" header value.
+fn header_addr(raw: &str) -> String {
+    if let (Some(i), Some(j)) = (raw.rfind('<'), raw.rfind('>')) {
+        if i < j {
+            return raw[i + 1..j].trim().to_lowercase();
+        }
+    }
+    raw.trim().to_lowercase()
 }
 
 /// Push the latest displays + pending-compose state into the Slint
@@ -1020,6 +1181,84 @@ fn week_start_days_today() -> i64 {
     monday
         .signed_duration_since(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
         .num_days()
+}
+
+/// Same, but for the week containing an arbitrary timestamp — used to
+/// navigate the calendar to a reminder's occurrence.
+fn week_start_days_for_ms(ms: i64) -> i64 {
+    use chrono::{Datelike, Duration, Local, TimeZone};
+    let date = Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .map(|t| t.date_naive())
+        .unwrap_or_else(|| Local::now().date_naive());
+    let monday = date - Duration::days(date.weekday().num_days_from_monday() as i64);
+    monday
+        .signed_duration_since(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
+        .num_days()
+}
+
+/// Single dispatch point for everything a calendar-reminder toast (or the
+/// in-app snooze modal) can ask for — restored from the Tauri build:
+///   default       → open the event in the calendar (does NOT ack — opening
+///                    is softer than «обработал»)
+///   ack           → mark acked, never bother again
+///   snooze-window → raise the window + show the in-app snooze modal; the
+///                    row's state is committed by the follow-up snz:*
+///   snz:N         → re-arm fire_at at now+N minutes
+///   snz:atstart   → re-arm exactly at the occurrence start
+fn handle_reminder_action(
+    ui: &MainWindow,
+    sh: &Rc<Shared>,
+    action: &str,
+    event_id: i64,
+    occ_ms: i64,
+) {
+    match action {
+        "ack" => {
+            if let Some(c) = sh.cache.as_ref() {
+                let _ = c.mark_reminder_acked(event_id, occ_ms);
+            }
+        }
+        "snooze-window" => {
+            let summary = sh
+                .cache
+                .as_ref()
+                .and_then(|c| c.get_reminder(event_id, occ_ms).ok().flatten())
+                .map(|r| r.summary)
+                .unwrap_or_default();
+            sh.snooze_ctx.set((event_id, occ_ms));
+            ui.set_snooze_summary(summary.into());
+            ui.set_snooze_visible(true);
+            raise_window(ui);
+        }
+        s if s.starts_with("snz:") => {
+            let Some(c) = sh.cache.as_ref() else { return };
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let (fire_at, lead) = if s == "snz:atstart" {
+                (occ_ms, 0)
+            } else {
+                let mins: i64 = s[4..].parse().unwrap_or(5);
+                let fire = now_ms + mins * 60_000;
+                (fire, ((occ_ms - fire) / 60_000).max(0) as i32)
+            };
+            if let Err(e) = c.snooze_reminder(event_id, occ_ms, fire_at, lead) {
+                eprintln!("reminders: snooze failed for {event_id}: {e}");
+            }
+        }
+        "default" => {
+            raise_window(ui);
+            sh.calendar_week_start_days.set(week_start_days_for_ms(occ_ms));
+            sh.pending_open_event.set(event_id);
+            ui.set_view_mode(1);
+            apply_calendar_view(ui, sh);
+            if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                let _ = etx.send(engine::EngineCmd::FetchCalendars);
+            }
+            refetch_calendar_events(ui, sh);
+        }
+        other => eprintln!("reminders: unknown action {other:?}"),
+    }
 }
 
 /// Side-by-side lanes for overlapping blocks within a day column: events
@@ -1114,16 +1353,157 @@ fn save_calendar_settings(ui: &MainWindow, sh: &Shared) {
     calendar_settings::save(&calendar_settings::CalendarSettings {
         hidden,
         colors: sh.calendar_colors.borrow().clone(),
+        notify_sound: ui.get_notify_sound_on(),
         panel_collapsed: ui.get_calendar_panel_collapsed(),
-        workdays_only: ui.get_workdays_only(),
-        show_non_work_hours: ui.get_show_non_work_hours(),
+        work_start_hour: sh.work_start.get(),
+        work_end_hour: sh.work_end.get(),
+        manual_hour_height: sh.manual_hour_h.get(),
+        manual_col_width: sh.manual_col_w.get(),
     });
+}
+
+/// Hard floors from the spec: an hour cell is never shorter than 52px nor a
+/// day column narrower than 300px. The 48px gutter holds the time labels.
+const MIN_HOUR_H: f32 = 52.0;
+const MIN_COL_W: f32 = 300.0;
+const GUTTER_W: f32 = 48.0;
+
+/// Choose day-count + column width for the available width.
+///   - manual day-zoom → 7-day content at the chosen width (horizontal scroll)
+///   - else 7 days if they fit at ≥300px (filling the width)
+///   - else 5 days (Mon–Fri) if they fit
+///   - else 5 days at the 300px floor (horizontal scroll)
+fn compute_horizontal(canvas_w: f32, manual_col_w: f32) -> (i32, f32) {
+    let avail = (canvas_w - GUTTER_W).max(MIN_COL_W);
+    if manual_col_w > 0.0 {
+        return (7, manual_col_w.clamp(MIN_COL_W, avail));
+    }
+    if avail >= 7.0 * MIN_COL_W {
+        (7, avail / 7.0)
+    } else if avail >= 5.0 * MIN_COL_W {
+        (5, avail / 5.0)
+    } else {
+        (5, MIN_COL_W)
+    }
+}
+
+/// Choose the visible hour band + hour height for the available height.
+/// Returns (vis_start, vis_end, hour_height) where the band is [vis_start,
+/// vis_end) local hours.
+///   - manual hour-zoom → full 0–24 at the chosen height (vertical scroll)
+///   - else if 24h fits at ≥52px → fill the canvas with all 24h
+///   - else if there are events outside work hours → full 0–24 scroll at 52px
+///   - else hide non-work symmetrically: the work window plus as many equal
+///     padding hours above/below as fit, filling the canvas (no scroll)
+fn compute_vertical(
+    canvas_h: f32,
+    work_start: i32,
+    work_end: i32,
+    has_out_of_work: bool,
+    manual_hour_h: f32,
+) -> (i32, i32, f32) {
+    let ws = work_start.clamp(0, 23);
+    let we = work_end.clamp(ws + 1, 24);
+    let h = canvas_h.max(MIN_HOUR_H);
+
+    if manual_hour_h > 0.0 {
+        return (0, 24, manual_hour_h.clamp(MIN_HOUR_H, h));
+    }
+    if h >= 24.0 * MIN_HOUR_H {
+        return (0, 24, h / 24.0); // all day fits — fill
+    }
+    if has_out_of_work {
+        return (0, 24, MIN_HOUR_H); // must show everything — scroll
+    }
+    // Hide non-work, keep work window + symmetric padding that still fits.
+    let work_hours = (we - ws).max(1);
+    let fit_rows = (h / MIN_HOUR_H).floor() as i32;
+    if fit_rows <= work_hours {
+        return (ws, we, MIN_HOUR_H); // even the work window must scroll
+    }
+    let extra = fit_rows - work_hours;
+    let pad = (extra / 2).min(ws).min(24 - we);
+    let top = ws - pad;
+    let bottom = we + pad;
+    let rows = (bottom - top).max(1);
+    (top, bottom, h / rows as f32)
+}
+
+#[cfg(test)]
+mod grid_layout_tests {
+    use super::{compute_horizontal, compute_vertical, MIN_COL_W, MIN_HOUR_H};
+
+    #[test]
+    fn horizontal_seven_then_five_then_scroll() {
+        // Wide enough for 7 columns → 7, filling the width.
+        let (d, w) = compute_horizontal(48.0 + 7.0 * 320.0, 0.0);
+        assert_eq!(d, 7);
+        assert!((w - 320.0).abs() < 0.1);
+        // Fits 5 but not 7 → 5 days, filled.
+        let (d, w) = compute_horizontal(48.0 + 5.0 * 320.0, 0.0);
+        assert_eq!(d, 5);
+        assert!(w >= MIN_COL_W);
+        // Too narrow even for 5 at the floor → 5 days at the 300px floor.
+        let (d, w) = compute_horizontal(48.0 + 3.0 * MIN_COL_W, 0.0);
+        assert_eq!(d, 5);
+        assert!((w - MIN_COL_W).abs() < 0.1);
+    }
+
+    #[test]
+    fn horizontal_manual_zoom_is_seven_days_clamped() {
+        let (d, w) = compute_horizontal(2000.0, 9999.0);
+        assert_eq!(d, 7);
+        assert!(w <= 2000.0 - 48.0 + 0.1); // clamped to available width
+        let (_, w) = compute_horizontal(2000.0, 100.0);
+        assert!((w - MIN_COL_W).abs() < 0.1); // clamped up to the floor
+    }
+
+    #[test]
+    fn vertical_fills_when_all_day_fits() {
+        // Plenty of height → all 24h, filled (hour height > floor).
+        let (s, e, hh) = compute_vertical(24.0 * 80.0, 8, 19, false, 0.0);
+        assert_eq!((s, e), (0, 24));
+        assert!((hh - 80.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn vertical_scrolls_full_day_when_out_of_work_events() {
+        // Can't fit 24h and there ARE out-of-work events → 0–24 at the floor.
+        let (s, e, hh) = compute_vertical(10.0 * MIN_HOUR_H, 8, 19, true, 0.0);
+        assert_eq!((s, e), (0, 24));
+        assert!((hh - MIN_HOUR_H).abs() < 0.1);
+    }
+
+    #[test]
+    fn vertical_hides_non_work_symmetrically() {
+        // Work window 8–19 (11h). Room for ~15 rows → 4 extra → 2 above/below.
+        let h = 15.0 * MIN_HOUR_H;
+        let (s, e, hh) = compute_vertical(h, 8, 19, false, 0.0);
+        assert_eq!(s, 6);
+        assert_eq!(e, 21);
+        assert!(hh >= MIN_HOUR_H); // fills, no scroll
+        assert!((hh - h / 15.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn vertical_manual_zoom_full_day_scroll() {
+        let (s, e, hh) = compute_vertical(600.0, 8, 19, false, 120.0);
+        assert_eq!((s, e), (0, 24));
+        assert!((hh - 120.0).abs() < 0.1);
+    }
 }
 
 fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
     use chrono::{Datelike, Duration, NaiveDate};
-    let workdays = ui.get_workdays_only();
-    let day_count = if workdays { 5 } else { 7 } as i32;
+    let (day_count, col_width) =
+        compute_horizontal(sh.grid_canvas_w.get(), sh.manual_col_w.get());
+    ui.set_col_width(col_width);
+    // Dash segments per quarter-hour line (24px period), capped so a very
+    // wide manual zoom can't spawn an absurd number of rects.
+    let dash_count = ((day_count as f32 * col_width) / 24.0)
+        .floor()
+        .clamp(0.0, 160.0) as i32;
+    ui.set_dash_count(dash_count);
     let week_days = sh.calendar_week_start_days.get();
     let monday = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()
         + Duration::days(week_days);
@@ -1157,12 +1537,6 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
         format!("{} {}", MONTHS[(monday.month() - 1) as usize], monday.year())
     };
     ui.set_week_title(title.into());
-    ui.set_hour_height(48.0);
-    // Work-hours view spans one hour either side of the workday (9–18 by
-    // default → 8–19); the toggle expands to the full 0–24.
-    let non_work = ui.get_show_non_work_hours();
-    ui.set_hour_start(if non_work { 0 } else { WORKDAY_START - 1 });
-    ui.set_hour_end(if non_work { 24 } else { WORKDAY_END + 1 });
 
     // Sidebar — calendar list. Sorted by name for stability. User-picked
     // colour overrides win over server colour / palette default.
@@ -1187,24 +1561,33 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
     };
     ui.set_calendars(slint::ModelRc::new(slint::VecModel::from(cal_items)));
 
-    // Place event blocks. Recurring masters are expanded into the visible
-    // week here (the server sends the master + its EXDATEs and leaves the
-    // expansion to us); an occurrence that crosses midnight is split into
-    // one block per day it touches. All-day events are routed out of the
-    // hour grid into the band above it.
+    // Place event blocks in two passes. Pass 1 expands every event into
+    // per-day timed segments + all-day chips, recording whether anything
+    // falls outside the work window (drives the vertical layout choice).
+    // Pass 2 — after the vertical band is known — turns segments into
+    // positioned blocks.
     let day_ms: i64 = 24 * 60 * 60 * 1000;
     // Week window in LOCAL time: the grid's day columns are local days, so
-    // the window must start at local Monday midnight, not UTC midnight —
-    // otherwise every event shifts by the UTC offset (+3 here) and
-    // midnight-adjacent ones land in the wrong column.
+    // the window must start at local Monday midnight, not UTC midnight.
     let week_start_ms = local_midnight_ms(monday).unwrap_or(week_days * day_ms);
-    let week_end_ms = week_start_ms + day_count as i64 * day_ms;
-    let hour_height: f32 = ui.get_hour_height();
-    let hour_start = ui.get_hour_start();
-    let hour_end = ui.get_hour_end();
-    let visible_top_ms = hour_start as i64 * 60 * 60 * 1000;
-    let visible_bottom_ms = hour_end as i64 * 60 * 60 * 1000;
-    let (mut blocks, all_day_blocks, all_day_rows): (Vec<EventBlock>, Vec<AllDayBlock>, i32) = {
+    // Always expand a full 7 days so dropping to a 5-day view doesn't lose
+    // data and the out-of-work scan stays stable; layout clamps to day_count.
+    let week_end_ms = week_start_ms + 7 * day_ms;
+
+    /// One timed segment confined to a single day column.
+    struct Seg {
+        id: i32,
+        day: i32,
+        start_in_day: i64, // ms from that day's local midnight
+        end_in_day: i64,
+        color: slint::Color,
+        title: slint::SharedString,
+        time: slint::SharedString,
+        count: i32,
+        tentative: bool,
+    }
+
+    let (segs, all_day_blocks, all_day_rows, has_out_of_work) = {
         let events = sh.calendar_events.borrow();
         let visibility = sh.calendar_visible.borrow();
         let cals = sh.calendars.borrow();
@@ -1218,10 +1601,6 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
             });
             hex(&raw)
         };
-        let to_px = |ms: i64| -> f32 {
-            let hours = (ms - visible_top_ms) as f32 / (60.0 * 60.0 * 1000.0);
-            hours * hour_height
-        };
         let fmt_hm = |abs_ms: i64| -> String {
             use chrono::{Local, TimeZone, Timelike};
             match Local.timestamp_millis_opt(abs_ms).single() {
@@ -1230,16 +1609,14 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
             }
         };
 
-        let mut blocks: Vec<EventBlock> = Vec::new();
+        let mut segs: Vec<Seg> = Vec::new();
         let mut all_day_blocks: Vec<AllDayBlock> = Vec::new();
-        // How many all-day chips already sit in each day column, so
-        // overlapping all-day events stack instead of overprinting.
         let mut all_day_fill = vec![0i32; day_count.max(0) as usize];
-
-        // "My" addresses for the unanswered-meeting check (Tauri's
-        // isUnansweredMeeting): account key + every known identity.
         let idents = sh.identity_colors.borrow();
         let me_key = sh.key.to_lowercase();
+        let ws_ms = sh.work_start.get() as i64 * 3_600_000;
+        let we_ms = sh.work_end.get() as i64 * 3_600_000;
+        let mut has_out_of_work = false;
 
         for e in events.iter() {
             if !*visibility.get(&e.calendar_id).unwrap_or(&true) {
@@ -1268,9 +1645,6 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
                 week_start_ms,
                 week_end_ms,
             );
-            // Diagnostics: a recurring master that expands to nothing this
-            // week is either legitimately out of window or an expand() bug
-            // — log it so missing-event reports are checkable from the log.
             if occ.is_empty() && !e.rrule.is_empty() {
                 println!(
                     "[cal] no-occurrence: id={} dtstart={} rrule={:?} exdates={} {:?}",
@@ -1282,8 +1656,6 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
                 );
             }
             for o in occ {
-                // Day range the occurrence touches. `end_ms - 1` so an event
-                // ending exactly on midnight doesn't bleed into the next day.
                 let first = ((o.start_ms - week_start_ms) / day_ms) as i32;
                 let last = (((o.end_ms - 1) - week_start_ms) / day_ms) as i32;
                 if e.all_day {
@@ -1301,32 +1673,31 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
                     }
                     continue;
                 }
+                let title: slint::SharedString = if e.summary.is_empty() {
+                    "(без названия)".into()
+                } else {
+                    e.summary.clone().into()
+                };
+                let time: slint::SharedString =
+                    format!("{} – {}", fmt_hm(o.start_ms), fmt_hm(o.end_ms)).into();
                 for day in first.max(0)..=last.min(day_count - 1) {
                     let day_start_ms = week_start_ms + day as i64 * day_ms;
-                    let seg_start = (o.start_ms - day_start_ms).max(0);
-                    let seg_end = (o.end_ms - day_start_ms).min(day_ms);
-                    let top_ms = seg_start.max(visible_top_ms);
-                    let bot_ms = seg_end.min(visible_bottom_ms);
-                    if bot_ms <= top_ms {
+                    let start_in_day = (o.start_ms - day_start_ms).max(0);
+                    let end_in_day = (o.end_ms - day_start_ms).min(day_ms);
+                    if end_in_day <= start_in_day {
                         continue;
                     }
-                    let top = to_px(top_ms);
-                    let h = (to_px(bot_ms) - top).max(18.0);
-                    blocks.push(EventBlock {
+                    if start_in_day < ws_ms || end_in_day > we_ms {
+                        has_out_of_work = true;
+                    }
+                    segs.push(Seg {
                         id: e.id as i32,
                         day,
-                        top,
-                        h,
+                        start_in_day,
+                        end_in_day,
                         color,
-                        title: if e.summary.is_empty() {
-                            "(без названия)".into()
-                        } else {
-                            e.summary.clone().into()
-                        },
-                        time: format!("{} – {}", fmt_hm(o.start_ms), fmt_hm(o.end_ms)).into(),
-                        all_day: false,
-                        xf: 0.0,
-                        wf: 1.0,
+                        title: title.clone(),
+                        time: time.clone(),
                         count: att_count,
                         tentative,
                     });
@@ -1334,23 +1705,63 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
             }
         }
         let rows = *all_day_fill.iter().max().unwrap_or(&0);
-        println!(
-            "[cal] layout: events_total={} blocks={} all_day={} week_start_ms={} \
-             window=[{}..{}) sample={:?}",
-            events.len(),
-            blocks.len(),
-            all_day_blocks.len(),
-            week_start_ms,
-            week_start_ms,
-            week_end_ms,
-            events
-                .iter()
-                .take(3)
-                .map(|e| (e.id, e.calendar_id, e.dtstart, e.all_day, e.rrule.clone()))
-                .collect::<Vec<_>>()
-        );
-        (blocks, all_day_blocks, rows)
+        (segs, all_day_blocks, rows, has_out_of_work)
     };
+
+    // Vertical band now that we know whether anything sits outside work hours.
+    let (vis_start, vis_end, hour_height) = compute_vertical(
+        sh.grid_canvas_h.get(),
+        sh.work_start.get(),
+        sh.work_end.get(),
+        has_out_of_work,
+        sh.manual_hour_h.get(),
+    );
+    ui.set_hour_height(hour_height);
+    ui.set_hour_start(vis_start);
+    ui.set_hour_end(vis_end);
+    ui.set_work_start(sh.work_start.get());
+    ui.set_work_end(sh.work_end.get());
+
+    let visible_top_ms = vis_start as i64 * 3_600_000;
+    let visible_bottom_ms = vis_end as i64 * 3_600_000;
+    let to_px = |ms: i64| -> f32 { (ms - visible_top_ms) as f32 / 3_600_000.0 * hour_height };
+    let mut blocks: Vec<EventBlock> = segs
+        .iter()
+        .filter_map(|s| {
+            let top_ms = s.start_in_day.max(visible_top_ms);
+            let bot_ms = s.end_in_day.min(visible_bottom_ms);
+            if bot_ms <= top_ms {
+                return None;
+            }
+            let top = to_px(top_ms);
+            let h = (to_px(bot_ms) - top).max(18.0);
+            Some(EventBlock {
+                id: s.id,
+                day: s.day,
+                top,
+                h,
+                color: s.color,
+                title: s.title.clone(),
+                time: s.time.clone(),
+                all_day: false,
+                xf: 0.0,
+                wf: 1.0,
+                count: s.count,
+                tentative: s.tentative,
+            })
+        })
+        .collect();
+    println!(
+        "[cal] layout: blocks={} all_day={} days={} col_w={:.0} vis=[{}..{}) hh={:.0} oow={}",
+        blocks.len(),
+        all_day_blocks.len(),
+        day_count,
+        col_width,
+        vis_start,
+        vis_end,
+        hour_height,
+        has_out_of_work
+    );
     assign_overlap_lanes(&mut blocks, day_count);
     ui.set_events(slint::ModelRc::new(slint::VecModel::from(blocks)));
     ui.set_all_day_events(slint::ModelRc::new(slint::VecModel::from(all_day_blocks)));
@@ -1361,9 +1772,9 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
 /// flips `calendar-loading` on so the topbar shows a "Загрузка…" pill
 /// until the result lands.
 fn refetch_calendar_events(ui: &MainWindow, sh: &Shared) {
-    let workdays = ui.get_workdays_only();
-    let day_count = if workdays { 5 } else { 7 };
-    let (from_ms, to_ms) = week_range_ms(sh.calendar_week_start_days.get(), day_count);
+    // Always fetch the full 7-day week so toggling to a 5-day view (or
+    // horizontal scroll) never needs a refetch.
+    let (from_ms, to_ms) = week_range_ms(sh.calendar_week_start_days.get(), 7);
     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
         ui.set_calendar_loading(true);
         let _ = etx.send(engine::EngineCmd::FetchCalendarEvents {
@@ -1402,11 +1813,20 @@ fn fmt_form(ms: i64, all_day: bool) -> String {
 
 /// Populate the edit-form's writable-calendar ComboBox; returns the ids
 /// parallel to the model so the save step can map index → calendar_id.
-fn fill_writable_calendars(ui: &MainWindow, sh: &Shared) -> Vec<i64> {
+///
+/// `only_visible` restricts the list to calendars currently ticked active
+/// in the sidebar — used when creating (you can only file a new event into
+/// a calendar you're actually looking at). Editing passes `false` so an
+/// event already living in a hidden calendar stays selectable.
+fn fill_writable_calendars(ui: &MainWindow, sh: &Shared, only_visible: bool) -> Vec<i64> {
     let cals = sh.calendars.borrow();
+    let visibility = sh.calendar_visible.borrow();
     let mut ids = Vec::new();
     let mut names: Vec<slint::SharedString> = Vec::new();
     for c in cals.iter().filter(|c| c.can_write) {
+        if only_visible && !*visibility.get(&c.id).unwrap_or(&true) {
+            continue;
+        }
         ids.push(c.id);
         names.push(c.name.clone().into());
     }
@@ -1416,15 +1836,26 @@ fn fill_writable_calendars(ui: &MainWindow, sh: &Shared) -> Vec<i64> {
 
 /// Open the create form (blank, default now → +1h, first writable calendar).
 fn open_create_form(ui: &MainWindow, sh: &Shared) {
-    let ids = fill_writable_calendars(ui, sh);
+    let now = chrono::Local::now().timestamp_millis();
+    open_create_form_at(ui, sh, now);
+}
+
+/// Open the create form anchored at a specific start time (e.g. the slot a
+/// double-click landed on), running one hour by default.
+fn open_create_form_at(ui: &MainWindow, sh: &Shared, start_ms: i64) {
+    // Active (visible) writable calendars only. If every writable calendar
+    // is hidden, fall back to the full set so creation isn't a dead end.
+    let mut ids = fill_writable_calendars(ui, sh, true);
+    if ids.is_empty() {
+        ids = fill_writable_calendars(ui, sh, false);
+    }
     *sh.edit_cal_ids.borrow_mut() = ids;
     sh.editing_event_id.set(0);
-    let now = chrono::Local::now().timestamp_millis();
     ui.set_edit_is_create(true);
     ui.set_edit_title("".into());
     ui.set_edit_all_day(false);
-    ui.set_edit_start(fmt_form(now, false).into());
-    ui.set_edit_end(fmt_form(now + 3_600_000, false).into());
+    ui.set_edit_start(fmt_form(start_ms, false).into());
+    ui.set_edit_end(fmt_form(start_ms + 3_600_000, false).into());
     ui.set_edit_location("".into());
     ui.set_edit_description("".into());
     ui.set_edit_calendar_idx(0);
@@ -1433,7 +1864,7 @@ fn open_create_form(ui: &MainWindow, sh: &Shared) {
 
 /// Open the edit form populated from an existing event.
 fn open_edit_form(ui: &MainWindow, sh: &Shared, ev: &ddmail_core::types::DesktopCalendarEvent) {
-    let ids = fill_writable_calendars(ui, sh);
+    let ids = fill_writable_calendars(ui, sh, false);
     let idx = ids.iter().position(|&id| id == ev.calendar_id).unwrap_or(0) as i32;
     *sh.edit_cal_ids.borrow_mut() = ids;
     sh.editing_event_id.set(ev.id);
@@ -1495,14 +1926,13 @@ fn save_edit_form(ui: &MainWindow, sh: &Shared) {
     ui.set_edit_visible(false);
 }
 
-/// Seed the calendar view's read-only state from the current toggles
-/// (workdays-only, non-work-hours). Day labels are filled in based on
-/// the current week; events / calendars stay empty until the engine
-/// produces them.
+/// Seed the calendar view's read-only state before the engine produces
+/// events: day labels for the current week + a sane initial vertical band
+/// so the grid isn't blank. Real layout is computed in `apply_calendar_view`
+/// once the grid's on-screen size is known.
 fn apply_calendar_defaults(ui: &MainWindow) {
     use chrono::{Datelike, Duration, Local};
-    let workdays = ui.get_workdays_only();
-    let day_count = if workdays { 5 } else { 7 } as i32;
+    let day_count = 7;
     let now = Local::now();
     // Week starts on Monday (ISO).
     let weekday_from_mon = now.weekday().num_days_from_monday() as i64;
@@ -1517,6 +1947,7 @@ fn apply_calendar_defaults(ui: &MainWindow) {
         .collect();
     ui.set_day_headers(slint::ModelRc::new(slint::VecModel::from(headers)));
     ui.set_day_count(day_count);
+    ui.set_col_width(MIN_COL_W);
     let title = {
         use chrono::Datelike as _;
         const MONTHS: [&str; 12] = [
@@ -1526,10 +1957,10 @@ fn apply_calendar_defaults(ui: &MainWindow) {
         format!("{} {}", MONTHS[(monday.month() - 1) as usize], monday.year())
     };
     ui.set_week_title(title.into());
-    ui.set_hour_height(48.0);
+    ui.set_hour_height(MIN_HOUR_H);
     if ui.get_hour_end() == 0 {
         ui.set_hour_start(8);
-        ui.set_hour_end(18);
+        ui.set_hour_end(19);
     }
     // Empty models so the for-loops don't trip on undefined.
     ui.set_calendars(slint::ModelRc::new(slint::VecModel::from(Vec::<CalendarItem>::new())));
@@ -1563,8 +1994,9 @@ fn main() {
     // toggles now; the per-calendar maps are seeded into Shared below).
     let cal_set = calendar_settings::load();
     ui.set_calendar_panel_collapsed(cal_set.panel_collapsed);
-    ui.set_workdays_only(cal_set.workdays_only);
-    ui.set_show_non_work_hours(cal_set.show_non_work_hours);
+    ui.set_notify_sound_on(cal_set.notify_sound);
+    ui.set_work_start(cal_set.work_start_hour.clamp(0, 23));
+    ui.set_work_end(cal_set.work_end_hour.clamp(1, 24));
     // Palette for the colour-picker popup, mirroring CAL_PALETTE.
     ui.set_cal_palette(ModelRc::new(VecModel::from(
         CAL_PALETTE.iter().map(|c| hex(c)).collect::<Vec<slint::Color>>(),
@@ -1968,6 +2400,7 @@ fn main() {
         sel_dragging: Cell::new(false),
         sel_moved: Cell::new(false),
         sel_suppress_click: Cell::new(false),
+        pending_open_ref: RefCell::new(None),
         render_seq,
         current: Cell::new(0),
         width: Cell::new(DEFAULT_WIDTH),
@@ -1985,9 +2418,17 @@ fn main() {
         calendar_colors: RefCell::new(HashMap::new()),
         calendar_events: RefCell::new(Vec::new()),
         calendar_week_start_days: Cell::new(week_start_days_today()),
+        grid_canvas_w: Cell::new(1000.0),
+        grid_canvas_h: Cell::new(680.0),
+        work_start: Cell::new(cal_set.work_start_hour.clamp(0, 23)),
+        work_end: Cell::new(cal_set.work_end_hour.clamp(1, 24)),
+        manual_hour_h: Cell::new(cal_set.manual_hour_height),
+        manual_col_w: Cell::new(cal_set.manual_col_width),
         editing_event_id: Cell::new(0),
         edit_cal_ids: RefCell::new(Vec::new()),
         compose_attachments: RefCell::new(Vec::new()),
+        pending_open_event: Cell::new(0),
+        snooze_ctx: Cell::new((0, 0)),
     });
     SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
     sync_media_globals(&ui, &shared.policy.borrow());
@@ -3028,24 +3469,71 @@ fn main() {
     ui.on_calendar_next(nav(7));
     ui.on_calendar_today(nav(0));
 
-    let ui_weak_wd = ui.as_weak();
-    let sh_wd = shared.clone();
-    ui.on_calendar_toggle_workdays(move || {
-        if let Some(ui) = ui_weak_wd.upgrade() {
-            ui.set_workdays_only(!ui.get_workdays_only());
-            apply_calendar_view(&ui, &sh_wd);
-            refetch_calendar_events(&ui, &sh_wd);
-            save_calendar_settings(&ui, &sh_wd);
+    // Grid body size mirror: layout depends on the on-screen canvas, so
+    // recompute whenever it changes (and once on init — `changed` doesn't
+    // fire for the first layout pass).
+    let ui_weak_gr = ui.as_weak();
+    let sh_gr = shared.clone();
+    ui.on_grid_area_resized(move |w, h| {
+        let Some(ui) = ui_weak_gr.upgrade() else { return };
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let changed = (sh_gr.grid_canvas_w.get() - w).abs() > 0.5
+            || (sh_gr.grid_canvas_h.get() - h).abs() > 0.5;
+        sh_gr.grid_canvas_w.set(w);
+        sh_gr.grid_canvas_h.set(h);
+        if changed {
+            apply_calendar_view(&ui, &sh_gr);
         }
     });
-    let ui_weak_nw = ui.as_weak();
-    let sh_nw = shared.clone();
-    ui.on_calendar_toggle_non_work_hours(move || {
-        if let Some(ui) = ui_weak_nw.upgrade() {
-            ui.set_show_non_work_hours(!ui.get_show_non_work_hours());
-            apply_calendar_view(&ui, &sh_nw);
-            save_calendar_settings(&ui, &sh_nw);
-        }
+    // Ctrl-wheel = zoom hours; Ctrl-Alt-wheel = zoom day width. Manual zoom
+    // wins over autofit (the layout then scrolls). delta>0 = zoom in.
+    let ui_weak_zh = ui.as_weak();
+    let sh_zh = shared.clone();
+    ui.on_calendar_zoom_hours(move |delta| {
+        let Some(ui) = ui_weak_zh.upgrade() else { return };
+        let canvas_h = sh_zh.grid_canvas_h.get().max(MIN_HOUR_H);
+        let cur = if sh_zh.manual_hour_h.get() > 0.0 {
+            sh_zh.manual_hour_h.get()
+        } else {
+            ui.get_hour_height()
+        };
+        let factor = if delta > 0.0 { 1.1 } else { 1.0 / 1.1 };
+        let next = (cur * factor).clamp(MIN_HOUR_H, canvas_h);
+        sh_zh.manual_hour_h.set(next);
+        apply_calendar_view(&ui, &sh_zh);
+        save_calendar_settings(&ui, &sh_zh);
+    });
+    let ui_weak_zd = ui.as_weak();
+    let sh_zd = shared.clone();
+    ui.on_calendar_zoom_days(move |delta| {
+        let Some(ui) = ui_weak_zd.upgrade() else { return };
+        let avail = (sh_zd.grid_canvas_w.get() - GUTTER_W).max(MIN_COL_W);
+        let cur = if sh_zd.manual_col_w.get() > 0.0 {
+            sh_zd.manual_col_w.get()
+        } else {
+            ui.get_col_width()
+        };
+        let factor = if delta > 0.0 { 1.1 } else { 1.0 / 1.1 };
+        let next = (cur * factor).clamp(MIN_COL_W, avail);
+        sh_zd.manual_col_w.set(next);
+        apply_calendar_view(&ui, &sh_zd);
+        save_calendar_settings(&ui, &sh_zd);
+    });
+    // Working-day start/end from the settings «Календарь» tab.
+    let ui_weak_ws = ui.as_weak();
+    let sh_ws = shared.clone();
+    ui.on_set_work_hours(move |start, end| {
+        let Some(ui) = ui_weak_ws.upgrade() else { return };
+        let s = start.clamp(0, 23);
+        let e = end.clamp(s + 1, 24);
+        sh_ws.work_start.set(s);
+        sh_ws.work_end.set(e);
+        ui.set_work_start(s);
+        ui.set_work_end(e);
+        apply_calendar_view(&ui, &sh_ws);
+        save_calendar_settings(&ui, &sh_ws);
     });
     let ui_weak_vis = ui.as_weak();
     let sh_vis = shared.clone();
@@ -3065,6 +3553,94 @@ fn main() {
     ui.on_calendar_panel_toggled(move || {
         if let Some(ui) = ui_weak_pt.upgrade() {
             save_calendar_settings(&ui, &sh_pt);
+        }
+    });
+    // Notification-sound toggle (burger menu) — persisted immediately.
+    let ui_weak_snd = ui.as_weak();
+    let sh_snd = shared.clone();
+    ui.on_toggle_notify_sound(move || {
+        if let Some(ui) = ui_weak_snd.upgrade() {
+            ui.set_notify_sound_on(!ui.get_notify_sound_on());
+            save_calendar_settings(&ui, &sh_snd);
+        }
+    });
+    // Settings modal: populate the read-only connection section from the
+    // live config (env first, then on-disk profile) and show it.
+    let ui_weak_set = ui.as_weak();
+    let sh_set = shared.clone();
+    ui.on_open_settings(move || {
+        let Some(ui) = ui_weak_set.upgrade() else { return };
+        let cfg = engine::AccountConfig::load();
+        match &cfg {
+            Some(c) => {
+                let account = if c.email.is_empty() {
+                    format!("{}@{}", c.username, c.host)
+                } else {
+                    c.email.clone()
+                };
+                ui.set_conn_account(account.into());
+                ui.set_conn_mode("Онлайн — IMAP/SMTP".into());
+                ui.set_conn_imap(
+                    format!("{}:{} · {}", c.host, c.port, if c.use_tls { "TLS" } else { "без TLS" })
+                        .into(),
+                );
+                ui.set_conn_smtp(format!("{}:{}", c.smtp_host, c.smtp_port).into());
+                ui.set_conn_native(c.native_url.clone().unwrap_or_default().into());
+            }
+            None => {
+                ui.set_conn_account(sh_set.key.clone().into());
+                ui.set_conn_mode("Только локальный кэш (IMAP не настроен)".into());
+                ui.set_conn_imap("".into());
+                ui.set_conn_smtp("".into());
+                ui.set_conn_native("".into());
+            }
+        }
+        ui.set_settings_tab(0);
+        ui.set_settings_visible(true);
+    });
+    // Global media-policy toggles from the settings «Контент» tab. Same
+    // effect as the per-message «Медиа…» allow-alls, minus the row context,
+    // so no body is needed.
+    let ui_weak_mg = ui.as_weak();
+    let sh_mg = shared.clone();
+    ui.on_set_media_global(move |which| {
+        let gen_now = {
+            let mut p = sh_mg.policy.borrow_mut();
+            match which.as_str() {
+                "allow-all" => p.allow_all = !p.allow_all,
+                "scripts-all" => p.allow_all_scripts = !p.allow_all_scripts,
+                "images-all" => p.allow_all_media = !p.allow_all_media,
+                other => {
+                    println!("media global {other} — not wired");
+                    return;
+                }
+            }
+            // Generation must change atomically with the policy so the
+            // texture cache key invalidates exactly the affected rows.
+            p.generation += 1;
+            let g = p.generation;
+            policy::save(&p);
+            g
+        };
+        sh_mg.policy_gen.set(gen_now);
+        if let Some(ui) = ui_weak_mg.upgrade() {
+            sync_media_globals(&ui, &sh_mg.policy.borrow());
+        }
+        // Repaint the open conversation under the new policy — no refetch.
+        let bodies = sh_mg.current_bodies.borrow().clone();
+        send_render_job(&sh_mg, bodies, None);
+    });
+    // Snooze modal choice → commit through the same action machine the
+    // toast buttons use ("snz:5" … "snz:atstart").
+    let ui_weak_snz = ui.as_weak();
+    let sh_snz = shared.clone();
+    ui.on_snooze_choice(move |choice| {
+        if let Some(ui) = ui_weak_snz.upgrade() {
+            let (eid, occ) = sh_snz.snooze_ctx.get();
+            if eid != 0 {
+                handle_reminder_action(&ui, &sh_snz, &format!("snz:{choice}"), eid, occ);
+            }
+            sh_snz.snooze_ctx.set((0, 0));
         }
     });
     // Colour picked in the per-calendar palette popup.
@@ -3090,18 +3666,25 @@ fn main() {
         let events = sh_ev.calendar_events.borrow();
         let Some(ev) = events.iter().find(|e| e.id as i32 == id) else { return };
 
+        // Humanized date: «чт, 12 декабря · 14:30 – 15:30» — a bare digit
+        // train («12.12 14:30») read as a hyperlink-ish blur.
+        const WD: [&str; 7] = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
+        const MON: [&str; 12] = [
+            "января", "февраля", "марта", "апреля", "мая", "июня",
+            "июля", "августа", "сентября", "октября", "ноября", "декабря",
+        ];
         let date_of = |ms: i64| {
             Local
                 .timestamp_millis_opt(ms)
                 .single()
-                .map(|d| format!("{:02}.{:02}.{}", d.day(), d.month(), d.year()))
-                .unwrap_or_default()
-        };
-        let dt = |ms: i64| {
-            Local
-                .timestamp_millis_opt(ms)
-                .single()
-                .map(|d| format!("{:02}.{:02} {:02}:{:02}", d.day(), d.month(), d.hour(), d.minute()))
+                .map(|d| {
+                    format!(
+                        "{}, {} {}",
+                        WD[d.weekday().num_days_from_monday() as usize],
+                        d.day(),
+                        MON[(d.month() - 1) as usize]
+                    )
+                })
                 .unwrap_or_default()
         };
         let tm = |ms: i64| {
@@ -3114,9 +3697,9 @@ fn main() {
         let when = if ev.all_day {
             format!("{} · весь день", date_of(ev.dtstart))
         } else if let Some(end) = ev.dtend {
-            format!("{} – {}", dt(ev.dtstart), tm(end))
+            format!("{} · {} – {}", date_of(ev.dtstart), tm(ev.dtstart), tm(end))
         } else {
-            dt(ev.dtstart)
+            format!("{} · {}", date_of(ev.dtstart), tm(ev.dtstart))
         };
 
         let organizer = match (ev.organizer_name.is_empty(), ev.organizer_email.is_empty()) {
@@ -3125,15 +3708,41 @@ fn main() {
             (false, true) => ev.organizer_name.clone(),
             (false, false) => format!("{} <{}>", ev.organizer_name, ev.organizer_email),
         };
-        let attendees = ev
+        // Attendees table: localized status + colour per row; also resolve
+        // MY participation so the pressed RSVP button is obvious.
+        let status_of = |ps: &str| -> (&'static str, &'static str) {
+            match ps.to_uppercase().as_str() {
+                "ACCEPTED" => ("Принял", "#27ae60"),
+                "DECLINED" => ("Отклонил", "#eb5757"),
+                "TENTATIVE" => ("Возможно", "#f2994a"),
+                _ => ("Не ответил", "#8b95a1"),
+            }
+        };
+        let att_rows: Vec<AttRow> = ev
             .attendees
             .iter()
             .map(|a| {
                 let n = if a.name.is_empty() { a.email.clone() } else { a.name.clone() };
-                if a.partstat.is_empty() { n } else { format!("{n} ({})", a.partstat) }
+                let (st, col) = status_of(&a.partstat);
+                AttRow {
+                    name: n.into(),
+                    status: st.into(),
+                    color: hex(col),
+                }
             })
-            .collect::<Vec<_>>()
-            .join(", ");
+            .collect();
+        let my_partstat = {
+            let idents = sh_ev.identity_colors.borrow();
+            let me_key = sh_ev.key.to_lowercase();
+            ev.attendees
+                .iter()
+                .find(|a| {
+                    let lc = a.email.to_lowercase();
+                    lc == me_key || idents.contains_key(&lc)
+                })
+                .map(|a| a.partstat.to_uppercase())
+                .unwrap_or_default()
+        };
 
         ui.set_detail_title(
             if ev.summary.is_empty() { "(без названия)".into() } else { ev.summary.clone() }.into(),
@@ -3141,10 +3750,25 @@ fn main() {
         ui.set_detail_when(when.into());
         ui.set_detail_location(ev.location.clone().into());
         ui.set_detail_organizer(organizer.into());
-        ui.set_detail_attendees(attendees.into());
+        ui.set_detail_attendee_rows(ModelRc::new(VecModel::from(att_rows)));
+        ui.set_detail_my_partstat(my_partstat.into());
         ui.set_detail_description(ev.description.clone().into());
+        // Meeting links live as plain text in location/description more
+        // often than not — surface every URL as a clickable row.
+        let links: Vec<slint::SharedString> =
+            extract_urls(&[ev.location.as_str(), ev.description.as_str()])
+                .into_iter()
+                .map(Into::into)
+                .collect();
+        ui.set_detail_links(ModelRc::new(VecModel::from(links)));
         ui.set_detail_event_id(ev.id as i32);
         ui.set_detail_visible(true);
+    });
+    let ui_weak_dol = ui.as_weak();
+    ui.on_detail_open_link(move |url| {
+        if let Some(ui) = ui_weak_dol.upgrade() {
+            handle_link(&ui, url.to_string());
+        }
     });
     let ui_weak_dc = ui.as_weak();
     ui.on_detail_close(move || {
@@ -3184,6 +3808,39 @@ fn main() {
         if let Some(ui) = ui_weak_new.upgrade() {
             open_create_form(&ui, &sh_new);
         }
+    });
+    // Double-click on empty grid space → create form prefilled with that
+    // day/time. x/y are viewport-content px; view_w is the viewport width.
+    let ui_weak_gc = ui.as_weak();
+    let sh_gc = shared.clone();
+    ui.on_grid_create_at(move |x, y, view_w| {
+        let Some(ui) = ui_weak_gc.upgrade() else { return };
+        const GUTTER: f32 = 48.0;
+        if x < GUTTER {
+            return; // clicked in the time-label gutter
+        }
+        let day_count = ui.get_day_count();
+        if day_count <= 0 {
+            return;
+        }
+        let col_w = (view_w - GUTTER) / day_count as f32;
+        if col_w <= 0.0 {
+            return;
+        }
+        let day = ((x - GUTTER) / col_w).floor() as i64;
+        if day < 0 || day >= day_count as i64 {
+            return;
+        }
+        // y px → hour-of-day, then snap the start to the nearest 15 minutes.
+        let hour_height = ui.get_hour_height();
+        let hour_start = ui.get_hour_start();
+        let minutes = hour_start as f32 * 60.0 + (y / hour_height) * 60.0;
+        let snapped = ((minutes / 15.0).round() as i64) * 15;
+        let day_ms: i64 = 24 * 60 * 60 * 1000;
+        let (week_start_ms, _) =
+            week_range_ms(sh_gc.calendar_week_start_days.get(), day_count);
+        let start_ms = week_start_ms + day * day_ms + snapped * 60_000;
+        open_create_form_at(&ui, &sh_gc, start_ms);
     });
     let ui_weak_ee = ui.as_weak();
     let sh_ee = shared.clone();
@@ -3228,9 +3885,25 @@ fn main() {
                     .unwrap_or_default()
             });
             for row in due {
-                notify::notify(
-                    &format!("\u{23f0} {}", row.summary),
+                // Buttons + body click route through the single Tauri-era
+                // action machine; the WinRT callback hops to the UI loop.
+                let (eid, occ) = (row.event_id, row.occurrence_start_ms);
+                toast::reminder_toast(
+                    &row.summary,
                     &reminders::body_for(&row, now_ms),
+                    now_ms < occ, // «Отложить…» only before the start
+                    move |action| {
+                        let action = action.to_string();
+                        if let Some(weak) = UI_WEAK.get() {
+                            let _ = weak.upgrade_in_event_loop(move |ui| {
+                                SHARED.with(|s| {
+                                    if let Some(sh) = s.borrow().as_ref() {
+                                        handle_reminder_action(&ui, sh, &action, eid, occ);
+                                    }
+                                });
+                            });
+                        }
+                    },
                 );
             }
         },
@@ -3238,18 +3911,26 @@ fn main() {
 
     // System tray (Windows): left-click / "Открыть" re-shows the window,
     // "Выход" quits. Kept alive until the event loop ends.
+    // Toast click callbacks (non-UI threads) reach the event loop through
+    // this weak handle.
+    let _ = UI_WEAK.set(ui.as_weak());
+
     #[cfg(windows)]
-    let _tray = {
+    {
         let ui_open = ui.as_weak();
-        tray::setup(
+        let tray = tray::setup(
             move || {
+                println!("tray: open requested");
                 if let Some(ui) = ui_open.upgrade() {
-                    let _ = ui.show();
+                    raise_window(&ui);
                 }
+                // Showing the window acknowledges the unread dot.
+                tray_set_dot(false);
             },
             || slint::quit_event_loop().unwrap(),
-        )
-    };
+        );
+        TRAY.with(|t| *t.borrow_mut() = tray);
+    }
 
     ui.run().unwrap();
 }
@@ -3315,6 +3996,45 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                                 if idx != sh.current.get() {
                                     sh.current.set(idx);
                                     ui.set_selected(idx as i32);
+                                }
+                            }
+                        }
+                        // The dialog on screen can never show an unread pill —
+                        // the user is reading it. Push \Seen for whatever the
+                        // server still reports unseen (covers letters whose
+                        // uid never reached us, e.g. two in one sync batch).
+                        if ui.window().is_visible() && ui.get_view_mode() == 0 {
+                            let cur = sh.current.get();
+                            let mut to_mark: Vec<MessageRef> = Vec::new();
+                            let had_unread = {
+                                let mut convs = sh.convs.borrow_mut();
+                                match convs.get_mut(cur) {
+                                    Some(c) if c.unread_count > 0 => {
+                                        for m in c.messages.iter_mut().filter(|m| !m.seen) {
+                                            to_mark.push(m.clone());
+                                            m.seen = true;
+                                        }
+                                        c.unread_count = 0;
+                                        true
+                                    }
+                                    _ => false,
+                                }
+                            };
+                            if had_unread {
+                                let displays = displays_from(
+                                    &sh.convs.borrow(),
+                                    &sh.identity_colors.borrow(),
+                                );
+                                *sh.displays.borrow_mut() = displays;
+                                refresh_sidebar(sh, ui);
+                            }
+                            if !to_mark.is_empty() {
+                                if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                                    let _ = etx.send(engine::EngineCmd::SetFlags {
+                                        messages: to_mark,
+                                        flags: "\\Seen".into(),
+                                        add: true,
+                                    });
                                 }
                             }
                         }
@@ -3389,20 +4109,11 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
         engine::EngineResult::Event(ev) => {
             use ddmail_core::event::EngineEvent;
             match ev {
-                EngineEvent::NewMail { folder, count } => {
-                    println!("engine event: new mail in {folder} (+{count}) — refetching");
-                    let body = if count > 1 {
-                        format!("{count} новых писем в {folder}")
-                    } else {
-                        format!("Новое письмо в {folder}")
-                    };
-                    notify::notify("ddmail", &body);
+                EngineEvent::NewMail { folder, count: _, new_count, from, subject, message_id } => {
+                    println!("engine event: new mail in {folder} (+{new_count}) from {from:?}");
                     SHARED.with(|s| {
-                        if let Some(sh) = s.borrow().as_ref() {
-                            if let Some(etx) = sh.engine_tx.borrow().as_ref() {
-                                let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
-                            }
-                        }
+                        let Some(sh) = s.borrow().as_ref().cloned() else { return };
+                        handle_new_mail(ui, &sh, folder, new_count, from, subject, message_id);
                     });
                 }
                 EngineEvent::ConnectionState { state, message } => {
@@ -3505,11 +4216,211 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     }
                     *sh.calendar_events.borrow_mut() = events;
                     apply_calendar_view(ui, sh);
+                    // A reminder toast asked to open this event — its week
+                    // is loaded now, so pop the detail card.
+                    let pend = sh.pending_open_event.get();
+                    if pend != 0 {
+                        sh.pending_open_event.set(0);
+                        if sh.calendar_events.borrow().iter().any(|e| e.id == pend) {
+                            ui.invoke_event_clicked(pend as i32);
+                        }
+                    }
                 }
             });
             ui.set_calendar_loading(false);
         }
         engine::EngineResult::Error(e) => eprintln!("engine error: {e}"),
+    }
+}
+
+/// Display name from a "Name <addr>" header (falls back to the address).
+fn display_from(raw: &str) -> String {
+    let r = raw.trim();
+    if r.is_empty() {
+        return "Новое письмо".into();
+    }
+    if let Some(i) = r.rfind('<') {
+        let name = r[..i].trim().trim_matches('"').trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+    header_addr(r)
+}
+
+/// displays-index → sidebar model index (the transient compose row shifts
+/// everything by one).
+fn model_index(sh: &Shared, idx: usize) -> usize {
+    if sh.pending_compose.borrow().is_some() {
+        idx + 1
+    } else {
+        idx
+    }
+}
+
+/// New-mail behaviour per the notification spec:
+///   * reading that very dialog → silent append (autoscroll only when the
+///     user is already at the bottom; otherwise just a row flash);
+///   * anywhere else → tray dot + sound (per settings), badge bump + row
+///     flash when the window shows the mail view;
+///   * window hidden → clickable toast (sender + subject) that raises the
+///     window, opens the dialog and scrolls to the message.
+fn handle_new_mail(
+    ui: &MainWindow,
+    sh: &Rc<Shared>,
+    folder: String,
+    new_count: u32,
+    from: String,
+    subject: String,
+    message_id: i64,
+) {
+    let from_addr = header_addr(&from);
+    let conv_idx = if from_addr.is_empty() {
+        None
+    } else {
+        sh.convs.borrow().iter().position(|c| {
+            c.counterparts.iter().any(|cp| cp.addr.eq_ignore_ascii_case(&from_addr))
+        })
+    };
+
+    let visible = ui.window().is_visible();
+    let in_mail_view = ui.get_view_mode() == 0;
+    // «Я в этом диалоге?» — compare the sender against the OPEN conversation,
+    // not the first list hit: pair-grouping can hold the same counterpart in
+    // several rows, and list re-sorts make index equality a lottery.
+    let is_current = visible
+        && in_mail_view
+        && !from_addr.is_empty()
+        && sh.convs.borrow().get(sh.current.get()).is_some_and(|c| {
+            c.counterparts.iter().any(|cp| cp.addr.eq_ignore_ascii_case(&from_addr))
+        });
+
+    if is_current {
+        let at_bottom = {
+            let vp_y = ui.get_chat_vp_y(); // negative when scrolled down
+            let vp_h = ui.get_chat_vp_h();
+            let view_h = ui.get_chat_view_h();
+            vp_h <= view_h || (-vp_y) + view_h >= vp_h - 60.0
+        };
+        if at_bottom {
+            // Follow the conversation: append + scroll to the end.
+            sh.open_unread.borrow_mut().clear();
+            sh.scroll_pending.set(true);
+        } else {
+            // Reading history above: don't yank the viewport — just flash.
+            flash_sidebar_row(ui, model_index(sh, sh.current.get()));
+        }
+        if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+            // In the dialog = read: push \Seen right away, so the delta
+            // refetch can't resurrect an unread pill for this row.
+            if message_id > 0 {
+                let _ = etx.send(engine::EngineCmd::SetFlags {
+                    messages: vec![MessageRef {
+                        folder: folder.clone(),
+                        uid: message_id as u32,
+                        seen: false,
+                    }],
+                    flags: "\\Seen".into(),
+                    add: true,
+                });
+            }
+            let mut refs = sh
+                .convs
+                .borrow()
+                .get(sh.current.get())
+                .map(|c| c.messages.clone())
+                .unwrap_or_default();
+            if message_id > 0 && !refs.iter().any(|m| m.uid == message_id as u32) {
+                refs.push(MessageRef { folder, uid: message_id as u32, seen: true });
+            }
+            let _ = etx.send(engine::EngineCmd::FetchMessages {
+                messages: refs,
+                generation: sh.open_gen.get(),
+            });
+            let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
+        }
+        return;
+    }
+
+    // Not looking at that dialog: tray dot + sound.
+    tray_set_dot(true);
+    if ui.get_notify_sound_on() {
+        toast::beep();
+    }
+
+    // Optimistic badge bump (data updates even when the calendar view
+    // hides the sidebar); flash only when the row is actually on screen.
+    if let Some(idx) = conv_idx {
+        if let Some(c) = sh.convs.borrow_mut().get_mut(idx) {
+            c.unread_count += new_count.max(1);
+        }
+        let displays = displays_from(&sh.convs.borrow(), &sh.identity_colors.borrow());
+        *sh.displays.borrow_mut() = displays;
+        refresh_sidebar(sh, ui);
+        if visible && in_mail_view {
+            flash_sidebar_row(ui, model_index(sh, idx));
+        }
+    }
+
+    if !visible {
+        let title = if new_count > 1 {
+            format!("{} (+{} ещё)", display_from(&from), new_count - 1)
+        } else {
+            display_from(&from)
+        };
+        let body = if subject.is_empty() { "(без темы)".to_string() } else { subject.clone() };
+        let click_folder = folder.clone();
+        let click_uid = message_id.max(0) as u32;
+        let click_addr = from_addr.clone();
+        toast::mail_toast(&title, &body, move || {
+            let Some(weak) = UI_WEAK.get() else { return };
+            let folder = click_folder.clone();
+            let addr = click_addr.clone();
+            let _ = weak.clone().upgrade_in_event_loop(move |ui| {
+                raise_window(&ui);
+                tray_set_dot(false);
+                SHARED.with(|s| {
+                    if let Some(sh) = s.borrow().as_ref() {
+                        open_message_from_toast(&ui, sh, &folder, click_uid, &addr);
+                    }
+                });
+            });
+        });
+    }
+
+    if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+        let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
+    }
+}
+
+/// Toast click: jump to the conversation (by the message id when we know
+/// it, else by sender) and scroll to the message once its body renders.
+fn open_message_from_toast(ui: &MainWindow, sh: &Shared, folder: &str, uid: u32, addr: &str) {
+    if uid > 0 {
+        *sh.pending_open_ref.borrow_mut() = Some((folder.to_string(), uid));
+    }
+    let idx = {
+        let convs = sh.convs.borrow();
+        convs
+            .iter()
+            .position(|c| uid > 0 && c.messages.iter().any(|m| m.uid == uid))
+            .or_else(|| {
+                if addr.is_empty() {
+                    None
+                } else {
+                    convs.iter().position(|c| {
+                        c.counterparts.iter().any(|cp| cp.addr.eq_ignore_ascii_case(addr))
+                    })
+                }
+            })
+    };
+    ui.set_view_mode(0);
+    if let Some(idx) = idx {
+        ui.set_selected(idx as i32);
+        apply_active_header(ui, sh, idx);
+        open_conversation(ui, sh, idx);
+        ui.set_sidebar_row_y(idx as f32 * 64.0);
+        ui.set_sidebar_scroll_seq(ui.get_sidebar_scroll_seq() + 1);
     }
 }
 

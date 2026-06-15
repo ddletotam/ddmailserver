@@ -48,6 +48,11 @@ single-instance = "0.3"
 # for the sync API (declared in the linux target block below).
 rfd = { version = "0.15", default-features = false }
 
+# Already in the tree via slint's raw-window-handle-06 feature; declared
+# directly so we can match RawWindowHandle::Win32 to raise/focus the window
+# from tray and toast clicks (plain slint show() can't un-minimize).
+raw-window-handle = "0.6"
+
 # Regex passes for sanitizing inbound email HTML before it reaches the
 # Ultralight renderer (strip <script>, <iframe>, MS Outlook conditionals,
 # event handlers вЂ” they confuse the old WebKit fork and cost us bubbles
@@ -81,9 +86,13 @@ javascriptcore-rs = "1"
 # thread, which conflicts with our render worker's gtk; the Linux dev wires
 # it separately).
 tray-icon = "0.19"
+# WinRT toast with in-process on_activated (click-through works while the
+# app is running; no AUMID/COM activator needed). Standalone, no tauri dep.
+tauri-winrt-notification = "0.7"
 webview2-com = "0.33"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_LibraryLoader",

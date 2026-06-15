@@ -160,7 +160,16 @@ where
     match response {
         IdleResponse::NewData(_) => {
             info!("IDLE: new data");
-            notifier(EngineEvent::NewMail { folder: "INBOX".into(), count: 1 });
+            // Plain-IMAP IDLE only knows "something arrived" — no toast
+            // content; the client degrades to a generic notification.
+            notifier(EngineEvent::NewMail {
+                folder: "INBOX".into(),
+                count: 1,
+                new_count: 1,
+                from: String::new(),
+                subject: String::new(),
+                message_id: 0,
+            });
         }
         IdleResponse::Timeout => { info!("IDLE: timeout"); }
         IdleResponse::ManualInterrupt => { info!("IDLE: interrupted"); }

@@ -339,12 +339,16 @@ func (s *Session) Data(r io.Reader) error {
 				}
 
 				s.hub.Publish(notify.Event{
-					UserID:   recipient.Mailbox.UserID,
-					FolderID: folderID,
-					Type:     notify.EventNewMessage,
-					Count:    count,
-					Username: username,
-					Mailbox:  "INBOX",
+					UserID:    recipient.Mailbox.UserID,
+					FolderID:  folderID,
+					Type:      notify.EventNewMessage,
+					Count:     count,
+					Username:  username,
+					Mailbox:   "INBOX",
+					From:      msg.From,
+					Subject:   msg.Subject,
+					MessageID: msg.ID,
+					NewCount:  1,
 				})
 			}
 

@@ -8,8 +8,18 @@ use std::sync::Arc;
 pub enum EngineEvent {
     /// Connection lifecycle: state is "connecting" | "connected" | "error".
     ConnectionState { state: String, message: Option<String> },
-    /// New mail arrived in `folder` (`count` messages).
-    NewMail { folder: String, count: u32 },
+    /// New mail arrived in `folder`. `count` is the folder total (IMAP
+    /// EXISTS semantics); `new_count`/`from`/`subject`/`message_id`
+    /// describe the LAST new message of the batch for toast content
+    /// (empty/zero when the source can't provide them).
+    NewMail {
+        folder: String,
+        count: u32,
+        new_count: u32,
+        from: String,
+        subject: String,
+        message_id: i64,
+    },
     /// A calendar changed server-side.
     CalendarUpdated { calendar_id: i64 },
     /// The session token was refreshed (native provider); persist it.

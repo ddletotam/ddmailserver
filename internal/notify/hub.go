@@ -28,6 +28,12 @@ type Event struct {
 	FolderID int64
 	Count    uint32 // Total message count (for EXISTS)
 	Mailbox  string // Mailbox name (e.g., "INBOX")
+	// Toast content for the desktop client (zero for non-mail events).
+	// For batch syncs these describe the LAST new message of the batch.
+	From      string // From header of the new message
+	Subject   string
+	MessageID int64 // messages.id — the client's native-mode uid
+	NewCount  int   // how many NEW messages this event describes (>=1)
 
 	// Calendar fields
 	CalendarID int64 // Affected calendar (0 means "any calendar for this user")

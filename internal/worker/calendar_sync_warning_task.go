@@ -162,11 +162,15 @@ func (t *CalendarSyncWarningTask) sendWarning(src *models.CalendarSource, count 
 
 	if t.notifyHub != nil {
 		t.notifyHub.Publish(notify.Event{
-			UserID:   user.ID,
-			Type:     notify.EventNewMessage,
-			Username: user.Username,
-			Mailbox:  "INBOX",
-			Count:    1,
+			UserID:    user.ID,
+			Type:      notify.EventNewMessage,
+			Username:  user.Username,
+			Mailbox:   "INBOX",
+			Count:     1,
+			From:      fromAddr,
+			Subject:   subject,
+			MessageID: msg.ID,
+			NewCount:  1,
 		})
 	}
 	log.Printf("Calendar sync warning email queued for user %d source %d (%d failures)", user.ID, src.ID, count)

@@ -560,6 +560,25 @@ impl MailProvider for NativeProvider {
                                             notifier(EngineEvent::NewMail {
                                                 folder: folder.to_string(),
                                                 count,
+                                                new_count: event
+                                                    .get("new_count")
+                                                    .and_then(|v| v.as_u64())
+                                                    .unwrap_or(1)
+                                                    as u32,
+                                                from: event
+                                                    .get("from")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or_default()
+                                                    .to_string(),
+                                                subject: event
+                                                    .get("subject")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or_default()
+                                                    .to_string(),
+                                                message_id: event
+                                                    .get("message_id")
+                                                    .and_then(|v| v.as_i64())
+                                                    .unwrap_or(0),
                                             });
                                         } else if event_type == "calendar_updated" {
                                             let calendar_id = event

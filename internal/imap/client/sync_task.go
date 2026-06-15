@@ -21,18 +21,33 @@ import (
 	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
+// NewMailNotice is what a completed sync reports to the notification hub:
+// folder totals for IMAP EXISTS plus toast content — the LAST new message
+// of the batch (the desktop shows «N новых» when NewCount > 1).
+type NewMailNotice struct {
+	Username  string
+	Mailbox   string
+	Count     uint32
+	NewCount  int
+	From      string
+	Subject   string
+	MessageID int64
+}
+
 type SyncTask struct {
 	account    *models.Account
 	database   *db.DB
 	analyzer   *parser.Analyzer
-	notifyFunc func(username, mailbox string, count uint32)
+	notifyFunc func(NewMailNotice)
 	priority   int
+	// Last non-spam message saved by the current run — toast content.
+	lastNew *models.Message
 	// Called to force-refresh the OAuth token when auth fails. The callback
 	// is expected to update the account in place (access token, expiry).
 	refreshOAuth func(account *models.Account) error
 }
 
-func (t *SyncTask) SetNotifyFunc(fn func(username, mailbox string, count uint32)) { t.notifyFunc = fn }
+func (t *SyncTask) SetNotifyFunc(fn func(NewMailNotice)) { t.notifyFunc = fn }
 func (t *SyncTask) SetAnalyzer(analyzer *parser.Analyzer)                         { t.analyzer = analyzer }
 func (t *SyncTask) SetOAuthRefresher(fn func(account *models.Account) error) {
 	t.refreshOAuth = fn
@@ -164,7 +179,18 @@ func (t *SyncTask) syncAllRemoteFolders(ctx context.Context, client *Client, loc
 	if totalNew > totalSpam && t.notifyFunc != nil {
 		totalMessages, _ := t.database.GetMessageCountByFolder(localInbox.ID)
 		if user, err := t.database.GetUserByID(t.account.UserID); err == nil {
-			t.notifyFunc(user.Username, "INBOX", totalMessages)
+			notice := NewMailNotice{
+				Username: user.Username,
+				Mailbox:  "INBOX",
+				Count:    totalMessages,
+				NewCount: totalNew - totalSpam,
+			}
+			if t.lastNew != nil {
+				notice.From = t.lastNew.From
+				notice.Subject = t.lastNew.Subject
+				notice.MessageID = t.lastNew.ID
+			}
+			t.notifyFunc(notice)
 		}
 	}
 	return nil
@@ -596,6 +622,10 @@ buildMessage:
 	}
 	if err := t.database.CreateMessage(msg); err != nil {
 		return false, false, err
+	}
+	if !isSpam {
+		// Toast content for the post-sync notification (last new wins).
+		t.lastNew = msg
 	}
 	attachmentCount := 0
 	for _, att := range attachments {
