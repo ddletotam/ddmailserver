@@ -4543,7 +4543,31 @@ fn handle_link(_ui: &MainWindow, url: String) {
         return;
     }
     println!("link click -> {url}");
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", "", &url])
-        .spawn();
+    open_external(&url);
+}
+
+/// Open a URL in the system default browser. Per-OS launcher — the previous
+/// `cmd /C start` was Windows-only, so links silently did nothing on Linux.
+fn open_external(url: &str) {
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", "", url]);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    };
+    #[cfg(target_os = "linux")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    if let Err(e) = cmd.spawn() {
+        eprintln!("open_external: failed to launch browser for {url}: {e}");
+    }
 }
