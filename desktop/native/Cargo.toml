@@ -83,6 +83,11 @@ javascriptcore-rs = "1"
 # D-Bus service on a background thread and never touches gtk — so, unlike the
 # Windows tray-icon, it doesn't fight the WebKitGTK render worker's gtk loop.
 ksni = "0.2"
+# Raise + focus the window from tray/toast clicks on X11. plain Slint show()
+# is a no-op for an already-mapped window; we send _NET_ACTIVE_WINDOW (EWMH)
+# from a throwaway display connection, the Linux analogue of Win32
+# SetForegroundWindow.
+x11 = { version = "2", features = ["xlib"] }
 
 # Windows: WebView2 (Edge/Chromium) в†’ offscreen CapturePreview(PNG) в†’ RGBA.
 [target.'cfg(windows)'.dependencies]
