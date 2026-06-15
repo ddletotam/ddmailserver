@@ -617,6 +617,10 @@ struct Shared {
     /// Which source view a pending FetchSource should open:
     /// 1 = заголовки, 2 = полный исходник.
     pending_source_view: Cell<u8>,
+    /// Full, untruncated text currently behind the source viewer (the widget
+    /// shows only a capped slice — see SOURCE_VIEW_MAX). «Копировать всё» reads
+    /// this so the clipboard always gets the complete source.
+    source_view_full: RefCell<String>,
     /// email(lowercase) → пастельный цвет айдентики (подкраска строк
     /// сайдбара по received_by). Обновляется при каждом списке диалогов.
     identity_colors: RefCell<HashMap<String, String>>,
@@ -2512,6 +2516,7 @@ fn main() {
         body_view_text: RefCell::new(HashSet::new()),
         pending_forward: RefCell::new(None),
         pending_source_view: Cell::new(0),
+        source_view_full: RefCell::new(String::new()),
         identity_colors: RefCell::new(startup_ident_colors),
         row_links: RefCell::new(Vec::new()),
         confirm_mode: Cell::new(0),
@@ -3367,6 +3372,31 @@ fn main() {
     // Context-menu actions on a message row.
     let ui_weak_act = ui.as_weak();
     let sh_act = shared.clone();
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_source_view_copy(move || {
+            use slint::Model;
+            let Some(ui) = ui_weak.upgrade() else { return };
+            if ui.get_source_view_is_headers() {
+                let mut out = String::new();
+                for h in ui.get_source_view_headers().iter() {
+                    out.push_str(h.name.as_str());
+                    out.push_str(": ");
+                    out.push_str(h.value.as_str());
+                    out.push('\n');
+                }
+                clipboard_set(&out);
+            } else {
+                // Full, untruncated source — not the capped slice in the widget.
+                SHARED.with(|s| {
+                    if let Some(sh) = s.borrow().as_ref() {
+                        clipboard_set(&sh.source_view_full.borrow());
+                    }
+                });
+            }
+        });
+    }
+
     ui.on_msg_action(move |row, action| {
         let row = row as usize;
         let action = action.to_string();
@@ -3492,10 +3522,12 @@ fn main() {
             let body_opt = sh_act.current_bodies.borrow().get(row).cloned();
             let Some(body) = body_opt else { return };
             if let Some(ui) = ui_weak_act.upgrade() {
-                ui.set_source_view_title(format!("Исходник тела — {}", body.subject).into());
-                ui.set_source_view_text(body.html.unwrap_or_default().into());
-                ui.set_source_view_is_headers(false);
-                ui.set_source_view_visible(true);
+                set_source_text(
+                    &ui,
+                    &sh_act,
+                    format!("Исходник тела — {}", body.subject),
+                    body.html.unwrap_or_default(),
+                );
             }
             return;
         }
@@ -4337,13 +4369,11 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         ui.set_source_view_title(format!("Заголовки (id {uid})").into());
                         ui.set_source_view_headers(ModelRc::new(VecModel::from(rows)));
                         ui.set_source_view_is_headers(true);
+                        ui.set_source_view_visible(true);
                     } else {
                         // Source: the raw RFC-822 bytes, verbatim, no processing.
-                        ui.set_source_view_title(format!("Исходник сообщения (id {uid})").into());
-                        ui.set_source_view_text(raw.into());
-                        ui.set_source_view_is_headers(false);
+                        set_source_text(ui, sh, format!("Исходник сообщения (id {uid})"), raw);
                     }
-                    ui.set_source_view_visible(true);
                 }
             });
         }
@@ -4612,6 +4642,35 @@ fn handle_link(_ui: &MainWindow, url: String) {
     }
     println!("link click -> {url}");
     open_external(&url);
+}
+
+/// Max raw text fed to the source-viewer widget. Slint lays out the entire
+/// string (no text virtualization), so a multi-MB source — a big message is
+/// mostly base64 — would freeze rendering and selection. We show the first
+/// chunk; «Копировать всё» still copies the full text from `source_view_full`.
+const SOURCE_VIEW_MAX: usize = 128 * 1024;
+
+/// Stash the full text and push a capped, render-safe slice into the viewer.
+fn set_source_text(ui: &MainWindow, sh: &Shared, title: String, full: String) {
+    let display = if full.len() > SOURCE_VIEW_MAX {
+        let mut cut = SOURCE_VIEW_MAX;
+        while cut > 0 && !full.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!(
+            "{}\n\n[… показаны первые {} КБ из {} КБ — «Копировать всё» даёт полный исходник …]",
+            &full[..cut],
+            SOURCE_VIEW_MAX / 1024,
+            full.len() / 1024
+        )
+    } else {
+        full.clone()
+    };
+    sh.source_view_full.replace(full);
+    ui.set_source_view_title(title.into());
+    ui.set_source_view_text(display.into());
+    ui.set_source_view_is_headers(false);
+    ui.set_source_view_visible(true);
 }
 
 /// Parse the RFC-822 header block into ordered (name, value) pairs.
