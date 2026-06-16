@@ -612,6 +612,10 @@ struct Shared {
     convs: RefCell<Vec<Conversation>>,
     displays: RefCell<Vec<Disp>>,
     avatars: RefCell<HashMap<String, Image>>,
+    /// account_key of the currently open conversation. Addressed engine
+    /// commands (body/flags/delete/source/attachment/send) carry it so they
+    /// route to the right server. Empty falls back to the primary account.
+    cur_account_key: RefCell<String>,
     /// Message refs for the currently rendered rows (row index → message).
     current_msgs: RefCell<Vec<MessageRef>>,
     /// Bodies of the open conversation, kept in memory (parallel to
@@ -891,6 +895,14 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
     let Some(c) = convs.get(idx) else { return };
     let conv_label = c.label.clone();
     let msg_count = c.messages.len();
+    // Which account this conversation belongs to (empty → primary). Drives the
+    // cache namespace and every addressed command issued while it's open.
+    let akey = if c.account_key.is_empty() {
+        sh.key.clone()
+    } else {
+        c.account_key.clone()
+    };
+    sh.cur_account_key.replace(akey.clone());
 
     // The right pane clears IMMEDIATELY: stale bubbles from the previous
     // conversation must never linger while this one loads. The progress
@@ -910,7 +922,8 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
         unread.iter().map(|m| (m.folder.clone(), m.uid)).collect();
     sh.scroll_pending.set(true);
 
-    if let (Some(cache), key) = (&sh.cache, &sh.key) {
+    if let Some(cache) = &sh.cache {
+        let key = &akey;
         let t_load_start = Instant::now();
         let bodies = cache.load_message_bodies(key, &c.messages).unwrap_or_default();
         let load_ms = t_load_start.elapsed().as_millis();
@@ -942,7 +955,11 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
                 fetch_refs.push(MessageRef { folder: f, uid: u, seen: false });
             }
         }
-        let _ = etx.send(engine::EngineCmd::FetchMessages { messages: fetch_refs, generation });
+        let _ = etx.send(engine::EngineCmd::FetchMessages {
+            messages: fetch_refs,
+            generation,
+            account_key: akey.clone(),
+        });
         // Opening a conversation reads it: push \Seen for everything that
         // was unread. The scroll anchor above is already snapshotted.
         if !unread.is_empty() {
@@ -950,6 +967,7 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
                 messages: unread,
                 flags: "\\Seen".into(),
                 add: true,
+                account_key: akey.clone(),
             });
         }
     }
@@ -2620,6 +2638,7 @@ fn main() {
         convs: RefCell::new(init_convs),
         displays: RefCell::new(displays.clone()),
         avatars: RefCell::new(HashMap::new()),
+        cur_account_key: RefCell::new(String::new()),
         current_msgs: RefCell::new(Vec::new()),
         current_bodies: RefCell::new(Vec::new()),
         open_gen: Cell::new(0),
@@ -2908,10 +2927,14 @@ fn main() {
                     domain,
                     address: cp_addr,
                     message_ids: ids,
+                    account_key: sh_delk.cur_account_key.borrow().clone(),
                 });
             } else {
                 println!("delete conversation {conv_id} ({} messages)", refs.len());
-                let _ = etx.send(engine::EngineCmd::Delete { messages: refs });
+                let _ = etx.send(engine::EngineCmd::Delete {
+                    messages: refs,
+                    account_key: sh_delk.cur_account_key.borrow().clone(),
+                });
             }
         }
         // Optimistic local removal; the engine resets the full-sync stamp on
@@ -3173,6 +3196,7 @@ fn main() {
                         uid: orig.uid,
                         seen: true,
                     }),
+                    account_key: sh_send.cur_account_key.borrow().clone(),
                 });
                 clear_overrides();
                 if let Some(u) = ui_now.as_ref() {
@@ -3202,6 +3226,7 @@ fn main() {
                     references: None,
                     attachments: attachments.clone(),
                     forward_attachments: None,
+                    account_key: sh_send.cur_account_key.borrow().clone(),
                 });
                 clear_overrides();
             } else {
@@ -3271,6 +3296,7 @@ fn main() {
                     to, cc: cc.clone(), subject, body: text, in_reply_to, references,
                     attachments: attachments.clone(),
                     forward_attachments: None,
+                    account_key: sh_send.cur_account_key.borrow().clone(),
                 });
                 clear_overrides();
             } else {
@@ -3330,6 +3356,7 @@ fn main() {
                 to, cc, subject, body: text, in_reply_to, references,
                 attachments,
                 forward_attachments: None,
+                account_key: sh_send.cur_account_key.borrow().clone(),
             });
             clear_overrides();
         } else {
@@ -3687,6 +3714,7 @@ fn main() {
                 let _ = etx.send(engine::EngineCmd::FetchSource {
                     folder: msg.folder.clone(),
                     uid: msg.uid,
+                    account_key: sh_act.cur_account_key.borrow().clone(),
                 });
             }
             return;
@@ -3728,13 +3756,17 @@ fn main() {
         };
         match action.as_str() {
             "delete" => {
-                let _ = etx.send(engine::EngineCmd::Delete { messages: vec![msg] });
+                let _ = etx.send(engine::EngineCmd::Delete {
+                    messages: vec![msg],
+                    account_key: sh_act.cur_account_key.borrow().clone(),
+                });
             }
             "read" => {
                 let _ = etx.send(engine::EngineCmd::SetFlags {
                     messages: vec![msg],
                     flags: "\\Seen".into(),
                     add: true,
+                    account_key: sh_act.cur_account_key.borrow().clone(),
                 });
             }
             "unread" => {
@@ -3742,6 +3774,7 @@ fn main() {
                     messages: vec![msg],
                     flags: "\\Seen".into(),
                     add: false,
+                    account_key: sh_act.cur_account_key.borrow().clone(),
                 });
             }
             other => println!("msg-action {other} (not wired yet)"),
@@ -4390,6 +4423,7 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                                         messages: to_mark,
                                         flags: "\\Seen".into(),
                                         add: true,
+                                        account_key: sh.cur_account_key.borrow().clone(),
                                     });
                                 }
                             }
@@ -4456,6 +4490,7 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                             let _ = etx.send(engine::EngineCmd::FetchMessages {
                                 messages: c.messages.clone(),
                                 generation: sh.open_gen.get(),
+                                account_key: sh.cur_account_key.borrow().clone(),
                             });
                         }
                     }
@@ -4682,6 +4717,7 @@ fn handle_new_mail(
                     }],
                     flags: "\\Seen".into(),
                     add: true,
+                    account_key: sh.cur_account_key.borrow().clone(),
                 });
             }
             let mut refs = sh
@@ -4696,6 +4732,7 @@ fn handle_new_mail(
             let _ = etx.send(engine::EngineCmd::FetchMessages {
                 messages: refs,
                 generation: sh.open_gen.get(),
+                account_key: sh.cur_account_key.borrow().clone(),
             });
             let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
         }
@@ -4804,6 +4841,7 @@ fn handle_link(_ui: &MainWindow, url: String) {
                                 uid,
                                 index,
                                 filename,
+                                account_key: sh.cur_account_key.borrow().clone(),
                             });
                         } else {
                             eprintln!("attachment: no live engine");
