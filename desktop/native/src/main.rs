@@ -2714,7 +2714,9 @@ fn main() {
     // only needs the cache for contacts; the provider call is wrapped in
     // unwrap_or_default and silently returns empty messages.
     if let Some(cache) = open_cache() {
-        let live_cfg = engine::AccountConfig::load();
+        // TODO(multiaccount P1): the orchestrator will consume all of
+        // load_all(); for now the engine still runs the first account.
+        let live_cfg = engine::AccountConfig::load_all().into_iter().next();
         let cfg = live_cfg.clone().unwrap_or_else(|| {
             // No live config: reconstruct just enough so that the engine's
             // `key = cfg.account_key()` matches what's already in the cache
@@ -3880,7 +3882,7 @@ fn main() {
     let sh_set = shared.clone();
     ui.on_open_settings(move || {
         let Some(ui) = ui_weak_set.upgrade() else { return };
-        let cfg = engine::AccountConfig::load();
+        let cfg = engine::AccountConfig::load_all().into_iter().next();
         match &cfg {
             Some(c) => {
                 let account = if c.email.is_empty() {
