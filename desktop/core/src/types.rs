@@ -84,6 +84,11 @@ pub struct Conversation {
     #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub messages: Vec<MessageRef>,
     pub draft: Option<MessageRef>, // latest draft for this conversation
+    /// Which account (server) this conversation came from. Empty from
+    /// providers; the engine stamps it when merging the unified list, so the
+    /// UI knows which account a reply / open / delete should target.
+    #[serde(default)]
+    pub account_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

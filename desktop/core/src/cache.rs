@@ -453,6 +453,7 @@ impl Cache {
                 total_count,
                 messages,
                 draft: None, // Drafts not cached
+                account_key: String::new(), // stamped by the engine on merge
             });
         }
 

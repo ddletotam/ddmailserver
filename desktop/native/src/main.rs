@@ -2714,10 +2714,9 @@ fn main() {
     // only needs the cache for contacts; the provider call is wrapped in
     // unwrap_or_default and silently returns empty messages.
     if let Some(cache) = open_cache() {
-        // TODO(multiaccount P1): the orchestrator will consume all of
-        // load_all(); for now the engine still runs the first account.
-        let live_cfg = engine::AccountConfig::load_all().into_iter().next();
-        let cfg = live_cfg.clone().unwrap_or_else(|| {
+        let mut accounts = engine::AccountConfig::load_all();
+        let live = !accounts.is_empty();
+        if accounts.is_empty() {
             // No live config: reconstruct just enough so that the engine's
             // `key = cfg.account_key()` matches what's already in the cache
             // (`{username}@{host}` format). Anything provider-touching
@@ -2727,7 +2726,7 @@ fn main() {
                 .rsplit_once('@')
                 .map(|(u, h)| (u.to_string(), h.to_string()))
                 .unwrap_or_else(|| (key.clone(), String::new()));
-            engine::AccountConfig {
+            accounts.push(engine::AccountConfig {
                 host: host.clone(),
                 port: 993,
                 username,
@@ -2738,13 +2737,13 @@ fn main() {
                 smtp_port: 465,
                 native_url: None,
                 native_token: None,
-            }
-        });
+            });
+        }
         let ui_weak_eng = ui.as_weak();
-        let etx = engine::spawn(cfg, cache, move |res| {
+        let etx = engine::spawn(accounts, cache, move |res| {
             let _ = ui_weak_eng.upgrade_in_event_loop(move |ui| handle_engine_result(&ui, res));
         });
-        if live_cfg.is_some() {
+        if live {
             let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
             let _ = etx.send(engine::EngineCmd::StartWatching);
         } else {

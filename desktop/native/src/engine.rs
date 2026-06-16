@@ -466,8 +466,17 @@ fn guess_mime(path: &std::path::Path) -> String {
 
 /// Spawn the engine thread. Returns a command sender; results arrive via `on_result`
 /// (called from background threads — forward to the UI loop yourself).
-pub fn spawn(
+/// One connected account: its cache key, config and provider. The orchestrator
+/// holds a Vec of these — aggregating commands (conversations, calendars,
+/// search) fan out across all; addressed commands route to one.
+struct AccountConn {
+    key: String,
     cfg: AccountConfig,
+    provider: Arc<dyn MailProvider>,
+}
+
+pub fn spawn(
+    accounts: Vec<AccountConfig>,
     cache: Arc<Cache>,
     on_result: impl Fn(EngineResult) + Send + Sync + 'static,
 ) -> mpsc::Sender<EngineCmd> {
@@ -481,48 +490,76 @@ pub fn spawn(
                 return;
             }
         };
-        let provider = build_provider(&cfg);
-        let key = cfg.account_key();
+        let conns: Vec<AccountConn> = accounts
+            .into_iter()
+            .map(|cfg| AccountConn {
+                key: cfg.account_key(),
+                provider: build_provider(&cfg),
+                cfg,
+            })
+            .collect();
+        if conns.is_empty() {
+            while rx.recv().is_ok() {}
+            return;
+        }
+        // Primary = first account. Addressed commands (body/flags/delete/
+        // source/attachment/send) and calendar commands use it until
+        // per-account routing lands (1b-ii); aggregating commands fan out.
+        let provider = conns[0].provider.clone();
+        let key = conns[0].key.clone();
+        let cfg = conns[0].cfg.clone();
 
         while let Ok(cmd) = rx.recv() {
             match cmd {
                 EngineCmd::FetchConversations { limit } => {
-                    let our = resolve_our_addrs(&cache, &cfg);
-                    // Delta sync (native provider): ask only for conversations
-                    // changed since the stored server-clock watermark. A full
-                    // resync runs on first start and every 24h — that's what
-                    // picks up deleted conversations, so the delta path
-                    // doesn't need tombstones. Plain IMAP ignores `since`
-                    // (trait default) and always comes back full.
-                    let since_key = format!("conv_since:{key}");
-                    let full_key = format!("conv_full_ts:{key}");
+                    // Fan out: each account syncs into ITS cache namespace
+                    // (delta — native asks only for conversations changed since
+                    // its server-clock watermark; a full resync runs on first
+                    // start and every 24h; IMAP ignores `since` and comes back
+                    // full). Then load the full set from every account's cache,
+                    // tag each with its account_key, merge and sort by date —
+                    // one unified list. A failed account is logged and skipped,
+                    // so one down server doesn't blank the others.
                     let now_s = chrono::Utc::now().timestamp();
-                    let last_full: i64 = cache
-                        .get_meta(&full_key)
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0);
-                    let since: i64 = if now_s - last_full > 24 * 3600 {
-                        0
-                    } else {
-                        cache.get_meta(&since_key).and_then(|v| v.parse().ok()).unwrap_or(0)
-                    };
-                    let r = rt.block_on(provider.fetch_conversations_delta(&our, limit, since));
-                    match r {
-                        Ok((convs, server_now, partial)) => {
-                            let partial = partial && since > 0;
-                            if partial {
-                                cache.upsert_conversations(&key, &convs).ok();
-                            } else {
-                                cache.save_conversations(&key, &convs).ok();
-                                cache.set_meta(&full_key, &now_s.to_string()).ok();
+                    for conn in &conns {
+                        let our = resolve_our_addrs(&cache, &conn.cfg);
+                        let since_key = format!("conv_since:{}", conn.key);
+                        let full_key = format!("conv_full_ts:{}", conn.key);
+                        let last_full: i64 = cache
+                            .get_meta(&full_key)
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0);
+                        let since: i64 = if now_s - last_full > 24 * 3600 {
+                            0
+                        } else {
+                            cache.get_meta(&since_key).and_then(|v| v.parse().ok()).unwrap_or(0)
+                        };
+                        match rt.block_on(conn.provider.fetch_conversations_delta(&our, limit, since)) {
+                            Ok((convs, server_now, partial)) => {
+                                if partial && since > 0 {
+                                    cache.upsert_conversations(&conn.key, &convs).ok();
+                                } else {
+                                    cache.save_conversations(&conn.key, &convs).ok();
+                                    cache.set_meta(&full_key, &now_s.to_string()).ok();
+                                }
+                                if server_now > 0 {
+                                    cache.set_meta(&since_key, &server_now.to_string()).ok();
+                                }
                             }
-                            if server_now > 0 {
-                                cache.set_meta(&since_key, &server_now.to_string()).ok();
-                            }
-                            on_result(EngineResult::Conversations { list: convs, partial });
+                            Err(e) => eprintln!("conversations sync [{}]: {e}", conn.key),
                         }
-                        Err(e) => on_result(EngineResult::Error(e)),
                     }
+                    // Merge the full set across accounts (always a replace).
+                    let mut merged: Vec<Conversation> = Vec::new();
+                    for conn in &conns {
+                        let mut convs = cache.load_conversations(&conn.key).unwrap_or_default();
+                        for c in &mut convs {
+                            c.account_key = conn.key.clone();
+                        }
+                        merged.extend(convs);
+                    }
+                    merged.sort_by(|a, b| b.last_date_ts.cmp(&a.last_date_ts));
+                    on_result(EngineResult::Conversations { list: merged, partial: false });
                 }
                 EngineCmd::FetchMessages { messages, generation } => {
                     // Bodies are immutable: a cached (folder, uid) never needs
@@ -756,14 +793,16 @@ pub fn spawn(
                     }
                 }
                 EngineCmd::StartWatching => {
-                    // Bridge provider events into EngineResult::Event. The
-                    // multi-threaded runtime keeps the spawned watcher alive
-                    // while this thread blocks on the next command.
-                    let sink = on_result.clone();
-                    let notifier: Notifier =
-                        Arc::new(move |ev| sink(EngineResult::Event(ev)));
-                    if let Err(e) = rt.block_on(provider.start_watching(notifier)) {
-                        on_result(EngineResult::Error(format!("watch: {e}")));
+                    // Start a watcher per account. start_watching spawns its
+                    // worker on the runtime and returns, so the loop stays
+                    // responsive. Events aren't account-tagged yet (P2).
+                    for conn in &conns {
+                        let sink = on_result.clone();
+                        let notifier: Notifier =
+                            Arc::new(move |ev| sink(EngineResult::Event(ev)));
+                        if let Err(e) = rt.block_on(conn.provider.start_watching(notifier)) {
+                            eprintln!("watch [{}]: {e}", conn.key);
+                        }
                     }
                 }
             }
