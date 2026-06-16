@@ -67,14 +67,8 @@ impl AccountConfig {
         })
     }
 
-    /// Load from `%APPDATA%/ru.letotam.ddmail/account.json` (fallback when env
-    /// isn't set). Plaintext for now — same trust level as the env approach;
-    /// a real login screen + keyring comes later.
-    pub fn from_file() -> Option<Self> {
-        let base = std::env::var("APPDATA").or_else(|_| std::env::var("HOME")).ok()?;
-        let path = std::path::Path::new(&base).join("ru.letotam.ddmail").join("account.json");
-        let data = std::fs::read_to_string(&path).ok()?;
-        let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+    /// Parse one account object (shared by account.json and accounts.json[]).
+    fn from_json(v: &serde_json::Value) -> Option<Self> {
         let host = v.get("host")?.as_str()?.to_string();
         let username = v.get("username")?.as_str()?.to_string();
         let password = v.get("password")?.as_str()?.to_string();
@@ -94,9 +88,71 @@ impl AccountConfig {
         })
     }
 
+    /// `%APPDATA%/ru.letotam.ddmail` or `$HOME/ru.letotam.ddmail`.
+    fn config_dir() -> Option<std::path::PathBuf> {
+        let base = std::env::var("APPDATA").or_else(|_| std::env::var("HOME")).ok()?;
+        Some(std::path::Path::new(&base).join("ru.letotam.ddmail"))
+    }
+
+    /// Load from the single-account `account.json` (legacy / fallback).
+    pub fn from_file() -> Option<Self> {
+        let path = Self::config_dir()?.join("account.json");
+        let data = std::fs::read_to_string(&path).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+        Self::from_json(&v)
+    }
+
     /// Env first (handy for dev), then the on-disk config file.
     pub fn load() -> Option<Self> {
         Self::from_env().or_else(Self::from_file)
+    }
+
+    /// All configured accounts. Source of truth is `accounts.json` (an array);
+    /// falls back to an env override (dev, not persisted) or a single
+    /// `account.json` which is then migrated into `accounts.json`.
+    pub fn load_all() -> Vec<AccountConfig> {
+        if let Some(dir) = Self::config_dir() {
+            if let Ok(data) = std::fs::read_to_string(dir.join("accounts.json")) {
+                if let Ok(serde_json::Value::Array(arr)) =
+                    serde_json::from_str::<serde_json::Value>(&data)
+                {
+                    let v: Vec<AccountConfig> = arr.iter().filter_map(Self::from_json).collect();
+                    if !v.is_empty() {
+                        return v;
+                    }
+                }
+            }
+        }
+        // Dev env override — used as-is, never written to disk.
+        if let Some(cfg) = Self::from_env() {
+            return vec![cfg];
+        }
+        // Legacy single account — migrate it into accounts.json going forward.
+        if let Some(cfg) = Self::from_file() {
+            cfg.migrate_to_accounts_json();
+            return vec![cfg];
+        }
+        Vec::new()
+    }
+
+    /// Write a one-element `accounts.json` from a legacy single account, unless
+    /// one already exists. Best-effort.
+    fn migrate_to_accounts_json(&self) {
+        let Some(dir) = Self::config_dir() else { return };
+        let path = dir.join("accounts.json");
+        if path.exists() {
+            return;
+        }
+        let arr = serde_json::json!([{
+            "host": self.host, "port": self.port, "use_tls": self.use_tls,
+            "username": self.username, "password": self.password, "email": self.email,
+            "smtp_host": self.smtp_host, "smtp_port": self.smtp_port,
+            "native_url": self.native_url, "native_token": self.native_token,
+        }]);
+        if let Ok(s) = serde_json::to_string_pretty(&arr) {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(&path, s);
+        }
     }
 
     pub fn account_key(&self) -> String {
