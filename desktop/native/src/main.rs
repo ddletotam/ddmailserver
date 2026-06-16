@@ -2178,6 +2178,24 @@ fn main() {
     let last_written =
         std::cell::Cell::new(None::<(i32, i32, u32, u32, f32, bool)>);
     let restore_done_saver = restore_done.clone();
+    // Advance the calendar now-line every minute. The full calendar re-render
+    // sets now-hour too (and today-col), so this only nudges the vertical
+    // position between renders — kept simple (no today-col recompute; the
+    // midnight column shift rides the next render/navigation).
+    let ui_weak_now = ui.as_weak();
+    let now_line_timer = slint::Timer::default();
+    now_line_timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_secs(60),
+        move || {
+            if let Some(ui) = ui_weak_now.upgrade() {
+                use chrono::Timelike;
+                let now = chrono::Local::now();
+                ui.set_now_hour(now.hour() as f32 + now.minute() as f32 / 60.0);
+            }
+        },
+    );
+
     let geometry_saver = slint::Timer::default();
     geometry_saver.start(
         slint::TimerMode::Repeated,
