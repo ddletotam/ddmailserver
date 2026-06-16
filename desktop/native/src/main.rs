@@ -4520,6 +4520,15 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             }
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
+                    // A flag change (seen/unseen) doesn't alter the conversation
+                    // list — the optimistic local update already cleared the
+                    // pill. Refetching here would re-detect a still-"unread"
+                    // server state (e.g. an unfetchable/stale message whose
+                    // \Seen never lands) and re-mark it forever. Only structural
+                    // changes (delete / spam purge) need a refetch.
+                    if what == "flags" {
+                        return;
+                    }
                     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
                         let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
                         // Reopen current conversation to refresh its bodies.
