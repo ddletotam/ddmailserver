@@ -311,6 +311,9 @@ export component MainWindow inherits Window {
     in property <int> today-col: -1;
     // Current local time as fractional hours (e.g. 14.5) for the now-line.
     in property <float> now-hour: -1;
+    // Aggregate connection light: 2 = green (all accounts connected),
+    // 1 = yellow (some down), 0 = red (none). Drives the corner indicator.
+    in property <int> conn-status: 2;
 
     callback view-changed(int);
     callback calendar-prev();
@@ -1063,6 +1066,7 @@ export component MainWindow inherits Window {
                         horizontal-stretch: 1;
                         Text {
                             text: root.active-name;
+                            color: #0f1419;
                             font-weight: 700;
                             font-size: 16px;
                             overflow: elide;
@@ -3221,5 +3225,21 @@ export component MainWindow inherits Window {
             }
         }
         }
+    }
+
+    // Connection status light (P2): an unobtrusive corner dot. Green = all
+    // accounts connected, yellow = some down, red = none. The hover panel with
+    // the per-account list + quick-fixes lands in P2-b.
+    Rectangle {
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        x: 10px;
+        y: root.height - self.height - 10px;
+        background: root.conn-status == 2 ? #36b37e
+                  : root.conn-status == 1 ? #ffab00
+                  : #ff5630;
+        border-width: 2px;
+        border-color: #ffffffcc;
     }
 }

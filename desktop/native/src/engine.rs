@@ -325,6 +325,9 @@ pub enum EngineResult {
     },
     /// A push event from the provider's background watcher.
     Event(EngineEvent),
+    /// Per-account connection state ("connecting" | "connected" | "error"),
+    /// tagged with the account so the UI can drive the aggregate indicator.
+    AccountState { account_key: String, state: String },
     /// A message was sent (server response / message-id).
     Sent(String),
     /// A mutating op (flags/delete) finished; UI should refresh.
@@ -826,13 +829,34 @@ pub fn spawn(
                 EngineCmd::StartWatching => {
                     // Start a watcher per account. start_watching spawns its
                     // worker on the runtime and returns, so the loop stays
-                    // responsive. Events aren't account-tagged yet (P2).
+                    // responsive. The notifier tags ConnectionState events with
+                    // the account so the UI's aggregate indicator knows the source.
                     for conn in &conns {
+                        let akey = conn.key.clone();
                         let sink = on_result.clone();
-                        let notifier: Notifier =
-                            Arc::new(move |ev| sink(EngineResult::Event(ev)));
+                        let notifier: Notifier = Arc::new(move |ev| match ev {
+                            EngineEvent::ConnectionState { state, .. } => {
+                                sink(EngineResult::AccountState {
+                                    account_key: akey.clone(),
+                                    state,
+                                })
+                            }
+                            other => sink(EngineResult::Event(other)),
+                        });
                         if let Err(e) = rt.block_on(conn.provider.start_watching(notifier)) {
                             eprintln!("watch [{}]: {e}", conn.key);
+                            on_result(EngineResult::AccountState {
+                                account_key: conn.key.clone(),
+                                state: "error".into(),
+                            });
+                        } else if conn.cfg.native_url.is_none() {
+                            // IMAP doesn't report connection state; assume
+                            // connected once the idle watcher started (real
+                            // tracking comes with P3 reconnect).
+                            on_result(EngineResult::AccountState {
+                                account_key: conn.key.clone(),
+                                state: "connected".into(),
+                            });
                         }
                     }
                 }
