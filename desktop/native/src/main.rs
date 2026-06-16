@@ -616,6 +616,11 @@ struct Shared {
     /// commands (body/flags/delete/source/attachment/send) carry it so they
     /// route to the right server. Empty falls back to the primary account.
     cur_account_key: RefCell<String>,
+    /// All account keys (the indicator's denominator) and their last-known
+    /// connection state ("connecting" | "connected" | "error"). Drives the
+    /// aggregate green/yellow/red status light.
+    account_keys: RefCell<Vec<String>>,
+    account_states: RefCell<HashMap<String, String>>,
     /// Message refs for the currently rendered rows (row index → message).
     current_msgs: RefCell<Vec<MessageRef>>,
     /// Bodies of the open conversation, kept in memory (parallel to
@@ -2639,6 +2644,8 @@ fn main() {
         displays: RefCell::new(displays.clone()),
         avatars: RefCell::new(HashMap::new()),
         cur_account_key: RefCell::new(String::new()),
+        account_keys: RefCell::new(Vec::new()),
+        account_states: RefCell::new(HashMap::new()),
         current_msgs: RefCell::new(Vec::new()),
         current_bodies: RefCell::new(Vec::new()),
         open_gen: Cell::new(0),
@@ -2775,6 +2782,17 @@ fn main() {
                 native_url: None,
                 native_token: None,
             });
+        }
+        // Seed the connection indicator: every account starts "connecting"
+        // until its watcher reports in.
+        {
+            let keys: Vec<String> = accounts.iter().map(|a| a.account_key()).collect();
+            let mut st = shared.account_states.borrow_mut();
+            for k in &keys {
+                st.insert(k.clone(), "connecting".into());
+            }
+            drop(st);
+            *shared.account_keys.borrow_mut() = keys;
         }
         let ui_weak_eng = ui.as_weak();
         let etx = engine::spawn(accounts, cache, move |res| {
@@ -4325,6 +4343,26 @@ fn main() {
 }
 
 /// Apply an engine result on the UI thread (reaches Shared via the thread-local).
+/// Recompute the aggregate connection light from per-account states:
+/// 2 = green (all connected), 1 = yellow (some down), 0 = red (none connected).
+fn apply_conn_status(ui: &MainWindow, sh: &Shared) {
+    let states = sh.account_states.borrow();
+    let keys = sh.account_keys.borrow();
+    let total = keys.len();
+    let connected = keys
+        .iter()
+        .filter(|k| states.get(*k).map(|s| s == "connected").unwrap_or(false))
+        .count();
+    let status = if total == 0 || connected == total {
+        2
+    } else if connected > 0 {
+        1
+    } else {
+        0
+    };
+    ui.set_conn_status(status);
+}
+
 fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
     match res {
         engine::EngineResult::Conversations { mut list, partial } => {
@@ -4494,6 +4532,17 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                             });
                         }
                     }
+                }
+            });
+        }
+        engine::EngineResult::AccountState { account_key, state } => {
+            println!("account {account_key}: {state}");
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    sh.account_states
+                        .borrow_mut()
+                        .insert(account_key, state);
+                    apply_conn_status(ui, sh);
                 }
             });
         }
