@@ -504,11 +504,10 @@ fn build_source_html(text: &str) -> String {
     )
 }
 
-/// Attachment-chip HTML appended below every bubble's main body.
-/// Clickable via the link hit-test (currently disabled after the
-/// WebKit migration — see render.rs) using an internal
-/// `ddmail-attach:folder|uid|index|filename` scheme decoded on the
-/// UI thread.
+/// Attachment-chip HTML appended below every bubble's main body. Clickable via
+/// the body link hit-test using an internal
+/// `ddmail-attach:folder|uid|index|filename` scheme decoded on the UI thread
+/// (handle_link → DownloadAttachment → AttachmentSaved → open_external).
 fn attachment_chips(b: &MessageBody) -> String {
     if b.attachments.is_empty() {
         return String::new();
@@ -4615,9 +4614,7 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
         }
         engine::EngineResult::AttachmentSaved(path) => {
             println!("attachment saved: {path} — opening");
-            let _ = std::process::Command::new("cmd")
-                .args(["/C", "start", "", &path])
-                .spawn();
+            open_external(&path);
         }
         engine::EngineResult::Source { uid, raw } => {
             SHARED.with(|s| {
