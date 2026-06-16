@@ -624,6 +624,7 @@ where
             total_count: regular_msgs.len() as u32,
             messages: regular_msgs.iter().map(|m| MessageRef { folder: m.folder.clone(), uid: m.uid, seen: m.seen }).collect(),
             draft,
+            account_key: String::new(), // stamped by the engine on merge
         });
     }
 
