@@ -249,22 +249,23 @@ pub enum EngineCmd {
     /// `generation` is the UI's conversation-open generation; it is echoed
     /// back in `EngineResult::Messages` so the UI can drop answers that
     /// arrive after the user already switched to another conversation.
-    FetchMessages { messages: Vec<MessageRef>, generation: u64 },
+    FetchMessages { messages: Vec<MessageRef>, generation: u64, account_key: String },
     StartWatching,
     FetchAvatar { email: String },
-    SetFlags { messages: Vec<MessageRef>, flags: String, add: bool },
-    Delete { messages: Vec<MessageRef> },
+    SetFlags { messages: Vec<MessageRef>, flags: String, add: bool, account_key: String },
+    Delete { messages: Vec<MessageRef>, account_key: String },
     /// Raw RFC-822 source of one message — feeds the «Показать →
     /// Заголовки / Исходник сообщения» views.
-    FetchSource { folder: String, uid: u32 },
+    FetchSource { folder: String, uid: u32, account_key: String },
     /// «Спам»: blacklist the sender (domain rule) and purge all their
     /// messages, including the given conversation rows.
     BlacklistAndPurge {
         domain: String,
         address: String,
         message_ids: Vec<i64>,
+        account_key: String,
     },
-    DownloadAttachment { folder: String, uid: u32, index: usize, filename: String },
+    DownloadAttachment { folder: String, uid: u32, index: usize, filename: String, account_key: String },
     /// Live dropdown lookup for the search-as-compose bar: matching contacts
     /// (name/email) AND matching messages (subject/body) in one round-trip.
     /// The query is echoed back in the result so the UI can drop stale answers
@@ -302,6 +303,9 @@ pub enum EngineCmd {
         /// Forward mode: re-attach every attachment of this original
         /// message (downloaded from the provider) to the outgoing one.
         forward_attachments: Option<MessageRef>,
+        /// Which account sends this message (reply → the conversation's
+        /// account; new compose → the chosen "От кого").
+        account_key: String,
     },
 }
 
@@ -475,6 +479,16 @@ struct AccountConn {
     provider: Arc<dyn MailProvider>,
 }
 
+/// Pick the account an addressed command targets. Falls back to the first
+/// account when the key is empty/unknown (single-account, or a command issued
+/// without a conversation context). `conns` is guaranteed non-empty.
+fn route<'a>(conns: &'a [AccountConn], account_key: &str) -> &'a AccountConn {
+    conns
+        .iter()
+        .find(|c| c.key == account_key)
+        .unwrap_or(&conns[0])
+}
+
 pub fn spawn(
     accounts: Vec<AccountConfig>,
     cache: Arc<Cache>,
@@ -561,7 +575,11 @@ pub fn spawn(
                     merged.sort_by(|a, b| b.last_date_ts.cmp(&a.last_date_ts));
                     on_result(EngineResult::Conversations { list: merged, partial: false });
                 }
-                EngineCmd::FetchMessages { messages, generation } => {
+                EngineCmd::FetchMessages { messages, generation, account_key } => {
+                    let conn = route(&conns, &account_key);
+                    let provider = conn.provider.clone();
+                    let key = conn.key.clone();
+                    let cfg = conn.cfg.clone();
                     // Bodies are immutable: a cached (folder, uid) never needs
                     // refetching, so only the refs missing from SQLite go out
                     // on the wire. Fully-cached conversation = no network at all.
@@ -639,13 +657,17 @@ pub fn spawn(
                         }
                     }
                 }
-                EngineCmd::SetFlags { messages, flags, add } => {
+                EngineCmd::SetFlags { messages, flags, add, account_key } => {
+                    let provider = route(&conns, &account_key).provider.clone();
                     match rt.block_on(provider.set_flags_batch(&messages, &flags, add)) {
                         Ok(()) => on_result(EngineResult::Done("flags".into())),
                         Err(e) => on_result(EngineResult::Error(e)),
                     }
                 }
-                EngineCmd::Delete { messages } => {
+                EngineCmd::Delete { messages, account_key } => {
+                    let conn = route(&conns, &account_key);
+                    let provider = conn.provider.clone();
+                    let key = conn.key.clone();
                     match rt.block_on(provider.delete_messages(&messages)) {
                         Ok(()) => {
                             // The conversations delta can only report CHANGED
@@ -658,13 +680,17 @@ pub fn spawn(
                         Err(e) => on_result(EngineResult::Error(e)),
                     }
                 }
-                EngineCmd::FetchSource { folder, uid } => {
+                EngineCmd::FetchSource { folder, uid, account_key } => {
+                    let provider = route(&conns, &account_key).provider.clone();
                     match rt.block_on(provider.fetch_message_source(&folder, uid)) {
                         Ok(raw) => on_result(EngineResult::Source { uid, raw }),
                         Err(e) => on_result(EngineResult::Error(e)),
                     }
                 }
-                EngineCmd::BlacklistAndPurge { domain, address, message_ids } => {
+                EngineCmd::BlacklistAndPurge { domain, address, message_ids, account_key } => {
+                    let conn = route(&conns, &account_key);
+                    let provider = conn.provider.clone();
+                    let key = conn.key.clone();
                     match rt.block_on(provider.blacklist_and_purge(&domain, &address, &message_ids)) {
                         Ok(n) => {
                             println!("engine: spam purge of {address} removed {n} messages");
@@ -676,7 +702,8 @@ pub fn spawn(
                         Err(e) => on_result(EngineResult::Error(e)),
                     }
                 }
-                EngineCmd::DownloadAttachment { folder, uid, index, filename } => {
+                EngineCmd::DownloadAttachment { folder, uid, index, filename, account_key } => {
+                    let provider = route(&conns, &account_key).provider.clone();
                     match rt.block_on(provider.fetch_attachment(&folder, uid, index)) {
                         Ok((bytes, _mime)) => match save_download(&filename, &bytes) {
                             Ok(path) => on_result(EngineResult::AttachmentSaved(path)),
@@ -738,7 +765,11 @@ pub fn spawn(
                         Err(e) => on_result(EngineResult::Error(format!("delete_event: {e}"))),
                     }
                 }
-                EngineCmd::Send { to, cc, subject, body, in_reply_to, references, attachments, forward_attachments } => {
+                EngineCmd::Send { to, cc, subject, body, in_reply_to, references, attachments, forward_attachments, account_key } => {
+                    let conn = route(&conns, &account_key);
+                    let provider = conn.provider.clone();
+                    let key = conn.key.clone();
+                    let cfg = conn.cfg.clone();
                     let mut outgoing = resolve_attachments(&attachments);
                     // Forward mode: pull the original's attachments from the
                     // provider and re-attach them as-is. Failures of single
