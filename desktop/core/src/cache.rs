@@ -335,6 +335,42 @@ impl Cache {
         tx.commit().map_err(|e| format!("commit: {e}"))
     }
 
+    /// Apply DELETE tombstones from the change journal: drop each message_id's
+    /// ref and cached body for this account, then remove any conversation left
+    /// with no messages. Returns how many message refs were removed. Message
+    /// refs written before the message_id column existed (empty message_id)
+    /// won't match — a full resync repopulates them.
+    pub fn apply_deletions(&self, account_key: &str, message_ids: &[String]) -> Result<usize, String> {
+        if message_ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        let tx = conn.unchecked_transaction().map_err(|e| format!("tx: {e}"))?;
+        let mut removed = 0usize;
+        for mid in message_ids {
+            if mid.is_empty() {
+                continue;
+            }
+            removed += tx.execute(
+                "DELETE FROM conversation_messages WHERE message_id = ?1 \
+                 AND conversation_id IN (SELECT id FROM conversations WHERE account_key = ?2)",
+                params![mid, account_key],
+            ).map_err(|e| format!("del conv msg: {e}"))?;
+            tx.execute(
+                "DELETE FROM message_bodies WHERE message_id = ?1 AND account_key = ?2",
+                params![mid, account_key],
+            ).ok();
+        }
+        // Conversations whose every message is now gone disappear too.
+        tx.execute(
+            "DELETE FROM conversations WHERE account_key = ?1 \
+             AND id NOT IN (SELECT DISTINCT conversation_id FROM conversation_messages)",
+            params![account_key],
+        ).map_err(|e| format!("del empty conv: {e}"))?;
+        tx.commit().map_err(|e| format!("commit: {e}"))?;
+        Ok(removed)
+    }
+
     /// Read a sync-bookkeeping value (see the `meta` table).
     pub fn get_meta(&self, key: &str) -> Option<String> {
         let conn = self.conn.lock().ok()?;
