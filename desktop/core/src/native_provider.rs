@@ -214,6 +214,13 @@ impl MailProvider for NativeProvider {
         Ok((resp.conversations, resp.server_now_ms, since > 0))
     }
 
+    async fn fetch_changes(&self, since: i64) -> Result<Option<ChangesResponse>, String> {
+        let resp: ChangesResponse = self
+            .get(&format!("/changes?since={}", since.max(0)))
+            .await?;
+        Ok(Some(resp))
+    }
+
     async fn fetch_conversation_messages(
         &self,
         _our_addrs: &[String],

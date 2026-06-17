@@ -37,6 +37,13 @@ pub trait MailProvider: Send + Sync {
         Ok((convs, 0, false))
     }
 
+    /// Read the change-journal tail since `since` (a monotone seq cursor).
+    /// `Ok(None)` means the provider has no journal (plain IMAP — it relies on
+    /// IMAP's own EXISTS/EXPUNGE), so callers skip journal-based reconciliation.
+    async fn fetch_changes(&self, _since: i64) -> Result<Option<ChangesResponse>, String> {
+        Ok(None)
+    }
+
     /// Fetch full message bodies for the given refs.
     async fn fetch_conversation_messages(
         &self,

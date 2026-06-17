@@ -19,7 +19,7 @@ use ddmail_core::provider::MailProvider;
 use ddmail_core::session::SessionPool;
 use ddmail_core::types::{
     Contact, Conversation, DesktopCalendar, DesktopCalendarEvent, MessageBody, MessageEnvelope,
-    MessageRef, OutgoingAttachment, OutgoingMessage,
+    MessageRef, OutgoingAttachment, OutgoingMessage, CHANGE_KIND_DELETE,
 };
 
 #[derive(Clone)]
@@ -539,6 +539,43 @@ pub fn spawn(
                     // so one down server doesn't blank the others.
                     let now_s = chrono::Utc::now().timestamp();
                     for conn in &conns {
+                        // Change journal: pull the tail since our cursor and
+                        // apply DELETE tombstones to the cache BEFORE the delta
+                        // below. This is what makes deletions-elsewhere drop off
+                        // without a full resync — the conversation delta only
+                        // reports changed threads, never removed ones. Providers
+                        // without a journal (plain IMAP) return None → skipped.
+                        let seq_key = format!("journal_seq:{}", conn.key);
+                        let cur_seq: i64 = cache
+                            .get_meta(&seq_key)
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0);
+                        match rt.block_on(conn.provider.fetch_changes(cur_seq)) {
+                            Ok(Some(ch)) => {
+                                let deletes: Vec<String> = ch
+                                    .entries
+                                    .iter()
+                                    .filter(|e| e.kind == CHANGE_KIND_DELETE)
+                                    .map(|e| e.message_id.clone())
+                                    .collect();
+                                if !deletes.is_empty() {
+                                    match cache.apply_deletions(&conn.key, &deletes) {
+                                        Ok(n) => println!(
+                                            "journal [{}]: applied {n} deletions ({} tombstones)",
+                                            conn.key,
+                                            deletes.len()
+                                        ),
+                                        Err(e) => eprintln!("journal apply [{}]: {e}", conn.key),
+                                    }
+                                }
+                                if ch.latest_seq > 0 {
+                                    cache.set_meta(&seq_key, &ch.latest_seq.to_string()).ok();
+                                }
+                            }
+                            Ok(None) => {} // no journal (IMAP) — rely on IMAP itself
+                            Err(e) => eprintln!("journal fetch [{}]: {e}", conn.key),
+                        }
+
                         let our = resolve_our_addrs(&cache, &conn.cfg);
                         let since_key = format!("conv_since:{}", conn.key);
                         let full_key = format!("conv_full_ts:{}", conn.key);

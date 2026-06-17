@@ -73,6 +73,34 @@ fn default_seen() -> bool {
     true
 }
 
+// ── Change journal (/changes) ──
+
+/// One change-journal entry. `kind`: 1 = upsert (visible), 2 = delete tombstone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeEntry {
+    pub seq: i64,
+    pub message_id: String,
+    pub kind: i32,
+}
+
+/// Response of GET /changes?since=seq. The client tracks `latest_seq` as its
+/// cursor; `reset` means the cursor is unusable (new client / fell behind
+/// retention) and a full conversation resync should adopt `latest_seq`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangesResponse {
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
+    pub entries: Vec<ChangeEntry>,
+    pub latest_seq: i64,
+    #[serde(default)]
+    pub low_watermark: i64,
+    #[serde(default)]
+    pub reset: bool,
+}
+
+/// Journal kind constants mirroring the server (migration 043).
+pub const CHANGE_KIND_UPSERT: i32 = 1;
+pub const CHANGE_KIND_DELETE: i32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     pub id: String,
