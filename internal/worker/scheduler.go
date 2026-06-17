@@ -45,6 +45,7 @@ type Scheduler struct {
 	spamCleanupLastRun       time.Time
 	accountLogCleanupLastRun time.Time
 	vaultCleanupLastRun      time.Time
+	journalCompactLastRun    time.Time
 }
 
 // NewScheduler creates a new task scheduler with all dependencies wired up.
@@ -186,6 +187,9 @@ func (s *Scheduler) scheduleAllAccounts() {
 
 	// Run vault cleanup (permanently delete soft-deleted messages older than 30 days)
 	s.runVaultCleanup()
+
+	// Prune the change journal (keep 30 days; advance low-watermark)
+	s.runJournalCompaction()
 
 	imapQueueLen, smtpQueueLen := s.pool.QueueLength()
 	log.Printf("Current queue lengths - IMAP: %d, SMTP: %d", imapQueueLen, smtpQueueLen)
@@ -617,4 +621,26 @@ func (s *Scheduler) runVaultCleanup() {
 	}
 
 	s.vaultCleanupLastRun = time.Now()
+}
+
+// journalRetention bounds how far back the change journal is kept. A client
+// offline longer than this loses its incremental cursor and full-resyncs
+// (the low-watermark, advanced on prune, signals that). Matches the vault
+// window so a delete tombstone outlives its purgeable message.
+const journalRetention = 30 * 24 * time.Hour
+
+// runJournalCompaction prunes change-journal entries older than the retention
+// window and advances the low-watermark. Only runs once per day.
+func (s *Scheduler) runJournalCompaction() {
+	if time.Since(s.journalCompactLastRun) < 24*time.Hour {
+		return
+	}
+
+	cutoffMs := time.Now().Add(-journalRetention).UnixMilli()
+	if _, err := s.database.CompactMessageChanges(cutoffMs); err != nil {
+		log.Printf("Failed to compact change journal: %v", err)
+		return
+	}
+
+	s.journalCompactLastRun = time.Now()
 }
