@@ -4567,6 +4567,27 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                 EngineEvent::ConnectionState { state, message } => {
                     println!("engine connection: {state} {}", message.unwrap_or_default());
                 }
+                EngineEvent::Expunged { folder } => {
+                    println!("engine event: expunge in {folder} — forcing full resync");
+                    SHARED.with(|s| {
+                        if let Some(sh) = s.borrow().as_ref() {
+                            // Force a FULL conversation resync so deleted threads
+                            // drop off: the delta only reports CHANGED convs, not
+                            // removals. Clearing each account's full-sync stamp
+                            // makes the next FetchConversations run with since=0
+                            // (full), which replaces the cache and prunes the
+                            // gone conversations.
+                            if let Some(cache) = &sh.cache {
+                                for k in sh.account_keys.borrow().iter() {
+                                    cache.set_meta(&format!("conv_full_ts:{k}"), "0").ok();
+                                }
+                            }
+                            if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                                let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
+                            }
+                        }
+                    });
+                }
                 EngineEvent::CalendarUpdated { calendar_id } => {
                     println!("engine event: calendar {calendar_id} updated");
                 }

@@ -586,6 +586,13 @@ impl MailProvider for NativeProvider {
                                                 .and_then(|v| v.as_i64())
                                                 .unwrap_or(0);
                                             notifier(EngineEvent::CalendarUpdated { calendar_id });
+                                        } else if event_type == "expunge" {
+                                            // Messages deleted elsewhere (another
+                                            // client, spam purge). Tell the engine
+                                            // to drop the now-dangling conversations.
+                                            notifier(EngineEvent::Expunged {
+                                                folder: folder.to_string(),
+                                            });
                                         }
                                         log::info!(
                                             "NativeProvider: event {event_type} folder={folder}"

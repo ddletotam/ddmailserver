@@ -20,6 +20,10 @@ pub enum EngineEvent {
         subject: String,
         message_id: i64,
     },
+    /// Messages were expunged server-side (deleted from another client or by a
+    /// spam purge) — the client should resync conversations so deleted threads
+    /// drop off instead of lingering with unloadable bodies.
+    Expunged { folder: String },
     /// A calendar changed server-side.
     CalendarUpdated { calendar_id: i64 },
     /// The session token was refreshed (native provider); persist it.
