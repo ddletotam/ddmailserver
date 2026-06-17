@@ -665,6 +665,48 @@ func (s *Server) HandleDesktopDeleteMessages(w http.ResponseWriter, r *http.Requ
 	respondJSON(w, http.StatusOK, map[string]int{"deleted": deleted, "queued_remote": queued})
 }
 
+// ── Change journal ──
+
+// DesktopChangesResponse is the /changes payload: the journal tail since the
+// client's cursor, plus the head and reset signal. See migration 043.
+type DesktopChangesResponse struct {
+	Entries      []db.MessageChange `json:"entries"`
+	LatestSeq    int64              `json:"latest_seq"`
+	LowWatermark int64              `json:"low_watermark"`
+	// Reset tells the client its cursor is unusable (new client, or fell behind
+	// retention) — it should full-resync via /conversations and adopt LatestSeq
+	// instead of replaying Entries (which are empty in that case).
+	Reset bool `json:"reset"`
+}
+
+// HandleDesktopChanges serves the change journal tail. The client tracks the
+// global `seq` cursor and reads incremental changes — crucially including
+// DELETE tombstones, which the conversation delta never reported. This is what
+// replaces the periodic full resync.
+func (s *Server) HandleDesktopChanges(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		respondError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+
+	entries, latest, low, err := s.database.GetMessageChanges(user.ID, since, 5000)
+	if err != nil {
+		log.Printf("desktop changes: %v", err)
+		respondError(w, http.StatusInternalServerError, "journal read failed")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, DesktopChangesResponse{
+		Entries:      entries,
+		LatestSeq:    latest,
+		LowWatermark: low,
+		Reset:        since <= 0 || since < low,
+	})
+}
+
 // ── Identities ──
 
 // HandleDesktopIdentities returns the user's email identities.
