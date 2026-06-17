@@ -163,6 +163,7 @@ impl Cache {
 
         // Migrations for existing databases
         conn.execute("ALTER TABLE conversation_messages ADD COLUMN seen INTEGER NOT NULL DEFAULT 1", []).ok();
+        conn.execute("ALTER TABLE conversation_messages ADD COLUMN message_id TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE conversations ADD COLUMN avatar_hash TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE conversations ADD COLUMN received_by TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE conversations ADD COLUMN last_subject TEXT NOT NULL DEFAULT ''", []).ok();
@@ -247,8 +248,8 @@ impl Cache {
 
             for mr in &conv.messages {
                 tx.execute(
-                    "INSERT OR IGNORE INTO conversation_messages (conversation_id, folder, uid, seen) VALUES (?1, ?2, ?3, ?4)",
-                    params![conv.id, mr.folder, mr.uid, mr.seen as i32],
+                    "INSERT OR IGNORE INTO conversation_messages (conversation_id, folder, uid, seen, message_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![conv.id, mr.folder, mr.uid, mr.seen as i32, mr.message_id],
                 ).map_err(|e| format!("ins msg ref: {e}"))?;
             }
 
@@ -302,8 +303,8 @@ impl Cache {
             ).map_err(|e| format!("del msg refs: {e}"))?;
             for mr in &conv.messages {
                 tx.execute(
-                    "INSERT OR IGNORE INTO conversation_messages (conversation_id, folder, uid, seen) VALUES (?1, ?2, ?3, ?4)",
-                    params![conv.id, mr.folder, mr.uid, mr.seen as i32],
+                    "INSERT OR IGNORE INTO conversation_messages (conversation_id, folder, uid, seen, message_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![conv.id, mr.folder, mr.uid, mr.seen as i32, mr.message_id],
                 ).map_err(|e| format!("ins msg ref: {e}"))?;
             }
         }
@@ -427,13 +428,14 @@ impl Cache {
 
             // Load message refs
             let mut msg_stmt = conn.prepare(
-                "SELECT folder, uid, COALESCE(seen, 1) FROM conversation_messages WHERE conversation_id = ?1"
+                "SELECT folder, uid, COALESCE(seen, 1), COALESCE(message_id, '') FROM conversation_messages WHERE conversation_id = ?1"
             ).map_err(|e| format!("prepare msgs: {e}"))?;
             let messages: Vec<MessageRef> = msg_stmt.query_map(params![id], |r| {
                 Ok(MessageRef {
                     folder: r.get(0)?,
                     uid: r.get(1)?,
                     seen: r.get::<_, i32>(2)? != 0,
+                    message_id: r.get(3)?,
                 })
             }).map_err(|e| format!("query msgs: {e}"))?
             .filter_map(|r| r.ok())
