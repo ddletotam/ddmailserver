@@ -45,3 +45,10 @@ desktop/.claude/
 node_modules/
 screenshot-*.png
 test-ui.js
+mailserver_linux
+
+# Retired Tauri client (removed in 1eced24) — local leftovers, never commit
+desktop/src-tauri/
+desktop/dist/
+desktop/native/target/
+desktop/core/target/

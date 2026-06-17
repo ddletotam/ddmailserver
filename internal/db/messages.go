@@ -28,6 +28,7 @@ func (db *DB) CreateMessage(msg *models.Message) error {
 			in_reply_to, message_references, spam_score, spam_status, spam_reasons,
 			is_spam, spam_rule_id, remote_uid, remote_folder, raw_email, created_at, updated_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
+		ON CONFLICT (user_id, message_id) WHERE COALESCE(message_id, '') <> '' DO NOTHING
 		RETURNING id
 	`
 
@@ -69,6 +70,12 @@ func (db *DB) CreateMessage(msg *models.Message) error {
 		msg.IsSpam, spamRuleID, remoteUID, remoteFolder, msg.RawEmail, msg.CreatedAt, msg.UpdatedAt,
 	).Scan(&msg.ID)
 
+	// ON CONFLICT DO NOTHING returns no row when (user_id, message_id) already
+	// exists — a duplicate (e.g. a race between concurrent syncs). The DB
+	// constraint is the dedup guarantee; callers treat this as "skip".
+	if err == sql.ErrNoRows {
+		return ErrDuplicateMessage
+	}
 	if err != nil {
 		return fmt.Errorf("failed to create message: %w", err)
 	}
@@ -175,6 +182,10 @@ func (db *DB) GetMessagesByUser(userID int64, limit, offset int) ([]*models.Mess
 // record is not accessible to the user (we don't distinguish to avoid leaking
 // existence information).
 var ErrNotFound = errors.New("not found")
+
+// ErrDuplicateMessage is returned by CreateMessage when a row with the same
+// (user_id, message_id) already exists. Callers treat it as a benign skip.
+var ErrDuplicateMessage = errors.New("duplicate message (user_id, message_id)")
 
 // GetMessageByIDForUser retrieves a message by ID, but only if it belongs to
 // the given user. Returns ErrNotFound for both "no such message" and "exists
