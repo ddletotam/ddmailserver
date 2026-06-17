@@ -3,14 +3,11 @@ package client
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"strings"
-	"time"
 
 	"github.com/emersion/go-imap"
 	"github.com/yourusername/mailserver/internal/calendar"
@@ -47,8 +44,8 @@ type SyncTask struct {
 	refreshOAuth func(account *models.Account) error
 }
 
-func (t *SyncTask) SetNotifyFunc(fn func(NewMailNotice)) { t.notifyFunc = fn }
-func (t *SyncTask) SetAnalyzer(analyzer *parser.Analyzer)                         { t.analyzer = analyzer }
+func (t *SyncTask) SetNotifyFunc(fn func(NewMailNotice))  { t.notifyFunc = fn }
+func (t *SyncTask) SetAnalyzer(analyzer *parser.Analyzer) { t.analyzer = analyzer }
 func (t *SyncTask) SetOAuthRefresher(fn func(account *models.Account) error) {
 	t.refreshOAuth = fn
 }
@@ -385,14 +382,13 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 	if hasFlag(imapMsg.Flags, imap.DeletedFlag) {
 		return false, false, nil
 	}
+	// A message's identity is (user_id, Message-ID) — never invented here. An
+	// upstream message without one is skipped (we can't 5xx the source) + logged.
 	messageID := imapMsg.Envelope.MessageId
 	if messageID == "" {
-		h := sha256.New()
-		h.Write([]byte(imapMsg.Envelope.Subject))
-		h.Write([]byte(formatAddressList(imapMsg.Envelope.From)))
-		h.Write([]byte(imapMsg.Envelope.Date.Format(time.RFC3339)))
-		h.Write([]byte(fmt.Sprintf("%d", imapMsg.Uid)))
-		messageID = fmt.Sprintf("<%s@generated.local>", hex.EncodeToString(h.Sum(nil))[:32])
+		log.Printf("IMAP sync: skip message (uid %d, subj %q) — no Message-ID",
+			imapMsg.Uid, imapMsg.Envelope.Subject)
+		return false, false, nil
 	}
 	exists, err := t.database.MessageExistsByMessageID(t.account.UserID, messageID)
 	if err != nil {

@@ -144,9 +144,17 @@ func (s *Session) Data(r io.Reader) error {
 		}
 	}
 
+	// Every message's identity is (user_id, Message-ID). We never invent one
+	// server-side — a message without a client-assigned Message-ID is rejected
+	// with a hard 5xx so the sender sees an explicit error.
+	if parsed.MessageID == "" {
+		log.Printf("MX: REJECT message from %s — no Message-ID header", s.from)
+		return errors.New("550 Message rejected: missing Message-ID header")
+	}
+
 	// Extract values from parsed message
 	subject := parsed.Subject
-	messageID := parsed.GetMessageID()
+	messageID := parsed.MessageID
 	rawDate := parsed.GetDate()
 	messageDate := timeutil.ToMs(rawDate)
 	messageDateTZ := timeutil.TZOffsetMinutes(rawDate)
