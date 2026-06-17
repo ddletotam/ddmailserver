@@ -56,6 +56,12 @@ pub struct Contact {
 pub struct MessageRef {
     pub folder: String,
     pub uid: u32,
+    /// Stable identity: the server's global key is (user_id, Message-ID). We
+    /// echo it back on body/flag/delete so a row the server deleted+reinserted
+    /// (upstream mirroring) still resolves — the volatile `uid` above can
+    /// dangle. Empty for sources/rows without a Message-ID (degrades to `uid`).
+    #[serde(default)]
+    pub message_id: String,
     /// Read state at conversation-list time. Defaults to true ("read") for
     /// sources that don't track it (IMAP fallback, old cache rows) — the
     /// scroll-to-unread feature then degrades to scroll-to-end.

@@ -576,7 +576,7 @@ where
 
         // Separate drafts from regular messages.
         let draft = msgs.iter().rev().find(|m| m.is_draft)
-            .map(|m| MessageRef { folder: m.folder.clone(), uid: m.uid, seen: true });
+            .map(|m| MessageRef { folder: m.folder.clone(), uid: m.uid, message_id: m.message_id.clone(), seen: true });
         let regular_msgs: Vec<&RawEnvelope> = msgs.iter().filter(|m| !m.is_draft).collect();
 
         // Drafts alone don't make a conversation — see HandleDesktopConversations
@@ -622,7 +622,7 @@ where
             last_subject: last.subject.clone(),
             unread_count: regular_msgs.iter().filter(|m| !m.seen).count() as u32,
             total_count: regular_msgs.len() as u32,
-            messages: regular_msgs.iter().map(|m| MessageRef { folder: m.folder.clone(), uid: m.uid, seen: m.seen }).collect(),
+            messages: regular_msgs.iter().map(|m| MessageRef { folder: m.folder.clone(), uid: m.uid, message_id: m.message_id.clone(), seen: m.seen }).collect(),
             draft,
             account_key: String::new(), // stamped by the engine on merge
         });

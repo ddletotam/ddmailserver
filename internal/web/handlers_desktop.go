@@ -376,8 +376,9 @@ func (s *Server) HandleDesktopSetFlags(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		Messages []struct {
-			Folder string `json:"folder"`
-			UID    int64  `json:"uid"` // messages.id in native mode
+			Folder    string `json:"folder"`
+			UID       int64  `json:"uid"` // messages.id — legacy/volatile
+			MessageID string `json:"message_id"`
 		} `json:"messages"`
 		Flags string `json:"flags"`
 		Add   bool   `json:"add"`
@@ -388,8 +389,8 @@ func (s *Server) HandleDesktopSetFlags(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, ref := range req.Messages {
-		msg, err := s.database.GetMessageByID(ref.UID)
-		if err != nil || msg.UserID != user.ID {
+		msg := s.resolveMsgRef(user.ID, ref.MessageID, ref.UID)
+		if msg == nil {
 			continue
 		}
 
@@ -401,15 +402,15 @@ func (s *Server) HandleDesktopSetFlags(w http.ResponseWriter, r *http.Request) {
 		propagate := false
 		switch req.Flags {
 		case "\\Seen":
-			s.database.UpdateMessageFlag(ref.UID, "seen", req.Add)
+			s.database.UpdateMessageFlag(msg.ID, "seen", req.Add)
 			newSeen = req.Add
 			propagate = true
 		case "\\Flagged":
-			s.database.UpdateMessageFlag(ref.UID, "flagged", req.Add)
+			s.database.UpdateMessageFlag(msg.ID, "flagged", req.Add)
 			newFlagged = req.Add
 			propagate = true
 		case "\\Answered":
-			s.database.UpdateMessageFlag(ref.UID, "answered", req.Add)
+			s.database.UpdateMessageFlag(msg.ID, "answered", req.Add)
 			newAnswered = req.Add
 			propagate = true
 		case "\\Deleted":
@@ -419,9 +420,9 @@ func (s *Server) HandleDesktopSetFlags(w http.ResponseWriter, r *http.Request) {
 			// update for behavioural parity but don't queue here — the
 			// dedicated handler is the single-source-of-truth for the
 			// delete-on-remote dance.
-			s.database.UpdateMessageFlag(ref.UID, "deleted", req.Add)
+			s.database.UpdateMessageFlag(msg.ID, "deleted", req.Add)
 		case "\\Draft":
-			s.database.UpdateMessageFlag(ref.UID, "draft", req.Add)
+			s.database.UpdateMessageFlag(msg.ID, "draft", req.Add)
 		}
 
 		if propagate && msg.AccountID > 0 && msg.RemoteUID > 0 {
@@ -452,8 +453,9 @@ func (s *Server) HandleDesktopMarkSpamByDomain(w http.ResponseWriter, r *http.Re
 	var req struct {
 		Domain   string `json:"domain"`
 		Messages []struct {
-			Folder string `json:"folder"`
-			UID    int64  `json:"uid"`
+			Folder    string `json:"folder"`
+			UID       int64  `json:"uid"`
+			MessageID string `json:"message_id"`
 		} `json:"messages"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -480,12 +482,12 @@ func (s *Server) HandleDesktopMarkSpamByDomain(w http.ResponseWriter, r *http.Re
 
 	marked := 0
 	for _, m := range req.Messages {
-		msg, err := s.database.GetMessageByID(m.UID)
-		if err != nil || msg.UserID != user.ID {
+		msg := s.resolveMsgRef(user.ID, m.MessageID, m.UID)
+		if msg == nil {
 			continue
 		}
-		if err := s.database.MarkMessageAsSpam(m.UID, &rule.ID); err != nil {
-			log.Printf("desktop spam-by-domain: mark %d: %v", m.UID, err)
+		if err := s.database.MarkMessageAsSpam(msg.ID, &rule.ID); err != nil {
+			log.Printf("desktop spam-by-domain: mark %d: %v", msg.ID, err)
 			continue
 		}
 		marked++
@@ -601,8 +603,9 @@ func (s *Server) HandleDesktopDeleteMessages(w http.ResponseWriter, r *http.Requ
 
 	var req struct {
 		Messages []struct {
-			Folder string `json:"folder"`
-			UID    int64  `json:"uid"`
+			Folder    string `json:"folder"`
+			UID       int64  `json:"uid"`
+			MessageID string `json:"message_id"`
 		} `json:"messages"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -613,11 +616,11 @@ func (s *Server) HandleDesktopDeleteMessages(w http.ResponseWriter, r *http.Requ
 	deleted := 0
 	queued := 0
 	for _, ref := range req.Messages {
-		msg, err := s.database.GetMessageByID(ref.UID)
-		if err != nil || msg.UserID != user.ID {
+		msg := s.resolveMsgRef(user.ID, ref.MessageID, ref.UID)
+		if msg == nil {
 			continue
 		}
-		if err := s.database.SoftDeleteMessage(ref.UID); err != nil {
+		if err := s.database.SoftDeleteMessage(msg.ID); err != nil {
 			continue
 		}
 		deleted++
@@ -878,11 +881,35 @@ type DesktopContactInfo struct {
 // DesktopMessageRef matches the client's MessageRef type.
 type DesktopMessageRef struct {
 	Folder string `json:"folder"`
-	UID    int64  `json:"uid"` // messages.id in native mode
+	UID    int64  `json:"uid"` // messages.id — legacy/volatile, kept for IMAP-fallback clients
+	// MessageID is the STABLE identity: the global key is (user_id, Message-ID).
+	// Native clients echo it back and we resolve by it, so a row deleted+
+	// reinserted by upstream mirroring still maps to the right message (the
+	// volatile uid above could dangle). Empty only for messages that genuinely
+	// lack a Message-ID (legacy local rows).
+	MessageID string `json:"message_id"`
 	// Seen lets the client scroll to the first unread message and decide
 	// what to mark read on open — kept fresh by the ?since= delta (flag
 	// changes bump updated_at).
 	Seen bool `json:"seen"`
+}
+
+// resolveMsgRef maps a desktop message reference to its DB row, preferring the
+// stable (user_id, Message-ID) key over the volatile serial uid. Falls back to
+// the uid (= messages.id) only when message_id is absent (older clients) or its
+// lookup misses. Returns nil when nothing belongs to the user.
+func (s *Server) resolveMsgRef(userID int64, messageID string, uid int64) *models.Message {
+	if messageID != "" {
+		if msg, err := s.database.GetMessageByMessageID(userID, messageID); err == nil && msg != nil && msg.UserID == userID {
+			return msg
+		}
+	}
+	if uid > 0 {
+		if msg, err := s.database.GetMessageByID(uid); err == nil && msg != nil && msg.UserID == userID {
+			return msg
+		}
+	}
+	return nil
 }
 
 // DesktopConversation matches the client's Conversation type.
@@ -1212,18 +1239,20 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 		msgRefs := make([]DesktopMessageRef, 0, len(regular))
 		for _, e := range regular {
 			msgRefs = append(msgRefs, DesktopMessageRef{
-				Folder: e.folderName,
-				UID:    e.msg.ID,
-				Seen:   e.msg.Seen,
+				Folder:    e.folderName,
+				UID:       e.msg.ID,
+				MessageID: e.msg.MessageID,
+				Seen:      e.msg.Seen,
 			})
 		}
 
 		var draftRef *DesktopMessageRef
 		if lastDraft != nil {
 			draftRef = &DesktopMessageRef{
-				Folder: lastDraft.folderName,
-				UID:    lastDraft.msg.ID,
-				Seen:   true,
+				Folder:    lastDraft.folderName,
+				UID:       lastDraft.msg.ID,
+				MessageID: lastDraft.msg.MessageID,
+				Seen:      true,
 			}
 		}
 
@@ -1435,8 +1464,8 @@ func (s *Server) HandleDesktopConversationMessages(w http.ResponseWriter, r *htt
 
 	bodies := []DesktopMessageBody{}
 	for _, ref := range refs {
-		msg, err := s.database.GetMessageByID(ref.UID)
-		if err != nil || msg.UserID != user.ID {
+		msg := s.resolveMsgRef(user.ID, ref.MessageID, ref.UID)
+		if msg == nil {
 			continue
 		}
 

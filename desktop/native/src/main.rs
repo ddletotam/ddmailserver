@@ -933,7 +933,7 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
         let load_ms = t_load_start.elapsed().as_millis();
         if !bodies.is_empty() {
             *sh.current_msgs.borrow_mut() =
-                bodies.iter().map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid, seen: true }).collect();
+                bodies.iter().map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid, message_id: b.message_id.clone(), seen: true }).collect();
             *sh.current_bodies.borrow_mut() = bodies.clone();
             println!(
                 "[perf] open_conversation idx={idx} label={conv_label:?} \
@@ -956,7 +956,9 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
         let mut fetch_refs = c.messages.clone();
         if let Some((f, u)) = sh.pending_open_ref.borrow().clone() {
             if !fetch_refs.iter().any(|m| m.uid == u) {
-                fetch_refs.push(MessageRef { folder: f, uid: u, seen: false });
+                // Toast target identified only by (folder, uid); no RFC
+                // Message-ID here — server falls back to uid for this one.
+                fetch_refs.push(MessageRef { folder: f, uid: u, message_id: String::new(), seen: false });
             }
         }
         let _ = etx.send(engine::EngineCmd::FetchMessages {
@@ -2731,7 +2733,7 @@ fn main() {
             // startup conversation resolve rows through these.
             *shared.current_msgs.borrow_mut() = bodies
                 .iter()
-                .map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid, seen: true })
+                .map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid, message_id: b.message_id.clone(), seen: true })
                 .collect();
             *shared.current_bodies.borrow_mut() = bodies.clone();
             // Startup scroll: same first-unread/end anchoring as a click.
@@ -3211,6 +3213,7 @@ fn main() {
                     forward_attachments: Some(MessageRef {
                         folder: orig.folder.clone(),
                         uid: orig.uid,
+                        message_id: orig.message_id.clone(),
                         seen: true,
                     }),
                     account_key: sh_send.cur_account_key.borrow().clone(),
@@ -4496,7 +4499,7 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     }
                     *sh.current_msgs.borrow_mut() = bodies
                         .iter()
-                        .map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid, seen: true })
+                        .map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid, message_id: b.message_id.clone(), seen: true })
                         .collect();
                     *sh.current_bodies.borrow_mut() = bodies.clone();
                     // First render after open may be THIS one (conversation
@@ -4784,11 +4787,26 @@ fn handle_new_mail(
         if let Some(etx) = sh.engine_tx.borrow().as_ref() {
             // In the dialog = read: push \Seen right away, so the delta
             // refetch can't resurrect an unread pill for this row.
+            // The stable RFC Message-ID for this row, if the conversation refs
+            // carry it — prefer it over the volatile uid (db id) so the flag
+            // lands even if the server reinserted the row.
+            let row_mid = sh
+                .convs
+                .borrow()
+                .get(sh.current.get())
+                .and_then(|c| {
+                    c.messages
+                        .iter()
+                        .find(|m| m.uid == message_id as u32)
+                        .map(|m| m.message_id.clone())
+                })
+                .unwrap_or_default();
             if message_id > 0 {
                 let _ = etx.send(engine::EngineCmd::SetFlags {
                     messages: vec![MessageRef {
                         folder: folder.clone(),
                         uid: message_id as u32,
+                        message_id: row_mid.clone(),
                         seen: false,
                     }],
                     flags: "\\Seen".into(),
@@ -4803,7 +4821,7 @@ fn handle_new_mail(
                 .map(|c| c.messages.clone())
                 .unwrap_or_default();
             if message_id > 0 && !refs.iter().any(|m| m.uid == message_id as u32) {
-                refs.push(MessageRef { folder, uid: message_id as u32, seen: true });
+                refs.push(MessageRef { folder, uid: message_id as u32, message_id: row_mid, seen: true });
             }
             let _ = etx.send(engine::EngineCmd::FetchMessages {
                 messages: refs,
