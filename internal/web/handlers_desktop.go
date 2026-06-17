@@ -20,6 +20,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/notify"
 	"github.com/yourusername/mailserver/internal/parser"
 	"github.com/yourusername/mailserver/internal/timeutil"
 )
@@ -644,6 +645,20 @@ func (s *Server) HandleDesktopDeleteMessages(w http.ResponseWriter, r *http.Requ
 	}
 
 	log.Printf("desktop delete: soft-deleted %d/%d messages, queued %d for remote sync", deleted, len(req.Messages), queued)
+
+	// Notify the user's OTHER connected clients so they drop the deleted
+	// conversations instead of leaving dangling titles whose bodies 404.
+	// The originating client already updated optimistically; a redundant
+	// resync there is harmless.
+	if deleted > 0 && s.notifyHub != nil {
+		s.notifyHub.Publish(notify.Event{
+			UserID:   user.ID,
+			Type:     notify.EventExpunge,
+			Username: user.Username,
+			Mailbox:  "INBOX",
+		})
+	}
+
 	respondJSON(w, http.StatusOK, map[string]int{"deleted": deleted, "queued_remote": queued})
 }
 
