@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -617,6 +618,11 @@ buildMessage:
 		IsSpam: isSpam, SpamRuleID: spamRuleID,
 	}
 	if err := t.database.CreateMessage(msg); err != nil {
+		if errors.Is(err, db.ErrDuplicateMessage) {
+			// Another sync/MX already stored this (user_id, Message-ID). The
+			// DB constraint won the race; treat as a benign skip.
+			return false, false, nil
+		}
 		return false, false, err
 	}
 	if !isSpam {

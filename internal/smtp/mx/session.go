@@ -308,6 +308,10 @@ func (s *Session) Data(r io.Reader) error {
 
 		// Save to database
 		if err := s.database.CreateMessage(msg); err != nil {
+			if errors.Is(err, db.ErrDuplicateMessage) {
+				log.Printf("MX: duplicate (user_id, Message-ID) for %s — skip", recipient.Email)
+				continue
+			}
 			log.Printf("MX: Failed to save message for %s: %v", recipient.Email, err)
 			continue
 		}
