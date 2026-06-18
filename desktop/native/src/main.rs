@@ -22,6 +22,7 @@ mod render;
 mod sanitize;
 mod texture_cache;
 mod toast;
+mod toast_window;
 mod window_state;
 
 use std::cell::{Cell, RefCell};
@@ -763,8 +764,10 @@ struct Shared {
     /// Event a reminder toast asked to open (0 = none); consumed once the
     /// calendar events for its week arrive from the engine.
     pending_open_event: Cell<i64>,
-    /// (event_id, occurrence_start_ms) the snooze modal is acting on.
-    snooze_ctx: Cell<(i64, i64)>,
+    /// (event_id, occurrence_start_ms, summary) the snooze modal is acting on.
+    /// Summary is the occurrence's logical key — needed to neutralise/cancel
+    /// its other reminders (cache keys on occurrence+summary).
+    snooze_ctx: RefCell<(i64, i64, String)>,
 }
 
 thread_local! {
@@ -1351,6 +1354,46 @@ fn week_start_days_for_ms(ms: i64) -> i64 {
         .num_days()
 }
 
+/// Route a reminder-toast action onto the UI loop. Toast callbacks fire on the
+/// UI thread already, but hopping via the event loop keeps us clear of any
+/// borrow that might be live while a toast window dispatches.
+fn reminder_dispatch(action: &'static str, eid: i64, occ: i64, summary: String) {
+    if let Some(weak) = UI_WEAK.get() {
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    handle_reminder_action(&ui, sh, action, eid, occ, &summary);
+                }
+            });
+        });
+    }
+}
+
+/// Smart-step «напомнить через …» options: only steps that land BEFORE the
+/// event starts (`mins_until` = minutes from now to the occurrence). Returns
+/// (value, label) pairs — value is minutes as a string for the snooze-choice
+/// callback. «В момент начала» is a separate fixed button, so it's not here.
+fn snooze_steps(mins_until: i64) -> Vec<(String, String)> {
+    const STEPS: &[(i64, &str)] = &[
+        (1, "Через 1 минуту"),
+        (5, "Через 5 минут"),
+        (10, "Через 10 минут"),
+        (15, "Через 15 минут"),
+        (30, "Через 30 минут"),
+        (60, "Через 1 час"),
+        (120, "Через 2 часа"),
+        (180, "Через 3 часа"),
+        (360, "Через 6 часов"),
+        (720, "Через 12 часов"),
+        (1440, "Через 1 день"),
+    ];
+    STEPS
+        .iter()
+        .filter(|(m, _)| *m < mins_until)
+        .map(|(m, l)| (m.to_string(), l.to_string()))
+        .collect()
+}
+
 /// Single dispatch point for everything a calendar-reminder toast (or the
 /// in-app snooze modal) can ask for — restored from the Tauri build:
 ///   default       → open the event in the calendar (does NOT ack — opening
@@ -1366,6 +1409,7 @@ fn handle_reminder_action(
     action: &str,
     event_id: i64,
     occ_ms: i64,
+    summary: &str,
 ) {
     match action {
         "ack" => {
@@ -1373,31 +1417,46 @@ fn handle_reminder_action(
                 let _ = c.mark_reminder_acked(event_id, occ_ms);
             }
         }
+        // «✕» on a «наступило» toast: wipe every reminder for this occurrence.
+        "cancel-occ" => {
+            if let Some(c) = sh.cache.as_ref() {
+                let _ = c.cancel_occurrence_reminders(occ_ms, summary);
+            }
+            toast_window::close_for_event(event_id);
+        }
         "snooze-window" => {
-            let summary = sh
-                .cache
-                .as_ref()
-                .and_then(|c| c.get_reminder(event_id, occ_ms).ok().flatten())
-                .map(|r| r.summary)
-                .unwrap_or_default();
-            sh.snooze_ctx.set((event_id, occ_ms));
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let mins_until = (occ_ms - now_ms) / 60_000;
+            let opts: Vec<SnoozeOpt> = snooze_steps(mins_until)
+                .into_iter()
+                .map(|(value, label)| SnoozeOpt {
+                    value: value.into(),
+                    label: label.into(),
+                })
+                .collect();
+            sh.snooze_ctx
+                .replace((event_id, occ_ms, summary.to_string()));
             ui.set_snooze_summary(summary.into());
+            ui.set_snooze_options(slint::ModelRc::new(slint::VecModel::from(opts)));
             ui.set_snooze_visible(true);
             raise_window(ui);
         }
+        // A manual snooze NEUTRALISES every other reminder for the occurrence
+        // (incl. event-defined alarms): set_manual_reminder replaces them all
+        // with one kind-3 row.
         s if s.starts_with("snz:") => {
             let Some(c) = sh.cache.as_ref() else { return };
             let now_ms = chrono::Utc::now().timestamp_millis();
-            let (fire_at, lead) = if s == "snz:atstart" {
-                (occ_ms, 0)
+            let fire_at = if s == "snz:atstart" {
+                occ_ms
             } else {
                 let mins: i64 = s[4..].parse().unwrap_or(5);
-                let fire = now_ms + mins * 60_000;
-                (fire, ((occ_ms - fire) / 60_000).max(0) as i32)
+                now_ms + mins * 60_000
             };
-            if let Err(e) = c.snooze_reminder(event_id, occ_ms, fire_at, lead) {
-                eprintln!("reminders: snooze failed for {event_id}: {e}");
+            if let Err(e) = c.set_manual_reminder(event_id, occ_ms, fire_at, summary) {
+                eprintln!("reminders: manual snooze failed for {event_id}: {e}");
             }
+            toast_window::close_for_event(event_id);
         }
         "default" => {
             raise_window(ui);
@@ -2074,6 +2133,11 @@ fn save_edit_form(ui: &MainWindow, sh: &Shared) {
             "dtstart": start,
         });
         body["dtend"] = end.unwrap_or(0).into(); // explicit 0 ⇒ clear on server
+        // Edit drops all prior reminders for this event; the refetch's seed()
+        // recreates them from the new settings (incl. wiping a manual snooze).
+        if let Some(c) = sh.cache.as_ref() {
+            let _ = c.purge_event_reminders(editing);
+        }
         let _ = etx.send(engine::EngineCmd::PatchEvent { event_id: editing, body });
     }
     ui.set_edit_visible(false);
@@ -2699,7 +2763,7 @@ fn main() {
         edit_cal_ids: RefCell::new(Vec::new()),
         compose_attachments: RefCell::new(Vec::new()),
         pending_open_event: Cell::new(0),
-        snooze_ctx: Cell::new((0, 0)),
+        snooze_ctx: RefCell::new((0, 0, String::new())),
     });
     SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
     sync_media_globals(&ui, &shared.policy.borrow());
@@ -4018,11 +4082,11 @@ fn main() {
     let sh_snz = shared.clone();
     ui.on_snooze_choice(move |choice| {
         if let Some(ui) = ui_weak_snz.upgrade() {
-            let (eid, occ) = sh_snz.snooze_ctx.get();
+            let (eid, occ, summary) = sh_snz.snooze_ctx.borrow().clone();
             if eid != 0 {
-                handle_reminder_action(&ui, &sh_snz, &format!("snz:{choice}"), eid, occ);
+                handle_reminder_action(&ui, &sh_snz, &format!("snz:{choice}"), eid, occ, &summary);
             }
-            sh_snz.snooze_ctx.set((0, 0));
+            sh_snz.snooze_ctx.replace((0, 0, String::new()));
         }
     });
     // Colour picked in the per-calendar palette popup.
@@ -4176,6 +4240,11 @@ fn main() {
     ui.on_detail_delete(move || {
         let Some(ui) = ui_weak_del.upgrade() else { return };
         let id = ui.get_detail_event_id() as i64;
+        // Delete wipes the event's reminders too (and the toast, if showing).
+        if let Some(c) = sh_del.cache.as_ref() {
+            let _ = c.purge_event_reminders(id);
+        }
+        toast_window::close_for_event(id);
         if let Some(etx) = sh_del.engine_tx.borrow().as_ref() {
             println!("delete event {id}");
             let _ = etx.send(engine::EngineCmd::DeleteEvent { event_id: id });
@@ -4267,26 +4336,56 @@ fn main() {
                     .unwrap_or_default()
             });
             for row in due {
-                // Buttons + body click route through the single Tauri-era
-                // action machine; the WinRT callback hops to the UI loop.
-                let (eid, occ) = (row.event_id, row.occurrence_start_ms);
-                toast::reminder_toast(
-                    &row.summary,
-                    &reminders::body_for(&row, now_ms),
-                    now_ms < occ, // «Отложить…» only before the start
-                    move |action| {
-                        let action = action.to_string();
-                        if let Some(weak) = UI_WEAK.get() {
-                            let _ = weak.upgrade_in_event_loop(move |ui| {
-                                SHARED.with(|s| {
-                                    if let Some(sh) = s.borrow().as_ref() {
-                                        handle_reminder_action(&ui, sh, &action, eid, occ);
-                                    }
-                                });
-                            });
-                        }
-                    },
-                );
+                // Guard: «скоро» is pointless once started; «наступило» is
+                // stale long after. Suppressed rows were already marked fired
+                // by scan(), so they won't return again.
+                if !reminders::should_show(&row, now_ms) {
+                    continue;
+                }
+                // Dedup: at most one toast per event on screen (kills the
+                // startup burst of repeats).
+                if toast_window::has_for_event(row.event_id) {
+                    continue;
+                }
+                let title = reminders::title_for(&row);
+                let body = reminders::body_for(&row, now_ms);
+                let eid = row.event_id;
+                let occ = row.occurrence_start_ms;
+                let summary = row.summary.clone();
+
+                if row.kind == reminders::KIND_STARTED {
+                    // B «наступило»: 3 min, no buttons. Body → open card + raise.
+                    // ✕ → delete all reminders for the occurrence.
+                    let s_close = summary.clone();
+                    let s_body = summary.clone();
+                    toast_window::show(
+                        reminders::KIND_STARTED,
+                        eid,
+                        &title,
+                        &body,
+                        false,
+                        180,
+                        move || reminder_dispatch("cancel-occ", eid, occ, s_close.clone()),
+                        move || reminder_dispatch("default", eid, occ, s_body.clone()),
+                        || {},
+                    );
+                } else {
+                    // A «скоро» (and manual): 30 s, «Напомнить позже» button.
+                    // Body → open card (toast stays). ✕ → just dismiss.
+                    let s_body = summary.clone();
+                    let s_act = summary.clone();
+                    toast_window::show(
+                        reminders::KIND_SOON,
+                        eid,
+                        &title,
+                        &body,
+                        true,
+                        30,
+                        || {},
+                        move || reminder_dispatch("default", eid, occ, s_body.clone()),
+                        move || reminder_dispatch("snooze-window", eid, occ, s_act.clone()),
+                    );
+                }
             }
         },
     );
@@ -4853,7 +4952,11 @@ fn handle_new_mail(
         }
     }
 
-    if !visible {
+    // Mail toast fires when the user can't see the new mail in-window: the
+    // window is hidden (tray), OR the calendar view is up (mail sidebar not
+    // visible). When the mail view is open and visible, the sidebar flash +
+    // unread bump above is the notification — no toast.
+    if !visible || !in_mail_view {
         let title = if new_count > 1 {
             format!("{} (+{} ещё)", display_from(&from), new_count - 1)
         } else {

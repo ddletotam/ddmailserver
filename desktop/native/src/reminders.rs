@@ -20,6 +20,15 @@
 use ddmail_core::cache::{Cache, ReminderRow};
 use ddmail_core::types::DesktopCalendarEvent;
 
+/// Reminder kinds (mirror the cache `kind` column / `toast_window`).
+pub const KIND_SOON: i32 = 1; // «скоро случится» — at dtstart − lead
+pub const KIND_STARTED: i32 = 2; // «наступило» — at dtstart
+pub const KIND_MANUAL: i32 = 3; // user «напомнить позже» (fires as a «скоро»)
+
+/// A «наступило» toast is only meaningful right around the start; if the
+/// client was offline and we cross it well after the fact, suppress it.
+pub const STARTED_GRACE_MS: i64 = 3 * 60 * 1000;
+
 /// Lead-time used when an event carries no VALARM (`alarm_lead_min == 0`).
 const DEFAULT_LEAD_MIN: i32 = 10;
 
@@ -36,16 +45,23 @@ pub const SCAN_INTERVAL_SECS: u64 = 30;
 
 /// Seed pending reminders from the current calendar view.
 ///
-/// Only future occurrences within the horizon are considered. The cache
-/// upsert is keyed on (occurrence_start, summary), so calling this on every
-/// refresh neither duplicates rows nor resurrects ones already `fired`.
+/// Each future occurrence gets TWO rows: «скоро случится» (kind 1, at
+/// dtstart − lead) and «наступило» (kind 2, at dtstart). Occurrences the user
+/// has taken manual control of (a kind-3 row exists) are left untouched, so a
+/// routine refresh can't clobber a «напомнить позже». Idempotent: the cache
+/// upserts on (occurrence, summary, kind) and never resurrects fired rows.
 pub fn seed(cache: &Cache, events: &[DesktopCalendarEvent], now_ms: i64) {
     let horizon = now_ms + SEED_HORIZON_MS;
     for ev in events {
+        // Only future starts within the horizon, with a real title.
         if ev.dtstart < now_ms || ev.dtstart > horizon {
             continue;
         }
         if ev.summary.trim().is_empty() {
+            continue;
+        }
+        // The user neutralised the auto reminders for this occurrence — respect it.
+        if cache.has_manual_reminder(ev.dtstart, &ev.summary) {
             continue;
         }
         let lead = if ev.alarm_lead_min > 0 {
@@ -53,18 +69,43 @@ pub fn seed(cache: &Cache, events: &[DesktopCalendarEvent], now_ms: i64) {
         } else {
             DEFAULT_LEAD_MIN
         };
-        let fire_at = ev.dtstart - (lead as i64) * 60_000;
+        let fire_soon = ev.dtstart - (lead as i64) * 60_000;
         if let Err(e) =
-            cache.upsert_pending_reminder(ev.id, ev.dtstart, fire_at, lead, &ev.summary)
+            cache.upsert_pending_reminder(ev.id, ev.dtstart, fire_soon, lead, &ev.summary, KIND_SOON)
         {
-            eprintln!("reminders: seed failed for event {}: {e}", ev.id);
+            eprintln!("reminders: seed A failed for event {}: {e}", ev.id);
+        }
+        if let Err(e) = cache.upsert_pending_reminder(
+            ev.id,
+            ev.dtstart,
+            ev.dtstart,
+            0,
+            &ev.summary,
+            KIND_STARTED,
+        ) {
+            eprintln!("reminders: seed B failed for event {}: {e}", ev.id);
         }
     }
 }
 
-/// Prune stale rows, then return reminders that have just come due,
-/// marking each `fired` before returning so the caller's toast dispatch
-/// can never re-trigger the same row.
+/// Regenerate reminders for one event after it was edited (or wipe them after
+/// a delete): purge every row for the event, then re-seed from the current
+/// view. Per spec, an edit/delete drops all prior reminders and rebuilds from
+/// the event's settings — including any manual snooze.
+pub fn reseed_event(cache: &Cache, event_id: i64, events: &[DesktopCalendarEvent], now_ms: i64) {
+    if let Err(e) = cache.purge_event_reminders(event_id) {
+        eprintln!("reminders: purge {event_id} failed: {e}");
+    }
+    // Re-seed only the surviving occurrences of this event (delete → none).
+    let mine: Vec<DesktopCalendarEvent> =
+        events.iter().filter(|e| e.id == event_id).cloned().collect();
+    seed(cache, &mine, now_ms);
+}
+
+/// Prune stale rows, then return reminders that have just come due, marking
+/// each `fired` (by its logical (occurrence, summary, kind) key, so A and B
+/// for one occurrence are tracked independently) before returning — the
+/// caller can never re-trigger the same row.
 pub fn scan(cache: &Cache, now_ms: i64) -> Vec<ReminderRow> {
     let cutoff = now_ms - PRUNE_AFTER_HOURS * 3600 * 1000;
     let _ = cache.prune_old_reminders(cutoff);
@@ -77,11 +118,35 @@ pub fn scan(cache: &Cache, now_ms: i64) -> Vec<ReminderRow> {
         }
     };
     for row in &due {
-        if let Err(e) = cache.mark_reminder_fired(row.event_id, row.occurrence_start_ms) {
+        if let Err(e) = cache.mark_reminder_fired(row.occurrence_start_ms, &row.summary, row.kind) {
             eprintln!("reminders: mark_fired failed for {}: {e}", row.event_id);
         }
     }
     due
+}
+
+/// Should a due row actually be shown? «скоро» (kind 1) is pointless once the
+/// event has started; «наступило» (kind 2) is stale long after the start. A
+/// manual snooze (kind 3) always shows — the user asked for it explicitly.
+pub fn should_show(row: &ReminderRow, now_ms: i64) -> bool {
+    match row.kind {
+        KIND_SOON => now_ms < row.occurrence_start_ms,
+        KIND_STARTED => now_ms <= row.occurrence_start_ms + STARTED_GRACE_MS,
+        _ => true,
+    }
+}
+
+/// Toast title: «Скоро: …» / «Наступило: …».
+pub fn title_for(row: &ReminderRow) -> String {
+    let s = if row.summary.trim().is_empty() {
+        "Событие"
+    } else {
+        row.summary.trim()
+    };
+    match row.kind {
+        KIND_STARTED => format!("Наступило: {s}"),
+        _ => format!("Скоро: {s}"),
+    }
 }
 
 /// Human-readable toast body for a due reminder: how long until the event
@@ -185,6 +250,7 @@ mod tests {
             fire_at_ms: 0,
             lead_min: 10,
             summary: "X".into(),
+            kind: KIND_SOON,
         };
         assert!(body_for(&row, -10 * 60_000).starts_with("Через 10 мин"));
         assert!(body_for(&row, 0).starts_with("Начинается"));

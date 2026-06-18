@@ -198,6 +198,13 @@ component SettingRow inherits Rectangle {
     }
 }
 
+// One «напомнить позже» option: `value` is what the snooze-choice callback
+// passes back ("5"/"30"/… minutes, or "atstart"); `label` is the display text.
+export struct SnoozeOpt {
+    value: string,
+    label: string,
+}
+
 export component MainWindow inherits Window {
     title: "ddmail";
     preferred-width: 1100px;
@@ -460,10 +467,13 @@ export component MainWindow inherits Window {
     // New-mail sound toggle (persisted client-side).
     in-out property <bool> notify-sound-on: true;
     callback toggle-notify-sound();
-    // Snooze picker for calendar-reminder toasts («Отложить…»).
+    // Snooze picker for calendar-reminder toasts («Напомнить позже»).
     in-out property <bool> snooze-visible: false;
     in property <string> snooze-summary: "";
-    callback snooze-choice(string); // "5"/"15"/"30"/"60"/"atstart"
+    // Smart-step options, built per-event in Rust (only steps that land before
+    // the start; «В момент начала» is a separate fixed button).
+    in property <[SnoozeOpt]> snooze-options: [];
+    callback snooze-choice(string); // option value: minutes ("5"/"30"/…) or "atstart"
     // ── Settings modal ──
     in-out property <bool> settings-visible: false;
     in-out property <int> settings-tab: 0; // 0 Уведомления · 1 Контент · 2 Подключение · 3 Аккаунты
@@ -2886,15 +2896,18 @@ export component MainWindow inherits Window {
                         font-size: 14px;
                         color: #2b3640;
                     }
-                    HorizontalLayout {
-                        spacing: 8px;
-                        for opt in ["5", "15", "30", "60"]: Rectangle {
+                    Text {
+                        text: "Напомнить через:";
+                        font-size: 13px; color: #5b6672;
+                    }
+                    VerticalLayout {
+                        spacing: 6px;
+                        for opt in root.snooze-options: Rectangle {
                             height: 34px;
-                            horizontal-stretch: 1;
                             border-radius: 8px;
                             background: snz-min.has-hover ? #1556c8 : #2f80ed;
                             Text {
-                                text: opt + " мин";
+                                text: opt.label;
                                 color: white; font-size: 14px; font-weight: 600;
                                 horizontal-alignment: center; vertical-alignment: center;
                             }
@@ -2902,7 +2915,7 @@ export component MainWindow inherits Window {
                                 clicked => {
                                     root.snooze-visible = false;
                                     kb.focus();
-                                    root.snooze-choice(opt);
+                                    root.snooze-choice(opt.value);
                                 }
                             }
                         }
@@ -3241,5 +3254,139 @@ export component MainWindow inherits Window {
                   : #ff5630;
         border-width: 2px;
         border-color: #ffffffcc;
+    }
+}
+
+// ── Calendar reminder toast (own frameless always-on-top window) ──
+// One component serves both kinds:
+//   A «скоро случится» → show-action=true (── «Напомнить позже»), X closes.
+//   B «наступило»      → show-action=false, click body raises+opens, X deletes.
+// Behavioural rules (timeout, delete-on-X, snooze dialog) live in Rust; this
+// is pure presentation. The whole card is a body-click target EXCEPT the X and
+// the action button, which sit above it in z-order and swallow their clicks.
+export component ToastWindow inherits Window {
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+    width: 360px;
+    height: 128px;
+
+    in property <string> toast-title;
+    in property <string> toast-body;
+    in property <bool> show-action: false;
+    in property <string> action-label: "Напомнить позже";
+    // 1 = «скоро» (accent blue), 2 = «наступило» (accent amber).
+    in property <int> kind: 1;
+    // Auto-close countdown. `timeout-ms`: total (0 = no timeout, no bar).
+    // `progress`: 0.0 = just shown (bar full) → 1.0 = expired (bar empty),
+    // driven from Rust each tick (a bound `animate` duration proved unreliable).
+    in property <int> timeout-ms: 0;
+    in property <float> progress: 0.0;
+
+    callback close-clicked();
+    callback body-clicked();
+    callback action-clicked();
+
+    Rectangle {
+        background: #23262b;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: #3a3f47;
+        drop-shadow-blur: 16px;
+        drop-shadow-color: #000000aa;
+
+        // Whole-card click target (below the buttons in z-order).
+        body-ta := TouchArea {
+            clicked => { root.body-clicked(); }
+        }
+
+        // Accent stripe on the left edge.
+        Rectangle {
+            x: 0; y: 0; width: 4px; height: parent.height;
+            background: root.kind == 2 ? #ffab00 : #3a6df0;
+            border-top-left-radius: 12px;
+            border-bottom-left-radius: 12px;
+        }
+
+        VerticalLayout {
+            padding: 14px;
+            padding-left: 16px;
+            spacing: 6px;
+
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.toast-title;
+                    font-size: 15px;
+                    font-weight: 700;
+                    color: #ffffff;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                close-ta := TouchArea {
+                    width: 24px;
+                    height: 24px;
+                    clicked => { root.close-clicked(); }
+                    Rectangle {
+                        background: close-ta.has-hover ? #3a3f47 : transparent;
+                        border-radius: 6px;
+                        Text {
+                            text: "✕";
+                            color: #aeb6c2;
+                            font-size: 15px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            Text {
+                text: root.toast-body;
+                font-size: 13px;
+                color: #c7cdd6;
+                wrap: word-wrap;
+                vertical-stretch: 1;
+                overflow: elide;
+            }
+
+            if root.show-action : HorizontalLayout {
+                alignment: end;
+                action-ta := TouchArea {
+                    width: action-bg.preferred-width;
+                    height: 28px;
+                    clicked => { root.action-clicked(); }
+                    action-bg := Rectangle {
+                        background: action-ta.has-hover ? #4f7df5 : #3a6df0;
+                        border-radius: 6px;
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            Text {
+                                text: root.action-label;
+                                color: #ffffff;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Countdown bar: drains full→empty over `timeout-ms`. Sized off `root`
+        // (the window) — `parent` inside an `if` can resolve to a zero-size
+        // wrapper. No big corner radius: a radius larger than the 4px height
+        // makes the renderer drop the rect entirely. Plain Rectangle (no
+        // TouchArea) so it never swallows body clicks.
+        if root.timeout-ms > 0 : Rectangle {
+            x: 4px;
+            y: root.height - 5px;
+            height: 4px;
+            width: (root.width - 8px) * (1.0 - root.progress);
+            background: root.kind == 2 ? #ffab00 : #3a6df0;
+            border-radius: 2px;
+        }
     }
 }
