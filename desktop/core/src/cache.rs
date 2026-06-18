@@ -191,11 +191,25 @@ impl Cache {
         // — so the user's last action sticks. Then put a UNIQUE INDEX on
         // the same key, and switch the upsert below to an ON CONFLICT
         // path so new event_ids overwrite the old one in-place.
+        // `kind` distinguishes the two reminder types per occurrence:
+        //   1 = «скоро случится» (at dtstart − lead)
+        //   2 = «наступило»      (at dtstart)
+        //   3 = manual snooze    (user-chosen, neutralises 1 & 2)
+        // The logical key gains `kind` so A and B can coexist for one
+        // occurrence. Existing rows default to kind 1.
+        conn.execute(
+            "ALTER TABLE event_reminders ADD COLUMN kind INTEGER NOT NULL DEFAULT 1",
+            [],
+        )
+        .ok();
+        // The old unique index (occurrence, summary) would now reject the
+        // second kind — drop it and recreate including `kind`.
+        conn.execute("DROP INDEX IF EXISTS idx_reminders_logical", []).ok();
         conn.execute(
             "DELETE FROM event_reminders WHERE rowid IN (\
                 SELECT rowid FROM (\
                     SELECT rowid, ROW_NUMBER() OVER (\
-                        PARTITION BY occurrence_start_ms, summary \
+                        PARTITION BY occurrence_start_ms, summary, kind \
                         ORDER BY CASE status \
                             WHEN 'acked' THEN 0 \
                             WHEN 'fired' THEN 1 \
@@ -208,7 +222,7 @@ impl Cache {
         ).ok();
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_reminders_logical \
-             ON event_reminders(occurrence_start_ms, summary)",
+             ON event_reminders(occurrence_start_ms, summary, kind)",
             [],
         ).ok();
 
@@ -741,16 +755,86 @@ impl Cache {
         fire_at_ms: i64,
         lead_min: i32,
         summary: &str,
+        kind: i32,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         conn.execute(
             "INSERT INTO event_reminders \
-             (event_id, occurrence_start_ms, fire_at_ms, status, lead_min, summary) \
-             VALUES (?1, ?2, ?3, 'pending', ?4, ?5) \
-             ON CONFLICT(occurrence_start_ms, summary) DO UPDATE SET \
+             (event_id, occurrence_start_ms, fire_at_ms, status, lead_min, summary, kind) \
+             VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?6) \
+             ON CONFLICT(occurrence_start_ms, summary, kind) DO UPDATE SET \
                 event_id = excluded.event_id",
-            params![event_id, occurrence_start_ms, fire_at_ms, lead_min, summary],
+            params![event_id, occurrence_start_ms, fire_at_ms, lead_min, summary, kind],
         ).map_err(|e| format!("ins reminder: {e}"))?;
+        Ok(())
+    }
+
+    /// True if a manual snooze (kind 3) exists for this occurrence — seeding
+    /// must then NOT recreate the auto A/B reminders (the user took control).
+    pub fn has_manual_reminder(&self, occurrence_start_ms: i64, summary: &str) -> bool {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        conn.query_row(
+            "SELECT 1 FROM event_reminders \
+             WHERE occurrence_start_ms = ?1 AND summary = ?2 AND kind = 3 LIMIT 1",
+            params![occurrence_start_ms, summary],
+            |_| Ok(()),
+        )
+        .is_ok()
+    }
+
+    /// Replace every reminder for an occurrence with a single manual (kind 3)
+    /// one — neutralises the auto A/B and any event-defined alarms, per spec.
+    pub fn set_manual_reminder(
+        &self,
+        event_id: i64,
+        occurrence_start_ms: i64,
+        fire_at_ms: i64,
+        summary: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        conn.execute(
+            "DELETE FROM event_reminders WHERE occurrence_start_ms = ?1 AND summary = ?2",
+            params![occurrence_start_ms, summary],
+        )
+        .map_err(|e| format!("manual clear: {e}"))?;
+        conn.execute(
+            "INSERT INTO event_reminders \
+             (event_id, occurrence_start_ms, fire_at_ms, status, lead_min, summary, kind) \
+             VALUES (?1, ?2, ?3, 'pending', 0, ?4, 3)",
+            params![event_id, occurrence_start_ms, fire_at_ms, summary],
+        )
+        .map_err(|e| format!("manual ins: {e}"))?;
+        Ok(())
+    }
+
+    /// Delete every reminder for one occurrence (all kinds). «✕» on a
+    /// «наступило» toast, and the delete-occurrence half of a manual snooze.
+    pub fn cancel_occurrence_reminders(
+        &self,
+        occurrence_start_ms: i64,
+        summary: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        conn.execute(
+            "DELETE FROM event_reminders WHERE occurrence_start_ms = ?1 AND summary = ?2",
+            params![occurrence_start_ms, summary],
+        )
+        .map_err(|e| format!("cancel occ: {e}"))?;
+        Ok(())
+    }
+
+    /// Delete all reminders for an event (every occurrence, every kind). Used
+    /// when an event is edited/deleted so they can be regenerated from scratch.
+    pub fn purge_event_reminders(&self, event_id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        conn.execute(
+            "DELETE FROM event_reminders WHERE event_id = ?1",
+            params![event_id],
+        )
+        .map_err(|e| format!("purge event: {e}"))?;
         Ok(())
     }
 
@@ -760,7 +844,7 @@ impl Cache {
     pub fn due_reminders(&self, now_ms: i64) -> Result<Vec<ReminderRow>, String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         let mut stmt = conn.prepare(
-            "SELECT event_id, occurrence_start_ms, fire_at_ms, lead_min, summary \
+            "SELECT event_id, occurrence_start_ms, fire_at_ms, lead_min, summary, kind \
              FROM event_reminders \
              WHERE status = 'pending' AND fire_at_ms <= ?1 \
              ORDER BY fire_at_ms ASC"
@@ -772,6 +856,7 @@ impl Cache {
                 fire_at_ms: r.get(2)?,
                 lead_min: r.get(3)?,
                 summary: r.get(4)?,
+                kind: r.get(5)?,
             })
         }).map_err(|e| format!("query: {e}"))?;
         let mut out = Vec::new();
@@ -779,12 +864,17 @@ impl Cache {
         Ok(out)
     }
 
-    pub fn mark_reminder_fired(&self, event_id: i64, occurrence_start_ms: i64) -> Result<(), String> {
+    pub fn mark_reminder_fired(
+        &self,
+        occurrence_start_ms: i64,
+        summary: &str,
+        kind: i32,
+    ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         conn.execute(
             "UPDATE event_reminders SET status = 'fired' \
-             WHERE event_id = ?1 AND occurrence_start_ms = ?2",
-            params![event_id, occurrence_start_ms],
+             WHERE occurrence_start_ms = ?1 AND summary = ?2 AND kind = ?3",
+            params![occurrence_start_ms, summary, kind],
         ).map_err(|e| format!("upd fired: {e}"))?;
         Ok(())
     }
@@ -799,7 +889,7 @@ impl Cache {
     ) -> Result<Option<ReminderRow>, String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         let mut stmt = conn.prepare(
-            "SELECT event_id, occurrence_start_ms, fire_at_ms, lead_min, summary \
+            "SELECT event_id, occurrence_start_ms, fire_at_ms, lead_min, summary, kind \
              FROM event_reminders WHERE event_id = ?1 AND occurrence_start_ms = ?2",
         ).map_err(|e| format!("prep: {e}"))?;
         let mut rows = stmt.query_map(params![event_id, occurrence_start_ms], |r| {
@@ -809,6 +899,7 @@ impl Cache {
                 fire_at_ms: r.get(2)?,
                 lead_min: r.get(3)?,
                 summary: r.get(4)?,
+                kind: r.get(5)?,
             })
         }).map_err(|e| format!("query: {e}"))?;
         match rows.next() {
@@ -868,4 +959,6 @@ pub struct ReminderRow {
     pub fire_at_ms: i64,
     pub lead_min: i32,
     pub summary: String,
+    /// 1 = «скоро случится», 2 = «наступило», 3 = manual snooze.
+    pub kind: i32,
 }
