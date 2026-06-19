@@ -768,6 +768,11 @@ struct Shared {
     /// Summary is the occurrence's logical key — needed to neutralise/cancel
     /// its other reminders (cache keys on occurrence+summary).
     snooze_ctx: RefCell<(i64, i64, String)>,
+    /// Per-render map of on-screen occurrences for drag-move: (event_id, day)
+    /// → (occurrence_start_ms, occurrence_end_ms, recurring). Lets the drag
+    /// handler recover the EXACT instance start (recurrence_id for scope=single)
+    /// — Slint `int` is i32 and can't carry epoch-ms. Rebuilt each layout.
+    cal_occ: RefCell<HashMap<(i32, i32), (i64, i64, bool)>>,
 }
 
 thread_local! {
@@ -1797,9 +1802,10 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
         time: slint::SharedString,
         count: i32,
         tentative: bool,
+        writable: bool, // calendar can_write → drag/resize allowed
     }
 
-    let (segs, all_day_blocks, all_day_rows, has_out_of_work) = {
+    let (segs, all_day_blocks, all_day_rows, has_out_of_work, occ_map) = {
         let events = sh.calendar_events.borrow();
         let visibility = sh.calendar_visible.borrow();
         let cals = sh.calendars.borrow();
@@ -1822,6 +1828,7 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
         };
 
         let mut segs: Vec<Seg> = Vec::new();
+        let mut occ_map: HashMap<(i32, i32), (i64, i64, bool)> = HashMap::new();
         let mut all_day_blocks: Vec<AllDayBlock> = Vec::new();
         let mut all_day_fill = vec![0i32; day_count.max(0) as usize];
         let idents = sh.identity_colors.borrow();
@@ -1835,6 +1842,11 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
                 continue;
             }
             let color = color_for(e.calendar_id);
+            let writable = cals
+                .iter()
+                .find(|c| c.id == e.calendar_id)
+                .map(|c| c.can_write)
+                .unwrap_or(false);
             let att_count = e.attendees.len() as i32;
             let tentative = att_count >= 2
                 && e
@@ -1912,13 +1924,22 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
                         time: time.clone(),
                         count: att_count,
                         tentative,
+                        writable,
                     });
+                    // Exact instance bounds for drag-move (recurrence_id +
+                    // duration). Recurring → only a scope=single override moves
+                    // the day (an "all" dtstart shift keeps BYDAY's weekday).
+                    occ_map.insert(
+                        (e.id as i32, day),
+                        (o.start_ms, o.end_ms, !e.rrule.is_empty()),
+                    );
                 }
             }
         }
         let rows = *all_day_fill.iter().max().unwrap_or(&0);
-        (segs, all_day_blocks, rows, has_out_of_work)
+        (segs, all_day_blocks, rows, has_out_of_work, occ_map)
     };
+    *sh.cal_occ.borrow_mut() = occ_map;
 
     // Vertical band now that we know whether anything sits outside work hours.
     let (vis_start, vis_end, hour_height) = compute_vertical(
@@ -1960,6 +1981,7 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
                 wf: 1.0,
                 count: s.count,
                 tentative: s.tentative,
+                writable: s.writable,
             })
         })
         .collect();
@@ -2764,6 +2786,7 @@ fn main() {
         compose_attachments: RefCell::new(Vec::new()),
         pending_open_event: Cell::new(0),
         snooze_ctx: RefCell::new((0, 0, String::new())),
+        cal_occ: RefCell::new(HashMap::new()),
     });
     SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
     sync_media_globals(&ui, &shared.policy.borrow());
@@ -4264,8 +4287,22 @@ fn main() {
     // day/time. x/y are viewport-content px; view_w is the viewport width.
     let ui_weak_gc = ui.as_weak();
     let sh_gc = shared.clone();
+    // Manual double-click detection (the Flickable eats TouchArea::double-clicked):
+    // (last_ms, last_x, last_y). A create fires only on the second click within
+    // 450 ms and ~12 px of the first.
+    let gc_last = std::cell::Cell::new((0i64, 0f32, 0f32));
     ui.on_grid_create_at(move |x, y, view_w| {
         let Some(ui) = ui_weak_gc.upgrade() else { return };
+        let now = chrono::Local::now().timestamp_millis();
+        let (last_ms, last_x, last_y) = gc_last.get();
+        let is_double =
+            now - last_ms < 450 && (x - last_x).abs() < 12.0 && (y - last_y).abs() < 12.0;
+        if !is_double {
+            // First click — arm and wait for the second.
+            gc_last.set((now, x, y));
+            return;
+        }
+        gc_last.set((0, 0.0, 0.0)); // consume, so a triple-click doesn't re-fire
         const GUTTER: f32 = 48.0;
         if x < GUTTER {
             return; // clicked in the time-label gutter
@@ -4293,6 +4330,106 @@ fn main() {
         let start_ms = week_start_ms + day * day_ms + snapped * 60_000;
         open_create_form_at(&ui, &sh_gc, start_ms);
     });
+
+    // Drag-to-move a block to a new day/time (writable calendars only — the
+    // block's TouchArea won't even start a drag otherwise). The ghost's final
+    // top-left (grid px) → nearest day column + 15-min-snapped start; duration
+    // and all other fields are preserved.
+    let ui_weak_gm = ui.as_weak();
+    let sh_gm = shared.clone();
+    ui.on_grid_event_moved(move |id, orig_x, orig_y, new_x, new_y| {
+        let Some(ui) = ui_weak_gm.upgrade() else { return };
+        const GUTTER: f32 = 48.0;
+        let day_count = ui.get_day_count();
+        let col_w = ui.get_col_width();
+        if day_count <= 0 || col_w <= 0.0 {
+            return;
+        }
+        let hour_height = ui.get_hour_height();
+        let hour_start = ui.get_hour_start();
+        let day_ms: i64 = 24 * 60 * 60 * 1000;
+        let (week_start_ms, _) = week_range_ms(sh_gm.calendar_week_start_days.get(), day_count);
+
+        // Block x = GUTTER + day*col_w + 2px → invert for the nearest column.
+        let px_to_day = |x: f32| -> i64 {
+            (((x - GUTTER - 2.0) / col_w).round() as i64).clamp(0, day_count as i64 - 1)
+        };
+        let px_to_min = |y: f32| -> i64 {
+            let minutes = hour_start as f32 * 60.0 + (y / hour_height) * 60.0;
+            ((minutes / 15.0).round().max(0.0) as i64) * 15
+        };
+
+        let orig_day = px_to_day(orig_x);
+        let new_day = px_to_day(new_x);
+        let new_start = week_start_ms + new_day * day_ms + px_to_min(new_y) * 60_000;
+
+        // Exact instance grabbed (gives recurrence_id + duration + whether the
+        // event recurs). Keyed (event_id, original day column).
+        let (occ_start, occ_end, recurring) =
+            match sh_gm.cal_occ.borrow().get(&(id, orig_day as i32)).copied() {
+                Some(v) => v,
+                None => return,
+            };
+        if new_start == occ_start {
+            return; // dropped back where it was
+        }
+        let new_end = new_start + (occ_end - occ_start).max(0);
+
+        // Preserve the event's display fields.
+        let (summary, description, location, all_day) = {
+            let events = sh_gm.calendar_events.borrow();
+            match events.iter().find(|e| e.id as i32 == id) {
+                Some(e) => (
+                    e.summary.clone(),
+                    e.description.clone(),
+                    e.location.clone(),
+                    e.all_day,
+                ),
+                None => return,
+            }
+        };
+
+        let mut body = serde_json::json!({
+            "summary": summary,
+            "description": description,
+            "location": location,
+            "all_day": all_day,
+            "dtstart": new_start,
+            "dtend": new_end,
+        });
+        if recurring {
+            // Move just THIS occurrence — an "all" dtstart shift keeps BYDAY's
+            // weekday, so only scope=single (an override) actually re-days it.
+            body["scope"] = "single".into();
+            body["recurrence_id"] = occ_start.into();
+            // No optimistic redraw: the override can't be reflected by local
+            // RRULE expansion; the refetch after PatchEvent shows it.
+        } else {
+            body["scope"] = "all".into();
+            // Optimistic shift so the block lands immediately; refetch reconciles.
+            {
+                let mut events = sh_gm.calendar_events.borrow_mut();
+                if let Some(e) = events.iter_mut().find(|e| e.id as i32 == id) {
+                    if e.dtend.is_some() {
+                        e.dtend = Some(new_end);
+                    }
+                    e.dtstart = new_start;
+                }
+            }
+            apply_calendar_view(&ui, &sh_gm);
+        }
+
+        if let Some(c) = sh_gm.cache.as_ref() {
+            let _ = c.purge_event_reminders(id as i64);
+        }
+        if let Some(etx) = sh_gm.engine_tx.borrow().as_ref() {
+            let _ = etx.send(engine::EngineCmd::PatchEvent {
+                event_id: id as i64,
+                body,
+            });
+        }
+    });
+
     let ui_weak_ee = ui.as_weak();
     let sh_ee = shared.clone();
     ui.on_detail_edit(move || {
