@@ -105,6 +105,8 @@ struct EventBlock {
     // the "unanswered meeting" look (invited, no RSVP yet → lighter).
     count: int,
     tentative: bool,
+    // Calendar is writable → this block can be dragged / resized.
+    writable: bool,
 }
 
 // One all-day chip in the band above the hour grid. Multi-day all-day
@@ -203,6 +205,51 @@ component SettingRow inherits Rectangle {
 export struct SnoozeOpt {
     value: string,
     label: string,
+}
+
+// Labelled text field for the event form — custom-styled (the std-widget
+// LineEdit/ComboBox render poorly here), built on the low-level TextInput so
+// the label and border are always visible.
+component CalField inherits VerticalLayout {
+    in property <string> label;
+    in property <string> placeholder;
+    in-out property <string> value;
+    spacing: 3px;
+    Text {
+        text: root.label;
+        font-size: 12px;
+        color: #5b6672;
+    }
+    Rectangle {
+        height: 34px;
+        background: white;
+        border-radius: 7px;
+        border-width: 1px;
+        border-color: ti.has-focus ? #2f80ed : #c8d4e4;
+        TouchArea {
+            clicked => { ti.focus(); }
+        }
+        if root.value == "": Text {
+            x: 10px;
+            width: parent.width - 20px;
+            height: 100%;
+            vertical-alignment: center;
+            text: root.placeholder;
+            color: #9aa5b1;
+            font-size: 14px;
+            overflow: elide;
+        }
+        ti := TextInput {
+            x: 10px;
+            width: parent.width - 20px;
+            height: 100%;
+            vertical-alignment: center;
+            text <=> root.value;
+            font-size: 14px;
+            color: #0f1419;
+            single-line: true;
+        }
+    }
 }
 
 export component MainWindow inherits Window {
@@ -344,6 +391,25 @@ export component MainWindow inherits Window {
     // click x, click y (viewport-content px), and the viewport width — Rust
     // turns them into a snapped start timestamp.
     callback grid-create-at(length, length, length);
+
+    // ── Event drag-to-move (writable calendars only) ──
+    // Drag state, set by the block's TouchArea; a ghost rectangle follows the
+    // cursor while `cal-dragging`. On release the block reports its new grid
+    // position and Rust converts px → new start/day → PatchEvent.
+    in-out property <int> cal-drag-id: -1; // event id being dragged (-1 = none)
+    in-out property <bool> cal-dragging: false; // moved past the threshold
+    in-out property <length> cal-drag-x0; // ghost origin (captured at press)
+    in-out property <length> cal-drag-y0;
+    in-out property <length> cal-drag-x; // live ghost top-left
+    in-out property <length> cal-drag-y;
+    in-out property <length> cal-drag-w;
+    in-out property <length> cal-drag-h;
+    in-out property <string> cal-drag-title;
+    in-out property <color> cal-drag-color;
+    // (id, orig-x, orig-y, new-x, new-y) — all grid px. Rust snaps both to the
+    // time grid + day column: orig gives the exact instance (recurrence_id for
+    // recurring), new gives the target start. Then it patches the event.
+    callback grid-event-moved(int, length, length, length, length);
 
     // Colour-picker popup state: which calendar's colour is being edited
     // (-1 = closed), plus the palette swatches mirrored from Rust.
@@ -2084,10 +2150,21 @@ export component MainWindow inherits Window {
                     // strip kept to the right of every chip). Ctrl-/Ctrl-Alt-
                     // wheel zooms; plain wheel falls through to the Flickable.
                     grid-bg := TouchArea {
-                        width: 100%;
-                        height: 100%;
-                        double-clicked => {
-                            root.grid-create-at(self.mouse-x, self.mouse-y, gridflick.viewport-width);
+                        // Explicit content-sized geometry: a direct Flickable
+                        // child's `100%` resolves to 0 (the content has no
+                        // bounded parent size), which is why this never got any
+                        // events while the px-sized blocks did.
+                        x: 0;
+                        y: 0;
+                        width: 48px + root.day-count * root.col-width;
+                        height: gridflick.viewport-height;
+                        // Low-level press → Rust detects the double (two presses,
+                        // same spot, < 450 ms); `clicked`/`double-clicked` are
+                        // unreliable for a full-area child of a Flickable.
+                        pointer-event(pe) => {
+                            if (pe.kind == PointerEventKind.down && pe.button == PointerEventButton.left) {
+                                root.grid-create-at(self.mouse-x, self.mouse-y, gridflick.viewport-width);
+                            }
                         }
                         scroll-event(se) => {
                             if (se.modifiers.control && se.modifiers.alt) { root.calendar-zoom-days(se.delta-y); return accept; }
@@ -2105,7 +2182,9 @@ export component MainWindow inherits Window {
                             ev.color.brighter(0.10) 0%,
                             ev.color 45%,
                             ev.color.darker(0.06) 100%);
-                        opacity: ev.tentative ? 0.55 : 1.0;
+                        opacity: (root.cal-drag-id == ev.id && root.cal-dragging)
+                            ? 0.35
+                            : (ev.tentative ? 0.55 : 1.0);
                         border-width: ev.tentative ? 1px : 0px;
                         border-color: white.transparentize(0.45);
                         drop-shadow-blur: 3px;
@@ -2113,7 +2192,45 @@ export component MainWindow inherits Window {
                         drop-shadow-color: #00000033;
                         border-radius: 4px;
                         ev-ta := TouchArea {
-                            clicked => { root.event-clicked(ev.id); }
+                            mouse-cursor: ev.writable ? MouseCursor.grab : MouseCursor.default;
+                            // Click opens the detail card — but not if this
+                            // press turned into a drag (cal-dragging stays set
+                            // until the next press).
+                            clicked => {
+                                if (!root.cal-dragging) { root.event-clicked(ev.id); }
+                            }
+                            pointer-event(pe) => {
+                                if (!ev.writable || pe.button != PointerEventButton.left) { return; }
+                                if (pe.kind == PointerEventKind.down) {
+                                    root.cal-drag-id = ev.id;
+                                    root.cal-dragging = false;
+                                    root.cal-drag-x0 = 48px + (ev.day + ev.xf) * root.col-width + 2px;
+                                    root.cal-drag-y0 = ev.top;
+                                    root.cal-drag-x = root.cal-drag-x0;
+                                    root.cal-drag-y = root.cal-drag-y0;
+                                    root.cal-drag-w = root.col-width * ev.wf - 6px;
+                                    root.cal-drag-h = ev.h;
+                                    root.cal-drag-title = ev.title;
+                                    root.cal-drag-color = ev.color;
+                                } else if (pe.kind == PointerEventKind.up) {
+                                    if (root.cal-drag-id == ev.id && root.cal-dragging) {
+                                        root.grid-event-moved(ev.id, root.cal-drag-x0, root.cal-drag-y0, root.cal-drag-x, root.cal-drag-y);
+                                    }
+                                    // Hide the ghost; keep cal-dragging until the
+                                    // next press so `clicked` can skip a drag.
+                                    root.cal-drag-id = -1;
+                                }
+                            }
+                            moved => {
+                                if (root.cal-drag-id == ev.id) {
+                                    if (Math.abs(self.mouse-x - self.pressed-x) > 4px
+                                        || Math.abs(self.mouse-y - self.pressed-y) > 4px) {
+                                        root.cal-dragging = true;
+                                    }
+                                    root.cal-drag-x = root.cal-drag-x0 + (self.mouse-x - self.pressed-x);
+                                    root.cal-drag-y = root.cal-drag-y0 + (self.mouse-y - self.pressed-y);
+                                }
+                            }
                             scroll-event(se) => {
                                 if (se.modifiers.control && se.modifiers.alt) { root.calendar-zoom-days(se.delta-y); return accept; }
                                 if (se.modifiers.control) { root.calendar-zoom-hours(se.delta-y); return accept; }
@@ -2159,6 +2276,32 @@ export component MainWindow inherits Window {
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
+                        }
+                    }
+                    // Drag ghost — a translucent copy that follows the cursor
+                    // while a block is being moved.
+                    if root.cal-drag-id >= 0 && root.cal-dragging: Rectangle {
+                        x: root.cal-drag-x;
+                        y: root.cal-drag-y;
+                        width: root.cal-drag-w;
+                        height: root.cal-drag-h;
+                        background: root.cal-drag-color;
+                        opacity: 0.85;
+                        border-radius: 4px;
+                        border-width: 2px;
+                        border-color: white;
+                        drop-shadow-blur: 10px;
+                        drop-shadow-color: #00000066;
+                        Text {
+                            x: 4px; y: 2px;
+                            width: parent.width - 8px;
+                            height: parent.height - 4px;
+                            text: root.cal-drag-title;
+                            color: white;
+                            font-size: 11px;
+                            font-weight: 700;
+                            overflow: elide;
+                            wrap: word-wrap;
                         }
                     }
                     // Now-line across today's column.
@@ -2574,7 +2717,7 @@ export component MainWindow inherits Window {
             background: #00000066;
             Rectangle {
                 width: min(520px, root.width - 80px);
-                height: min(540px, root.height - 80px);
+                height: min(620px, root.height - 80px);
                 background: white;
                 border-radius: 14px;
                 drop-shadow-blur: 24px;
@@ -2587,13 +2730,85 @@ export component MainWindow inherits Window {
                         text: root.edit-is-create ? "Новое событие" : "Изменить событие";
                         font-size: 18px; font-weight: 700; color: #0f1419;
                     }
-                    LineEdit { placeholder-text: "Тема"; text <=> root.edit-title; }
-                    ComboBox { model: root.edit-calendars; current-index <=> root.edit-calendar-idx; }
-                    CheckBox { text: "Весь день"; checked <=> root.edit-all-day; }
-                    LineEdit { placeholder-text: "Начало (ГГГГ-ММ-ДД ЧЧ:ММ)"; text <=> root.edit-start; }
-                    LineEdit { placeholder-text: "Конец (ГГГГ-ММ-ДД ЧЧ:ММ)"; text <=> root.edit-end; }
-                    LineEdit { placeholder-text: "Место"; text <=> root.edit-location; }
-                    LineEdit { placeholder-text: "Описание"; text <=> root.edit-description; }
+                    CalField {
+                        label: "Тема";
+                        placeholder: "Название события";
+                        value <=> root.edit-title;
+                    }
+                    // Calendar picker — selectable chips (std ComboBox renders
+                    // poorly here).
+                    VerticalLayout {
+                        spacing: 3px;
+                        Text { text: "Календарь"; font-size: 12px; color: #5b6672; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            alignment: start;
+                            for name[i] in root.edit-calendars: Rectangle {
+                                height: 30px;
+                                border-radius: 7px;
+                                background: root.edit-calendar-idx == i ? #2f80ed : #eef2f7;
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    Text {
+                                        text: name;
+                                        color: root.edit-calendar-idx == i ? white : #2b3640;
+                                        font-size: 13px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                TouchArea { clicked => { root.edit-calendar-idx = i; } }
+                            }
+                        }
+                    }
+                    // All-day toggle.
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        ad-box := Rectangle {
+                            width: 20px;
+                            height: 20px;
+                            border-radius: 5px;
+                            border-width: 1px;
+                            border-color: root.edit-all-day ? #2f80ed : #c8d4e4;
+                            background: root.edit-all-day ? #2f80ed : white;
+                            Text {
+                                text: "✓";
+                                color: white;
+                                font-size: 13px;
+                                visible: root.edit-all-day;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            TouchArea { clicked => { root.edit-all-day = !root.edit-all-day; } }
+                        }
+                        Text {
+                            text: "Весь день";
+                            color: #2b3640;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    CalField {
+                        label: "Начало";
+                        placeholder: "ГГГГ-ММ-ДД ЧЧ:ММ";
+                        value <=> root.edit-start;
+                    }
+                    CalField {
+                        label: "Конец";
+                        placeholder: "ГГГГ-ММ-ДД ЧЧ:ММ";
+                        value <=> root.edit-end;
+                    }
+                    CalField {
+                        label: "Место";
+                        placeholder: "—";
+                        value <=> root.edit-location;
+                    }
+                    CalField {
+                        label: "Описание";
+                        placeholder: "—";
+                        value <=> root.edit-description;
+                    }
                     Rectangle { vertical-stretch: 1; }
                     HorizontalLayout {
                         spacing: 8px;
