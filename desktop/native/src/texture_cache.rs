@@ -17,8 +17,9 @@ use std::time::SystemTime;
 use crate::render_common::{parse_link_rects, parse_text_runs, LinkRect, TextRun};
 
 /// Bump when the sidecar format gains fields (part of the filename key):
-/// v2 = + text runs. Old entries simply miss and re-render once.
-const FORMAT_VERSION: u32 = 2;
+/// v2 = + text runs. v3 = bubble corner timestamp added to the rendered HTML.
+/// Old entries simply miss and re-render once.
+const FORMAT_VERSION: u32 = 3;
 
 /// Disk budget. Eviction drops oldest-by-mtime entries until under cap;
 /// runs once at startup (steady-state growth between starts is modest).
