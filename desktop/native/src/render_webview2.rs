@@ -41,7 +41,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 }
 
 const MAX_H: u32 = 6000;
-const LOAD_TIMEOUT_MS: u128 = 6000;
+/// Cap on waiting for the `load` event (NavigationCompleted). `load` waits for
+/// every subresource, so a single slow/hung external image would otherwise
+/// stall the whole render for the full timeout. Kept short; on expiry we fall
+/// back to rendering the already-parsed DOM (see navigate_sync).
+const LOAD_TIMEOUT_MS: u128 = 2500;
 
 pub struct Bitmap {
     pub rgba: Vec<u8>,
@@ -287,9 +291,23 @@ impl Engine {
                 return ok;
             }
             if start.elapsed().as_millis() > LOAD_TIMEOUT_MS {
-                return false;
+                // `load` never fired — almost always a slow/hung external
+                // image (media allowed). If the DOM itself parsed, render what
+                // we have (text + whatever images already arrived) rather than
+                // returning a blank bubble.
+                return self.dom_parsed();
             }
             pump_a_bit();
+        }
+    }
+
+    /// True once the document has finished parsing (DOMContentLoaded), even if
+    /// subresources are still loading. Lets us snapshot text-heavy mail whose
+    /// external images never finish.
+    unsafe fn dom_parsed(&self) -> bool {
+        match self.eval_json("document.readyState") {
+            Some(s) => s.contains("interactive") || s.contains("complete"),
+            None => false,
         }
     }
 
@@ -386,7 +404,12 @@ unsafe fn read_stream(stream: &IStream) -> Option<Vec<u8>> {
 }
 
 fn empty_bitmap(width: u32) -> Bitmap {
-    Bitmap { rgba: vec![255, 255, 255, 255], width: width.max(1), height: 1 }
+    // The buffer MUST match width×height×4. A single-pixel (4-byte) buffer for
+    // a `width`-wide row is an inconsistent bitmap: SharedPixelBuffer and the
+    // PNG encoder both assert on the length mismatch, and the panic takes out
+    // the render worker — every later conversation then hangs on the loader.
+    let w = width.max(1);
+    Bitmap { rgba: vec![255u8; (w as usize) * 4], width: w, height: 1 }
 }
 
 /// Pump pending Win32 messages briefly so WebView2 can lay out / paint.

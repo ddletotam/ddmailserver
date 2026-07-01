@@ -111,6 +111,17 @@ impl TextureDiskCache {
         if rgba.is_empty() || width_px == 0 || height_px == 0 {
             return;
         }
+        // image::save_buffer asserts on a length mismatch and would panic the
+        // render worker (which then can't render any later conversation). A
+        // malformed bitmap is skipped, not fatal — it just re-renders later.
+        let expected = (width_px as usize) * (height_px as usize) * 4;
+        if rgba.len() != expected {
+            eprintln!(
+                "texture store: bad buffer {}x{} — {} bytes, expected {} — skipping",
+                width_px, height_px, rgba.len(), expected
+            );
+            return;
+        }
         let base = self.base(folder, uid, width, policy_gen, mode, fp);
         let links_json: Vec<serde_json::Value> = links
             .iter()

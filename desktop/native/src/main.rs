@@ -2577,6 +2577,14 @@ fn main() {
                                     result = engine.render_one(&text_html, width);
                                 }
                                 render_ms_total += t_r.elapsed().as_millis();
+                                // A failed paint (load timed out, DOM never
+                                // parsed, empty document) must NOT be cached —
+                                // otherwise the degenerate 1px bitmap sticks on
+                                // disk and every later open serves that instead
+                                // of retrying. We still return it for this pass
+                                // (an empty bubble beats a missing one), just
+                                // don't persist it.
+                                let succeeded = result.successful();
                                 let bitmap = result.bitmap;
                                 let t_p = Instant::now();
                                 let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
@@ -2585,18 +2593,20 @@ fn main() {
                                 pack_ms_total += t_p.elapsed().as_millis();
                                 let entry = (buf, bitmap.height as f32, result.links, result.runs);
                                 println!(
-                                    "[perf]   body uid={} h={}px painted={} ready={} links={} runs={}",
+                                    "[perf]   body uid={} h={}px painted={} ready={} links={} runs={} cached={}",
                                     body.uid, bitmap.height, result.painted_height,
-                                    result.view_ready, entry.2.len(), entry.3.len()
+                                    result.view_ready, entry.2.len(), entry.3.len(), succeeded
                                 );
-                                if let Some(t) = tex_disk.as_ref() {
-                                    t.store(
-                                        &body.folder, body.uid, width, policy_gen, mode, fp,
-                                        &bitmap.rgba, bitmap.width, bitmap.height,
-                                        entry.1, &entry.2, &entry.3,
-                                    );
+                                if succeeded {
+                                    if let Some(t) = tex_disk.as_ref() {
+                                        t.store(
+                                            &body.folder, body.uid, width, policy_gen, mode, fp,
+                                            &bitmap.rgba, bitmap.width, bitmap.height,
+                                            entry.1, &entry.2, &entry.3,
+                                        );
+                                    }
+                                    remember(&key, &entry, &mut body_cache, &mut ram_order);
                                 }
-                                remember(&key, &entry, &mut body_cache, &mut ram_order);
                                 entry
                             };
                             // Context-menu data: per-sender / per-host
