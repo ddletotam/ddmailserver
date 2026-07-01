@@ -1204,7 +1204,7 @@ export component MainWindow inherits Window {
                 // Thin loader bar overlaid at the top while Ultralight is
                 // still chewing through the conversation's bubbles. Becomes
                 // invisible the moment progress catches up with total.
-                if root.render-total > 0 && root.render-progress < root.render-total: Rectangle {
+                if root.render-total > 0 && root.render-progress < root.render-total: bar := Rectangle {
                     x: 0;
                     y: 0;
                     width: parent.width;
@@ -1213,8 +1213,28 @@ export component MainWindow inherits Window {
                     border-color: #2f80ed44;
                     border-width: 0px;
                     z: 10;
-                    // Progress bar fill — proportional.
-                    Rectangle {
+
+                    // progress == 0 means the bodies are still being fetched
+                    // over the network — nothing has rendered yet. Show a
+                    // moving segment so the bar never looks frozen at "0 из N".
+                    // Flips to a real proportional fill the moment the render
+                    // worker starts ticking bodies off.
+                    property <bool> indeterminate: root.render-progress <= 0;
+                    property <float> phase: 0;
+
+                    Timer {
+                        interval: 33ms;
+                        running: bar.indeterminate;
+                        triggered => {
+                            bar.phase = bar.phase + 0.018;
+                            if (bar.phase >= 1) {
+                                bar.phase = 0;
+                            }
+                        }
+                    }
+
+                    // Determinate fill — proportional (rendering in progress).
+                    if !bar.indeterminate: Rectangle {
                         x: 0;
                         y: parent.height - 3px;
                         width: parent.width * (root.render-total > 0
@@ -1223,10 +1243,21 @@ export component MainWindow inherits Window {
                         height: 3px;
                         background: #2f80ed;
                     }
+                    // Indeterminate — a segment sliding left-to-right while the
+                    // fetch is in flight.
+                    if bar.indeterminate: Rectangle {
+                        y: parent.height - 3px;
+                        width: parent.width * 0.3;
+                        x: (parent.width * 1.3) * bar.phase - parent.width * 0.3;
+                        height: 3px;
+                        background: #2f80ed;
+                    }
                     Text {
                         width: parent.width;
                         height: parent.height - 3px;
-                        text: "Загружаю " + root.render-progress + " из " + root.render-total + "…";
+                        text: bar.indeterminate
+                            ? "Загружаю письма…"
+                            : "Загружаю " + root.render-progress + " из " + root.render-total + "…";
                         color: #2f80ed;
                         font-size: 12px;
                         font-weight: 700;

@@ -602,6 +602,27 @@ pub fn spawn(
                             }
                             Err(e) => eprintln!("conversations sync [{}]: {e}", conn.key),
                         }
+
+                        // Identities drive the sidebar row tints. Only the IMAP
+                        // path used to persist them, so native mode showed grey
+                        // rows whenever the cache lacked a prior IMAP-run's
+                        // identities table (e.g. after a cache reset). Refresh
+                        // on a full sync (identities change rarely) OR whenever
+                        // the table is empty — the latter recovers the tints
+                        // without waiting for the next 24h full cycle.
+                        let need_idents = since == 0
+                            || cache
+                                .load_identities(&conn.key)
+                                .map(|v| v.is_empty())
+                                .unwrap_or(true);
+                        if need_idents {
+                            match rt.block_on(conn.provider.fetch_identities()) {
+                                Ok(idents) => {
+                                    cache.save_identities(&conn.key, &idents).ok();
+                                }
+                                Err(e) => eprintln!("identities sync [{}]: {e}", conn.key),
+                            }
+                        }
                     }
                     // Merge the full set across accounts (always a replace).
                     let mut merged: Vec<Conversation> = Vec::new();

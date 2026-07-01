@@ -47,6 +47,15 @@ const NAMES: [&str; 25] = [
 ];
 const PALETTE: [&str; 6] = ["#2f80ed", "#27ae60", "#eb5757", "#9b51e0", "#f2994a", "#11998e"];
 
+/// How many messages the server may scan when building the conversation list.
+/// Mirrors the server-side default (handlers_desktop.go). A small cap combined
+/// with the server's `ORDER BY uid ASC` fetch means it returns the OLDEST N
+/// messages — so a multi-account aggregated INBOX with thousands of messages
+/// drops recent conversations off the list entirely (ancient threads linger,
+/// mail from a few days ago never appears). 5000 covers realistic inboxes;
+/// deltas keep every subsequent sync cheap regardless.
+const CONV_FETCH_LIMIT: u32 = 5000;
+
 /// Calendar palette, modelled on Google Calendar's event colours — the
 /// reference design for "distinct, calm, and readable with white text on
 /// event blocks". Their Banana yellow is swapped for a darker amber (white
@@ -299,6 +308,30 @@ fn fmt_short_date(ts_ms: i64) -> String {
     format!("{:02}.{:02}.{:02}", dt.day(), dt.month(), dt.year() % 100)
 }
 
+/// Bubble corner stamp: time-only for today, date+time within the year,
+/// and a two-digit year for older mail. Empty string for a missing date.
+fn fmt_bubble_time(ts_ms: i64) -> String {
+    if ts_ms <= 0 {
+        return String::new();
+    }
+    use chrono::{DateTime, Datelike, Local, TimeZone, Timelike};
+    let dt: DateTime<Local> = match Local.timestamp_millis_opt(ts_ms).single() {
+        Some(d) => d,
+        None => return String::new(),
+    };
+    let now = Local::now();
+    if dt.year() == now.year() && dt.ordinal() == now.ordinal() {
+        return format!("{:02}:{:02}", dt.hour(), dt.minute());
+    }
+    if dt.year() == now.year() {
+        return format!("{:02}.{:02} {:02}:{:02}", dt.day(), dt.month(), dt.hour(), dt.minute());
+    }
+    format!(
+        "{:02}.{:02}.{:02} {:02}:{:02}",
+        dt.day(), dt.month(), dt.year() % 100, dt.hour(), dt.minute()
+    )
+}
+
 fn contact_items(contacts: &[Contact]) -> Vec<ContactItem> {
     contacts
         .iter()
@@ -474,7 +507,7 @@ fn build_body_html(b: &MessageBody, policy: &policy::Policy) -> String {
             html_escape(b.text.as_deref().unwrap_or(""))
         ),
     };
-    bubble_template(b.is_outgoing, &format!("{inner}{}", attachment_chips(b)))
+    bubble_template(b.is_outgoing, &fmt_bubble_time(b.date_ts), &format!("{inner}{}", attachment_chips(b)))
 }
 
 /// Text-only bubble — the fallback we render when WebKit chokes on an
@@ -483,7 +516,7 @@ fn build_body_html(b: &MessageBody, policy: &policy::Policy) -> String {
 fn build_text_only_html(b: &MessageBody) -> String {
     let escaped = html_escape(b.text.as_deref().unwrap_or(""));
     let inner = format!("<div style=\"white-space:pre-wrap\">{escaped}</div>");
-    bubble_template(b.is_outgoing, &format!("{inner}{}", attachment_chips(b)))
+    bubble_template(b.is_outgoing, &fmt_bubble_time(b.date_ts), &format!("{inner}{}", attachment_chips(b)))
 }
 
 /// Render width (CSS px) for the source/headers viewer bitmap. The Image is
@@ -530,9 +563,16 @@ fn attachment_chips(b: &MessageBody) -> String {
     s
 }
 
-fn bubble_template(is_outgoing: bool, inner: &str) -> String {
+fn bubble_template(is_outgoing: bool, time: &str, inner: &str) -> String {
     let side = if is_outgoing { "out" } else { "in" };
     let bg = if is_outgoing { "#cfe6ff" } else { "#ffffff" };
+    // Bottom-right timestamp inside the bubble (as in the old Tauri client).
+    // Empty date_ts → no stamp.
+    let time_html = if time.is_empty() {
+        String::new()
+    } else {
+        format!("<div class=\"time\">{}</div>", html_escape(time))
+    };
     format!(
         r#"<!DOCTYPE html><html><head><meta charset="utf-8"><style>
         html, body {{ margin: 0; padding: 0; background: #e9eef5; }}
@@ -555,8 +595,10 @@ fn bubble_template(is_outgoing: bool, inner: &str) -> String {
         .att {{ display: inline-block; background: rgba(0,0,0,0.06); border-radius: 8px;
                 padding: 4px 10px; margin: 2px 4px 2px 0; color: #2f80ed;
                 text-decoration: none; font-size: 13px; }}
+        .time {{ text-align: right; font-size: 11px; color: #8a97a5;
+                 margin-top: 4px; user-select: none; }}
         </style></head>
-        <body><div class="row {side}"><div class="bubble">{inner}</div></div></body></html>"#
+        <body><div class="row {side}"><div class="bubble">{inner}{time_html}</div></div></body></html>"#
     )
 }
 
@@ -2887,7 +2929,7 @@ fn main() {
             let _ = ui_weak_eng.upgrade_in_event_loop(move |ui| handle_engine_result(&ui, res));
         });
         if live {
-            let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
+            let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
             let _ = etx.send(engine::EngineCmd::StartWatching);
         } else {
             println!("engine: DDMAIL_IMAP_* not set — live IMAP disabled, cache-only mode");
@@ -4768,7 +4810,7 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         return;
                     }
                     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
-                        let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
+                        let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
                         // Reopen current conversation to refresh its bodies.
                         let cur = sh.current.get();
                         if let Some(c) = sh.convs.borrow().get(cur) {
@@ -4822,7 +4864,7 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                                 }
                             }
                             if let Some(etx) = sh.engine_tx.borrow().as_ref() {
-                                let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
+                                let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
                             }
                         }
                     });
@@ -4848,7 +4890,7 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         refresh_sidebar(sh, ui);
                     }
                     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
-                        let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
+                        let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
                     }
                 }
             });
@@ -5064,7 +5106,7 @@ fn handle_new_mail(
                 generation: sh.open_gen.get(),
                 account_key: sh.cur_account_key.borrow().clone(),
             });
-            let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
+            let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
         }
         return;
     }
@@ -5120,7 +5162,7 @@ fn handle_new_mail(
     }
 
     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
-        let _ = etx.send(engine::EngineCmd::FetchConversations { limit: 200 });
+        let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
     }
 }
 
