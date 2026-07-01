@@ -1213,6 +1213,10 @@ export component MainWindow inherits Window {
                     border-color: #2f80ed44;
                     border-width: 0px;
                     z: 10;
+                    // Keep the sliding indeterminate segment inside the chat
+                    // pane — without this its negative-x start bleeds left
+                    // across the conversation sidebar.
+                    clip: true;
 
                     // progress == 0 means the bodies are still being fetched
                     // over the network — nothing has rendered yet. Show a
