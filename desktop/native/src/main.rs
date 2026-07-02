@@ -310,12 +310,14 @@ fn fmt_short_date(ts_ms: i64) -> String {
 
 /// Bubble corner stamp: time-only for today, date+time within the year,
 /// and a two-digit year for older mail. Empty string for a missing date.
-fn fmt_bubble_time(ts_ms: i64) -> String {
-    if ts_ms <= 0 {
+/// `ts_secs` is MessageBody.date_ts — a Unix timestamp in SECONDS (the server
+/// sends date_ts in seconds, unlike the messages table's millisecond `date`).
+fn fmt_bubble_time(ts_secs: i64) -> String {
+    if ts_secs <= 0 {
         return String::new();
     }
     use chrono::{DateTime, Datelike, Local, TimeZone, Timelike};
-    let dt: DateTime<Local> = match Local.timestamp_millis_opt(ts_ms).single() {
+    let dt: DateTime<Local> = match Local.timestamp_opt(ts_secs, 0).single() {
         Some(d) => d,
         None => return String::new(),
     };
