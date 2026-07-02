@@ -18,8 +18,9 @@ use crate::render_common::{parse_link_rects, parse_text_runs, LinkRect, TextRun}
 
 /// Bump when the sidecar format gains fields (part of the filename key):
 /// v2 = + text runs. v3 = bubble corner timestamp added to the rendered HTML.
+/// v4 = timestamp unit fix (date_ts is seconds, was mis-rendered as 1970).
 /// Old entries simply miss and re-render once.
-const FORMAT_VERSION: u32 = 3;
+const FORMAT_VERSION: u32 = 4;
 
 /// Disk budget. Eviction drops oldest-by-mtime entries until under cap;
 /// runs once at startup (steady-state growth between starts is modest).
