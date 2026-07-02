@@ -2773,7 +2773,19 @@ fn main() {
     // ----- Shared state -----
     let (cache, key, init_convs) = match account {
         Some((c, k, convs)) => (Some(c), k, convs),
-        None => (None, String::new(), Vec::new()),
+        None => {
+            // Empty cache at startup (first run or right after a cache reset):
+            // still attach the cache and adopt the live account's key. The old
+            // behaviour left sh.cache = None and sh.key = "", so the
+            // Conversations handler skipped identity_color_map entirely and
+            // every sidebar row stayed grey (and cached-body reads were cold)
+            // until a restart happened to find a populated DB.
+            let key = engine::AccountConfig::load_all()
+                .first()
+                .map(|a| a.account_key())
+                .unwrap_or_default();
+            (open_cache(), key, Vec::new())
+        }
     };
     let loaded_policy = policy::load();
     let shared = Rc::new(Shared {
