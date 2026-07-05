@@ -95,7 +95,9 @@ func (s *Server) HandleCreateDomain(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(err.Error(), "duplicate") {
 			respondHTMXError(w, r, http.StatusConflict, "Domain already exists")
 		} else {
-			respondHTMXError(w, r, http.StatusInternalServerError, "Failed to create domain")
+			// Surface the underlying error: this is a self-hosted admin action,
+			// and a bare "failed" forces a trip to journalctl every time.
+			respondHTMXError(w, r, http.StatusInternalServerError, "Failed to create domain: "+err.Error())
 		}
 		return
 	}
@@ -242,7 +244,9 @@ func (s *Server) HandleCreateMailbox(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(err.Error(), "duplicate") {
 			respondHTMXError(w, r, http.StatusConflict, "Mailbox already exists")
 		} else {
-			respondHTMXError(w, r, http.StatusInternalServerError, "Failed to create mailbox")
+			// Surface the underlying error: this is a self-hosted admin action,
+			// and a bare "failed" forces a trip to journalctl every time.
+			respondHTMXError(w, r, http.StatusInternalServerError, "Failed to create mailbox: "+err.Error())
 		}
 		return
 	}

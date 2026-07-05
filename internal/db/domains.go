@@ -5,21 +5,28 @@ import (
 	"fmt"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CreateDomain creates a new domain
 func (db *DB) CreateDomain(domain *models.Domain) error {
+	// created_at is passed explicitly: the column has no DB-side default, so
+	// omitting it stores NULL — which then breaks every SELECT that scans
+	// created_at into int64 (GetAllDomains feeds the MX server).
+	domain.CreatedAt = timeutil.Now()
+
 	query := `
-		INSERT INTO domains (domain, user_id, enabled)
-		VALUES ($1, $2, $3)
-		RETURNING id, created_at`
+		INSERT INTO domains (domain, user_id, enabled, created_at)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id`
 
 	err := db.QueryRow(
 		query,
 		domain.Domain,
 		domain.UserID,
 		domain.Enabled,
-	).Scan(&domain.ID, &domain.CreatedAt)
+		domain.CreatedAt,
+	).Scan(&domain.ID)
 
 	if err != nil {
 		return fmt.Errorf("failed to create domain: %w", err)
@@ -31,7 +38,7 @@ func (db *DB) CreateDomain(domain *models.Domain) error {
 // GetDomainByID returns a domain by ID
 func (db *DB) GetDomainByID(id int64) (*models.Domain, error) {
 	query := `
-		SELECT id, domain, user_id, enabled, created_at
+		SELECT id, domain, user_id, enabled, COALESCE(created_at, 0)
 		FROM domains
 		WHERE id = $1`
 
@@ -57,7 +64,7 @@ func (db *DB) GetDomainByID(id int64) (*models.Domain, error) {
 // GetDomainByName returns a domain by domain name
 func (db *DB) GetDomainByName(domainName string) (*models.Domain, error) {
 	query := `
-		SELECT id, domain, user_id, enabled, created_at
+		SELECT id, domain, user_id, enabled, COALESCE(created_at, 0)
 		FROM domains
 		WHERE domain = $1`
 
@@ -83,7 +90,7 @@ func (db *DB) GetDomainByName(domainName string) (*models.Domain, error) {
 // GetDomainsByUserID returns all domains for a user
 func (db *DB) GetDomainsByUserID(userID int64) ([]*models.Domain, error) {
 	query := `
-		SELECT id, domain, user_id, enabled, created_at
+		SELECT id, domain, user_id, enabled, COALESCE(created_at, 0)
 		FROM domains
 		WHERE user_id = $1
 		ORDER BY domain`
@@ -116,7 +123,7 @@ func (db *DB) GetDomainsByUserID(userID int64) ([]*models.Domain, error) {
 // GetAllDomains returns all enabled domains (for MX server)
 func (db *DB) GetAllDomains() ([]*models.Domain, error) {
 	query := `
-		SELECT id, domain, user_id, enabled, created_at
+		SELECT id, domain, user_id, enabled, COALESCE(created_at, 0)
 		FROM domains
 		WHERE enabled = true
 		ORDER BY domain`
