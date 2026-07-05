@@ -480,6 +480,13 @@ export component MainWindow inherits Window {
     // plain binding would be destroyed by the user's first manual scroll.)
     in-out property <length> chat-scroll-y: 0;
     in-out property <int> chat-scroll-seq: 0;
+    // True between a seq bump and the next scroll-less render: the first
+    // imperative assign happens BEFORE the ListView has laid out the new
+    // rows (viewport-height is stale — often 0, the pane is cleared on
+    // open), so the clamp kills the jump. While pending, the assign is
+    // re-run on viewport-height changes; Rust clears the flag on the next
+    // render that carries no scroll target.
+    in-out property <bool> chat-scroll-pending: false;
     // Confirmation modal (delete conversation / spam-purge — the Rust side
     // dispatches by its own mode flag).
     in-out property <bool> confirm-delete-visible: false;
@@ -1280,6 +1287,7 @@ export component MainWindow inherits Window {
                     height: 0;
                     x: root.chat-scroll-seq * 1px;
                     changed x => {
+                        root.chat-scroll-pending = true;
                         lv.viewport-y = -max(0px, min(root.chat-scroll-y,
                             lv.viewport-height - lv.height));
                     }
@@ -1288,7 +1296,15 @@ export component MainWindow inherits Window {
                     // Mirror scroll state for the Rust-side "at bottom?" check
                     // (new-mail append behaviour).
                     changed viewport-y => { root.chat-vp-y = self.viewport-y; }
-                    changed viewport-height => { root.chat-vp-h = self.viewport-height; }
+                    changed viewport-height => {
+                        root.chat-vp-h = self.viewport-height;
+                        // Re-run the pending post-open jump now that the rows
+                        // are actually laid out (see chat-scroll-pending).
+                        if (root.chat-scroll-pending) {
+                            lv.viewport-y = -max(0px, min(root.chat-scroll-y,
+                                lv.viewport-height - lv.height));
+                        }
+                    }
                     changed height => { root.chat-view-h = self.height; }
                     for msg[idx] in root.messages: Rectangle {
                         height: msg.h;

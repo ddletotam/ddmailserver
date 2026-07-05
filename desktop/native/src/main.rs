@@ -971,7 +971,7 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
     sh.current_bodies.borrow_mut().clear();
 
     // Unread snapshot BEFORE we mark anything read — it anchors the
-    // scroll (last unread at top; none unread → scroll to the end).
+    // scroll (first unread at top; none unread → scroll to the end).
     let unread: Vec<MessageRef> = c.messages.iter().filter(|m| !m.seen).cloned().collect();
     let had_unread = !unread.is_empty();
     *sh.open_unread.borrow_mut() =
@@ -993,7 +993,9 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
                 bodies.len(),
                 t0.elapsed()
             );
-            let scroll = take_scroll_target(sh, &bodies);
+            // Peek, don't consume: the FetchMessages answer will re-render
+            // and must carry the same anchor (it aborts this render).
+            let scroll = take_scroll_target(sh, &bodies, false);
             send_render_job(sh, bodies, scroll);
         } else {
             println!(
@@ -1234,13 +1236,29 @@ fn sync_media_globals(ui: &MainWindow, p: &policy::Policy) {
 /// Consume the pending post-open scroll: row index of the LAST unread
 /// body (top-aligned), or -1 for "scroll to the end" when everything was
 /// already read. None when this render isn't the first one after open.
-fn take_scroll_target(sh: &Shared, bodies: &[MessageBody]) -> Option<i32> {
+/// Post-open scroll anchor: the FIRST unread row (the whole unread run then
+/// reads top-to-bottom), or -1 (= scroll to end) when nothing is unread.
+/// `consume` clears the pending flag; peek mode
+/// (`consume=false`) is for the optimistic cached render — the anchor must
+/// survive until the FetchMessages answer re-renders the conversation,
+/// because that render ABORTS the cached one (seq bump) and would otherwise
+/// arrive with no scroll target, losing the jump entirely.
+fn take_scroll_target(sh: &Shared, bodies: &[MessageBody], consume: bool) -> Option<i32> {
     if !sh.scroll_pending.get() {
         return None;
     }
-    sh.scroll_pending.set(false);
-    // Toast-click target wins: jump straight to the clicked message.
-    if let Some((_, uid)) = sh.pending_open_ref.borrow_mut().take() {
+    if consume {
+        sh.scroll_pending.set(false);
+    }
+    // Toast-click target wins: jump straight to the clicked message. Peek
+    // mode must not take() the ref — open_conversation still needs it for
+    // fetch_refs, and the consuming render needs it to re-anchor.
+    let toast_uid = if consume {
+        sh.pending_open_ref.borrow_mut().take().map(|(_, u)| u)
+    } else {
+        sh.pending_open_ref.borrow().as_ref().map(|(_, u)| *u)
+    };
+    if let Some(uid) = toast_uid {
         if let Some(r) = bodies.iter().position(|b| b.uid == uid) {
             return Some(r as i32);
         }
@@ -1249,7 +1267,7 @@ fn take_scroll_target(sh: &Shared, bodies: &[MessageBody]) -> Option<i32> {
     Some(
         bodies
             .iter()
-            .rposition(|b| unread.contains(&(b.folder.clone(), b.uid)))
+            .position(|b| unread.contains(&(b.folder.clone(), b.uid)))
             .map(|r| r as i32)
             .unwrap_or(-1),
     )
@@ -2716,6 +2734,11 @@ fn main() {
                             if let Some(y) = scroll_y {
                                 ui.set_chat_scroll_y(y);
                                 ui.set_chat_scroll_seq(ui.get_chat_scroll_seq() + 1);
+                            } else {
+                                // Scroll-less render (width change, new mail,
+                                // policy toggle): stop re-anchoring on future
+                                // viewport-height changes.
+                                ui.set_chat_scroll_pending(false);
                             }
                         });
                     }
@@ -2897,7 +2920,9 @@ fn main() {
                 .map(|m| (m.folder.clone(), m.uid))
                 .collect();
             shared.scroll_pending.set(true);
-            let scroll = take_scroll_target(&shared, &bodies);
+            // Consume: no fetch follows at startup — a leftover pending flag
+            // would let a much later background refresh yank the viewport.
+            let scroll = take_scroll_target(&shared, &bodies, true);
             send_render_job(&shared, bodies, scroll);
             break;
         }
@@ -4804,9 +4829,9 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         .map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid, message_id: b.message_id.clone(), seen: true })
                         .collect();
                     *sh.current_bodies.borrow_mut() = bodies.clone();
-                    // First render after open may be THIS one (conversation
-                    // wasn't cached) — apply the pending scroll if so.
-                    let scroll = take_scroll_target(sh, &bodies);
+                    // Last render after open is THIS one (it aborts the
+                    // optimistic cached render) — consume the pending scroll.
+                    let scroll = take_scroll_target(sh, &bodies, true);
                     send_render_job(sh, bodies, scroll);
                 }
             });
