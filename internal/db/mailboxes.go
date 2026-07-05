@@ -5,14 +5,20 @@ import (
 	"fmt"
 
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // CreateMailbox creates a new mailbox
 func (db *DB) CreateMailbox(mailbox *models.Mailbox) error {
+	// created_at is passed explicitly: the column has no DB-side default, so
+	// omitting it stores NULL — which then breaks every SELECT that scans
+	// created_at into int64 (GetMailbox decides MX recipient acceptance).
+	mailbox.CreatedAt = timeutil.Now()
+
 	query := `
-		INSERT INTO mailboxes (user_id, domain_id, local_part, enabled)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, created_at`
+		INSERT INTO mailboxes (user_id, domain_id, local_part, enabled, created_at)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id`
 
 	err := db.QueryRow(
 		query,
@@ -20,7 +26,8 @@ func (db *DB) CreateMailbox(mailbox *models.Mailbox) error {
 		mailbox.DomainID,
 		mailbox.LocalPart,
 		mailbox.Enabled,
-	).Scan(&mailbox.ID, &mailbox.CreatedAt)
+		mailbox.CreatedAt,
+	).Scan(&mailbox.ID)
 
 	if err != nil {
 		return fmt.Errorf("failed to create mailbox: %w", err)
@@ -32,7 +39,7 @@ func (db *DB) CreateMailbox(mailbox *models.Mailbox) error {
 // GetMailboxByID returns a mailbox by ID
 func (db *DB) GetMailboxByID(id int64) (*models.Mailbox, error) {
 	query := `
-		SELECT id, user_id, domain_id, local_part, enabled, created_at
+		SELECT id, user_id, domain_id, local_part, enabled, COALESCE(created_at, 0)
 		FROM mailboxes
 		WHERE id = $1`
 
@@ -59,7 +66,7 @@ func (db *DB) GetMailboxByID(id int64) (*models.Mailbox, error) {
 // GetMailbox returns a mailbox by domain ID and local part (for MX server)
 func (db *DB) GetMailbox(domainID int64, localPart string) (*models.Mailbox, error) {
 	query := `
-		SELECT id, user_id, domain_id, local_part, enabled, created_at
+		SELECT id, user_id, domain_id, local_part, enabled, COALESCE(created_at, 0)
 		FROM mailboxes
 		WHERE domain_id = $1 AND local_part = $2`
 
@@ -86,7 +93,7 @@ func (db *DB) GetMailbox(domainID int64, localPart string) (*models.Mailbox, err
 // GetMailboxesByUserID returns all mailboxes for a user
 func (db *DB) GetMailboxesByUserID(userID int64) ([]*models.Mailbox, error) {
 	query := `
-		SELECT id, user_id, domain_id, local_part, enabled, created_at
+		SELECT id, user_id, domain_id, local_part, enabled, COALESCE(created_at, 0)
 		FROM mailboxes
 		WHERE user_id = $1
 		ORDER BY local_part`
@@ -120,7 +127,7 @@ func (db *DB) GetMailboxesByUserID(userID int64) ([]*models.Mailbox, error) {
 // GetMailboxesByDomainID returns all mailboxes for a domain
 func (db *DB) GetMailboxesByDomainID(domainID int64) ([]*models.Mailbox, error) {
 	query := `
-		SELECT id, user_id, domain_id, local_part, enabled, created_at
+		SELECT id, user_id, domain_id, local_part, enabled, COALESCE(created_at, 0)
 		FROM mailboxes
 		WHERE domain_id = $1
 		ORDER BY local_part`
@@ -197,7 +204,7 @@ type MailboxWithDomain struct {
 // GetMailboxesWithDomainByUserID returns mailboxes with domain names
 func (db *DB) GetMailboxesWithDomainByUserID(userID int64) ([]*MailboxWithDomain, error) {
 	query := `
-		SELECT m.id, m.user_id, m.domain_id, m.local_part, m.enabled, m.created_at, d.domain
+		SELECT m.id, m.user_id, m.domain_id, m.local_part, m.enabled, COALESCE(m.created_at, 0), d.domain
 		FROM mailboxes m
 		JOIN domains d ON m.domain_id = d.id
 		WHERE m.user_id = $1
