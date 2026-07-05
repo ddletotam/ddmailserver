@@ -653,6 +653,20 @@ func (db *DB) UpdateMessageRemoteUID(userID int64, messageID string, remoteUID u
 	return rows > 0, nil
 }
 
+// UpdateMessageSize persists the RFC822.SIZE of a message. The size is the
+// length of the RFC822 representation this server assembles and serves as
+// BODY[] — not the original raw size on the remote — because clients (iOS
+// Mail in particular) cross-check RFC822.SIZE against the literal they
+// actually receive and discard bodies that don't match.
+func (db *DB) UpdateMessageSize(messageID int64, size int64) error {
+	_, err := db.Exec(`UPDATE messages SET size = $1, updated_at = $2 WHERE id = $3`,
+		size, timeutil.Now(), messageID)
+	if err != nil {
+		return fmt.Errorf("failed to update message size: %w", err)
+	}
+	return nil
+}
+
 // GetNextUIDForFolder returns the next UID for a folder and increments it atomically
 func (db *DB) GetNextUIDForFolder(folderID int64) (uint32, error) {
 	var uid uint32

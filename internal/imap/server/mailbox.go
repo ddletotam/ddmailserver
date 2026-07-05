@@ -206,7 +206,7 @@ func (m *Mailbox) Check() error {
 func (m *Mailbox) ListMessages(uid bool, seqSet *imap.SeqSet, items []imap.FetchItem, ch chan<- *imap.Message) error {
 	defer close(ch)
 
-	log.Printf("Listing messages for mailbox %s (uid: %v, seqset: %v)", m.name, uid, seqSet)
+	log.Printf("Listing messages for mailbox %s (uid: %v, seqset: %v, items: %v)", m.name, uid, seqSet, items)
 
 	// Load lightweight metadata for the whole folder (no body/body_html). We need
 	// the full ordered list to assign sequence numbers and evaluate seqSet, but
@@ -221,10 +221,16 @@ func (m *Mailbox) ListMessages(uid bool, seqSet *imap.SeqSet, items []imap.Fetch
 	// RFC822/BODYSTRUCTURE variants do; FLAGS/UID/ENVELOPE/SIZE/INTERNALDATE
 	// are served entirely from metadata.
 	needsBody := false
+	wantsSize := false
 	for _, it := range items {
 		switch it {
-		case imap.FetchUid, imap.FetchFlags, imap.FetchInternalDate, imap.FetchRFC822Size, imap.FetchEnvelope:
+		case imap.FetchUid, imap.FetchFlags, imap.FetchInternalDate, imap.FetchEnvelope:
 			// metadata-only
+		case imap.FetchRFC822Size:
+			// Metadata-only when the stored size is already known; messages with
+			// size=0 need the body loaded so the exact assembled size can be
+			// computed (and persisted) — see convertToIMAPMessage.
+			wantsSize = true
 		default:
 			needsBody = true
 		}
@@ -234,9 +240,9 @@ func (m *Mailbox) ListMessages(uid bool, seqSet *imap.SeqSet, items []imap.Fetch
 	type selected struct {
 		seqNum int
 		msg    *models.Message
+		full   bool // body/attachments loaded, not just metadata
 	}
 	var picks []selected
-	var pickedIDs []int64
 	for seqNum, msg := range metas {
 		id := uint32(seqNum + 1)
 		if uid {
@@ -245,15 +251,23 @@ func (m *Mailbox) ListMessages(uid bool, seqSet *imap.SeqSet, items []imap.Fetch
 		if !seqSet.Contains(id) {
 			continue
 		}
-		picks = append(picks, selected{seqNum, msg})
-		pickedIDs = append(pickedIDs, msg.ID)
+		picks = append(picks, selected{seqNum: seqNum, msg: msg})
 	}
 
-	log.Printf("Found %d messages in mailbox %s (folder %d), %d selected (needsBody=%v)",
-		len(metas), m.name, m.folderID, len(picks), needsBody)
+	// IDs that need the full row: everything when a body item was requested,
+	// otherwise just the size=0 messages when RFC822.SIZE was requested.
+	var pickedIDs []int64
+	for _, p := range picks {
+		if needsBody || (wantsSize && p.msg.Size == 0) {
+			pickedIDs = append(pickedIDs, p.msg.ID)
+		}
+	}
+
+	log.Printf("Found %d messages in mailbox %s (folder %d), %d selected (needsBody=%v, fullLoads=%d)",
+		len(metas), m.name, m.folderID, len(picks), needsBody, len(pickedIDs))
 
 	// Load full bodies only for the selected subset, only when needed.
-	if needsBody && len(pickedIDs) > 0 {
+	if len(pickedIDs) > 0 {
 		full, ferr := m.database.GetMessagesByIDs(pickedIDs)
 		if ferr != nil {
 			log.Printf("Failed to load message bodies: %v", ferr)
@@ -265,13 +279,14 @@ func (m *Mailbox) ListMessages(uid bool, seqSet *imap.SeqSet, items []imap.Fetch
 			for i := range picks {
 				if fm, ok := byID[picks[i].msg.ID]; ok {
 					picks[i].msg = fm
+					picks[i].full = true
 				}
 			}
 		}
 	}
 
 	for _, p := range picks {
-		ch <- m.convertToIMAPMessage(p.msg, uint32(p.seqNum+1), items)
+		ch <- m.convertToIMAPMessage(p.msg, uint32(p.seqNum+1), items, p.full)
 	}
 
 	return nil
@@ -973,7 +988,10 @@ func (m *Mailbox) Expunge() error {
 }
 
 // Helper function to convert database message to IMAP message
-func (m *Mailbox) convertToIMAPMessage(msg *models.Message, seqNum uint32, items []imap.FetchItem) *imap.Message {
+// fullyLoaded reports whether msg carries its body/attachments (vs. a
+// metadata-only row) — assembling the RFC822 from a metadata-only row would
+// poison the body cache with an empty rendition.
+func (m *Mailbox) convertToIMAPMessage(msg *models.Message, seqNum uint32, items []imap.FetchItem, fullyLoaded bool) *imap.Message {
 	imapMsg := imap.NewMessage(seqNum, items)
 
 	for _, item := range items {
@@ -1125,6 +1143,17 @@ func (m *Mailbox) convertToIMAPMessage(msg *models.Message, seqNum uint32, items
 			imapMsg.Uid = msg.UID
 
 		case imap.FetchRFC822Size:
+			// Sync never populated size (historically 0). RFC822.SIZE must be the
+			// exact length of the BODY[] literal we assemble — iOS Mail discards
+			// bodies whose size doesn't match and retries for tens of minutes.
+			// Compute it from the assembled message once and persist.
+			if msg.Size == 0 && fullyLoaded {
+				size := int64(len(m.entireMessageBytes(msg)))
+				msg.Size = size
+				if err := m.database.UpdateMessageSize(msg.ID, size); err != nil {
+					log.Printf("Failed to persist size for message %d: %v", msg.ID, err)
+				}
+			}
 			imapMsg.Size = uint32(msg.Size)
 
 		case imap.FetchRFC822, imap.FetchRFC822Header, imap.FetchRFC822Text:
@@ -1304,15 +1333,32 @@ func (m *Mailbox) buildEntireMessageBytes(msg *models.Message) []byte {
 				bodyBuf.WriteString("\r\n")
 				bodyBuf.WriteString(fmt.Sprintf("--%s--\r\n", altBoundary))
 
-				for _, att := range inlineAtts {
+				for _, attMeta := range inlineAtts {
+					// GetAttachmentsByMessageID returns metadata only — load the
+					// data individually, same as regular attachments below. Writing
+					// attMeta.Data here silently produced empty inline parts while
+					// BODYSTRUCTURE still advertised the real size; iOS Mail
+					// discards such messages and retries indefinitely.
+					att, err := m.database.GetAttachmentByID(attMeta.ID)
+					if err != nil {
+						log.Printf("buildEntireMessageBytes: failed to load inline attachment %d: %v", attMeta.ID, err)
+						continue
+					}
 					bodyBuf.WriteString(fmt.Sprintf("--%s\r\n", relatedBoundary))
 					bodyBuf.WriteString(fmt.Sprintf("Content-Type: %s\r\n", att.ContentType))
 					bodyBuf.WriteString("Content-Transfer-Encoding: base64\r\n")
 					bodyBuf.WriteString(fmt.Sprintf("Content-ID: <%s>\r\n", att.ContentID))
 					bodyBuf.WriteString(fmt.Sprintf("Content-Disposition: inline; filename=\"%s\"\r\n", encodeHeader(att.Filename)))
 					bodyBuf.WriteString("\r\n")
-					bodyBuf.WriteString(base64.StdEncoding.EncodeToString(att.Data))
-					bodyBuf.WriteString("\r\n")
+					encoded := base64.StdEncoding.EncodeToString(att.Data)
+					for i := 0; i < len(encoded); i += 76 {
+						end := i + 76
+						if end > len(encoded) {
+							end = len(encoded)
+						}
+						bodyBuf.WriteString(encoded[i:end])
+						bodyBuf.WriteString("\r\n")
+					}
 				}
 				bodyBuf.WriteString(fmt.Sprintf("--%s--\r\n", relatedBoundary))
 			} else {
