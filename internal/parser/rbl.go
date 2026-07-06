@@ -161,11 +161,27 @@ func (c *RBLChecker) checkList(reversedIP string, list RBLList) RBLResult {
 		}
 	}
 
-	if len(addrs) > 0 {
+	// A DNSBL "listed" verdict is ONLY a 127.0.0.0/8 answer that is not a
+	// service code. Anything else is noise: ISP resolvers wildcard NXDOMAIN
+	// into real IPs, and Spamhaus signals errors (public/open resolver,
+	// query limits) via 127.255.255.x — treating those as listings marks
+	// every message from every sender as RBL-hit.
+	for _, a := range addrs {
+		ip := net.ParseIP(a)
+		if ip == nil {
+			continue
+		}
+		v4 := ip.To4()
+		if v4 == nil || v4[0] != 127 {
+			continue
+		}
+		if v4[1] == 255 && v4[2] == 255 {
+			continue // Spamhaus error/service codes, not listings
+		}
 		return RBLResult{
 			Listed:   true,
 			ListName: list.Name,
-			Response: addrs[0],
+			Response: a,
 			Weight:   list.Weight,
 		}
 	}
