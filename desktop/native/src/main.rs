@@ -159,6 +159,76 @@ fn identity_color_map(cache: &Cache, key: &str) -> HashMap<String, String> {
         .collect()
 }
 
+/// (Re)fill the composer from-picker: the Slint model for drawing and the
+/// parallel email list in Shared for send-time resolution. Keeps the current
+/// selection if its email survives the refresh; otherwise re-aims at the
+/// default identity (falling back to the primary account email).
+fn refresh_composer_identities(ui: &MainWindow, sh: &Shared) {
+    let Some(cache) = &sh.cache else { return };
+    let idents = cache.load_identities(&sh.key).unwrap_or_default();
+    let prev_email = {
+        let list = sh.composer_identities.borrow();
+        let idx = ui.get_composer_identity_index();
+        list.get(idx.max(0) as usize).cloned()
+    };
+    let mut items: Vec<IdentityItem> = Vec::with_capacity(idents.len());
+    let mut emails: Vec<String> = Vec::with_capacity(idents.len());
+    let mut selected: i32 = -1;
+    let mut default_idx: i32 = 0;
+    for (i, id) in idents.iter().enumerate() {
+        let color = if id.color.trim().is_empty() {
+            IDENT_PASTEL[i % IDENT_PASTEL.len()]
+        } else {
+            id.color.as_str()
+        };
+        let label = if id.name.trim().is_empty() {
+            id.email.clone()
+        } else {
+            format!("{} <{}>", id.name.trim(), id.email)
+        };
+        items.push(IdentityItem {
+            label: label.into(),
+            email: id.email.clone().into(),
+            tint: parse_hex_color(color),
+        });
+        emails.push(id.email.to_lowercase());
+        if id.is_default {
+            default_idx = i as i32;
+        }
+        if Some(&id.email.to_lowercase()) == prev_email.as_ref() {
+            selected = i as i32;
+        }
+    }
+    // No identities synced yet — the picker hides (length < 2), sends fall
+    // back to the account email engine-side.
+    ui.set_composer_identities(ModelRc::new(VecModel::from(items)));
+    ui.set_composer_identity_index(if selected >= 0 { selected } else { default_idx });
+    *sh.composer_identities.borrow_mut() = emails;
+}
+
+/// Aim the from-picker at a specific identity email (case-insensitive).
+/// No-op when the email isn't one of ours — the previous selection stays.
+fn aim_composer_identity(ui: &MainWindow, sh: &Shared, email: &str) {
+    if email.is_empty() {
+        return;
+    }
+    let lc = email.to_lowercase();
+    if let Some(i) = sh.composer_identities.borrow().iter().position(|e| *e == lc) {
+        ui.set_composer_identity_index(i as i32);
+    }
+}
+
+/// "#rrggbb" → slint Color; anything unparsable → neutral grey.
+fn parse_hex_color(s: &str) -> slint::Color {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() == 6 {
+        if let Ok(v) = u32::from_str_radix(h, 16) {
+            return slint::Color::from_rgb_u8((v >> 16) as u8, (v >> 8) as u8, v as u8);
+        }
+    }
+    slint::Color::from_rgb_u8(0x8b, 0x95, 0xa1)
+}
+
 fn cache_db_path() -> Option<std::path::PathBuf> {
     // Pick the per-OS location of the existing cache dir so the client
     // reads the same cache.db the user already has.
@@ -707,6 +777,10 @@ struct Shared {
     /// email(lowercase) → пастельный цвет айдентики (подкраска строк
     /// сайдбара по received_by). Обновляется при каждом списке диалогов.
     identity_colors: RefCell<HashMap<String, String>>,
+    /// From-picker дропдауна композера: e-mail'ы в том же порядке, что и
+    /// Slint-модель composer-identities. on_send резолвит выбранный индекс
+    /// через этот список (Slint-модель — источник только для отрисовки).
+    composer_identities: RefCell<Vec<String>>,
     /// UI-thread copy of the per-row link rects (CSS px, bubble-relative) —
     /// drives the pointer cursor over links. The render worker keeps its
     /// own copy for click hit-testing; this one answers synchronous
@@ -959,6 +1033,10 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
         c.account_key.clone()
     };
     sh.cur_account_key.replace(akey.clone());
+    // Replies default to the identity that received this conversation; the
+    // from-picker shows it and the user can still override before sending.
+    aim_composer_identity(ui, sh, &c.received_by);
+    ui.set_identity_menu_open(false);
 
     // The right pane clears IMMEDIATELY: stale bubbles from the previous
     // conversation must never linger while this one loads. The progress
@@ -2155,7 +2233,98 @@ fn open_create_form_at(ui: &MainWindow, sh: &Shared, start_ms: i64) {
     ui.set_edit_location("".into());
     ui.set_edit_description("".into());
     ui.set_edit_calendar_idx(0);
+    ui.set_edit_organizer("".into());
+    ui.set_edit_attendees(ModelRc::new(VecModel::from(Vec::<AttendeeItem>::new())));
+    ui.set_edit_meta("".into());
+    ui.set_edit_extras(ModelRc::new(VecModel::from(Vec::<EventExtraItem>::new())));
     ui.set_edit_visible(true);
+}
+
+/// Russian display label for an extra VEVENT property; unknown names pass
+/// through as-is (they're already uppercased server-side).
+fn extra_label(name: &str, value: &str) -> (String, String) {
+    match name {
+        "CONFERENCE" | "X-TELEMOST-CONFERENCE" | "X-GOOGLE-CONFERENCE" => {
+            ("Видеовстреча".into(), value.into())
+        }
+        "URL" => ("Ссылка".into(), value.into()),
+        "CATEGORIES" => ("Категории".into(), value.into()),
+        "CLASS" => (
+            "Доступ".into(),
+            match value.to_uppercase().as_str() {
+                "PRIVATE" => "Приватное".into(),
+                "CONFIDENTIAL" => "Конфиденциальное".into(),
+                _ => value.into(),
+            },
+        ),
+        "TRANSP" => (
+            "Занятость".into(),
+            if value.eq_ignore_ascii_case("TRANSPARENT") {
+                "Свободен".into()
+            } else {
+                value.into()
+            },
+        ),
+        "PRIORITY" => ("Приоритет".into(), value.into()),
+        "COMMENT" => ("Комментарий".into(), value.into()),
+        "CONTACT" => ("Контакт".into(), value.into()),
+        "ATTACH" => ("Вложение".into(), value.into()),
+        _ => (name.into(), value.into()),
+    }
+}
+
+/// PARTSTAT → status dot colour (green accepted / red declined / orange
+/// tentative / grey no answer yet).
+fn partstat_dot(partstat: &str) -> slint::Color {
+    match partstat.to_uppercase().as_str() {
+        "ACCEPTED" => slint::Color::from_rgb_u8(0x34, 0xa8, 0x53),
+        "DECLINED" => slint::Color::from_rgb_u8(0xe2, 0x3b, 0x3b),
+        "TENTATIVE" => slint::Color::from_rgb_u8(0xf5, 0xa6, 0x23),
+        _ => slint::Color::from_rgb_u8(0xb5, 0xbc, 0xc6),
+    }
+}
+
+/// "Имя <email>" when a display name exists, plain email otherwise.
+fn person_label(name: &str, email: &str) -> String {
+    if name.trim().is_empty() {
+        email.to_string()
+    } else {
+        format!("{} <{}>", name.trim(), email)
+    }
+}
+
+/// RRULE → короткая русская метка. Only FREQ/INTERVAL are surfaced — the
+/// point is "это повторяющееся событие", not a full RFC 5545 rendering.
+fn humanize_rrule(rrule: &str) -> String {
+    let up = rrule.to_uppercase();
+    let get = |k: &str| {
+        up.split(&[';', ':'][..])
+            .find_map(|p| p.strip_prefix(k).map(|v| v.to_string()))
+    };
+    let interval: u32 = get("INTERVAL=").and_then(|v| v.parse().ok()).unwrap_or(1);
+    let (each, unit) = match get("FREQ=").as_deref() {
+        Some("DAILY") => ("Ежедневно", "дн."),
+        Some("WEEKLY") => ("Еженедельно", "нед."),
+        Some("MONTHLY") => ("Ежемесячно", "мес."),
+        Some("YEARLY") => ("Ежегодно", "г."),
+        _ => return "Повторяется".to_string(),
+    };
+    if interval > 1 {
+        format!("Каждые {interval} {unit}")
+    } else {
+        each.to_string()
+    }
+}
+
+/// Minutes-before-start → "N мин" / "N ч" / "N дн".
+fn humanize_lead(min: i32) -> String {
+    if min % 1440 == 0 && min >= 1440 {
+        format!("{} дн", min / 1440)
+    } else if min % 60 == 0 && min >= 60 {
+        format!("{} ч", min / 60)
+    } else {
+        format!("{min} мин")
+    }
 }
 
 /// Open the edit form populated from an existing event.
@@ -2172,6 +2341,53 @@ fn open_edit_form(ui: &MainWindow, sh: &Shared, ev: &ddmail_core::types::Desktop
     ui.set_edit_location(ev.location.clone().into());
     ui.set_edit_description(ev.description.clone().into());
     ui.set_edit_calendar_idx(idx);
+
+    // Read-only meeting details (see the card's edit-organizer block).
+    ui.set_edit_organizer(
+        if ev.organizer_email.is_empty() {
+            String::new()
+        } else {
+            person_label(&ev.organizer_name, &ev.organizer_email)
+        }
+        .into(),
+    );
+    let attendees: Vec<AttendeeItem> = ev
+        .attendees
+        .iter()
+        .map(|a| AttendeeItem {
+            label: person_label(&a.name, &a.email).into(),
+            dot: partstat_dot(&a.partstat),
+        })
+        .collect();
+    ui.set_edit_attendees(ModelRc::new(VecModel::from(attendees)));
+    let extras: Vec<EventExtraItem> = ev
+        .extras
+        .iter()
+        .map(|x| {
+            let (label, value) = extra_label(&x.name, &x.value);
+            let is_link = value.starts_with("http://") || value.starts_with("https://");
+            EventExtraItem {
+                label: label.into(),
+                value: value.into(),
+                is_link,
+            }
+        })
+        .collect();
+    ui.set_edit_extras(ModelRc::new(VecModel::from(extras)));
+    let mut meta: Vec<String> = Vec::new();
+    match ev.status.to_uppercase().as_str() {
+        "CANCELLED" => meta.push("Отменено".to_string()),
+        "TENTATIVE" => meta.push("Предварительно".to_string()),
+        _ => {}
+    }
+    if !ev.rrule.is_empty() {
+        meta.push(humanize_rrule(&ev.rrule));
+    }
+    if ev.alarm_lead_min > 0 {
+        meta.push(format!("Напоминание за {}", humanize_lead(ev.alarm_lead_min)));
+    }
+    ui.set_edit_meta(meta.join(" · ").into());
+
     ui.set_edit_visible(true);
 }
 
@@ -2268,7 +2484,29 @@ fn apply_calendar_defaults(ui: &MainWindow) {
     ui.set_events(slint::ModelRc::new(slint::VecModel::from(Vec::<EventBlock>::new())));
 }
 
+/// Minimal stdout logger: ddmail-core (NativeProvider, engine) reports
+/// through the `log` crate, and without an installed logger those records
+/// vanish — the WebSocket watcher's connect/refresh diagnostics were
+/// invisible exactly when they were needed.
+struct StdoutLogger;
+
+impl log::Log for StdoutLogger {
+    fn enabled(&self, m: &log::Metadata) -> bool {
+        m.level() <= log::Level::Info
+    }
+    fn log(&self, r: &log::Record) {
+        if self.enabled(r.metadata()) {
+            println!("[{}] {}", r.level(), r.args());
+        }
+    }
+    fn flush(&self) {}
+}
+
+static STDOUT_LOGGER: StdoutLogger = StdoutLogger;
+
 fn main() {
+    let _ = log::set_logger(&STDOUT_LOGGER)
+        .map(|()| log::set_max_level(log::LevelFilter::Info));
     // Single-instance guard: a second launch exits instead of opening a
     // duplicate window. (Focusing the existing window needs IPC — TODO.)
     let _instance = single_instance::SingleInstance::new("ddmail-native-single").ok();
@@ -2837,6 +3075,7 @@ fn main() {
         src_sel_moved: Cell::new(false),
         src_sel_dragging: Cell::new(false),
         identity_colors: RefCell::new(startup_ident_colors),
+        composer_identities: RefCell::new(Vec::new()),
         row_links: RefCell::new(Vec::new()),
         confirm_mode: Cell::new(0),
         row_text_runs: RefCell::new(Vec::new()),
@@ -2879,6 +3118,9 @@ fn main() {
     });
     SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
     sync_media_globals(&ui, &shared.policy.borrow());
+    // Seed the composer from-picker from cached identities; refreshed again
+    // whenever the engine resyncs identities.
+    refresh_composer_identities(&ui, &shared);
 
     // Seed the persisted per-calendar maps (visibility deny-list + colour
     // overrides) now that Shared exists.
@@ -3320,6 +3562,17 @@ fn main() {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        // Sending identity from the from-picker (None until identities sync;
+        // the engine then falls back to the account email). Resolved through
+        // the Shared email list — the Slint model is draw-only.
+        let from_identity: Option<String> = ui_now.as_ref().and_then(|u| {
+            let idx = u.get_composer_identity_index();
+            sh_send
+                .composer_identities
+                .borrow()
+                .get(idx.max(0) as usize)
+                .cloned()
+        });
         // Staged attachment paths for this send, snapshotted up front so the
         // per-branch Send commands all carry the same list.
         let attachments: Vec<String> = sh_send
@@ -3387,6 +3640,7 @@ fn main() {
                     body: body_text,
                     in_reply_to: None,
                     references: None,
+                    from: from_identity.clone(),
                     attachments: attachments.clone(),
                     forward_attachments: Some(MessageRef {
                         folder: orig.folder.clone(),
@@ -3422,6 +3676,7 @@ fn main() {
                     body: text,
                     in_reply_to: None,
                     references: None,
+                    from: from_identity.clone(),
                     attachments: attachments.clone(),
                     forward_attachments: None,
                     account_key: sh_send.cur_account_key.borrow().clone(),
@@ -3492,6 +3747,7 @@ fn main() {
                 println!("sending explicit reply to {to:?}");
                 let _ = etx.send(engine::EngineCmd::Send {
                     to, cc: cc.clone(), subject, body: text, in_reply_to, references,
+                    from: from_identity.clone(),
                     attachments: attachments.clone(),
                     forward_attachments: None,
                     account_key: sh_send.cur_account_key.borrow().clone(),
@@ -3552,6 +3808,7 @@ fn main() {
             println!("sending reply to {to:?}");
             let _ = etx.send(engine::EngineCmd::Send {
                 to, cc, subject, body: text, in_reply_to, references,
+                from: from_identity.clone(),
                 attachments,
                 forward_attachments: None,
                 account_key: sh_send.cur_account_key.borrow().clone(),
@@ -4313,11 +4570,43 @@ fn main() {
         ui.set_detail_attendee_rows(ModelRc::new(VecModel::from(att_rows)));
         ui.set_detail_my_partstat(my_partstat.into());
         ui.set_detail_description(ev.description.clone().into());
+        // Status/recurrence/reminder digest — same shape as the edit form.
+        let mut meta: Vec<String> = Vec::new();
+        match ev.status.to_uppercase().as_str() {
+            "CANCELLED" => meta.push("Отменено".to_string()),
+            "TENTATIVE" => meta.push("Предварительно".to_string()),
+            _ => {}
+        }
+        if !ev.rrule.is_empty() {
+            meta.push(humanize_rrule(&ev.rrule));
+        }
+        if ev.alarm_lead_min > 0 {
+            meta.push(format!("Напоминание за {}", humanize_lead(ev.alarm_lead_min)));
+        }
+        ui.set_detail_meta(meta.join(" · ").into());
+        // Every non-default VEVENT property the server extracted.
+        let extras: Vec<EventExtraItem> = ev
+            .extras
+            .iter()
+            .map(|x| {
+                let (label, value) = extra_label(&x.name, &x.value);
+                let is_link = value.starts_with("http://") || value.starts_with("https://");
+                EventExtraItem { label: label.into(), value: value.into(), is_link }
+            })
+            .collect();
+        let extra_urls: std::collections::HashSet<String> = extras
+            .iter()
+            .filter(|x| x.is_link)
+            .map(|x| x.value.to_string())
+            .collect();
+        ui.set_detail_extras(ModelRc::new(VecModel::from(extras)));
         // Meeting links live as plain text in location/description more
-        // often than not — surface every URL as a clickable row.
+        // often than not — surface every URL as a clickable row, minus the
+        // ones already shown as first-class extras (CONFERENCE/URL).
         let links: Vec<slint::SharedString> =
             extract_urls(&[ev.location.as_str(), ev.description.as_str()])
                 .into_iter()
+                .filter(|u| !extra_urls.contains(u))
                 .map(Into::into)
                 .collect();
         ui.set_detail_links(ModelRc::new(VecModel::from(links)));
@@ -4545,6 +4834,9 @@ fn main() {
             ui.set_edit_visible(false);
         }
     });
+    ui.on_edit_open_url(move |url| {
+        open_external(url.as_str());
+    });
 
     // Calendar reminders: a UI-thread timer scans the persisted reminder
     // table every interval and toasts whatever just came due. Runs on the
@@ -4723,9 +5015,11 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         if partial { "merge" } else { "full" }
                     );
                     // Identities may have been (re)synced alongside the
-                    // conversations — refresh the row-tint map from cache.
+                    // conversations — refresh the row-tint map and the
+                    // composer from-picker from cache.
                     if let Some(cache) = &sh.cache {
                         *sh.identity_colors.borrow_mut() = identity_color_map(cache, &sh.key);
+                        refresh_composer_identities(ui, sh);
                     }
                     let displays = displays_from(&merged, &sh.identity_colors.borrow());
                     let items = sidebar_items(&displays, &sh.avatars.borrow());
@@ -4877,6 +5171,18 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             println!("account {account_key}: {state}");
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
+                    // Catch-up refetch on every (re)connect: the client is
+                    // push-driven, and any event published while the socket
+                    // was dead (silent TCP death, server restart, watchdog
+                    // gap) is gone for good — the hub doesn't replay. One
+                    // conversations fetch per reconnect closes that window.
+                    if state == "connected" {
+                        if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                            let _ = etx.send(engine::EngineCmd::FetchConversations {
+                                limit: CONV_FETCH_LIMIT,
+                            });
+                        }
+                    }
                     sh.account_states
                         .borrow_mut()
                         .insert(account_key, state);

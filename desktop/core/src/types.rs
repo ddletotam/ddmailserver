@@ -321,4 +321,14 @@ pub struct DesktopCalendarEvent {
     /// should fall back to its global default lead-time.
     #[serde(default)]
     pub alarm_lead_min: i32,
+    /// Non-default VEVENT properties that aren't first-class fields —
+    /// conference links, URL, CATEGORIES, CLASS etc. Uppercased names.
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
+    pub extras: Vec<DesktopEventExtra>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopEventExtra {
+    pub name: String,
+    pub value: String,
 }
