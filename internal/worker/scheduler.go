@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/yourusername/mailserver/internal/db"
+	"github.com/yourusername/mailserver/internal/dkimsign"
 	imapclient "github.com/yourusername/mailserver/internal/imap/client"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/notify"
@@ -28,6 +29,7 @@ type SchedulerDeps struct {
 	NotifyHub       *notify.Hub
 	Hostname        string
 	Analyzer        *parser.Analyzer
+	DKIMSigner      *dkimsign.Signer // nil → direct delivery goes unsigned
 }
 
 // Scheduler schedules periodic tasks for mail synchronization
@@ -42,6 +44,7 @@ type Scheduler struct {
 	notifyHub                *notify.Hub
 	hostname                 string
 	analyzer                 *parser.Analyzer
+	dkimSigner               *dkimsign.Signer
 	spamCleanupLastRun       time.Time
 	accountLogCleanupLastRun time.Time
 	vaultCleanupLastRun      time.Time
@@ -70,6 +73,7 @@ func NewScheduler(deps SchedulerDeps) *Scheduler {
 		notifyHub:      deps.NotifyHub,
 		hostname:       deps.Hostname,
 		analyzer:       deps.Analyzer,
+		dkimSigner:     deps.DKIMSigner,
 	}
 }
 
@@ -302,7 +306,7 @@ func (s *Scheduler) scheduleSMTPSend() {
 
 		if msg.AccountID == 0 {
 			// Direct delivery for local domain senders
-			sendTask = smtpclient.NewDirectSendTask(msg, s.database, s.getHostname())
+			sendTask = smtpclient.NewDirectSendTask(msg, s.database, s.getHostname(), s.dkimSigner)
 		} else {
 			// Relay through external SMTP account
 			account, err := s.database.GetAccountByID(msg.AccountID)

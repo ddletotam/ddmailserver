@@ -14,6 +14,7 @@ import (
 	"github.com/yourusername/mailserver/internal/caldav/importer"
 	"github.com/yourusername/mailserver/internal/config"
 	"github.com/yourusername/mailserver/internal/db"
+	"github.com/yourusername/mailserver/internal/dkimsign"
 	imapclient "github.com/yourusername/mailserver/internal/imap/client"
 	imapserver "github.com/yourusername/mailserver/internal/imap/server"
 	"github.com/yourusername/mailserver/internal/ldap"
@@ -161,10 +162,18 @@ func main() {
 	hostname := "localhost"
 	if cfg.Server.Domain != "" {
 		hostname = cfg.Server.Domain
+	} else {
+		log.Printf("WARNING: server.domain is not set — outgoing SMTP will HELO as %q, which large providers reject", hostname)
 	}
 
 	// Check if TLS is configured
 	hasTLS := cfg.Security.TLSCert != "" && cfg.Security.TLSKey != ""
+
+	// DKIM signing of direct-delivery outgoing mail (one key per domain).
+	dkimSigner := dkimsign.New(cfg.DKIM.Selector, cfg.DKIM.KeyDir)
+	if dkimSigner == nil {
+		log.Printf("DKIM signing disabled (dkim.selector/dkim.key_dir not configured)")
+	}
 
 	// Initialize notification hub for IMAP IDLE support
 	log.Printf("Initializing notification hub...")
@@ -185,6 +194,7 @@ func main() {
 		NotifyHub:       notifyHub,
 		Hostname:        hostname,
 		Analyzer:        spamAnalyzer,
+		DKIMSigner:      dkimSigner,
 	})
 
 	// Initialize IDLE manager for persistent IMAP connections
@@ -233,10 +243,12 @@ func main() {
 		}
 	}
 
-	// Initialize SMTP server (submission - for authenticated users)
+	// Initialize SMTP server (submission - for authenticated users).
+	// Plaintext AUTH is allowed only when no TLS listener exists at all:
+	// with TLS configured, clients must use the implicit-TLS port.
 	log.Printf("Initializing SMTP server...")
 	smtpAddr := fmt.Sprintf("%s:%d", cfg.Server.WebHost, cfg.Server.SMTPPort)
-	smtpSrv := smtpserver.New(database, smtpAddr, hostname)
+	smtpSrv := smtpserver.New(database, smtpAddr, hostname, !hasTLS)
 	go func() {
 		if err := smtpSrv.Start(); err != nil && !errors.Is(err, net.ErrClosed) {
 			log.Fatalf("SMTP server error: %v", err)

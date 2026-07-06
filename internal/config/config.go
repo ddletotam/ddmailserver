@@ -17,6 +17,16 @@ type Config struct {
 	OAuth       OAuthConfig       `yaml:"oauth"`
 	Spam        SpamConfig        `yaml:"spam"`
 	Meilisearch MeilisearchConfig `yaml:"meilisearch"`
+	DKIM        DKIMConfig        `yaml:"dkim"`
+}
+
+// DKIMConfig enables DKIM signing of direct-delivery outgoing mail.
+// KeyDir holds one PEM RSA key per sending domain, named "<domain>.key";
+// the key is looked up by the domain of the From address. Empty selector
+// or key_dir disables signing.
+type DKIMConfig struct {
+	Selector string `yaml:"selector"`
+	KeyDir   string `yaml:"key_dir"`
 }
 
 type MeilisearchConfig struct {

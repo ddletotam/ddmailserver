@@ -3,12 +3,14 @@ package client
 import (
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/smtp"
 	"strings"
 
+	"github.com/yourusername/mailserver/internal/logmask"
 	"github.com/yourusername/mailserver/internal/models"
 )
 
@@ -218,7 +220,22 @@ func SendDirect(from string, to []string, message []byte, hostname string) error
 	return nil
 }
 
+// errStartTLS marks a failed STARTTLS handshake. The TCP session is dead
+// after a handshake failure — "continuing" on the same connection just
+// surfaces the TLS error on the next command. Opportunistic TLS therefore
+// means: redial from scratch and skip STARTTLS entirely.
+var errStartTLS = errors.New("starttls handshake failed")
+
 func sendDirectToHost(addr, hostname, from string, to []string, msg []byte) error {
+	err := sendDirectAttempt(addr, hostname, from, to, msg, true)
+	if errors.Is(err, errStartTLS) {
+		log.Printf("STARTTLS with %s failed, redialing without TLS", addr)
+		err = sendDirectAttempt(addr, hostname, from, to, msg, false)
+	}
+	return err
+}
+
+func sendDirectAttempt(addr, hostname, from string, to []string, msg []byte, tryTLS bool) error {
 	client, err := smtp.Dial(addr)
 	if err != nil {
 		return fmt.Errorf("dial failed: %w", err)
@@ -229,12 +246,15 @@ func sendDirectToHost(addr, hostname, from string, to []string, msg []byte) erro
 		return fmt.Errorf("EHLO failed: %w", err)
 	}
 
-	// Try STARTTLS if available
-	if ok, _ := client.Extension("STARTTLS"); ok {
-		host := strings.Split(addr, ":")[0]
-		tlsConfig := &tls.Config{ServerName: host}
-		if err := client.StartTLS(tlsConfig); err != nil {
-			log.Printf("STARTTLS failed for %s, continuing without TLS: %v", addr, err)
+	// Opportunistic STARTTLS; a failed handshake aborts this attempt (the
+	// connection is unusable) and the caller retries in plaintext.
+	if tryTLS {
+		if ok, _ := client.Extension("STARTTLS"); ok {
+			host := strings.Split(addr, ":")[0]
+			tlsConfig := &tls.Config{ServerName: host}
+			if err := client.StartTLS(tlsConfig); err != nil {
+				return fmt.Errorf("%w: %v", errStartTLS, err)
+			}
 		}
 	}
 
@@ -244,7 +264,9 @@ func sendDirectToHost(addr, hostname, from string, to []string, msg []byte) erro
 
 	for _, rcpt := range to {
 		if err := client.Rcpt(rcpt); err != nil {
-			return fmt.Errorf("RCPT TO %s failed: %w", rcpt, err)
+			// Masked: this error lands in logs and outbox last_error, and
+			// the recipient address is personal data.
+			return fmt.Errorf("RCPT TO %s failed: %w", logmask.Addr(rcpt), err)
 		}
 	}
 

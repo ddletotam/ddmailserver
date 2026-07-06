@@ -11,13 +11,19 @@ import (
 	"time"
 
 	"github.com/yourusername/mailserver/internal/db"
+	"github.com/yourusername/mailserver/internal/logmask"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/parser"
 	"github.com/yourusername/mailserver/internal/task"
 	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
-const maxRetries = 3
+// maxRetries is the total number of delivery attempts before an outbox
+// message is marked failed. IncrementOutboxMessageRetries schedules the
+// next attempt with growing backoff (1m → 5m → 15m → 1h → 4h → 12h), so a
+// temporarily-refusing MX gets ~17.5 hours of retries, not three attempts
+// in as many minutes.
+const maxRetries = 6
 
 // SendTask represents an SMTP send task
 type SendTask struct {
@@ -50,7 +56,9 @@ func (t *SendTask) Priority() int {
 
 // String returns a human-readable description
 func (t *SendTask) String() string {
-	return fmt.Sprintf("SMTP send message %d from %s to %s", t.outboxMessage.ID, t.outboxMessage.From, t.outboxMessage.To)
+	// Recipient addresses are personal data — mask them in worker logs.
+	return fmt.Sprintf("SMTP send message %d from %s to %s",
+		t.outboxMessage.ID, logmask.Addr(t.outboxMessage.From), logmask.AddrList(t.outboxMessage.To))
 }
 
 // Execute runs the send operation
