@@ -174,21 +174,28 @@ func (t *SyncTask) syncAllRemoteFolders(ctx context.Context, client *Client, loc
 	}
 	t.accountLog("info", "synced %d new messages (skipped %d duplicates, %d classified spam) across %d folders",
 		totalNew, totalSkipped, totalSpam, len(jobs))
-	if totalNew > totalSpam && t.notifyFunc != nil {
+	// Push gate: t.lastNew is set by every non-spam save of this run, so its
+	// presence is direct evidence the user got something worth announcing.
+	// The old arithmetic gate (totalNew > totalSpam) silently swallowed the
+	// notification whenever one batch carried both a clean message and at
+	// least as much spam — one junk mail in the same sync cycle was enough
+	// to make a fresh inbox message arrive with no push at all.
+	if t.lastNew != nil && t.notifyFunc != nil {
 		totalMessages, _ := t.database.GetMessageCountByFolder(localInbox.ID)
 		if user, err := t.database.GetUserByID(t.account.UserID); err == nil {
-			notice := NewMailNotice{
-				Username: user.Username,
-				Mailbox:  "INBOX",
-				Count:    totalMessages,
-				NewCount: totalNew - totalSpam,
+			newCount := totalNew - totalSpam
+			if newCount < 1 {
+				newCount = 1
 			}
-			if t.lastNew != nil {
-				notice.From = t.lastNew.From
-				notice.Subject = t.lastNew.Subject
-				notice.MessageID = t.lastNew.ID
-			}
-			t.notifyFunc(notice)
+			t.notifyFunc(NewMailNotice{
+				Username:  user.Username,
+				Mailbox:   "INBOX",
+				Count:     totalMessages,
+				NewCount:  newCount,
+				From:      t.lastNew.From,
+				Subject:   t.lastNew.Subject,
+				MessageID: t.lastNew.ID,
+			})
 		}
 	}
 	return nil
