@@ -1328,6 +1328,7 @@ dependencies = [
  "image",
  "javascriptcore-rs",
  "ksni",
+ "log",
  "notify-rust",
  "raw-window-handle",
  "regex",

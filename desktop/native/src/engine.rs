@@ -297,6 +297,9 @@ pub enum EngineCmd {
         body: String,
         in_reply_to: Option<String>,
         references: Option<String>,
+        /// Sending identity ("From"). None → the account's own email.
+        /// The server matches it against the user's accounts/identities.
+        from: Option<String>,
         /// Filesystem paths of files the user attached in the composer.
         /// Resolved to bytes (and a guessed MIME type) just before sending.
         attachments: Vec<String>,
@@ -826,7 +829,7 @@ pub fn spawn(
                         Err(e) => on_result(EngineResult::Error(format!("delete_event: {e}"))),
                     }
                 }
-                EngineCmd::Send { to, cc, subject, body, in_reply_to, references, attachments, forward_attachments, account_key } => {
+                EngineCmd::Send { to, cc, subject, body, in_reply_to, references, from, attachments, forward_attachments, account_key } => {
                     let conn = route(&conns, &account_key);
                     let provider = conn.provider.clone();
                     let key = conn.key.clone();
@@ -862,7 +865,7 @@ pub fn spawn(
                         }
                     }
                     let msg = OutgoingMessage {
-                        from: cfg.email.clone(),
+                        from: from.unwrap_or_else(|| cfg.email.clone()),
                         to,
                         cc,
                         subject,

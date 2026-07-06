@@ -269,6 +269,121 @@ type DesktopCalendarEvent struct {
 	// start" (positive int). 0 means no usable VALARM was found and the
 	// desktop should fall back to its global default lead time.
 	AlarmLeadMin int `json:"alarm_lead_min,omitempty"`
+	// Extras carries every VEVENT property that is neither surfaced as a
+	// first-class field above nor pure plumbing, with default values
+	// (TRANSP:OPAQUE, CLASS:PUBLIC…) elided. This is how conference links
+	// (CONFERENCE / X-TELEMOST-CONFERENCE), URL, CATEGORIES etc. reach the
+	// desktop card — they only exist inside ical_data.
+	Extras []DesktopEventExtra `json:"extras,omitempty"`
+}
+
+// DesktopEventExtra is one non-default VEVENT property, name uppercased.
+type DesktopEventExtra struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// desktopExtraSkip lists VEVENT properties already surfaced as first-class
+// DesktopCalendarEvent fields, or pure plumbing that means nothing to a user.
+var desktopExtraSkip = map[string]bool{
+	"UID": true, "SUMMARY": true, "DESCRIPTION": true, "LOCATION": true,
+	"DTSTART": true, "DTEND": true, "DURATION": true, "DTSTAMP": true,
+	"CREATED": true, "LAST-MODIFIED": true, "SEQUENCE": true,
+	"ORGANIZER": true, "ATTENDEE": true, "RRULE": true, "RDATE": true,
+	"EXDATE": true, "RECURRENCE-ID": true, "STATUS": true,
+}
+
+// extraRank orders the extras: recognisable meeting fields first, the
+// alphabetical long tail after.
+func extraRank(name string) int {
+	switch name {
+	case "CONFERENCE":
+		return 0
+	case "URL":
+		return 1
+	case "CATEGORIES":
+		return 2
+	case "CLASS":
+		return 3
+	case "TRANSP":
+		return 4
+	case "PRIORITY":
+		return 5
+	default:
+		return 10
+	}
+}
+
+// extraPropsFromICal extracts the non-default properties of the master
+// VEVENT. Values are deduplicated case-insensitively: Yandex, for one,
+// publishes the conference URL as both CONFERENCE and X-TELEMOST-CONFERENCE.
+func extraPropsFromICal(icalData string) []DesktopEventExtra {
+	if icalData == "" {
+		return nil
+	}
+	cal, err := ical.NewDecoder(strings.NewReader(icalData)).Decode()
+	if err != nil {
+		return nil
+	}
+	events := cal.Events()
+	var master *ical.Event
+	for i := range events {
+		if events[i].Props.Get(ical.PropRecurrenceID) == nil {
+			master = &events[i]
+			break
+		}
+	}
+	if master == nil {
+		return nil
+	}
+
+	names := make([]string, 0, len(master.Props))
+	for name := range master.Props {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		ri, rj := extraRank(names[i]), extraRank(names[j])
+		if ri != rj {
+			return ri < rj
+		}
+		return names[i] < names[j]
+	})
+
+	var out []DesktopEventExtra
+	seenVal := make(map[string]bool)
+	for _, name := range names {
+		up := strings.ToUpper(name)
+		// X-MOZ-*/X-LIC-* are client bookkeeping (Thunderbird ack stamps
+		// and libical annotations), never user-facing data.
+		if desktopExtraSkip[up] || strings.HasPrefix(up, "X-MOZ-") || strings.HasPrefix(up, "X-LIC-") {
+			continue
+		}
+		for _, p := range master.Props[name] {
+			val := p.Value
+			if t, terr := p.Text(); terr == nil && t != "" {
+				val = t
+			}
+			val = strings.TrimSpace(val)
+			if val == "" {
+				continue
+			}
+			// Default values carry no information — elide.
+			upVal := strings.ToUpper(val)
+			if (up == "TRANSP" && upVal == "OPAQUE") ||
+				(up == "CLASS" && upVal == "PUBLIC") ||
+				(up == "PRIORITY" && (val == "0" || val == "5")) ||
+				up == "METHOD" || up == "CALSCALE" {
+				continue
+			}
+			key := strings.ToLower(val)
+			if seenVal[key] {
+				continue
+			}
+			seenVal[key] = true
+			out = append(out, DesktopEventExtra{Name: up, Value: val})
+		}
+	}
+	return out
 }
 
 // overridesFromICal pulls RECURRENCE-ID override VEVENTs out of a recurring
@@ -455,6 +570,7 @@ func (s *Server) HandleDesktopCalendarEvents(w http.ResponseWriter, r *http.Requ
 
 	out := make([]DesktopCalendarEvent, 0, len(events))
 	for _, e := range events {
+		extras := extraPropsFromICal(e.ICalData)
 		atts, _ := s.database.GetAttendeesByEventID(e.ID)
 		dtos := make([]DesktopCalendarAttendee, 0, len(atts))
 		for _, a := range atts {
@@ -484,6 +600,7 @@ func (s *Server) HandleDesktopCalendarEvents(w http.ResponseWriter, r *http.Requ
 				if o.DTStart < toMs && oEnd > fromMs {
 					o.Attendees = dtos
 					o.AlarmLeadMin = parseAlarmLeadMin(e.ICalData)
+					o.Extras = extras
 					out = append(out, o)
 				}
 			}
@@ -506,6 +623,7 @@ func (s *Server) HandleDesktopCalendarEvents(w http.ResponseWriter, r *http.Requ
 			ExDates:        exDates,
 			Attendees:      dtos,
 			AlarmLeadMin:   parseAlarmLeadMin(e.ICalData),
+			Extras:         extras,
 		})
 	}
 

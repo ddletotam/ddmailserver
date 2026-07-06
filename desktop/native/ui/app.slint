@@ -126,6 +126,30 @@ struct AttachChip {
     name: string,
 }
 
+// A sending identity in the composer's from-picker. `tint` mirrors the
+// sidebar identity colour so the dot is recognisable across the app.
+struct IdentityItem {
+    label: string,
+    email: string,
+    tint: color,
+}
+
+// One attendee row in the event card's read-only block. `dot` encodes the
+// participation status (green accepted / red declined / orange tentative /
+// grey no answer) — computed Rust-side from PARTSTAT.
+struct AttendeeItem {
+    label: string,
+    dot: color,
+}
+
+// One extra event property (conference link, URL, categories…). Links are
+// clickable and open in the browser.
+struct EventExtraItem {
+    label: string,
+    value: string,
+    is-link: bool,
+}
+
 // A horizontal dashed hairline — Slint has no stroke-dash, so we tile fixed
 // dash segments. `count` (period 24px) comes from Rust, sized to the grid.
 component DashLine inherits Rectangle {
@@ -306,6 +330,13 @@ export component MainWindow inherits Window {
     // side after the native file dialog; cleared once the message is staged.
     in property <[AttachChip]> composer-attachments;
 
+    // From-picker: which identity the next message is sent as. The Rust
+    // side fills the list, re-aims the index at the conversation's
+    // receiving identity on open, and reads it back at send time.
+    in property <[IdentityItem]> composer-identities;
+    in-out property <int> composer-identity-index: 0;
+    in-out property <bool> identity-menu-open: false;
+
     // Render progress: while a conversation's bubbles stream in from
     // Ultralight, a thin bar above the bubble list shows "M of N done".
     // Visible when total > 0 AND progress < total.
@@ -428,6 +459,10 @@ export component MainWindow inherits Window {
     in property <[AttRow]> detail-attendee-rows;
     in property <string> detail-my-partstat: "";
     in property <string> detail-description;
+    // Status/recurrence/reminder line + every non-default event property
+    // (conference link, URL, categories…) — see EventExtraItem.
+    in property <string> detail-meta: "";
+    in property <[EventExtraItem]> detail-extras;
     in-out property <int> detail-event-id;
     // Every URL found in the event's location/description (plain text
     // included) — rendered as clickable rows in the card.
@@ -449,6 +484,17 @@ export component MainWindow inherits Window {
     in-out property <bool> edit-all-day: false;
     in property <[string]> edit-calendars;     // writable calendar names
     in-out property <int> edit-calendar-idx: 0;
+    // Read-only block of the event card (meetings): organizer line,
+    // attendees with participation-status dots, and a meta line
+    // (cancelled/tentative · recurrence · reminder). All empty for
+    // create mode and plain local events — the block collapses.
+    in property <string> edit-organizer: "";
+    in property <[AttendeeItem]> edit-attendees;
+    in property <string> edit-meta: "";
+    // Everything else the event carries that isn't a form field: conference
+    // link, event URL, categories… Links open in the browser.
+    in property <[EventExtraItem]> edit-extras;
+    callback edit-open-url(string);
     callback edit-save();
     callback edit-cancel();
     callback new-event();
@@ -480,12 +526,12 @@ export component MainWindow inherits Window {
     // plain binding would be destroyed by the user's first manual scroll.)
     in-out property <length> chat-scroll-y: 0;
     in-out property <int> chat-scroll-seq: 0;
-    // True between a seq bump and the next scroll-less render: the first
-    // imperative assign happens BEFORE the ListView has laid out the new
-    // rows (viewport-height is stale — often 0, the pane is cleared on
-    // open), so the clamp kills the jump. While pending, the assign is
-    // re-run on viewport-height changes; Rust clears the flag on the next
-    // render that carries no scroll target.
+    // True between a seq bump and the first post-layout re-apply: the
+    // initial imperative assign happens BEFORE the ListView has laid out
+    // the new rows (viewport-height is stale — often 0, the pane is
+    // cleared on open), so the clamp kills the jump. The next
+    // viewport-height change re-runs the assign once and drops the flag;
+    // Rust also clears it on any scroll-less render as a belt.
     in-out property <bool> chat-scroll-pending: false;
     // Confirmation modal (delete conversation / spam-purge — the Rust side
     // dispatches by its own mode flag).
@@ -1299,8 +1345,13 @@ export component MainWindow inherits Window {
                     changed viewport-height => {
                         root.chat-vp-h = self.viewport-height;
                         // Re-run the pending post-open jump now that the rows
-                        // are actually laid out (see chat-scroll-pending).
+                        // are actually laid out — ONCE. The flag must drop
+                        // here: the lazy ListView keeps adjusting
+                        // viewport-height while the user scrolls, and a
+                        // sticky flag re-yanks the view on every tick,
+                        // making it impossible to scroll away.
                         if (root.chat-scroll-pending) {
+                            root.chat-scroll-pending = false;
                             lv.viewport-y = -max(0px, min(root.chat-scroll-y,
                                 lv.viewport-height - lv.height));
                         }
@@ -1683,6 +1734,38 @@ export component MainWindow inherits Window {
                 HorizontalLayout {
                     padding: 12px;
                     spacing: 12px;
+                    // From-picker — the identity the next message goes out as.
+                    // Coloured dot mirrors the sidebar tint; click opens the
+                    // list (rendered as a floating panel above the composer).
+                    if root.composer-identities.length > 1: Rectangle {
+                        width: 42px;
+                        height: 42px;
+                        border-radius: 21px;
+                        background: ident-ta.has-hover || root.identity-menu-open
+                            ? #eef0f4 : transparent;
+                        ident-ta := TouchArea {
+                            clicked => { root.identity-menu-open = !root.identity-menu-open; }
+                        }
+                        Rectangle {
+                            x: 12px;
+                            y: 15px;
+                            width: 12px;
+                            height: 12px;
+                            border-radius: 6px;
+                            background: root.composer-identity-index >= 0
+                                && root.composer-identity-index < root.composer-identities.length
+                                ? root.composer-identities[root.composer-identity-index].tint
+                                : #8b95a1;
+                        }
+                        Text {
+                            x: 27px;
+                            height: parent.height;
+                            text: "▾";
+                            color: #8b95a1;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
                     // Attach files — opens the native picker.
                     Rectangle {
                         width: 42px;
@@ -1779,6 +1862,66 @@ export component MainWindow inherits Window {
                             stroke: #6b7480;
                             stroke-width: 2px;
                             fill: transparent;
+                        }
+                    }
+                }
+                // From-picker list — floats above the composer (negative y;
+                // Rectangles don't clip children). Later sibling of the
+                // input row, so it paints over the bubble list.
+                if root.identity-menu-open: Rectangle {
+                    x: 12px;
+                    y: -self.height - 6px;
+                    width: 340px;
+                    height: root.composer-identities.length * 36px + 8px;
+                    background: white;
+                    border-radius: 10px;
+                    border-width: 1px;
+                    border-color: #e3e6ea;
+                    drop-shadow-blur: 14px;
+                    drop-shadow-color: #00000026;
+                    drop-shadow-offset-y: 2px;
+                    VerticalLayout {
+                        padding: 4px;
+                        for ident[ii] in root.composer-identities: Rectangle {
+                            height: 36px;
+                            border-radius: 8px;
+                            background: idrow-ta.has-hover ? #f0f4fa : transparent;
+                            idrow-ta := TouchArea {
+                                clicked => {
+                                    root.composer-identity-index = ii;
+                                    root.identity-menu-open = false;
+                                }
+                            }
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 8px;
+                                Rectangle {
+                                    width: 10px;
+                                    Rectangle {
+                                        y: 13px;
+                                        width: 10px;
+                                        height: 10px;
+                                        border-radius: 5px;
+                                        background: ident.tint;
+                                    }
+                                }
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: ident.label;
+                                    color: #0f1419;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                if ii == root.composer-identity-index: Text {
+                                    text: "✓";
+                                    color: #2f80ed;
+                                    font-size: 14px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                            }
                         }
                     }
                 }
@@ -2616,6 +2759,42 @@ export component MainWindow inherits Window {
                     if root.detail-organizer != "": Text {
                         text: "Организатор: " + root.detail-organizer; font-size: 13px; color: #4a5560; wrap: word-wrap;
                     }
+                    if root.detail-meta != "": Text {
+                        text: root.detail-meta; font-size: 12px; font-weight: 600; color: #b3541e;
+                    }
+                    // Non-default event properties: conference link, event
+                    // URL, categories, privacy… Links open in the browser.
+                    for ex in root.detail-extras: HorizontalLayout {
+                        spacing: 8px;
+                        height: 22px;
+                        Text {
+                            width: 110px;
+                            text: ex.label;
+                            font-size: 12px;
+                            color: #5b6672;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            border-radius: 6px;
+                            background: dex-ta.has-hover && ex.is-link ? #e8f0fe : transparent;
+                            dex-ta := TouchArea {
+                                enabled: ex.is-link;
+                                mouse-cursor: ex.is-link ? MouseCursor.pointer : MouseCursor.default;
+                                clicked => { root.detail-open-link(ex.value); }
+                            }
+                            Text {
+                                x: 4px;
+                                width: parent.width - 8px;
+                                height: parent.height;
+                                text: ex.value;
+                                font-size: 13px;
+                                color: ex.is-link ? #2f80ed : #0f1419;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
                     // Attendees — a proper two-column table (name | status),
                     // scrollable when long.
                     if root.detail-attendee-rows.length > 0: Rectangle {
@@ -2780,6 +2959,93 @@ export component MainWindow inherits Window {
                     Text {
                         text: root.edit-is-create ? "Новое событие" : "Изменить событие";
                         font-size: 18px; font-weight: 700; color: #0f1419;
+                    }
+                    // Read-only meeting details. Present only when the event
+                    // carries them (organizer/attendees come from iTIP/CalDAV
+                    // and aren't editable here).
+                    if root.edit-meta != "": Text {
+                        text: root.edit-meta;
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: #b3541e;
+                    }
+                    // Extra event properties: conference link, event URL,
+                    // categories, privacy… Everything non-default the event
+                    // carries beyond the editable fields below.
+                    for ex in root.edit-extras: HorizontalLayout {
+                        spacing: 8px;
+                        height: 20px;
+                        Text {
+                            width: 110px;
+                            text: ex.label;
+                            font-size: 12px;
+                            color: #5b6672;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            ex-ta := TouchArea {
+                                enabled: ex.is-link;
+                                mouse-cursor: ex.is-link ? MouseCursor.pointer : MouseCursor.default;
+                                clicked => { root.edit-open-url(ex.value); }
+                            }
+                            Text {
+                                width: parent.width;
+                                height: parent.height;
+                                text: ex.value;
+                                font-size: 13px;
+                                color: ex.is-link ? #2f80ed : #0f1419;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                    if root.edit-organizer != "": VerticalLayout {
+                        spacing: 3px;
+                        Text { text: "Организатор"; font-size: 12px; color: #5b6672; }
+                        Text {
+                            text: root.edit-organizer;
+                            font-size: 13px;
+                            color: #0f1419;
+                            overflow: elide;
+                        }
+                    }
+                    if root.edit-attendees.length > 0: VerticalLayout {
+                        spacing: 3px;
+                        Text {
+                            text: "Участники (" + root.edit-attendees.length + ")";
+                            font-size: 12px;
+                            color: #5b6672;
+                        }
+                        // Cap at four rows; longer lists scroll in place.
+                        Flickable {
+                            height: min(root.edit-attendees.length * 22px, 88px);
+                            viewport-height: root.edit-attendees.length * 22px;
+                            VerticalLayout {
+                                for at in root.edit-attendees: HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 22px;
+                                    Rectangle {
+                                        width: 8px;
+                                        Rectangle {
+                                            y: 7px;
+                                            width: 8px;
+                                            height: 8px;
+                                            border-radius: 4px;
+                                            background: at.dot;
+                                        }
+                                    }
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        text: at.label;
+                                        font-size: 13px;
+                                        color: #0f1419;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                        }
                     }
                     CalField {
                         label: "Тема";

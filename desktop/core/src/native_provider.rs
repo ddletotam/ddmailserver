@@ -31,6 +31,64 @@ pub struct NativeProvider {
     refresh_lock: Arc<Mutex<()>>,
 }
 
+/// Single-flight token refresh, callable from tasks that can't hold &self
+/// (the WebSocket watcher outlives any borrow of the provider). Semantics:
+/// under the lock, if the current token no longer equals `seen_token`,
+/// someone already rotated it — succeed without a round trip. The server
+/// accepts signature-valid expired tokens up to 30 days old.
+#[allow(clippy::too_many_arguments)]
+async fn refresh_token_standalone(
+    http: &Client,
+    server_url: &str,
+    token: &Arc<RwLock<String>>,
+    refresh_lock: &Arc<Mutex<()>>,
+    notifier: Option<&Notifier>,
+    account_id: &str,
+    seen_token: &str,
+) -> Result<(), String> {
+    let _guard = refresh_lock.lock().await;
+
+    // Under the lock — has someone already refreshed for us?
+    {
+        let current = token.read().await;
+        if current.as_str() != seen_token {
+            return Ok(());
+        }
+    }
+
+    let resp = http
+        .post(format!("{server_url}/api/desktop/v1/auth/refresh"))
+        .bearer_auth(seen_token)
+        .send()
+        .await
+        .map_err(|e| format!("Refresh request: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Refresh failed HTTP {status}: {body}"));
+    }
+
+    let data: serde_json::Value =
+        resp.json().await.map_err(|e| format!("Refresh parse: {e}"))?;
+    let new_token = data
+        .get("token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Refresh: missing token in response".to_string())?
+        .to_string();
+
+    *token.write().await = new_token.clone();
+
+    if let Some(notifier) = notifier {
+        notifier(EngineEvent::TokenRefreshed {
+            account_id: account_id.to_string(),
+            token: new_token.clone(),
+        });
+    }
+    log::info!("NativeProvider: token refreshed for account {account_id}");
+    Ok(())
+}
+
 impl NativeProvider {
     pub fn new(
         server_url: String,
@@ -67,48 +125,16 @@ impl NativeProvider {
     /// immediately. Otherwise we perform the exchange. This is the standard
     /// single-flight pattern: N concurrent 401s produce one refresh.
     async fn refresh_token(&self, seen_token: &str) -> Result<(), String> {
-        let _guard = self.refresh_lock.lock().await;
-
-        // Under the lock — has someone already refreshed for us?
-        {
-            let current = self.token.read().await;
-            if current.as_str() != seen_token {
-                return Ok(());
-            }
-        }
-
-        let resp = self
-            .http
-            .post(format!("{}/api/desktop/v1/auth/refresh", self.server_url))
-            .bearer_auth(seen_token)
-            .send()
-            .await
-            .map_err(|e| format!("Refresh request: {e}"))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Refresh failed HTTP {status}: {body}"));
-        }
-
-        let data: serde_json::Value =
-            resp.json().await.map_err(|e| format!("Refresh parse: {e}"))?;
-        let new_token = data
-            .get("token")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "Refresh: missing token in response".to_string())?
-            .to_string();
-
-        *self.token.write().await = new_token.clone();
-
-        if let Some(notifier) = &self.notifier {
-            notifier(EngineEvent::TokenRefreshed {
-                account_id: self.account_id.clone(),
-                token: new_token.clone(),
-            });
-        }
-        log::info!("NativeProvider: token refreshed for account {}", self.account_id);
-        Ok(())
+        refresh_token_standalone(
+            &self.http,
+            &self.server_url,
+            &self.token,
+            &self.refresh_lock,
+            self.notifier.as_ref(),
+            &self.account_id,
+            seen_token,
+        )
+        .await
     }
 
     /// Send a request with auto-refresh on 401. The closure is called once
@@ -525,6 +551,14 @@ impl MailProvider for NativeProvider {
             .replace("http://", "ws://");
         let user_email = self.user_email.clone();
         let token = self.token.clone();
+        // Pieces for in-loop token refresh: the watcher is the only network
+        // activity in push-driven idle periods, so if IT doesn't refresh an
+        // expired JWT, nothing does — the client stays in "error" forever.
+        let http = self.http.clone();
+        let server_url = self.server_url.clone();
+        let refresh_lock = self.refresh_lock.clone();
+        let self_notifier = self.notifier.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             log::info!("NativeProvider: connecting WebSocket for {user_email}");
@@ -533,11 +567,15 @@ impl MailProvider for NativeProvider {
                 message: None,
             });
 
+            // Short first retry, doubling to a 30s ceiling; reset on success.
+            let mut backoff_secs: u64 = 2;
+
             loop {
                 let current_token = token.read().await.clone();
                 let ws_url = format!("{ws_base}/api/desktop/v1/ws?token={current_token}");
                 match tokio_tungstenite::connect_async(&ws_url).await {
                     Ok((ws_stream, _)) => {
+                        backoff_secs = 2;
                         log::info!("NativeProvider: WebSocket connected for {user_email}");
                         notifier(EngineEvent::ConnectionState {
                             state: "connected".into(),
@@ -547,7 +585,28 @@ impl MailProvider for NativeProvider {
                         use futures::StreamExt;
                         let (_, mut read) = ws_stream.split();
 
-                        while let Some(msg) = read.next().await {
+                        // Read watchdog: the server pings every 30s, so a
+                        // healthy connection always produces SOME frame
+                        // within a minute. A half-open TCP session (NAT
+                        // reset, server restart the FIN of which never
+                        // arrived) otherwise parks read.next() forever —
+                        // the loop never reconnects and push goes silent.
+                        loop {
+                            let msg = match tokio::time::timeout(
+                                std::time::Duration::from_secs(90),
+                                read.next(),
+                            )
+                            .await
+                            {
+                                Err(_) => {
+                                    log::warn!(
+                                        "NativeProvider: no frames for 90s — dropping dead WebSocket"
+                                    );
+                                    break;
+                                }
+                                Ok(None) => break, // stream ended
+                                Ok(Some(m)) => m,
+                            };
                             match msg {
                                 Ok(tungstenite::Message::Text(text)) => {
                                     if let Ok(event) =
@@ -624,12 +683,34 @@ impl MailProvider for NativeProvider {
                             state: "error".into(),
                             message: Some(e.to_string()),
                         });
+                        // The usual cause after long uptime is an expired JWT
+                        // (the handshake is rejected with 401 before upgrade).
+                        // Try a refresh with the token we just failed on; the
+                        // next iteration reads the rotated token from the lock.
+                        if let Err(re) = refresh_token_standalone(
+                            &http,
+                            &server_url,
+                            &token,
+                            &refresh_lock,
+                            self_notifier.as_ref(),
+                            &account_id,
+                            &current_token,
+                        )
+                        .await
+                        {
+                            log::warn!("NativeProvider: watcher token refresh failed: {re}");
+                        }
                     }
                 }
 
-                // Reconnect after 30s
-                log::info!("NativeProvider: reconnecting in 30s...");
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                log::info!("NativeProvider: reconnecting in {backoff_secs}s...");
+                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs * 2).min(30);
+                // Flapping or reconnecting — show truthful state while retrying.
+                notifier(EngineEvent::ConnectionState {
+                    state: "connecting".into(),
+                    message: None,
+                });
             }
         });
 
