@@ -1161,7 +1161,7 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 		}
 
 		// Counterparts = union of (from, to, cc) minus our identities, deduped
-		// and sorted for canonical key form. Skip pure self-traffic.
+		// and sorted for canonical key form.
 		seen := map[string]bool{}
 		cps := []string{}
 		add := func(a string) {
@@ -1176,7 +1176,18 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 			add(r)
 		}
 		if len(cps) == 0 {
-			continue
+			// Pure self-traffic: the sender AND every recipient are our own
+			// identities — notes-to-self, or service mail from a local
+			// domain's no-reply mailbox. Dropping these makes an unread
+			// inbox message silently unfindable; key the conversation on
+			// the sender instead (a Telegram-style "self" chat).
+			if fromLc != "" {
+				cps = []string{fromLc}
+			} else if myID != "" {
+				cps = []string{myID}
+			} else {
+				continue
+			}
 		}
 		sort.Strings(cps)
 
