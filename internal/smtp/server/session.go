@@ -12,6 +12,7 @@ import (
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
 	"github.com/yourusername/mailserver/internal/db"
+	"github.com/yourusername/mailserver/internal/logmask"
 	"github.com/yourusername/mailserver/internal/models"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -75,21 +76,21 @@ func (s *Session) AuthPlain(username, password string) error {
 
 // Mail is called to set the sender
 func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
-	log.Printf("MAIL FROM: %s", from)
+	log.Printf("MAIL FROM: %s", logmask.Addr(from))
 	s.from = from
 	return nil
 }
 
 // Rcpt is called to set a recipient
 func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
-	log.Printf("RCPT TO: %s", to)
+	log.Printf("RCPT TO: %s", logmask.Addr(to))
 	s.to = append(s.to, to)
 	return nil
 }
 
 // Data is called when the client wants to send the message body
 func (s *Session) Data(r io.Reader) error {
-	log.Printf("Receiving message from %s to %v", s.from, s.to)
+	log.Printf("Receiving message from %s to %s", logmask.Addr(s.from), logmask.AddrSlice(s.to))
 
 	if s.from == "" {
 		return errors.New("no sender specified")
@@ -124,7 +125,7 @@ func (s *Session) Data(r io.Reader) error {
 	msgID = strings.TrimPrefix(msgID, "<")
 	msgID = strings.TrimSuffix(msgID, ">")
 	if msgID == "" {
-		log.Printf("SMTP: rejecting submission from %s — missing Message-Id header", s.from)
+		log.Printf("SMTP: rejecting submission from %s — missing Message-Id header", logmask.Addr(s.from))
 		return &smtp.SMTPError{
 			Code:         554,
 			EnhancedCode: smtp.EnhancedCode{5, 6, 0},
@@ -138,7 +139,7 @@ func (s *Session) Data(r io.Reader) error {
 	// by re-submitting the same message every 10 minutes.
 	if sentFolder, err := s.database.GetLocalFolderByType(s.userID, "sent"); err == nil && sentFolder != nil {
 		if exists, _ := s.database.MessageExistsInFolder(sentFolder.ID, msgID); exists {
-			log.Printf("SMTP: dedup — message %s from %s already in Sent folder, returning OK without re-queuing", msgID, s.from)
+			log.Printf("SMTP: dedup — message %s from %s already in Sent folder, returning OK without re-queuing", msgID, logmask.Addr(s.from))
 			return nil
 		}
 	}
@@ -200,7 +201,7 @@ func (s *Session) Data(r io.Reader) error {
 		return fmt.Errorf("failed to save message: %w", err)
 	}
 
-	log.Printf("Message %d queued for sending from %s to %v", outboxMsg.ID, s.from, s.to)
+	log.Printf("Message %d queued for sending from %s to %s", outboxMsg.ID, logmask.Addr(s.from), logmask.AddrSlice(s.to))
 
 	return nil
 }
@@ -240,7 +241,7 @@ func (s *Session) determineAccount(fromAddr string) (int64, error) {
 	parts := strings.SplitN(email, "@", 2)
 	if len(parts) == 2 {
 		if _, err := s.database.GetDomainByName(parts[1]); err == nil {
-			log.Printf("Local domain sender %s, using direct delivery", email)
+			log.Printf("Local domain sender %s, using direct delivery", logmask.Addr(email))
 			return 0, nil
 		}
 	}
@@ -248,7 +249,7 @@ func (s *Session) determineAccount(fromAddr string) (int64, error) {
 	// If no exact match, use the first enabled account
 	for _, account := range accounts {
 		if account.Enabled {
-			log.Printf("No exact match for %s, using account %s", email, account.Email)
+			log.Printf("No exact match for %s, using account %s", logmask.Addr(email), logmask.Addr(account.Email))
 			return account.ID, nil
 		}
 	}

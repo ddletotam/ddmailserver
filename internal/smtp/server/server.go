@@ -15,8 +15,11 @@ type Server struct {
 	tlsConfig  *tls.Config
 }
 
-// New creates a new SMTP server
-func New(database *db.DB, addr string, hostname string) *Server {
+// New creates a new SMTP server. allowInsecureAuth permits AUTH on the
+// plaintext listener — acceptable only when no TLS listener exists at all
+// (dev setups); with TLS configured, plaintext credentials on the open
+// internet are a leak, so callers must pass false.
+func New(database *db.DB, addr string, hostname string, allowInsecureAuth bool) *Server {
 	// Create backend
 	be := NewBackend(database)
 
@@ -24,11 +27,11 @@ func New(database *db.DB, addr string, hostname string) *Server {
 	s := smtp.NewServer(be)
 	s.Addr = addr
 	s.Domain = hostname
-	s.AllowInsecureAuth = true           // Allow plain text auth (will be secured by TLS)
+	s.AllowInsecureAuth = allowInsecureAuth
 	s.MaxMessageBytes = 10 * 1024 * 1024 // 10MB max message size
 	s.MaxRecipients = 50
 
-	log.Printf("SMTP server created, will listen on %s", addr)
+	log.Printf("SMTP server created, will listen on %s (insecure auth: %v)", addr, allowInsecureAuth)
 
 	return &Server{
 		smtpServer: s,

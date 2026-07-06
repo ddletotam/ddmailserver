@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/yourusername/mailserver/internal/db"
+	"github.com/yourusername/mailserver/internal/dkimsign"
+	"github.com/yourusername/mailserver/internal/logmask"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/task"
 )
@@ -16,15 +18,17 @@ type DirectSendTask struct {
 	outboxMessage *models.OutboxMessage
 	database      *db.DB
 	hostname      string
+	signer        *dkimsign.Signer // nil → send unsigned
 	priority      int
 }
 
 // NewDirectSendTask creates a new direct send task
-func NewDirectSendTask(outboxMessage *models.OutboxMessage, database *db.DB, hostname string) *DirectSendTask {
+func NewDirectSendTask(outboxMessage *models.OutboxMessage, database *db.DB, hostname string, signer *dkimsign.Signer) *DirectSendTask {
 	return &DirectSendTask{
 		outboxMessage: outboxMessage,
 		database:      database,
 		hostname:      hostname,
+		signer:        signer,
 		priority:      1,
 	}
 }
@@ -38,11 +42,13 @@ func (t *DirectSendTask) Priority() int {
 }
 
 func (t *DirectSendTask) String() string {
-	return fmt.Sprintf("Direct send message %d from %s to %s", t.outboxMessage.ID, t.outboxMessage.From, t.outboxMessage.To)
+	// Recipient addresses are personal data — mask them in worker logs.
+	return fmt.Sprintf("Direct send message %d from %s to %s",
+		t.outboxMessage.ID, logmask.Addr(t.outboxMessage.From), logmask.AddrList(t.outboxMessage.To))
 }
 
 func (t *DirectSendTask) Execute(ctx context.Context) error {
-	log.Printf("Direct sending message %d from %s", t.outboxMessage.ID, t.outboxMessage.From)
+	log.Printf("Direct sending message %d from %s", t.outboxMessage.ID, logmask.Addr(t.outboxMessage.From))
 
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -63,6 +69,10 @@ func (t *DirectSendTask) Execute(ctx context.Context) error {
 	} else {
 		return fmt.Errorf("no raw email data for direct delivery")
 	}
+
+	// DKIM: sign with the From-domain key when one is configured. Without
+	// the signature Gmail/Yandex either junk or reject direct delivery.
+	emailData = t.signer.Sign(t.outboxMessage.From, emailData)
 
 	err := SendDirect(t.outboxMessage.From, recipients, emailData, t.hostname)
 

@@ -41,18 +41,21 @@ func (db *DB) CreateOutboxMessage(msg *models.OutboxMessage) error {
 	return nil
 }
 
-// GetPendingOutboxMessages retrieves all pending messages
+// GetPendingOutboxMessages retrieves pending messages that are due: after a
+// failed attempt next_attempt_at holds the earliest time of the next try
+// (backoff schedule in IncrementOutboxMessageRetries), so retries don't
+// hammer a temporarily-refusing MX every scheduler cycle.
 func (db *DB) GetPendingOutboxMessages(limit int) ([]*models.OutboxMessage, error) {
 	query := `
 		SELECT id, user_id, COALESCE(account_id, 0), from_addr, to_addr, cc, bcc, subject, body, body_html,
 		       raw_email, status, retries, last_error, created_at, updated_at, sent_at
 		FROM outbox_messages
-		WHERE status = 'pending'
+		WHERE status = 'pending' AND COALESCE(next_attempt_at, 0) <= $2
 		ORDER BY created_at ASC
 		LIMIT $1
 	`
 
-	rows, err := db.Query(query, limit)
+	rows, err := db.Query(query, limit, timeutil.Now())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pending messages: %w", err)
 	}
@@ -127,12 +130,24 @@ func (db *DB) MarkOutboxMessageSent(id int64) error {
 	return nil
 }
 
-// IncrementOutboxMessageRetries increments the retry counter
+// IncrementOutboxMessageRetries increments the retry counter and schedules
+// the next attempt with growing backoff: 1m → 5m → 15m → 1h → 4h → 12h,
+// indexed by the retries count BEFORE this failure. Past the last step the
+// delay stays 12h, but the send tasks mark the message failed after
+// maxRetries attempts anyway.
 func (db *DB) IncrementOutboxMessageRetries(id int64, lastError string) error {
 	now := timeutil.Now()
 	query := `
 		UPDATE outbox_messages
-		SET retries = retries + 1, last_error = $1, updated_at = $2
+		SET retries = retries + 1, last_error = $1, updated_at = $2,
+		    next_attempt_at = $2 + (CASE LEAST(retries, 5)
+		        WHEN 0 THEN 60000
+		        WHEN 1 THEN 300000
+		        WHEN 2 THEN 900000
+		        WHEN 3 THEN 3600000
+		        WHEN 4 THEN 14400000
+		        ELSE 43200000
+		    END)
 		WHERE id = $3
 	`
 
