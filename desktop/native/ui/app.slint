@@ -428,6 +428,7 @@ export component MainWindow inherits Window {
     // cursor while `cal-dragging`. On release the block reports its new grid
     // position and Rust converts px → new start/day → PatchEvent.
     in-out property <int> cal-drag-id: -1; // event id being dragged (-1 = none)
+    in-out property <int> cal-drag-mode: 0; // 0 = move, 1 = resize-top, 2 = resize-bottom
     in-out property <bool> cal-dragging: false; // moved past the threshold
     in-out property <length> cal-drag-x0; // ghost origin (captured at press)
     in-out property <length> cal-drag-y0;
@@ -435,12 +436,16 @@ export component MainWindow inherits Window {
     in-out property <length> cal-drag-y;
     in-out property <length> cal-drag-w;
     in-out property <length> cal-drag-h;
+    in-out property <length> cal-drag-h0; // original height (resize keeps the far edge fixed)
     in-out property <string> cal-drag-title;
     in-out property <color> cal-drag-color;
     // (id, orig-x, orig-y, new-x, new-y) — all grid px. Rust snaps both to the
     // time grid + day column: orig gives the exact instance (recurrence_id for
     // recurring), new gives the target start. Then it patches the event.
     callback grid-event-moved(int, length, length, length, length);
+    // Resize (id, orig-x, orig-y, new-top-y, new-bottom-y) — day unchanged;
+    // new start = top edge, new end = bottom edge (grid px → snapped time).
+    callback grid-event-resized(int, length, length, length, length);
 
     // Colour-picker popup state: which calendar's colour is being edited
     // (-1 = closed), plus the palette swatches mirrored from Rust.
@@ -2397,6 +2402,7 @@ export component MainWindow inherits Window {
                                 if (!ev.writable || pe.button != PointerEventButton.left) { return; }
                                 if (pe.kind == PointerEventKind.down) {
                                     root.cal-drag-id = ev.id;
+                                    root.cal-drag-mode = 0; // move
                                     root.cal-dragging = false;
                                     root.cal-drag-x0 = 48px + (ev.day + ev.xf) * root.col-width + 2px;
                                     root.cal-drag-y0 = ev.top;
@@ -2404,6 +2410,7 @@ export component MainWindow inherits Window {
                                     root.cal-drag-y = root.cal-drag-y0;
                                     root.cal-drag-w = root.col-width * ev.wf - 6px;
                                     root.cal-drag-h = ev.h;
+                                    root.cal-drag-h0 = ev.h;
                                     root.cal-drag-title = ev.title;
                                     root.cal-drag-color = ev.color;
                                 } else if (pe.kind == PointerEventKind.up) {
@@ -2469,6 +2476,82 @@ export component MainWindow inherits Window {
                                 font-weight: 700;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
+                            }
+                        }
+                        // Resize grips (writable only). Top edge → start, bottom
+                        // edge → end; the opposite edge stays fixed (the ghost's
+                        // y + h arithmetic keeps it pinned).
+                        if ev.writable: TouchArea {
+                            x: 0;
+                            y: 0;
+                            width: parent.width;
+                            height: 7px;
+                            mouse-cursor: MouseCursor.ns-resize;
+                            pointer-event(pe) => {
+                                if (pe.button != PointerEventButton.left) { return; }
+                                if (pe.kind == PointerEventKind.down) {
+                                    root.cal-drag-id = ev.id;
+                                    root.cal-drag-mode = 1;
+                                    root.cal-dragging = false;
+                                    root.cal-drag-x0 = 48px + (ev.day + ev.xf) * root.col-width + 2px;
+                                    root.cal-drag-y0 = ev.top;
+                                    root.cal-drag-x = root.cal-drag-x0;
+                                    root.cal-drag-y = root.cal-drag-y0;
+                                    root.cal-drag-w = root.col-width * ev.wf - 6px;
+                                    root.cal-drag-h = ev.h;
+                                    root.cal-drag-h0 = ev.h;
+                                    root.cal-drag-title = ev.title;
+                                    root.cal-drag-color = ev.color;
+                                } else if (pe.kind == PointerEventKind.up) {
+                                    if (root.cal-drag-id == ev.id && root.cal-dragging) {
+                                        root.grid-event-resized(ev.id, root.cal-drag-x0, root.cal-drag-y0, root.cal-drag-y, root.cal-drag-y + root.cal-drag-h);
+                                    }
+                                    root.cal-drag-id = -1;
+                                }
+                            }
+                            moved => {
+                                if (root.cal-drag-id == ev.id) {
+                                    if (Math.abs(self.mouse-y - self.pressed-y) > 3px) { root.cal-dragging = true; }
+                                    root.cal-drag-y = Math.min(
+                                        root.cal-drag-y0 + root.cal-drag-h0 - 18px,
+                                        root.cal-drag-y0 + (self.mouse-y - self.pressed-y));
+                                    root.cal-drag-h = Math.max(18px, root.cal-drag-y0 + root.cal-drag-h0 - root.cal-drag-y);
+                                }
+                            }
+                        }
+                        if ev.writable: TouchArea {
+                            x: 0;
+                            y: parent.height - 7px;
+                            width: parent.width;
+                            height: 7px;
+                            mouse-cursor: MouseCursor.ns-resize;
+                            pointer-event(pe) => {
+                                if (pe.button != PointerEventButton.left) { return; }
+                                if (pe.kind == PointerEventKind.down) {
+                                    root.cal-drag-id = ev.id;
+                                    root.cal-drag-mode = 2;
+                                    root.cal-dragging = false;
+                                    root.cal-drag-x0 = 48px + (ev.day + ev.xf) * root.col-width + 2px;
+                                    root.cal-drag-y0 = ev.top;
+                                    root.cal-drag-x = root.cal-drag-x0;
+                                    root.cal-drag-y = root.cal-drag-y0;
+                                    root.cal-drag-w = root.col-width * ev.wf - 6px;
+                                    root.cal-drag-h = ev.h;
+                                    root.cal-drag-h0 = ev.h;
+                                    root.cal-drag-title = ev.title;
+                                    root.cal-drag-color = ev.color;
+                                } else if (pe.kind == PointerEventKind.up) {
+                                    if (root.cal-drag-id == ev.id && root.cal-dragging) {
+                                        root.grid-event-resized(ev.id, root.cal-drag-x0, root.cal-drag-y0, root.cal-drag-y, root.cal-drag-y + root.cal-drag-h);
+                                    }
+                                    root.cal-drag-id = -1;
+                                }
+                            }
+                            moved => {
+                                if (root.cal-drag-id == ev.id) {
+                                    if (Math.abs(self.mouse-y - self.pressed-y) > 3px) { root.cal-dragging = true; }
+                                    root.cal-drag-h = Math.max(18px, root.cal-drag-h0 + (self.mouse-y - self.pressed-y));
+                                }
                             }
                         }
                     }
