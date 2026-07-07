@@ -4810,6 +4810,87 @@ fn main() {
         }
     });
 
+    // Resize a block by its top/bottom edge (writable only). Day is unchanged
+    // (taken from the original x); new start = top edge, new end = bottom edge.
+    let ui_weak_gr = ui.as_weak();
+    let sh_gr = shared.clone();
+    ui.on_grid_event_resized(move |id, orig_x, orig_y, new_top_y, new_bottom_y| {
+        let _ = orig_y;
+        let Some(ui) = ui_weak_gr.upgrade() else { return };
+        const GUTTER: f32 = 48.0;
+        let day_count = ui.get_day_count();
+        let col_w = ui.get_col_width();
+        if day_count <= 0 || col_w <= 0.0 {
+            return;
+        }
+        let hour_height = ui.get_hour_height();
+        let hour_start = ui.get_hour_start();
+        let day_ms: i64 = 24 * 60 * 60 * 1000;
+        let (week_start_ms, _) = week_range_ms(sh_gr.calendar_week_start_days.get(), day_count);
+        let day = (((orig_x - GUTTER - 2.0) / col_w).round() as i64).clamp(0, day_count as i64 - 1);
+        let to_min = |y: f32| -> i64 {
+            let m = hour_start as f32 * 60.0 + (y / hour_height) * 60.0;
+            ((m / 15.0).round().max(0.0) as i64) * 15
+        };
+        let new_start = week_start_ms + day * day_ms + to_min(new_top_y) * 60_000;
+        let mut new_end = week_start_ms + day * day_ms + to_min(new_bottom_y) * 60_000;
+        if new_end <= new_start {
+            new_end = new_start + 15 * 60_000;
+        }
+
+        let (occ_start, occ_end, recurring) =
+            match sh_gr.cal_occ.borrow().get(&(id, day as i32)).copied() {
+                Some(v) => v,
+                None => return,
+            };
+        if new_start == occ_start && new_end == occ_end {
+            return; // no change
+        }
+        let (summary, description, location, all_day) = {
+            let events = sh_gr.calendar_events.borrow();
+            match events.iter().find(|e| e.id as i32 == id) {
+                Some(e) => (
+                    e.summary.clone(),
+                    e.description.clone(),
+                    e.location.clone(),
+                    e.all_day,
+                ),
+                None => return,
+            }
+        };
+        let mut body = serde_json::json!({
+            "summary": summary,
+            "description": description,
+            "location": location,
+            "all_day": all_day,
+            "dtstart": new_start,
+            "dtend": new_end,
+        });
+        if recurring {
+            body["scope"] = "single".into();
+            body["recurrence_id"] = occ_start.into();
+        } else {
+            body["scope"] = "all".into();
+            {
+                let mut events = sh_gr.calendar_events.borrow_mut();
+                if let Some(e) = events.iter_mut().find(|e| e.id as i32 == id) {
+                    e.dtstart = new_start;
+                    e.dtend = Some(new_end);
+                }
+            }
+            apply_calendar_view(&ui, &sh_gr);
+        }
+        if let Some(c) = sh_gr.cache.as_ref() {
+            let _ = c.purge_event_reminders(id as i64);
+        }
+        if let Some(etx) = sh_gr.engine_tx.borrow().as_ref() {
+            let _ = etx.send(engine::EngineCmd::PatchEvent {
+                event_id: id as i64,
+                body,
+            });
+        }
+    });
+
     let ui_weak_ee = ui.as_weak();
     let sh_ee = shared.clone();
     ui.on_detail_edit(move || {
