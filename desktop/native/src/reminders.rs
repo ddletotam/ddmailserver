@@ -1,112 +1,140 @@
-//! Calendar reminder scheduling for the native client.
+//! Calendar reminder scheduling — user spec of 2026-07-11.
 //!
-//! Lives in the client (not core) because firing a reminder means showing
-//! an OS toast — a UI concern. The data, though, is persisted in the core
-//! cache's `event_reminders` table so a reminder still fires after a
-//! restart that crosses its lead-time window.
+//! Model: every occurrence carries a CASCADE of alarms taken from the
+//! event's VALARMs (element 0 = primary, the rest = secondary). A link of
+//! the cascade fires its toast; what happens next depends on how the toast
+//! dies:
+//!   - TIMEOUT (untouched)  → the next link arms;
+//!   - «✕»                  → the whole occurrence is silenced forever;
+//!   - «напомнить позже»    → cascade replaced by ONE user-chosen reminder;
+//!   - body click           → toast stays, its timer stops (no outcome yet).
 //!
-//! Two halves:
-//!   - [`seed`] — called whenever the calendar view refreshes. Turns the
-//!     freshly-fetched events into pending reminder rows (idempotent: the
-//!     cache upserts by occurrence+summary).
-//!   - [`scan`] — called on a fixed interval by a `slint::Timer` on the UI
-//!     thread. Prunes stale rows, then returns the rows that just came due,
-//!     marking each `fired` first so a hung toast can't loop-spam it.
-//!
-//! Unlike the old Tauri build this scheduler runs on the Slint event loop
-//! rather than a background Tokio task: `slint::Timer` keeps ticking while
-//! the window is hidden to tray, so we don't need a separate thread.
+//! Data lives in the core cache (`reminders2`); this module owns seeding
+//! from the fetched events and the scan-side state machine. Toast plumbing
+//! (windows, buttons, navigation) stays in main.rs.
 
 use ddmail_core::cache::{Cache, ReminderRow};
 use ddmail_core::types::DesktopCalendarEvent;
 
-/// Reminder kinds (mirror the cache `kind` column / `toast_window`).
-pub const KIND_SOON: i32 = 1; // «скоро случится» — at dtstart − lead
-pub const KIND_STARTED: i32 = 2; // «наступило» — at dtstart
-pub const KIND_MANUAL: i32 = 3; // user «напомнить позже» (fires as a «скоро»)
+use crate::recurrence;
 
-/// A «наступило» toast is only meaningful right around the start; if the
-/// client was offline and we cross it well after the fact, suppress it.
-pub const STARTED_GRACE_MS: i64 = 3 * 60 * 1000;
-
-/// Lead-time used when an event carries no VALARM (`alarm_lead_min == 0`).
-const DEFAULT_LEAD_MIN: i32 = 10;
-
-/// Don't seed reminders for events further out than this — keeps the table
-/// bounded. The view re-seeds on every refresh, so events crossing the
-/// horizon get picked up well before they fire.
+/// Don't seed occurrences further out than this. The view re-seeds on every
+/// refetch, so events crossing the horizon are picked up well before firing.
 const SEED_HORIZON_MS: i64 = 30 * 24 * 3600 * 1000;
 
-/// Rows older than this are pruned on each scan.
+/// Occurrence with no dtend counts as running for this long (spec answer #6).
+pub const NO_END_RUNNING_MS: i64 = 30 * 60 * 1000;
+
+/// Rows whose occurrence is older than this are pruned on each scan.
 const PRUNE_AFTER_HOURS: i64 = 48;
 
 /// How often the UI-thread timer scans for due reminders.
-pub const SCAN_INTERVAL_SECS: u64 = 30;
+pub const SCAN_INTERVAL_SECS: u64 = 15;
 
-/// Seed pending reminders from the current calendar view.
+/// Toast lifetimes.
+pub const SOON_TIMEOUT_SECS: u64 = 30;
+pub const AT_START_TIMEOUT_SECS: u64 = 180;
+
+/// How a due reminder should present itself.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ToastMode {
+    /// «Скоро: …» — ✕ / body / «Напомнить позже», timeout advances cascade.
+    Soon,
+    /// «Наступило: …» — ✕ + body only, closes on body click.
+    AtStart,
+    /// Startup catch-up: the event is in progress. Same shape as AtStart
+    /// with the «Событие уже идёт!» marker.
+    AlreadyRunning,
+}
+
+/// A reminder the scanner decided to show right now.
+#[derive(Debug, Clone)]
+pub struct DueToast {
+    pub row: ReminderRow,
+    pub mode: ToastMode,
+}
+
+/// Effective end of an occurrence for "is it still running" decisions.
+pub fn occurrence_end(row: &ReminderRow) -> i64 {
+    if row.occurrence_end_ms > row.occurrence_start_ms {
+        row.occurrence_end_ms
+    } else {
+        row.occurrence_start_ms + NO_END_RUNNING_MS
+    }
+}
+
+/// Seed the alarm cascades from the current calendar view.
 ///
-/// Each future occurrence gets TWO rows: «скоро случится» (kind 1, at
-/// dtstart − lead) and «наступило» (kind 2, at dtstart). Occurrences the user
-/// has taken manual control of (a kind-3 row exists) are left untouched, so a
-/// routine refresh can't clobber a «напомнить позже». Idempotent: the cache
-/// upserts on (occurrence, summary, kind) and never resurrects fired rows.
-pub fn seed(cache: &Cache, events: &[DesktopCalendarEvent], now_ms: i64) {
+/// `hidden_calendars` are skipped outright (spec answer #9: выключено —
+/// значит выключено). Recurring masters are expanded client-side so their
+/// occurrences within the horizon get reminders too; one-off events and
+/// server-side override rows seed directly. Signature covers everything
+/// reminder-relevant, so any event change (times, alarms, title) resets the
+/// occurrence's cascade — spec answer #8.
+pub fn seed(
+    cache: &Cache,
+    events: &[DesktopCalendarEvent],
+    hidden_calendars: &dyn Fn(i64) -> bool,
+    now_ms: i64,
+) {
     let horizon = now_ms + SEED_HORIZON_MS;
     for ev in events {
-        // Only future starts within the horizon, with a real title.
-        if ev.dtstart < now_ms || ev.dtstart > horizon {
+        if ev.summary.trim().is_empty() || ev.all_day {
             continue;
         }
-        if ev.summary.trim().is_empty() {
+        if hidden_calendars(ev.calendar_id) {
             continue;
         }
-        // The user neutralised the auto reminders for this occurrence — respect it.
-        if cache.has_manual_reminder(ev.dtstart, &ev.summary) {
-            continue;
-        }
-        let lead = if ev.alarm_lead_min > 0 {
-            ev.alarm_lead_min
+        let leads: Vec<i32> = if !ev.alarm_leads.is_empty() {
+            ev.alarm_leads.clone()
+        } else if ev.alarm_lead_min > 0 {
+            vec![ev.alarm_lead_min]
         } else {
-            DEFAULT_LEAD_MIN
+            vec![10] // pre-alarm_leads server fallback
         };
-        let fire_soon = ev.dtstart - (lead as i64) * 60_000;
-        if let Err(e) =
-            cache.upsert_pending_reminder(ev.id, ev.dtstart, fire_soon, lead, &ev.summary, KIND_SOON)
-        {
-            eprintln!("reminders: seed A failed for event {}: {e}", ev.id);
-        }
-        if let Err(e) = cache.upsert_pending_reminder(
-            ev.id,
+        let signature = format!(
+            "{}|{}|{:?}|{}",
             ev.dtstart,
-            ev.dtstart,
-            0,
-            &ev.summary,
-            KIND_STARTED,
-        ) {
-            eprintln!("reminders: seed B failed for event {}: {e}", ev.id);
+            ev.dtend.unwrap_or(0),
+            leads,
+            ev.summary.trim()
+        );
+        let duration = ev
+            .dtend
+            .map(|e| (e - ev.dtstart).max(0))
+            .unwrap_or(0);
+
+        // Occurrences: rrule masters expand within [now, horizon]; plain
+        // events and override rows are their own single occurrence.
+        let starts: Vec<i64> = if ev.rrule.is_empty() {
+            vec![ev.dtstart]
+        } else {
+            recurrence::expand(ev.dtstart, ev.dtend, &ev.rrule, &ev.exdates, now_ms, horizon)
+                .into_iter()
+                .map(|o| o.start_ms)
+                .collect()
+        };
+        for start in starts {
+            if start <= now_ms || start > horizon {
+                continue;
+            }
+            let end = if duration > 0 { start + duration } else { 0 };
+            if let Err(e) =
+                cache.seed_occurrence(ev.id, start, end, ev.summary.trim(), &leads, &signature)
+            {
+                eprintln!("reminders: seed failed for event {}: {e}", ev.id);
+            }
         }
     }
 }
 
-/// Regenerate reminders for one event after it was edited (or wipe them after
-/// a delete): purge every row for the event, then re-seed from the current
-/// view. Per spec, an edit/delete drops all prior reminders and rebuilds from
-/// the event's settings — including any manual snooze.
-pub fn reseed_event(cache: &Cache, event_id: i64, events: &[DesktopCalendarEvent], now_ms: i64) {
-    if let Err(e) = cache.purge_event_reminders(event_id) {
-        eprintln!("reminders: purge {event_id} failed: {e}");
-    }
-    // Re-seed only the surviving occurrences of this event (delete → none).
-    let mine: Vec<DesktopCalendarEvent> =
-        events.iter().filter(|e| e.id == event_id).cloned().collect();
-    seed(cache, &mine, now_ms);
-}
-
-/// Prune stale rows, then return reminders that have just come due, marking
-/// each `fired` (by its logical (occurrence, summary, kind) key, so A and B
-/// for one occurrence are tracked independently) before returning — the
-/// caller can never re-trigger the same row.
-pub fn scan(cache: &Cache, now_ms: i64) -> Vec<ReminderRow> {
+/// Prune stale rows, then run the state machine over the due set:
+///   - occurrence over        → expire silently (spec: «прошло — тихо удаляем»);
+///   - occurrence in progress → ONE «уже идёт» toast per occurrence, the
+///     rest of its cascade is cancelled;
+///   - otherwise              → show as Soon (lead > 0) or AtStart (lead 0).
+/// Every returned row is already marked `shown`.
+pub fn scan(cache: &Cache, now_ms: i64) -> Vec<DueToast> {
     let cutoff = now_ms - PRUNE_AFTER_HOURS * 3600 * 1000;
     let _ = cache.prune_old_reminders(cutoff);
 
@@ -117,56 +145,64 @@ pub fn scan(cache: &Cache, now_ms: i64) -> Vec<ReminderRow> {
             return Vec::new();
         }
     };
-    for row in &due {
-        if let Err(e) = cache.mark_reminder_fired(row.occurrence_start_ms, &row.summary, row.kind) {
-            eprintln!("reminders: mark_fired failed for {}: {e}", row.event_id);
+
+    let mut out: Vec<DueToast> = Vec::new();
+    let mut running_seen: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+    for row in due {
+        let key = (row.event_id, row.occurrence_start_ms);
+        if occurrence_end(&row) <= now_ms {
+            let _ = cache.expire_occurrence_reminders(row.event_id, row.occurrence_start_ms);
+            continue;
         }
+        if row.occurrence_start_ms <= now_ms {
+            // In progress. One catch-up toast per occurrence; the rest of
+            // the cascade is moot — cancel it so nothing else fires later.
+            if !running_seen.insert(key) {
+                continue;
+            }
+            let _ = cache.mark_reminder_shown(row.event_id, row.occurrence_start_ms, row.seq);
+            let _ = cache.cancel_occurrence_reminders(row.event_id, row.occurrence_start_ms);
+            out.push(DueToast { row, mode: ToastMode::AlreadyRunning });
+            continue;
+        }
+        let _ = cache.mark_reminder_shown(row.event_id, row.occurrence_start_ms, row.seq);
+        let mode = if row.at_start || row.lead_min == 0 {
+            ToastMode::AtStart
+        } else {
+            ToastMode::Soon
+        };
+        out.push(DueToast { row, mode });
     }
-    due
+    out
 }
 
-/// Should a due row actually be shown? «скоро» (kind 1) is pointless once the
-/// event has started; «наступило» (kind 2) is stale long after the start. A
-/// manual snooze (kind 3) always shows — the user asked for it explicitly.
-pub fn should_show(row: &ReminderRow, now_ms: i64) -> bool {
-    match row.kind {
-        KIND_SOON => now_ms < row.occurrence_start_ms,
-        KIND_STARTED => now_ms <= row.occurrence_start_ms + STARTED_GRACE_MS,
-        _ => true,
-    }
-}
-
-/// Toast title: «Скоро: …» / «Наступило: …».
-pub fn title_for(row: &ReminderRow) -> String {
-    let s = if row.summary.trim().is_empty() {
+/// Toast title per mode.
+pub fn title_for(t: &DueToast) -> String {
+    let s = if t.row.summary.trim().is_empty() {
         "Событие"
     } else {
-        row.summary.trim()
+        t.row.summary.trim()
     };
-    match row.kind {
-        KIND_STARTED => format!("Наступило: {s}"),
-        _ => format!("Скоро: {s}"),
+    match t.mode {
+        ToastMode::Soon => format!("Скоро: {s}"),
+        ToastMode::AtStart => format!("Наступило: {s}"),
+        ToastMode::AlreadyRunning => format!("Событие уже идёт! {s}"),
     }
 }
 
-/// Human-readable toast body for a due reminder: how long until the event
-/// starts (or that it's starting now) plus the local start time.
-pub fn body_for(row: &ReminderRow, now_ms: i64) -> String {
+/// Toast body: time until start + the local start time.
+pub fn body_for(t: &DueToast, now_ms: i64) -> String {
     use chrono::{Local, TimeZone};
-    let start_local = Local
-        .timestamp_millis_opt(row.occurrence_start_ms)
-        .single();
-    let hhmm = start_local
-        .map(|t| t.format("%H:%M").to_string())
+    let hhmm = Local
+        .timestamp_millis_opt(t.row.occurrence_start_ms)
+        .single()
+        .map(|x| x.format("%H:%M").to_string())
         .unwrap_or_default();
-
-    let mins_until = (row.occurrence_start_ms - now_ms) / 60_000;
-    if mins_until > 1 {
-        format!("Через {mins_until} мин — начало в {hhmm}")
-    } else if mins_until >= 0 {
-        format!("Начинается — в {hhmm}")
-    } else {
-        format!("Началось в {hhmm}")
+    let mins_until = (t.row.occurrence_start_ms - now_ms) / 60_000;
+    match t.mode {
+        ToastMode::AlreadyRunning => format!("Началось в {hhmm}"),
+        _ if mins_until > 1 => format!("Через {mins_until} мин — начало в {hhmm}"),
+        _ => format!("Начинается — в {hhmm}"),
     }
 }
 
@@ -176,12 +212,10 @@ mod tests {
     use std::path::PathBuf;
 
     fn temp_cache() -> Cache {
-        // Unique-enough per test process; cargo runs tests in one process so
-        // we suffix with a static counter to avoid collisions across tests.
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "ddmail_rem_test_{}_{}",
+            "ddmail_rem2_test_{}_{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
@@ -189,71 +223,106 @@ mod tests {
         Cache::new(PathBuf::from(&dir)).expect("cache")
     }
 
-    fn event(id: i64, summary: &str, dtstart: i64, lead: i32) -> DesktopCalendarEvent {
+    fn event(id: i64, summary: &str, dtstart: i64, leads: &[i32]) -> DesktopCalendarEvent {
         serde_json::from_value(serde_json::json!({
             "id": id, "calendar_id": 1, "uid": format!("uid-{id}"),
-            "summary": summary, "dtstart": dtstart, "dtend": null,
-            "all_day": false, "alarm_lead_min": lead,
+            "summary": summary, "dtstart": dtstart, "dtend": dtstart + 3_600_000,
+            "all_day": false, "alarm_leads": leads,
         }))
         .expect("event")
     }
 
+    fn no_hidden(_: i64) -> bool {
+        false
+    }
+
     #[test]
-    fn seeds_only_future_within_horizon() {
+    fn cascade_fires_in_order_on_timeouts() {
         let cache = temp_cache();
         let now = 1_000_000_000_000;
-        let evs = vec![
-            event(1, "Past", now - 60_000, 10),           // already started — skip
-            event(2, "Soon", now + 5 * 60_000, 10),       // future, fires now (lead 10)
-            event(3, "Far", now + SEED_HORIZON_MS + 1, 10), // beyond horizon — skip
-            event(4, "", now + 5 * 60_000, 10),           // empty summary — skip
-        ];
-        seed(&cache, &evs, now);
+        // Two alarms: -10 min (primary) and at-start (secondary).
+        let start = now + 5 * 60_000;
+        seed(&cache, &[event(1, "Meet", start, &[10, 0])], &no_hidden, now);
 
-        // Only event 2 is due (its fire_at = start - 10min is in the past).
+        // Primary due immediately (fire_at = start - 10m < now).
         let due = scan(&cache, now);
-        assert_eq!(due.len(), 1, "only the in-window future event fires");
-        assert_eq!(due[0].event_id, 2);
-        assert_eq!(due[0].summary, "Soon");
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].row.seq, 0);
+        assert_eq!(due[0].mode, ToastMode::Soon);
+        // Secondary stays chained until the primary's toast TIMES OUT.
+        assert_eq!(scan(&cache, now).len(), 0);
+        cache.reminder_timeout(1, start, 0).unwrap();
+        // Now armed; due at start.
+        assert_eq!(scan(&cache, now).len(), 0, "at-start not due yet");
+        let due2 = scan(&cache, start);
+        assert_eq!(due2.len(), 1);
+        assert_eq!(due2[0].row.seq, 1);
     }
 
     #[test]
-    fn does_not_refire_after_marked() {
+    fn cross_kills_the_whole_cascade() {
         let cache = temp_cache();
         let now = 2_000_000_000_000;
-        seed(&cache, &[event(7, "Daily", now + 60_000, 10)], now);
-
-        assert_eq!(scan(&cache, now).len(), 1, "fires once");
-        assert_eq!(scan(&cache, now).len(), 0, "stays fired, no spam");
+        let start = now + 5 * 60_000;
+        seed(&cache, &[event(2, "Kill", start, &[10, 5, 0])], &no_hidden, now);
+        assert_eq!(scan(&cache, now).len(), 1);
+        cache.cancel_occurrence_reminders(2, start).unwrap();
+        cache.reminder_timeout(2, start, 0).unwrap(); // stray timeout after ✕
+        assert_eq!(scan(&cache, start).len(), 0, "✕ is irreversible");
     }
 
     #[test]
-    fn lead_defaults_when_zero() {
+    fn user_choice_replaces_cascade() {
         let cache = temp_cache();
         let now = 3_000_000_000_000;
-        // Start DEFAULT_LEAD+1 minutes out, no alarm → fire_at still future.
-        let start = now + (DEFAULT_LEAD_MIN as i64 + 1) * 60_000;
-        seed(&cache, &[event(9, "NoAlarm", start, 0)], now);
-        assert_eq!(scan(&cache, now).len(), 0, "default lead not yet reached");
-
-        // One minute later we cross the default-lead boundary.
-        let due = scan(&cache, now + 2 * 60_000);
+        let start = now + 30 * 60_000;
+        seed(&cache, &[event(3, "Snooze", start, &[25, 0])], &no_hidden, now);
+        assert_eq!(scan(&cache, now + 5 * 60_000).len(), 1); // primary at -25m
+        cache
+            .user_choice_reminder(3, start, start + 3_600_000, now + 10 * 60_000, false, "Snooze")
+            .unwrap();
+        let due = scan(&cache, now + 10 * 60_000);
         assert_eq!(due.len(), 1);
-        assert_eq!(due[0].lead_min, DEFAULT_LEAD_MIN);
+        assert_eq!(due[0].row.seq, 100);
+        // The event-defined at-start alarm never fires afterwards.
+        cache.reminder_timeout(3, start, 100).unwrap();
+        assert_eq!(scan(&cache, start).len(), 0);
     }
 
     #[test]
-    fn body_text_phrases() {
-        let row = ReminderRow {
-            event_id: 1,
-            occurrence_start_ms: 0,
-            fire_at_ms: 0,
-            lead_min: 10,
-            summary: "X".into(),
-            kind: KIND_SOON,
-        };
-        assert!(body_for(&row, -10 * 60_000).starts_with("Через 10 мин"));
-        assert!(body_for(&row, 0).starts_with("Начинается"));
-        assert!(body_for(&row, 60_000).starts_with("Началось"));
+    fn startup_running_and_past() {
+        let cache = temp_cache();
+        let now = 4_000_000_000_000;
+        // Seed while both events are future…
+        let running_start = now + 60_000;
+        let past_start = now + 120_000;
+        seed(&cache, &[event(4, "Running", running_start, &[10])], &no_hidden, now);
+        seed(&cache, &[event(5, "Past", past_start, &[10])], &no_hidden, now);
+        // …then "wake up" long after: event 4 is mid-run, event 5 is over.
+        let wake = running_start + 30 * 60_000; // event4 (1h long) still running
+        let due = scan(&cache, wake);
+        let modes: Vec<_> = due.iter().map(|d| (d.row.event_id, d.mode)).collect();
+        assert!(modes.contains(&(4, ToastMode::AlreadyRunning)));
+        // Event 5 (1h long) is also still running at wake… make it truly past:
+        let wake2 = past_start + 2 * 3_600_000;
+        let due2 = scan(&cache, wake2);
+        assert!(due2.iter().all(|d| d.row.event_id != 5), "ended events stay silent");
+    }
+
+    #[test]
+    fn event_change_resets_cascade() {
+        let cache = temp_cache();
+        let now = 5_000_000_000_000;
+        let start = now + 20 * 60_000;
+        seed(&cache, &[event(6, "Move", start, &[10])], &no_hidden, now);
+        cache.cancel_occurrence_reminders(6, start).unwrap(); // user said ✕
+        // Same event, unchanged: reseed keeps the cancellation.
+        seed(&cache, &[event(6, "Move", start, &[10])], &no_hidden, now);
+        assert_eq!(scan(&cache, start - 60_000).len(), 0);
+        // The event moved → full reset, reminders live again.
+        let start2 = start + 3_600_000;
+        seed(&cache, &[event(6, "Move", start2, &[10])], &no_hidden, now);
+        let due = scan(&cache, start2 - 60_000);
+        assert_eq!(due.len(), 1, "changed event re-arms as if new");
     }
 }

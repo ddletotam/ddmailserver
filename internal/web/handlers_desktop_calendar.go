@@ -161,6 +161,66 @@ func parseAlarmLeadMin(icalData string) int {
 	return 0
 }
 
+// parseAlarmLeads returns EVERY VALARM trigger of the event as "minutes
+// before start", in document order: element 0 is the primary reminder, the
+// rest form the secondary cascade (each fires only if the previous toast
+// died by timeout — client-side logic). Non-negative triggers (PT0S, "at
+// the moment of start") map to 0. Events without a single usable VALARM
+// get the server-side default of DEFAULT_ALARM_LEAD_MIN — per the spec the
+// server owns the default, the client only consumes the list.
+func parseAlarmLeads(icalData string) []int {
+	const defaultLead = 10
+	if !strings.Contains(icalData, "VALARM") {
+		return []int{defaultLead}
+	}
+	lines := strings.Split(icalData, "\n")
+	logical := make([]string, 0, len(lines))
+	for _, raw := range lines {
+		raw = strings.TrimRight(raw, "\r")
+		if (strings.HasPrefix(raw, " ") || strings.HasPrefix(raw, "\t")) && len(logical) > 0 {
+			logical[len(logical)-1] += raw[1:]
+			continue
+		}
+		logical = append(logical, raw)
+	}
+	var leads []int
+	inAlarm := false
+	got := false
+	for _, line := range logical {
+		switch {
+		case strings.HasPrefix(line, "BEGIN:VALARM"):
+			inAlarm = true
+			got = false
+		case strings.HasPrefix(line, "END:VALARM"):
+			inAlarm = false
+		case inAlarm && !got && strings.HasPrefix(line, "TRIGGER"):
+			colon := strings.Index(line, ":")
+			if colon < 0 {
+				continue
+			}
+			params := line[:colon]
+			value := strings.TrimSpace(line[colon+1:])
+			if strings.Contains(params, "RELATED=END") || strings.Contains(params, "VALUE=DATE-TIME") {
+				continue
+			}
+			if strings.HasPrefix(value, "-") {
+				if min := iso8601DurationToMinutes(strings.TrimPrefix(value, "-")); min > 0 {
+					leads = append(leads, min)
+					got = true
+				}
+			} else {
+				// PT0S and other non-negative triggers → "at start".
+				leads = append(leads, 0)
+				got = true
+			}
+		}
+	}
+	if len(leads) == 0 {
+		return []int{defaultLead}
+	}
+	return leads
+}
+
 // iso8601DurationToMinutes parses the shape "P[nW][nD][T[nH][nM][nS]]" and
 // returns the total in minutes (sub-minute components are floored). Returns
 // 0 on any parse error — we lose the alarm but never poison the response.
@@ -268,7 +328,12 @@ type DesktopCalendarEvent struct {
 	// AlarmLeadMin is the VALARM trigger expressed as "minutes before
 	// start" (positive int). 0 means no usable VALARM was found and the
 	// desktop should fall back to its global default lead time.
+	// Deprecated in favour of AlarmLeads; kept for older clients.
 	AlarmLeadMin int `json:"alarm_lead_min,omitempty"`
+	// AlarmLeads lists EVERY VALARM as "minutes before start" in document
+	// order (0 = at start). Never empty: events without alarms carry the
+	// server default. Element 0 = primary reminder, the rest cascade.
+	AlarmLeads []int `json:"alarm_leads,omitempty"`
 	// Extras carries every VEVENT property that is neither surfaced as a
 	// first-class field above nor pure plumbing, with default values
 	// (TRANSP:OPAQUE, CLASS:PUBLIC…) elided. This is how conference links
@@ -600,6 +665,7 @@ func (s *Server) HandleDesktopCalendarEvents(w http.ResponseWriter, r *http.Requ
 				if o.DTStart < toMs && oEnd > fromMs {
 					o.Attendees = dtos
 					o.AlarmLeadMin = parseAlarmLeadMin(e.ICalData)
+					o.AlarmLeads = parseAlarmLeads(e.ICalData)
 					o.Extras = extras
 					out = append(out, o)
 				}
@@ -623,6 +689,7 @@ func (s *Server) HandleDesktopCalendarEvents(w http.ResponseWriter, r *http.Requ
 			ExDates:        exDates,
 			Attendees:      dtos,
 			AlarmLeadMin:   parseAlarmLeadMin(e.ICalData),
+			AlarmLeads:     parseAlarmLeads(e.ICalData),
 			Extras:         extras,
 		})
 	}

@@ -319,8 +319,14 @@ pub struct DesktopCalendarEvent {
     pub attendees: Vec<DesktopCalendarAttendee>,
     /// VALARM trigger as "minutes before start". 0 / missing → desktop
     /// should fall back to its global default lead-time.
+    /// Deprecated in favour of `alarm_leads`; kept for older servers.
     #[serde(default)]
     pub alarm_lead_min: i32,
+    /// Every VALARM as "minutes before start" in document order (0 = at
+    /// start). Element 0 = primary reminder, the rest cascade — each fires
+    /// only if the previous toast died by timeout.
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
+    pub alarm_leads: Vec<i32>,
     /// Non-default VEVENT properties that aren't first-class fields —
     /// conference links, URL, CATEGORIES, CLASS etc. Uppercased names.
     #[serde(default, deserialize_with = "null_as_empty_vec")]

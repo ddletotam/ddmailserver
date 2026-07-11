@@ -133,25 +133,36 @@ impl Cache {
             --
             -- One row per (event, occurrence). The scheduler treats it as
             -- the source of truth so snoozes and acks survive app restarts.
+            -- Calendar reminders, one row per alarm of an occurrence (spec
+            -- 2026-07-11). seq = cascade position: 0 is the primary alarm,
+            -- 1.. are the event's secondary alarms (each armed only when the
+            -- previous toast dies by timeout), 100 is the single user-chosen
+            -- reminder from «напомнить позже» (it replaces the cascade).
             --
-            -- status state machine:
-            --   pending → fired   (notifier shows the toast)
-            --   fired   → acked   (user clicked OK / Open)
-            --   fired   → pending (user snoozed; fire_at_ms updated)
+            -- status machine:
+            --   armed     → shown      (toast on screen)
+            --   chained   → armed      (previous toast timed out)
+            --   shown     → done       (toast timed out → arm the next)
+            --   *         → cancelled  (✕ / user choice / event edited)
+            --   *         → expired    (occurrence ended while client off)
             --
-            -- summary is denormalised so the toast can render without
-            -- re-fetching the event from the server.
-            CREATE TABLE IF NOT EXISTS event_reminders (
+            -- signature fingerprints (dtstart, dtend, leads, summary): any
+            -- event change → delete + reseed, per spec.
+            CREATE TABLE IF NOT EXISTS reminders2 (
                 event_id INTEGER NOT NULL,
                 occurrence_start_ms INTEGER NOT NULL,
+                occurrence_end_ms INTEGER NOT NULL DEFAULT 0,
+                seq INTEGER NOT NULL,
                 fire_at_ms INTEGER NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                lead_min INTEGER NOT NULL DEFAULT 15,
+                lead_min INTEGER NOT NULL DEFAULT 0,
+                at_start INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'armed',
                 summary TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY (event_id, occurrence_start_ms)
+                signature TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (event_id, occurrence_start_ms, seq)
             );
-            CREATE INDEX IF NOT EXISTS idx_reminders_fire
-                ON event_reminders(fire_at_ms);
+            CREATE INDEX IF NOT EXISTS idx_reminders2_due
+                ON reminders2(status, fire_at_ms);
 
             -- Small key/value store for sync bookkeeping (delta watermarks,
             -- last-full-sync timestamps). One row per key.
@@ -197,34 +208,11 @@ impl Cache {
         //   3 = manual snooze    (user-chosen, neutralises 1 & 2)
         // The logical key gains `kind` so A and B can coexist for one
         // occurrence. Existing rows default to kind 1.
-        conn.execute(
-            "ALTER TABLE event_reminders ADD COLUMN kind INTEGER NOT NULL DEFAULT 1",
-            [],
-        )
-        .ok();
-        // The old unique index (occurrence, summary) would now reject the
-        // second kind — drop it and recreate including `kind`.
-        conn.execute("DROP INDEX IF EXISTS idx_reminders_logical", []).ok();
-        conn.execute(
-            "DELETE FROM event_reminders WHERE rowid IN (\
-                SELECT rowid FROM (\
-                    SELECT rowid, ROW_NUMBER() OVER (\
-                        PARTITION BY occurrence_start_ms, summary, kind \
-                        ORDER BY CASE status \
-                            WHEN 'acked' THEN 0 \
-                            WHEN 'fired' THEN 1 \
-                            ELSE 2 END, \
-                        event_id DESC\
-                    ) AS rn FROM event_reminders\
-                ) WHERE rn > 1\
-            )",
-            [],
-        ).ok();
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_reminders_logical \
-             ON event_reminders(occurrence_start_ms, summary, kind)",
-            [],
-        ).ok();
+        // The v1 reminders table had a broken PRIMARY KEY (event_id,
+        // occurrence) that made the second alarm row of an occurrence
+        // impossible — superseded wholesale by reminders2. Dropping it loses
+        // at most one pending snooze, once, at upgrade time.
+        conn.execute("DROP TABLE IF EXISTS event_reminders", []).ok();
 
         Ok(Self { conn: Mutex::new(conn) })
     }
@@ -737,126 +725,210 @@ impl Cache {
 
     // ── Calendar reminders ──
 
-    /// Insert a reminder for an event occurrence if no row exists yet.
+    /// Seed (or refresh) the alarm cascade for one future occurrence.
     ///
-    /// Dedup is on (occurrence_start_ms, summary), not (event_id, occ): the
-    /// frontend re-pushes the whole schedule whenever the calendar list
-    /// changes, and CalDAV resyncs reassign `event_id` so the same logical
-    /// occurrence shows up with a different id each round. We treat
-    /// (occ, summary) as the logical identity and update event_id in-place
-    /// on conflict — the user's status / fire_at / lead_min stay put, so
-    /// acks and snoozes survive the resync. The latest event_id wins
-    /// because the open-event payload from the toast needs to route to
-    /// whichever row the backend currently exposes.
-    pub fn upsert_pending_reminder(
+    /// `leads` come from the event's VALARMs in document order (element 0 =
+    /// primary, the rest = the secondary cascade; 0 minutes = "at start").
+    /// The signature fingerprints everything reminder-relevant about the
+    /// event: matching → the occurrence is left untouched, so fired and
+    /// cancelled states survive routine refetches; differing → every row is
+    /// dropped and the cascade rebuilds as if the event just appeared (per
+    /// spec, any event change resets its notifications).
+    pub fn seed_occurrence(
         &self,
         event_id: i64,
-        occurrence_start_ms: i64,
-        fire_at_ms: i64,
-        lead_min: i32,
+        occ_start_ms: i64,
+        occ_end_ms: i64,
         summary: &str,
-        kind: i32,
+        leads: &[i32],
+        signature: &str,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
-        conn.execute(
-            "INSERT INTO event_reminders \
-             (event_id, occurrence_start_ms, fire_at_ms, status, lead_min, summary, kind) \
-             VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?6) \
-             ON CONFLICT(occurrence_start_ms, summary, kind) DO UPDATE SET \
-                event_id = excluded.event_id",
-            params![event_id, occurrence_start_ms, fire_at_ms, lead_min, summary, kind],
-        ).map_err(|e| format!("ins reminder: {e}"))?;
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT signature FROM reminders2 \
+                 WHERE event_id = ?1 AND occurrence_start_ms = ?2 LIMIT 1",
+                params![event_id, occ_start_ms],
+                |r| r.get(0),
+            )
+            .ok();
+        match existing {
+            Some(sig) if sig == signature => return Ok(()),
+            Some(_) => {
+                conn.execute(
+                    "DELETE FROM reminders2 WHERE event_id = ?1 AND occurrence_start_ms = ?2",
+                    params![event_id, occ_start_ms],
+                )
+                .map_err(|e| format!("reseed clear: {e}"))?;
+            }
+            None => {}
+        }
+        for (i, lead) in leads.iter().enumerate() {
+            let status = if i == 0 { "armed" } else { "chained" };
+            conn.execute(
+                "INSERT OR IGNORE INTO reminders2 \
+                 (event_id, occurrence_start_ms, occurrence_end_ms, seq, fire_at_ms, \
+                  lead_min, at_start, status, summary, signature) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    event_id,
+                    occ_start_ms,
+                    occ_end_ms,
+                    i as i64,
+                    occ_start_ms - (*lead as i64) * 60_000,
+                    lead,
+                    (*lead == 0) as i32,
+                    status,
+                    summary,
+                    signature
+                ],
+            )
+            .map_err(|e| format!("seed row: {e}"))?;
+        }
         Ok(())
     }
 
-    /// True if a manual snooze (kind 3) exists for this occurrence — seeding
-    /// must then NOT recreate the auto A/B reminders (the user took control).
-    pub fn has_manual_reminder(&self, occurrence_start_ms: i64, summary: &str) -> bool {
-        let conn = match self.conn.lock() {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-        conn.query_row(
-            "SELECT 1 FROM event_reminders \
-             WHERE occurrence_start_ms = ?1 AND summary = ?2 AND kind = 3 LIMIT 1",
-            params![occurrence_start_ms, summary],
-            |_| Ok(()),
-        )
-        .is_ok()
-    }
-
-    /// Replace every reminder for an occurrence with a single manual (kind 3)
-    /// one — neutralises the auto A/B and any event-defined alarms, per spec.
-    pub fn set_manual_reminder(
-        &self,
-        event_id: i64,
-        occurrence_start_ms: i64,
-        fire_at_ms: i64,
-        summary: &str,
-    ) -> Result<(), String> {
+    /// The toast for this row is on screen — stop the scanner returning it.
+    pub fn mark_reminder_shown(&self, event_id: i64, occ_start_ms: i64, seq: i64) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         conn.execute(
-            "DELETE FROM event_reminders WHERE occurrence_start_ms = ?1 AND summary = ?2",
-            params![occurrence_start_ms, summary],
+            "UPDATE reminders2 SET status = 'shown' \
+             WHERE event_id = ?1 AND occurrence_start_ms = ?2 AND seq = ?3",
+            params![event_id, occ_start_ms, seq],
         )
-        .map_err(|e| format!("manual clear: {e}"))?;
-        conn.execute(
-            "INSERT INTO event_reminders \
-             (event_id, occurrence_start_ms, fire_at_ms, status, lead_min, summary, kind) \
-             VALUES (?1, ?2, ?3, 'pending', 0, ?4, 3)",
-            params![event_id, occurrence_start_ms, fire_at_ms, summary],
-        )
-        .map_err(|e| format!("manual ins: {e}"))?;
+        .map_err(|e| format!("mark shown: {e}"))?;
         Ok(())
     }
 
-    /// Delete every reminder for one occurrence (all kinds). «✕» on a
-    /// «наступило» toast, and the delete-occurrence half of a manual snooze.
-    pub fn cancel_occurrence_reminders(
-        &self,
-        occurrence_start_ms: i64,
-        summary: &str,
-    ) -> Result<(), String> {
+    /// The toast died by TIMEOUT (no user choice): retire this row and arm
+    /// the next link of the cascade, if any — per spec a secondary
+    /// event-defined alarm fires only when the previous toast expired
+    /// untouched.
+    pub fn reminder_timeout(&self, event_id: i64, occ_start_ms: i64, seq: i64) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         conn.execute(
-            "DELETE FROM event_reminders WHERE occurrence_start_ms = ?1 AND summary = ?2",
-            params![occurrence_start_ms, summary],
+            "UPDATE reminders2 SET status = 'done' \
+             WHERE event_id = ?1 AND occurrence_start_ms = ?2 AND seq = ?3",
+            params![event_id, occ_start_ms, seq],
+        )
+        .map_err(|e| format!("timeout done: {e}"))?;
+        conn.execute(
+            "UPDATE reminders2 SET status = 'armed' \
+             WHERE event_id = ?1 AND occurrence_start_ms = ?2 AND status = 'chained' \
+               AND seq = (SELECT MIN(seq) FROM reminders2 \
+                          WHERE event_id = ?1 AND occurrence_start_ms = ?2 AND status = 'chained')",
+            params![event_id, occ_start_ms],
+        )
+        .map_err(|e| format!("arm next: {e}"))?;
+        Ok(())
+    }
+
+    /// «✕» on a reminder toast (or a user snooze replacing the cascade):
+    /// kill every remaining notification of the occurrence, irreversibly.
+    /// Rows stay (status = cancelled) so the signature keeps routine
+    /// reseeds from resurrecting them.
+    pub fn cancel_occurrence_reminders(&self, event_id: i64, occ_start_ms: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        conn.execute(
+            "UPDATE reminders2 SET status = 'cancelled' \
+             WHERE event_id = ?1 AND occurrence_start_ms = ?2 \
+               AND status IN ('armed', 'chained', 'shown')",
+            params![event_id, occ_start_ms],
         )
         .map_err(|e| format!("cancel occ: {e}"))?;
         Ok(())
     }
 
-    /// Delete all reminders for an event (every occurrence, every kind). Used
-    /// when an event is edited/deleted so they can be regenerated from scratch.
+    /// «Напомнить позже» commit: replace the whole cascade with ONE
+    /// user-chosen reminder (seq 100).
+    pub fn user_choice_reminder(
+        &self,
+        event_id: i64,
+        occ_start_ms: i64,
+        occ_end_ms: i64,
+        fire_at_ms: i64,
+        at_start: bool,
+        summary: &str,
+    ) -> Result<(), String> {
+        let sig: String = {
+            let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+            conn.query_row(
+                "SELECT signature FROM reminders2 \
+                 WHERE event_id = ?1 AND occurrence_start_ms = ?2 LIMIT 1",
+                params![event_id, occ_start_ms],
+                |r| r.get(0),
+            )
+            .unwrap_or_default()
+        };
+        self.cancel_occurrence_reminders(event_id, occ_start_ms)?;
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO reminders2 \
+             (event_id, occurrence_start_ms, occurrence_end_ms, seq, fire_at_ms, \
+              lead_min, at_start, status, summary, signature) \
+             VALUES (?1, ?2, ?3, 100, ?4, ?5, ?6, 'armed', ?7, ?8)",
+            params![
+                event_id,
+                occ_start_ms,
+                occ_end_ms,
+                fire_at_ms,
+                ((occ_start_ms - fire_at_ms) / 60_000).max(0),
+                at_start as i32,
+                summary,
+                sig
+            ],
+        )
+        .map_err(|e| format!("user choice ins: {e}"))?;
+        Ok(())
+    }
+
+    /// The occurrence ended while nobody was looking — retire every row
+    /// silently (startup corner case: "прошло — тихо удаляем").
+    pub fn expire_occurrence_reminders(&self, event_id: i64, occ_start_ms: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        conn.execute(
+            "UPDATE reminders2 SET status = 'expired' \
+             WHERE event_id = ?1 AND occurrence_start_ms = ?2 \
+               AND status IN ('armed', 'chained', 'shown')",
+            params![event_id, occ_start_ms],
+        )
+        .map_err(|e| format!("expire occ: {e}"))?;
+        Ok(())
+    }
+
+    /// Delete all reminders for an event (every occurrence). Event edited or
+    /// deleted → everything regenerates from the event's current settings.
     pub fn purge_event_reminders(&self, event_id: i64) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         conn.execute(
-            "DELETE FROM event_reminders WHERE event_id = ?1",
+            "DELETE FROM reminders2 WHERE event_id = ?1",
             params![event_id],
         )
         .map_err(|e| format!("purge event: {e}"))?;
         Ok(())
     }
 
-    /// Reminders whose fire time has passed AND that haven't been shown
-    /// yet. Status 'fired' rows stay in the table so we don't re-toast a
-    /// notification the user dismissed deliberately.
+    /// Armed rows whose fire time has passed — raw material for the scan
+    /// side, which decides shown / expired / already-running per occurrence.
     pub fn due_reminders(&self, now_ms: i64) -> Result<Vec<ReminderRow>, String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         let mut stmt = conn.prepare(
-            "SELECT event_id, occurrence_start_ms, fire_at_ms, lead_min, summary, kind \
-             FROM event_reminders \
-             WHERE status = 'pending' AND fire_at_ms <= ?1 \
+            "SELECT event_id, occurrence_start_ms, occurrence_end_ms, seq, \
+                    fire_at_ms, lead_min, at_start, summary \
+             FROM reminders2 \
+             WHERE status = 'armed' AND fire_at_ms <= ?1 \
              ORDER BY fire_at_ms ASC"
         ).map_err(|e| format!("prep: {e}"))?;
         let rows = stmt.query_map(params![now_ms], |r| {
             Ok(ReminderRow {
                 event_id: r.get(0)?,
                 occurrence_start_ms: r.get(1)?,
-                fire_at_ms: r.get(2)?,
-                lead_min: r.get(3)?,
-                summary: r.get(4)?,
-                kind: r.get(5)?,
+                occurrence_end_ms: r.get(2)?,
+                seq: r.get(3)?,
+                fire_at_ms: r.get(4)?,
+                lead_min: r.get(5)?,
+                at_start: r.get::<_, i32>(6)? != 0,
+                summary: r.get(7)?,
             })
         }).map_err(|e| format!("query: {e}"))?;
         let mut out = Vec::new();
@@ -864,101 +936,30 @@ impl Cache {
         Ok(out)
     }
 
-    pub fn mark_reminder_fired(
-        &self,
-        occurrence_start_ms: i64,
-        summary: &str,
-        kind: i32,
-    ) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
-        conn.execute(
-            "UPDATE event_reminders SET status = 'fired' \
-             WHERE occurrence_start_ms = ?1 AND summary = ?2 AND kind = ?3",
-            params![occurrence_start_ms, summary, kind],
-        ).map_err(|e| format!("upd fired: {e}"))?;
-        Ok(())
-    }
-
-    /// Fetch a single reminder row by its logical id. Used by the
-    /// snooze-config window to populate its UI without round-tripping
-    /// the data through URL params.
-    pub fn get_reminder(
-        &self,
-        event_id: i64,
-        occurrence_start_ms: i64,
-    ) -> Result<Option<ReminderRow>, String> {
-        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
-        let mut stmt = conn.prepare(
-            "SELECT event_id, occurrence_start_ms, fire_at_ms, lead_min, summary, kind \
-             FROM event_reminders WHERE event_id = ?1 AND occurrence_start_ms = ?2",
-        ).map_err(|e| format!("prep: {e}"))?;
-        let mut rows = stmt.query_map(params![event_id, occurrence_start_ms], |r| {
-            Ok(ReminderRow {
-                event_id: r.get(0)?,
-                occurrence_start_ms: r.get(1)?,
-                fire_at_ms: r.get(2)?,
-                lead_min: r.get(3)?,
-                summary: r.get(4)?,
-                kind: r.get(5)?,
-            })
-        }).map_err(|e| format!("query: {e}"))?;
-        match rows.next() {
-            Some(r) => Ok(Some(r.map_err(|e| format!("row: {e}"))?)),
-            None => Ok(None),
-        }
-    }
-
-    pub fn mark_reminder_acked(&self, event_id: i64, occurrence_start_ms: i64) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
-        conn.execute(
-            "UPDATE event_reminders SET status = 'acked' \
-             WHERE event_id = ?1 AND occurrence_start_ms = ?2",
-            params![event_id, occurrence_start_ms],
-        ).map_err(|e| format!("upd acked: {e}"))?;
-        Ok(())
-    }
-
-    /// Snooze: reschedule fire_at and put status back to pending. Caller is
-    /// responsible for computing the new absolute fire_at_ms.
-    pub fn snooze_reminder(
-        &self,
-        event_id: i64,
-        occurrence_start_ms: i64,
-        new_fire_at_ms: i64,
-        new_lead_min: i32,
-    ) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
-        conn.execute(
-            "UPDATE event_reminders SET status = 'pending', fire_at_ms = ?3, lead_min = ?4 \
-             WHERE event_id = ?1 AND occurrence_start_ms = ?2",
-            params![event_id, occurrence_start_ms, new_fire_at_ms, new_lead_min],
-        ).map_err(|e| format!("upd snooze: {e}"))?;
-        Ok(())
-    }
-
-    /// Drop reminders whose occurrence is well in the past so the table
-    /// doesn't grow indefinitely. The cutoff is generous enough that we
-    /// don't lose history a user might still want to investigate.
+    /// Bound the table: drop rows whose occurrence is well past.
     pub fn prune_old_reminders(&self, cutoff_ms: i64) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         conn.execute(
-            "DELETE FROM event_reminders WHERE occurrence_start_ms < ?1",
+            "DELETE FROM reminders2 WHERE occurrence_start_ms < ?1",
             params![cutoff_ms],
         ).map_err(|e| format!("prune: {e}"))?;
         Ok(())
     }
 }
 
-/// A scheduled reminder row, denormalised enough that the notifier can
-/// render the toast without touching any other table. Serializable so a
-/// reminder row can be pulled by id and shipped to the UI cheaply.
+/// One alarm row of an occurrence's cascade, denormalised enough that the
+/// notifier renders the toast without touching any other table.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReminderRow {
     pub event_id: i64,
     pub occurrence_start_ms: i64,
+    /// 0 = unknown end (the scanner substitutes start + 30 min).
+    pub occurrence_end_ms: i64,
+    /// Cascade position: 0 primary, 1.. event-defined secondary, 100 user.
+    pub seq: i64,
     pub fire_at_ms: i64,
     pub lead_min: i32,
+    /// "At the moment of start" presentation: ✕ + body only, no snooze.
+    pub at_start: bool,
     pub summary: String,
-    /// 1 = «скоро случится», 2 = «наступило», 3 = manual snooze.
-    pub kind: i32,
 }
