@@ -882,10 +882,10 @@ struct Shared {
     /// Event a reminder toast asked to open (0 = none); consumed once the
     /// calendar events for its week arrive from the engine.
     pending_open_event: Cell<i64>,
-    /// (event_id, occurrence_start_ms, summary) the snooze modal is acting on.
-    /// Summary is the occurrence's logical key — needed to neutralise/cancel
-    /// its other reminders (cache keys on occurrence+summary).
-    snooze_ctx: RefCell<(i64, i64, String)>,
+    /// (event_id, occurrence_start_ms, occurrence_end_ms, toast_id, summary)
+    /// the snooze modal is acting on. toast_id lets a committed choice close
+    /// the originating toast and a cancel resume its paused timer.
+    snooze_ctx: RefCell<(i64, i64, i64, u64, String)>,
     /// Per-render map of on-screen occurrences for drag-move: (event_id, day)
     /// → (occurrence_start_ms, occurrence_end_ms, recurring). Lets the drag
     /// handler recover the EXACT instance start (recurrence_id for scope=single)
@@ -1502,12 +1502,12 @@ fn week_start_days_for_ms(ms: i64) -> i64 {
 /// Route a reminder-toast action onto the UI loop. Toast callbacks fire on the
 /// UI thread already, but hopping via the event loop keeps us clear of any
 /// borrow that might be live while a toast window dispatches.
-fn reminder_dispatch(action: &'static str, eid: i64, occ: i64, summary: String) {
+fn reminder_dispatch(action: &'static str, eid: i64, occ: i64, seq: i64, summary: String) {
     if let Some(weak) = UI_WEAK.get() {
         let _ = weak.upgrade_in_event_loop(move |ui| {
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
-                    handle_reminder_action(&ui, sh, action, eid, occ, &summary);
+                    handle_reminder_action(&ui, sh, action, eid, occ, seq, &summary);
                 }
             });
         });
@@ -1539,37 +1539,42 @@ fn snooze_steps(mins_until: i64) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Single dispatch point for everything a calendar-reminder toast (or the
-/// in-app snooze modal) can ask for — restored from the Tauri build:
-///   default       → open the event in the calendar (does NOT ack — opening
-///                    is softer than «обработал»)
-///   ack           → mark acked, never bother again
-///   snooze-window → raise the window + show the in-app snooze modal; the
-///                    row's state is committed by the follow-up snz:*
-///   snz:N         → re-arm fire_at at now+N minutes
-///   snz:atstart   → re-arm exactly at the occurrence start
+/// Single dispatch point for what a calendar-reminder toast can ask for
+/// (spec 2026-07-11):
+///   cancel-occ    → «✕»: kill the whole cascade of this occurrence, forever.
+///   timeout       → toast expired untouched: retire the row + arm the next
+///                   cascade link (event-defined secondary alarm).
+///   open-stay     → body of a «скоро» toast: navigate to the event, STOP the
+///                   toast's timer, leave it open.
+///   open-close    → body of an at-start / running toast: navigate + close.
+///   snooze-window → «Напомнить позже»: pause the toast timer + open the
+///                   in-app snooze dialog (choice committed in on_snooze_choice).
 fn handle_reminder_action(
     ui: &MainWindow,
     sh: &Rc<Shared>,
     action: &str,
     event_id: i64,
     occ_ms: i64,
+    seq: i64,
     summary: &str,
 ) {
     match action {
-        "ack" => {
-            if let Some(c) = sh.cache.as_ref() {
-                let _ = c.mark_reminder_acked(event_id, occ_ms);
-            }
-        }
-        // «✕» on a «наступило» toast: wipe every reminder for this occurrence.
         "cancel-occ" => {
             if let Some(c) = sh.cache.as_ref() {
-                let _ = c.cancel_occurrence_reminders(occ_ms, summary);
+                let _ = c.cancel_occurrence_reminders(event_id, occ_ms);
             }
             toast_window::close_for_event(event_id);
         }
+        "timeout" => {
+            // The toast is already gone (tick removed it). Advance the
+            // cascade so a secondary alarm can arm.
+            if let Some(c) = sh.cache.as_ref() {
+                let _ = c.reminder_timeout(event_id, occ_ms, seq);
+            }
+        }
         "snooze-window" => {
+            let toast_id = toast_window::id_for_event(event_id);
+            toast_window::pause_timer(toast_id);
             let now_ms = chrono::Utc::now().timestamp_millis();
             let mins_until = (occ_ms - now_ms) / 60_000;
             let opts: Vec<SnoozeOpt> = snooze_steps(mins_until)
@@ -1579,31 +1584,30 @@ fn handle_reminder_action(
                     label: label.into(),
                 })
                 .collect();
+            // occ_end recovered from the current calendar view (0 if unknown;
+            // user_choice_reminder tolerates it).
+            let occ_end = sh
+                .calendar_events
+                .borrow()
+                .iter()
+                .find(|e| e.id == event_id)
+                .and_then(|e| e.dtend)
+                .unwrap_or(0);
             sh.snooze_ctx
-                .replace((event_id, occ_ms, summary.to_string()));
+                .replace((event_id, occ_ms, occ_end, toast_id, summary.to_string()));
             ui.set_snooze_summary(summary.into());
             ui.set_snooze_options(slint::ModelRc::new(slint::VecModel::from(opts)));
             ui.set_snooze_visible(true);
             raise_window(ui);
         }
-        // A manual snooze NEUTRALISES every other reminder for the occurrence
-        // (incl. event-defined alarms): set_manual_reminder replaces them all
-        // with one kind-3 row.
-        s if s.starts_with("snz:") => {
-            let Some(c) = sh.cache.as_ref() else { return };
-            let now_ms = chrono::Utc::now().timestamp_millis();
-            let fire_at = if s == "snz:atstart" {
-                occ_ms
+        "open-stay" | "open-close" => {
+            if action == "open-close" {
+                toast_window::close_for_event(event_id);
             } else {
-                let mins: i64 = s[4..].parse().unwrap_or(5);
-                now_ms + mins * 60_000
-            };
-            if let Err(e) = c.set_manual_reminder(event_id, occ_ms, fire_at, summary) {
-                eprintln!("reminders: manual snooze failed for {event_id}: {e}");
+                // Body click on «скоро»: freeze the toast, it stays until the
+                // user dismisses it (spec: таймер закрытия останавливается).
+                toast_window::stop_timer(toast_window::id_for_event(event_id));
             }
-            toast_window::close_for_event(event_id);
-        }
-        "default" => {
             raise_window(ui);
             sh.calendar_week_start_days.set(week_start_days_for_ms(occ_ms));
             sh.pending_open_event.set(event_id);
@@ -2069,9 +2073,12 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
                     // Exact instance bounds for drag-move (recurrence_id +
                     // duration). Recurring → only a scope=single override moves
                     // the day (an "all" dtstart shift keeps BYDAY's weekday).
+                    // An override row (non-empty recurrence_id, empty rrule)
+                    // must ALSO stay scope=single: patching it as "all" would
+                    // rewrite the master series' times with one occurrence's.
                     occ_map.insert(
                         (e.id as i32, day),
-                        (o.start_ms, o.end_ms, !e.rrule.is_empty()),
+                        (o.start_ms, o.end_ms, !e.rrule.is_empty() || !e.recurrence_id.is_empty()),
                     );
                 }
             }
@@ -3113,7 +3120,7 @@ fn main() {
         edit_cal_ids: RefCell::new(Vec::new()),
         compose_attachments: RefCell::new(Vec::new()),
         pending_open_event: Cell::new(0),
-        snooze_ctx: RefCell::new((0, 0, String::new())),
+        snooze_ctx: RefCell::new((0, 0, 0, 0, String::new())),
         cal_occ: RefCell::new(HashMap::new()),
     });
     SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
@@ -4453,12 +4460,39 @@ fn main() {
     let sh_snz = shared.clone();
     ui.on_snooze_choice(move |choice| {
         if let Some(ui) = ui_weak_snz.upgrade() {
-            let (eid, occ, summary) = sh_snz.snooze_ctx.borrow().clone();
+            let (eid, occ, occ_end, toast_id, summary) = sh_snz.snooze_ctx.borrow().clone();
             if eid != 0 {
-                handle_reminder_action(&ui, &sh_snz, &format!("snz:{choice}"), eid, occ, &summary);
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let at_start = choice == "atstart";
+                let fire_at = if at_start {
+                    occ
+                } else {
+                    now_ms + choice.parse::<i64>().unwrap_or(5) * 60_000
+                };
+                // User made a choice: cascade → one reminder; toast closes
+                // immediately and silently (no cascade-advancing timeout).
+                if let Some(c) = sh_snz.cache.as_ref() {
+                    if let Err(e) =
+                        c.user_choice_reminder(eid, occ, occ_end, fire_at, at_start, &summary)
+                    {
+                        eprintln!("reminders: user choice failed for {eid}: {e}");
+                    }
+                }
+                toast_window::stop_timer(toast_id); // disarm the timeout hook
+                toast_window::close(toast_id);
             }
-            sh_snz.snooze_ctx.replace((0, 0, String::new()));
+            sh_snz.snooze_ctx.replace((0, 0, 0, 0, String::new()));
         }
+    });
+    // Snooze dialog dismissed WITHOUT a choice: the toast behaves as if the
+    // button was never pressed — resume its paused countdown.
+    let sh_snc = shared.clone();
+    ui.on_snooze_cancel(move || {
+        let (_, _, _, toast_id, _) = sh_snc.snooze_ctx.borrow().clone();
+        if toast_id != 0 {
+            toast_window::resume_timer(toast_id);
+        }
+        sh_snc.snooze_ctx.replace((0, 0, 0, 0, String::new()));
     });
     // Colour picked in the per-calendar palette popup.
     let ui_weak_cc = ui.as_weak();
@@ -4730,9 +4764,12 @@ fn main() {
         let day_ms: i64 = 24 * 60 * 60 * 1000;
         let (week_start_ms, _) = week_range_ms(sh_gm.calendar_week_start_days.get(), day_count);
 
-        // Block x = GUTTER + day*col_w + 2px → invert for the nearest column.
+        // Block x = GUTTER + (day + lane_xf)*col_w + 2px, lane_xf ∈ [0,1) for
+        // overlap lanes — floor recovers the day column. round() broke every
+        // block in lane xf >= 0.5: the lookup jumped to the NEXT day, the
+        // cal_occ probe missed, and the drag silently did nothing.
         let px_to_day = |x: f32| -> i64 {
-            (((x - GUTTER - 2.0) / col_w).round() as i64).clamp(0, day_count as i64 - 1)
+            (((x - GUTTER - 2.0) / col_w).floor() as i64).clamp(0, day_count as i64 - 1)
         };
         let px_to_min = |y: f32| -> i64 {
             let minutes = hour_start as f32 * 60.0 + (y / hour_height) * 60.0;
@@ -4748,7 +4785,10 @@ fn main() {
         let (occ_start, occ_end, recurring) =
             match sh_gm.cal_occ.borrow().get(&(id, orig_day as i32)).copied() {
                 Some(v) => v,
-                None => return,
+                None => {
+                    eprintln!("[cal] move: no occurrence for id={id} day={orig_day} — drop ignored");
+                    return;
+                }
             };
         if new_start == occ_start {
             return; // dropped back where it was
@@ -4827,7 +4867,9 @@ fn main() {
         let hour_start = ui.get_hour_start();
         let day_ms: i64 = 24 * 60 * 60 * 1000;
         let (week_start_ms, _) = week_range_ms(sh_gr.calendar_week_start_days.get(), day_count);
-        let day = (((orig_x - GUTTER - 2.0) / col_w).round() as i64).clamp(0, day_count as i64 - 1);
+        // floor, not round: orig_x carries the overlap-lane fraction (xf) —
+        // see px_to_day in the move handler above.
+        let day = (((orig_x - GUTTER - 2.0) / col_w).floor() as i64).clamp(0, day_count as i64 - 1);
         let to_min = |y: f32| -> i64 {
             let m = hour_start as f32 * 60.0 + (y / hour_height) * 60.0;
             ((m / 15.0).round().max(0.0) as i64) * 15
@@ -4841,7 +4883,10 @@ fn main() {
         let (occ_start, occ_end, recurring) =
             match sh_gr.cal_occ.borrow().get(&(id, day as i32)).copied() {
                 Some(v) => v,
-                None => return,
+                None => {
+                    eprintln!("[cal] resize: no occurrence for id={id} day={day} — ignored");
+                    return;
+                }
             };
         if new_start == occ_start && new_end == occ_end {
             return; // no change
@@ -4936,56 +4981,62 @@ fn main() {
                     .and_then(|sh| sh.cache.as_ref().map(|c| reminders::scan(c, now_ms)))
                     .unwrap_or_default()
             });
-            for row in due {
-                // Guard: «скоро» is pointless once started; «наступило» is
-                // stale long after. Suppressed rows were already marked fired
-                // by scan(), so they won't return again.
-                if !reminders::should_show(&row, now_ms) {
+            for t in due {
+                // One toast per event on screen at a time (dedup a burst).
+                if toast_window::has_for_event(t.row.event_id) {
                     continue;
                 }
-                // Dedup: at most one toast per event on screen (kills the
-                // startup burst of repeats).
-                if toast_window::has_for_event(row.event_id) {
-                    continue;
-                }
-                let title = reminders::title_for(&row);
-                let body = reminders::body_for(&row, now_ms);
-                let eid = row.event_id;
-                let occ = row.occurrence_start_ms;
-                let summary = row.summary.clone();
+                let title = reminders::title_for(&t);
+                let body = reminders::body_for(&t, now_ms);
+                let eid = t.row.event_id;
+                let occ = t.row.occurrence_start_ms;
+                let seq = t.row.seq;
+                let summary = t.row.summary.clone();
 
-                if row.kind == reminders::KIND_STARTED {
-                    // B «наступило»: 3 min, no buttons. Body → open card + raise.
-                    // ✕ → delete all reminders for the occurrence.
-                    let s_close = summary.clone();
-                    let s_body = summary.clone();
-                    toast_window::show(
-                        reminders::KIND_STARTED,
-                        eid,
-                        &title,
-                        &body,
-                        false,
-                        180,
-                        move || reminder_dispatch("cancel-occ", eid, occ, s_close.clone()),
-                        move || reminder_dispatch("default", eid, occ, s_body.clone()),
-                        || {},
-                    );
-                } else {
-                    // A «скоро» (and manual): 30 s, «Напомнить позже» button.
-                    // Body → open card (toast stays). ✕ → just dismiss.
-                    let s_body = summary.clone();
-                    let s_act = summary.clone();
-                    toast_window::show(
-                        reminders::KIND_SOON,
-                        eid,
-                        &title,
-                        &body,
-                        true,
-                        30,
-                        || {},
-                        move || reminder_dispatch("default", eid, occ, s_body.clone()),
-                        move || reminder_dispatch("snooze-window", eid, occ, s_act.clone()),
-                    );
+                match t.mode {
+                    reminders::ToastMode::AtStart | reminders::ToastMode::AlreadyRunning => {
+                        // ✕ = close only; body = open card + close. No snooze,
+                        // no cascade advance (this is the terminal alarm).
+                        let s_body = summary.clone();
+                        let id = toast_window::show(
+                            2,
+                            eid,
+                            &title,
+                            &body,
+                            false,
+                            reminders::AT_START_TIMEOUT_SECS,
+                            move || reminder_dispatch("cancel-occ", eid, occ, seq, String::new()),
+                            move || reminder_dispatch("open-close", eid, occ, seq, s_body.clone()),
+                            || {},
+                        );
+                        // Timeout = silent expiry; still retire the row so the
+                        // cascade can't resurrect it.
+                        toast_window::set_on_timeout(id, move || {
+                            reminder_dispatch("timeout", eid, occ, seq, String::new())
+                        });
+                    }
+                    reminders::ToastMode::Soon => {
+                        // ✕ = kill the whole cascade of this occurrence.
+                        // Body = open card, STOP the timer (toast stays).
+                        // «Напомнить позже» = snooze dialog (pauses timer).
+                        // Timeout = advance the cascade to the next alarm.
+                        let s_body = summary.clone();
+                        let s_act = summary.clone();
+                        let id = toast_window::show(
+                            1,
+                            eid,
+                            &title,
+                            &body,
+                            true,
+                            reminders::SOON_TIMEOUT_SECS,
+                            move || reminder_dispatch("cancel-occ", eid, occ, seq, String::new()),
+                            move || reminder_dispatch("open-stay", eid, occ, seq, s_body.clone()),
+                            move || reminder_dispatch("snooze-window", eid, occ, seq, s_act.clone()),
+                        );
+                        toast_window::set_on_timeout(id, move || {
+                            reminder_dispatch("timeout", eid, occ, seq, String::new())
+                        });
+                    }
                 }
             }
         },
@@ -5400,7 +5451,10 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                 if let Some(sh) = s.borrow().as_ref() {
                     let now_ms = chrono::Utc::now().timestamp_millis();
                     if let Some(c) = sh.cache.as_ref() {
-                        reminders::seed(c, &events, now_ms);
+                        // Hidden calendars don't get reminders (spec #9).
+                        let vis = sh.calendar_visible.borrow();
+                        let hidden = |cal_id: i64| !*vis.get(&cal_id).unwrap_or(&true);
+                        reminders::seed(c, &events, &hidden, now_ms);
                     }
                     *sh.calendar_events.borrow_mut() = events;
                     apply_calendar_view(ui, sh);
@@ -5463,6 +5517,14 @@ fn handle_new_mail(
     message_id: i64,
 ) {
     let from_addr = header_addr(&from);
+    // Spec #1: a toast only for a real letter to read. Spam and iTIP/ics are
+    // already dropped server-side; «своё» (from one of our own identities) is
+    // filtered here — our outgoing mail syncing back is not a notification.
+    if !from_addr.is_empty()
+        && sh.identity_colors.borrow().contains_key(&from_addr.to_lowercase())
+    {
+        return;
+    }
     let conv_idx = if from_addr.is_empty() {
         None
     } else {
@@ -5572,12 +5634,14 @@ fn handle_new_mail(
     // visible). When the mail view is open and visible, the sidebar flash +
     // unread bump above is the notification — no toast.
     if !visible || !in_mail_view {
-        let title = if new_count > 1 {
-            format!("{} (+{} ещё)", display_from(&from), new_count - 1)
+        // Spec #1: a batch collapses to a single «N новых» toast; a lone
+        // message shows sender + subject.
+        let (title, body) = if new_count > 1 {
+            (format!("{new_count} новых"), String::new())
         } else {
-            display_from(&from)
+            let b = if subject.is_empty() { "(без темы)".to_string() } else { subject.clone() };
+            (display_from(&from), b)
         };
-        let body = if subject.is_empty() { "(без темы)".to_string() } else { subject.clone() };
         let click_folder = folder.clone();
         let click_uid = message_id.max(0) as u32;
         let click_addr = from_addr.clone();

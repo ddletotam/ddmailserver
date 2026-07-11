@@ -598,6 +598,7 @@ export component MainWindow inherits Window {
     // the start; «В момент начала» is a separate fixed button).
     in property <[SnoozeOpt]> snooze-options: [];
     callback snooze-choice(string); // option value: minutes ("5"/"30"/…) or "atstart"
+    callback snooze-cancel();       // dialog dismissed WITHOUT a choice → resume the toast timer
     // ── Settings modal ──
     in-out property <bool> settings-visible: false;
     in-out property <int> settings-tab: 0; // 0 Уведомления · 1 Контент · 2 Подключение · 3 Аккаунты
@@ -3475,14 +3476,15 @@ export component MainWindow inherits Window {
 
     // ---------- Snooze picker for calendar reminders (modal) ----------
     if root.snooze-visible: TouchArea {
-        // Clicking the dimmed area cancels — the toast stays "fired", so
-        // cancelling here simply drops the snooze.
-        clicked => { root.snooze-visible = false; kb.focus(); }
+        // Clicking the dimmed area cancels without a choice — the toast
+        // resumes its countdown as if the button was never pressed.
+        clicked => { root.snooze-visible = false; root.snooze-cancel(); kb.focus(); }
         FocusScope {
             init => { self.focus(); }
             key-pressed(ev) => {
                 if (ev.text == Key.Escape) {
                     root.snooze-visible = false;
+                    root.snooze-cancel();
                     kb.focus();
                     return accept;
                 }
@@ -3556,7 +3558,7 @@ export component MainWindow inherits Window {
                                 }
                             }
                         }
-                        Button { text: "Отмена"; clicked => { root.snooze-visible = false; kb.focus(); } }
+                        Button { text: "Отмена"; clicked => { root.snooze-visible = false; root.snooze-cancel(); kb.focus(); } }
                     }
                 }
             }
@@ -3946,12 +3948,18 @@ export component ToastWindow inherits Window {
                     Rectangle {
                         background: close-ta.has-hover ? #3a3f47 : transparent;
                         border-radius: 6px;
-                        Text {
-                            text: "✕";
-                            color: #aeb6c2;
-                            font-size: 15px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                        // Drawn cross — the ✕ glyph is missing from the
+                        // default font on Windows (same story as the burger
+                        // and the chevrons).
+                        Path {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 10px;
+                            height: 10px;
+                            commands: "M 0 0 L 10 10 M 10 0 L 0 10";
+                            stroke: #aeb6c2;
+                            stroke-width: 2px;
+                            fill: transparent;
                         }
                     }
                 }

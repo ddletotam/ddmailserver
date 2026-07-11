@@ -26,6 +26,11 @@ struct Entry {
     win: ToastWindow,
     created: std::time::Instant,
     timeout_ms: u64, // 0 = no auto-close / no progress bar
+    // Timer pause (snooze dialog open) — created shifts forward on resume.
+    paused_at: Option<std::time::Instant>,
+    // Invoked when the toast dies by TIMEOUT specifically (not by ✕ or a
+    // programmatic close) — the reminder cascade advances on this signal.
+    on_timeout: Option<Box<dyn Fn()>>,
 }
 
 #[derive(Default)]
@@ -51,8 +56,8 @@ const TOAST_H: f32 = 128.0;
 ///   - `on_close`  : «✕» pressed (the window is closed for you afterwards).
 ///   - `on_body`   : card body clicked (does NOT close — caller decides).
 ///   - `on_action` : action button («Напомнить позже») pressed.
-/// `timeout_secs > 0` auto-closes after that long (no `on_close` callback —
-/// a silent expiry). Returns the toast id (0 on failure).
+/// `timeout_secs > 0` auto-closes after that long (silent expiry — but see
+/// `set_on_timeout` for the cascade hook). Returns the toast id (0 on failure).
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     kind: i32,
@@ -106,6 +111,8 @@ pub fn show(
             win,
             created: std::time::Instant::now(),
             timeout_ms: timeout_secs.saturating_mul(1000),
+            paused_at: None,
+            on_timeout: None,
         });
         if r.ticker.is_none() {
             let t = slint::Timer::default();
@@ -121,6 +128,53 @@ pub fn show(
     id
 }
 
+/// Register the timeout-specific callback: runs only when the toast expires
+/// naturally. ✕, programmatic closes and body clicks never trigger it.
+pub fn set_on_timeout(id: u64, cb: impl Fn() + 'static) {
+    REG.with(|r| {
+        if let Some(e) = r.borrow_mut().items.iter_mut().find(|e| e.id == id) {
+            e.on_timeout = Some(Box::new(cb));
+        }
+    });
+}
+
+/// Pause the auto-close timer (the snooze dialog is open on top).
+pub fn pause_timer(id: u64) {
+    REG.with(|r| {
+        if let Some(e) = r.borrow_mut().items.iter_mut().find(|e| e.id == id) {
+            if e.paused_at.is_none() {
+                e.paused_at = Some(std::time::Instant::now());
+            }
+        }
+    });
+}
+
+/// Resume a paused timer (snooze dialog dismissed without a choice — the
+/// toast behaves as if the button was never pressed).
+pub fn resume_timer(id: u64) {
+    REG.with(|r| {
+        if let Some(e) = r.borrow_mut().items.iter_mut().find(|e| e.id == id) {
+            if let Some(p) = e.paused_at.take() {
+                e.created += p.elapsed();
+            }
+        }
+    });
+}
+
+/// Stop the auto-close timer for good (body click on a «скоро» toast: the
+/// toast stays until the user closes it themselves). The timeout callback
+/// will never fire for this toast.
+pub fn stop_timer(id: u64) {
+    REG.with(|r| {
+        if let Some(e) = r.borrow_mut().items.iter_mut().find(|e| e.id == id) {
+            e.timeout_ms = 0;
+            e.on_timeout = None;
+            e.win.set_timeout_ms(0);
+            e.win.set_progress(0.0);
+        }
+    });
+}
+
 /// Drive every toast's progress bar; auto-close the expired ones. Runs on the
 /// UI thread off the shared ticker.
 fn tick() {
@@ -129,7 +183,7 @@ fn tick() {
     REG.with(|r| {
         let r = r.borrow();
         for e in &r.items {
-            if e.timeout_ms == 0 {
+            if e.timeout_ms == 0 || e.paused_at.is_some() {
                 continue;
             }
             let elapsed = now.duration_since(e.created).as_millis() as u64;
@@ -141,7 +195,22 @@ fn tick() {
         }
     });
     for id in due {
-        close(id);
+        // Take the entry out first: the timeout callback may itself open a
+        // toast, and calling into REG while borrowed would panic.
+        let entry = REG.with(|r| {
+            let mut r = r.borrow_mut();
+            r.items
+                .iter()
+                .position(|e| e.id == id)
+                .map(|pos| r.items.remove(pos))
+        });
+        if let Some(e) = entry {
+            e.win.hide().ok();
+            reposition();
+            if let Some(cb) = &e.on_timeout {
+                cb();
+            }
+        }
     }
 }
 
@@ -178,6 +247,19 @@ pub fn close_all() {
 /// burst of repeats right after the client starts).
 pub fn has_for_event(event_id: i64) -> bool {
     REG.with(|r| r.borrow().items.iter().any(|e| e.event_id == event_id))
+}
+
+/// Toast id currently showing for this event (0 = none). There's at most
+/// one — the scanner dedups on has_for_event before showing another.
+pub fn id_for_event(event_id: i64) -> u64 {
+    REG.with(|r| {
+        r.borrow()
+            .items
+            .iter()
+            .find(|e| e.event_id == event_id)
+            .map(|e| e.id)
+            .unwrap_or(0)
+    })
 }
 
 /// Close every toast for an event — «✕» on a «наступило» toast wipes the
