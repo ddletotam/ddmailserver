@@ -161,6 +161,35 @@ impl Engine {
         }
     }
 
+    /// Panic-guarded wrapper. A render touches WebView2 COM, PNG decode and
+    /// raw slice arithmetic in `capture` — any of which can panic on a
+    /// malformed document or a wedged control. An unguarded panic unwinds the
+    /// render worker thread and kills it for good: the loader bar seeded by
+    /// `open_conversation` then spins forever until a restart. Here we catch
+    /// it, return an empty (uncached) result, and signal the worker to
+    /// rebuild the engine before the next job. Returns (result, panicked).
+    pub fn render_one_guarded(&mut self, html: &str, width: u32) -> (RenderResult, bool) {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.render_one(html, width)
+        }));
+        match r {
+            Ok(res) => (res, false),
+            Err(_) => {
+                eprintln!("render: WebView2 render panicked — empty bubble, engine will rebuild");
+                (
+                    RenderResult {
+                        bitmap: empty_bitmap(width),
+                        view_ready: false,
+                        painted_height: 0,
+                        links: Vec::new(),
+                        runs: Vec::new(),
+                    },
+                    true,
+                )
+            }
+        }
+    }
+
     pub fn render_one(&mut self, html: &str, width: u32) -> RenderResult {
         unsafe {
             let w = width.max(1) as i32;

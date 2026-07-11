@@ -88,6 +88,32 @@ impl Engine {
         }
     }
 
+    /// Panic-guarded wrapper — see the WebView2 backend for the rationale.
+    /// A render panic must not kill the worker thread (permanent loader
+    /// spinner). Returns (result, panicked); the worker rebuilds the engine
+    /// when panicked is true.
+    pub fn render_one_guarded(&mut self, html: &str, width: u32) -> (RenderResult, bool) {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.render_one(html, width)
+        }));
+        match r {
+            Ok(res) => (res, false),
+            Err(_) => {
+                eprintln!("render: WebKit render panicked — empty bubble, engine will rebuild");
+                (
+                    RenderResult {
+                        bitmap: empty_bitmap(width),
+                        view_ready: false,
+                        painted_height: 0,
+                        links: Vec::new(),
+                        runs: Vec::new(),
+                    },
+                    true,
+                )
+            }
+        }
+    }
+
     pub fn render_one(&mut self, html: &str, width: u32) -> RenderResult {
         let w = width as i32;
         // Start with a deliberately *small* viewport. WebKit treats
