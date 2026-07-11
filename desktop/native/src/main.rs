@@ -2735,12 +2735,20 @@ fn main() {
             let mut row_links: Vec<Vec<render_common::LinkRect>> = Vec::new();
             // Per-row text layer (word rects) — mouse selection support.
             let mut row_runs: Vec<Vec<render_common::TextRun>> = Vec::new();
+            // Set when a render panics mid-job: the WebView/COM state may be
+            // wedged, so we throw the engine away and build a fresh one before
+            // the next job rather than risk every later render failing too.
+            let mut engine_needs_rebuild = false;
             loop {
                 let job = {
                     let lock = rx.lock().unwrap();
                     lock.recv()
                 };
                 let Ok(job) = job else { break };
+                if engine_needs_rebuild {
+                    engine = render::Engine::new();
+                    engine_needs_rebuild = false;
+                }
                 match job {
                     Job::SetConversation { bodies, width, policy, policy_gen, seq, scroll_to, modes } => {
                         // Latest-wins: a newer conversation/relayout job is
@@ -2830,16 +2838,25 @@ fn main() {
                                     build_body_html(body, &policy)
                                 };
                                 let t_r = Instant::now();
-                                let mut result = engine.render_one(&html, width);
+                                let (mut result, panicked) = engine.render_one_guarded(&html, width);
+                                if panicked {
+                                    engine_needs_rebuild = true;
+                                }
                                 let text_available = body
                                     .text
                                     .as_deref()
                                     .map(|s| !s.trim().is_empty())
                                     .unwrap_or(false);
-                                if !result.successful() && text_available && !force_text {
+                                // Don't poke a just-panicked engine again this
+                                // job — the text fallback would likely panic too.
+                                if !result.successful() && text_available && !force_text && !panicked {
                                     fallback_used += 1;
                                     let text_html = build_text_only_html(body);
-                                    result = engine.render_one(&text_html, width);
+                                    let (r2, p2) = engine.render_one_guarded(&text_html, width);
+                                    result = r2;
+                                    if p2 {
+                                        engine_needs_rebuild = true;
+                                    }
                                 }
                                 render_ms_total += t_r.elapsed().as_millis();
                                 // A failed paint (load timed out, DOM never
@@ -3009,7 +3026,10 @@ fn main() {
                         // bitmap + word rects. The modal then selects via the
                         // fast Rust text-run layer, not Slint's TextInput.
                         let html = build_source_html(&text);
-                        let result = engine.render_one(&html, width);
+                        let (result, panicked) = engine.render_one_guarded(&html, width);
+                        if panicked {
+                            engine_needs_rebuild = true;
+                        }
                         let bmp = result.bitmap;
                         let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
                             &bmp.rgba, bmp.width, bmp.height,
