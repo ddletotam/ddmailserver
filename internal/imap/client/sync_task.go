@@ -632,10 +632,6 @@ buildMessage:
 		}
 		return false, false, err
 	}
-	if !isSpam {
-		// Toast content for the post-sync notification (last new wins).
-		t.lastNew = msg
-	}
 	attachmentCount := 0
 	for _, att := range attachments {
 		attachment := &models.Attachment{
@@ -664,15 +660,28 @@ buildMessage:
 		if processed, perr := handler.ProcessAndDispatch(parsed, t.account.UserID, t.account.ID, identities); perr != nil {
 			log.Printf("IMAP sync: ICS dispatch on msg %d: %v", msg.ID, perr)
 		} else if processed {
-			if delErr := t.database.HardDeleteMessage(msg.ID); delErr != nil {
+			// SOFT delete, not hard: the remote copy stays on the source
+			// server, so a hard-deleted row is "new" again on the very next
+			// sync — the same invite got re-fetched, re-dispatched and
+			// re-announced every cycle, forever (the "ancient event toast
+			// every 6 minutes" bug). A soft-deleted row keeps its
+			// (user_id, message_id) for dedup and stays invisible.
+			if delErr := t.database.SoftDeleteMessage(msg.ID); delErr != nil {
 				log.Printf("IMAP sync: failed to drop iTIP-consumed msg %d: %v", msg.ID, delErr)
 			} else {
-				log.Printf("IMAP sync: msg %d consumed by iTIP handler, deleted", msg.ID)
+				log.Printf("IMAP sync: msg %d consumed by iTIP handler, hidden", msg.ID)
 				return false, isSpam, nil
 			}
 		}
 	}
 
+	if !isSpam {
+		// Toast content for the post-sync notification (last new wins).
+		// Assigned only AFTER the iTIP branch: a consumed invite never
+		// surfaces as a message, so it must not become the toast either —
+		// that's the other half of the ancient-toast bug.
+		t.lastNew = msg
+	}
 	return true, isSpam, nil
 }
 
