@@ -148,7 +148,20 @@ pub fn scan(cache: &Cache, now_ms: i64) -> Vec<DueToast> {
 
     let mut out: Vec<DueToast> = Vec::new();
     let mut running_seen: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+    // A logical occurrence is (start, summary): the same meeting can carry
+    // two event_ids (mirrored across calendars, or master + override). The
+    // first time such an occurrence comes due we retire every other id's
+    // rows so only one cascade — and one toast — survives.
+    let mut logical_seen: std::collections::HashSet<(i64, String)> = std::collections::HashSet::new();
     for row in due {
+        let logical = (row.occurrence_start_ms, row.summary.clone());
+        if logical_seen.insert(logical.clone()) {
+            let _ = cache.dedup_occurrence(row.event_id, row.occurrence_start_ms, &row.summary);
+        } else {
+            // A duplicate that dedup_occurrence just retired but this scan had
+            // already fetched — skip it (its row is now 'done').
+            continue;
+        }
         let key = (row.event_id, row.occurrence_start_ms);
         if occurrence_end(&row) <= now_ms {
             let _ = cache.expire_occurrence_reminders(row.event_id, row.occurrence_start_ms);
@@ -307,6 +320,21 @@ mod tests {
         let wake2 = past_start + 2 * 3_600_000;
         let due2 = scan(&cache, wake2);
         assert!(due2.iter().all(|d| d.row.event_id != 5), "ended events stay silent");
+    }
+
+    #[test]
+    fn same_meeting_two_event_ids_fires_once() {
+        let cache = temp_cache();
+        let now = 6_500_000_000_000;
+        let start = now + 5 * 60_000;
+        // Same meeting mirrored across two calendars → two event_ids, same
+        // title + start. Both seed an armed seq-0.
+        seed(&cache, &[event(10, "Синк", start, &[10])], &no_hidden, now);
+        seed(&cache, &[event(20, "Синк", start, &[10])], &no_hidden, now);
+        let due = scan(&cache, now);
+        assert_eq!(due.len(), 1, "one logical occurrence → one toast");
+        // The retired duplicate never resurfaces on later scans either.
+        assert_eq!(scan(&cache, now).len(), 0);
     }
 
     #[test]

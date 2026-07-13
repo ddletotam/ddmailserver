@@ -199,7 +199,10 @@ impl Cache {
         // used to emit every override VEVENT's VALARM on every occurrence, so
         // occurrences carried dozens of duplicate alarms → an endless toast
         // cascade. Clearing lets seed() rebuild from the corrected data.
-        const REMINDERS_DATA_VERSION: &str = "2";
+        // v3: dedup of the same meeting carried under two event_ids landed;
+        // clear the transitional mix (incl. any orphaned user-snooze row) so
+        // the cascade reseeds clean.
+        const REMINDERS_DATA_VERSION: &str = "3";
         let rv: String = conn
             .query_row(
                 "SELECT value FROM meta WHERE key = 'reminders_data_version'",
@@ -787,6 +790,29 @@ impl Cache {
             )
             .map_err(|e| format!("seed row: {e}"))?;
         }
+        Ok(())
+    }
+
+    /// Retire the alarm rows of any OTHER event that shares this logical
+    /// occurrence (same start + summary). The same meeting can exist under
+    /// several event_ids — a recurring master plus a stored override, or the
+    /// same event mirrored across two calendars — and each would otherwise
+    /// fire its own identical toast. We keep `keep_event_id`'s cascade and
+    /// permanently silence the duplicates.
+    pub fn dedup_occurrence(
+        &self,
+        keep_event_id: i64,
+        occ_start_ms: i64,
+        summary: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        conn.execute(
+            "UPDATE reminders2 SET status = 'done' \
+             WHERE occurrence_start_ms = ?1 AND summary = ?2 AND event_id <> ?3 \
+               AND status IN ('armed', 'chained', 'shown')",
+            params![occ_start_ms, summary, keep_event_id],
+        )
+        .map_err(|e| format!("dedup occ: {e}"))?;
         Ok(())
     }
 
