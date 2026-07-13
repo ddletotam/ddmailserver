@@ -800,6 +800,17 @@ func (s *Server) HandleDesktopSend(w http.ResponseWriter, r *http.Request) {
 		} `json:"attachments"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// A silent 400 here was invisible: the client looked like it sent.
+		// Log the reason, and translate the body-limit case (attachments too
+		// big) into a clear 413 the client can show verbatim.
+		if strings.Contains(err.Error(), "request body too large") {
+			log.Printf("Desktop send from user %d rejected: body exceeds %d MB (attachments too large)",
+				user.ID, MaxMailBodySize>>20)
+			respondError(w, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("attachments too large (limit %d MB)", MaxMailBodySize>>20))
+			return
+		}
+		log.Printf("Desktop send from user %d: bad request body: %v", user.ID, err)
 		respondError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
