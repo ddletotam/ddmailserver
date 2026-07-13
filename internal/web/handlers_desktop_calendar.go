@@ -161,59 +161,67 @@ func parseAlarmLeadMin(icalData string) int {
 	return 0
 }
 
-// parseAlarmLeads returns EVERY VALARM trigger of the event as "minutes
+// parseAlarmLeads returns the MASTER VEVENT's VALARM triggers as "minutes
 // before start", in document order: element 0 is the primary reminder, the
 // rest form the secondary cascade (each fires only if the previous toast
 // died by timeout — client-side logic). Non-negative triggers (PT0S, "at
-// the moment of start") map to 0. Events without a single usable VALARM
-// get the server-side default of DEFAULT_ALARM_LEAD_MIN — per the spec the
-// server owns the default, the client only consumes the list.
+// the moment of start") map to 0. Events without a single usable VALARM get
+// the server default — the server owns the default, the client consumes it.
+//
+// Critically it reads ONLY the master VEVENT (the one without a
+// RECURRENCE-ID): a recurring resource bundles the master plus one VEVENT
+// per modified occurrence, each with its own VALARM. Scanning the whole blob
+// concatenated every override's alarms onto every occurrence — dozens of
+// duplicated reminders and an endless toast cascade.
 func parseAlarmLeads(icalData string) []int {
 	const defaultLead = 10
 	if !strings.Contains(icalData, "VALARM") {
 		return []int{defaultLead}
 	}
-	lines := strings.Split(icalData, "\n")
-	logical := make([]string, 0, len(lines))
-	for _, raw := range lines {
-		raw = strings.TrimRight(raw, "\r")
-		if (strings.HasPrefix(raw, " ") || strings.HasPrefix(raw, "\t")) && len(logical) > 0 {
-			logical[len(logical)-1] += raw[1:]
+	cal, err := ical.NewDecoder(strings.NewReader(icalData)).Decode()
+	if err != nil {
+		return []int{defaultLead}
+	}
+	events := cal.Events()
+	var master *ical.Event
+	for i := range events {
+		if events[i].Props.Get(ical.PropRecurrenceID) == nil {
+			master = &events[i]
+			break
+		}
+	}
+	if master == nil {
+		return []int{defaultLead}
+	}
+
+	var leads []int
+	seen := map[int]bool{}
+	for _, child := range master.Children {
+		if child.Name != ical.CompAlarm {
 			continue
 		}
-		logical = append(logical, raw)
-	}
-	var leads []int
-	inAlarm := false
-	got := false
-	for _, line := range logical {
-		switch {
-		case strings.HasPrefix(line, "BEGIN:VALARM"):
-			inAlarm = true
-			got = false
-		case strings.HasPrefix(line, "END:VALARM"):
-			inAlarm = false
-		case inAlarm && !got && strings.HasPrefix(line, "TRIGGER"):
-			colon := strings.Index(line, ":")
-			if colon < 0 {
-				continue
-			}
-			params := line[:colon]
-			value := strings.TrimSpace(line[colon+1:])
-			if strings.Contains(params, "RELATED=END") || strings.Contains(params, "VALUE=DATE-TIME") {
-				continue
-			}
-			if strings.HasPrefix(value, "-") {
-				if min := iso8601DurationToMinutes(strings.TrimPrefix(value, "-")); min > 0 {
-					leads = append(leads, min)
-					got = true
-				}
-			} else {
-				// PT0S and other non-negative triggers → "at start".
-				leads = append(leads, 0)
-				got = true
+		trig := child.Props.Get(ical.PropTrigger)
+		if trig == nil {
+			continue
+		}
+		if trig.Params.Get("RELATED") == "END" || trig.Params.Get(ical.ParamValue) == "DATE-TIME" {
+			continue
+		}
+		v := strings.TrimSpace(trig.Value)
+		lead := 0
+		if strings.HasPrefix(v, "-") {
+			lead = iso8601DurationToMinutes(strings.TrimPrefix(v, "-"))
+			if lead <= 0 {
+				continue // unparseable "before" trigger
 			}
 		}
+		// De-dupe identical triggers (some clients emit DISPLAY + EMAIL
+		// alarms at the same lead).
+		if seen[lead] {
+			continue
+		}
+		seen[lead] = true
+		leads = append(leads, lead)
 	}
 	if len(leads) == 0 {
 		return []int{defaultLead}

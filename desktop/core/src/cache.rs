@@ -187,32 +187,34 @@ impl Cache {
         // next lookup uses the new chain (and labels the result with a MIME).
         conn.execute("DELETE FROM avatar_cache WHERE mime = ''", []).ok();
 
-        // Reminders dedup migration. The PRIMARY KEY (event_id,
-        // occurrence_start_ms) doesn't dedupe across calendar resyncs
-        // because CalDAV-side event ids are not stable: every sync mints
-        // new ids, the frontend re-pushes reminders, and INSERT-OR-IGNORE
-        // happily creates a fresh row per id. Result: one logical
-        // occurrence ends up with 6-10 reminder rows, the scheduler fires
-        // them one by one and the user sees the same toast nagging every
-        // scan tick.
-        //
-        // The logical key is (occurrence_start_ms, summary): two events
-        // can't legitimately share both. Dedupe rows along that key,
-        // keeping the one that's furthest along — acked > fired > pending
-        // — so the user's last action sticks. Then put a UNIQUE INDEX on
-        // the same key, and switch the upsert below to an ON CONFLICT
-        // path so new event_ids overwrite the old one in-place.
-        // `kind` distinguishes the two reminder types per occurrence:
-        //   1 = «скоро случится» (at dtstart − lead)
-        //   2 = «наступило»      (at dtstart)
-        //   3 = manual snooze    (user-chosen, neutralises 1 & 2)
-        // The logical key gains `kind` so A and B can coexist for one
-        // occurrence. Existing rows default to kind 1.
         // The v1 reminders table had a broken PRIMARY KEY (event_id,
         // occurrence) that made the second alarm row of an occurrence
         // impossible — superseded wholesale by reminders2. Dropping it loses
         // at most one pending snooze, once, at upgrade time.
         conn.execute("DROP TABLE IF EXISTS event_reminders", []).ok();
+
+        // One-shot wipe of reminders2 when the reminder-data version lags.
+        // Bump REMINDERS_DATA_VERSION whenever a fixed bug left polluted rows
+        // that would keep firing until they naturally reseed. v2: the server
+        // used to emit every override VEVENT's VALARM on every occurrence, so
+        // occurrences carried dozens of duplicate alarms → an endless toast
+        // cascade. Clearing lets seed() rebuild from the corrected data.
+        const REMINDERS_DATA_VERSION: &str = "2";
+        let rv: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'reminders_data_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        if rv != REMINDERS_DATA_VERSION {
+            conn.execute("DELETE FROM reminders2", []).ok();
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('reminders_data_version', ?1)",
+                params![REMINDERS_DATA_VERSION],
+            )
+            .ok();
+        }
 
         Ok(Self { conn: Mutex::new(conn) })
     }
