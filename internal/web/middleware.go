@@ -16,6 +16,12 @@ import (
 // Input size limits
 const (
 	MaxRequestBodySize = 10 << 20 // 10 MB for general requests
+	// Outgoing mail carries base64-encoded attachments inline in the JSON
+	// body, which inflates the payload ~33% over the assembled message. The
+	// general 10 MB cap silently rejected any mail with more than ~7 MB of
+	// attachments at json.Decode. 30 MB leaves room for a message close to
+	// the ~25 MB most receiving servers (Gmail/Yandex) accept.
+	MaxMailBodySize    = 30 << 20 // 30 MB for send endpoints (base64 attachments)
 	MaxFormFieldLength = 10000    // 10KB per form field
 	MaxUsernameLength  = 255
 	MaxPasswordLength  = 1000
@@ -212,14 +218,26 @@ func (s *Server) LoggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// BodyLimitMiddleware limits request body size to prevent DoS
+// BodyLimitMiddleware limits request body size to prevent DoS. Mail-send
+// endpoints get a larger cap because attachments ride inline as base64.
 func (s *Server) BodyLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
-			r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodySize)
+			limit := int64(MaxRequestBodySize)
+			if isMailSendPath(r.URL.Path) {
+				limit = MaxMailBodySize
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isMailSendPath reports whether the path submits an outgoing message (whose
+// body may carry base64 attachments over the general limit).
+func isMailSendPath(p string) bool {
+	return strings.HasSuffix(p, "/api/desktop/v1/send") ||
+		strings.HasSuffix(p, "/messages/send")
 }
 
 // ValidateFieldLength checks if a form field exceeds the maximum allowed length

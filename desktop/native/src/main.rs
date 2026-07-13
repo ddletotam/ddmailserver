@@ -5491,6 +5491,28 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             });
             ui.set_calendar_loading(false);
         }
+        engine::EngineResult::SendFailed(e) => {
+            eprintln!("engine: send failed: {e}");
+            // Make the failure visible — the composer optimistically looked
+            // like it sent, so without this the user only finds out by asking.
+            // Translate the two common causes into plain Russian.
+            let body = if e.contains("413") || e.to_lowercase().contains("too large") {
+                "Вложения слишком большие. Уменьшите размер или пришлите ссылкой.".to_string()
+            } else {
+                format!("Причина: {}", e.chars().take(160).collect::<String>())
+            };
+            toast_window::show(
+                2, // amber
+                0, // not tied to a calendar event
+                "Не удалось отправить письмо",
+                &body,
+                false,
+                600,
+                || {},
+                || {},
+                || {},
+            );
+        }
         engine::EngineResult::Error(e) => eprintln!("engine error: {e}"),
     }
 }

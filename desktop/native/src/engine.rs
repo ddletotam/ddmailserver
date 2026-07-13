@@ -346,6 +346,9 @@ pub enum EngineResult {
     /// Events for the currently displayed week — echoed back from
     /// FetchCalendarEvents.
     CalendarEvents(Vec<DesktopCalendarEvent>),
+    /// A Send command failed — surfaced to the user (toast), unlike the
+    /// generic Error which only logs. Carries the human-readable reason.
+    SendFailed(String),
     Error(String),
 }
 
@@ -884,7 +887,9 @@ pub fn spawn(
                     ));
                     match r {
                         Ok(id) => on_result(EngineResult::Sent(id)),
-                        Err(e) => on_result(EngineResult::Error(e)),
+                        // Distinct from the generic Error: the UI toasts this
+                        // so a failed send is never silently swallowed.
+                        Err(e) => on_result(EngineResult::SendFailed(e)),
                     }
                 }
                 EngineCmd::StartWatching => {
