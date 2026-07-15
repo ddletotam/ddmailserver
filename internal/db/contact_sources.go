@@ -18,6 +18,15 @@ func (db *DB) CreateContactSource(source *models.ContactSource) error {
 		source.AuthType = "password"
 	}
 
+	// No orphan sources: fall back to the user's default identity.
+	if source.IdentityEmail == "" {
+		email, err := db.DefaultIdentityEmail(source.UserID)
+		if err != nil {
+			return err
+		}
+		source.IdentityEmail = email
+	}
+
 	// Encrypt password
 	var encryptedPassword string
 	var err error
@@ -52,8 +61,8 @@ func (db *DB) CreateContactSource(source *models.ContactSource) error {
 		INSERT INTO contact_sources (
 			user_id, name, source_type, carddav_url, carddav_username, carddav_password,
 			auth_type, oauth_access_token, oauth_refresh_token, oauth_token_expiry,
-			sync_enabled, sync_interval, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			sync_enabled, sync_interval, created_at, updated_at, identity_email
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		RETURNING id
 	`
 
@@ -63,7 +72,7 @@ func (db *DB) CreateContactSource(source *models.ContactSource) error {
 		source.CardDAVURL, source.CardDAVUsername, encryptedPassword,
 		source.AuthType, encryptedAccessToken, encryptedRefreshToken, tokenExpiry,
 		source.SyncEnabled, source.SyncInterval,
-		source.CreatedAt, source.UpdatedAt,
+		source.CreatedAt, source.UpdatedAt, source.IdentityEmail,
 	).Scan(&source.ID)
 
 	if err != nil {
@@ -76,7 +85,7 @@ func (db *DB) CreateContactSource(source *models.ContactSource) error {
 // GetContactSourcesByUserID retrieves all contact sources for a user
 func (db *DB) GetContactSourcesByUserID(userID int64) ([]*models.ContactSource, error) {
 	query := `
-		SELECT id, user_id, name, source_type,
+		SELECT id, user_id, name, source_type, COALESCE(identity_email, ''),
 		       COALESCE(carddav_url, ''), COALESCE(carddav_username, ''), COALESCE(carddav_password, ''),
 		       COALESCE(auth_type, 'password'), COALESCE(oauth_access_token, ''), COALESCE(oauth_refresh_token, ''), oauth_token_expiry,
 		       sync_enabled, sync_interval, last_sync, COALESCE(last_error, ''),
@@ -99,6 +108,7 @@ func (db *DB) GetContactSourcesByUserID(userID int64) ([]*models.ContactSource, 
 
 		err := rows.Scan(
 			&source.ID, &source.UserID, &source.Name, &source.SourceType,
+			&source.IdentityEmail,
 			&source.CardDAVURL, &source.CardDAVUsername, &source.CardDAVPassword,
 			&source.AuthType, &source.OAuthAccessToken, &source.OAuthRefreshToken, &tokenExpiry,
 			&source.SyncEnabled, &source.SyncInterval, &lastSync, &source.LastError,
@@ -132,7 +142,7 @@ func (db *DB) GetContactSourceByID(id int64) (*models.ContactSource, error) {
 	var lastSync, tokenExpiry sql.NullInt64
 
 	query := `
-		SELECT id, user_id, name, source_type,
+		SELECT id, user_id, name, source_type, COALESCE(identity_email, ''),
 		       COALESCE(carddav_url, ''), COALESCE(carddav_username, ''), COALESCE(carddav_password, ''),
 		       COALESCE(auth_type, 'password'), COALESCE(oauth_access_token, ''), COALESCE(oauth_refresh_token, ''), oauth_token_expiry,
 		       sync_enabled, sync_interval, last_sync, COALESCE(last_error, ''),
@@ -143,6 +153,7 @@ func (db *DB) GetContactSourceByID(id int64) (*models.ContactSource, error) {
 
 	err := db.QueryRow(query, id).Scan(
 		&source.ID, &source.UserID, &source.Name, &source.SourceType,
+		&source.IdentityEmail,
 		&source.CardDAVURL, &source.CardDAVUsername, &source.CardDAVPassword,
 		&source.AuthType, &source.OAuthAccessToken, &source.OAuthRefreshToken, &tokenExpiry,
 		&source.SyncEnabled, &source.SyncInterval, &lastSync, &source.LastError,
@@ -174,6 +185,14 @@ func (db *DB) GetContactSourceByID(id int64) (*models.ContactSource, error) {
 // UpdateContactSource updates an existing contact source
 func (db *DB) UpdateContactSource(source *models.ContactSource) error {
 	source.UpdatedAt = timeutil.Now()
+
+	if source.IdentityEmail == "" {
+		email, err := db.DefaultIdentityEmail(source.UserID)
+		if err != nil {
+			return err
+		}
+		source.IdentityEmail = email
+	}
 
 	// Encrypt password
 	var encryptedPassword string
@@ -209,15 +228,15 @@ func (db *DB) UpdateContactSource(source *models.ContactSource) error {
 		UPDATE contact_sources SET
 			name = $1, source_type = $2, carddav_url = $3, carddav_username = $4, carddav_password = $5,
 			auth_type = $6, oauth_access_token = $7, oauth_refresh_token = $8, oauth_token_expiry = $9,
-			sync_enabled = $10, sync_interval = $11, updated_at = $12
-		WHERE id = $13
+			sync_enabled = $10, sync_interval = $11, updated_at = $12, identity_email = $13
+		WHERE id = $14
 	`
 
 	_, err = db.Exec(
 		query,
 		source.Name, source.SourceType, source.CardDAVURL, source.CardDAVUsername, encryptedPassword,
 		source.AuthType, encryptedAccessToken, encryptedRefreshToken, tokenExpiry,
-		source.SyncEnabled, source.SyncInterval, source.UpdatedAt,
+		source.SyncEnabled, source.SyncInterval, source.UpdatedAt, source.IdentityEmail,
 		source.ID,
 	)
 
@@ -261,7 +280,7 @@ func (db *DB) UpdateContactSourceLastError(id int64, lastError string) error {
 // GetAllEnabledContactSources retrieves all enabled contact sources for syncing
 func (db *DB) GetAllEnabledContactSources() ([]*models.ContactSource, error) {
 	query := `
-		SELECT id, user_id, name, source_type,
+		SELECT id, user_id, name, source_type, COALESCE(identity_email, ''),
 		       COALESCE(carddav_url, ''), COALESCE(carddav_username, ''), COALESCE(carddav_password, ''),
 		       COALESCE(auth_type, 'password'), COALESCE(oauth_access_token, ''), COALESCE(oauth_refresh_token, ''), oauth_token_expiry,
 		       sync_enabled, sync_interval, last_sync, COALESCE(last_error, ''),
@@ -284,6 +303,7 @@ func (db *DB) GetAllEnabledContactSources() ([]*models.ContactSource, error) {
 
 		err := rows.Scan(
 			&source.ID, &source.UserID, &source.Name, &source.SourceType,
+			&source.IdentityEmail,
 			&source.CardDAVURL, &source.CardDAVUsername, &source.CardDAVPassword,
 			&source.AuthType, &source.OAuthAccessToken, &source.OAuthRefreshToken, &tokenExpiry,
 			&source.SyncEnabled, &source.SyncInterval, &lastSync, &source.LastError,

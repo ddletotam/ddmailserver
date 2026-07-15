@@ -722,6 +722,26 @@ func (s *Server) HandleDesktopIdentities(w http.ResponseWriter, r *http.Request)
 		Name      string `json:"name"`
 		Signature string `json:"signature"`
 		IsDefault bool   `json:"is_default"`
+		// Per-identity capabilities: whether the client may offer creating a
+		// new event / contact "under" this address. Derived from the writable
+		// sources associated with the identity (see docs/unified-identity-
+		// aggregation.md). Per-event editability is reported separately on
+		// each event.
+		CanCreateEvents   bool `json:"can_create_events"`
+		CanCreateContacts bool `json:"can_create_contacts"`
+	}
+
+	// Writable-identity sets (best-effort: on error, capabilities stay false).
+	calWritable, _ := s.database.WritableCalendarIdentities(user.ID)
+	contactWritable, _ := s.database.WritableContactIdentities(user.ID)
+	mkIdentity := func(email, name string, isDefault bool) Identity {
+		return Identity{
+			Email:             email,
+			Name:              name,
+			IsDefault:         isDefault,
+			CanCreateEvents:   calWritable[email],
+			CanCreateContacts: contactWritable[email],
+		}
 	}
 
 	identities := []Identity{}
@@ -733,11 +753,8 @@ func (s *Server) HandleDesktopIdentities(w http.ResponseWriter, r *http.Request)
 			if !mb.Enabled {
 				continue
 			}
-			identities = append(identities, Identity{
-				Email:     fmt.Sprintf("%s@%s", mb.LocalPart, mb.DomainName),
-				Name:      user.Username,
-				IsDefault: i == 0,
-			})
+			email := fmt.Sprintf("%s@%s", mb.LocalPart, mb.DomainName)
+			identities = append(identities, mkIdentity(email, user.Username, i == 0))
 		}
 	}
 
@@ -748,26 +765,15 @@ func (s *Server) HandleDesktopIdentities(w http.ResponseWriter, r *http.Request)
 			if acc.Email == "" || !acc.Enabled {
 				continue
 			}
-			identities = append(identities, Identity{
-				Email:     acc.Email,
-				Name:      acc.Name,
-				IsDefault: len(identities) == 0,
-			})
+			identities = append(identities, mkIdentity(acc.Email, acc.Name, len(identities) == 0))
 			for _, alias := range acc.GetAliases() {
-				identities = append(identities, Identity{
-					Email: alias,
-					Name:  acc.Name,
-				})
+				identities = append(identities, mkIdentity(alias, acc.Name, false))
 			}
 		}
 	}
 
 	if len(identities) == 0 {
-		identities = append(identities, Identity{
-			Email:     user.Username,
-			Name:      user.Username,
-			IsDefault: true,
-		})
+		identities = append(identities, mkIdentity(user.Username, user.Username, true))
 	}
 
 	respondJSON(w, http.StatusOK, identities)

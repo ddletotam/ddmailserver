@@ -9,7 +9,11 @@ type ContactSource struct {
 	ID         int64  `json:"id"`
 	UserID     int64  `json:"user_id"`
 	Name       string `json:"name"`
-	SourceType string `json:"source_type"` // "local", "carddav", "google", "microsoft"
+	SourceType string `json:"source_type"` // "local", "carddav", "google", "microsoft", "ldap"
+
+	// Identity (email address) this source belongs to. Mandatory — the
+	// desktop client is identity-keyed and there are no orphan sources.
+	IdentityEmail string `json:"identity_email"`
 
 	// CardDAV fields
 	CardDAVURL      string `json:"carddav_url,omitempty"`
