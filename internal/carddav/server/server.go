@@ -2,8 +2,10 @@ package server
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -12,6 +14,13 @@ import (
 	"github.com/yourusername/mailserver/internal/models"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// textMatchRe pulls the search term out of an addressbook-query
+// <C:text-match>…</C:text-match> element regardless of namespace prefix.
+var textMatchRe = regexp.MustCompile(`(?is)<[a-z0-9]*:?text-match[^>]*>(.*?)</[a-z0-9]*:?text-match>`)
+
+// hrefRe pulls <D:href> targets out of an addressbook-multiget body.
+var hrefRe = regexp.MustCompile(`(?is)<[a-z0-9]*:?href[^>]*>(.*?)</[a-z0-9]*:?href>`)
 
 // Server is a CardDAV server
 type Server struct {
@@ -277,17 +286,33 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request, user *mode
 		return
 	}
 
-	// Get all contacts for this address book
 	contacts, err := s.database.GetContactsByAddressBookID(bookID)
 	if err != nil {
 		http.Error(w, "Failed to get contacts", http.StatusInternalServerError)
 		return
 	}
 
-	// Build multiget response
+	body, _ := io.ReadAll(r.Body)
+	report := string(body)
+
+	// Two REPORT flavours land here. addressbook-query is a server-side search
+	// (this is what powers a standard client's autocomplete — filter here
+	// instead of dumping the whole book). addressbook-multiget asks for a
+	// specific set of hrefs. A body without either (or without filters) keeps
+	// the old "return everything" behaviour.
+	switch {
+	case strings.Contains(report, "addressbook-query"):
+		if terms := extractLower(textMatchRe, report); len(terms) > 0 {
+			contacts = filterContactsByTerms(contacts, terms)
+		}
+	case strings.Contains(report, "addressbook-multiget"):
+		if uids := hrefUIDs(report); len(uids) > 0 {
+			contacts = filterContactsByUID(contacts, uids)
+		}
+	}
+
 	response := `<?xml version="1.0" encoding="utf-8"?>
 <D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">`
-
 	for _, contact := range contacts {
 		contactURL := fmt.Sprintf("%s%d/addressbooks/%d/%s.vcf", s.prefix, user.ID, book.ID, contact.UID)
 		response += fmt.Sprintf(`
@@ -302,13 +327,67 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request, user *mode
     </D:propstat>
   </D:response>`, contactURL, contact.ETag, xmlEscape(contact.VCardData))
 	}
-
 	response += `
 </D:multistatus>`
 
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.WriteHeader(http.StatusMultiStatus)
 	w.Write([]byte(response))
+}
+
+// extractLower returns the trimmed, lower-cased capture groups of re over s.
+func extractLower(re *regexp.Regexp, s string) []string {
+	var out []string
+	for _, m := range re.FindAllStringSubmatch(s, -1) {
+		v := strings.ToLower(strings.TrimSpace(m[1]))
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// filterContactsByTerms keeps contacts matching ANY term across the common
+// autocomplete fields (name, emails, organization).
+func filterContactsByTerms(contacts []*models.Contact, terms []string) []*models.Contact {
+	var out []*models.Contact
+	for _, c := range contacts {
+		hay := strings.ToLower(strings.Join([]string{
+			c.FullName, c.GivenName, c.FamilyName, c.Nickname,
+			c.Email, c.Email2, c.Email3, c.Organization,
+		}, " "))
+		for _, t := range terms {
+			if strings.Contains(hay, t) {
+				out = append(out, c)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// hrefUIDs extracts contact UIDs from the <D:href> targets of a multiget body.
+func hrefUIDs(report string) map[string]bool {
+	uids := make(map[string]bool)
+	for _, m := range hrefRe.FindAllStringSubmatch(report, -1) {
+		href := strings.TrimSpace(m[1])
+		if href == "" {
+			continue
+		}
+		seg := href[strings.LastIndex(href, "/")+1:]
+		uids[strings.TrimSuffix(seg, ".vcf")] = true
+	}
+	return uids
+}
+
+func filterContactsByUID(contacts []*models.Contact, uids map[string]bool) []*models.Contact {
+	var out []*models.Contact
+	for _, c := range contacts {
+		if uids[c.UID] {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, user *models.User) {
