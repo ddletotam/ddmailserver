@@ -56,7 +56,8 @@ func (db *DB) GetCalendarsByUserIDFiltered(userID int64, enabledOnly bool) ([]*m
 		SELECT c.id, c.source_id, c.user_id, COALESCE(c.remote_id, ''), c.name,
 		       COALESCE(c.description, ''), COALESCE(c.color, s.color), c.timezone,
 		       COALESCE(c.ctag, ''), c.can_write, COALESCE(c.reverse_sync, false),
-		       COALESCE(c.enabled, true), c.created_at, c.updated_at, s.source_type
+		       COALESCE(c.enabled, true), c.created_at, c.updated_at, s.source_type,
+		       COALESCE(s.identity_email, '')
 		FROM calendars c
 		JOIN calendar_sources s ON c.source_id = s.id
 		WHERE c.user_id = $1
@@ -81,6 +82,7 @@ func (db *DB) GetCalendarsByUserIDFiltered(userID int64, enabledOnly bool) ([]*m
 			&cal.Description, &cal.Color, &cal.Timezone,
 			&cal.CTag, &cal.CanWrite, &cal.ReverseSync,
 			&cal.Enabled, &cal.CreatedAt, &cal.UpdatedAt, &cal.SourceType,
+			&cal.IdentityEmail,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan calendar: %w", err)
@@ -100,7 +102,8 @@ func (db *DB) GetCalendarByID(id int64) (*models.Calendar, error) {
 		SELECT c.id, c.source_id, c.user_id, COALESCE(c.remote_id, ''), c.name,
 		       COALESCE(c.description, ''), COALESCE(c.color, s.color), c.timezone,
 		       COALESCE(c.ctag, ''), c.can_write, COALESCE(c.reverse_sync, false),
-		       COALESCE(c.enabled, true), c.created_at, c.updated_at, s.source_type
+		       COALESCE(c.enabled, true), c.created_at, c.updated_at, s.source_type,
+		       COALESCE(s.identity_email, '')
 		FROM calendars c
 		JOIN calendar_sources s ON c.source_id = s.id
 		WHERE c.id = $1
@@ -111,6 +114,7 @@ func (db *DB) GetCalendarByID(id int64) (*models.Calendar, error) {
 		&cal.Description, &cal.Color, &cal.Timezone,
 		&cal.CTag, &cal.CanWrite, &cal.ReverseSync,
 		&cal.Enabled, &cal.CreatedAt, &cal.UpdatedAt, &cal.SourceType,
+		&cal.IdentityEmail,
 	)
 
 	if err == sql.ErrNoRows {
