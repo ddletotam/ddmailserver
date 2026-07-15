@@ -109,10 +109,13 @@ methods; ImapProvider rejects calendars ("requires a DDMail server"). So
     and enforces rights.
   - Per-source colour set at source configuration; carried resolved on each
     event. Client stops defaulting colour.
-- **Phase 2 — corporate GAL via an outbound LDAP client.** New `contact_source`
-  type, associated to an identity. Live proxied search (query on demand, merge
-  with local) rather than a full sync — 10k+ directories go stale and carry
-  foreign ACLs. Personal CardDAV books keep syncing.
+- **Phase 2 — corporate GAL via an outbound LDAP client. DROPPED 2026-07-15 as
+  not applicable.** Probing the user's accounts found NO externally-reachable
+  LDAP (ports 389/636/3268 closed everywhere). The corporate directories are
+  reached by other means: AppSec (Yandex 360) already syncs via Yandex CardDAV
+  (a configured contact source); skiftrade is on-prem Exchange with EWS/OWA
+  blocked externally — its GAL would need an EWS client after IT exposes EWS,
+  a separate effort, not LDAP. Revisit only if a real LDAP endpoint appears.
 - **Phase 3 — `addressbook-query` in the CardDAV server face.** Real
   server-side autocomplete for standard clients (Thunderbird/Outlook).
 - **Phase 4 — standard CalDAV/CardDAV client providers in the desktop client.**
