@@ -104,6 +104,130 @@ pub async fn fetch_contacts(
     Ok(out)
 }
 
+/// The contact resource URL inside a collection: `{collection}/{uid}.vcf`.
+fn contact_url(collection_url: &str, uid: &str) -> String {
+    format!("{}/{}.vcf", collection_url.trim_end_matches('/'), uid)
+}
+
+/// Build a vCard 3.0 from parsed fields.
+pub fn build_vcard(
+    uid: &str,
+    full_name: &str,
+    emails: &[String],
+    phones: &[String],
+    org: &str,
+    title: &str,
+) -> String {
+    let mut v = String::from("BEGIN:VCARD\r\nVERSION:3.0\r\n");
+    v.push_str(&format!("UID:{uid}\r\n"));
+    if !full_name.is_empty() {
+        v.push_str(&format!("FN:{}\r\n", vc_escape(full_name)));
+    }
+    v.push_str(&format!("N:;{};;;\r\n", vc_escape(full_name)));
+    for e in emails.iter().filter(|s| !s.trim().is_empty()) {
+        v.push_str(&format!("EMAIL:{}\r\n", vc_escape(e)));
+    }
+    for p in phones.iter().filter(|s| !s.trim().is_empty()) {
+        v.push_str(&format!("TEL:{}\r\n", vc_escape(p)));
+    }
+    if !org.is_empty() {
+        v.push_str(&format!("ORG:{}\r\n", vc_escape(org)));
+    }
+    if !title.is_empty() {
+        v.push_str(&format!("TITLE:{}\r\n", vc_escape(title)));
+    }
+    v.push_str("END:VCARD\r\n");
+    v
+}
+
+fn vc_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace(',', "\\,").replace(';', "\\;").replace('\n', "\\n")
+}
+
+/// PUT a vCard to create/replace a contact, honouring the precondition.
+pub async fn put_contact(
+    collection_url: &str,
+    username: &str,
+    password: &str,
+    uid: &str,
+    vcard: &str,
+    pre: crate::caldav_client::Precondition<'_>,
+) -> Result<(), String> {
+    let http = http_client()?;
+    let mut req = http
+        .put(contact_url(collection_url, uid))
+        .basic_auth(username, Some(password))
+        .header(reqwest::header::CONTENT_TYPE, "text/vcard; charset=utf-8");
+    req = match pre {
+        crate::caldav_client::Precondition::IfNew => req.header(reqwest::header::IF_NONE_MATCH, "*"),
+        crate::caldav_client::Precondition::IfMatch(t) => req.header(reqwest::header::IF_MATCH, t),
+        crate::caldav_client::Precondition::None => req,
+    };
+    let resp = req.body(vcard.to_string()).send().await.map_err(|e| format!("carddav PUT: {e}"))?;
+    if resp.status().as_u16() == 412 {
+        return Err("contact changed on the server — reopen and retry".into());
+    }
+    if !resp.status().is_success() {
+        return Err(format!("carddav PUT HTTP {}", resp.status()));
+    }
+    Ok(())
+}
+
+/// GET one contact's raw .vcf + ETag.
+pub async fn get_contact_raw(
+    collection_url: &str,
+    username: &str,
+    password: &str,
+    uid: &str,
+) -> Result<(String, Option<String>), String> {
+    let http = http_client()?;
+    let resp = http
+        .get(contact_url(collection_url, uid))
+        .basic_auth(username, Some(password))
+        .send()
+        .await
+        .map_err(|e| format!("carddav GET: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("carddav GET HTTP {}", resp.status()));
+    }
+    let etag = resp
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let body = resp.text().await.map_err(|e| format!("carddav GET body: {e}"))?;
+    Ok((body, etag))
+}
+
+/// DELETE a contact, optionally If-Match-guarded.
+pub async fn delete_contact(
+    collection_url: &str,
+    username: &str,
+    password: &str,
+    uid: &str,
+    if_match: Option<&str>,
+) -> Result<(), String> {
+    let http = http_client()?;
+    let mut req = http
+        .delete(contact_url(collection_url, uid))
+        .basic_auth(username, Some(password));
+    if let Some(t) = if_match {
+        req = req.header(reqwest::header::IF_MATCH, t);
+    }
+    let resp = req.send().await.map_err(|e| format!("carddav DELETE: {e}"))?;
+    if !resp.status().is_success() && resp.status().as_u16() != 404 {
+        return Err(format!("carddav DELETE HTTP {}", resp.status()));
+    }
+    Ok(())
+}
+
+fn http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("http client: {e}"))
+}
+
 /// Pull each `<…:address-data>…</…:address-data>` payload out of a DAV
 /// multistatus, namespace-prefix agnostic, and XML-unescape it. Hand-rolled
 /// (no XML dep); good enough for well-formed multistatus bodies.
@@ -143,6 +267,7 @@ fn extract_address_data(xml: &str) -> Vec<String> {
 /// `PROP;PARAMS:value`. Returns None if there's no usable identity at all.
 fn parse_vcard(vcard: &str) -> Option<DesktopContact> {
     let unfolded = unfold_vcard(vcard);
+    let mut uid = String::new();
     let mut full_name = String::new();
     let mut emails = Vec::new();
     let mut phones = Vec::new();
@@ -156,6 +281,7 @@ fn parse_vcard(vcard: &str) -> Option<DesktopContact> {
         }
         let name = head.split(';').next().unwrap_or("").to_ascii_uppercase();
         match name.as_str() {
+            "UID" => uid = value.to_string(),
             "FN" => full_name = value.to_string(),
             "EMAIL" => emails.push(value.to_string()),
             "TEL" => phones.push(value.to_string()),
@@ -170,6 +296,7 @@ fn parse_vcard(vcard: &str) -> Option<DesktopContact> {
     }
     Some(DesktopContact {
         id: 0,
+        uid,
         full_name,
         emails,
         phones,

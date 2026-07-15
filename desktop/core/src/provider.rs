@@ -208,6 +208,22 @@ pub trait MailProvider: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Create a contact. `body` carries full_name/emails/phones/organization/
+    /// title (+ optional from_identity). Returns the new row as JSON.
+    async fn create_contact(&self, _body: serde_json::Value) -> Result<serde_json::Value, String> {
+        Err("Creating contacts requires a CardDAV URL or a DDMail server.".into())
+    }
+
+    /// Update a contact by id (server db id / standalone synthetic id).
+    async fn update_contact(&self, _id: i64, _body: serde_json::Value) -> Result<(), String> {
+        Err("Editing contacts requires a CardDAV URL or a DDMail server.".into())
+    }
+
+    /// Delete a contact by id.
+    async fn delete_contact(&self, _id: i64) -> Result<(), String> {
+        Err("Deleting contacts requires a CardDAV URL or a DDMail server.".into())
+    }
+
     /// Provider type identifier.
     fn provider_type(&self) -> &'static str;
 }

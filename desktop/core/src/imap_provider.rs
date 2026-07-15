@@ -40,6 +40,9 @@ pub struct ImapProvider {
     pub caldav_collection: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// Same, for the CardDAV addressbook collection.
     pub carddav_collection: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// id → vCard UID for the last-fetched CardDAV contacts (edit/delete
+    /// resolution), mirroring caldav_event_uids.
+    pub carddav_contact_uids: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<i64, String>>>,
 }
 
 impl ImapProvider {
@@ -61,6 +64,21 @@ impl ImapProvider {
         .unwrap_or_else(|_| configured.clone());
         *self.carddav_collection.lock().map_err(|e| format!("lock: {e}"))? = Some(resolved.clone());
         Ok(Some(resolved))
+    }
+
+    /// Assign each fetched contact a stable numeric id from its UID and record
+    /// id→UID so edit/delete (addressed by id) can find the resource.
+    fn tag_contact_ids(&self, mut list: Vec<DesktopContact>) -> Result<Vec<DesktopContact>, String> {
+        let mut map = self.carddav_contact_uids.lock().map_err(|e| format!("lock: {e}"))?;
+        for c in list.iter_mut() {
+            if c.uid.is_empty() {
+                continue;
+            }
+            let id = crate::caldav_client::event_id_from_uid(&c.uid);
+            c.id = id;
+            map.insert(id, c.uid.clone());
+        }
+        Ok(list)
     }
 
     /// The calendar-collection URL to operate on: the configured `caldav_url`
@@ -88,6 +106,19 @@ impl ImapProvider {
 /// Synthetic calendar id for a standalone CalDAV collection (there is exactly
 /// one per plain-server account, so a fixed id is fine).
 const STANDALONE_CALDAV_CAL_ID: i64 = 1;
+
+/// Extract (full_name, emails, phones, organization, title) from a contact
+/// write body.
+fn contact_fields(body: &serde_json::Value) -> (String, Vec<String>, Vec<String>, String, String) {
+    let s = |k: &str| body.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let arr = |k: &str| {
+        body.get(k)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+    (s("full_name"), arr("emails"), arr("phones"), s("organization"), s("title"))
+}
 
 /// Helper macro: connect → run closure → logout.
 macro_rules! with_session {
@@ -475,26 +506,87 @@ impl MailProvider for ImapProvider {
         let Some(url) = self.carddav_collection_url().await? else {
             return Ok(Vec::new());
         };
-        crate::carddav_client::fetch_contacts(
-            &url,
-            &self.username,
-            &self.password,
-            None,
-            limit as usize,
+        let list = crate::carddav_client::fetch_contacts(
+            &url, &self.username, &self.password, None, limit as usize,
         )
-        .await
+        .await?;
+        Ok(self.tag_contact_ids(list)?)
     }
 
     async fn search_contacts(&self, query: &str, limit: u32) -> Result<Vec<DesktopContact>, String> {
         let Some(url) = self.carddav_collection_url().await? else {
             return Ok(Vec::new());
         };
-        crate::carddav_client::fetch_contacts(
-            &url,
-            &self.username,
-            &self.password,
-            Some(query),
-            limit as usize,
+        let list = crate::carddav_client::fetch_contacts(
+            &url, &self.username, &self.password, Some(query), limit as usize,
+        )
+        .await?;
+        Ok(self.tag_contact_ids(list)?)
+    }
+
+    async fn create_contact(&self, body: serde_json::Value) -> Result<serde_json::Value, String> {
+        let Some(url) = self.carddav_collection_url().await? else {
+            return Err("Creating contacts requires a CardDAV URL or a DDMail server.".into());
+        };
+        let (full_name, emails, phones, org, title) = contact_fields(&body);
+        let uid = format!(
+            "{:x}@ddmail",
+            crate::caldav_client::event_id_from_uid(&format!("{full_name}{}", emails.join(",")))
+        );
+        let vcard = crate::carddav_client::build_vcard(&uid, &full_name, &emails, &phones, &org, &title);
+        crate::carddav_client::put_contact(
+            &url, &self.username, &self.password, &uid, &vcard,
+            crate::caldav_client::Precondition::IfNew,
+        )
+        .await?;
+        let id = crate::caldav_client::event_id_from_uid(&uid);
+        self.carddav_contact_uids
+            .lock()
+            .map_err(|e| format!("lock: {e}"))?
+            .insert(id, uid.clone());
+        Ok(serde_json::json!({ "id": id, "uid": uid }))
+    }
+
+    async fn update_contact(&self, id: i64, body: serde_json::Value) -> Result<(), String> {
+        let Some(url) = self.carddav_collection_url().await? else {
+            return Err("Editing contacts requires a CardDAV URL or a DDMail server.".into());
+        };
+        let uid = self
+            .carddav_contact_uids
+            .lock()
+            .map_err(|e| format!("lock: {e}"))?
+            .get(&id)
+            .cloned()
+            .ok_or("unknown contact id — reopen the address book and retry")?;
+        let (_, etag) =
+            crate::carddav_client::get_contact_raw(&url, &self.username, &self.password, &uid).await?;
+        let (full_name, emails, phones, org, title) = contact_fields(&body);
+        let vcard = crate::carddav_client::build_vcard(&uid, &full_name, &emails, &phones, &org, &title);
+        let pre = match etag.as_deref() {
+            Some(t) => crate::caldav_client::Precondition::IfMatch(t),
+            None => crate::caldav_client::Precondition::None,
+        };
+        crate::carddav_client::put_contact(&url, &self.username, &self.password, &uid, &vcard, pre)
+            .await
+    }
+
+    async fn delete_contact(&self, id: i64) -> Result<(), String> {
+        let Some(url) = self.carddav_collection_url().await? else {
+            return Err("Deleting contacts requires a CardDAV URL or a DDMail server.".into());
+        };
+        let uid = self
+            .carddav_contact_uids
+            .lock()
+            .map_err(|e| format!("lock: {e}"))?
+            .get(&id)
+            .cloned()
+            .ok_or("unknown contact id — reopen the address book and retry")?;
+        let if_match = crate::carddav_client::get_contact_raw(&url, &self.username, &self.password, &uid)
+            .await
+            .ok()
+            .and_then(|(_, t)| t);
+        crate::carddav_client::delete_contact(
+            &url, &self.username, &self.password, &uid, if_match.as_deref(),
         )
         .await
     }

@@ -63,6 +63,10 @@ pub struct Contact {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DesktopContact {
     pub id: i64,
+    /// vCard UID — populated by the standalone CardDAV client so edit/delete
+    /// can resolve the resource; empty for the native path (which uses `id`).
+    #[serde(default)]
+    pub uid: String,
     #[serde(default)]
     pub full_name: String,
     #[serde(default, deserialize_with = "null_as_empty_vec")]
