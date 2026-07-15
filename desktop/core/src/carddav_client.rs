@@ -173,3 +173,60 @@ fn xml_unescape(s: &str) -> String {
         .replace("&apos;", "'")
         .replace("&amp;", "&")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MULTISTATUS: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/carddav/1/addressbooks/2/a.vcf</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:getetag>"e1"</D:getetag>
+        <C:address-data>BEGIN:VCARD
+VERSION:3.0
+FN:Ivan Petrov
+EMAIL;TYPE=work:ivan@example.com
+ORG:Acme;Sales
+END:VCARD</C:address-data>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>"#;
+
+    #[test]
+    fn extracts_and_parses_one_card() {
+        let cards = extract_address_data(MULTISTATUS);
+        assert_eq!(cards.len(), 1, "one address-data block");
+        let c = parse_vcard(&cards[0]).expect("parsed");
+        assert_eq!(c.full_name, "Ivan Petrov");
+        assert_eq!(c.emails, vec!["ivan@example.com"]);
+        assert_eq!(c.organization, "Acme");
+    }
+
+    #[test]
+    fn self_closing_address_data_is_skipped() {
+        // The <C:address-data/> in a request/prop template must not be picked
+        // up as a contact.
+        let xml = r#"<D:prop><C:address-data/></D:prop>"#;
+        assert!(extract_address_data(xml).is_empty());
+    }
+
+    #[test]
+    fn vcard_line_folding_and_unescape() {
+        let cards = extract_address_data(
+            "<C:address-data>BEGIN:VCARD\nFN:Long\n  Name\nEMAIL:a&amp;b@x.ru\nEND:VCARD</C:address-data>",
+        );
+        let c = parse_vcard(&cards[0]).unwrap();
+        assert_eq!(c.full_name, "LongName");
+        assert_eq!(c.emails, vec!["a&b@x.ru"]);
+    }
+
+    #[test]
+    fn card_without_identity_is_dropped() {
+        assert!(parse_vcard("BEGIN:VCARD\nNOTE:hi\nEND:VCARD").is_none());
+    }
+}
