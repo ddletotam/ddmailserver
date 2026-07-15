@@ -9,6 +9,43 @@
 
 use crate::types::DesktopContact;
 
+/// Resolve a configured CardDAV URL to a concrete addressbook-collection URL:
+/// use it directly if it's already an addressbook, else walk
+/// current-user-principal → addressbook-home-set → first addressbook (RFC
+/// 6764). Falls back to the input if discovery finds nothing.
+pub async fn resolve_addressbook_collection(
+    url: &str,
+    username: &str,
+    password: &str,
+) -> Result<String, String> {
+    use crate::caldav_client::{abs_url, first_href, propfind, split_responses};
+    let prop = r#"<D:prop><D:resourcetype/><D:current-user-principal/></D:prop>"#;
+    let root = propfind(url, username, password, 0, prop).await?;
+    if root.to_lowercase().contains("addressbook") {
+        return Ok(url.to_string());
+    }
+    let principal = first_href(&root, "current-user-principal").unwrap_or_else(|| url.to_string());
+    let principal = abs_url(url, &principal);
+    let home_prop =
+        r#"<D:prop><C:addressbook-home-set xmlns:C="urn:ietf:params:xml:ns:carddav"/></D:prop>"#;
+    let home_xml = propfind(&principal, username, password, 0, home_prop).await?;
+    let Some(home) = first_href(&home_xml, "addressbook-home-set") else {
+        return Ok(url.to_string());
+    };
+    let home = abs_url(url, &home);
+    let listing = propfind(&home, username, password, 1, prop).await?;
+    for resp in split_responses(&listing) {
+        if resp.to_lowercase().contains("addressbook")
+            && resp.to_lowercase().contains("resourcetype")
+        {
+            if let Some(href) = first_href(&resp, "href") {
+                return Ok(abs_url(&home, &href));
+            }
+        }
+    }
+    Ok(url.to_string())
+}
+
 /// Fetch contacts from an addressbook collection URL. `query = None` (or empty)
 /// lists everything; a non-empty query is a name/email substring search.
 pub async fn fetch_contacts(
