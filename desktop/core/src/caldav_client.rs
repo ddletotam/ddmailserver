@@ -83,44 +83,69 @@ fn event_url(collection_url: &str, uid: &str) -> String {
     format!("{base}/{}.ics", uid)
 }
 
-/// PUT a full VCALENDAR to create/replace an event. Unconditional
-/// (last-write-wins) for now — no If-Match/ETag round-trip yet.
+/// Optimistic-concurrency precondition for a write.
+pub enum Precondition<'a> {
+    /// Create-only: fail if the resource already exists (If-None-Match: *).
+    IfNew,
+    /// Update-only: fail if it changed since we read this ETag (If-Match).
+    IfMatch(&'a str),
+    /// No precondition (last-write-wins).
+    None,
+}
+
+/// PUT a full VCALENDAR to create/replace an event, honouring `pre`.
+/// A 412 (precondition failed) maps to a clear "changed on the server" error.
 pub async fn put_event(
     collection_url: &str,
     username: &str,
     password: &str,
     uid: &str,
     ical: &str,
+    pre: Precondition<'_>,
 ) -> Result<(), String> {
     let http = client()?;
-    let resp = http
+    let mut req = http
         .put(event_url(collection_url, uid))
         .basic_auth(username, Some(password))
-        .header(reqwest::header::CONTENT_TYPE, "text/calendar; charset=utf-8")
+        .header(reqwest::header::CONTENT_TYPE, "text/calendar; charset=utf-8");
+    req = match pre {
+        Precondition::IfNew => req.header(reqwest::header::IF_NONE_MATCH, "*"),
+        Precondition::IfMatch(tag) => req.header(reqwest::header::IF_MATCH, tag),
+        Precondition::None => req,
+    };
+    let resp = req
         .body(ical.to_string())
         .send()
         .await
         .map_err(|e| format!("caldav PUT: {e}"))?;
+    if resp.status().as_u16() == 412 {
+        return Err("event changed on the server — reopen the calendar and retry".into());
+    }
     if !resp.status().is_success() {
         return Err(format!("caldav PUT HTTP {}", resp.status()));
     }
     Ok(())
 }
 
-/// DELETE an event resource.
+/// DELETE an event resource, optionally guarded by If-Match.
 pub async fn delete_event(
     collection_url: &str,
     username: &str,
     password: &str,
     uid: &str,
+    if_match: Option<&str>,
 ) -> Result<(), String> {
     let http = client()?;
-    let resp = http
+    let mut req = http
         .delete(event_url(collection_url, uid))
-        .basic_auth(username, Some(password))
-        .send()
-        .await
-        .map_err(|e| format!("caldav DELETE: {e}"))?;
+        .basic_auth(username, Some(password));
+    if let Some(tag) = if_match {
+        req = req.header(reqwest::header::IF_MATCH, tag);
+    }
+    let resp = req.send().await.map_err(|e| format!("caldav DELETE: {e}"))?;
+    if resp.status().as_u16() == 412 {
+        return Err("event changed on the server — reopen the calendar and retry".into());
+    }
     // 404 is fine — already gone.
     if !resp.status().is_success() && resp.status().as_u16() != 404 {
         return Err(format!("caldav DELETE HTTP {}", resp.status()));
@@ -128,13 +153,14 @@ pub async fn delete_event(
     Ok(())
 }
 
-/// GET the raw .ics of one event (for patch = fetch-merge-put).
+/// GET one event's raw .ics plus its current ETag (for fetch-merge-put and
+/// If-Match-guarded delete).
 pub async fn get_event_raw(
     collection_url: &str,
     username: &str,
     password: &str,
     uid: &str,
-) -> Result<String, String> {
+) -> Result<(String, Option<String>), String> {
     let http = client()?;
     let resp = http
         .get(event_url(collection_url, uid))
@@ -145,7 +171,13 @@ pub async fn get_event_raw(
     if !resp.status().is_success() {
         return Err(format!("caldav GET HTTP {}", resp.status()));
     }
-    resp.text().await.map_err(|e| format!("caldav GET body: {e}"))
+    let etag = resp
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let body = resp.text().await.map_err(|e| format!("caldav GET body: {e}"))?;
+    Ok((body, etag))
 }
 
 fn client() -> Result<reqwest::Client, String> {
