@@ -348,6 +348,15 @@ type DesktopCalendarEvent struct {
 	// (CONFERENCE / X-TELEMOST-CONFERENCE), URL, CATEGORIES etc. reach the
 	// desktop card — they only exist inside ical_data.
 	Extras []DesktopEventExtra `json:"extras,omitempty"`
+	// Server-resolved so the source-blind client can render one calendar:
+	// the owning calendar's colour, whether THIS event may be edited/deleted,
+	// and the identity it belongs to. Capabilities are advisory — the server
+	// re-checks on write and may still reject (see docs/unified-identity-
+	// aggregation.md).
+	Color         string `json:"color,omitempty"`
+	Editable      bool   `json:"editable"`
+	Deletable     bool   `json:"deletable"`
+	IdentityEmail string `json:"identity_email,omitempty"`
 }
 
 // DesktopEventExtra is one non-default VEVENT property, name uppercased.
@@ -600,8 +609,10 @@ func (s *Server) HandleDesktopCalendarEvents(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	allowed := make(map[int64]bool, len(allCals))
+	calByID := make(map[int64]*models.Calendar, len(allCals))
 	for _, c := range allCals {
 		allowed[c.ID] = true
+		calByID[c.ID] = c
 	}
 
 	var ids []int64
@@ -641,6 +652,17 @@ func (s *Server) HandleDesktopCalendarEvents(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
+	// Stamp each emitted event with its calendar's colour, write-capability
+	// and owning identity, so the source-blind client renders one calendar.
+	applyMeta := func(ev *DesktopCalendarEvent) {
+		if c := calByID[ev.CalendarID]; c != nil {
+			ev.Color = c.Color
+			ev.Editable = c.CanWrite
+			ev.Deletable = c.CanWrite
+			ev.IdentityEmail = c.IdentityEmail
+		}
+	}
+
 	out := make([]DesktopCalendarEvent, 0, len(events))
 	for _, e := range events {
 		extras := extraPropsFromICal(e.ICalData)
@@ -675,11 +697,12 @@ func (s *Server) HandleDesktopCalendarEvents(w http.ResponseWriter, r *http.Requ
 					o.AlarmLeadMin = parseAlarmLeadMin(e.ICalData)
 					o.AlarmLeads = parseAlarmLeads(e.ICalData)
 					o.Extras = extras
+					applyMeta(&o)
 					out = append(out, o)
 				}
 			}
 		}
-		out = append(out, DesktopCalendarEvent{
+		ev := DesktopCalendarEvent{
 			ID:             e.ID,
 			CalendarID:     e.CalendarID,
 			UID:            e.UID,
@@ -699,7 +722,9 @@ func (s *Server) HandleDesktopCalendarEvents(w http.ResponseWriter, r *http.Requ
 			AlarmLeadMin:   parseAlarmLeadMin(e.ICalData),
 			AlarmLeads:     parseAlarmLeads(e.ICalData),
 			Extras:         extras,
-		})
+		}
+		applyMeta(&ev)
+		out = append(out, ev)
 	}
 
 	respondJSON(w, http.StatusOK, out)

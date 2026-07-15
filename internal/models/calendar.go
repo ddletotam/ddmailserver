@@ -82,8 +82,9 @@ type Calendar struct {
 	CreatedAt int64 `json:"created_at"`
 	UpdatedAt int64 `json:"updated_at"`
 
-	// Joined field
-	SourceType string `json:"source_type,omitempty"`
+	// Joined fields
+	SourceType    string `json:"source_type,omitempty"`
+	IdentityEmail string `json:"identity_email,omitempty"`
 }
 
 // CalendarEvent represents a calendar event

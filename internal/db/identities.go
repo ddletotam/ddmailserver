@@ -1,6 +1,32 @@
 package db
 
-import "fmt"
+import (
+	"database/sql"
+	"fmt"
+)
+
+// DefaultWriteCalendarID returns the calendar a NEW event should land in when
+// the client creates it "under" an identity. Preference: a local calendar of
+// that identity, else its oldest writable calendar. Returns 0 (no error) when
+// the identity has no writable calendar — the caller turns that into a 403.
+func (db *DB) DefaultWriteCalendarID(userID int64, identityEmail string) (int64, error) {
+	query := `
+		SELECT c.id
+		FROM calendars c JOIN calendar_sources s ON c.source_id = s.id
+		WHERE c.user_id = $1 AND s.identity_email = $2 AND c.can_write = true
+		ORDER BY (s.source_type = 'local') DESC, c.created_at ASC
+		LIMIT 1
+	`
+	var id int64
+	err := db.QueryRow(query, userID, identityEmail).Scan(&id)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to resolve write calendar for %s: %w", identityEmail, err)
+	}
+	return id, nil
+}
 
 // WritableCalendarIdentities returns the set of identity emails (for a user)
 // that can host a NEW event: an identity owning at least one local calendar
