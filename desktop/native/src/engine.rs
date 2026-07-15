@@ -18,8 +18,8 @@ use ddmail_core::native_provider::NativeProvider;
 use ddmail_core::provider::MailProvider;
 use ddmail_core::session::SessionPool;
 use ddmail_core::types::{
-    Contact, Conversation, DesktopCalendar, DesktopCalendarEvent, MessageBody, MessageEnvelope,
-    MessageRef, OutgoingAttachment, OutgoingMessage, CHANGE_KIND_DELETE,
+    Contact, Conversation, DesktopCalendar, DesktopCalendarEvent, DesktopContact, MessageBody,
+    MessageEnvelope, MessageRef, OutgoingAttachment, OutgoingMessage, CHANGE_KIND_DELETE,
 };
 
 #[derive(Clone)]
@@ -317,6 +317,10 @@ pub enum EngineCmd {
         to_ms: i64,
         calendar_ids: Vec<i64>,
     },
+    /// The unified address book. Empty `query` = the full book; a non-empty
+    /// query is autocomplete/search. `query` is echoed in the result so the UI
+    /// can drop stale answers.
+    FetchContacts { query: String, limit: u32 },
     /// Set the requesting user's PARTSTAT on an event (ACCEPTED/TENTATIVE/DECLINED).
     Rsvp { event_id: i64, partstat: String },
     /// Create a calendar event from a server-shaped JSON body.
@@ -378,6 +382,9 @@ pub enum EngineResult {
     Source { uid: u32, raw: String },
     /// Calendar list (sidebar) — echoed back from FetchCalendars.
     Calendars(Vec<DesktopCalendar>),
+    /// Address-book rows — echoed back from FetchContacts. `query` lets the UI
+    /// drop stale answers when typing faster than the engine answers.
+    Contacts { query: String, list: Vec<DesktopContact> },
     /// Events for the currently displayed week — echoed back from
     /// FetchCalendarEvents.
     CalendarEvents(Vec<DesktopCalendarEvent>),
@@ -835,6 +842,17 @@ pub fn spawn(
                     match rt.block_on(provider.list_calendars()) {
                         Ok(cals) => on_result(EngineResult::Calendars(cals)),
                         Err(e) => on_result(EngineResult::Error(format!("list_calendars: {e}"))),
+                    }
+                }
+                EngineCmd::FetchContacts { query, limit } => {
+                    let res = if query.trim().is_empty() {
+                        rt.block_on(provider.list_contacts(limit))
+                    } else {
+                        rt.block_on(provider.search_contacts(&query, limit))
+                    };
+                    match res {
+                        Ok(list) => on_result(EngineResult::Contacts { query, list }),
+                        Err(e) => on_result(EngineResult::Error(format!("fetch_contacts: {e}"))),
                     }
                 }
                 EngineCmd::FetchCalendarEvents { from_ms, to_ms, calendar_ids } => {
