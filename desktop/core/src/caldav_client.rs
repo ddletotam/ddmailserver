@@ -66,6 +66,111 @@ pub async fn fetch_events(
     Ok(out)
 }
 
+/// Resolve a configured CalDAV URL to a concrete calendar-collection URL.
+/// If the URL is already a calendar collection (or a server that returns
+/// events directly) this is a cheap PROPFIND; otherwise it walks
+/// current-user-principal → calendar-home-set → first calendar collection
+/// (RFC 6764 discovery). Returns the input unchanged if discovery finds
+/// nothing (so a direct collection URL, Yandex-style, still just works).
+pub async fn resolve_calendar_collection(
+    url: &str,
+    username: &str,
+    password: &str,
+) -> Result<String, String> {
+    // Is the URL itself a calendar collection?
+    let root = propfind(url, username, password, 0, PROP_RESOURCETYPE_HOME).await?;
+    if root.to_lowercase().contains("<c:calendar") || root.to_lowercase().contains(":calendar/>")
+    {
+        return Ok(url.to_string());
+    }
+    // Walk principal → calendar-home-set → first calendar.
+    let principal = first_href(&root, "current-user-principal").unwrap_or_else(|| url.to_string());
+    let principal = abs_url(url, &principal);
+    let home_xml = propfind(&principal, username, password, 0, PROP_CAL_HOME).await?;
+    let Some(home) = first_href(&home_xml, "calendar-home-set") else {
+        return Ok(url.to_string());
+    };
+    let home = abs_url(url, &home);
+    let listing = propfind(&home, username, password, 1, PROP_RESOURCETYPE_HOME).await?;
+    // Pick the first response whose resourcetype is a calendar.
+    for resp in split_responses(&listing) {
+        if resp.to_lowercase().contains("calendar")
+            && resp.to_lowercase().contains("resourcetype")
+        {
+            if let Some(href) = first_href(&resp, "href") {
+                return Ok(abs_url(&home, &href));
+            }
+        }
+    }
+    Ok(url.to_string())
+}
+
+const PROP_RESOURCETYPE_HOME: &str = r#"<D:prop><D:resourcetype/><D:current-user-principal/><D:displayname/></D:prop>"#;
+const PROP_CAL_HOME: &str = r#"<D:prop><C:calendar-home-set xmlns:C="urn:ietf:params:xml:ns:caldav"/></D:prop>"#;
+
+/// One PROPFIND round-trip returning the raw multistatus XML.
+pub(crate) async fn propfind(
+    url: &str,
+    username: &str,
+    password: &str,
+    depth: u8,
+    prop: &str,
+) -> Result<String, String> {
+    let body = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?><D:propfind xmlns:D="DAV:">{prop}</D:propfind>"#
+    );
+    let http = client()?;
+    let method = reqwest::Method::from_bytes(b"PROPFIND").map_err(|e| format!("method: {e}"))?;
+    let resp = http
+        .request(method, url)
+        .basic_auth(username, Some(password))
+        .header("Depth", depth.to_string())
+        .header(reqwest::header::CONTENT_TYPE, "application/xml; charset=utf-8")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| format!("PROPFIND: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("PROPFIND HTTP {}", resp.status()));
+    }
+    resp.text().await.map_err(|e| format!("PROPFIND body: {e}"))
+}
+
+/// Split a multistatus into its `<response>…</response>` chunks.
+pub(crate) fn split_responses(xml: &str) -> Vec<String> {
+    extract_tag(xml, "response")
+}
+
+/// First `<…:TAG><…:href>VALUE</href>` inside `xml` (or a bare href for
+/// tag="href"). Namespace-prefix agnostic.
+pub(crate) fn first_href(xml: &str, tag: &str) -> Option<String> {
+    if tag == "href" {
+        return extract_tag(xml, "href").into_iter().next().map(|s| s.trim().to_string());
+    }
+    for block in extract_tag(xml, tag) {
+        if let Some(h) = extract_tag(&block, "href").into_iter().next() {
+            return Some(h.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Resolve a possibly-relative href against a base URL's origin.
+pub(crate) fn abs_url(base: &str, href: &str) -> String {
+    if href.starts_with("http://") || href.starts_with("https://") {
+        return href.to_string();
+    }
+    // Scheme + host from base; href is an absolute path.
+    let after_scheme = base.split("://").nth(1).unwrap_or(base);
+    let host = after_scheme.split('/').next().unwrap_or("");
+    let scheme = base.split("://").next().unwrap_or("https");
+    if href.starts_with('/') {
+        format!("{scheme}://{host}{href}")
+    } else {
+        format!("{}/{}", base.trim_end_matches('/'), href)
+    }
+}
+
 /// Stable, positive, non-zero synthetic event id derived from the iCal UID
 /// (CalDAV addresses events by UID; our UI routes by i64 id). FNV-1a >> 1.
 pub fn event_id_from_uid(uid: &str) -> i64 {
@@ -515,6 +620,22 @@ mod tests {
         assert!(merged.contains("SUMMARY:New title"), "summary replaced");
         assert!(!merged.contains("SUMMARY:Old"));
         assert!(!merged.contains("DTEND:"), "dtend dropped when None");
+    }
+
+    #[test]
+    fn discovery_href_and_abs_url() {
+        let xml = r#"<D:multistatus xmlns:D="DAV:"><D:response><D:href>/p/</D:href>
+          <D:propstat><D:prop><D:current-user-principal><D:href>/principals/lucky/</D:href></D:current-user-principal></D:prop></D:propstat>
+        </D:response></D:multistatus>"#;
+        assert_eq!(first_href(xml, "current-user-principal").as_deref(), Some("/principals/lucky/"));
+        assert_eq!(
+            abs_url("https://mail.letotam.ru/caldav/", "/principals/lucky/"),
+            "https://mail.letotam.ru/principals/lucky/"
+        );
+        assert_eq!(
+            abs_url("https://x.ru/a/", "https://other.ru/b/"),
+            "https://other.ru/b/"
+        );
     }
 
     #[test]

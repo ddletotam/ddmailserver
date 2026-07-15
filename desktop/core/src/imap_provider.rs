@@ -35,6 +35,54 @@ pub struct ImapProvider {
     /// resolve the resource. The provider is long-lived per account, so this
     /// survives between fetch and edit.
     pub caldav_event_uids: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<i64, String>>>,
+    /// Cached result of resolving `caldav_url` to a concrete calendar
+    /// collection (discovery runs once per account, then this is reused).
+    pub caldav_collection: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Same, for the CardDAV addressbook collection.
+    pub carddav_collection: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl ImapProvider {
+    /// The addressbook-collection URL to operate on: `carddav_url` resolved
+    /// through discovery if it's a base, cached after the first call.
+    async fn carddav_collection_url(&self) -> Result<Option<String>, String> {
+        let Some(configured) = &self.carddav_url else {
+            return Ok(None);
+        };
+        if let Some(cached) = self.carddav_collection.lock().map_err(|e| format!("lock: {e}"))?.clone() {
+            return Ok(Some(cached));
+        }
+        let resolved = crate::carddav_client::resolve_addressbook_collection(
+            configured,
+            &self.username,
+            &self.password,
+        )
+        .await
+        .unwrap_or_else(|_| configured.clone());
+        *self.carddav_collection.lock().map_err(|e| format!("lock: {e}"))? = Some(resolved.clone());
+        Ok(Some(resolved))
+    }
+
+    /// The calendar-collection URL to operate on: the configured `caldav_url`
+    /// resolved through discovery (RFC 6764) if it's a server/principal base,
+    /// cached after the first call. `None` when no CalDAV is configured.
+    async fn caldav_collection_url(&self) -> Result<Option<String>, String> {
+        let Some(configured) = &self.caldav_url else {
+            return Ok(None);
+        };
+        if let Some(cached) = self.caldav_collection.lock().map_err(|e| format!("lock: {e}"))?.clone() {
+            return Ok(Some(cached));
+        }
+        let resolved = crate::caldav_client::resolve_calendar_collection(
+            configured,
+            &self.username,
+            &self.password,
+        )
+        .await
+        .unwrap_or_else(|_| configured.clone());
+        *self.caldav_collection.lock().map_err(|e| format!("lock: {e}"))? = Some(resolved.clone());
+        Ok(Some(resolved))
+    }
 }
 
 /// Synthetic calendar id for a standalone CalDAV collection (there is exactly
@@ -291,9 +339,10 @@ impl MailProvider for ImapProvider {
         to_ms: i64,
         _calendar_ids: &[i64],
     ) -> Result<Vec<DesktopCalendarEvent>, String> {
-        let Some(url) = &self.caldav_url else {
+        let Some(url) = self.caldav_collection_url().await? else {
             return Ok(Vec::new());
         };
+        let url = url.as_str();
         let mut events =
             crate::caldav_client::fetch_events(url, &self.username, &self.password, from_ms, to_ms)
                 .await?;
@@ -317,9 +366,10 @@ impl MailProvider for ImapProvider {
     }
 
     async fn create_event(&self, body: serde_json::Value) -> Result<serde_json::Value, String> {
-        let Some(url) = &self.caldav_url else {
+        let Some(url) = self.caldav_collection_url().await? else {
             return Err("Creating events requires a CalDAV URL or a DDMail server.".into());
         };
+        let url = url.as_str();
         let summary = body.get("summary").and_then(|v| v.as_str()).unwrap_or("");
         let description = body.get("description").and_then(|v| v.as_str()).unwrap_or("");
         let location = body.get("location").and_then(|v| v.as_str()).unwrap_or("");
@@ -359,9 +409,10 @@ impl MailProvider for ImapProvider {
     }
 
     async fn patch_event(&self, event_id: i64, body: serde_json::Value) -> Result<(), String> {
-        let Some(url) = &self.caldav_url else {
+        let Some(url) = self.caldav_collection_url().await? else {
             return Err("Editing events requires a CalDAV URL or a DDMail server.".into());
         };
+        let url = url.as_str();
         let uid = self
             .caldav_event_uids
             .lock()
@@ -394,9 +445,10 @@ impl MailProvider for ImapProvider {
     }
 
     async fn delete_event(&self, event_id: i64) -> Result<(), String> {
-        let Some(url) = &self.caldav_url else {
+        let Some(url) = self.caldav_collection_url().await? else {
             return Err("Deleting events requires a CalDAV URL or a DDMail server.".into());
         };
+        let url = url.as_str();
         let uid = self
             .caldav_event_uids
             .lock()
@@ -420,11 +472,11 @@ impl MailProvider for ImapProvider {
     }
 
     async fn list_contacts(&self, limit: u32) -> Result<Vec<DesktopContact>, String> {
-        let Some(url) = &self.carddav_url else {
+        let Some(url) = self.carddav_collection_url().await? else {
             return Ok(Vec::new());
         };
         crate::carddav_client::fetch_contacts(
-            url,
+            &url,
             &self.username,
             &self.password,
             None,
@@ -434,11 +486,11 @@ impl MailProvider for ImapProvider {
     }
 
     async fn search_contacts(&self, query: &str, limit: u32) -> Result<Vec<DesktopContact>, String> {
-        let Some(url) = &self.carddav_url else {
+        let Some(url) = self.carddav_collection_url().await? else {
             return Ok(Vec::new());
         };
         crate::carddav_client::fetch_contacts(
-            url,
+            &url,
             &self.username,
             &self.password,
             Some(query),
