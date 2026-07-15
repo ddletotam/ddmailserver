@@ -7,8 +7,18 @@ edition = "2024"
 name = "ddmail-native"
 path = "src/main.rs"
 
+[profile.release]
+# Installer builds: thin LTO + stripped symbols roughly halve the exe size
+# at a small compile-time cost; panics still print (abort not set).
+lto = "thin"
+strip = "symbols"
+
 [build-dependencies]
 slint-build = "1.13"
+
+[target.'cfg(windows)'.build-dependencies]
+# Embeds assets/ddmail.ico into the exe (see build.rs).
+winresource = "0.1"
 
 [dependencies]
 # raw-window-handle-06 exposes the OS window handle (HasWindowHandle), which
