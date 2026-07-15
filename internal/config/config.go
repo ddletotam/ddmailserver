@@ -74,7 +74,6 @@ type ServerConfig struct {
 	SMTPPort    int    `yaml:"smtp_port"`
 	SMTPTLSPort int    `yaml:"smtp_tls_port"`
 	SMTPMXPort  int    `yaml:"smtp_mx_port"` // incoming mail (default 25)
-	LDAPPort    int    `yaml:"ldap_port"`    // address book lookups (default 10389)
 	WebPort     int    `yaml:"web_port"`
 	WebHost     string `yaml:"web_host"`
 	Domain      string `yaml:"domain"` // Mail server hostname (e.g., mail.example.com)

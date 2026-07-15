@@ -17,7 +17,6 @@ import (
 	"github.com/yourusername/mailserver/internal/dkimsign"
 	imapclient "github.com/yourusername/mailserver/internal/imap/client"
 	imapserver "github.com/yourusername/mailserver/internal/imap/server"
-	"github.com/yourusername/mailserver/internal/ldap"
 	"github.com/yourusername/mailserver/internal/notify"
 	"github.com/yourusername/mailserver/internal/oauth"
 	"github.com/yourusername/mailserver/internal/parser"
@@ -291,23 +290,11 @@ func main() {
 		defer mxSrv.Stop()
 	}
 
-	// LDAP server for address book autocomplete
-	if cfg.Server.LDAPPort > 0 {
-		log.Printf("Initializing LDAP server for address book lookups...")
-		ldapBaseDN := "dc=mail,dc=letotam,dc=ru"
-		if cfg.Server.Domain != "" {
-			ldapBaseDN = ldap.DomainToBaseDN(cfg.Server.Domain)
-		}
-		ldapSrv := ldap.New(database, ldap.Config{
-			Port:   cfg.Server.LDAPPort,
-			BaseDN: ldapBaseDN,
-		})
-		if err := ldapSrv.Start(); err != nil {
-			log.Printf("Failed to start LDAP server: %v", err)
-		} else {
-			defer ldapSrv.Stop()
-		}
-	}
+	// (Removed) The inbound LDAP server face is not part of the aggregation
+	// design and was a remote-crash DoS (nmcclain BER parser panics on
+	// malformed packets). Contacts reach standard clients via CardDAV; LDAP is
+	// used only on the inbound side (pulling a corporate GAL). See
+	// docs/unified-identity-aggregation.md.
 
 	// Initialize web server
 	log.Printf("Initializing web server...")
