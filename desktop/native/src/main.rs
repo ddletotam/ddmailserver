@@ -2631,6 +2631,7 @@ fn run_login_window() -> bool {
                         native_url: Some(server.clone()),
                         native_token: Some(login.token.clone()),
                         carddav_url: None,
+                        caldav_url: None,
                     };
                     engine::AccountConfig::save_all(std::slice::from_ref(&cfg));
                     done.store(true, Ordering::Relaxed);
@@ -3380,6 +3381,7 @@ fn main() {
                 native_url: None,
                 native_token: None,
                 carddav_url: None,
+                caldav_url: None,
             });
         }
         // Seed the connection indicator: every account starts "connecting"
