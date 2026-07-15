@@ -195,6 +195,19 @@ pub trait MailProvider: Send + Sync {
     /// ImapProvider returns "not supported".
     async fn delete_event(&self, event_id: i64) -> Result<(), String>;
 
+    /// The unified address book (aggregated server-side across all sources).
+    /// `limit` caps the result. ImapProvider returns an empty list until
+    /// standalone CardDAV support lands (Phase 4).
+    async fn list_contacts(&self, _limit: u32) -> Result<Vec<DesktopContact>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Autocomplete/search across the unified address book. Default empty so
+    /// non-native providers degrade gracefully.
+    async fn search_contacts(&self, _query: &str, _limit: u32) -> Result<Vec<DesktopContact>, String> {
+        Ok(Vec::new())
+    }
+
     /// Provider type identifier.
     fn provider_type(&self) -> &'static str;
 }

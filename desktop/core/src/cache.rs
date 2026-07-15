@@ -628,6 +628,10 @@ impl Cache {
                 signature: row.get(2)?,
                 is_default: row.get::<_, i32>(3)? != 0,
                 color: row.get(4)?,
+                // Capabilities aren't cached — they come from the live
+                // /identities fetch; default false until that lands.
+                can_create_events: false,
+                can_create_contacts: false,
             })
         }).map_err(|e| format!("query: {e}"))?;
 
