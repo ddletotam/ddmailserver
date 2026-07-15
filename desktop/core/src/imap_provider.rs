@@ -339,7 +339,15 @@ impl MailProvider for ImapProvider {
         let ical = crate::caldav_client::build_ical(
             &uid, summary, description, location, dtstart, dtend, all_day,
         );
-        crate::caldav_client::put_event(url, &self.username, &self.password, &uid, &ical).await?;
+        crate::caldav_client::put_event(
+            url,
+            &self.username,
+            &self.password,
+            &uid,
+            &ical,
+            crate::caldav_client::Precondition::IfNew,
+        )
+        .await?;
         let id = crate::caldav_client::event_id_from_uid(&uid);
         self.caldav_event_uids
             .lock()
@@ -361,8 +369,9 @@ impl MailProvider for ImapProvider {
             .get(&event_id)
             .cloned()
             .ok_or("unknown event id — reopen the calendar and retry")?;
-        // Fetch-merge-put so recurrence and other unedited properties survive.
-        let existing =
+        // Fetch-merge-put so recurrence and other unedited properties survive;
+        // the fetched ETag guards the PUT against a concurrent change.
+        let (existing, etag) =
             crate::caldav_client::get_event_raw(url, &self.username, &self.password, &uid).await?;
         let summary = body.get("summary").and_then(|v| v.as_str()).unwrap_or("");
         let description = body.get("description").and_then(|v| v.as_str()).unwrap_or("");
@@ -376,7 +385,12 @@ impl MailProvider for ImapProvider {
         let merged = crate::caldav_client::merge_ical(
             &existing, summary, description, location, dtstart, dtend, all_day,
         );
-        crate::caldav_client::put_event(url, &self.username, &self.password, &uid, &merged).await
+        let pre = match etag.as_deref() {
+            Some(tag) => crate::caldav_client::Precondition::IfMatch(tag),
+            None => crate::caldav_client::Precondition::None,
+        };
+        crate::caldav_client::put_event(url, &self.username, &self.password, &uid, &merged, pre)
+            .await
     }
 
     async fn delete_event(&self, event_id: i64) -> Result<(), String> {
@@ -390,7 +404,19 @@ impl MailProvider for ImapProvider {
             .get(&event_id)
             .cloned()
             .ok_or("unknown event id — reopen the calendar and retry")?;
-        crate::caldav_client::delete_event(url, &self.username, &self.password, &uid).await
+        // Grab the current ETag so the delete can't clobber a newer version.
+        let if_match = crate::caldav_client::get_event_raw(url, &self.username, &self.password, &uid)
+            .await
+            .ok()
+            .and_then(|(_, tag)| tag);
+        crate::caldav_client::delete_event(
+            url,
+            &self.username,
+            &self.password,
+            &uid,
+            if_match.as_deref(),
+        )
+        .await
     }
 
     async fn list_contacts(&self, limit: u32) -> Result<Vec<DesktopContact>, String> {
