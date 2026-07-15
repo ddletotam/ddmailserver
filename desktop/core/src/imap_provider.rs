@@ -26,9 +26,15 @@ pub struct ImapProvider {
     /// yet — a direct collection URL (Phase 4, slice 1).
     pub carddav_url: Option<String>,
     /// Optional CalDAV calendar-collection URL. When set, list_calendars
-    /// returns one synthetic calendar and fetch_calendar_events reads from it
-    /// (read-only, Basic auth). Direct collection URL, no discovery (slice 2).
+    /// returns one calendar and fetch_calendar_events reads from it; with
+    /// write support the event create/patch/delete also target it (Basic
+    /// auth). Direct collection URL, no discovery.
     pub caldav_url: Option<String>,
+    /// Maps our synthetic numeric event id → iCal UID for the last-fetched
+    /// CalDAV events, so patch/delete (which the UI addresses by i64 id) can
+    /// resolve the resource. The provider is long-lived per account, so this
+    /// survives between fetch and edit.
+    pub caldav_event_uids: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<i64, String>>>,
 }
 
 /// Synthetic calendar id for a standalone CalDAV collection (there is exactly
@@ -273,7 +279,7 @@ impl MailProvider for ImapProvider {
             description: String::new(),
             color: "#3a6df0".into(),
             source_type: "caldav".into(),
-            can_write: false,
+            can_write: true,
             enabled: true,
             timezone: String::new(),
         }])
@@ -291,9 +297,17 @@ impl MailProvider for ImapProvider {
         let mut events =
             crate::caldav_client::fetch_events(url, &self.username, &self.password, from_ms, to_ms)
                 .await?;
+        // Assign a stable numeric id per UID and remember the mapping so
+        // patch/delete (addressed by id) can resolve the CalDAV resource.
+        let mut map = self.caldav_event_uids.lock().map_err(|e| format!("lock: {e}"))?;
         for e in events.iter_mut() {
+            let id = crate::caldav_client::event_id_from_uid(&e.uid);
+            e.id = id;
             e.calendar_id = STANDALONE_CALDAV_CAL_ID;
+            e.editable = true;
+            e.deletable = true;
             e.identity_email = self.user_email.clone();
+            map.insert(id, e.uid.clone());
         }
         Ok(events)
     }
@@ -302,16 +316,81 @@ impl MailProvider for ImapProvider {
         Err("RSVP requires a DDMail server.".into())
     }
 
-    async fn patch_event(&self, _event_id: i64, _body: serde_json::Value) -> Result<(), String> {
-        Err("Editing events requires a DDMail server.".into())
+    async fn create_event(&self, body: serde_json::Value) -> Result<serde_json::Value, String> {
+        let Some(url) = &self.caldav_url else {
+            return Err("Creating events requires a CalDAV URL or a DDMail server.".into());
+        };
+        let summary = body.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+        let description = body.get("description").and_then(|v| v.as_str()).unwrap_or("");
+        let location = body.get("location").and_then(|v| v.as_str()).unwrap_or("");
+        let all_day = body.get("all_day").and_then(|v| v.as_bool()).unwrap_or(false);
+        let dtstart = body
+            .get("dtstart")
+            .and_then(|v| v.as_i64())
+            .ok_or("dtstart required")?;
+        let dtend = body.get("dtend").and_then(|v| v.as_i64()).filter(|&v| v != 0);
+        // UID from start + a hash of the summary (no RNG in core); the server
+        // treats a repeat PUT of the same UID as an update, which is benign.
+        let uid = format!(
+            "{}-{:x}@ddmail",
+            dtstart,
+            crate::caldav_client::event_id_from_uid(summary)
+        );
+        let ical = crate::caldav_client::build_ical(
+            &uid, summary, description, location, dtstart, dtend, all_day,
+        );
+        crate::caldav_client::put_event(url, &self.username, &self.password, &uid, &ical).await?;
+        let id = crate::caldav_client::event_id_from_uid(&uid);
+        self.caldav_event_uids
+            .lock()
+            .map_err(|e| format!("lock: {e}"))?
+            .insert(id, uid.clone());
+        Ok(serde_json::json!({
+            "id": id, "uid": uid, "calendar_id": STANDALONE_CALDAV_CAL_ID
+        }))
     }
 
-    async fn create_event(&self, _body: serde_json::Value) -> Result<serde_json::Value, String> {
-        Err("Creating events requires a DDMail server.".into())
+    async fn patch_event(&self, event_id: i64, body: serde_json::Value) -> Result<(), String> {
+        let Some(url) = &self.caldav_url else {
+            return Err("Editing events requires a CalDAV URL or a DDMail server.".into());
+        };
+        let uid = self
+            .caldav_event_uids
+            .lock()
+            .map_err(|e| format!("lock: {e}"))?
+            .get(&event_id)
+            .cloned()
+            .ok_or("unknown event id — reopen the calendar and retry")?;
+        // Fetch-merge-put so recurrence and other unedited properties survive.
+        let existing =
+            crate::caldav_client::get_event_raw(url, &self.username, &self.password, &uid).await?;
+        let summary = body.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+        let description = body.get("description").and_then(|v| v.as_str()).unwrap_or("");
+        let location = body.get("location").and_then(|v| v.as_str()).unwrap_or("");
+        let all_day = body.get("all_day").and_then(|v| v.as_bool()).unwrap_or(false);
+        let dtstart = body
+            .get("dtstart")
+            .and_then(|v| v.as_i64())
+            .ok_or("dtstart required")?;
+        let dtend = body.get("dtend").and_then(|v| v.as_i64()).filter(|&v| v != 0);
+        let merged = crate::caldav_client::merge_ical(
+            &existing, summary, description, location, dtstart, dtend, all_day,
+        );
+        crate::caldav_client::put_event(url, &self.username, &self.password, &uid, &merged).await
     }
 
-    async fn delete_event(&self, _event_id: i64) -> Result<(), String> {
-        Err("Deleting events requires a DDMail server.".into())
+    async fn delete_event(&self, event_id: i64) -> Result<(), String> {
+        let Some(url) = &self.caldav_url else {
+            return Err("Deleting events requires a CalDAV URL or a DDMail server.".into());
+        };
+        let uid = self
+            .caldav_event_uids
+            .lock()
+            .map_err(|e| format!("lock: {e}"))?
+            .get(&event_id)
+            .cloned()
+            .ok_or("unknown event id — reopen the calendar and retry")?;
+        crate::caldav_client::delete_event(url, &self.username, &self.password, &uid).await
     }
 
     async fn list_contacts(&self, limit: u32) -> Result<Vec<DesktopContact>, String> {
