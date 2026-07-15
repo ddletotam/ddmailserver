@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod cache;
+pub mod caldav_client;
 pub mod carddav_client;
 pub mod event;
 pub mod imap;

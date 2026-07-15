@@ -25,7 +25,15 @@ pub struct ImapProvider {
     /// credentials by default); otherwise contacts are empty. No autodiscovery
     /// yet — a direct collection URL (Phase 4, slice 1).
     pub carddav_url: Option<String>,
+    /// Optional CalDAV calendar-collection URL. When set, list_calendars
+    /// returns one synthetic calendar and fetch_calendar_events reads from it
+    /// (read-only, Basic auth). Direct collection URL, no discovery (slice 2).
+    pub caldav_url: Option<String>,
 }
+
+/// Synthetic calendar id for a standalone CalDAV collection (there is exactly
+/// one per plain-server account, so a fixed id is fine).
+const STANDALONE_CALDAV_CAL_ID: i64 = 1;
 
 /// Helper macro: connect → run closure → logout.
 macro_rules! with_session {
@@ -254,16 +262,40 @@ impl MailProvider for ImapProvider {
     }
 
     async fn list_calendars(&self) -> Result<Vec<DesktopCalendar>, String> {
-        Err("Calendars require a DDMail server. Add an account on a server that supports the native protocol, or wait for standalone CalDAV support.".into())
+        // A direct CalDAV collection URL exposes exactly one (read-only)
+        // calendar; without one, a plain IMAP account simply has no calendars.
+        let Some(_) = &self.caldav_url else {
+            return Ok(Vec::new());
+        };
+        Ok(vec![DesktopCalendar {
+            id: STANDALONE_CALDAV_CAL_ID,
+            name: self.user_email.clone(),
+            description: String::new(),
+            color: "#3a6df0".into(),
+            source_type: "caldav".into(),
+            can_write: false,
+            enabled: true,
+            timezone: String::new(),
+        }])
     }
 
     async fn fetch_calendar_events(
         &self,
-        _from_ms: i64,
-        _to_ms: i64,
+        from_ms: i64,
+        to_ms: i64,
         _calendar_ids: &[i64],
     ) -> Result<Vec<DesktopCalendarEvent>, String> {
-        Err("Calendars require a DDMail server.".into())
+        let Some(url) = &self.caldav_url else {
+            return Ok(Vec::new());
+        };
+        let mut events =
+            crate::caldav_client::fetch_events(url, &self.username, &self.password, from_ms, to_ms)
+                .await?;
+        for e in events.iter_mut() {
+            e.calendar_id = STANDALONE_CALDAV_CAL_ID;
+            e.identity_email = self.user_email.clone();
+        }
+        Ok(events)
     }
 
     async fn rsvp_event(&self, _event_id: i64, _partstat: &str) -> Result<String, String> {
