@@ -34,6 +34,8 @@ pub struct AccountConfig {
     pub smtp_port: u16,
     pub native_url: Option<String>,
     pub native_token: Option<String>,
+    /// Optional CardDAV addressbook-collection URL (plain-server accounts).
+    pub carddav_url: Option<String>,
 }
 
 impl AccountConfig {
@@ -64,6 +66,7 @@ impl AccountConfig {
             smtp_port,
             native_url: std::env::var("DDMAIL_NATIVE_URL").ok(),
             native_token: std::env::var("DDMAIL_NATIVE_TOKEN").ok(),
+            carddav_url: std::env::var("DDMAIL_CARDDAV_URL").ok(),
         })
     }
 
@@ -92,6 +95,7 @@ impl AccountConfig {
             smtp_port: v.get("smtp_port").and_then(|x| x.as_u64()).unwrap_or(465) as u16,
             native_url: v.get("native_url").and_then(|x| x.as_str()).map(String::from),
             native_token: v.get("native_token").and_then(|x| x.as_str()).map(String::from),
+            carddav_url: v.get("carddav_url").and_then(|x| x.as_str()).map(String::from),
         })
     }
 
@@ -148,6 +152,7 @@ impl AccountConfig {
             "username": self.username, "password": self.password, "email": self.email,
             "smtp_host": self.smtp_host, "smtp_port": self.smtp_port,
             "native_url": self.native_url, "native_token": self.native_token,
+            "carddav_url": self.carddav_url,
         })
     }
 
@@ -260,6 +265,7 @@ fn build_provider(cfg: &AccountConfig) -> Arc<dyn MailProvider> {
             use_tls: cfg.use_tls,
             user_email: cfg.email.clone(),
             pool: Arc::new(SessionPool::new()),
+            carddav_url: cfg.carddav_url.clone(),
         })
     }
 }
