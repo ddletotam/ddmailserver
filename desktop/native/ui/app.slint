@@ -4219,87 +4219,134 @@ export component ToastWindow inherits Window {
 // error text or the window is hidden and startup continues).
 export component LoginWindow inherits Window {
     title: "ddmail — вход";
-    width: 420px;
-    height: 380px;
+    width: 440px;
+    height: 640px;
     background: #1b1e23;
 
+    // 0 = DDMail (our server, native); 1 = standalone (any IMAP + optional
+    // CalDAV/CardDAV).
+    in-out property <int> mode: 0;
+
+    // Native mode.
     in-out property <string> server-url: "https://mail.letotam.ru";
+    // Shared.
     in-out property <string> username: "";
     in-out property <string> password: "";
+    // Standalone mode.
+    in-out property <string> email: "";
+    in-out property <string> imap-host: "";
+    in-out property <string> imap-port: "993";
+    in-out property <string> caldav-url: "";
+    in-out property <string> carddav-url: "";
+
     in property <string> error: "";
     in property <bool> busy: false;
 
     callback submit();
 
     VerticalLayout {
-        padding: 32px;
-        spacing: 10px;
+        padding: 28px;
+        spacing: 8px;
 
         Text {
             text: "ddmail";
-            font-size: 26px;
-            font-weight: 800;
-            color: #ffffff;
+            font-size: 26px; font-weight: 800; color: #ffffff;
             horizontal-alignment: center;
         }
         Text {
-            text: "Вход в почту";
-            font-size: 13px;
-            color: #aeb6c2;
+            text: "Подключение почты";
+            font-size: 13px; color: #aeb6c2;
             horizontal-alignment: center;
         }
+        Rectangle { height: 6px; }
 
-        Rectangle { height: 8px; }
-
-        Text { text: "Сервер"; font-size: 12px; color: #aeb6c2; }
-        server-edit := LineEdit {
-            text <=> root.server-url;
-            font-size: 14px;
-            enabled: !root.busy;
-        }
-
-        Text { text: "Логин"; font-size: 12px; color: #aeb6c2; }
-        user-edit := LineEdit {
-            text <=> root.username;
-            font-size: 14px;
-            enabled: !root.busy;
-            accepted => { pass-edit.focus(); }
-        }
-
-        Text { text: "Пароль"; font-size: 12px; color: #aeb6c2; }
-        pass-edit := LineEdit {
-            text <=> root.password;
-            font-size: 14px;
-            input-type: InputType.password;
-            enabled: !root.busy;
-            accepted => { root.submit(); }
-        }
-
-        // Error line keeps its slot (fixed height) so the card never jumps.
-        Text {
-            text: root.error;
-            font-size: 12px;
-            color: #ff6b6b;
-            height: 18px;
-            overflow: elide;
-        }
-
-        submit-ta := TouchArea {
-            height: 40px;
-            enabled: !root.busy;
-            clicked => { root.submit(); }
-            Rectangle {
-                background: root.busy
-                    ? #2c3e66
-                    : (submit-ta.has-hover ? #4f7df5 : #3a6df0);
-                border-radius: 8px;
-                Text {
-                    text: root.busy ? "Входим…" : "Войти";
-                    color: #ffffff;
-                    font-size: 15px;
-                    font-weight: 700;
+        // Account-type toggle.
+        HorizontalLayout {
+            spacing: 0px;
+            height: 38px;
+            tab-native := TouchArea {
+                clicked => { root.mode = 0; }
+                Rectangle {
+                    background: root.mode == 0 ? #3a6df0 : #23262b;
+                    border-top-left-radius: 8px; border-bottom-left-radius: 8px;
+                    Text { text: "Наш сервер"; color: root.mode == 0 ? #ffffff : #aeb6c2; font-size: 13px; font-weight: 600; }
+                }
+            }
+            tab-standalone := TouchArea {
+                clicked => { root.mode = 1; }
+                Rectangle {
+                    background: root.mode == 1 ? #3a6df0 : #23262b;
+                    border-top-right-radius: 8px; border-bottom-right-radius: 8px;
+                    Text { text: "Другой (IMAP)"; color: root.mode == 1 ? #ffffff : #aeb6c2; font-size: 13px; font-weight: 600; }
                 }
             }
         }
+        Rectangle { height: 4px; }
+
+        // ── Native fields ──
+        if root.mode == 0: Text { text: "Сервер"; font-size: 12px; color: #aeb6c2; }
+        if root.mode == 0: LineEdit {
+            text <=> root.server-url; font-size: 14px; enabled: !root.busy;
+        }
+
+        // ── Standalone fields ──
+        if root.mode == 1: Text { text: "Email"; font-size: 12px; color: #aeb6c2; }
+        if root.mode == 1: LineEdit {
+            text <=> root.email; font-size: 14px; enabled: !root.busy;
+            placeholder-text: "you@example.com";
+        }
+        if root.mode == 1: Text { text: "IMAP-сервер"; font-size: 12px; color: #aeb6c2; }
+        if root.mode == 1: LineEdit {
+            text <=> root.imap-host; font-size: 14px; enabled: !root.busy;
+            placeholder-text: "imap.example.com";
+        }
+        if root.mode == 1: Text { text: "IMAP-порт"; font-size: 12px; color: #aeb6c2; }
+        if root.mode == 1: LineEdit {
+            text <=> root.imap-port; font-size: 14px; enabled: !root.busy;
+        }
+
+        // ── Shared credentials ──
+        Text { text: "Логин"; font-size: 12px; color: #aeb6c2; }
+        LineEdit {
+            text <=> root.username; font-size: 14px; enabled: !root.busy;
+        }
+        Text { text: "Пароль"; font-size: 12px; color: #aeb6c2; }
+        pass-edit := LineEdit {
+            text <=> root.password; font-size: 14px;
+            input-type: InputType.password; enabled: !root.busy;
+            accepted => { root.submit(); }
+        }
+
+        // ── Optional standalone calendar/contacts ──
+        if root.mode == 1: Text { text: "CalDAV URL (необязательно)"; font-size: 12px; color: #aeb6c2; }
+        if root.mode == 1: LineEdit {
+            text <=> root.caldav-url; font-size: 14px; enabled: !root.busy;
+            placeholder-text: "https://…/calendars/…/";
+        }
+        if root.mode == 1: Text { text: "CardDAV URL (необязательно)"; font-size: 12px; color: #aeb6c2; }
+        if root.mode == 1: LineEdit {
+            text <=> root.carddav-url; font-size: 14px; enabled: !root.busy;
+            placeholder-text: "https://…/addressbooks/…/";
+        }
+
+        Text {
+            text: root.error;
+            font-size: 12px; color: #ff6b6b; height: 18px; overflow: elide;
+        }
+
+        submit-ta := TouchArea {
+            height: 42px;
+            enabled: !root.busy;
+            clicked => { root.submit(); }
+            Rectangle {
+                background: root.busy ? #2c3e66 : (submit-ta.has-hover ? #4f7df5 : #3a6df0);
+                border-radius: 8px;
+                Text {
+                    text: root.busy ? "Подключаем…" : (root.mode == 0 ? "Войти" : "Подключить");
+                    color: #ffffff; font-size: 15px; font-weight: 700;
+                }
+            }
+        }
+        Rectangle { vertical-stretch: 1; }
     }
 }

@@ -2613,9 +2613,45 @@ fn run_login_window() -> bool {
         if lw.get_busy() {
             return;
         }
-        let server = lw.get_server_url().trim().trim_end_matches('/').to_string();
         let username = lw.get_username().trim().to_string();
         let password = lw.get_password().to_string();
+
+        // ── Standalone (IMAP + optional CalDAV/CardDAV): no server login,
+        // just persist the account directly. ──
+        if lw.get_mode() == 1 {
+            let email = lw.get_email().trim().to_string();
+            let host = lw.get_imap_host().trim().to_string();
+            if email.is_empty() || host.is_empty() || username.is_empty() || password.is_empty() {
+                lw.set_error("Заполните email, IMAP-сервер, логин и пароль".into());
+                return;
+            }
+            let port: u16 = lw.get_imap_port().trim().parse().unwrap_or(993);
+            let opt = |s: String| {
+                let t = s.trim().to_string();
+                if t.is_empty() { None } else { Some(t) }
+            };
+            let cfg = engine::AccountConfig {
+                host: host.clone(),
+                port,
+                username,
+                password,
+                use_tls: true,
+                email,
+                smtp_host: host,
+                smtp_port: 465,
+                native_url: None,
+                native_token: None,
+                carddav_url: opt(lw.get_carddav_url().to_string()),
+                caldav_url: opt(lw.get_caldav_url().to_string()),
+            };
+            engine::AccountConfig::save_all(std::slice::from_ref(&cfg));
+            done_cb.store(true, Ordering::Relaxed);
+            let _ = lw.hide();
+            return;
+        }
+
+        // ── Native (our server): username+password → JWT. ──
+        let server = lw.get_server_url().trim().trim_end_matches('/').to_string();
         if server.is_empty() || username.is_empty() || password.is_empty() {
             lw.set_error("Заполните все поля".into());
             return;
