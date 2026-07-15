@@ -14,6 +14,16 @@ struct MessageHit {
     date: string,
 }
 
+// One row of the unified address book (view-mode 2). Aggregated server-side;
+// the client shows one book and never groups by source.
+struct AddrBookRow {
+    name: string,
+    detail: string,   // primary email, or organization
+    initials: string,
+    color: brush,     // initials-bubble tint
+    email: string,    // primary email (for compose-to on click)
+}
+
 struct ConvItem {
     name: string,
     preview: string,
@@ -356,6 +366,14 @@ export component MainWindow inherits Window {
     in-out property <int> view-mode: 0;
     // Burger menu (top-left) open state — replaces the old always-on nav rail.
     in-out property <bool> view-menu-open: false;
+
+    // ── Address book (view-mode 2) ──
+    in property <[AddrBookRow]> address-book;
+    in-out property <string> contacts-query: "";
+    // Fired (debounce-free; Rust throttles) as the user types the search box.
+    callback contacts-search(string);
+    // A row was clicked — Rust starts a compose to this address.
+    callback contact-activated(string);
     // When true the calendar's left panel (+ Событие / КАЛЕНДАРИ) is hidden,
     // giving the week grid the full width.
     in-out property <bool> calendar-panel-collapsed: false;
@@ -2638,6 +2656,85 @@ export component MainWindow inherits Window {
                 changed height => { root.grid-area-resized(self.width, self.height); }
             }
         }
+        // ---------- Address book (view-mode 2) ----------
+        if root.view-mode == 2: Rectangle {
+            horizontal-stretch: 1;
+            background: #f7f8fa;
+            VerticalLayout {
+                // Header: burger + title.
+                Rectangle {
+                    height: 56px;
+                    Rectangle {
+                        x: 10px; y: 10px; width: 36px; height: 36px;
+                        border-radius: 10px;
+                        background: burger-ab.has-hover ? #e1e6ee : transparent;
+                        burger-ab := TouchArea { clicked => { root.view-menu-open = !root.view-menu-open; } }
+                        VerticalLayout {
+                            padding-left: 9px; padding-right: 9px; spacing: 4px; alignment: center;
+                            Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
+                            Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
+                            Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
+                        }
+                    }
+                    Text {
+                        x: 60px; width: parent.width - 72px; height: 56px;
+                        text: "Контакты";
+                        font-size: 18px; font-weight: 700; color: #0f1419;
+                        vertical-alignment: center;
+                    }
+                }
+                // Search box.
+                HorizontalLayout {
+                    padding-left: 12px; padding-right: 12px; padding-bottom: 8px;
+                    cb-search := LineEdit {
+                        placeholder-text: "Поиск контактов";
+                        text <=> root.contacts-query;
+                        edited => { root.contacts-search(root.contacts-query); }
+                    }
+                }
+                // Rows.
+                ListView {
+                    vertical-stretch: 1;
+                    for c in root.address-book: Rectangle {
+                        height: 60px;
+                        background: ab-row.has-hover ? #eef2f7 : transparent;
+                        ab-row := TouchArea { clicked => { root.contact-activated(c.email); } }
+                        HorizontalLayout {
+                            padding-left: 14px; padding-right: 14px; spacing: 12px;
+                            alignment: start;
+                            Rectangle {
+                                width: 40px; height: 40px; border-radius: 20px;
+                                y: (parent.height - self.height) / 2;
+                                background: c.color;
+                                Text {
+                                    text: c.initials;
+                                    color: white; font-size: 15px; font-weight: 700;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center; spacing: 2px;
+                                Text {
+                                    text: c.name;
+                                    font-size: 14px; font-weight: 600; color: #0f1419;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: c.detail;
+                                    font-size: 12px; color: #6b7480;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                        Rectangle {
+                            x: 66px; y: parent.height - 1px;
+                            width: parent.width - 66px; height: 1px;
+                            background: #edf0f3;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // ---------- View switcher (burger) overlay ----------
@@ -2649,7 +2746,7 @@ export component MainWindow inherits Window {
             x: 10px;
             y: 54px;
             width: 220px;
-            height: 126px;
+            height: 164px;
             background: white;
             border-radius: 10px;
             border-width: 1px;
@@ -2683,6 +2780,19 @@ export component MainWindow inherits Window {
                         padding-left: 12px; spacing: 10px; alignment: start;
                         Text { text: "📅"; font-size: 16px; vertical-alignment: center; }
                         Text { text: "Календарь"; font-size: 14px; font-weight: 600; color: #0f1419; vertical-alignment: center; }
+                    }
+                }
+                Rectangle {
+                    height: 36px;
+                    border-radius: 8px;
+                    background: root.view-mode == 2 ? #eaf2fe : (vm-con.has-hover ? #f0f2f5 : transparent);
+                    vm-con := TouchArea {
+                        clicked => { root.view-mode = 2; root.view-changed(2); root.view-menu-open = false; }
+                    }
+                    HorizontalLayout {
+                        padding-left: 12px; spacing: 10px; alignment: start;
+                        Text { text: "👤"; font-size: 16px; vertical-alignment: center; }
+                        Text { text: "Контакты"; font-size: 14px; font-weight: 600; color: #0f1419; vertical-alignment: center; }
                     }
                 }
                 Rectangle {

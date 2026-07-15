@@ -218,6 +218,64 @@ fn aim_composer_identity(ui: &MainWindow, sh: &Shared, email: &str) {
     }
 }
 
+/// Ask the engine for the address book. Empty query = full book, otherwise a
+/// search. Answers are guarded UI-side by the echoed query (see the
+/// EngineResult::Contacts handler), so typing fast just drops stale results.
+fn fetch_contacts(sh: &Shared, query: &str) {
+    if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+        let limit = if query.trim().is_empty() { 500 } else { 50 };
+        let _ = etx.send(engine::EngineCmd::FetchContacts {
+            query: query.to_string(),
+            limit,
+        });
+    }
+}
+
+/// Two-letter initials for the avatar bubble: first letters of the first two
+/// whitespace-separated words, else the first char, uppercased.
+fn contact_initials(name: &str) -> String {
+    let words: Vec<&str> = name.split_whitespace().collect();
+    let s: String = match words.as_slice() {
+        [] => String::new(),
+        [one] => one.chars().take(1).collect(),
+        [a, b, ..] => a.chars().take(1).chain(b.chars().take(1)).collect(),
+    };
+    s.to_uppercase()
+}
+
+/// Stable pastel pick for a contact bubble, hashed off a seed (email or name).
+fn contact_pastel(seed: &str) -> &'static str {
+    let h = seed.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    IDENT_PASTEL[(h as usize) % IDENT_PASTEL.len()]
+}
+
+/// Build the Slint address-book rows from the engine's contact DTOs.
+fn address_book_rows(list: &[ddmail_core::types::DesktopContact]) -> Vec<AddrBookRow> {
+    list.iter()
+        .map(|c| {
+            let email = c.emails.first().cloned().unwrap_or_default();
+            let name = if c.full_name.trim().is_empty() {
+                if !email.is_empty() { email.clone() } else { c.organization.clone() }
+            } else {
+                c.full_name.clone()
+            };
+            let detail = if !email.is_empty() {
+                email.clone()
+            } else {
+                c.organization.clone()
+            };
+            let seed = if email.is_empty() { name.clone() } else { email.clone() };
+            AddrBookRow {
+                name: name.clone().into(),
+                detail: detail.into(),
+                initials: contact_initials(&name).into(),
+                color: parse_hex_color(contact_pastel(&seed)).into(),
+                email: email.into(),
+            }
+        })
+        .collect()
+}
+
 /// "#rrggbb" → slint Color; anything unparsable → neutral grey.
 fn parse_hex_color(s: &str) -> slint::Color {
     let h = s.trim().trim_start_matches('#');
@@ -4377,8 +4435,30 @@ fn main() {
                     let _ = etx.send(engine::EngineCmd::FetchCalendars);
                 }
                 refetch_calendar_events(&ui, &sh_view);
+            } else if mode == 2 {
+                // Enter the address book: load the full book (empty query).
+                ui.set_contacts_query("".into());
+                fetch_contacts(&sh_view, "");
             }
         }
+    });
+
+    // Address-book search box: fire the lookup on every edit (engine answers
+    // are guarded by the echoed query, so stale results are dropped).
+    let sh_cs = shared.clone();
+    ui.on_contacts_search(move |q| {
+        fetch_contacts(&sh_cs, q.as_str());
+    });
+
+    // Click a contact row → jump to a compose addressed to them.
+    let ui_weak_ca = ui.as_weak();
+    ui.on_contact_activated(move |email| {
+        let Some(ui) = ui_weak_ca.upgrade() else { return };
+        if email.is_empty() {
+            return;
+        }
+        ui.set_view_mode(0);
+        ui.invoke_search_compose_new(email);
     });
     // If we start straight in calendar mode (e.g. saved state), kick
     // off the same fetch. (Not yet persisted, but trivial when it is.)
@@ -5557,6 +5637,15 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     apply_calendar_view(ui, sh);
                 }
             });
+        }
+        engine::EngineResult::Contacts { query, list } => {
+            // Drop stale answers: the search box has moved on since this
+            // request went out.
+            if ui.get_contacts_query().as_str() != query {
+                return;
+            }
+            let rows = address_book_rows(&list);
+            ui.set_address_book(ModelRc::new(VecModel::from(rows)));
         }
         engine::EngineResult::CalendarEvents(events) => {
             println!("engine: {} calendar events", events.len());
