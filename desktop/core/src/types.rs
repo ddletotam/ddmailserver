@@ -21,6 +21,13 @@ pub struct Identity {
     pub is_default: bool,
     #[serde(default)]
     pub color: String, // assigned client-side, pastel
+    /// Per-identity capabilities from the server: may the client offer
+    /// creating a new event / contact "under" this address. The create-under
+    /// picker is built only from identities where these are true.
+    #[serde(default)]
+    pub can_create_events: bool,
+    #[serde(default)]
+    pub can_create_contacts: bool,
 }
 
 // ── Folder ──
@@ -48,6 +55,26 @@ pub struct Contact {
     pub email: String,
     pub name: String,
     pub source: String, // "auto" | "carddav"
+}
+
+/// One row of the unified address book served by the DDMail server
+/// (`GET /contacts`). Aggregated across all the user's sources — membership
+/// is deliberately not exposed.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DesktopContact {
+    pub id: i64,
+    #[serde(default)]
+    pub full_name: String,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
+    pub emails: Vec<String>,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
+    pub phones: Vec<String>,
+    #[serde(default)]
+    pub organization: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub photo_url: String,
 }
 
 // ── Message ──
@@ -331,6 +358,18 @@ pub struct DesktopCalendarEvent {
     /// conference links, URL, CATEGORIES, CLASS etc. Uppercased names.
     #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub extras: Vec<DesktopEventExtra>,
+    /// Server-resolved presentation + capability so the source-blind client
+    /// renders one calendar: the owning calendar's colour, whether THIS event
+    /// may be edited/deleted, and the identity it belongs to. Advisory — the
+    /// server re-checks on write and may still reject.
+    #[serde(default)]
+    pub color: String,
+    #[serde(default)]
+    pub editable: bool,
+    #[serde(default)]
+    pub deletable: bool,
+    #[serde(default)]
+    pub identity_email: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -438,6 +438,15 @@ impl MailProvider for NativeProvider {
         self.get("/calendars").await
     }
 
+    async fn list_contacts(&self, limit: u32) -> Result<Vec<DesktopContact>, String> {
+        self.get(&format!("/contacts?limit={limit}")).await
+    }
+
+    async fn search_contacts(&self, query: &str, limit: u32) -> Result<Vec<DesktopContact>, String> {
+        let q = urlencoding::encode(query);
+        self.get(&format!("/contacts/search?q={q}&limit={limit}")).await
+    }
+
     async fn fetch_calendar_events(
         &self,
         from_ms: i64,
