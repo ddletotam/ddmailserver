@@ -254,16 +254,18 @@ fn address_book_rows(list: &[ddmail_core::types::DesktopContact]) -> Vec<AddrBoo
     list.iter()
         .map(|c| {
             let email = c.emails.first().cloned().unwrap_or_default();
-            let name = if c.full_name.trim().is_empty() {
-                if !email.is_empty() { email.clone() } else { c.organization.clone() }
-            } else {
+            let has_name = !c.full_name.trim().is_empty();
+            // With a real name, the second line is the email. Without one, the
+            // email becomes the title and the second line falls back to the
+            // organization (usually empty) — never repeat the email twice.
+            let name = if has_name {
                 c.full_name.clone()
-            };
-            let detail = if !email.is_empty() {
+            } else if !email.is_empty() {
                 email.clone()
             } else {
                 c.organization.clone()
             };
+            let detail = if has_name { email.clone() } else { c.organization.clone() };
             let seed = if email.is_empty() { name.clone() } else { email.clone() };
             AddrBookRow {
                 name: name.clone().into(),
