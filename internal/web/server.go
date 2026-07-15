@@ -197,6 +197,9 @@ func (s *Server) setupRoutes() {
 	desktopAuthAPI.HandleFunc("/avatars", s.HandleDesktopAvatar).Methods("GET")
 	desktopAuthAPI.HandleFunc("/contacts/search", s.HandleDesktopContactSearch).Methods("GET")
 	desktopAuthAPI.HandleFunc("/contacts", s.HandleDesktopContacts).Methods("GET")
+	desktopAuthAPI.HandleFunc("/contacts", s.HandleDesktopContactCreate).Methods("POST")
+	desktopAuthAPI.HandleFunc("/contacts/{id}", s.HandleDesktopContactPatch).Methods("PATCH")
+	desktopAuthAPI.HandleFunc("/contacts/{id}", s.HandleDesktopContactDelete).Methods("DELETE")
 
 	// CalDAV server (uses Basic Auth, handles its own authentication)
 	// MUST be registered BEFORE the catch-all "/" web routes

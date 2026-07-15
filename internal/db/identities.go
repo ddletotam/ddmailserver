@@ -58,6 +58,28 @@ func (db *DB) WritableContactIdentities(userID int64) (map[string]bool, error) {
 	return db.identitySet(query, userID)
 }
 
+// DefaultWriteAddressBookID returns the address book a NEW contact should land
+// in for the given identity: a local book preferred, else the oldest writable
+// one. 0 (no error) when the identity has no writable book.
+func (db *DB) DefaultWriteAddressBookID(userID int64, identityEmail string) (int64, error) {
+	query := `
+		SELECT ab.id
+		FROM address_books ab JOIN contact_sources cs ON ab.source_id = cs.id
+		WHERE ab.user_id = $1 AND cs.identity_email = $2 AND ab.can_write = true
+		ORDER BY (cs.source_type = 'local') DESC, ab.id ASC
+		LIMIT 1
+	`
+	var id int64
+	err := db.QueryRow(query, userID, identityEmail).Scan(&id)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to resolve write address book for %s: %w", identityEmail, err)
+	}
+	return id, nil
+}
+
 func (db *DB) identitySet(query string, userID int64) (map[string]bool, error) {
 	rows, err := db.Query(query, userID)
 	if err != nil {
