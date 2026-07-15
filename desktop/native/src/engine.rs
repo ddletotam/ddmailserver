@@ -68,10 +68,17 @@ impl AccountConfig {
     }
 
     /// Parse one account object (shared by account.json and accounts.json[]).
+    /// `password` is optional for native-mode accounts (the login screen
+    /// stores a token instead of the IMAP password).
     fn from_json(v: &serde_json::Value) -> Option<Self> {
         let host = v.get("host")?.as_str()?.to_string();
         let username = v.get("username")?.as_str()?.to_string();
-        let password = v.get("password")?.as_str()?.to_string();
+        let native = v.get("native_url").is_some() && v.get("native_token").is_some();
+        let password = match v.get("password").and_then(|x| x.as_str()) {
+            Some(p) => p.to_string(),
+            None if native => String::new(),
+            None => return None,
+        };
         let email = v.get("email").and_then(|x| x.as_str()).unwrap_or(&username).to_string();
         let smtp_host = v.get("smtp_host").and_then(|x| x.as_str()).unwrap_or(&host).to_string();
         Some(AccountConfig {
@@ -135,24 +142,52 @@ impl AccountConfig {
         Vec::new()
     }
 
-    /// Write a one-element `accounts.json` from a legacy single account, unless
-    /// one already exists. Best-effort.
-    fn migrate_to_accounts_json(&self) {
-        let Some(dir) = Self::config_dir() else { return };
-        let path = dir.join("accounts.json");
-        if path.exists() {
-            return;
-        }
-        let arr = serde_json::json!([{
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
             "host": self.host, "port": self.port, "use_tls": self.use_tls,
             "username": self.username, "password": self.password, "email": self.email,
             "smtp_host": self.smtp_host, "smtp_port": self.smtp_port,
             "native_url": self.native_url, "native_token": self.native_token,
-        }]);
+        })
+    }
+
+    /// Overwrite `accounts.json` with the given set. Best-effort.
+    pub fn save_all(accounts: &[AccountConfig]) {
+        let Some(dir) = Self::config_dir() else { return };
+        let arr =
+            serde_json::Value::Array(accounts.iter().map(|a| a.to_json()).collect());
         if let Ok(s) = serde_json::to_string_pretty(&arr) {
             let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(&path, s);
+            let _ = std::fs::write(dir.join("accounts.json"), s);
         }
+    }
+
+    /// Persist a rotated JWT (native provider's auto-refresh) back into
+    /// `accounts.json`, so the next launch starts from the fresh token
+    /// instead of the stale one. `account_id` is the account email — the id
+    /// the provider was built with (see build_provider).
+    pub fn persist_native_token(account_id: &str, token: &str) {
+        let mut accounts = Self::load_all();
+        let mut changed = false;
+        for a in accounts.iter_mut() {
+            if a.email == account_id && a.native_token.is_some() {
+                a.native_token = Some(token.to_string());
+                changed = true;
+            }
+        }
+        if changed {
+            Self::save_all(&accounts);
+        }
+    }
+
+    /// Write a one-element `accounts.json` from a legacy single account, unless
+    /// one already exists. Best-effort.
+    fn migrate_to_accounts_json(&self) {
+        let Some(dir) = Self::config_dir() else { return };
+        if dir.join("accounts.json").exists() {
+            return;
+        }
+        Self::save_all(std::slice::from_ref(self));
     }
 
     pub fn account_key(&self) -> String {

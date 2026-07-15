@@ -4013,3 +4013,93 @@ export component ToastWindow inherits Window {
         }
     }
 }
+
+// First-run login: shown instead of the main window when no account is
+// configured. Rust does the actual HTTP round-trip (submit → busy → either
+// error text or the window is hidden and startup continues).
+export component LoginWindow inherits Window {
+    title: "ddmail — вход";
+    width: 420px;
+    height: 380px;
+    background: #1b1e23;
+
+    in-out property <string> server-url: "https://mail.letotam.ru";
+    in-out property <string> username: "";
+    in-out property <string> password: "";
+    in property <string> error: "";
+    in property <bool> busy: false;
+
+    callback submit();
+
+    VerticalLayout {
+        padding: 32px;
+        spacing: 10px;
+
+        Text {
+            text: "ddmail";
+            font-size: 26px;
+            font-weight: 800;
+            color: #ffffff;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: "Вход в почту";
+            font-size: 13px;
+            color: #aeb6c2;
+            horizontal-alignment: center;
+        }
+
+        Rectangle { height: 8px; }
+
+        Text { text: "Сервер"; font-size: 12px; color: #aeb6c2; }
+        server-edit := LineEdit {
+            text <=> root.server-url;
+            font-size: 14px;
+            enabled: !root.busy;
+        }
+
+        Text { text: "Логин"; font-size: 12px; color: #aeb6c2; }
+        user-edit := LineEdit {
+            text <=> root.username;
+            font-size: 14px;
+            enabled: !root.busy;
+            accepted => { pass-edit.focus(); }
+        }
+
+        Text { text: "Пароль"; font-size: 12px; color: #aeb6c2; }
+        pass-edit := LineEdit {
+            text <=> root.password;
+            font-size: 14px;
+            input-type: InputType.password;
+            enabled: !root.busy;
+            accepted => { root.submit(); }
+        }
+
+        // Error line keeps its slot (fixed height) so the card never jumps.
+        Text {
+            text: root.error;
+            font-size: 12px;
+            color: #ff6b6b;
+            height: 18px;
+            overflow: elide;
+        }
+
+        submit-ta := TouchArea {
+            height: 40px;
+            enabled: !root.busy;
+            clicked => { root.submit(); }
+            Rectangle {
+                background: root.busy
+                    ? #2c3e66
+                    : (submit-ta.has-hover ? #4f7df5 : #3a6df0);
+                border-radius: 8px;
+                Text {
+                    text: root.busy ? "Входим…" : "Войти";
+                    color: #ffffff;
+                    font-size: 15px;
+                    font-weight: 700;
+                }
+            }
+        }
+    }
+}
