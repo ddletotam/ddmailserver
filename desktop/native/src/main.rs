@@ -250,6 +250,21 @@ fn contact_pastel(seed: &str) -> &'static str {
 }
 
 /// Build the Slint address-book rows from the engine's contact DTOs.
+/// Build a contact-write body from the editor fields (one email/phone slot in
+/// the v1 form; the server/model accept arrays).
+fn contact_body_from_ui(ui: &MainWindow) -> serde_json::Value {
+    let email = ui.get_ce_email().trim().to_string();
+    let phone = ui.get_ce_phone().trim().to_string();
+    let emails: Vec<String> = if email.is_empty() { vec![] } else { vec![email] };
+    let phones: Vec<String> = if phone.is_empty() { vec![] } else { vec![phone] };
+    serde_json::json!({
+        "full_name": ui.get_ce_name().trim().to_string(),
+        "emails": emails,
+        "phones": phones,
+        "organization": ui.get_ce_org().trim().to_string(),
+    })
+}
+
 fn address_book_rows(list: &[ddmail_core::types::DesktopContact]) -> Vec<AddrBookRow> {
     list.iter()
         .map(|c| {
@@ -935,6 +950,11 @@ struct Shared {
     editing_event_id: Cell<i64>,
     /// Writable calendar ids, parallel to the edit-form's ComboBox model.
     edit_cal_ids: RefCell<Vec<i64>>,
+    /// Last-fetched address book (parallel to the `address-book` Slint model),
+    /// so the contact editor can read a row's full data by index.
+    address_book: RefCell<Vec<ddmail_core::types::DesktopContact>>,
+    /// Contact being edited (0 in create mode).
+    editing_contact_id: Cell<i64>,
     /// Files staged for the next outgoing message, picked via the composer's
     /// attach button. Parallel to the `composer-attachments` Slint model
     /// (which holds just the basenames). Cleared once a message is staged.
@@ -3289,6 +3309,8 @@ fn main() {
         manual_col_w: Cell::new(cal_set.manual_col_width),
         editing_event_id: Cell::new(0),
         edit_cal_ids: RefCell::new(Vec::new()),
+        address_book: RefCell::new(Vec::new()),
+        editing_contact_id: Cell::new(0),
         compose_attachments: RefCell::new(Vec::new()),
         pending_open_event: Cell::new(0),
         snooze_ctx: RefCell::new((0, 0, 0, 0, String::new())),
@@ -4466,6 +4488,73 @@ fn main() {
         ui.set_view_mode(0);
         ui.invoke_search_compose_new(email);
     });
+
+    // Contact editor: open blank (create).
+    let ui_weak_cadd = ui.as_weak();
+    let sh_cadd = shared.clone();
+    ui.on_contact_add(move || {
+        let Some(ui) = ui_weak_cadd.upgrade() else { return };
+        sh_cadd.editing_contact_id.set(0);
+        ui.set_ce_is_edit(false);
+        ui.set_ce_name("".into());
+        ui.set_ce_email("".into());
+        ui.set_ce_phone("".into());
+        ui.set_ce_org("".into());
+        ui.set_contact_editor_open(true);
+    });
+
+    // Contact editor: open populated for a row (edit).
+    let ui_weak_ced = ui.as_weak();
+    let sh_ced = shared.clone();
+    ui.on_contact_edit(move |idx| {
+        let Some(ui) = ui_weak_ced.upgrade() else { return };
+        let book = sh_ced.address_book.borrow();
+        let Some(c) = book.get(idx.max(0) as usize) else { return };
+        sh_ced.editing_contact_id.set(c.id);
+        ui.set_ce_is_edit(true);
+        ui.set_ce_name(c.full_name.clone().into());
+        ui.set_ce_email(c.emails.first().cloned().unwrap_or_default().into());
+        ui.set_ce_phone(c.phones.first().cloned().unwrap_or_default().into());
+        ui.set_ce_org(c.organization.clone().into());
+        ui.set_contact_editor_open(true);
+    });
+
+    let ui_weak_ccancel = ui.as_weak();
+    ui.on_contact_editor_cancel(move || {
+        if let Some(ui) = ui_weak_ccancel.upgrade() {
+            ui.set_contact_editor_open(false);
+        }
+    });
+
+    // Save: create or update, then close and refresh the book.
+    let ui_weak_csave = ui.as_weak();
+    let sh_csave = shared.clone();
+    ui.on_contact_save(move || {
+        let Some(ui) = ui_weak_csave.upgrade() else { return };
+        let body = contact_body_from_ui(&ui);
+        let Some(etx) = sh_csave.engine_tx.borrow().clone() else { return };
+        let id = sh_csave.editing_contact_id.get();
+        if id == 0 {
+            let _ = etx.send(engine::EngineCmd::CreateContact { body });
+        } else {
+            let _ = etx.send(engine::EngineCmd::UpdateContact { id, body });
+        }
+        ui.set_contact_editor_open(false);
+    });
+
+    // Delete the contact being edited.
+    let ui_weak_cdel = ui.as_weak();
+    let sh_cdel = shared.clone();
+    ui.on_contact_delete(move || {
+        let Some(ui) = ui_weak_cdel.upgrade() else { return };
+        let id = sh_cdel.editing_contact_id.get();
+        if id != 0 {
+            if let Some(etx) = sh_cdel.engine_tx.borrow().as_ref() {
+                let _ = etx.send(engine::EngineCmd::DeleteContact { id });
+            }
+        }
+        ui.set_contact_editor_open(false);
+    });
     // If we start straight in calendar mode (e.g. saved state), kick
     // off the same fetch. (Not yet persisted, but trivial when it is.)
 
@@ -5468,6 +5557,16 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                 });
                 return;
             }
+            if what == "contact" {
+                // Address-book mutation → refresh the current view/search.
+                let q = ui.get_contacts_query().to_string();
+                SHARED.with(|s| {
+                    if let Some(sh) = s.borrow().as_ref() {
+                        fetch_contacts(sh, &q);
+                    }
+                });
+                return;
+            }
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
                     // A flag change (seen/unseen) doesn't alter the conversation
@@ -5652,6 +5751,11 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             }
             let rows = address_book_rows(&list);
             ui.set_address_book(ModelRc::new(VecModel::from(rows)));
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    *sh.address_book.borrow_mut() = list;
+                }
+            });
         }
         engine::EngineResult::CalendarEvents(events) => {
             println!("engine: {} calendar events", events.len());

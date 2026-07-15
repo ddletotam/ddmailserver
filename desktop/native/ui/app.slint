@@ -374,6 +374,20 @@ export component MainWindow inherits Window {
     callback contacts-search(string);
     // A row was clicked — Rust starts a compose to this address.
     callback contact-activated(string);
+
+    // Contact editor overlay (create/edit). Rust fills the fields and toggles
+    // `contact-editor-open`; save/delete dispatch to the engine.
+    in-out property <bool> contact-editor-open: false;
+    in-out property <bool> ce-is-edit: false; // show Delete + Написать
+    in-out property <string> ce-name;
+    in-out property <string> ce-email;
+    in-out property <string> ce-phone;
+    in-out property <string> ce-org;
+    callback contact-add();          // open blank editor
+    callback contact-edit(int);      // open editor for row index
+    callback contact-save();
+    callback contact-delete();
+    callback contact-editor-cancel();
     // When true the calendar's left panel (+ Событие / КАЛЕНДАРИ) is hidden,
     // giving the week grid the full width.
     in-out property <bool> calendar-panel-collapsed: false;
@@ -2677,10 +2691,20 @@ export component MainWindow inherits Window {
                         }
                     }
                     Text {
-                        x: 60px; width: parent.width - 72px; height: 56px;
+                        x: 60px; width: parent.width - 120px; height: 56px;
                         text: "Контакты";
                         font-size: 18px; font-weight: 700; color: #0f1419;
                         vertical-alignment: center;
+                    }
+                    // "+" — new contact.
+                    Rectangle {
+                        x: parent.width - 46px; y: 10px; width: 36px; height: 36px;
+                        border-radius: 10px;
+                        background: ab-add.has-hover ? #d7e6ff : #eaf2fe;
+                        ab-add := TouchArea { clicked => { root.contact-add(); } }
+                        // Drawn plus (glyph font unreliable on Windows).
+                        Rectangle { width: 14px; height: 2px; border-radius: 1px; background: #2f80ed; }
+                        Rectangle { width: 2px; height: 14px; border-radius: 1px; background: #2f80ed; }
                     }
                 }
                 // Search box.
@@ -2695,10 +2719,10 @@ export component MainWindow inherits Window {
                 // Rows.
                 ListView {
                     vertical-stretch: 1;
-                    for c in root.address-book: Rectangle {
+                    for c[idx] in root.address-book: Rectangle {
                         height: 60px;
                         background: ab-row.has-hover ? #eef2f7 : transparent;
-                        ab-row := TouchArea { clicked => { root.contact-activated(c.email); } }
+                        ab-row := TouchArea { clicked => { root.contact-edit(idx); } }
                         HorizontalLayout {
                             padding-left: 14px; padding-right: 14px; spacing: 12px;
                             alignment: start;
@@ -2809,6 +2833,72 @@ export component MainWindow inherits Window {
                             text: "Настройки";
                             font-size: 14px; font-weight: 600; color: #0f1419;
                             vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------- Contact editor overlay ----------
+    if root.contact-editor-open: TouchArea {
+        clicked => { root.contact-editor-cancel(); }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 380px;
+            height: 356px;
+            background: white;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: #e6ecf2;
+            drop-shadow-blur: 18px;
+            drop-shadow-color: #00000022;
+            TouchArea { } // swallow clicks on the card
+            VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                Text {
+                    text: root.ce-is-edit ? "Изменить контакт" : "Новый контакт";
+                    font-size: 17px; font-weight: 700; color: #0f1419;
+                }
+                Text { text: "Имя"; font-size: 12px; color: #6b7480; }
+                LineEdit { text <=> root.ce-name; font-size: 14px; }
+                Text { text: "Email"; font-size: 12px; color: #6b7480; }
+                LineEdit { text <=> root.ce-email; font-size: 14px; }
+                Text { text: "Телефон"; font-size: 12px; color: #6b7480; }
+                LineEdit { text <=> root.ce-phone; font-size: 14px; }
+                Text { text: "Организация"; font-size: 12px; color: #6b7480; }
+                LineEdit { text <=> root.ce-org; font-size: 14px; }
+                Rectangle { height: 4px; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    if root.ce-is-edit: ce-del := TouchArea {
+                        height: 38px; width: 90px;
+                        clicked => { root.contact-delete(); }
+                        Rectangle {
+                            background: ce-del.has-hover ? #ffe1e1 : #fff0f0;
+                            border-radius: 8px;
+                            Text { text: "Удалить"; color: #d64545; font-size: 14px; font-weight: 600; }
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    ce-cancel := TouchArea {
+                        height: 38px; width: 90px;
+                        clicked => { root.contact-editor-cancel(); }
+                        Rectangle {
+                            background: ce-cancel.has-hover ? #eef0f3 : #f5f6f8;
+                            border-radius: 8px;
+                            Text { text: "Отмена"; color: #0f1419; font-size: 14px; }
+                        }
+                    }
+                    ce-save := TouchArea {
+                        height: 38px; width: 110px;
+                        clicked => { root.contact-save(); }
+                        Rectangle {
+                            background: ce-save.has-hover ? #4f7df5 : #3a6df0;
+                            border-radius: 8px;
+                            Text { text: "Сохранить"; color: white; font-size: 14px; font-weight: 700; }
                         }
                     }
                 }
