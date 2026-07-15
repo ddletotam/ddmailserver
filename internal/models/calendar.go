@@ -11,6 +11,10 @@ type CalendarSource struct {
 	Name       string `json:"name"`
 	SourceType string `json:"source_type"` // "local", "caldav", "ics_import", "ics_url"
 
+	// Identity (email address) this source belongs to. Mandatory — the
+	// desktop client is identity-keyed and there are no orphan sources.
+	IdentityEmail string `json:"identity_email"`
+
 	// Link to email account for sending invites
 	AccountID *int64 `json:"account_id,omitempty"`
 
