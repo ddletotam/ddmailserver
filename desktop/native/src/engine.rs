@@ -336,6 +336,11 @@ pub enum EngineCmd {
     /// query is autocomplete/search. `query` is echoed in the result so the UI
     /// can drop stale answers.
     FetchContacts { query: String, limit: u32 },
+    /// Address-book writes. Bodies are server-shaped JSON
+    /// (full_name/emails/phones/organization/title [+ from_identity on create]).
+    CreateContact { body: serde_json::Value },
+    UpdateContact { id: i64, body: serde_json::Value },
+    DeleteContact { id: i64 },
     /// Set the requesting user's PARTSTAT on an event (ACCEPTED/TENTATIVE/DECLINED).
     Rsvp { event_id: i64, partstat: String },
     /// Create a calendar event from a server-shaped JSON body.
@@ -870,6 +875,20 @@ pub fn spawn(
                         Err(e) => on_result(EngineResult::Error(format!("fetch_contacts: {e}"))),
                     }
                 }
+                EngineCmd::CreateContact { body } => match rt.block_on(provider.create_contact(body)) {
+                    Ok(_) => on_result(EngineResult::Done("contact".into())),
+                    Err(e) => on_result(EngineResult::Error(format!("create_contact: {e}"))),
+                },
+                EngineCmd::UpdateContact { id, body } => {
+                    match rt.block_on(provider.update_contact(id, body)) {
+                        Ok(_) => on_result(EngineResult::Done("contact".into())),
+                        Err(e) => on_result(EngineResult::Error(format!("update_contact: {e}"))),
+                    }
+                }
+                EngineCmd::DeleteContact { id } => match rt.block_on(provider.delete_contact(id)) {
+                    Ok(_) => on_result(EngineResult::Done("contact".into())),
+                    Err(e) => on_result(EngineResult::Error(format!("delete_contact: {e}"))),
+                },
                 EngineCmd::FetchCalendarEvents { from_ms, to_ms, calendar_ids } => {
                     match rt.block_on(provider.fetch_calendar_events(from_ms, to_ms, &calendar_ids)) {
                         Ok(events) => on_result(EngineResult::CalendarEvents(events)),
