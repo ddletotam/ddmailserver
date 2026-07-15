@@ -274,6 +274,7 @@ fn build_provider(cfg: &AccountConfig) -> Arc<dyn MailProvider> {
             caldav_event_uids: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             caldav_collection: Arc::new(std::sync::Mutex::new(None)),
             carddav_collection: Arc::new(std::sync::Mutex::new(None)),
+            carddav_contact_uids: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         })
     }
 }
