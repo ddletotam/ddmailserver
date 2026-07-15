@@ -2630,6 +2630,7 @@ fn run_login_window() -> bool {
                         smtp_port: 465,
                         native_url: Some(server.clone()),
                         native_token: Some(login.token.clone()),
+                        carddav_url: None,
                     };
                     engine::AccountConfig::save_all(std::slice::from_ref(&cfg));
                     done.store(true, Ordering::Relaxed);
@@ -3378,6 +3379,7 @@ fn main() {
                 smtp_port: 465,
                 native_url: None,
                 native_token: None,
+                carddav_url: None,
             });
         }
         // Seed the connection indicator: every account starts "connecting"

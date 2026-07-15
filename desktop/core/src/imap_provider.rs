@@ -20,6 +20,11 @@ pub struct ImapProvider {
     pub use_tls: bool,
     pub user_email: String,
     pub pool: std::sync::Arc<SessionPool>,
+    /// Optional CardDAV addressbook-collection URL for this account. When set,
+    /// the address book is served from it (Basic auth with the IMAP
+    /// credentials by default); otherwise contacts are empty. No autodiscovery
+    /// yet — a direct collection URL (Phase 4, slice 1).
+    pub carddav_url: Option<String>,
 }
 
 /// Helper macro: connect → run closure → logout.
@@ -275,6 +280,34 @@ impl MailProvider for ImapProvider {
 
     async fn delete_event(&self, _event_id: i64) -> Result<(), String> {
         Err("Deleting events requires a DDMail server.".into())
+    }
+
+    async fn list_contacts(&self, limit: u32) -> Result<Vec<DesktopContact>, String> {
+        let Some(url) = &self.carddav_url else {
+            return Ok(Vec::new());
+        };
+        crate::carddav_client::fetch_contacts(
+            url,
+            &self.username,
+            &self.password,
+            None,
+            limit as usize,
+        )
+        .await
+    }
+
+    async fn search_contacts(&self, query: &str, limit: u32) -> Result<Vec<DesktopContact>, String> {
+        let Some(url) = &self.carddav_url else {
+            return Ok(Vec::new());
+        };
+        crate::carddav_client::fetch_contacts(
+            url,
+            &self.username,
+            &self.password,
+            Some(query),
+            limit as usize,
+        )
+        .await
     }
 
     fn provider_type(&self) -> &'static str {
