@@ -2511,6 +2511,88 @@ impl log::Log for StdoutLogger {
 
 static STDOUT_LOGGER: StdoutLogger = StdoutLogger;
 
+/// `https://mail.letotam.ru:8443/x` → `mail.letotam.ru` — the host part only,
+/// used as the account-key host for native-mode accounts.
+fn host_from_url(url: &str) -> String {
+    let s = url.trim();
+    let s = s.strip_prefix("https://").or_else(|| s.strip_prefix("http://")).unwrap_or(s);
+    s.split(['/', ':']).next().unwrap_or(s).to_string()
+}
+
+/// First-run login: modal window → POST /auth/login → accounts.json.
+/// Returns false when the user closed the window without logging in
+/// (the caller exits — there is nothing to show without an account).
+fn run_login_window() -> bool {
+    let Ok(lw) = LoginWindow::new() else { return false };
+    let done = Arc::new(AtomicBool::new(false));
+
+    let weak = lw.as_weak();
+    let done_cb = done.clone();
+    lw.on_submit(move || {
+        let Some(lw) = weak.upgrade() else { return };
+        if lw.get_busy() {
+            return;
+        }
+        let server = lw.get_server_url().trim().trim_end_matches('/').to_string();
+        let username = lw.get_username().trim().to_string();
+        let password = lw.get_password().to_string();
+        if server.is_empty() || username.is_empty() || password.is_empty() {
+            lw.set_error("Заполните все поля".into());
+            return;
+        }
+        // The scheme is implied for the common case; typing it still works.
+        let server = if server.starts_with("http://") || server.starts_with("https://") {
+            server
+        } else {
+            format!("https://{server}")
+        };
+        lw.set_error("".into());
+        lw.set_busy(true);
+
+        let weak = lw.as_weak();
+        let done = done_cb.clone();
+        std::thread::spawn(move || {
+            let result = tokio::runtime::Runtime::new()
+                .map_err(|e| format!("tokio: {e}"))
+                .and_then(|rt| {
+                    rt.block_on(ddmail_core::auth::login(&server, &username, &password))
+                });
+            match result {
+                Ok(login) => {
+                    let cfg = engine::AccountConfig {
+                        host: host_from_url(&server),
+                        port: 993,
+                        username: login.username.clone(),
+                        password: String::new(),
+                        use_tls: true,
+                        email: login.email.clone(),
+                        smtp_host: host_from_url(&server),
+                        smtp_port: 465,
+                        native_url: Some(server.clone()),
+                        native_token: Some(login.token.clone()),
+                    };
+                    engine::AccountConfig::save_all(std::slice::from_ref(&cfg));
+                    done.store(true, Ordering::Relaxed);
+                    let _ = weak.upgrade_in_event_loop(|lw| {
+                        let _ = lw.hide();
+                    });
+                }
+                Err(e) => {
+                    let _ = weak.upgrade_in_event_loop(move |lw| {
+                        lw.set_busy(false);
+                        lw.set_error(e.into());
+                    });
+                }
+            }
+        });
+    });
+
+    if lw.run().is_err() {
+        return false;
+    }
+    done.load(Ordering::Relaxed)
+}
+
 fn main() {
     let _ = log::set_logger(&STDOUT_LOGGER)
         .map(|()| log::set_max_level(log::LevelFilter::Info));
@@ -2522,6 +2604,13 @@ fn main() {
             eprintln!("ddmail is already running");
             return;
         }
+    }
+
+    // First run (no env override, no accounts.json): login screen first.
+    // Closing it without logging in exits — the app is useless without an
+    // account and an empty cache.
+    if engine::AccountConfig::load_all().is_empty() && !run_login_window() {
+        return;
     }
 
     let ui = MainWindow::new().unwrap();
@@ -5379,8 +5468,12 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                 EngineEvent::CalendarUpdated { calendar_id } => {
                     println!("engine event: calendar {calendar_id} updated");
                 }
-                EngineEvent::TokenRefreshed { account_id, .. } => {
-                    println!("engine event: token refreshed for {account_id}");
+                EngineEvent::TokenRefreshed { account_id, token } => {
+                    // Persist the rotated JWT — otherwise the next launch
+                    // starts from the stale token and, past the 30-day
+                    // refresh window, would silently fall back to cache-only.
+                    engine::AccountConfig::persist_native_token(&account_id, &token);
+                    println!("engine event: token refreshed for {account_id} (persisted)");
                 }
             }
         }
