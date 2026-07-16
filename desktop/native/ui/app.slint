@@ -1990,249 +1990,81 @@ export component MainWindow inherits Window {
 
         // Calendar sidebar — same width as the mail sidebar, sharing the
         // splitter handle position.
-        if root.view-mode == 1 && !root.calendar-panel-collapsed: Rectangle {
-            width: root.sidebar-width;
-            background: #f7f8fa;
-            VerticalLayout {
-                // Top nav: prev / today / next + week title underneath.
-                Rectangle {
-                    height: 80px;
-                    background: white;
-                    VerticalLayout {
-                        padding-top: 8px;
-                        padding-left: 8px;
-                        padding-right: 8px;
-                        spacing: 4px;
-                        HorizontalLayout {
-                            spacing: 4px;
-                            alignment: stretch;
-                            // Burger — keeps the same top-left spot as the
-                            // mail view; when the panel is collapsed the
-                            // main topbar shows it instead.
-                            Rectangle {
-                                width: 32px;
-                                height: 32px;
-                                border-radius: 10px;
-                                background: burger-p.has-hover ? #eef0f4 : transparent;
-                                burger-p := TouchArea { clicked => { root.view-menu-open = !root.view-menu-open; } }
-                                VerticalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    spacing: 4px;
-                                    alignment: center;
-                                    Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
-                                    Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
-                                    Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
-                                }
-                            }
-                            Rectangle {
-                                width: 32px;
-                                height: 32px;
-                                border-radius: 16px;
-                                background: prv-ta.has-hover ? #eef0f4 : transparent;
-                                prv-ta := TouchArea { clicked => { root.calendar-prev(); } }
-                                Text {
-                                    width: parent.width; height: parent.height;
-                                    text: "‹"; color: #6b7480; font-size: 18px;
-                                    horizontal-alignment: center; vertical-alignment: center;
-                                }
-                            }
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                height: 32px;
-                                border-radius: 16px;
-                                background: tdy-ta.has-hover ? #eef0f4 : transparent;
-                                tdy-ta := TouchArea { clicked => { root.calendar-today(); } }
-                                Text {
-                                    width: parent.width; height: parent.height;
-                                    text: "Сегодня"; font-weight: 700; font-size: 13px;
-                                    color: #0f1419;
-                                    horizontal-alignment: center; vertical-alignment: center;
-                                }
-                            }
-                            Rectangle {
-                                width: 32px;
-                                height: 32px;
-                                border-radius: 16px;
-                                background: nxt-ta.has-hover ? #eef0f4 : transparent;
-                                nxt-ta := TouchArea { clicked => { root.calendar-next(); } }
-                                Text {
-                                    width: parent.width; height: parent.height;
-                                    text: "›"; color: #6b7480; font-size: 18px;
-                                    horizontal-alignment: center; vertical-alignment: center;
-                                }
-                            }
-                        }
-                        Text {
-                            text: root.week-title;
-                            font-weight: 700; font-size: 14px;
-                            color: #0f1419;
-                            horizontal-alignment: center;
-                        }
-                    }
-                }
-                // New-event button
-                Rectangle {
-                    height: 40px;
-                    Rectangle {
-                        x: 10px; y: 6px;
-                        width: parent.width - 20px; height: 32px;
-                        border-radius: 8px;
-                        background: ne-ta.has-hover ? #2670d8 : #2f80ed;
-                        Text { text: "+ Событие"; color: white; font-size: 13px; font-weight: 600;
-                               horizontal-alignment: center; vertical-alignment: center; }
-                        ne-ta := TouchArea { clicked => { root.new-event(); } }
-                    }
-                }
-                // Section header
-                Rectangle {
-                    height: 28px;
-                    Text {
-                        x: 14px;
-                        y: 8px;
-                        text: "КАЛЕНДАРИ";
-                        color: #8b95a1;
-                        font-size: 11px;
-                        font-weight: 700;
-                        letter-spacing: 0.5px;
-                    }
-                }
-                ListView {
-                    for c[ci] in root.calendars: Rectangle {
-                        height: 32px;
-                        background: cl-ta.has-hover ? #eef0f4 : transparent;
-                        cl-ta := TouchArea {
-                            clicked => { root.calendar-toggle-visibility(c.id); }
-                        }
-                        HorizontalLayout {
-                            padding-left: 14px;
-                            padding-right: 12px;
-                            spacing: 10px;
-                            alignment: stretch;
-                            Rectangle {
-                                width: 14px;
-                                height: 14px;
-                                y: (parent.height - self.height) / 2;
-                                border-radius: 4px;
-                                background: c.visible ? c.color : transparent;
-                                border-color: c.color;
-                                border-width: c.visible ? 0px : 1.5px;
-                                // Clicking the swatch edits this calendar's
-                                // colour (the row click still toggles
-                                // visibility — this TouchArea wins inside).
-                                TouchArea {
-                                    clicked => { root.color-picker-cal = c.id; }
-                                }
-                            }
-                            Text {
-                                horizontal-stretch: 1;
-                                text: c.name;
-                                font-size: 13px;
-                                color: c.visible ? #0f1419 : #8b95a1;
-                                vertical-alignment: center;
-                                overflow: elide;
-                                wrap: no-wrap;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Splitter (calendar view) — hidden when the panel is collapsed.
-        if root.view-mode == 1 && !root.calendar-panel-collapsed: Rectangle {
-            width: 4px;
-            background: spl-ta-cal.has-hover || spl-ta-cal.pressed ? #d2dbe4 : #e6ecf2;
-            spl-ta-cal := TouchArea {
-                mouse-cursor: ew-resize;
-                moved => {
-                    if (self.pressed) {
-                        root.sidebar-width = max(180px, min(640px,
-                            root.sidebar-width + self.mouse-x - 2px));
-                    }
-                }
-            }
-        }
+        // (The calendar left panel was removed: navigation lives in the top
+        // bar and the calendar list moved to Settings → Календарь.)
 
         // Calendar main pane (week grid)
         if root.view-mode == 1: VerticalLayout {
-            // Topbar with view toggles
+            // Top bar: burger + date nav (‹ Сегодня ›) + week title + New event.
+            // The calendar list moved to Settings → Календарь; this bar owns
+            // all navigation now (the left panel is gone).
             Rectangle {
-                height: 50px;
+                height: 52px;
                 background: white;
                 HorizontalLayout {
-                    padding: 8px;
-                    spacing: 8px;
-                    alignment: stretch;
-                    // Burger — only when the panel is collapsed; with the
-                    // panel open the burger lives inside it (same top-left
-                    // spot either way, predictability beats decoration).
-                    if root.calendar-panel-collapsed: Rectangle {
-                        width: 34px;
-                        height: 34px;
+                    padding: 9px;
+                    spacing: 6px;
+                    alignment: start;
+                    Rectangle {
+                        width: 34px; height: 34px;
                         y: (parent.height - self.height) / 2;
                         border-radius: 10px;
                         background: burger-c.has-hover ? #eef0f4 : transparent;
                         burger-c := TouchArea { clicked => { root.view-menu-open = !root.view-menu-open; } }
-                        // Drawn burger — ☰ glyph missing from the default font.
                         VerticalLayout {
-                            padding-left: 8px;
-                            padding-right: 8px;
-                            spacing: 4px;
-                            alignment: center;
+                            padding-left: 8px; padding-right: 8px; spacing: 4px; alignment: center;
                             Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
                             Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
                             Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
                         }
                     }
-                    // Collapse / reveal the calendar list panel.
+                    // Prev
                     Rectangle {
-                        width: 34px;
-                        height: 34px;
-                        y: (parent.height - self.height) / 2;
-                        border-radius: 10px;
-                        background: panel-tg.has-hover ? #eef0f4 : transparent;
-                        panel-tg := TouchArea {
-                            clicked => {
-                                root.calendar-panel-collapsed = !root.calendar-panel-collapsed;
-                                root.calendar-panel-toggled();
-                            }
-                        }
-                        // "‹"/"›" — same glyphs as the week prev/next buttons,
-                        // known to render in the default font (unlike «/»).
-                        Text {
-                            width: parent.width; height: parent.height;
-                            text: root.calendar-panel-collapsed ? "››" : "‹‹";
-                            color: #6b7480; font-size: 15px; font-weight: 700;
-                            horizontal-alignment: center; vertical-alignment: center;
-                        }
+                        width: 32px; height: 34px; y: (parent.height - self.height) / 2;
+                        border-radius: 8px;
+                        background: prv-ta.has-hover ? #eef0f4 : transparent;
+                        prv-ta := TouchArea { clicked => { root.calendar-prev(); } }
+                        Text { width: parent.width; height: parent.height; text: "‹"; color: #6b7480; font-size: 18px; horizontal-alignment: center; vertical-alignment: center; }
                     }
+                    // Today
+                    Rectangle {
+                        width: 84px; height: 34px; y: (parent.height - self.height) / 2;
+                        border-radius: 8px;
+                        background: tdy-ta.has-hover ? #eef0f4 : transparent;
+                        tdy-ta := TouchArea { clicked => { root.calendar-today(); } }
+                        Text { width: parent.width; height: parent.height; text: "Сегодня"; font-weight: 700; font-size: 13px; color: #0f1419; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    // Next
+                    Rectangle {
+                        width: 32px; height: 34px; y: (parent.height - self.height) / 2;
+                        border-radius: 8px;
+                        background: nxt-ta.has-hover ? #eef0f4 : transparent;
+                        nxt-ta := TouchArea { clicked => { root.calendar-next(); } }
+                        Text { width: parent.width; height: parent.height; text: "›"; color: #6b7480; font-size: 18px; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    // Week title
+                    Text {
+                        text: root.week-title;
+                        font-weight: 700; font-size: 15px; color: #0f1419;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                    }
+                    // Loading pill + spacer
                     Rectangle {
                         horizontal-stretch: 1;
                         if root.calendar-loading: Rectangle {
-                            width: parent.width;
-                            height: parent.height;
-                            HorizontalLayout {
-                                alignment: start;
-                                padding-left: 8px;
-                                Rectangle {
-                                    width: 110px;
-                                    height: 26px;
-                                    border-radius: 13px;
-                                    background: #2f80ed22;
-                                    y: (parent.height - self.height) / 2;
-                                    Text {
-                                        width: parent.width; height: parent.height;
-                                        text: "Загрузка…";
-                                        color: #2f80ed;
-                                        font-size: 12px;
-                                        font-weight: 700;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
+                            x: 8px; y: (parent.height - self.height) / 2;
+                            width: 110px; height: 26px; border-radius: 13px; background: #2f80ed22;
+                            Text { width: parent.width; height: parent.height; text: "Загрузка…"; color: #2f80ed; font-size: 12px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
                         }
+                    }
+                    // New event
+                    Rectangle {
+                        width: 118px; height: 34px; y: (parent.height - self.height) / 2;
+                        border-radius: 8px;
+                        background: ne-ta.has-hover ? #2670d8 : #2f80ed;
+                        ne-ta := TouchArea { clicked => { root.new-event(); } }
+                        Text { width: parent.width; height: parent.height; text: "+ Событие"; color: white; font-size: 13px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                     }
                 }
             }
@@ -4065,6 +3897,45 @@ export component MainWindow inherits Window {
                                         minimum: 1; maximum: 24;
                                         value: root.work-end;
                                         edited(v) => { root.set-work-hours(root.work-start, v); }
+                                    }
+                                }
+
+                                Rectangle { height: 16px; }
+                                Text {
+                                    text: "Календари";
+                                    font-size: 16px; font-weight: 700; color: #0f1419;
+                                }
+                                Text {
+                                    text: "Название — показать/скрыть; цветной квадрат — сменить цвет.";
+                                    font-size: 12px; color: #8b95a1; wrap: word-wrap;
+                                }
+                                Rectangle { height: 6px; }
+                                for c[ci] in root.calendars: Rectangle {
+                                    height: 38px;
+                                    border-radius: 8px;
+                                    background: setcal-ta.has-hover ? #f5f6f8 : transparent;
+                                    setcal-ta := TouchArea { clicked => { root.calendar-toggle-visibility(c.id); } }
+                                    HorizontalLayout {
+                                        padding-left: 10px; padding-right: 10px; spacing: 10px; alignment: start;
+                                        Rectangle {
+                                            width: 16px; height: 16px; y: (parent.height - self.height) / 2;
+                                            border-radius: 4px;
+                                            background: c.visible ? c.color : transparent;
+                                            border-color: c.color; border-width: c.visible ? 0px : 1.5px;
+                                            scp := TouchArea { clicked => { root.color-picker-cal = c.id; } }
+                                        }
+                                        Text {
+                                            horizontal-stretch: 1;
+                                            text: c.name;
+                                            font-size: 14px;
+                                            color: c.visible ? #0f1419 : #8b95a1;
+                                            vertical-alignment: center; overflow: elide;
+                                        }
+                                        Text {
+                                            text: c.visible ? "показан" : "скрыт";
+                                            font-size: 12px; color: #8b95a1;
+                                            vertical-alignment: center;
+                                        }
                                     }
                                 }
                             }
