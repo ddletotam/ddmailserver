@@ -508,6 +508,7 @@ fn parse_vevent(vevent: &str) -> Option<DesktopCalendarEvent> {
     Some(DesktopCalendarEvent {
         id: 0,
         calendar_id: 0, // set by the caller (one synthetic calendar per URL)
+        account_key: String::new(),
         uid,
         summary,
         description,

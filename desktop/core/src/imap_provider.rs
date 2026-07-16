@@ -413,6 +413,7 @@ impl MailProvider for ImapProvider {
         };
         Ok(vec![DesktopCalendar {
             id: STANDALONE_CALDAV_CAL_ID,
+            account_key: String::new(),
             name: self.user_email.clone(),
             description: String::new(),
             color: "#3a6df0".into(),

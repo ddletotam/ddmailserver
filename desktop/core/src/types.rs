@@ -63,6 +63,10 @@ pub struct Contact {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DesktopContact {
     pub id: i64,
+    /// Which account this row came from (engine-tagged, not from the server) —
+    /// so multi-account writes route back to the owning connection.
+    #[serde(default)]
+    pub account_key: String,
     /// vCard UID — populated by the standalone CardDAV client so edit/delete
     /// can resolve the resource; empty for the native path (which uses `id`).
     #[serde(default)]
@@ -294,6 +298,9 @@ pub struct InlinePart {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DesktopCalendar {
     pub id: i64,
+    /// Engine-tagged owning account (multi-account routing).
+    #[serde(default)]
+    pub account_key: String,
     pub name: String,
     #[serde(default)]
     pub description: String,
@@ -321,6 +328,9 @@ pub struct DesktopCalendarAttendee {
 pub struct DesktopCalendarEvent {
     pub id: i64,
     pub calendar_id: i64,
+    /// Engine-tagged owning account (multi-account routing).
+    #[serde(default)]
+    pub account_key: String,
     pub uid: String,
     #[serde(default)]
     pub summary: String,
