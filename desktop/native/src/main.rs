@@ -2,6 +2,11 @@
 //! Sidebar = real conversations from the desktop cache; selecting one renders
 //! its real message bodies as Ultralight bitmaps composited as Slint images.
 
+// Release builds run under the GUI subsystem so Windows doesn't spawn a console
+// window at launch. Debug builds keep the console — that's where our `println!`
+// diagnostics (tray, search, engine) go during development.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 slint::include_modules!();
 
 mod calendar_settings;
@@ -5849,7 +5854,13 @@ fn main() {
         });
     }
 
-    ui.run().unwrap();
+    // Show the window, then run the loop in "stay alive past the last window"
+    // mode: closing the window via its ✕ returns CloseRequestResponse::HideWindow
+    // (above), which hides it to the tray. `ui.run()` would quit the loop when
+    // that last window hides; `run_event_loop_until_quit` keeps the process
+    // alive in the tray until the tray's "Выход" calls `quit_event_loop`.
+    ui.show().unwrap();
+    slint::run_event_loop_until_quit().unwrap();
 }
 
 /// Apply an engine result on the UI thread (reaches Shared via the thread-local).
