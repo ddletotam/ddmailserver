@@ -177,6 +177,23 @@ impl AccountConfig {
         }
     }
 
+    /// Add (or replace, matched by account_key) a connection in accounts.json.
+    /// Used by the connections settings — never clobbers other accounts.
+    pub fn add_account(cfg: &AccountConfig) {
+        let key = cfg.account_key();
+        let mut all: Vec<AccountConfig> =
+            Self::load_all().into_iter().filter(|a| a.account_key() != key).collect();
+        all.push(cfg.clone());
+        Self::save_all(&all);
+    }
+
+    /// Remove a connection by account_key from accounts.json.
+    pub fn remove_account(account_key: &str) {
+        let all: Vec<AccountConfig> =
+            Self::load_all().into_iter().filter(|a| a.account_key() != account_key).collect();
+        Self::save_all(&all);
+    }
+
     /// Persist a rotated JWT (native provider's auto-refresh) back into
     /// `accounts.json`, so the next launch starts from the fresh token
     /// instead of the stale one. `account_id` is the account email — the id

@@ -961,6 +961,8 @@ struct Shared {
     /// event id → owning account_key, from the last events fetch, so calendar
     /// writes (rsvp/patch/delete) route to the right connection.
     event_accounts: RefCell<HashMap<i64, String>>,
+    /// Keeps the add/edit-connection modal alive while it's open.
+    add_conn_window: RefCell<Option<LoginWindow>>,
     /// Files staged for the next outgoing message, picked via the composer's
     /// attach button. Parallel to the `composer-attachments` Slint model
     /// (which holds just the basenames). Cleared once a message is staged.
@@ -2606,15 +2608,33 @@ fn host_from_url(url: &str) -> String {
     s.split(['/', ':']).next().unwrap_or(s).to_string()
 }
 
-/// First-run login: modal window → POST /auth/login → accounts.json.
-/// Returns false when the user closed the window without logging in
-/// (the caller exits — there is nothing to show without an account).
-fn run_login_window() -> bool {
-    let Ok(lw) = LoginWindow::new() else { return false };
-    let done = Arc::new(AtomicBool::new(false));
+/// Close the add-connection modal and rebuild the engine from the updated
+/// accounts.json. Safe to call from any thread — it hops to the UI loop.
+fn finish_add_connection(main_weak: slint::Weak<MainWindow>) {
+    let _ = slint::invoke_from_event_loop(move || {
+        SHARED.with(|s| {
+            if let Some(sh) = s.borrow().as_ref() {
+                if let Some(lw) = sh.add_conn_window.borrow_mut().take() {
+                    let _ = lw.hide();
+                }
+                if let Some(m) = main_weak.upgrade() {
+                    rebuild_engine(&m, sh);
+                }
+            }
+        });
+    });
+}
+
+/// Open the add-connection modal from the running app. Native (server/login/
+/// pass → JWT), standalone IMAP/SMTP (+optional CalDAV/CardDAV), or Google
+/// OAuth. On success the connection is APPENDED to accounts.json (never
+/// clobbering the others) and the engine rebuilds. The window is retained in
+/// Shared while open.
+fn open_add_connection(main_weak: slint::Weak<MainWindow>) {
+    let Ok(lw) = LoginWindow::new() else { return };
 
     let weak = lw.as_weak();
-    let done_cb = done.clone();
+    let mw_submit = main_weak.clone();
     lw.on_submit(move || {
         let Some(lw) = weak.upgrade() else { return };
         if lw.get_busy() {
@@ -2623,8 +2643,7 @@ fn run_login_window() -> bool {
         let username = lw.get_username().trim().to_string();
         let password = lw.get_password().to_string();
 
-        // ── Standalone (IMAP + optional CalDAV/CardDAV): no server login,
-        // just persist the account directly. ──
+        // ── Standalone IMAP/SMTP: persist directly, no server login. ──
         if lw.get_mode() == 1 {
             let email = lw.get_email().trim().to_string();
             let host = lw.get_imap_host().trim().to_string();
@@ -2652,19 +2671,18 @@ fn run_login_window() -> bool {
                 caldav_url: opt(lw.get_caldav_url().to_string()),
                 oauth_refresh_token: None,
             };
-            engine::AccountConfig::save_all(std::slice::from_ref(&cfg));
-            done_cb.store(true, Ordering::Relaxed);
-            let _ = lw.hide();
+            engine::AccountConfig::add_account(&cfg);
+            finish_add_connection(mw_submit.clone());
             return;
         }
 
-        // ── Native (our server): username+password → JWT. ──
+        // ── Native (our server): try username+password → JWT. On failure the
+        // user can switch to the "Другой (IMAP)" tab (the manual fallback). ──
         let server = lw.get_server_url().trim().trim_end_matches('/').to_string();
         if server.is_empty() || username.is_empty() || password.is_empty() {
             lw.set_error("Заполните все поля".into());
             return;
         }
-        // The scheme is implied for the common case; typing it still works.
         let server = if server.starts_with("http://") || server.starts_with("https://") {
             server
         } else {
@@ -2674,13 +2692,11 @@ fn run_login_window() -> bool {
         lw.set_busy(true);
 
         let weak = lw.as_weak();
-        let done = done_cb.clone();
+        let mw = mw_submit.clone();
         std::thread::spawn(move || {
             let result = tokio::runtime::Runtime::new()
                 .map_err(|e| format!("tokio: {e}"))
-                .and_then(|rt| {
-                    rt.block_on(ddmail_core::auth::login(&server, &username, &password))
-                });
+                .and_then(|rt| rt.block_on(ddmail_core::auth::login(&server, &username, &password)));
             match result {
                 Ok(login) => {
                     let cfg = engine::AccountConfig {
@@ -2698,26 +2714,23 @@ fn run_login_window() -> bool {
                         caldav_url: None,
                         oauth_refresh_token: None,
                     };
-                    engine::AccountConfig::save_all(std::slice::from_ref(&cfg));
-                    done.store(true, Ordering::Relaxed);
-                    let _ = weak.upgrade_in_event_loop(|lw| {
-                        let _ = lw.hide();
-                    });
+                    engine::AccountConfig::add_account(&cfg);
+                    finish_add_connection(mw);
                 }
                 Err(e) => {
+                    // Fallback hint: connect failed → offer the manual IMAP form.
                     let _ = weak.upgrade_in_event_loop(move |lw| {
                         lw.set_busy(false);
-                        lw.set_error(e.into());
+                        lw.set_error(format!("{e} — попробуйте вкладку «Другой (IMAP)»").into());
                     });
                 }
             }
         });
     });
 
-    // Offer Google sign-in only when client creds are present on this machine.
     lw.set_google_available(ddmail_core::oauth::load_client_creds().is_some());
     let gweak = lw.as_weak();
-    let gdone = done.clone();
+    let mw_google = main_weak.clone();
     lw.on_google_login(move || {
         let Some(lw) = gweak.upgrade() else { return };
         if lw.get_busy() {
@@ -2726,7 +2739,7 @@ fn run_login_window() -> bool {
         lw.set_error("".into());
         lw.set_busy(true);
         let weak = lw.as_weak();
-        let done = gdone.clone();
+        let mw = mw_google.clone();
         std::thread::spawn(move || {
             let result = tokio::runtime::Runtime::new()
                 .map_err(|e| format!("tokio: {e}"))
@@ -2764,11 +2777,8 @@ fn run_login_window() -> bool {
                         )),
                         oauth_refresh_token: Some(tokens.refresh_token),
                     };
-                    engine::AccountConfig::save_all(std::slice::from_ref(&cfg));
-                    done.store(true, Ordering::Relaxed);
-                    let _ = weak.upgrade_in_event_loop(|lw| {
-                        let _ = lw.hide();
-                    });
+                    engine::AccountConfig::add_account(&cfg);
+                    finish_add_connection(mw);
                 }
                 Err(e) => {
                     let _ = weak.upgrade_in_event_loop(move |lw| {
@@ -2780,10 +2790,76 @@ fn run_login_window() -> bool {
         });
     });
 
-    if lw.run().is_err() {
-        return false;
+    let _ = lw.show();
+    SHARED.with(|s| {
+        if let Some(sh) = s.borrow().as_ref() {
+            *sh.add_conn_window.borrow_mut() = Some(lw);
+        }
+    });
+}
+
+/// (Re)spawn the mail engine from the current `accounts.json`. Tears down any
+/// running engine first (dropping the command Sender ends its thread), then
+/// spawns a fresh one over the current account set and kicks the initial
+/// fetch. Called at startup and whenever connections change; a reloading
+/// marker is shown until the first conversations arrive.
+fn rebuild_engine(ui: &MainWindow, shared: &Rc<Shared>) {
+    // Tear down the previous engine (its thread exits when the Sender drops).
+    shared.engine_tx.borrow_mut().take();
+
+    let Some(cache) = open_cache() else { return };
+    let mut accounts = engine::AccountConfig::load_all();
+    let live = !accounts.is_empty();
+    ui.set_has_connections(live);
+
+    if accounts.is_empty() && !shared.key.is_empty() {
+        // Dev cache-only fallback: reconstruct a placeholder so cache reads
+        // resolve to the existing namespace (no live provider).
+        let key = shared.key.clone();
+        let (username, host) = key
+            .rsplit_once('@')
+            .map(|(u, h)| (u.to_string(), h.to_string()))
+            .unwrap_or_else(|| (key.clone(), String::new()));
+        accounts.push(engine::AccountConfig {
+            host: host.clone(),
+            port: 993,
+            username,
+            password: String::new(),
+            use_tls: true,
+            email: key,
+            smtp_host: host,
+            smtp_port: 465,
+            native_url: None,
+            native_token: None,
+            carddav_url: None,
+            caldav_url: None,
+            oauth_refresh_token: None,
+        });
     }
-    done.load(Ordering::Relaxed)
+
+    {
+        let keys: Vec<String> = accounts.iter().map(|a| a.account_key()).collect();
+        let mut st = shared.account_states.borrow_mut();
+        st.clear();
+        for k in &keys {
+            st.insert(k.clone(), "connecting".into());
+        }
+        drop(st);
+        *shared.account_keys.borrow_mut() = keys;
+    }
+
+    let ui_weak_eng = ui.as_weak();
+    let etx = engine::spawn(accounts, cache, move |res| {
+        let _ = ui_weak_eng.upgrade_in_event_loop(move |ui| handle_engine_result(&ui, res));
+    });
+    if live {
+        ui.set_engine_reloading(true);
+        let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
+        let _ = etx.send(engine::EngineCmd::StartWatching);
+    } else {
+        ui.set_engine_reloading(false);
+    }
+    *shared.engine_tx.borrow_mut() = Some(etx);
 }
 
 fn main() {
@@ -2799,12 +2875,10 @@ fn main() {
         }
     }
 
-    // First run (no env override, no accounts.json): login screen first.
-    // Closing it without logging in exits — the app is useless without an
-    // account and an empty cache.
-    if engine::AccountConfig::load_all().is_empty() && !run_login_window() {
-        return;
-    }
+    // No forced login gate: the app opens straight to the UI. With no
+    // configured connections it shows an empty state inviting the user to add
+    // one from settings (connections are managed there, add/remove/edit at any
+    // time). See rebuild_engine + the connections settings panel.
 
     let ui = MainWindow::new().unwrap();
 
@@ -3424,6 +3498,7 @@ fn main() {
         editing_contact_id: Cell::new(0),
         editing_contact_account: RefCell::new(String::new()),
         event_accounts: RefCell::new(HashMap::new()),
+        add_conn_window: RefCell::new(None),
         compose_attachments: RefCell::new(Vec::new()),
         pending_open_event: Cell::new(0),
         snooze_ctx: RefCell::new((0, 0, 0, 0, String::new())),
@@ -3483,66 +3558,9 @@ fn main() {
         }
     }
 
-    // ----- Live engine (config from env, with cache-only fallback) -----
-    //
-    // When DDMAIL_IMAP_* env vars are set we spawn a fully live engine and
-    // fire the initial FetchConversations + StartWatching. When they're
-    // not, we still spawn an engine with a placeholder config so that
-    // `SearchDropdown` (the live-dropdown lookup) keeps working — it
-    // only needs the cache for contacts; the provider call is wrapped in
-    // unwrap_or_default and silently returns empty messages.
-    if let Some(cache) = open_cache() {
-        let mut accounts = engine::AccountConfig::load_all();
-        let live = !accounts.is_empty();
-        if accounts.is_empty() {
-            // No live config: reconstruct just enough so that the engine's
-            // `key = cfg.account_key()` matches what's already in the cache
-            // (`{username}@{host}` format). Anything provider-touching
-            // stays empty / unreachable; only cache-backed reads make sense.
-            let key = shared.key.clone();
-            let (username, host) = key
-                .rsplit_once('@')
-                .map(|(u, h)| (u.to_string(), h.to_string()))
-                .unwrap_or_else(|| (key.clone(), String::new()));
-            accounts.push(engine::AccountConfig {
-                host: host.clone(),
-                port: 993,
-                username,
-                password: String::new(),
-                use_tls: true,
-                email: key,
-                smtp_host: host,
-                smtp_port: 465,
-                native_url: None,
-                native_token: None,
-                carddav_url: None,
-                caldav_url: None,
-                oauth_refresh_token: None,
-            });
-        }
-        // Seed the connection indicator: every account starts "connecting"
-        // until its watcher reports in.
-        {
-            let keys: Vec<String> = accounts.iter().map(|a| a.account_key()).collect();
-            let mut st = shared.account_states.borrow_mut();
-            for k in &keys {
-                st.insert(k.clone(), "connecting".into());
-            }
-            drop(st);
-            *shared.account_keys.borrow_mut() = keys;
-        }
-        let ui_weak_eng = ui.as_weak();
-        let etx = engine::spawn(accounts, cache, move |res| {
-            let _ = ui_weak_eng.upgrade_in_event_loop(move |ui| handle_engine_result(&ui, res));
-        });
-        if live {
-            let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
-            let _ = etx.send(engine::EngineCmd::StartWatching);
-        } else {
-            println!("engine: DDMAIL_IMAP_* not set — live IMAP disabled, cache-only mode");
-        }
-        *shared.engine_tx.borrow_mut() = Some(etx);
-    }
+    // ----- Live engine ----- (spawned from accounts.json; rebuilt on demand
+    // when connections change, see rebuild_engine).
+    rebuild_engine(&ui, &shared);
 
     // ----- Callbacks -----
     let ui_weak2 = ui.as_weak();
@@ -4794,6 +4812,12 @@ fn main() {
     // live config (env first, then on-disk profile) and show it.
     let ui_weak_set = ui.as_weak();
     let sh_set = shared.clone();
+    // Empty-state CTA → open the add-connection modal.
+    let ui_weak_afc = ui.as_weak();
+    ui.on_add_first_connection(move || {
+        open_add_connection(ui_weak_afc.clone());
+    });
+
     ui.on_open_settings(move || {
         let Some(ui) = ui_weak_set.upgrade() else { return };
         let cfg = engine::AccountConfig::load_all().into_iter().next();
@@ -5528,6 +5552,8 @@ fn apply_conn_status(ui: &MainWindow, sh: &Shared) {
 fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
     match res {
         engine::EngineResult::Conversations { mut list, partial } => {
+            // First conversations after a (re)build arrived — drop the marker.
+            ui.set_engine_reloading(false);
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
                     if partial && list.is_empty() {
