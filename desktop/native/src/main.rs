@@ -47,6 +47,10 @@ const NAMES: [&str; 25] = [
 ];
 const PALETTE: [&str; 6] = ["#2f80ed", "#27ae60", "#eb5757", "#9b51e0", "#f2994a", "#11998e"];
 
+/// The app icon (emerald speech bubble), bundled for the Slint window icon
+/// (WM_SETICON) and the tray glyph — neither reads the .ico embedded in the exe.
+pub(crate) const ICON_PNG: &[u8] = include_bytes!("../assets/ddmail_icon.png");
+
 /// How many messages the server may scan when building the conversation list.
 /// Mirrors the server-side default (handlers_desktop.go). A small cap combined
 /// with the server's `ORDER BY uid ASC` fetch means it returns the OLDEST N
@@ -1001,6 +1005,110 @@ thread_local! {
     /// The tray handle — kept here so the new-mail path can flip the
     /// unread dot from engine-result handlers.
     static TRAY: RefCell<Option<tray::Tray>> = const { RefCell::new(None) };
+}
+
+/// Build an `HICON` at `size`×`size` from the bundled icon PNG. Slint/winit
+/// doesn't read the exe's embedded .ico for the window icon, so we set it
+/// ourselves via WM_SETICON. Returns None if decoding or GDI allocation fails.
+#[cfg(windows)]
+fn hicon_from_png(size: u32) -> Option<windows::Win32::UI::WindowsAndMessaging::HICON> {
+    use image::imageops::FilterType;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Graphics::Gdi::{
+        CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        DIB_RGB_COLORS, HDC,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO};
+
+    let rgba = image::load_from_memory(ICON_PNG)
+        .ok()?
+        .resize_exact(size, size, FilterType::Lanczos3)
+        .to_rgba8();
+    let (w, h) = (size as i32, size as i32);
+
+    let bi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: core::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w,
+            biHeight: -h, // negative → top-down
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0 as u32,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bits: *mut core::ffi::c_void = core::ptr::null_mut();
+    let hbm_color = unsafe {
+        CreateDIBSection(
+            HDC(core::ptr::null_mut()),
+            &bi,
+            DIB_RGB_COLORS,
+            &mut bits,
+            HANDLE(core::ptr::null_mut()),
+            0,
+        )
+        .ok()?
+    };
+    if bits.is_null() {
+        unsafe { let _ = DeleteObject(hbm_color); }
+        return None;
+    }
+    // RGBA → BGRA (what a 32bpp DIB expects).
+    unsafe {
+        let dst = bits as *mut u8;
+        for (i, px) in rgba.pixels().enumerate() {
+            let o = i * 4;
+            *dst.add(o) = px[2];
+            *dst.add(o + 1) = px[1];
+            *dst.add(o + 2) = px[0];
+            *dst.add(o + 3) = px[3];
+        }
+    }
+    let hbm_mask = unsafe { CreateBitmap(w, h, 1, 1, None) };
+    let mut ii = ICONINFO {
+        fIcon: true.into(),
+        xHotspot: 0,
+        yHotspot: 0,
+        hbmMask: hbm_mask,
+        hbmColor: hbm_color,
+    };
+    let hicon = unsafe { CreateIconIndirect(&mut ii).ok() };
+    unsafe {
+        let _ = DeleteObject(hbm_color);
+        let _ = DeleteObject(hbm_mask);
+    }
+    hicon
+}
+
+/// Set the window's title-bar + taskbar icon (Windows). Must run after the
+/// native window exists (call from a single-shot timer once the loop starts).
+/// The leaked HICONs live for the app's lifetime — the shell keeps referencing
+/// them, and there's exactly one window, so this is a bounded, one-time cost.
+#[cfg(windows)]
+fn set_window_icon(ui: &MainWindow) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_SETICON};
+    const ICON_SMALL: usize = 0;
+    const ICON_BIG: usize = 1;
+
+    let handle = ui.window().window_handle();
+    let Ok(wh) = handle.window_handle() else { return };
+    let RawWindowHandle::Win32(h) = wh.as_raw() else { return };
+    let hwnd = HWND(h.hwnd.get() as *mut core::ffi::c_void);
+    for (size, which) in [(32u32, ICON_BIG), (16u32, ICON_SMALL)] {
+        if let Some(hicon) = hicon_from_png(size) {
+            unsafe {
+                SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    WPARAM(which),
+                    LPARAM(hicon.0 as isize),
+                );
+            }
+        }
+    }
 }
 
 /// Show + un-minimize + bring to foreground. Plain `ui.show()` is a no-op
@@ -5639,6 +5747,19 @@ fn main() {
             },
         );
         TRAY.with(|t| *t.borrow_mut() = tray);
+    }
+
+    // Set the window icon once the native window is realized (the HWND doesn't
+    // exist yet here). Slint/winit doesn't pick up the exe's embedded .ico, so
+    // the title bar + taskbar would otherwise show the toolkit's default glyph.
+    #[cfg(windows)]
+    {
+        let icon_weak = ui.as_weak();
+        slint::Timer::single_shot(std::time::Duration::from_millis(80), move || {
+            if let Some(ui) = icon_weak.upgrade() {
+                set_window_icon(&ui);
+            }
+        });
     }
 
     ui.run().unwrap();
