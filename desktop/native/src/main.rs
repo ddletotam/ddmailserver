@@ -955,6 +955,12 @@ struct Shared {
     address_book: RefCell<Vec<ddmail_core::types::DesktopContact>>,
     /// Contact being edited (0 in create mode).
     editing_contact_id: Cell<i64>,
+    /// account_key of the contact under edit, for multi-account write routing
+    /// (empty ⇒ the engine falls back to the first account).
+    editing_contact_account: RefCell<String>,
+    /// event id → owning account_key, from the last events fetch, so calendar
+    /// writes (rsvp/patch/delete) route to the right connection.
+    event_accounts: RefCell<HashMap<i64, String>>,
     /// Files staged for the next outgoing message, picked via the composer's
     /// attach button. Parallel to the `composer-attachments` Slint model
     /// (which holds just the basenames). Cleared once a message is staged.
@@ -2509,7 +2515,7 @@ fn save_edit_form(ui: &MainWindow, sh: &Shared) {
         if let Some(e) = end {
             body["dtend"] = e.into();
         }
-        let _ = etx.send(engine::EngineCmd::CreateEvent { body });
+        let _ = etx.send(engine::EngineCmd::CreateEvent { body, account_key: String::new() });
     } else {
         let mut body = serde_json::json!({
             "scope": "all",
@@ -2525,7 +2531,8 @@ fn save_edit_form(ui: &MainWindow, sh: &Shared) {
         if let Some(c) = sh.cache.as_ref() {
             let _ = c.purge_event_reminders(editing);
         }
-        let _ = etx.send(engine::EngineCmd::PatchEvent { event_id: editing, body });
+        let ak = sh.event_accounts.borrow().get(&editing).cloned().unwrap_or_default();
+        let _ = etx.send(engine::EngineCmd::PatchEvent { event_id: editing, body, account_key: ak });
     }
     ui.set_edit_visible(false);
 }
@@ -3415,6 +3422,8 @@ fn main() {
         edit_cal_ids: RefCell::new(Vec::new()),
         address_book: RefCell::new(Vec::new()),
         editing_contact_id: Cell::new(0),
+        editing_contact_account: RefCell::new(String::new()),
+        event_accounts: RefCell::new(HashMap::new()),
         compose_attachments: RefCell::new(Vec::new()),
         pending_open_event: Cell::new(0),
         snooze_ctx: RefCell::new((0, 0, 0, 0, String::new())),
@@ -4600,6 +4609,7 @@ fn main() {
     ui.on_contact_add(move || {
         let Some(ui) = ui_weak_cadd.upgrade() else { return };
         sh_cadd.editing_contact_id.set(0);
+        sh_cadd.editing_contact_account.borrow_mut().clear();
         ui.set_ce_is_edit(false);
         ui.set_ce_name("".into());
         ui.set_ce_email("".into());
@@ -4616,6 +4626,7 @@ fn main() {
         let book = sh_ced.address_book.borrow();
         let Some(c) = book.get(idx.max(0) as usize) else { return };
         sh_ced.editing_contact_id.set(c.id);
+        *sh_ced.editing_contact_account.borrow_mut() = c.account_key.clone();
         ui.set_ce_is_edit(true);
         ui.set_ce_name(c.full_name.clone().into());
         ui.set_ce_email(c.emails.first().cloned().unwrap_or_default().into());
@@ -4639,10 +4650,11 @@ fn main() {
         let body = contact_body_from_ui(&ui);
         let Some(etx) = sh_csave.engine_tx.borrow().clone() else { return };
         let id = sh_csave.editing_contact_id.get();
+        let ak = sh_csave.editing_contact_account.borrow().clone();
         if id == 0 {
-            let _ = etx.send(engine::EngineCmd::CreateContact { body });
+            let _ = etx.send(engine::EngineCmd::CreateContact { body, account_key: ak });
         } else {
-            let _ = etx.send(engine::EngineCmd::UpdateContact { id, body });
+            let _ = etx.send(engine::EngineCmd::UpdateContact { id, body, account_key: ak });
         }
         ui.set_contact_editor_open(false);
     });
@@ -4654,8 +4666,9 @@ fn main() {
         let Some(ui) = ui_weak_cdel.upgrade() else { return };
         let id = sh_cdel.editing_contact_id.get();
         if id != 0 {
+            let ak = sh_cdel.editing_contact_account.borrow().clone();
             if let Some(etx) = sh_cdel.engine_tx.borrow().as_ref() {
-                let _ = etx.send(engine::EngineCmd::DeleteContact { id });
+                let _ = etx.send(engine::EngineCmd::DeleteContact { id, account_key: ak });
             }
         }
         ui.set_contact_editor_open(false);
@@ -5053,9 +5066,11 @@ fn main() {
     ui.on_rsvp(move |id, partstat| {
         if let Some(etx) = sh_rsvp.engine_tx.borrow().as_ref() {
             println!("rsvp event {id} -> {partstat}");
+            let ak = sh_rsvp.event_accounts.borrow().get(&(id as i64)).cloned().unwrap_or_default();
             let _ = etx.send(engine::EngineCmd::Rsvp {
                 event_id: id as i64,
                 partstat: partstat.to_string(),
+                account_key: ak,
             });
         }
     });
@@ -5071,9 +5086,10 @@ fn main() {
             let _ = c.purge_event_reminders(id);
         }
         toast_window::close_for_event(id);
+        let ak = sh_del.event_accounts.borrow().get(&id).cloned().unwrap_or_default();
         if let Some(etx) = sh_del.engine_tx.borrow().as_ref() {
             println!("delete event {id}");
-            let _ = etx.send(engine::EngineCmd::DeleteEvent { event_id: id });
+            let _ = etx.send(engine::EngineCmd::DeleteEvent { event_id: id, account_key: ak });
         }
         ui.set_detail_visible(false);
     });
@@ -5231,10 +5247,12 @@ fn main() {
         if let Some(c) = sh_gm.cache.as_ref() {
             let _ = c.purge_event_reminders(id as i64);
         }
+        let ak = sh_gm.event_accounts.borrow().get(&(id as i64)).cloned().unwrap_or_default();
         if let Some(etx) = sh_gm.engine_tx.borrow().as_ref() {
             let _ = etx.send(engine::EngineCmd::PatchEvent {
                 event_id: id as i64,
                 body,
+                account_key: ak,
             });
         }
     });
@@ -5317,10 +5335,12 @@ fn main() {
         if let Some(c) = sh_gr.cache.as_ref() {
             let _ = c.purge_event_reminders(id as i64);
         }
+        let ak = sh_gr.event_accounts.borrow().get(&(id as i64)).cloned().unwrap_or_default();
         if let Some(etx) = sh_gr.engine_tx.borrow().as_ref() {
             let _ = etx.send(engine::EngineCmd::PatchEvent {
                 event_id: id as i64,
                 body,
+                account_key: ak,
             });
         }
     });
@@ -5872,6 +5892,16 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         let vis = sh.calendar_visible.borrow();
                         let hidden = |cal_id: i64| !*vis.get(&cal_id).unwrap_or(&true);
                         reminders::seed(c, &events, &hidden, now_ms);
+                    }
+                    // Remember each event's owning account for write routing.
+                    {
+                        let mut m = sh.event_accounts.borrow_mut();
+                        m.clear();
+                        for e in &events {
+                            if !e.account_key.is_empty() {
+                                m.insert(e.id, e.account_key.clone());
+                            }
+                        }
                     }
                     *sh.calendar_events.borrow_mut() = events;
                     apply_calendar_view(ui, sh);

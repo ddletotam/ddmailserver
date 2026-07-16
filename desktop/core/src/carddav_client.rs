@@ -297,6 +297,7 @@ fn parse_vcard(vcard: &str) -> Option<DesktopContact> {
     }
     Some(DesktopContact {
         id: 0,
+        account_key: String::new(),
         uid,
         full_name,
         emails,

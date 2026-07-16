@@ -351,17 +351,17 @@ pub enum EngineCmd {
     FetchContacts { query: String, limit: u32 },
     /// Address-book writes. Bodies are server-shaped JSON
     /// (full_name/emails/phones/organization/title [+ from_identity on create]).
-    CreateContact { body: serde_json::Value },
-    UpdateContact { id: i64, body: serde_json::Value },
-    DeleteContact { id: i64 },
+    CreateContact { body: serde_json::Value, account_key: String },
+    UpdateContact { id: i64, body: serde_json::Value, account_key: String },
+    DeleteContact { id: i64, account_key: String },
     /// Set the requesting user's PARTSTAT on an event (ACCEPTED/TENTATIVE/DECLINED).
-    Rsvp { event_id: i64, partstat: String },
+    Rsvp { event_id: i64, partstat: String, account_key: String },
     /// Create a calendar event from a server-shaped JSON body.
-    CreateEvent { body: serde_json::Value },
+    CreateEvent { body: serde_json::Value, account_key: String },
     /// Patch an existing event (body carries the changed fields + scope).
-    PatchEvent { event_id: i64, body: serde_json::Value },
+    PatchEvent { event_id: i64, body: serde_json::Value, account_key: String },
     /// Delete an event.
-    DeleteEvent { event_id: i64 },
+    DeleteEvent { event_id: i64, account_key: String },
     Send {
         to: Vec<String>,
         cc: Vec<String>,
@@ -872,61 +872,101 @@ pub fn spawn(
                     });
                 }
                 EngineCmd::FetchCalendars => {
-                    match rt.block_on(provider.list_calendars()) {
-                        Ok(cals) => on_result(EngineResult::Calendars(cals)),
-                        Err(e) => on_result(EngineResult::Error(format!("list_calendars: {e}"))),
+                    // Fan out across every account and tag each calendar with
+                    // its owner — one unified list, no primary account.
+                    let mut all = Vec::new();
+                    for conn in &conns {
+                        match rt.block_on(conn.provider.list_calendars()) {
+                            Ok(mut cals) => {
+                                for c in cals.iter_mut() {
+                                    c.account_key = conn.key.clone();
+                                }
+                                all.extend(cals);
+                            }
+                            Err(e) => eprintln!("list_calendars [{}]: {e}", conn.key),
+                        }
                     }
+                    on_result(EngineResult::Calendars(all));
                 }
                 EngineCmd::FetchContacts { query, limit } => {
-                    let res = if query.trim().is_empty() {
-                        rt.block_on(provider.list_contacts(limit))
-                    } else {
-                        rt.block_on(provider.search_contacts(&query, limit))
-                    };
-                    match res {
-                        Ok(list) => on_result(EngineResult::Contacts { query, list }),
-                        Err(e) => on_result(EngineResult::Error(format!("fetch_contacts: {e}"))),
+                    let mut all = Vec::new();
+                    for conn in &conns {
+                        let r = if query.trim().is_empty() {
+                            rt.block_on(conn.provider.list_contacts(limit))
+                        } else {
+                            rt.block_on(conn.provider.search_contacts(&query, limit))
+                        };
+                        match r {
+                            Ok(mut list) => {
+                                for c in list.iter_mut() {
+                                    c.account_key = conn.key.clone();
+                                }
+                                all.extend(list);
+                            }
+                            Err(e) => eprintln!("fetch_contacts [{}]: {e}", conn.key),
+                        }
+                    }
+                    on_result(EngineResult::Contacts { query, list: all });
+                }
+                EngineCmd::CreateContact { body, account_key } => {
+                    let provider = route(&conns, &account_key).provider.clone();
+                    match rt.block_on(provider.create_contact(body)) {
+                        Ok(_) => on_result(EngineResult::Done("contact".into())),
+                        Err(e) => on_result(EngineResult::Error(format!("create_contact: {e}"))),
                     }
                 }
-                EngineCmd::CreateContact { body } => match rt.block_on(provider.create_contact(body)) {
-                    Ok(_) => on_result(EngineResult::Done("contact".into())),
-                    Err(e) => on_result(EngineResult::Error(format!("create_contact: {e}"))),
-                },
-                EngineCmd::UpdateContact { id, body } => {
+                EngineCmd::UpdateContact { id, body, account_key } => {
+                    let provider = route(&conns, &account_key).provider.clone();
                     match rt.block_on(provider.update_contact(id, body)) {
                         Ok(_) => on_result(EngineResult::Done("contact".into())),
                         Err(e) => on_result(EngineResult::Error(format!("update_contact: {e}"))),
                     }
                 }
-                EngineCmd::DeleteContact { id } => match rt.block_on(provider.delete_contact(id)) {
-                    Ok(_) => on_result(EngineResult::Done("contact".into())),
-                    Err(e) => on_result(EngineResult::Error(format!("delete_contact: {e}"))),
-                },
-                EngineCmd::FetchCalendarEvents { from_ms, to_ms, calendar_ids } => {
-                    match rt.block_on(provider.fetch_calendar_events(from_ms, to_ms, &calendar_ids)) {
-                        Ok(events) => on_result(EngineResult::CalendarEvents(events)),
-                        Err(e) => on_result(EngineResult::Error(format!("fetch_calendar_events: {e}"))),
+                EngineCmd::DeleteContact { id, account_key } => {
+                    let provider = route(&conns, &account_key).provider.clone();
+                    match rt.block_on(provider.delete_contact(id)) {
+                        Ok(_) => on_result(EngineResult::Done("contact".into())),
+                        Err(e) => on_result(EngineResult::Error(format!("delete_contact: {e}"))),
                     }
                 }
-                EngineCmd::Rsvp { event_id, partstat } => {
+                EngineCmd::FetchCalendarEvents { from_ms, to_ms, calendar_ids } => {
+                    let mut all = Vec::new();
+                    for conn in &conns {
+                        match rt.block_on(conn.provider.fetch_calendar_events(from_ms, to_ms, &calendar_ids)) {
+                            Ok(mut evs) => {
+                                for e in evs.iter_mut() {
+                                    e.account_key = conn.key.clone();
+                                }
+                                all.extend(evs);
+                            }
+                            Err(e) => eprintln!("fetch_calendar_events [{}]: {e}", conn.key),
+                        }
+                    }
+                    on_result(EngineResult::CalendarEvents(all));
+                }
+                EngineCmd::Rsvp { event_id, partstat, account_key } => {
+                    let provider = route(&conns, &account_key).provider.clone();
                     match rt.block_on(provider.rsvp_event(event_id, &partstat)) {
                         Ok(_) => on_result(EngineResult::Done("rsvp".into())),
                         Err(e) => on_result(EngineResult::Error(format!("rsvp: {e}"))),
                     }
                 }
-                EngineCmd::CreateEvent { body } => {
+                EngineCmd::CreateEvent { body, account_key } => {
+                    let provider = route(&conns, &account_key).provider.clone();
                     match rt.block_on(provider.create_event(body)) {
                         Ok(_) => on_result(EngineResult::Done("rsvp".into())),
                         Err(e) => on_result(EngineResult::Error(format!("create_event: {e}"))),
                     }
                 }
-                EngineCmd::PatchEvent { event_id, body } => {
+                EngineCmd::PatchEvent { event_id, body, account_key } => {
+                    let provider = route(&conns, &account_key).provider.clone();
                     match rt.block_on(provider.patch_event(event_id, body)) {
                         Ok(_) => on_result(EngineResult::Done("rsvp".into())),
                         Err(e) => on_result(EngineResult::Error(format!("patch_event: {e}"))),
                     }
                 }
-                EngineCmd::DeleteEvent { event_id } => {
+                EngineCmd::DeleteEvent { event_id, account_key } => {
+                    let provider = route(&conns, &account_key).provider.clone();
                     match rt.block_on(provider.delete_event(event_id)) {
                         Ok(_) => on_result(EngineResult::Done("rsvp".into())),
                         Err(e) => on_result(EngineResult::Error(format!("delete_event: {e}"))),
