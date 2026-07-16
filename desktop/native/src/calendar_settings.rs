@@ -1,7 +1,7 @@
 //! Persistent calendar-view settings, saved IMMEDIATELY on every change
 //! (not on exit): which calendars are toggled off, per-calendar colour
-//! overrides, the left-panel collapsed state, and the 5/7-day + work-hours
-//! view toggles. Stored as `calendar.json` next to `window.json`.
+//! overrides, and the 5/7-day + work-hours view toggles. Stored as
+//! `calendar.json` next to `window.json`.
 
 use std::collections::HashMap;
 use std::fs;
@@ -18,7 +18,6 @@ pub struct CalendarSettings {
     /// Per-calendar colour overrides picked by the user (id → "#rrggbb").
     /// Takes precedence over both the server colour and the palette default.
     pub colors: HashMap<i64, String>,
-    pub panel_collapsed: bool,
     /// Sound on new-mail notifications (the file is de-facto the client
     /// settings store, calendar name notwithstanding).
     #[serde(default = "default_true")]

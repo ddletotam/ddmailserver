@@ -85,18 +85,18 @@ pub fn setup(
     })
 }
 
-/// 32×32 solid brand-blue (#2f80ed) RGBA icon.
+/// 32×32 solid emerald (#10b981) RGBA icon.
 #[cfg(windows)]
 fn solid_icon_rgba() -> Vec<u8> {
     let mut v = Vec::with_capacity(32 * 32 * 4);
     for _ in 0..32 * 32 {
-        v.extend_from_slice(&[0x2f, 0x80, 0xed, 0xff]);
+        v.extend_from_slice(&[0x10, 0xb9, 0x81, 0xff]);
     }
     v
 }
 
 /// Solid icon + unread dot bottom-right: a white disc (so the badge reads
-/// against the blue base) with a blue core — «синий кружочек».
+/// against the emerald base) with a darker-emerald core — «изумрудный кружочек».
 #[cfg(windows)]
 fn dotted_icon_rgba() -> Vec<u8> {
     let mut v = solid_icon_rgba();
@@ -108,8 +108,8 @@ fn dotted_icon_rgba() -> Vec<u8> {
             let d2 = dx * dx + dy * dy;
             let px = (y * 32 + x) * 4;
             if d2 <= 4.5 * 4.5 {
-                // Blue core.
-                v[px..px + 4].copy_from_slice(&[0x15, 0x56, 0xc8, 0xff]);
+                // Darker-emerald core.
+                v[px..px + 4].copy_from_slice(&[0x04, 0x78, 0x57, 0xff]);
             } else if d2 <= 7.0 * 7.0 {
                 // White ring around it.
                 v[px..px + 4].copy_from_slice(&[0xff, 0xff, 0xff, 0xff]);
@@ -203,14 +203,14 @@ pub fn setup(
     Some(Tray { handle })
 }
 
-/// 32×32 brand-blue (#2f80ed) icon in ksni's ARGB32 byte order ([A,R,G,B] per
+/// 32×32 emerald (#10b981) icon in ksni's ARGB32 byte order ([A,R,G,B] per
 /// pixel — network byte order, unlike the Windows RGBA above). With `unread`,
-/// the same bottom-right badge: white ring around a darker-blue core.
+/// the same bottom-right badge: white ring around a darker-emerald core.
 #[cfg(target_os = "linux")]
 fn icon_argb(unread: bool) -> Vec<u8> {
     let mut v = Vec::with_capacity(32 * 32 * 4);
     for _ in 0..32 * 32 {
-        v.extend_from_slice(&[0xff, 0x2f, 0x80, 0xed]);
+        v.extend_from_slice(&[0xff, 0x10, 0xb9, 0x81]);
     }
     if unread {
         let (cx, cy) = (24.0f32, 24.0f32);
@@ -221,7 +221,7 @@ fn icon_argb(unread: bool) -> Vec<u8> {
                 let d2 = dx * dx + dy * dy;
                 let px = (y * 32 + x) * 4;
                 if d2 <= 4.5 * 4.5 {
-                    v[px..px + 4].copy_from_slice(&[0xff, 0x15, 0x56, 0xc8]);
+                    v[px..px + 4].copy_from_slice(&[0xff, 0x04, 0x78, 0x57]);
                 } else if d2 <= 7.0 * 7.0 {
                     v[px..px + 4].copy_from_slice(&[0xff, 0xff, 0xff, 0xff]);
                 }
