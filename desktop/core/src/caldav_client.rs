@@ -11,6 +11,24 @@ use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
 
 use crate::types::DesktopCalendarEvent;
 
+/// Applies DAV auth to a request. Convention (keeps the (username, password)
+/// signatures unchanged across the clients): an empty username with a password
+/// of `"Bearer <token>"` sends an Authorization header (OAuth); anything else
+/// is HTTP Basic. Callers building OAuth requests pass ("", "Bearer <token>").
+pub(crate) trait DavAuthExt {
+    fn dav_auth(self, username: &str, password: &str) -> Self;
+}
+
+impl DavAuthExt for reqwest::RequestBuilder {
+    fn dav_auth(self, username: &str, password: &str) -> Self {
+        if username.is_empty() && password.starts_with("Bearer ") {
+            self.header(reqwest::header::AUTHORIZATION, password)
+        } else {
+            self.basic_auth(username, Some(password))
+        }
+    }
+}
+
 /// Fetch events overlapping `[from_ms, to_ms)` from a calendar-collection URL.
 pub async fn fetch_events(
     calendar_url: &str,
@@ -42,7 +60,7 @@ pub async fn fetch_events(
     let method = reqwest::Method::from_bytes(b"REPORT").map_err(|e| format!("method: {e}"))?;
     let resp = http
         .request(method, calendar_url)
-        .basic_auth(username, Some(password))
+        .dav_auth(username, password)
         .header("Depth", "1")
         .header(reqwest::header::CONTENT_TYPE, "application/xml; charset=utf-8")
         .body(body)
@@ -123,7 +141,7 @@ pub(crate) async fn propfind(
     let method = reqwest::Method::from_bytes(b"PROPFIND").map_err(|e| format!("method: {e}"))?;
     let resp = http
         .request(method, url)
-        .basic_auth(username, Some(password))
+        .dav_auth(username, password)
         .header("Depth", depth.to_string())
         .header(reqwest::header::CONTENT_TYPE, "application/xml; charset=utf-8")
         .body(body)
@@ -211,7 +229,7 @@ pub async fn put_event(
     let http = client()?;
     let mut req = http
         .put(event_url(collection_url, uid))
-        .basic_auth(username, Some(password))
+        .dav_auth(username, password)
         .header(reqwest::header::CONTENT_TYPE, "text/calendar; charset=utf-8");
     req = match pre {
         Precondition::IfNew => req.header(reqwest::header::IF_NONE_MATCH, "*"),
@@ -243,7 +261,7 @@ pub async fn delete_event(
     let http = client()?;
     let mut req = http
         .delete(event_url(collection_url, uid))
-        .basic_auth(username, Some(password));
+        .dav_auth(username, password);
     if let Some(tag) = if_match {
         req = req.header(reqwest::header::IF_MATCH, tag);
     }
@@ -269,7 +287,7 @@ pub async fn get_event_raw(
     let http = client()?;
     let resp = http
         .get(event_url(collection_url, uid))
-        .basic_auth(username, Some(password))
+        .dav_auth(username, password)
         .send()
         .await
         .map_err(|e| format!("caldav GET: {e}"))?;

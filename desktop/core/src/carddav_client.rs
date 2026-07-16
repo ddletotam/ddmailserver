@@ -7,6 +7,7 @@
 //! our own CardDAV face and simple servers; full discovery and foreign-server
 //! quirks (Yandex/iCloud) are later refinements. Basic auth, read-only.
 
+use crate::caldav_client::DavAuthExt;
 use crate::types::DesktopContact;
 
 /// Resolve a configured CardDAV URL to a concrete addressbook-collection URL:
@@ -80,7 +81,7 @@ pub async fn fetch_contacts(
     let method = reqwest::Method::from_bytes(b"REPORT").map_err(|e| format!("method: {e}"))?;
     let resp = http
         .request(method, addressbook_url)
-        .basic_auth(username, Some(password))
+        .dav_auth(username, password)
         .header("Depth", "1")
         .header(reqwest::header::CONTENT_TYPE, "application/xml; charset=utf-8")
         .body(body)
@@ -156,7 +157,7 @@ pub async fn put_contact(
     let http = http_client()?;
     let mut req = http
         .put(contact_url(collection_url, uid))
-        .basic_auth(username, Some(password))
+        .dav_auth(username, password)
         .header(reqwest::header::CONTENT_TYPE, "text/vcard; charset=utf-8");
     req = match pre {
         crate::caldav_client::Precondition::IfNew => req.header(reqwest::header::IF_NONE_MATCH, "*"),
@@ -183,7 +184,7 @@ pub async fn get_contact_raw(
     let http = http_client()?;
     let resp = http
         .get(contact_url(collection_url, uid))
-        .basic_auth(username, Some(password))
+        .dav_auth(username, password)
         .send()
         .await
         .map_err(|e| format!("carddav GET: {e}"))?;
@@ -210,7 +211,7 @@ pub async fn delete_contact(
     let http = http_client()?;
     let mut req = http
         .delete(contact_url(collection_url, uid))
-        .basic_auth(username, Some(password));
+        .dav_auth(username, password);
     if let Some(t) = if_match {
         req = req.header(reqwest::header::IF_MATCH, t);
     }

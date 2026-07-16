@@ -38,6 +38,9 @@ pub struct AccountConfig {
     pub carddav_url: Option<String>,
     /// Optional CalDAV calendar-collection URL (plain-server accounts).
     pub caldav_url: Option<String>,
+    /// Google OAuth refresh token (standalone Gmail accounts). Present ⇒ DAV
+    /// uses Bearer and IMAP uses XOAUTH2; the access token is minted lazily.
+    pub oauth_refresh_token: Option<String>,
 }
 
 impl AccountConfig {
@@ -70,6 +73,7 @@ impl AccountConfig {
             native_token: std::env::var("DDMAIL_NATIVE_TOKEN").ok(),
             carddav_url: std::env::var("DDMAIL_CARDDAV_URL").ok(),
             caldav_url: std::env::var("DDMAIL_CALDAV_URL").ok(),
+            oauth_refresh_token: std::env::var("DDMAIL_OAUTH_REFRESH").ok(),
         })
     }
 
@@ -100,6 +104,7 @@ impl AccountConfig {
             native_token: v.get("native_token").and_then(|x| x.as_str()).map(String::from),
             carddav_url: v.get("carddav_url").and_then(|x| x.as_str()).map(String::from),
             caldav_url: v.get("caldav_url").and_then(|x| x.as_str()).map(String::from),
+            oauth_refresh_token: v.get("oauth_refresh_token").and_then(|x| x.as_str()).map(String::from),
         })
     }
 
@@ -157,6 +162,7 @@ impl AccountConfig {
             "smtp_host": self.smtp_host, "smtp_port": self.smtp_port,
             "native_url": self.native_url, "native_token": self.native_token,
             "carddav_url": self.carddav_url, "caldav_url": self.caldav_url,
+            "oauth_refresh_token": self.oauth_refresh_token,
         })
     }
 
@@ -275,6 +281,13 @@ fn build_provider(cfg: &AccountConfig) -> Arc<dyn MailProvider> {
             caldav_collection: Arc::new(std::sync::Mutex::new(None)),
             carddav_collection: Arc::new(std::sync::Mutex::new(None)),
             carddav_contact_uids: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            oauth_refresh_token: cfg.oauth_refresh_token.clone(),
+            oauth_client: if cfg.oauth_refresh_token.is_some() {
+                ddmail_core::oauth::load_client_creds()
+            } else {
+                None
+            },
+            oauth_access: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 }

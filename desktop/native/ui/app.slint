@@ -4241,8 +4241,12 @@ export component LoginWindow inherits Window {
 
     in property <string> error: "";
     in property <bool> busy: false;
+    // Google sign-in is offered only when client creds are present on this
+    // machine (google_oauth.json).
+    in property <bool> google-available: false;
 
     callback submit();
+    callback google-login();
 
     VerticalLayout {
         padding: 28px;
@@ -4344,6 +4348,23 @@ export component LoginWindow inherits Window {
                 Text {
                     text: root.busy ? "Подключаем…" : (root.mode == 0 ? "Войти" : "Подключить");
                     color: #ffffff; font-size: 15px; font-weight: 700;
+                }
+            }
+        }
+
+        // Google sign-in (standalone OAuth). Shown when creds are configured.
+        if root.google-available: gbtn := TouchArea {
+            height: 40px;
+            enabled: !root.busy;
+            clicked => { root.google-login(); }
+            Rectangle {
+                background: gbtn.has-hover ? #2a2e35 : #23262b;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: #3a3f47;
+                Text {
+                    text: "Войти через Google";
+                    color: #e8eaed; font-size: 14px; font-weight: 600;
                 }
             }
         }
