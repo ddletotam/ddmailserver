@@ -2926,7 +2926,9 @@ export component MainWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             width: 380px;
-            height: 356px;
+            // Height follows the content so the buttons are never clipped and
+            // the account picker (create) fits when shown.
+            height: ce-col.preferred-height;
             background: white;
             border-radius: 12px;
             border-width: 1px;
@@ -2934,7 +2936,7 @@ export component MainWindow inherits Window {
             drop-shadow-blur: 18px;
             drop-shadow-color: #00000022;
             TouchArea { } // swallow clicks on the card
-            VerticalLayout {
+            ce-col := VerticalLayout {
                 padding: 20px;
                 spacing: 10px;
                 Text {
@@ -4324,7 +4326,7 @@ export component ToastWindow inherits Window {
 export component LoginWindow inherits Window {
     title: "ddmail — вход";
     width: 440px;
-    height: 640px;
+    height: 700px;
     background: #1b1e23;
 
     // 0 = DDMail (our server, native); 1 = standalone (any IMAP + optional
@@ -4391,50 +4393,59 @@ export component LoginWindow inherits Window {
         }
         Rectangle { height: 4px; }
 
-        // ── Native fields ──
-        if root.mode == 0: Text { text: "Сервер"; font-size: 12px; color: #aeb6c2; }
-        if root.mode == 0: LineEdit {
-            text <=> root.server-url; font-size: 14px; enabled: !root.busy;
-        }
+        // Fields scroll (the standalone form is taller than the window) while
+        // the buttons below stay pinned and always reachable.
+        ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                spacing: 8px;
 
-        // ── Standalone fields ──
-        if root.mode == 1: Text { text: "Email"; font-size: 12px; color: #aeb6c2; }
-        if root.mode == 1: LineEdit {
-            text <=> root.email; font-size: 14px; enabled: !root.busy;
-            placeholder-text: "you@example.com";
-        }
-        if root.mode == 1: Text { text: "IMAP-сервер"; font-size: 12px; color: #aeb6c2; }
-        if root.mode == 1: LineEdit {
-            text <=> root.imap-host; font-size: 14px; enabled: !root.busy;
-            placeholder-text: "imap.example.com";
-        }
-        if root.mode == 1: Text { text: "IMAP-порт"; font-size: 12px; color: #aeb6c2; }
-        if root.mode == 1: LineEdit {
-            text <=> root.imap-port; font-size: 14px; enabled: !root.busy;
-        }
+                // ── Native fields ──
+                if root.mode == 0: Text { text: "Сервер"; font-size: 12px; color: #aeb6c2; }
+                if root.mode == 0: LineEdit {
+                    text <=> root.server-url; font-size: 14px; enabled: !root.busy;
+                }
 
-        // ── Shared credentials ──
-        Text { text: "Логин"; font-size: 12px; color: #aeb6c2; }
-        LineEdit {
-            text <=> root.username; font-size: 14px; enabled: !root.busy;
-        }
-        Text { text: "Пароль"; font-size: 12px; color: #aeb6c2; }
-        pass-edit := LineEdit {
-            text <=> root.password; font-size: 14px;
-            input-type: InputType.password; enabled: !root.busy;
-            accepted => { root.submit(); }
-        }
+                // ── Standalone fields ──
+                if root.mode == 1: Text { text: "Email"; font-size: 12px; color: #aeb6c2; }
+                if root.mode == 1: LineEdit {
+                    text <=> root.email; font-size: 14px; enabled: !root.busy;
+                    placeholder-text: "you@example.com";
+                }
+                if root.mode == 1: Text { text: "IMAP-сервер"; font-size: 12px; color: #aeb6c2; }
+                if root.mode == 1: LineEdit {
+                    text <=> root.imap-host; font-size: 14px; enabled: !root.busy;
+                    placeholder-text: "imap.example.com";
+                }
+                if root.mode == 1: Text { text: "IMAP-порт"; font-size: 12px; color: #aeb6c2; }
+                if root.mode == 1: LineEdit {
+                    text <=> root.imap-port; font-size: 14px; enabled: !root.busy;
+                }
 
-        // ── Optional standalone calendar/contacts ──
-        if root.mode == 1: Text { text: "CalDAV URL (необязательно)"; font-size: 12px; color: #aeb6c2; }
-        if root.mode == 1: LineEdit {
-            text <=> root.caldav-url; font-size: 14px; enabled: !root.busy;
-            placeholder-text: "https://…/calendars/…/";
-        }
-        if root.mode == 1: Text { text: "CardDAV URL (необязательно)"; font-size: 12px; color: #aeb6c2; }
-        if root.mode == 1: LineEdit {
-            text <=> root.carddav-url; font-size: 14px; enabled: !root.busy;
-            placeholder-text: "https://…/addressbooks/…/";
+                // ── Shared credentials ──
+                Text { text: "Логин"; font-size: 12px; color: #aeb6c2; }
+                LineEdit {
+                    text <=> root.username; font-size: 14px; enabled: !root.busy;
+                }
+                Text { text: "Пароль"; font-size: 12px; color: #aeb6c2; }
+                pass-edit := LineEdit {
+                    text <=> root.password; font-size: 14px;
+                    input-type: InputType.password; enabled: !root.busy;
+                    accepted => { root.submit(); }
+                }
+
+                // ── Optional standalone calendar/contacts ──
+                if root.mode == 1: Text { text: "CalDAV URL (необязательно)"; font-size: 12px; color: #aeb6c2; }
+                if root.mode == 1: LineEdit {
+                    text <=> root.caldav-url; font-size: 14px; enabled: !root.busy;
+                    placeholder-text: "https://…/calendars/…/";
+                }
+                if root.mode == 1: Text { text: "CardDAV URL (необязательно)"; font-size: 12px; color: #aeb6c2; }
+                if root.mode == 1: LineEdit {
+                    text <=> root.carddav-url; font-size: 14px; enabled: !root.busy;
+                    placeholder-text: "https://…/addressbooks/…/";
+                }
+            }
         }
 
         Text {
@@ -4472,6 +4483,5 @@ export component LoginWindow inherits Window {
                 }
             }
         }
-        Rectangle { vertical-stretch: 1; }
     }
 }
