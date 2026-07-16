@@ -391,6 +391,9 @@ export component MainWindow inherits Window {
     // `contact-editor-open`; save/delete dispatch to the engine.
     in-out property <bool> contact-editor-open: false;
     in-out property <bool> ce-is-edit: false; // show Delete + Написать
+    // Account picker for CREATE (only shown with >1 connection).
+    in property <[string]> ce-accounts;
+    in-out property <int> ce-account-idx: 0;
     in-out property <string> ce-name;
     in-out property <string> ce-email;
     in-out property <string> ce-phone;
@@ -2937,6 +2940,13 @@ export component MainWindow inherits Window {
                 Text {
                     text: root.ce-is-edit ? "Изменить контакт" : "Новый контакт";
                     font-size: 17px; font-weight: 700; color: #0f1419;
+                }
+                if !root.ce-is-edit && root.ce-accounts.length > 1: Text {
+                    text: "Аккаунт"; font-size: 12px; color: #6b7480;
+                }
+                if !root.ce-is-edit && root.ce-accounts.length > 1: ComboBox {
+                    model: root.ce-accounts;
+                    current-index <=> root.ce-account-idx;
                 }
                 Text { text: "Имя"; font-size: 12px; color: #6b7480; }
                 LineEdit { text <=> root.ce-name; font-size: 14px; }

@@ -950,6 +950,9 @@ struct Shared {
     editing_event_id: Cell<i64>,
     /// Writable calendar ids, parallel to the edit-form's ComboBox model.
     edit_cal_ids: RefCell<Vec<i64>>,
+    /// account_key of each writable calendar (parallel to edit_cal_ids), so a
+    /// newly-created event routes to the calendar's owning account.
+    edit_cal_accounts: RefCell<Vec<String>>,
     /// Last-fetched address book (parallel to the `address-book` Slint model),
     /// so the contact editor can read a row's full data by index.
     address_book: RefCell<Vec<ddmail_core::types::DesktopContact>>,
@@ -958,6 +961,8 @@ struct Shared {
     /// account_key of the contact under edit, for multi-account write routing
     /// (empty ⇒ the engine falls back to the first account).
     editing_contact_account: RefCell<String>,
+    /// account_keys parallel to the contact editor's account ComboBox (create).
+    ce_account_keys: RefCell<Vec<String>>,
     /// event id → owning account_key, from the last events fetch, so calendar
     /// writes (rsvp/patch/delete) route to the right connection.
     event_accounts: RefCell<HashMap<i64, String>>,
@@ -2294,15 +2299,18 @@ fn fill_writable_calendars(ui: &MainWindow, sh: &Shared, only_visible: bool) -> 
     let cals = sh.calendars.borrow();
     let visibility = sh.calendar_visible.borrow();
     let mut ids = Vec::new();
+    let mut accounts = Vec::new();
     let mut names: Vec<slint::SharedString> = Vec::new();
     for c in cals.iter().filter(|c| c.can_write) {
         if only_visible && !*visibility.get(&c.id).unwrap_or(&true) {
             continue;
         }
         ids.push(c.id);
+        accounts.push(c.account_key.clone());
         names.push(c.name.clone().into());
     }
     ui.set_edit_calendars(slint::ModelRc::new(slint::VecModel::from(names)));
+    *sh.edit_cal_accounts.borrow_mut() = accounts;
     ids
 }
 
@@ -2520,7 +2528,8 @@ fn save_edit_form(ui: &MainWindow, sh: &Shared) {
         if let Some(e) = end {
             body["dtend"] = e.into();
         }
-        let _ = etx.send(engine::EngineCmd::CreateEvent { body, account_key: String::new() });
+        let cal_account = sh.edit_cal_accounts.borrow().get(idx).cloned().unwrap_or_default();
+        let _ = etx.send(engine::EngineCmd::CreateEvent { body, account_key: cal_account });
     } else {
         let mut body = serde_json::json!({
             "scope": "all",
@@ -3543,9 +3552,11 @@ fn main() {
         manual_col_w: Cell::new(cal_set.manual_col_width),
         editing_event_id: Cell::new(0),
         edit_cal_ids: RefCell::new(Vec::new()),
+        edit_cal_accounts: RefCell::new(Vec::new()),
         address_book: RefCell::new(Vec::new()),
         editing_contact_id: Cell::new(0),
         editing_contact_account: RefCell::new(String::new()),
+        ce_account_keys: RefCell::new(Vec::new()),
         event_accounts: RefCell::new(HashMap::new()),
         add_conn_window: RefCell::new(None),
         settings_conn_keys: RefCell::new(Vec::new()),
@@ -4699,6 +4710,20 @@ fn main() {
         let Some(ui) = ui_weak_cadd.upgrade() else { return };
         sh_cadd.editing_contact_id.set(0);
         sh_cadd.editing_contact_account.borrow_mut().clear();
+        // Populate the account picker (labels + parallel keys).
+        {
+            let accounts = engine::AccountConfig::load_all();
+            let labels: Vec<slint::SharedString> = accounts
+                .iter()
+                .map(|a| {
+                    if a.email.is_empty() { a.account_key() } else { a.email.clone() }.into()
+                })
+                .collect();
+            *sh_cadd.ce_account_keys.borrow_mut() =
+                accounts.iter().map(|a| a.account_key()).collect();
+            ui.set_ce_accounts(ModelRc::new(VecModel::from(labels)));
+            ui.set_ce_account_idx(0);
+        }
         ui.set_ce_is_edit(false);
         ui.set_ce_name("".into());
         ui.set_ce_email("".into());
@@ -4739,7 +4764,13 @@ fn main() {
         let body = contact_body_from_ui(&ui);
         let Some(etx) = sh_csave.engine_tx.borrow().clone() else { return };
         let id = sh_csave.editing_contact_id.get();
-        let ak = sh_csave.editing_contact_account.borrow().clone();
+        let ak = if id == 0 {
+            // Create → the account chosen in the picker.
+            let idx = ui.get_ce_account_idx().max(0) as usize;
+            sh_csave.ce_account_keys.borrow().get(idx).cloned().unwrap_or_default()
+        } else {
+            sh_csave.editing_contact_account.borrow().clone()
+        };
         if id == 0 {
             let _ = etx.send(engine::EngineCmd::CreateContact { body, account_key: ak });
         } else {
