@@ -366,6 +366,12 @@ export component MainWindow inherits Window {
     in-out property <int> view-mode: 0;
     // Burger menu (top-left) open state — replaces the old always-on nav rail.
     in-out property <bool> view-menu-open: false;
+    // Connection lifecycle: any connections configured? and is the engine
+    // currently rebuilding (after a connection change / at startup)?
+    in property <bool> has-connections: false;
+    in property <bool> engine-reloading: false;
+    // Empty-state CTA → open settings to add the first connection.
+    callback add-first-connection();
 
     // ── Address book (view-mode 2) ──
     in property <[AddrBookRow]> address-book;
@@ -2836,6 +2842,65 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // ---------- Empty state (no connections) ----------
+    if !root.has-connections && !root.engine-reloading: Rectangle {
+        background: #f7f8fa;
+        VerticalLayout {
+            alignment: center;
+            spacing: 12px;
+            Text {
+                text: "Нет подключений";
+                font-size: 20px; font-weight: 700; color: #0f1419;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: "Добавьте почтовый аккаунт, чтобы начать.";
+                font-size: 14px; color: #6b7480;
+                horizontal-alignment: center;
+            }
+            HorizontalLayout {
+                alignment: center;
+                efc-btn := TouchArea {
+                    width: 220px; height: 44px;
+                    clicked => { root.add-first-connection(); }
+                    Rectangle {
+                        background: efc-btn.has-hover ? #4f7df5 : #3a6df0;
+                        border-radius: 8px;
+                        Text {
+                            text: "Добавить подключение";
+                            color: white; font-size: 15px; font-weight: 700;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------- Engine-reloading banner ----------
+    if root.engine-reloading: Rectangle {
+        x: (root.width - self.width) / 2;
+        y: 8px;
+        width: 260px;
+        height: 34px;
+        background: #23262b;
+        border-radius: 8px;
+        drop-shadow-blur: 12px;
+        drop-shadow-color: #00000055;
+        HorizontalLayout {
+            padding-left: 14px; padding-right: 14px; spacing: 10px; alignment: center;
+            // Small pulsing dot so it clearly isn't frozen.
+            dot := Rectangle {
+                width: 8px; height: 8px; border-radius: 4px; background: #3a6df0;
+                opacity: 0.4;
+                animate opacity { duration: 700ms; iteration-count: -1; direction: alternate; }
+            }
+            Text {
+                text: "Обновление подключений…";
+                color: #e8eaed; font-size: 13px; vertical-alignment: center;
             }
         }
     }
