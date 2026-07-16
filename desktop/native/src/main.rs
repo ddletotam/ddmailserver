@@ -595,7 +595,7 @@ fn enter_compose_mode(sh: &Shared, ui: &MainWindow, email: &str) {
         .unwrap_or_default();
     ui.set_active_name(email.clone().into());
     ui.set_active_initials(initial.into());
-    ui.set_active_color(slint::Brush::SolidColor(hex("#2f80ed")));
+    ui.set_active_color(slint::Brush::SolidColor(hex("#10b981")));
     ui.set_active_meta("".into());
     ui.set_active_ident_color(slint::Brush::SolidColor(hex("#ffffff")));
     ui.set_messages(ModelRc::new(VecModel::from(Vec::<RowItem>::new())));
@@ -737,10 +737,10 @@ fn bubble_template(is_outgoing: bool, time: &str, inner: &str) -> String {
         .bubble * {{ max-width: 100% !important; border: 0 !important; background-image: none !important; }}
         .bubble table, .bubble td, .bubble th {{ border-collapse: collapse !important; }}
         .bubble img {{ max-width: 100% !important; height: auto !important; }}
-        a {{ color: #2f80ed; }}
+        a {{ color: #10b981; }}
         .atts {{ margin-top: 8px; }}
         .att {{ display: inline-block; background: rgba(0,0,0,0.06); border-radius: 8px;
-                padding: 4px 10px; margin: 2px 4px 2px 0; color: #2f80ed;
+                padding: 4px 10px; margin: 2px 4px 2px 0; color: #10b981;
                 text-decoration: none; font-size: 13px; }}
         .time {{ text-align: right; font-size: 11px; color: #8a97a5;
                  margin-top: 4px; user-select: none; }}
@@ -1508,7 +1508,7 @@ fn pending_compose_item(target: &str) -> ConvItem {
         name: target.to_string().into(),
         preview: "Новое сообщение".into(),
         initials: initials.into(),
-        color: slint::Brush::SolidColor(hex("#2f80ed")),
+        color: slint::Brush::SolidColor(hex("#10b981")),
         time: "".into(),
         has_avatar: false,
         avatar: Image::default(),
@@ -1797,7 +1797,7 @@ fn week_range_ms(week_start_days: i64, day_count: i32) -> (i64, i64) {
 }
 
 /// Snapshot the current calendar-view preferences into calendar.json.
-/// Called immediately after every change (visibility / colour / panel /
+/// Called immediately after every change (visibility / colour /
 /// day- and hour-range toggles) — never deferred to exit.
 fn save_calendar_settings(ui: &MainWindow, sh: &Shared) {
     let hidden: Vec<i64> = sh
@@ -1811,7 +1811,6 @@ fn save_calendar_settings(ui: &MainWindow, sh: &Shared) {
         hidden,
         colors: sh.calendar_colors.borrow().clone(),
         notify_sound: ui.get_notify_sound_on(),
-        panel_collapsed: ui.get_calendar_panel_collapsed(),
         work_start_hour: sh.work_start.get(),
         work_end_hour: sh.work_end.get(),
         manual_hour_height: sh.manual_hour_h.get(),
@@ -2977,10 +2976,9 @@ fn main() {
         });
     }
 
-    // Restore persisted calendar-view preferences (panel state + view
-    // toggles now; the per-calendar maps are seeded into Shared below).
+    // Restore persisted calendar-view preferences (view toggles now; the
+    // per-calendar maps are seeded into Shared below).
     let cal_set = calendar_settings::load();
-    ui.set_calendar_panel_collapsed(cal_set.panel_collapsed);
     ui.set_notify_sound_on(cal_set.notify_sound);
     ui.set_work_start(cal_set.work_start_hour.clamp(0, 23));
     ui.set_work_end(cal_set.work_end_hour.clamp(1, 24));
@@ -4890,15 +4888,6 @@ fn main() {
             sh_vis.calendar_visible.borrow_mut().insert(id, !cur);
             apply_calendar_view(&ui, &sh_vis);
             save_calendar_settings(&ui, &sh_vis);
-        }
-    });
-    // Panel collapse/expand — the property flips on the Slint side; this
-    // callback just persists the new state immediately.
-    let ui_weak_pt = ui.as_weak();
-    let sh_pt = shared.clone();
-    ui.on_calendar_panel_toggled(move || {
-        if let Some(ui) = ui_weak_pt.upgrade() {
-            save_calendar_settings(&ui, &sh_pt);
         }
     });
     // Notification-sound toggle (burger menu) — persisted immediately.

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- DDM app icon: emerald tile + white speech bubble ("written message"). -->
+  <rect x="0" y="0" width="256" height="256" rx="56" fill="#10b981"/>
+  <rect x="51" y="61" width="154" height="102" rx="33" fill="#ffffff"/>
+  <polygon points="85,163 79,194 125,163" fill="#ffffff"/>
+  <rect x="79" y="92" width="98" height="14" rx="7" fill="#10b981"/>
+  <rect x="79" y="118" width="68" height="14" rx="7" fill="#10b981"/>
+</svg>

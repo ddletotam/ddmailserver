@@ -189,7 +189,7 @@ component Toggle inherits Rectangle {
     width: 42px;
     height: 24px;
     border-radius: 12px;
-    background: !root.enabled ? #e6ecf2 : (root.on ? #2f80ed : #c7cdd6);
+    background: !root.enabled ? #e6ecf2 : (root.on ? #10b981 : #c7cdd6);
     animate background { duration: 120ms; }
     opacity: root.enabled ? 1.0 : 0.5;
     Rectangle {
@@ -265,7 +265,7 @@ component CalField inherits VerticalLayout {
         background: white;
         border-radius: 7px;
         border-width: 1px;
-        border-color: ti.has-focus ? #2f80ed : #c8d4e4;
+        border-color: ti.has-focus ? #10b981 : #c8d4e4;
         TouchArea {
             clicked => { ti.focus(); }
         }
@@ -403,9 +403,6 @@ export component MainWindow inherits Window {
     callback contact-save();
     callback contact-delete();
     callback contact-editor-cancel();
-    // When true the calendar's left panel (+ Событие / КАЛЕНДАРИ) is hidden,
-    // giving the week grid the full width.
-    in-out property <bool> calendar-panel-collapsed: false;
 
     // ── Calendar state ──
     in property <[CalendarItem]> calendars;
@@ -460,8 +457,6 @@ export component MainWindow inherits Window {
     callback calendar-zoom-days(length);
     // Working-day start/end hours from the settings «Календарь» tab.
     callback set-work-hours(int, int);
-    // Fired right after the panel collapsed/expanded so Rust persists it.
-    callback calendar-panel-toggled();
     // (calendar id, palette index) from the colour-picker popup.
     callback calendar-set-color(int, int);
     callback event-clicked(int);
@@ -925,7 +920,7 @@ export component MainWindow inherits Window {
                         height: 64px;
                         // Identity tint on idle rows (Tauri-era behaviour):
                         // selection and hover override it.
-                        background: idx == root.selected ? #2f80ed
+                        background: idx == root.selected ? #10b981
                             : conv-ta.has-hover ? #e8ecf1
                             : conv.ident-color;
                         // New-mail flash: pops on instantly, fades out over
@@ -933,7 +928,7 @@ export component MainWindow inherits Window {
                         Rectangle {
                             width: parent.width;
                             height: parent.height;
-                            background: #2f80ed4d;
+                            background: #10b9814d;
                             opacity: conv.highlight ? 1.0 : 0.0;
                             animate opacity { duration: 900ms; easing: ease-out; }
                         }
@@ -993,12 +988,12 @@ export component MainWindow inherits Window {
                                     width: max(18px, ub-t.preferred-width + 12px);
                                     height: 18px;
                                     border-radius: 9px;
-                                    background: idx == root.selected ? white : #2f80ed;
+                                    background: idx == root.selected ? white : #10b981;
                                     ub-t := Text {
                                         width: parent.width;
                                         height: parent.height;
                                         text: conv.unread;
-                                        color: idx == root.selected ? #2f80ed : white;
+                                        color: idx == root.selected ? #10b981 : white;
                                         font-size: 11px;
                                         font-weight: 700;
                                         horizontal-alignment: center;
@@ -1066,14 +1061,14 @@ export component MainWindow inherits Window {
                             Text {
                                 width: 18px;
                                 text: "✎";
-                                color: #2f80ed;
+                                color: #10b981;
                                 font-size: 14px;
                                 vertical-alignment: center;
                             }
                             Text {
                                 horizontal-stretch: 1;
                                 text: "Написать по адресу: " + root.search-compose-email;
-                                color: #2f80ed;
+                                color: #10b981;
                                 font-size: 14px;
                                 vertical-alignment: center;
                                 overflow: elide;
@@ -1320,8 +1315,8 @@ export component MainWindow inherits Window {
                     y: 0;
                     width: parent.width;
                     height: 28px;
-                    background: #2f80ed11;
-                    border-color: #2f80ed44;
+                    background: #10b98111;
+                    border-color: #10b98144;
                     border-width: 0px;
                     z: 10;
                     // Keep the sliding indeterminate segment inside the chat
@@ -1356,7 +1351,7 @@ export component MainWindow inherits Window {
                             ? root.render-progress / root.render-total
                             : 0);
                         height: 3px;
-                        background: #2f80ed;
+                        background: #10b981;
                     }
                     // Indeterminate — a segment sliding left-to-right while the
                     // fetch is in flight.
@@ -1365,7 +1360,7 @@ export component MainWindow inherits Window {
                         width: parent.width * 0.3;
                         x: (parent.width * 1.3) * bar.phase - parent.width * 0.3;
                         height: 3px;
-                        background: #2f80ed;
+                        background: #10b981;
                     }
                     Text {
                         width: parent.width;
@@ -1373,7 +1368,7 @@ export component MainWindow inherits Window {
                         text: bar.indeterminate
                             ? "Загружаю письма…"
                             : "Загружаю " + root.render-progress + " из " + root.render-total + "…";
-                        color: #2f80ed;
+                        color: #10b981;
                         font-size: 12px;
                         font-weight: 700;
                         horizontal-alignment: center;
@@ -1510,7 +1505,7 @@ export component MainWindow inherits Window {
                                 y: sr.y;
                                 width: sr.w;
                                 height: sr.h;
-                                background: #2f80ed3d;
+                                background: #10b9813d;
                                 border-radius: 2px;
                             }
                         }
@@ -1695,7 +1690,7 @@ export component MainWindow inherits Window {
                     spacing: 10px;
                     Rectangle {
                         width: 3px;
-                        background: #2f80ed;
+                        background: #10b981;
                         border-radius: 1px;
                     }
                     VerticalLayout {
@@ -1705,7 +1700,7 @@ export component MainWindow inherits Window {
                             text: root.reply-ribbon-from;
                             font-size: 12px;
                             font-weight: 700;
-                            color: #2f80ed;
+                            color: #10b981;
                             overflow: elide;
                         }
                         Text {
@@ -1758,7 +1753,7 @@ export component MainWindow inherits Window {
                             spacing: 2px;
                             Text {
                                 text: a.name;
-                                color: #2f80ed;
+                                color: #10b981;
                                 font-size: 12px;
                                 font-weight: 600;
                                 max-width: 170px;
@@ -1883,7 +1878,7 @@ export component MainWindow inherits Window {
                         width: 42px;
                         height: 42px;
                         border-radius: 21px;
-                        background: #2f80ed;
+                        background: #10b981;
                         Text {
                             width: parent.width;
                             height: parent.height;
@@ -1974,7 +1969,7 @@ export component MainWindow inherits Window {
                                 }
                                 if ii == root.composer-identity-index: Text {
                                     text: "✓";
-                                    color: #2f80ed;
+                                    color: #10b981;
                                     font-size: 14px;
                                     font-weight: 700;
                                     vertical-alignment: center;
@@ -2054,15 +2049,15 @@ export component MainWindow inherits Window {
                         horizontal-stretch: 1;
                         if root.calendar-loading: Rectangle {
                             x: 8px; y: (parent.height - self.height) / 2;
-                            width: 110px; height: 26px; border-radius: 13px; background: #2f80ed22;
-                            Text { width: parent.width; height: parent.height; text: "Загрузка…"; color: #2f80ed; font-size: 12px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                            width: 110px; height: 26px; border-radius: 13px; background: #10b98122;
+                            Text { width: parent.width; height: parent.height; text: "Загрузка…"; color: #10b981; font-size: 12px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
                     // New event
                     Rectangle {
                         width: 118px; height: 34px; y: (parent.height - self.height) / 2;
                         border-radius: 8px;
-                        background: ne-ta.has-hover ? #2670d8 : #2f80ed;
+                        background: ne-ta.has-hover ? #059669 : #10b981;
                         ne-ta := TouchArea { clicked => { root.new-event(); } }
                         Text { width: parent.width; height: parent.height; text: "+ Событие"; color: white; font-size: 13px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                     }
@@ -2086,13 +2081,13 @@ export component MainWindow inherits Window {
                         width: min(parent.width - 8px, 96px);
                         height: parent.height - 6px;
                         border-radius: (parent.height - 6px) / 2;
-                        background: #2f80ed18;
+                        background: #10b98118;
                     }
                     Text {
                         width: parent.width; height: parent.height;
                         text: h;
                         font-weight: 700; font-size: 12px;
-                        color: d == root.today-col ? #2f80ed : #6b7480;
+                        color: d == root.today-col ? #10b981 : #6b7480;
                         horizontal-alignment: center; vertical-alignment: center;
                     }
                 }
@@ -2204,7 +2199,7 @@ export component MainWindow inherits Window {
                         y: 0;
                         width: root.col-width;
                         height: gridflick.viewport-height;
-                        background: #2f80ed0a;
+                        background: #10b9810a;
                     }
                     // Quarter-hour rules: :00 normal, :30 thin solid, :15/:45
                     // thin dashed.
@@ -2555,8 +2550,8 @@ export component MainWindow inherits Window {
                         background: ab-add.has-hover ? #d7e6ff : #eaf2fe;
                         ab-add := TouchArea { clicked => { root.contact-add(); } }
                         // Drawn plus (glyph font unreliable on Windows).
-                        Rectangle { width: 14px; height: 2px; border-radius: 1px; background: #2f80ed; }
-                        Rectangle { width: 2px; height: 14px; border-radius: 1px; background: #2f80ed; }
+                        Rectangle { width: 14px; height: 2px; border-radius: 1px; background: #10b981; }
+                        Rectangle { width: 2px; height: 14px; border-radius: 1px; background: #10b981; }
                     }
                 }
                 // Search box.
@@ -2641,7 +2636,7 @@ export component MainWindow inherits Window {
                     }
                     HorizontalLayout {
                         padding-left: 12px; spacing: 10px; alignment: start;
-                        Text { text: "✉"; font-size: 16px; color: #2f80ed; vertical-alignment: center; }
+                        Text { text: "✉"; font-size: 16px; color: #10b981; vertical-alignment: center; }
                         Text { text: "Почта"; font-size: 14px; font-weight: 600; color: #0f1419; vertical-alignment: center; }
                     }
                 }
@@ -2919,7 +2914,7 @@ export component MainWindow inherits Window {
                         Rectangle {
                             width: 90px; height: 28px; border-radius: 8px;
                             background: e-ta.has-hover ? #e1e6ee : #f0f2f5;
-                            Text { text: "Изменить"; color: #2f80ed; font-size: 13px; font-weight: 600;
+                            Text { text: "Изменить"; color: #10b981; font-size: 13px; font-weight: 600;
                                    horizontal-alignment: center; vertical-alignment: center; }
                             e-ta := TouchArea { clicked => { root.detail-edit(); } }
                         }
@@ -2993,7 +2988,7 @@ export component MainWindow inherits Window {
                                 height: parent.height;
                                 text: ex.value;
                                 font-size: 13px;
-                                color: ex.is-link ? #2f80ed : #0f1419;
+                                color: ex.is-link ? #10b981 : #0f1419;
                                 vertical-alignment: center;
                                 overflow: elide;
                             }
@@ -3052,7 +3047,7 @@ export component MainWindow inherits Window {
                             height: parent.height;
                             text: "🔗 " + lnk;
                             font-size: 13px;
-                            color: #2f80ed;
+                            color: #10b981;
                             overflow: elide;
                             vertical-alignment: center;
                         }
@@ -3198,7 +3193,7 @@ export component MainWindow inherits Window {
                                 height: parent.height;
                                 text: ex.value;
                                 font-size: 13px;
-                                color: ex.is-link ? #2f80ed : #0f1419;
+                                color: ex.is-link ? #10b981 : #0f1419;
                                 vertical-alignment: center;
                                 overflow: elide;
                             }
@@ -3267,7 +3262,7 @@ export component MainWindow inherits Window {
                             for name[i] in root.edit-calendars: Rectangle {
                                 height: 30px;
                                 border-radius: 7px;
-                                background: root.edit-calendar-idx == i ? #2f80ed : #eef2f7;
+                                background: root.edit-calendar-idx == i ? #10b981 : #eef2f7;
                                 HorizontalLayout {
                                     padding-left: 12px;
                                     padding-right: 12px;
@@ -3291,8 +3286,8 @@ export component MainWindow inherits Window {
                             height: 20px;
                             border-radius: 5px;
                             border-width: 1px;
-                            border-color: root.edit-all-day ? #2f80ed : #c8d4e4;
-                            background: root.edit-all-day ? #2f80ed : white;
+                            border-color: root.edit-all-day ? #10b981 : #c8d4e4;
+                            background: root.edit-all-day ? #10b981 : white;
                             Text {
                                 text: "✓";
                                 color: white;
@@ -3452,7 +3447,7 @@ export component MainWindow inherits Window {
                                         y: sr.y;
                                         width: sr.w;
                                         height: sr.h;
-                                        background: #2f80ed3d;
+                                        background: #10b9813d;
                                         border-radius: 2px;
                                     }
                                 }
@@ -3511,7 +3506,7 @@ export component MainWindow inherits Window {
                                         font-family: "Consolas";
                                         font-size: 12px;
                                         color: #2b3640;
-                                        selection-background-color: #2f80ed;
+                                        selection-background-color: #10b981;
                                         selection-foreground-color: white;
                                     }
                                 }
@@ -3642,7 +3637,7 @@ export component MainWindow inherits Window {
                         for opt in root.snooze-options: Rectangle {
                             height: 34px;
                             border-radius: 8px;
-                            background: snz-min.has-hover ? #1556c8 : #2f80ed;
+                            background: snz-min.has-hover ? #059669 : #10b981;
                             Text {
                                 text: opt.label;
                                 color: white; font-size: 14px; font-weight: 600;
@@ -3667,7 +3662,7 @@ export component MainWindow inherits Window {
                             border-width: 1px; border-color: #c8d4e4;
                             Text {
                                 text: "В момент начала";
-                                color: #1556c8; font-size: 14px; font-weight: 600;
+                                color: #059669; font-size: 14px; font-weight: 600;
                                 horizontal-alignment: center; vertical-alignment: center;
                             }
                             snz-at := TouchArea {
@@ -3768,7 +3763,7 @@ export component MainWindow inherits Window {
                                         text: tab.label;
                                         font-size: 14px;
                                         font-weight: root.settings-tab == i ? 700 : 500;
-                                        color: root.settings-tab == i ? #1556c8 : #2b3640;
+                                        color: root.settings-tab == i ? #059669 : #2b3640;
                                         vertical-alignment: center;
                                     }
                                 }
