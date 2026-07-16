@@ -617,12 +617,9 @@ pub fn spawn(
             while rx.recv().is_ok() {}
             return;
         }
-        // Primary = first account. Addressed commands (body/flags/delete/
-        // source/attachment/send) and calendar commands use it until
-        // per-account routing lands (1b-ii); aggregating commands fan out.
+        // Addressed and aggregating commands now route per-account; only the
+        // provider-agnostic avatar fetch still uses the first provider.
         let provider = conns[0].provider.clone();
-        let key = conns[0].key.clone();
-        let cfg = conns[0].cfg.clone();
 
         while let Ok(cmd) = rx.recv() {
             match cmd {
@@ -876,12 +873,22 @@ pub fn spawn(
                     // hit the provider. Failures on either side degrade
                     // gracefully so a missing contact index doesn't blank
                     // the dropdown.
-                    let contacts = cache
-                        .search_contacts(&key, &query, limit)
-                        .unwrap_or_default();
-                    let messages = rt
-                        .block_on(provider.search_messages(&cfg.email, &query))
-                        .unwrap_or_default();
+                    // Fan out across all accounts and merge (each cache is
+                    // namespaced by key; each provider searches its own mail),
+                    // capped at the total limit.
+                    let mut contacts = Vec::new();
+                    let mut messages = Vec::new();
+                    for conn in &conns {
+                        if contacts.len() < limit as usize {
+                            if let Ok(c) = cache.search_contacts(&conn.key, &query, limit) {
+                                contacts.extend(c);
+                            }
+                        }
+                        if let Ok(m) = rt.block_on(conn.provider.search_messages(&conn.cfg.email, &query)) {
+                            messages.extend(m);
+                        }
+                    }
+                    contacts.truncate(limit as usize);
                     on_result(EngineResult::SearchDropdown {
                         query,
                         contacts,
