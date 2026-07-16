@@ -493,6 +493,79 @@ fn contact_items(contacts: &[Contact]) -> Vec<ContactItem> {
         .collect()
 }
 
+/// Match `q_lc` (already lowercased) against everything the user thinks of as a
+/// person: address-book contacts first, then the counterparts of every loaded
+/// conversation — by BOTH display name and address, exactly as shown in the
+/// sidebar. Case-insensitive and Unicode-aware (Rust `to_lowercase`, unlike
+/// SQLite's ASCII-only `LOWER`, which never folded Cyrillic). Returned as
+/// `Contact` so the dropdown row + select-flow reuse unchanged; deduped by
+/// address, capped. Runs entirely client-side, so it answers on the first
+/// keystroke without waiting for the network message search.
+fn local_search_contacts(
+    book: &[ddmail_core::types::DesktopContact],
+    convs: &[Conversation],
+    q_lc: &str,
+) -> Vec<Contact> {
+    const CAP: usize = 12;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<Contact> = Vec::new();
+
+    // 1) Address book — first priority.
+    for c in book {
+        let hit = c.full_name.to_lowercase().contains(q_lc)
+            || c.organization.to_lowercase().contains(q_lc)
+            || c.emails.iter().any(|e| e.to_lowercase().contains(q_lc));
+        if !hit {
+            continue;
+        }
+        let email = c.emails.first().cloned().unwrap_or_default();
+        let key = if email.is_empty() {
+            c.full_name.to_lowercase()
+        } else {
+            email.to_lowercase()
+        };
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        out.push(Contact {
+            email,
+            name: if c.full_name.trim().is_empty() {
+                c.organization.clone()
+            } else {
+                c.full_name.clone()
+            },
+            source: "carddav".into(),
+        });
+        if out.len() >= CAP {
+            return out;
+        }
+    }
+
+    // 2) Conversation counterparts — name AND address, as seen in the sidebar.
+    // convs are already newest-first, so order is meaningful.
+    for conv in convs {
+        for cp in &conv.counterparts {
+            if cp.addr.is_empty() {
+                continue;
+            }
+            if !(cp.name.to_lowercase().contains(q_lc) || cp.addr.to_lowercase().contains(q_lc)) {
+                continue;
+            }
+            if seen.insert(cp.addr.to_lowercase()) {
+                out.push(Contact {
+                    email: cp.addr.clone(),
+                    name: cp.name.clone(),
+                    source: "conversation".into(),
+                });
+                if out.len() >= CAP {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Pull a short single-line preview out of a message body — first the
 /// plain-text part, then collapsing HTML tags out of html when text is
 /// missing. Whitespace squashed, capped at ~80 chars for the ribbon.
@@ -4399,6 +4472,20 @@ fn main() {
         if let Some(ui) = ui_weak_st.upgrade() {
             ui.set_search_compose_email(parse_email_like(&trimmed).unwrap_or_default().into());
             ui.set_search_loading(true);
+            // Answer instantly from client-side state (address book + sidebar
+            // counterparts) so contacts appear on the first keystroke — the
+            // engine result below only augments this with cache + messages.
+            if !trimmed.is_empty() {
+                let q_lc = trimmed.to_lowercase();
+                let local = local_search_contacts(
+                    &sh_typed.address_book.borrow(),
+                    &sh_typed.convs.borrow(),
+                    &q_lc,
+                );
+                let c_items = contact_items(&local);
+                *sh_typed.search_contacts.borrow_mut() = local;
+                ui.set_search_contacts(ModelRc::new(VecModel::from(c_items)));
+            }
         }
         if let Some(etx) = sh_typed.engine_tx.borrow().as_ref() {
             let _ = etx.send(engine::EngineCmd::SearchDropdown { query: trimmed, limit: 12 });
@@ -6077,9 +6164,28 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     if *sh.search_query_inflight.borrow() != query {
                         return;
                     }
-                    let c_items = contact_items(&contacts);
+                    // Contacts first: address book + sidebar counterparts
+                    // (client-side), then fold in the engine's cache-contact
+                    // hits (accounts whose book isn't mirrored locally),
+                    // deduped by address. Messages stay their own section.
+                    let q_lc = query.to_lowercase();
+                    let mut merged = local_search_contacts(
+                        &sh.address_book.borrow(),
+                        &sh.convs.borrow(),
+                        &q_lc,
+                    );
+                    let mut seen: std::collections::HashSet<String> =
+                        merged.iter().map(|c| c.email.to_lowercase()).collect();
+                    for c in contacts {
+                        let key = c.email.to_lowercase();
+                        if !key.is_empty() && seen.insert(key) {
+                            merged.push(c);
+                        }
+                    }
+                    merged.truncate(12);
+                    let c_items = contact_items(&merged);
                     let m_items = message_hits(&messages);
-                    *sh.search_contacts.borrow_mut() = contacts;
+                    *sh.search_contacts.borrow_mut() = merged;
                     *sh.search_messages.borrow_mut() = messages;
                     ui.set_search_contacts(ModelRc::new(VecModel::from(c_items)));
                     ui.set_search_messages(ModelRc::new(VecModel::from(m_items)));
