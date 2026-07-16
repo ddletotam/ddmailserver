@@ -15,7 +15,49 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 
 /// Scopes for mail (IMAP), calendar (CalDAV) and contacts (CardDAV).
-const SCOPES: &str = "https://mail.google.com/ https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/carddav";
+const SCOPES: &str = "https://mail.google.com/ https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/carddav https://www.googleapis.com/auth/userinfo.email";
+
+/// Google OAuth client credentials for this install. Kept OUT of the repo —
+/// read from `%APPDATA%/ru.letotam.ddmail/google_oauth.json` (or `$HOME/...`),
+/// a plain `{ "client_id": "...", "client_secret": "..." }`.
+#[derive(Debug, Clone)]
+pub struct ClientCreds {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+/// Load the client creds from the app config dir; None if the file is absent
+/// or malformed (the onboarding UI then shows "Google not configured").
+pub fn load_client_creds() -> Option<ClientCreds> {
+    let base = std::env::var("APPDATA").or_else(|_| std::env::var("HOME")).ok()?;
+    let path = std::path::Path::new(&base).join("ru.letotam.ddmail").join("google_oauth.json");
+    let data = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+    Some(ClientCreds {
+        client_id: v.get("client_id")?.as_str()?.to_string(),
+        client_secret: v.get("client_secret")?.as_str()?.to_string(),
+    })
+}
+
+/// Fetch the account's primary email via the userinfo endpoint (so onboarding
+/// doesn't have to ask the user to type it).
+pub async fn fetch_email(access_token: &str) -> Result<String, String> {
+    let http = reqwest::Client::new();
+    let resp = http
+        .get("https://www.googleapis.com/oauth2/v2/userinfo")
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| format!("userinfo: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("userinfo HTTP {}", resp.status()));
+    }
+    let v: serde_json::Value = resp.json().await.map_err(|e| format!("userinfo parse: {e}"))?;
+    v.get("email")
+        .and_then(|x| x.as_str())
+        .map(String::from)
+        .ok_or_else(|| "userinfo: no email".to_string())
+}
 
 #[derive(Debug, Clone)]
 pub struct GoogleTokens {

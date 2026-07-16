@@ -309,6 +309,34 @@ pub(crate) async fn connect_tls(host: &str, port: u16, username: &str, password:
     client.login(username, password).await.map_err(|e| crate::session::friendly_login_error(e.0))
 }
 
+/// SASL XOAUTH2 authenticator for Gmail/Google IMAP: emits the
+/// `user=…^Aauth=Bearer <token>^A^A` initial response.
+struct XOAuth2 {
+    user: String,
+    token: String,
+}
+
+impl async_imap::Authenticator for &XOAuth2 {
+    type Response = String;
+    fn process(&mut self, _challenge: &[u8]) -> Self::Response {
+        format!("user={}\x01auth=Bearer {}\x01\x01", self.user, self.token)
+    }
+}
+
+/// TLS IMAP connect using XOAUTH2 (OAuth access token) instead of a password.
+pub(crate) async fn connect_tls_xoauth2(host: &str, port: u16, email: &str, access_token: &str)
+    -> Result<async_imap::Session<async_native_tls::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>>, String>
+{
+    let tls = async_native_tls::TlsConnector::new();
+    let tcp = tokio::net::TcpStream::connect((host, port))
+        .await.map_err(|e| format!("TCP: {e}"))?;
+    let tls_stream = tls.connect(host, tcp.compat())
+        .await.map_err(|e| format!("TLS: {e}"))?;
+    let client = async_imap::Client::new(tls_stream);
+    let auth = XOAuth2 { user: email.to_string(), token: access_token.to_string() };
+    client.authenticate("XOAUTH2", &auth).await.map_err(|e| format!("XOAUTH2: {}", e.0))
+}
+
 pub(crate) async fn connect_plain(host: &str, port: u16, username: &str, password: &str)
     -> Result<async_imap::Session<tokio_util::compat::Compat<tokio::net::TcpStream>>, String>
 {

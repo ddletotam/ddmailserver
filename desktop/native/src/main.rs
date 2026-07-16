@@ -2643,6 +2643,7 @@ fn run_login_window() -> bool {
                 native_token: None,
                 carddav_url: opt(lw.get_carddav_url().to_string()),
                 caldav_url: opt(lw.get_caldav_url().to_string()),
+                oauth_refresh_token: None,
             };
             engine::AccountConfig::save_all(std::slice::from_ref(&cfg));
             done_cb.store(true, Ordering::Relaxed);
@@ -2688,6 +2689,73 @@ fn run_login_window() -> bool {
                         native_token: Some(login.token.clone()),
                         carddav_url: None,
                         caldav_url: None,
+                        oauth_refresh_token: None,
+                    };
+                    engine::AccountConfig::save_all(std::slice::from_ref(&cfg));
+                    done.store(true, Ordering::Relaxed);
+                    let _ = weak.upgrade_in_event_loop(|lw| {
+                        let _ = lw.hide();
+                    });
+                }
+                Err(e) => {
+                    let _ = weak.upgrade_in_event_loop(move |lw| {
+                        lw.set_busy(false);
+                        lw.set_error(e.into());
+                    });
+                }
+            }
+        });
+    });
+
+    // Offer Google sign-in only when client creds are present on this machine.
+    lw.set_google_available(ddmail_core::oauth::load_client_creds().is_some());
+    let gweak = lw.as_weak();
+    let gdone = done.clone();
+    lw.on_google_login(move || {
+        let Some(lw) = gweak.upgrade() else { return };
+        if lw.get_busy() {
+            return;
+        }
+        lw.set_error("".into());
+        lw.set_busy(true);
+        let weak = lw.as_weak();
+        let done = gdone.clone();
+        std::thread::spawn(move || {
+            let result = tokio::runtime::Runtime::new()
+                .map_err(|e| format!("tokio: {e}"))
+                .and_then(|rt| {
+                    rt.block_on(async {
+                        let creds = ddmail_core::oauth::load_client_creds()
+                            .ok_or("google_oauth.json missing")?;
+                        let now = chrono::Local::now().timestamp();
+                        let tokens = ddmail_core::oauth::google_login(
+                            &creds.client_id,
+                            &creds.client_secret,
+                            now,
+                        )
+                        .await?;
+                        let email = ddmail_core::oauth::fetch_email(&tokens.access_token).await?;
+                        Ok::<_, String>((tokens, email))
+                    })
+                });
+            match result {
+                Ok((tokens, email)) => {
+                    let cfg = engine::AccountConfig {
+                        host: "imap.gmail.com".into(),
+                        port: 993,
+                        username: email.clone(),
+                        password: String::new(),
+                        use_tls: true,
+                        email: email.clone(),
+                        smtp_host: "smtp.gmail.com".into(),
+                        smtp_port: 465,
+                        native_url: None,
+                        native_token: None,
+                        carddav_url: Some("https://www.googleapis.com/.well-known/carddav".into()),
+                        caldav_url: Some(format!(
+                            "https://apidata.googleusercontent.com/caldav/v2/{email}/events"
+                        )),
+                        oauth_refresh_token: Some(tokens.refresh_token),
                     };
                     engine::AccountConfig::save_all(std::slice::from_ref(&cfg));
                     done.store(true, Ordering::Relaxed);
@@ -3440,6 +3508,7 @@ fn main() {
                 native_token: None,
                 carddav_url: None,
                 caldav_url: None,
+                oauth_refresh_token: None,
             });
         }
         // Seed the connection indicator: every account starts "connecting"
