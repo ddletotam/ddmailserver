@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use lettre::{
-    transport::smtp::authentication::Credentials,
+    transport::smtp::authentication::{Credentials, Mechanism},
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
 use lettre::message::{header::ContentType, Attachment, Mailbox, MultiPart, SinglePart};
@@ -24,6 +24,16 @@ fn make_message_id(from_email: &str) -> String {
 pub(crate) async fn send_message_impl(
     host: &str, port: u16, username: &str, password: &str, use_tls: bool,
     message: &OutgoingMessage,
+) -> Result<String, String> {
+    send_message_auth(host, port, username, password, use_tls, false, message).await
+}
+
+/// As `send_message_impl`, but `xoauth2 = true` authenticates with SASL
+/// XOAUTH2 (Gmail/Google): `password` is the OAuth access token, `username`
+/// the email.
+pub(crate) async fn send_message_auth(
+    host: &str, port: u16, username: &str, password: &str, use_tls: bool,
+    xoauth2: bool, message: &OutgoingMessage,
 ) -> Result<String, String> {
     let from_mailbox: Mailbox = message.from.parse()
         .map_err(|e| format!("Invalid from address: {e}"))?;
@@ -63,17 +73,23 @@ pub(crate) async fn send_message_impl(
     let creds = Credentials::new(username.to_string(), password.to_string());
 
     let mailer = if use_tls {
-        AsyncSmtpTransport::<Tokio1Executor>::relay(host)
+        let mut b = AsyncSmtpTransport::<Tokio1Executor>::relay(host)
             .map_err(|e| format!("SMTP relay: {e}"))?
             .port(port)
-            .credentials(creds)
-            .build()
+            .credentials(creds);
+        if xoauth2 {
+            b = b.authentication(vec![Mechanism::Xoauth2]);
+        }
+        b.build()
     } else {
-        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
+        let mut b = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
             .map_err(|e| format!("SMTP starttls: {e}"))?
             .port(port)
-            .credentials(creds)
-            .build()
+            .credentials(creds);
+        if xoauth2 {
+            b = b.authentication(vec![Mechanism::Xoauth2]);
+        }
+        b.build()
     };
 
     let response = mailer.send(email)

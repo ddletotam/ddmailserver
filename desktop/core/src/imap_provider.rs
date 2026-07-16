@@ -340,8 +340,15 @@ impl MailProvider for ImapProvider {
         smtp_port: u16,
         message: &OutgoingMessage,
     ) -> Result<String, String> {
-        // Delegate to the existing smtp module logic.
-        // We re-use the same credentials (username/password) for SMTP.
+        // OAuth (Gmail): SMTP over XOAUTH2 with a fresh access token; else
+        // password auth with the account credentials.
+        if self.oauth_refresh_token.is_some() {
+            let tok = self.oauth_access_token().await?;
+            return crate::smtp::send_message_auth(
+                smtp_host, smtp_port, &self.username, &tok, self.use_tls, true, message,
+            )
+            .await;
+        }
         crate::smtp::send_message_impl(
             smtp_host,
             smtp_port,
@@ -358,8 +365,8 @@ impl MailProvider for ImapProvider {
         notifier: Notifier,
     ) -> Result<(), String> {
         // OAuth accounts: the IDLE watcher authenticates with a password, which
-        // Gmail-OAuth doesn't have — skip it (no push; fetch still works via
-        // XOAUTH2). SMTP XOAUTH2 send is likewise a follow-up.
+        // Gmail-OAuth doesn't have — skip it (no push; fetch works via XOAUTH2,
+        // send via SMTP XOAUTH2). A push path for OAuth is a later refinement.
         if self.oauth_refresh_token.is_some() {
             return Ok(());
         }
