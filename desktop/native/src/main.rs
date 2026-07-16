@@ -963,6 +963,9 @@ struct Shared {
     event_accounts: RefCell<HashMap<i64, String>>,
     /// Keeps the add/edit-connection modal alive while it's open.
     add_conn_window: RefCell<Option<LoginWindow>>,
+    /// account_keys parallel to the settings connections list (for edit/delete
+    /// by row index).
+    settings_conn_keys: RefCell<Vec<String>>,
     /// Files staged for the next outgoing message, picked via the composer's
     /// attach button. Parallel to the `composer-attachments` Slint model
     /// (which holds just the basenames). Cleared once a message is staged.
@@ -2619,6 +2622,7 @@ fn finish_add_connection(main_weak: slint::Weak<MainWindow>) {
                 }
                 if let Some(m) = main_weak.upgrade() {
                     rebuild_engine(&m, sh);
+                    refresh_connections(&m, sh);
                 }
             }
         });
@@ -2630,8 +2634,28 @@ fn finish_add_connection(main_weak: slint::Weak<MainWindow>) {
 /// OAuth. On success the connection is APPENDED to accounts.json (never
 /// clobbering the others) and the engine rebuilds. The window is retained in
 /// Shared while open.
-fn open_add_connection(main_weak: slint::Weak<MainWindow>) {
+fn open_add_connection(main_weak: slint::Weak<MainWindow>, prefill: Option<engine::AccountConfig>) {
     let Ok(lw) = LoginWindow::new() else { return };
+
+    // Editing: pre-fill the form. (Native passwords/tokens aren't stored, so
+    // the user re-enters the password to re-authenticate; a changed host/login
+    // creates a new key — same host/login replaces in place.)
+    if let Some(c) = &prefill {
+        if c.native_url.is_some() {
+            lw.set_mode(0);
+            lw.set_server_url(c.native_url.clone().unwrap_or_default().into());
+            lw.set_username(c.username.clone().into());
+        } else {
+            lw.set_mode(1);
+            lw.set_email(c.email.clone().into());
+            lw.set_imap_host(c.host.clone().into());
+            lw.set_imap_port(c.port.to_string().into());
+            lw.set_username(c.username.clone().into());
+            lw.set_password(c.password.clone().into());
+            lw.set_carddav_url(c.carddav_url.clone().unwrap_or_default().into());
+            lw.set_caldav_url(c.caldav_url.clone().unwrap_or_default().into());
+        }
+    }
 
     let weak = lw.as_weak();
     let mw_submit = main_weak.clone();
@@ -2860,6 +2884,31 @@ fn rebuild_engine(ui: &MainWindow, shared: &Rc<Shared>) {
         ui.set_engine_reloading(false);
     }
     *shared.engine_tx.borrow_mut() = Some(etx);
+}
+
+/// Rebuild the Settings → Подключения list from accounts.json, keeping a
+/// parallel key list for edit/delete-by-index.
+fn refresh_connections(ui: &MainWindow, shared: &Rc<Shared>) {
+    let accounts = engine::AccountConfig::load_all();
+    let mut rows: Vec<ConnRow> = Vec::with_capacity(accounts.len());
+    let mut keys: Vec<String> = Vec::with_capacity(accounts.len());
+    for a in &accounts {
+        let title = if a.email.is_empty() { a.account_key() } else { a.email.clone() };
+        let mode = if a.native_url.is_some() {
+            "наш сервер"
+        } else if a.oauth_refresh_token.is_some() {
+            "Google OAuth"
+        } else {
+            "IMAP/SMTP"
+        };
+        rows.push(ConnRow {
+            title: title.into(),
+            subtitle: format!("{} · {}", a.host, mode).into(),
+        });
+        keys.push(a.account_key());
+    }
+    *shared.settings_conn_keys.borrow_mut() = keys;
+    ui.set_connections(ModelRc::new(VecModel::from(rows)));
 }
 
 fn main() {
@@ -3499,6 +3548,7 @@ fn main() {
         editing_contact_account: RefCell::new(String::new()),
         event_accounts: RefCell::new(HashMap::new()),
         add_conn_window: RefCell::new(None),
+        settings_conn_keys: RefCell::new(Vec::new()),
         compose_attachments: RefCell::new(Vec::new()),
         pending_open_event: Cell::new(0),
         snooze_ctx: RefCell::new((0, 0, 0, 0, String::new())),
@@ -3878,6 +3928,27 @@ fn main() {
         let text = text.to_string();
         if text.trim().is_empty() {
             return;
+        }
+        // Graceful guard: if this thread belongs to a connection that was
+        // since removed, the send has nowhere to go — say so plainly instead
+        // of misrouting to another account.
+        {
+            let ak = sh_send.cur_account_key.borrow().clone();
+            let alive = ak.is_empty() || sh_send.account_keys.borrow().iter().any(|k| *k == ak);
+            if !alive {
+                toast_window::show(
+                    2,
+                    0,
+                    "Отправка недоступна",
+                    "Это письмо из подключения, которое было удалено. Добавьте подключение заново, чтобы отправлять с этого адреса.",
+                    false,
+                    600,
+                    || {},
+                    || {},
+                    || {},
+                );
+                return;
+            }
         }
         // Read chevron-panel overrides up front. Non-empty subject
         // override wins over the per-branch auto-derivation; cc is
@@ -4815,7 +4886,31 @@ fn main() {
     // Empty-state CTA → open the add-connection modal.
     let ui_weak_afc = ui.as_weak();
     ui.on_add_first_connection(move || {
-        open_add_connection(ui_weak_afc.clone());
+        open_add_connection(ui_weak_afc.clone(), None);
+    });
+
+    // Settings → Подключения: add / edit / delete.
+    let ui_weak_addc = ui.as_weak();
+    ui.on_add_connection(move || {
+        open_add_connection(ui_weak_addc.clone(), None);
+    });
+    let ui_weak_editc = ui.as_weak();
+    let sh_editc = shared.clone();
+    ui.on_edit_connection(move |idx| {
+        let key = sh_editc.settings_conn_keys.borrow().get(idx.max(0) as usize).cloned();
+        let Some(key) = key else { return };
+        let cfg = engine::AccountConfig::load_all().into_iter().find(|a| a.account_key() == key);
+        open_add_connection(ui_weak_editc.clone(), cfg);
+    });
+    let ui_weak_delc = ui.as_weak();
+    let sh_delc = shared.clone();
+    ui.on_delete_connection(move |idx| {
+        let Some(ui) = ui_weak_delc.upgrade() else { return };
+        let key = sh_delc.settings_conn_keys.borrow().get(idx.max(0) as usize).cloned();
+        let Some(key) = key else { return };
+        engine::AccountConfig::remove_account(&key);
+        rebuild_engine(&ui, &sh_delc);
+        refresh_connections(&ui, &sh_delc);
     });
 
     ui.on_open_settings(move || {
@@ -4845,6 +4940,7 @@ fn main() {
                 ui.set_conn_native("".into());
             }
         }
+        refresh_connections(&ui, &sh_set);
         ui.set_settings_tab(0);
         ui.set_settings_visible(true);
     });
