@@ -85,14 +85,30 @@ pub fn setup(
     })
 }
 
-/// 32×32 solid emerald (#10b981) RGBA icon.
+/// 32×32 RGBA of the app icon (emerald speech bubble), decoded from the bundled
+/// PNG. Falls back to a solid emerald fill if decoding ever fails.
+#[cfg(any(windows, target_os = "linux"))]
+fn base_icon_rgba() -> Vec<u8> {
+    use image::imageops::FilterType;
+    match image::load_from_memory(crate::ICON_PNG) {
+        Ok(img) => img
+            .resize_exact(32, 32, FilterType::Lanczos3)
+            .to_rgba8()
+            .into_raw(),
+        Err(_) => {
+            let mut v = Vec::with_capacity(32 * 32 * 4);
+            for _ in 0..32 * 32 {
+                v.extend_from_slice(&[0x10, 0xb9, 0x81, 0xff]);
+            }
+            v
+        }
+    }
+}
+
+/// 32×32 emerald-bubble RGBA icon.
 #[cfg(windows)]
 fn solid_icon_rgba() -> Vec<u8> {
-    let mut v = Vec::with_capacity(32 * 32 * 4);
-    for _ in 0..32 * 32 {
-        v.extend_from_slice(&[0x10, 0xb9, 0x81, 0xff]);
-    }
-    v
+    base_icon_rgba()
 }
 
 /// Solid icon + unread dot bottom-right: a white disc (so the badge reads
@@ -208,9 +224,11 @@ pub fn setup(
 /// the same bottom-right badge: white ring around a darker-emerald core.
 #[cfg(target_os = "linux")]
 fn icon_argb(unread: bool) -> Vec<u8> {
+    // Bubble RGBA → ksni's ARGB byte order ([A,R,G,B] per pixel).
+    let rgba = base_icon_rgba();
     let mut v = Vec::with_capacity(32 * 32 * 4);
-    for _ in 0..32 * 32 {
-        v.extend_from_slice(&[0xff, 0x10, 0xb9, 0x81]);
+    for px in rgba.chunks_exact(4) {
+        v.extend_from_slice(&[px[3], px[0], px[1], px[2]]);
     }
     if unread {
         let (cx, cy) = (24.0f32, 24.0f32);

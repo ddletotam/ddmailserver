@@ -84,3 +84,12 @@ $w.Flush()
 $dest = Join-Path $PSScriptRoot "..\assets\ddmail.ico"
 [System.IO.File]::WriteAllBytes($dest, $out.ToArray())
 Write-Host "Wrote $dest ($($out.Length) bytes, $($pngs.Count) sizes)"
+
+# Also emit a 256x256 PNG. Bundled into the exe (include_bytes!) and decoded at
+# runtime for the Slint window icon (WM_SETICON) and the system-tray glyph —
+# neither of which reads the embedded .ico.
+$png = New-Icon 256
+$pngDest = Join-Path $PSScriptRoot "..\assets\ddmail_icon.png"
+$png.Save($pngDest, [System.Drawing.Imaging.ImageFormat]::Png)
+$png.Dispose()
+Write-Host "Wrote $pngDest"
