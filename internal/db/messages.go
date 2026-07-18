@@ -509,9 +509,9 @@ func (db *DB) RefreshExistingFromRemote(
 	remoteFolder string,
 	seen, flagged, answered bool,
 	downgradeSpam bool,
-) error {
+) (bool, error) {
 	if messageID == "" {
-		return nil
+		return false, nil
 	}
 	now := timeutil.Now()
 	// No-op guard: this runs for EVERY existing message on EVERY sync
@@ -519,9 +519,11 @@ func (db *DB) RefreshExistingFromRemote(
 	// and bumped updated_at on unchanged rows — which both churns the DB
 	// and poisons updated_at as a change signal (the desktop delta sync
 	// saw every conversation as "changed" every cycle). Only write when
-	// something actually differs.
+	// something actually differs. The returned bool is that same signal
+	// (RowsAffected > 0) — the sync task uses it to publish flags_changed
+	// pushes only when a remote-side change actually landed.
 	if downgradeSpam {
-		_, err := db.Exec(
+		res, err := db.Exec(
 			`UPDATE messages SET
 			   remote_uid = $1, remote_folder = $2,
 			   seen = $3, flagged = $4, answered = $5,
@@ -538,11 +540,12 @@ func (db *DB) RefreshExistingFromRemote(
 			remoteUID, remoteFolder, seen, flagged, answered, now, userID, messageID,
 		)
 		if err != nil {
-			return fmt.Errorf("refresh + downgrade: %w", err)
+			return false, fmt.Errorf("refresh + downgrade: %w", err)
 		}
-		return nil
+		n, _ := res.RowsAffected()
+		return n > 0, nil
 	}
-	_, err := db.Exec(
+	res, err := db.Exec(
 		`UPDATE messages SET
 		   remote_uid = $1, remote_folder = $2,
 		   seen = $3, flagged = $4, answered = $5,
@@ -556,9 +559,10 @@ func (db *DB) RefreshExistingFromRemote(
 		remoteUID, remoteFolder, seen, flagged, answered, now, userID, messageID,
 	)
 	if err != nil {
-		return fmt.Errorf("refresh existing: %w", err)
+		return false, fmt.Errorf("refresh existing: %w", err)
 	}
-	return nil
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // BackfillEncodedHeaders runs `decode` over every row whose Subject or

@@ -103,6 +103,15 @@ func (s *Scheduler) TriggerSyncForAccount(account *models.Account) {
 				NewCount:  n.NewCount,
 			})
 		})
+		task.SetFlagsNotifyFunc(func(int) {
+			// Read/starred in a client of the source account — tell the
+			// desktop to refresh unread state (no toast, just a delta pull).
+			s.notifyHub.Publish(notify.Event{
+				UserID:  userID,
+				Type:    notify.EventFlagsChanged,
+				Mailbox: "INBOX",
+			})
+		})
 	}
 	if s.analyzer != nil {
 		task.SetAnalyzer(s.analyzer)
@@ -264,6 +273,14 @@ func (s *Scheduler) scheduleIMAPSync() {
 					Subject:   n.Subject,
 					MessageID: n.MessageID,
 					NewCount:  n.NewCount,
+				})
+			})
+			task.SetFlagsNotifyFunc(func(int) {
+				// See TriggerSyncForAccount — same push, poll path.
+				s.notifyHub.Publish(notify.Event{
+					UserID:  uid,
+					Type:    notify.EventFlagsChanged,
+					Mailbox: "INBOX",
 				})
 			})
 		}

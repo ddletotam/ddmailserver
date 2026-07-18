@@ -19,9 +19,10 @@ use webview2_com::{
 };
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2Controller,
-    ICoreWebView2Environment, COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+    ICoreWebView2Controller3, ICoreWebView2Environment,
+    COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
 };
-use windows::core::PCWSTR;
+use windows::core::{Interface, PCWSTR};
 use windows::Win32::Foundation::{BOOL, E_POINTER, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::Com::{CoInitializeEx, IStream, COINIT_APARTMENTTHREADED, STREAM_SEEK};
 use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
@@ -32,7 +33,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::render_common::{
-    parse_link_rects, parse_text_runs, LinkRect, TextRun, LINK_RECTS_JS, TEXT_RUNS_JS,
+    parse_link_rects, parse_text_runs, LinkRect, TextRun, HIDE_SCROLLBARS_JS, LINK_RECTS_JS,
+    TEXT_RUNS_JS,
 };
 
 /// Plain pass-through window procedure (the off-screen host needs no logic).
@@ -60,6 +62,10 @@ pub struct RenderResult {
     pub links: Vec<LinkRect>,
     /// Per-word text layer for mouse selection (PDF-viewer style).
     pub runs: Vec<TextRun>,
+    /// Rasterization scale the bitmap was captured at: bitmap px =
+    /// CSS px × scale. Links/runs stay in CSS px; the UI divides the
+    /// bitmap height by this to get the logical display height.
+    pub scale: f32,
 }
 
 impl RenderResult {
@@ -72,7 +78,11 @@ pub struct Engine {
     _hwnd: HWND,
     _env: ICoreWebView2Environment,
     controller: ICoreWebView2Controller,
+    /// Controller3 gives explicit RasterizationScale control (HiDPI-crisp
+    /// captures). None on ancient WebView2 runtimes — we render at 1x then.
+    controller3: Option<ICoreWebView2Controller3>,
     webview: ICoreWebView2,
+    cur_scale: f64,
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -151,14 +161,39 @@ impl Engine {
 
             let _ = controller.SetIsVisible(true);
             let webview = controller.CoreWebView2().expect("CoreWebView2");
+            let controller3: Option<ICoreWebView2Controller3> = controller.cast().ok();
+            if let Some(c3) = controller3.as_ref() {
+                // The hidden host window's monitor DPI is irrelevant — the
+                // scale is driven explicitly per render from the UI window.
+                let _ = c3.SetShouldDetectMonitorScaleChanges(false);
+            }
 
             Engine {
                 _hwnd: hwnd,
                 _env: env,
                 controller,
+                controller3,
                 webview,
+                cur_scale: 1.0,
             }
         }
+    }
+
+    /// Apply the requested rasterization scale (UI window scale factor) and
+    /// return the scale actually in effect — 1.0 when the runtime lacks
+    /// Controller3, so every physical-pixel computation downstream agrees
+    /// with what the capture really produces.
+    unsafe fn apply_scale(&mut self, want: f32) -> f64 {
+        let want = if want.is_finite() && want >= 0.5 && want <= 4.0 {
+            want as f64
+        } else {
+            1.0
+        };
+        let Some(c3) = self.controller3.as_ref() else { return 1.0 };
+        if (self.cur_scale - want).abs() > 0.001 && c3.SetRasterizationScale(want).is_ok() {
+            self.cur_scale = want;
+        }
+        self.cur_scale
     }
 
     /// Panic-guarded wrapper. A render touches WebView2 COM, PNG decode and
@@ -168,9 +203,9 @@ impl Engine {
     /// `open_conversation` then spins forever until a restart. Here we catch
     /// it, return an empty (uncached) result, and signal the worker to
     /// rebuild the engine before the next job. Returns (result, panicked).
-    pub fn render_one_guarded(&mut self, html: &str, width: u32) -> (RenderResult, bool) {
+    pub fn render_one_guarded(&mut self, html: &str, width: u32, scale: f32) -> (RenderResult, bool) {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.render_one(html, width)
+            self.render_one(html, width, scale)
         }));
         match r {
             Ok(res) => (res, false),
@@ -183,6 +218,7 @@ impl Engine {
                         painted_height: 0,
                         links: Vec::new(),
                         runs: Vec::new(),
+                        scale: 1.0,
                     },
                     true,
                 )
@@ -190,11 +226,16 @@ impl Engine {
         }
     }
 
-    pub fn render_one(&mut self, html: &str, width: u32) -> RenderResult {
+    pub fn render_one(&mut self, html: &str, width: u32, scale: f32) -> RenderResult {
         unsafe {
-            let w = width.max(1) as i32;
+            let scale = self.apply_scale(scale);
+            let w_css = width.max(1);
+            // Bounds are raw (physical) pixels; the page sees bounds/scale CSS px.
+            let w_phys = ((w_css as f64) * scale).round().max(1.0) as i32;
             // Small viewport first so scrollHeight reflects content, not the box.
-            let _ = self.controller.SetBounds(RECT { left: 0, top: 0, right: w, bottom: 1 });
+            let _ = self
+                .controller
+                .SetBounds(RECT { left: 0, top: 0, right: w_phys, bottom: 1 });
 
             let view_ready = self.navigate_sync(html);
             if !view_ready {
@@ -204,8 +245,14 @@ impl Engine {
                     painted_height: 0,
                     links: Vec::new(),
                     runs: Vec::new(),
+                    scale: scale as f32,
                 };
             }
+
+            // Kill scrollbars before measuring: at this 1px-tall viewport the
+            // vertical scrollbar steals layout width that the full-height
+            // viewport won't — height and rects must describe the final layout.
+            let _ = self.eval_json(HIDE_SCROLLBARS_JS);
 
             let painted_height = self.measure_height().min(MAX_H);
             if painted_height == 0 {
@@ -215,23 +262,28 @@ impl Engine {
                     painted_height: 0,
                     links: Vec::new(),
                     runs: Vec::new(),
+                    scale: scale as f32,
                 };
             }
+
+            // Grow the viewport BEFORE extracting geometry: rects and the
+            // snapshot must come from the same layout. Extracting first (the
+            // old order) read coordinates that late images / viewport-height
+            // dependent CSS then shifted under the capture.
+            let h_phys = ((painted_height as f64) * scale).round().max(1.0) as i32;
+            let _ = self.controller.SetBounds(RECT {
+                left: 0,
+                top: 0,
+                right: w_phys,
+                bottom: h_phys,
+            });
+            pump_a_bit();
 
             let links = self.extract_links();
             let runs = self.extract_text_runs();
 
-            // Grow viewport to fit content so CapturePreview covers it all.
-            let _ = self.controller.SetBounds(RECT {
-                left: 0,
-                top: 0,
-                right: w,
-                bottom: painted_height as i32,
-            });
-            pump_a_bit();
-
             let bitmap = self
-                .capture(width, painted_height)
+                .capture(w_css, painted_height, scale)
                 .unwrap_or_else(|| empty_bitmap(width));
 
             RenderResult {
@@ -240,6 +292,7 @@ impl Engine {
                 painted_height,
                 links,
                 runs,
+                scale: scale as f32,
             }
         }
     }
@@ -367,7 +420,9 @@ impl Engine {
         }
     }
 
-    unsafe fn capture(&self, width: u32, height: u32) -> Option<Bitmap> {
+    /// Capture the viewport. `width`/`height` are CSS px; the PNG comes back
+    /// in physical px (CSS × rasterization scale) — crop against those.
+    unsafe fn capture(&self, width: u32, height: u32, scale: f64) -> Option<Bitmap> {
         let stream: IStream = CreateStreamOnHGlobal(None, true).ok()?;
 
         let (tx, rx) = mpsc::channel::<bool>();
@@ -401,9 +456,12 @@ impl Engine {
         let img = image::load_from_memory(&png).ok()?;
         let rgba = img.to_rgba8();
         let (iw, ih) = (rgba.width(), rgba.height());
-        // Crop to the measured content height; PNG width should already match.
-        let h = ih.min(height.max(1)).min(MAX_H);
-        let w = iw.min(width.max(1));
+        // Crop to the measured content size in PHYSICAL px; the PNG width
+        // should already match w_css × scale.
+        let pw = ((width.max(1) as f64) * scale).round().max(1.0) as u32;
+        let ph = ((height.max(1) as f64) * scale).round().max(1.0) as u32;
+        let h = ih.min(ph);
+        let w = iw.min(pw);
         let row = iw as usize * 4;
         let src = rgba.into_raw();
         let mut out = Vec::with_capacity(w as usize * h as usize * 4);

@@ -13,6 +13,7 @@ import (
 	"github.com/emersion/go-imap"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/notify"
 	"github.com/yourusername/mailserver/internal/parser"
 	"github.com/yourusername/mailserver/internal/search"
 	"github.com/yourusername/mailserver/internal/timeutil"
@@ -544,6 +545,7 @@ func (m *Mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, operation i
 	}
 
 	// Update matching messages
+	updatedAny := false
 	for seqNum, msg := range messages {
 		id := uint32(seqNum + 1)
 		if uid {
@@ -598,6 +600,7 @@ func (m *Mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, operation i
 		if err != nil {
 			log.Printf("Failed to update flags for message %d: %v", msg.ID, err)
 		} else {
+			updatedAny = true
 			log.Printf("Updated flags for message %d: seen=%v, flagged=%v, answered=%v, deleted=%v",
 				msg.ID, seen, flagged, answered, deleted)
 
@@ -617,6 +620,18 @@ func (m *Mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, operation i
 				}
 			}
 		}
+	}
+
+	// One WS push per STORE so connected desktop clients refresh unread
+	// state (read/starred in Thunderbird/iOS). IMAP sessions are already
+	// covered by the untagged FETCH above; this is the WebSocket leg.
+	if updatedAny && m.backend != nil && m.backend.hub != nil {
+		m.backend.hub.Publish(notify.Event{
+			UserID:   m.user.userID,
+			Type:     notify.EventFlagsChanged,
+			Username: m.user.username,
+			Mailbox:  m.name,
+		})
 	}
 
 	return nil

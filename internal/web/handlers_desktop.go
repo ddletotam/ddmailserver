@@ -388,6 +388,8 @@ func (s *Server) HandleDesktopSetFlags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	anyVisibleChange := false
+	changedFolder := ""
 	for _, ref := range req.Messages {
 		msg := s.resolveMsgRef(user.ID, ref.MessageID, ref.UID)
 		if msg == nil {
@@ -425,6 +427,20 @@ func (s *Server) HandleDesktopSetFlags(w http.ResponseWriter, r *http.Request) {
 			s.database.UpdateMessageFlag(msg.ID, "draft", req.Add)
 		}
 
+		if propagate {
+			// Track for the WS push below. Only seen/flagged/answered are
+			// user-visible unread-state changes worth a push; \Deleted and
+			// \Draft ride their own flows.
+			if (req.Flags == "\\Seen" && msg.Seen != req.Add) ||
+				(req.Flags == "\\Flagged" && msg.Flagged != req.Add) ||
+				(req.Flags == "\\Answered" && msg.Answered != req.Add) {
+				anyVisibleChange = true
+				if changedFolder == "" {
+					changedFolder = ref.Folder
+				}
+			}
+		}
+
 		if propagate && msg.AccountID > 0 && msg.RemoteUID > 0 {
 			if err := s.database.QueueFlagSync(
 				msg.ID, msg.AccountID, msg.RemoteFolder, msg.RemoteUID,
@@ -433,6 +449,17 @@ func (s *Server) HandleDesktopSetFlags(w http.ResponseWriter, r *http.Request) {
 				log.Printf("desktop set-flags: queue flag sync failed for msg %d: %v", msg.ID, err)
 			}
 		}
+	}
+
+	// Push so OTHER connected desktops of this user converge immediately
+	// (multi-device). The originator gets an echo too — it reacts with one
+	// cheap delta fetch, which is harmless.
+	if anyVisibleChange && s.notifyHub != nil {
+		s.notifyHub.Publish(notify.Event{
+			UserID:  user.ID,
+			Type:    notify.EventFlagsChanged,
+			Mailbox: changedFolder,
+		})
 	}
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
