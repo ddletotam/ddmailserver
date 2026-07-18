@@ -208,10 +208,12 @@ func main() {
 	go scheduler.Start()
 	defer scheduler.Stop()
 
-	// Initialize IMAP server (plain) WITHOUT IDLE support
+	// Initialize IMAP server (plain) WITHOUT the IDLE extension, but WITH the
+	// notify hub: flag changes made through this listener must still publish
+	// flags_changed for the desktop WS push (the hub is not IDLE-specific).
 	log.Printf("Initializing IMAP server (plain, no IDLE)...")
 	imapAddr := fmt.Sprintf("%s:%d", cfg.Server.WebHost, cfg.Server.IMAPPort)
-	imapSrv := imapserver.New(database, imapAddr)
+	imapSrv := imapserver.NewWithHub(database, imapAddr, notifyHub)
 	if searchIndexer != nil {
 		imapSrv.SetSearchIndexer(searchIndexer)
 	}
