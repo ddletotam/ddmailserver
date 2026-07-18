@@ -27,7 +27,8 @@ use javascriptcore::ValueExt;
 use webkit2gtk::{LoadEvent, SnapshotOptions, SnapshotRegion, WebView, WebViewExt};
 
 use crate::render_common::{
-    parse_link_rects, parse_text_runs, LinkRect, TextRun, LINK_RECTS_JS, TEXT_RUNS_JS,
+    parse_link_rects, parse_text_runs, LinkRect, TextRun, HIDE_SCROLLBARS_JS, LINK_RECTS_JS,
+    TEXT_RUNS_JS,
 };
 
 /// Per-bubble canvas cap. WebKitGTK happily renders the whole document
@@ -59,6 +60,10 @@ pub struct RenderResult {
     pub links: Vec<LinkRect>,
     /// Per-word text layer for mouse selection (PDF-viewer style).
     pub runs: Vec<TextRun>,
+    /// Bitmap px per CSS px. This backend always snapshots at 1x (WebKitGTK
+    /// off-screen snapshots ignore rasterization scale) — kept for API parity
+    /// with the WebView2 backend.
+    pub scale: f32,
 }
 
 impl RenderResult {
@@ -92,9 +97,9 @@ impl Engine {
     /// A render panic must not kill the worker thread (permanent loader
     /// spinner). Returns (result, panicked); the worker rebuilds the engine
     /// when panicked is true.
-    pub fn render_one_guarded(&mut self, html: &str, width: u32) -> (RenderResult, bool) {
+    pub fn render_one_guarded(&mut self, html: &str, width: u32, scale: f32) -> (RenderResult, bool) {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.render_one(html, width)
+            self.render_one(html, width, scale)
         }));
         match r {
             Ok(res) => (res, false),
@@ -107,6 +112,7 @@ impl Engine {
                         painted_height: 0,
                         links: Vec::new(),
                         runs: Vec::new(),
+                        scale: 1.0,
                     },
                     true,
                 )
@@ -114,7 +120,7 @@ impl Engine {
         }
     }
 
-    pub fn render_one(&mut self, html: &str, width: u32) -> RenderResult {
+    pub fn render_one(&mut self, html: &str, width: u32, _scale: f32) -> RenderResult {
         let w = width as i32;
         // Start with a deliberately *small* viewport. WebKit treats
         // `document.body.scrollHeight` as the larger of (content,
@@ -132,8 +138,15 @@ impl Engine {
                 painted_height: 0,
                 links: Vec::new(),
                 runs: Vec::new(),
+                scale: 1.0,
             };
         }
+
+        // Kill scrollbars before measuring: at the 1px-tall viewport the
+        // vertical scrollbar steals layout width that the full-height
+        // viewport won't have — height and rects must describe the final
+        // layout, not the transiently narrower one.
+        self.run_js_blind(HIDE_SCROLLBARS_JS);
 
         // Force a layout pass so scrollHeight reflects the freshly
         // loaded content.
@@ -147,18 +160,21 @@ impl Engine {
                 painted_height: 0,
                 links: Vec::new(),
                 runs: Vec::new(),
+                scale: 1.0,
             };
         }
 
-        let links = self.extract_links();
-        let runs = self.extract_text_runs();
-
-        // Grow the viewport to fit the content so the snapshot has
-        // somewhere to land. Cap at MAX_H to keep GBM happy.
+        // Grow the viewport BEFORE extracting geometry: rects and the
+        // snapshot must come from the same layout (late images / viewport-
+        // height dependent CSS shifted the old pre-grow coordinates).
+        // Cap at MAX_H to keep GBM happy.
         let render_h = painted_height.min(MAX_H) as i32;
         self.view.set_size_request(w, render_h);
         self._offscreen.set_default_size(w, render_h);
         pump_iterations(4);
+
+        let links = self.extract_links();
+        let runs = self.extract_text_runs();
 
         let bitmap = self
             .snapshot_to_rgba(width, painted_height)
@@ -170,7 +186,17 @@ impl Engine {
             painted_height,
             links,
             runs,
+            scale: 1.0,
         }
+    }
+
+    /// Run a JS snippet for its side effect only (result ignored).
+    fn run_js_blind(&self, js: &str) {
+        let done = Rc::new(Cell::new(false));
+        let done_cb = done.clone();
+        self.view
+            .run_javascript(js, None::<&gio::Cancellable>, move |_| done_cb.set(true));
+        wait_until(&done, 1000);
     }
 
     /// Extract `<a href>` rects (document-relative CSS px) via JS. Mirrors

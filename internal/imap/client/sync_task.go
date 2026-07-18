@@ -40,13 +40,20 @@ type SyncTask struct {
 	priority   int
 	// Last non-spam message saved by the current run — toast content.
 	lastNew *models.Message
+	// How many already-known messages had their flags refreshed from the
+	// remote this run (read in another client → seen pulled in). Drives a
+	// single flags_changed push at the end of the run so connected desktop
+	// clients update unread state without waiting for new mail.
+	flagsChanged    int
+	flagsNotifyFunc func(changed int)
 	// Called to force-refresh the OAuth token when auth fails. The callback
 	// is expected to update the account in place (access token, expiry).
 	refreshOAuth func(account *models.Account) error
 }
 
-func (t *SyncTask) SetNotifyFunc(fn func(NewMailNotice))  { t.notifyFunc = fn }
-func (t *SyncTask) SetAnalyzer(analyzer *parser.Analyzer) { t.analyzer = analyzer }
+func (t *SyncTask) SetNotifyFunc(fn func(NewMailNotice))    { t.notifyFunc = fn }
+func (t *SyncTask) SetFlagsNotifyFunc(fn func(changed int)) { t.flagsNotifyFunc = fn }
+func (t *SyncTask) SetAnalyzer(analyzer *parser.Analyzer)   { t.analyzer = analyzer }
 func (t *SyncTask) SetOAuthRefresher(fn func(account *models.Account) error) {
 	t.refreshOAuth = fn
 }
@@ -197,6 +204,14 @@ func (t *SyncTask) syncAllRemoteFolders(ctx context.Context, client *Client, loc
 				MessageID: t.lastNew.ID,
 			})
 		}
+	}
+	// Flags pulled from the remote for already-known messages (read/starred
+	// in another client of the SOURCE account). One push per run, and only
+	// when something actually changed — RefreshExistingFromRemote's no-op
+	// guard is the filter.
+	if t.flagsChanged > 0 && t.flagsNotifyFunc != nil {
+		t.accountLog("info", "flags refreshed on %d existing messages — pushing flags_changed", t.flagsChanged)
+		t.flagsNotifyFunc(t.flagsChanged)
 	}
 	return nil
 }
@@ -443,14 +458,17 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 			log.Printf("IMAP sync: check spam rules on existing %s: %v", messageID, ruleErr)
 		}
 		downgrade := ruleAction != "spam" // spam-rule keeps is_spam=true; allow / no-rule lets remote INBOX rescue
-		if err := t.database.RefreshExistingFromRemote(
+		changed, err := t.database.RefreshExistingFromRemote(
 			t.account.UserID, messageID, imapMsg.Uid, remoteFolderName,
 			hasFlag(imapMsg.Flags, imap.SeenFlag),
 			hasFlag(imapMsg.Flags, imap.FlaggedFlag),
 			hasFlag(imapMsg.Flags, imap.AnsweredFlag),
 			downgrade,
-		); err != nil {
+		)
+		if err != nil {
 			log.Printf("IMAP sync: refresh existing %s failed: %v", messageID, err)
+		} else if changed {
+			t.flagsChanged++
 		}
 		if !downgrade && ruleMatched != nil {
 			// Make sure the row is actually flagged spam and that

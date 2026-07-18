@@ -24,6 +24,10 @@ pub enum EngineEvent {
     /// spam purge) — the client should resync conversations so deleted threads
     /// drop off instead of lingering with unloadable bodies.
     Expunged { folder: String },
+    /// Flags changed server-side (read/starred in another client, or pulled
+    /// from the source account by the sync). A cheap conversations delta is
+    /// enough: flag changes bump updated_at, so the changed threads come back.
+    FlagsChanged { folder: String },
     /// A calendar changed server-side.
     CalendarUpdated { calendar_id: i64 },
     /// The session token was refreshed (native provider); persist it.

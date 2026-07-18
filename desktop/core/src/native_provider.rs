@@ -698,6 +698,12 @@ impl MailProvider for NativeProvider {
                                             notifier(EngineEvent::Expunged {
                                                 folder: folder.to_string(),
                                             });
+                                        } else if event_type == "flags_changed" {
+                                            // Read/starred elsewhere — refresh
+                                            // unread state via a delta fetch.
+                                            notifier(EngineEvent::FlagsChanged {
+                                                folder: folder.to_string(),
+                                            });
                                         }
                                         log::info!(
                                             "NativeProvider: event {event_type} folder={folder}"

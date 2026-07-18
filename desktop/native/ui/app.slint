@@ -556,6 +556,12 @@ export component MainWindow inherits Window {
     // just renders the highlight rects for selection-row.
     in property <int> selection-row: -1;
     in property <[SelRect]> selection-rects;
+    // Width (logical px) the current rows' link/text rects were extracted at.
+    // While the column width drifts from it (resize-debounce window) the
+    // bitmap is stretched horizontally by `image-fit: fill` — mouse x must be
+    // mapped INTO this space before hit-testing, and highlight rects mapped
+    // OUT of it, or clicks/highlights skew until the re-render lands.
+    in property <length> body-rects-width: 740px;
     callback sel-start(int, length, length);
     callback sel-move(int, length, length);
     callback sel-end();
@@ -1497,13 +1503,16 @@ export component MainWindow inherits Window {
                         // Selection highlight — merged per-line rects over
                         // the texture, computed Rust-side. Plain Rectangles:
                         // they don't intercept pointer events.
-                        if idx == root.selection-row: Rectangle {
+                        if idx == root.selection-row: selov := Rectangle {
                             width: parent.width;
                             height: msg.h;
+                            // rect-space → widget-space (x only: the bitmap
+                            // height is displayed 1:1, width may be stretched).
+                            property <float> fx: self.width / max(1px, root.body-rects-width);
                             for sr in root.selection-rects: Rectangle {
-                                x: sr.x;
+                                x: sr.x * selov.fx;
                                 y: sr.y;
-                                width: sr.w;
+                                width: sr.w * selov.fx;
                                 height: sr.h;
                                 background: #10b9813d;
                                 border-radius: 2px;
@@ -1517,13 +1526,16 @@ export component MainWindow inherits Window {
                         TouchArea {
                             width: parent.width;
                             height: msg.h;
+                            // widget-space → rect-space for the mouse x (see
+                            // body-rects-width); y is already 1:1.
+                            property <float> fx: root.body-rects-width / max(1px, self.width);
                             mouse-cursor: self.has-hover
-                                && root.hover-link(idx, self.mouse-x, self.mouse-y)
+                                && root.hover-link(idx, self.mouse-x * self.fx, self.mouse-y)
                                 ? MouseCursor.pointer : MouseCursor.default;
-                            clicked => { root.hit-test(idx, self.mouse-x, self.mouse-y); }
+                            clicked => { root.hit-test(idx, self.mouse-x * self.fx, self.mouse-y); }
                             moved => {
                                 if (self.pressed) {
-                                    root.sel-move(idx, self.mouse-x, self.mouse-y);
+                                    root.sel-move(idx, self.mouse-x * self.fx, self.mouse-y);
                                 }
                             }
                             pointer-event(e) => {
@@ -1533,7 +1545,7 @@ export component MainWindow inherits Window {
                                 }
                                 if (e.button == PointerEventButton.left) {
                                     if (e.kind == PointerEventKind.down) {
-                                        root.sel-start(idx, self.mouse-x, self.mouse-y);
+                                        root.sel-start(idx, self.mouse-x * self.fx, self.mouse-y);
                                     } else if (e.kind == PointerEventKind.up) {
                                         root.sel-end();
                                     }

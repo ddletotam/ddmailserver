@@ -851,12 +851,15 @@ enum Job {
         /// Per-body render mode, parallel to `bodies`: 0 = auto
         /// (HTML when present), 1 = force the text-only bubble.
         modes: Vec<u8>,
+        /// UI window scale factor — the WebView rasterizes at this scale so
+        /// the capture is 1:1 with physical pixels (crisp on HiDPI).
+        scale: f32,
     },
     HitTest { row: usize, x: f32, y: f32 },
     /// Render the source/headers viewer text to a bitmap + word rects, so the
     /// modal reuses the fast bubble selection layer instead of Slint's
     /// (slow-on-large-text) TextInput.
-    RenderSource { text: String, width: u32 },
+    RenderSource { text: String, width: u32, scale: f32 },
 }
 
 /// Everything the render worker knows about a row besides its bitmap —
@@ -966,6 +969,9 @@ struct Shared {
     render_seq: Arc<AtomicU64>,
     current: Cell<usize>,
     width: Cell<u32>,
+    /// UI window scale factor last seen by the width watcher; render jobs
+    /// carry it so WebView2 rasterizes at the display's real DPI.
+    render_scale: Cell<f32>,
     tx: mpsc::Sender<Job>,
     engine_tx: RefCell<Option<mpsc::Sender<engine::EngineCmd>>>,
     /// Last search query we asked the engine for. Engine echoes the
@@ -1481,7 +1487,11 @@ fn selection_text_for(runs: &[render_common::TextRun], anchor: usize, head: usiz
     let mut prev: Option<&render_common::TextRun> = None;
     for r in &runs[lo..=hi] {
         if let Some(p) = prev {
-            if (r.y - p.y).abs() > p.h * 0.6 {
+            // A continuation run is the next line fragment of the SAME word
+            // (wrapped URL etc.) — join with nothing so it pastes intact.
+            if r.cont {
+                // no separator
+            } else if (r.y - p.y).abs() > p.h * 0.6 {
                 out.push('\n');
             } else {
                 out.push(' ');
@@ -1652,6 +1662,7 @@ fn send_render_job(sh: &Shared, bodies: Vec<MessageBody>, scroll_to: Option<i32>
         seq,
         scroll_to,
         modes,
+        scale: sh.render_scale.get(),
     });
 }
 
@@ -3348,7 +3359,7 @@ fn main() {
                     engine_needs_rebuild = false;
                 }
                 match job {
-                    Job::SetConversation { bodies, width, policy, policy_gen, seq, scroll_to, modes } => {
+                    Job::SetConversation { bodies, width, policy, policy_gen, seq, scroll_to, modes, scale } => {
                         // Latest-wins: a newer conversation/relayout job is
                         // already queued behind this one — rendering it would
                         // produce frames nobody will ever see.
@@ -3394,8 +3405,11 @@ fn main() {
                             let force_text = mode == 1 && has_html;
                             // Content fingerprint: bodies are mostly immutable,
                             // but cid:→data: healing rewrites the HTML — the
-                            // texture must miss when the content changed.
-                            let fp = texture_cache::fnv1a(body.html.as_deref().unwrap_or(""));
+                            // texture must miss when the content changed. The
+                            // rasterization scale is folded in too: the same
+                            // width at a different DPI is a different bitmap.
+                            let fp = texture_cache::fnv1a(body.html.as_deref().unwrap_or(""))
+                                ^ ((scale.to_bits() as u64) << 32);
                             let key = (body.folder.clone(), body.uid, width, policy_gen, mode, fp);
                             let mut remember =
                                 |key: &(String, u32, u32, u64, u8, u64),
@@ -3436,7 +3450,8 @@ fn main() {
                                     build_body_html(body, &policy)
                                 };
                                 let t_r = Instant::now();
-                                let (mut result, panicked) = engine.render_one_guarded(&html, width);
+                                let (mut result, panicked) =
+                                    engine.render_one_guarded(&html, width, scale);
                                 if panicked {
                                     engine_needs_rebuild = true;
                                 }
@@ -3450,7 +3465,7 @@ fn main() {
                                 if !result.successful() && text_available && !force_text && !panicked {
                                     fallback_used += 1;
                                     let text_html = build_text_only_html(body);
-                                    let (r2, p2) = engine.render_one_guarded(&text_html, width);
+                                    let (r2, p2) = engine.render_one_guarded(&text_html, width, scale);
                                     result = r2;
                                     if p2 {
                                         engine_needs_rebuild = true;
@@ -3465,13 +3480,19 @@ fn main() {
                                 // (an empty bubble beats a missing one), just
                                 // don't persist it.
                                 let succeeded = result.successful();
+                                // Logical (CSS px) display height: the bitmap
+                                // is captured at `scale` physical px per CSS
+                                // px, and the Image box must stay in CSS px so
+                                // link/text rects keep mapping 1:1.
+                                let rscale = result.scale.max(0.25);
                                 let bitmap = result.bitmap;
                                 let t_p = Instant::now();
                                 let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
                                     &bitmap.rgba, bitmap.width, bitmap.height,
                                 );
                                 pack_ms_total += t_p.elapsed().as_millis();
-                                let entry = (buf, bitmap.height as f32, result.links, result.runs);
+                                let entry =
+                                    (buf, bitmap.height as f32 / rscale, result.links, result.runs);
                                 println!(
                                     "[perf]   body uid={} h={}px painted={} ready={} links={} runs={} cached={}",
                                     body.uid, bitmap.height, result.painted_height,
@@ -3545,7 +3566,14 @@ fn main() {
                         // copies for click hit-testing).
                         let links_for_ui = row_links.clone();
                         let runs_for_ui = row_runs.clone();
+                        let rects_width = width as f32;
                         let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+                            // The width these rows' link/text rects were
+                            // extracted at — Slint maps mouse coords into (and
+                            // highlight rects out of) this space, so hits stay
+                            // exact even while the column width drifts from
+                            // the render width (resize-debounce window).
+                            ui.set_body_rects_width(rects_width);
                             // Wrap each SharedPixelBuffer in an Image —
                             // this is cheap (refcount bump, no memcpy)
                             // and is the only step that has to run on
@@ -3619,20 +3647,21 @@ fn main() {
                             None => println!("click row {row} @({x:.0},{y:.0}) — no link"),
                         }
                     }
-                    Job::RenderSource { text, width } => {
+                    Job::RenderSource { text, width, scale } => {
                         // Render the viewer text the same way as a bubble: a
                         // bitmap + word rects. The modal then selects via the
                         // fast Rust text-run layer, not Slint's TextInput.
                         let html = build_source_html(&text);
-                        let (result, panicked) = engine.render_one_guarded(&html, width);
+                        let (result, panicked) = engine.render_one_guarded(&html, width, scale);
                         if panicked {
                             engine_needs_rebuild = true;
                         }
+                        let rscale = result.scale.max(0.25);
                         let bmp = result.bitmap;
                         let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
                             &bmp.rgba, bmp.width, bmp.height,
                         );
-                        let h = bmp.height as f32;
+                        let h = bmp.height as f32 / rscale;
                         let runs = result.runs;
                         println!(
                             "[perf] source render {}x{} runs={}",
@@ -3714,6 +3743,7 @@ fn main() {
         render_seq,
         current: Cell::new(0),
         width: Cell::new(DEFAULT_WIDTH),
+        render_scale: Cell::new(1.0),
         tx,
         engine_tx: RefCell::new(None),
         search_query_inflight: RefCell::new(String::new()),
@@ -4018,14 +4048,28 @@ fn main() {
     // after a restart the render width silently stayed at DEFAULT_WIDTH and
     // every bubble stretched to the real (wider) column. This watcher feeds
     // the actual chat-column width through the same resize path — covering
-    // the first frame and any future missed events (DPI change, etc.).
+    // the first frame and any future missed events. It also tracks the
+    // window scale factor: a DPI change re-renders so WebView2 rasterizes
+    // at the display's real scale (crisp bubbles after a monitor move).
     let ui_weak_ww = ui.as_weak();
+    let sh_ww = shared.clone();
     let width_watcher = slint::Timer::default();
     width_watcher.start(
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(500),
         move || {
             if let Some(ui) = ui_weak_ww.upgrade() {
+                let sf = ui.window().scale_factor();
+                if sf.is_finite()
+                    && sf > 0.0
+                    && (sf - sh_ww.render_scale.get()).abs() > 0.01
+                {
+                    sh_ww.render_scale.set(sf);
+                    let bodies = sh_ww.current_bodies.borrow().clone();
+                    if !bodies.is_empty() {
+                        send_render_job(&sh_ww, bodies, None);
+                    }
+                }
                 let w = ui.get_chat_width();
                 if w > 0.0 {
                     ui.invoke_viewport_resized(w);
@@ -6136,6 +6180,22 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         }
                     });
                 }
+                EngineEvent::FlagsChanged { folder } => {
+                    // Read/starred in another client (or pulled from the
+                    // source account by the server sync). No toast — just a
+                    // delta conversations fetch: flag changes bump
+                    // updated_at server-side, so the changed threads come
+                    // back with fresh seen states and the sidebar unread
+                    // badges correct themselves.
+                    println!("engine event: flags changed in {folder} — delta refetch");
+                    SHARED.with(|s| {
+                        if let Some(sh) = s.borrow().as_ref() {
+                            if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                                let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
+                            }
+                        }
+                    });
+                }
                 EngineEvent::CalendarUpdated { calendar_id } => {
                     println!("engine event: calendar {calendar_id} updated");
                 }
@@ -6618,7 +6678,11 @@ fn set_source_text(ui: &MainWindow, sh: &Shared, title: String, full: String) {
     ui.invoke_grab_key_focus();
     // Render the (capped) text to a bitmap + word rects on the worker thread;
     // the modal then selects via the fast text-run layer.
-    let _ = sh.tx.send(Job::RenderSource { text: display, width: SOURCE_RENDER_W });
+    let _ = sh.tx.send(Job::RenderSource {
+        text: display,
+        width: SOURCE_RENDER_W,
+        scale: sh.render_scale.get(),
+    });
 }
 
 /// Parse the RFC-822 header block into ordered (name, value) pairs.
