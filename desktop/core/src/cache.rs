@@ -977,6 +977,41 @@ impl Cache {
         ).map_err(|e| format!("prune: {e}"))?;
         Ok(())
     }
+
+    /// Cull reminders whose event vanished from the server: rows with an
+    /// occurrence inside [from_ms, to_ms) whose event_id is not in `keep`
+    /// (the ids of a fresh, COMPLETE fetch of that window) lose the whole
+    /// event's cascade — a deleted meeting must not keep toasting. Returns
+    /// the culled event ids so the caller can close any open toasts.
+    pub fn prune_orphan_reminders(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+        keep: &std::collections::HashSet<i64>,
+    ) -> Result<Vec<i64>, String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT event_id FROM reminders2 \
+                 WHERE occurrence_start_ms >= ?1 AND occurrence_start_ms < ?2",
+            )
+            .map_err(|e| format!("prepare: {e}"))?;
+        let rows = stmt
+            .query_map(params![from_ms, to_ms], |r| r.get::<_, i64>(0))
+            .map_err(|e| format!("query: {e}"))?;
+        let mut orphans = Vec::new();
+        for r in rows {
+            let id = r.map_err(|e| format!("row: {e}"))?;
+            if !keep.contains(&id) {
+                orphans.push(id);
+            }
+        }
+        for id in &orphans {
+            conn.execute("DELETE FROM reminders2 WHERE event_id = ?1", params![id])
+                .map_err(|e| format!("delete: {e}"))?;
+        }
+        Ok(orphans)
+    }
 }
 
 /// One alarm row of an occurrence's cascade, denormalised enough that the
