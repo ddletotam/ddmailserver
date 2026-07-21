@@ -139,13 +139,29 @@ struct Disp {
     unread: u32,
 }
 
-/// Pastel palette for identities lacking a server-side colour. Mirrors the
-/// old Tauri identityStore + imap.rs::fetch_identities_impl so both
-/// connection modes look identical.
-const IDENT_PASTEL: [&str; 15] = [
+/// Pastel palette for identities lacking a server-side colour. Used as the
+/// SIDEBAR ROW TINT — a soft wash behind the conversation row, so it must
+/// stay light. The first 15 mirror the old Tauri identityStore +
+/// imap.rs::fetch_identities_impl (so existing rows don't change colour);
+/// the rest extend the wheel for users with many aliases.
+/// `IDENT_VIVID` is the hue-aligned saturated counterpart — same index, same
+/// hue, used only for the from-picker dot (see `refresh_composer_identities`).
+const IDENT_PASTEL: [&str; 24] = [
     "#FFE4E1", "#E8F5E9", "#E3F2FD", "#FFF9C4", "#F3E5F5",
     "#E0F7FA", "#FBE9E7", "#F1F8E9", "#EDE7F6", "#E8EAF6",
     "#FCE4EC", "#E0F2F1", "#FFF3E0", "#F9FBE7", "#EFEBE9",
+    "#ECEFF1", "#FFF8E1", "#E1F5FE", "#DCEDC8", "#FFCDD2",
+    "#F8BBD0", "#D1C4E9", "#B2DFDB", "#B3E5FC",
+];
+/// Saturated counterpart to `IDENT_PASTEL`, index-aligned by hue. Used ONLY
+/// for the from-picker dot: at 12px a pastel dot is invisible, so the sender
+/// selector shows the intense version while the sidebar keeps the wash.
+const IDENT_VIVID: [&str; 24] = [
+    "#E53935", "#43A047", "#1E88E5", "#FDD835", "#8E24AA",
+    "#00ACC1", "#F4511E", "#7CB342", "#5E35B1", "#3949AB",
+    "#D81B60", "#00897B", "#FB8C00", "#C0CA33", "#6D4C41",
+    "#546E7A", "#FFB300", "#039BE5", "#558B2F", "#C62828",
+    "#AD1457", "#6A1B9A", "#00695C", "#0277BD",
 ];
 /// «Ugly gray» for conversations received by an unknown alias.
 const IDENT_UNKNOWN: &str = "#d5d5d0";
@@ -185,8 +201,11 @@ fn refresh_composer_identities(ui: &MainWindow, sh: &Shared) {
     let mut selected: i32 = -1;
     let mut default_idx: i32 = 0;
     for (i, id) in idents.iter().enumerate() {
+        // From-picker dot: use the VIVID palette for a palette-fallback
+        // identity (a 12px pastel dot reads as white). A server-provided
+        // colour is the user's own choice — keep it verbatim.
         let color = if id.color.trim().is_empty() {
-            IDENT_PASTEL[i % IDENT_PASTEL.len()]
+            IDENT_VIVID[i % IDENT_VIVID.len()]
         } else {
             id.color.as_str()
         };
@@ -606,6 +625,96 @@ fn body_preview(body: &MessageBody) -> String {
     }
 }
 
+/// Recompute the chevron panel's ghost hints: the EFFECTIVE «Кому»/«Тема»
+/// an implicit send would use right now. The panel's fields are overrides
+/// (empty = follow the dialog), so without hints an empty «Кому» reads as
+/// «уйдёт в никуда» — this shows exactly where a plain reply goes. Mirrors
+/// the on_send branch logic; must be re-run whenever the reply context
+/// changes (conversation switch, bodies arrival, reply/forward/compose
+/// mode transitions).
+fn refresh_composer_hints(ui: &MainWindow, sh: &Shared) {
+    let re_subject = |s: &str| -> String {
+        if s.trim().is_empty() {
+            String::new()
+        } else if s.to_lowercase().starts_with("re:") {
+            s.to_string()
+        } else {
+            format!("Re: {s}")
+        }
+    };
+    // Forward: «Кому» is a REQUIRED real field (the send refuses without
+    // it) — a hint would wrongly suggest it can stay empty.
+    if sh.pending_forward.borrow().is_some() {
+        ui.set_composer_to_auto("".into());
+        ui.set_composer_subject_auto("".into());
+        return;
+    }
+    // Transient compose to a fresh address.
+    if let Some(email) = sh.pending_compose.borrow().clone() {
+        ui.set_composer_to_auto(email.into());
+        ui.set_composer_subject_auto("".into());
+        return;
+    }
+    // Explicit reply via the quote ribbon: sender + (in groups) the
+    // source's To/Cc, minus our own identity — same as the send branch.
+    if let Some(body) = sh.pending_reply.borrow().as_ref() {
+        let our = sh.key.to_lowercase();
+        let extract_addr = |raw: &str| -> String {
+            let lt = raw.find('<');
+            let gt = lt.and_then(|i| raw[i..].find('>').map(|j| i + j));
+            if let (Some(i), Some(j)) = (lt, gt) {
+                raw[i + 1..j].trim().to_lowercase()
+            } else {
+                raw.trim().to_lowercase()
+            }
+        };
+        let mut to: Vec<String> = Vec::new();
+        let mut push = |a: String| {
+            if !a.is_empty() && a != our && !to.contains(&a) {
+                to.push(a);
+            }
+        };
+        push(body.from_addr.to_lowercase());
+        let is_group = sh
+            .convs
+            .borrow()
+            .get(sh.current.get())
+            .map(|c| c.is_group)
+            .unwrap_or(false);
+        if is_group {
+            for a in body.to.iter().chain(body.cc.iter()) {
+                push(extract_addr(a));
+            }
+        }
+        ui.set_composer_to_auto(to.join(", ").into());
+        ui.set_composer_subject_auto(re_subject(&body.subject).into());
+        return;
+    }
+    // Implicit reply within the open conversation: all counterparts
+    // (reply-all in groups), subject from the last incoming message.
+    let convs = sh.convs.borrow();
+    let Some(c) = convs.get(sh.current.get()) else {
+        ui.set_composer_to_auto("".into());
+        ui.set_composer_subject_auto("".into());
+        return;
+    };
+    let to: Vec<String> = c
+        .counterparts
+        .iter()
+        .map(|cp| cp.addr.clone())
+        .filter(|a| !a.is_empty())
+        .collect();
+    let cached = sh.current_bodies.borrow();
+    let base_subject = cached
+        .iter()
+        .rev()
+        .find(|b| !b.is_outgoing)
+        .map(|b| b.subject.clone())
+        .unwrap_or_else(|| c.last_subject.clone());
+    ui.set_composer_to_auto(to.join(", ").into());
+    ui.set_composer_subject_auto(re_subject(&base_subject).into());
+}
+
 fn enter_reply_mode(sh: &Shared, ui: &MainWindow, body: MessageBody) {
     let display_from = if body.from.is_empty() {
         body.from_addr.clone()
@@ -618,6 +727,7 @@ fn enter_reply_mode(sh: &Shared, ui: &MainWindow, body: MessageBody) {
     ui.set_reply_ribbon_preview(preview.into());
     ui.set_reply_ribbon_visible(true);
     ui.invoke_focus_composer();
+    refresh_composer_hints(ui, sh);
 }
 
 fn exit_reply_mode(sh: &Shared, ui: &MainWindow) {
@@ -627,6 +737,7 @@ fn exit_reply_mode(sh: &Shared, ui: &MainWindow) {
     ui.set_reply_ribbon_from("".into());
     ui.set_reply_ribbon_preview("".into());
     ui.set_composer_to("".into());
+    refresh_composer_hints(ui, sh);
 }
 
 /// «Переслать» — Telegram-style: the original is pinned above the input as
@@ -657,6 +768,7 @@ fn enter_forward_mode(sh: &Shared, ui: &MainWindow, body: MessageBody) {
     ui.set_composer_cc("".into());
     ui.set_composer_expanded(true);
     ui.set_focus_to_seq(ui.get_focus_to_seq() + 1);
+    refresh_composer_hints(ui, sh);
 }
 
 /// Shared logic for "enter transient compose mode". Pins the chat header
@@ -1064,8 +1176,23 @@ struct Shared {
     /// (which holds just the basenames). Cleared once a message is staged.
     compose_attachments: RefCell<Vec<std::path::PathBuf>>,
     /// Event a reminder toast asked to open (0 = none); consumed once the
-    /// calendar events for its week arrive from the engine.
+    /// calendar events for its week arrive from the engine. The occurrence
+    /// start + summary ride along for the stale-id fallback: the server
+    /// re-creates events under new ids on calendar re-sync, so the id a
+    /// reminder was seeded with may be dead by the time the toast is
+    /// clicked — the meeting is then recovered by occurrence instead.
     pending_open_event: Cell<i64>,
+    pending_open_occ: Cell<i64>,
+    pending_open_summary: RefCell<String>,
+    /// Last CalendarUpdated-driven refetch — debounces the server's push
+    /// bursts (one per calendar per sync cycle) to one refetch per window.
+    last_cal_refetch: Cell<Option<std::time::Instant>>,
+    /// Hour the calendar grid should scroll to on the next layout (None =
+    /// no request). Set when the calendar view opens; consumed by
+    /// `apply_calendar_view` once real calendar data has arrived, so the
+    /// scroll target is computed against the final hour-height, not the
+    /// pre-data defaults. Re-issued on every apply until then.
+    pending_cal_scroll: Cell<Option<f32>>,
     /// (event_id, occurrence_start_ms, occurrence_end_ms, toast_id, summary)
     /// the snooze modal is acting on. toast_id lets a committed choice close
     /// the originating toast and a cancel resume its paused timer.
@@ -1089,6 +1216,9 @@ thread_local! {
     /// The tray handle — kept here so the new-mail path can flip the
     /// unread dot from engine-result handlers.
     static TRAY: RefCell<Option<tray::Tray>> = const { RefCell::new(None) };
+    /// Startup ticker that retries `set_window_icon` until the native window
+    /// exists; parked here so the icon-setter callback can stop and drop it.
+    static ICON_TIMER: RefCell<Option<slint::Timer>> = const { RefCell::new(None) };
 }
 
 /// Build an `HICON` at `size`×`size` from the bundled icon PNG. Slint/winit
@@ -1170,7 +1300,7 @@ fn hicon_from_png(size: u32) -> Option<windows::Win32::UI::WindowsAndMessaging::
 /// The leaked HICONs live for the app's lifetime — the shell keeps referencing
 /// them, and there's exactly one window, so this is a bounded, one-time cost.
 #[cfg(windows)]
-fn set_window_icon(ui: &MainWindow) {
+fn set_window_icon(ui: &MainWindow) -> bool {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_SETICON};
@@ -1178,8 +1308,8 @@ fn set_window_icon(ui: &MainWindow) {
     const ICON_BIG: usize = 1;
 
     let handle = ui.window().window_handle();
-    let Ok(wh) = handle.window_handle() else { return };
-    let RawWindowHandle::Win32(h) = wh.as_raw() else { return };
+    let Ok(wh) = handle.window_handle() else { return false };
+    let RawWindowHandle::Win32(h) = wh.as_raw() else { return false };
     let hwnd = HWND(h.hwnd.get() as *mut core::ffi::c_void);
     for (size, which) in [(32u32, ICON_BIG), (16u32, ICON_SMALL)] {
         if let Some(hicon) = hicon_from_png(size) {
@@ -1193,6 +1323,71 @@ fn set_window_icon(ui: &MainWindow) {
             }
         }
     }
+    true
+}
+
+/// Set the window's title-bar + taskbar icon (Linux/X11) — the analogue of
+/// the Windows WM_SETICON path above. Writes `_NET_WM_ICON` (EWMH) on the
+/// Xlib window from a throwaway display connection, so we never race the
+/// winit/Slint event loop's own Xlib connection (same pattern as
+/// `activate_window_x11`). Must run after the native window exists. On a
+/// Wayland session there is no per-window icon protocol — the icon comes
+/// from the .desktop entry instead (see installer/install_linux.sh) — and
+/// the non-Xlib handle makes this a silent no-op.
+#[cfg(target_os = "linux")]
+fn set_window_icon(ui: &MainWindow) -> bool {
+    use image::imageops::FilterType;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let handle = ui.window().window_handle();
+    // No native window yet — tell the startup ticker to try again.
+    let Ok(wh) = handle.window_handle() else { return false };
+    let RawWindowHandle::Xlib(h) = wh.as_raw() else {
+        // Wayland (or anything non-Xlib): no per-window icon protocol; the
+        // icon comes from the .desktop entry. Nothing to retry.
+        return true;
+    };
+    let window = h.window;
+
+    // A decode failure is permanent — report done so the ticker stops.
+    let Ok(img) = image::load_from_memory(ICON_PNG) else { return true };
+    // _NET_WM_ICON payload: [w, h, w*h ARGB pixels] per size, each element a
+    // CARDINAL carried in a c_ulong (that's how format-32 properties travel
+    // through Xlib on 64-bit). The WM picks the closest size itself.
+    let mut data: Vec<std::os::raw::c_ulong> = Vec::new();
+    for size in [16u32, 32, 48, 64, 128] {
+        let rgba = img.resize_exact(size, size, FilterType::Lanczos3).to_rgba8();
+        data.push(size as std::os::raw::c_ulong);
+        data.push(size as std::os::raw::c_ulong);
+        for px in rgba.pixels() {
+            let [r, g, b, a] = px.0;
+            let argb = ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+            data.push(argb as std::os::raw::c_ulong);
+        }
+    }
+
+    use std::ptr;
+    use x11::xlib;
+    unsafe {
+        let dpy = xlib::XOpenDisplay(ptr::null());
+        if dpy.is_null() {
+            return true;
+        }
+        let net_wm_icon = xlib::XInternAtom(dpy, c"_NET_WM_ICON".as_ptr(), xlib::False);
+        xlib::XChangeProperty(
+            dpy,
+            window,
+            net_wm_icon,
+            xlib::XA_CARDINAL,
+            32,
+            xlib::PropModeReplace,
+            data.as_ptr() as *const u8,
+            data.len() as i32,
+        );
+        xlib::XFlush(dpy);
+        xlib::XCloseDisplay(dpy);
+    }
+    true
 }
 
 /// Show + un-minimize + bring to foreground. Plain `ui.show()` is a no-op
@@ -1370,6 +1565,8 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
             );
         }
     }
+    // Ghost hints in the chevron panel follow the newly opened dialog.
+    refresh_composer_hints(ui, sh);
     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
         // A toast-click target may be newer than the cached conversation
         // refs — make sure the fetch includes it.
@@ -1894,6 +2091,7 @@ fn handle_reminder_action(
             raise_window(ui);
         }
         "open-stay" | "open-close" => {
+            println!("[cal] toast-open: action={action} event={event_id} occ={occ_ms}");
             if action == "open-close" {
                 toast_window::close_for_event(event_id);
             } else {
@@ -1904,6 +2102,19 @@ fn handle_reminder_action(
             raise_window(ui);
             sh.calendar_week_start_days.set(week_start_days_for_ms(occ_ms));
             sh.pending_open_event.set(event_id);
+            sh.pending_open_occ.set(occ_ms);
+            *sh.pending_open_summary.borrow_mut() = summary.to_string();
+            // Land the viewport on the event itself (an hour of context
+            // above), not on the working day — the toast points at it.
+            {
+                use chrono::{TimeZone as _, Timelike as _};
+                let hour = chrono::Local
+                    .timestamp_millis_opt(occ_ms)
+                    .single()
+                    .map(|t| t.hour() as f32 + t.minute() as f32 / 60.0)
+                    .unwrap_or(sh.work_start.get() as f32);
+                sh.pending_cal_scroll.set(Some((hour - 1.0).max(0.0)));
+            }
             ui.set_view_mode(1);
             apply_calendar_view(ui, sh);
             if let Some(etx) = sh.engine_tx.borrow().as_ref() {
@@ -2012,6 +2223,32 @@ fn save_calendar_settings(ui: &MainWindow, sh: &Shared) {
         work_end_hour: sh.work_end.get(),
         manual_hour_height: sh.manual_hour_h.get(),
         manual_col_width: sh.manual_col_w.get(),
+    });
+}
+
+/// Scroll the calendar grid so `hour` (fractional local hours) sits at the
+/// top of the viewport. Entering the calendar always lands on the working
+/// day, not on 00:00 — with a manual hour-zoom the grid models the full 0–24
+/// and would otherwise open on the night hours. In the no-scroll band layout
+/// the clamp in the .slint bridge makes this a no-op.
+fn scroll_calendar_to_hour(ui: &MainWindow, hour: f32) {
+    let top = (hour - ui.get_hour_start() as f32).max(0.0) * ui.get_hour_height();
+    ui.set_grid_scroll_y(top);
+    // pending: the pane may be instantiating right now (view-mode just
+    // switched) — the Flickable then applies this on its first layout.
+    ui.set_grid_scroll_pending(true);
+    ui.set_grid_scroll_seq(ui.get_grid_scroll_seq() + 1);
+    // The conditional pane misses BOTH triggers when it instantiates with
+    // its final geometry (second visit, data already cached): the seq bump
+    // predates the bridge and the first layout isn't a property *change*.
+    // One delayed re-bump lands after instantiation and covers that hole.
+    let ui_weak = ui.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_millis(120), move || {
+        if let Some(ui) = ui_weak.upgrade() {
+            if ui.get_grid_scroll_pending() {
+                ui.set_grid_scroll_seq(ui.get_grid_scroll_seq() + 1);
+            }
+        }
     });
 }
 
@@ -2439,6 +2676,19 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
     ui.set_events(slint::ModelRc::new(slint::VecModel::from(blocks)));
     ui.set_all_day_events(slint::ModelRc::new(slint::VecModel::from(all_day_blocks)));
     ui.set_all_day_rows(all_day_rows);
+
+    // Requested grid scroll (entering the view / opening from a toast).
+    // Issued only now — against the hour props THIS layout just set. Kept
+    // pending until the week's EVENTS have arrived: they decide whether the
+    // grid is the no-scroll work band or the full 0–24 scroll (out-of-work
+    // events force the latter), and a pixel target computed before that
+    // settles points at the wrong hour.
+    if let Some(hour) = sh.pending_cal_scroll.get() {
+        if !sh.calendar_events.borrow().is_empty() {
+            sh.pending_cal_scroll.set(None);
+        }
+        scroll_calendar_to_hour(ui, hour);
+    }
 }
 
 /// Re-fire FetchCalendarEvents for the currently displayed week. Also
@@ -3776,6 +4026,10 @@ fn main() {
         settings_conn_keys: RefCell::new(Vec::new()),
         compose_attachments: RefCell::new(Vec::new()),
         pending_open_event: Cell::new(0),
+        pending_open_occ: Cell::new(0),
+        pending_open_summary: RefCell::new(String::new()),
+        last_cal_refetch: Cell::new(None),
+        pending_cal_scroll: Cell::new(None),
         snooze_ctx: RefCell::new((0, 0, 0, 0, String::new())),
         cal_occ: RefCell::new(HashMap::new()),
     });
@@ -3817,6 +4071,7 @@ fn main() {
                 .map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid, message_id: b.message_id.clone(), seen: true })
                 .collect();
             *shared.current_bodies.borrow_mut() = bodies.clone();
+            refresh_composer_hints(&ui, &shared);
             // Startup scroll: same first-unread/end anchoring as a click.
             *shared.open_unread.borrow_mut() = c
                 .messages
@@ -4473,19 +4728,12 @@ fn main() {
     let sh_att = shared.clone();
     ui.on_attach_files(move || {
         let Some(u) = ui_weak_att.upgrade() else { return };
-        // Parent the dialog to our window so it opens in front and is truly
-        // modal — without an owner Win32 can surface it behind the app. The
-        // raw-window-handle-06 feature gives us window_handle(); bind it so it
-        // outlives pick_files().
-        let handle = u.window().window_handle();
-        let picked = rfd::FileDialog::new().set_parent(&handle).pick_files();
-        if let Some(paths) = picked {
-            if paths.is_empty() {
-                return;
-            }
-            sh_att.compose_attachments.borrow_mut().extend(paths);
-            refresh_attachment_chips(&u, &sh_att);
+        let paths = pick_attachment_files(&u);
+        if paths.is_empty() {
+            return;
         }
+        sh_att.compose_attachments.borrow_mut().extend(paths);
+        refresh_attachment_chips(&u, &sh_att);
     });
     let ui_weak_rm = ui.as_weak();
     let sh_rm = shared.clone();
@@ -4914,6 +5162,9 @@ fn main() {
     ui.on_view_changed(move |mode| {
         if let Some(ui) = ui_weak_view.upgrade() {
             if mode == 1 {
+                // Land the viewport on the working day, not on 00:00 —
+                // consumed by apply_calendar_view once the layout is real.
+                sh_view.pending_cal_scroll.set(Some(sh_view.work_start.get() as f32));
                 apply_calendar_view(&ui, &sh_view);
                 if let Some(etx) = sh_view.engine_tx.borrow().as_ref() {
                     let _ = etx.send(engine::EngineCmd::FetchCalendars);
@@ -5081,6 +5332,8 @@ fn main() {
     let sh_zh = shared.clone();
     ui.on_calendar_zoom_hours(move |delta| {
         let Some(ui) = ui_weak_zh.upgrade() else { return };
+        // A manual zoom overrides any queued programmatic scroll.
+        sh_zh.pending_cal_scroll.set(None);
         let canvas_h = sh_zh.grid_canvas_h.get().max(MIN_HOUR_H);
         let cur = if sh_zh.manual_hour_h.get() > 0.0 {
             sh_zh.manual_hour_h.get()
@@ -5088,6 +5341,16 @@ fn main() {
             ui.get_hour_height()
         };
         let factor = if delta > 0.0 { 1.1 } else { 1.0 / 1.1 };
+        // Zooming out при упоре в пол returns to autofit (manual = 0): the
+        // grid collapses back to the work-hours band. Without this escape
+        // hatch a single ctrl-wheel pinned the layout to the full 0–24
+        // scroll forever — every launch then opened on the night hours.
+        if delta < 0.0 && cur <= MIN_HOUR_H + 0.5 {
+            sh_zh.manual_hour_h.set(0.0);
+            apply_calendar_view(&ui, &sh_zh);
+            save_calendar_settings(&ui, &sh_zh);
+            return;
+        }
         let next = (cur * factor).clamp(MIN_HOUR_H, canvas_h);
         sh_zh.manual_hour_h.set(next);
         apply_calendar_view(&ui, &sh_zh);
@@ -5104,6 +5367,14 @@ fn main() {
             ui.get_col_width()
         };
         let factor = if delta > 0.0 { 1.1 } else { 1.0 / 1.1 };
+        // Same escape hatch as the hour zoom: bottoming out returns to
+        // autofit column widths.
+        if delta < 0.0 && cur <= MIN_COL_W + 0.5 {
+            sh_zd.manual_col_w.set(0.0);
+            apply_calendar_view(&ui, &sh_zd);
+            save_calendar_settings(&ui, &sh_zd);
+            return;
+        }
         let next = (cur * factor).clamp(MIN_COL_W, avail);
         sh_zd.manual_col_w.set(next);
         apply_calendar_view(&ui, &sh_zd);
@@ -5885,17 +6156,41 @@ fn main() {
         TRAY.with(|t| *t.borrow_mut() = tray);
     }
 
-    // Set the window icon once the native window is realized (the HWND doesn't
-    // exist yet here). Slint/winit doesn't pick up the exe's embedded .ico, so
-    // the title bar + taskbar would otherwise show the toolkit's default glyph.
-    #[cfg(windows)]
+    // Set the window icon once the native window is realized (the HWND / X11
+    // window doesn't exist yet here). Slint/winit doesn't pick up the exe's
+    // embedded .ico (Windows) and sets no _NET_WM_ICON (X11), so the title
+    // bar + taskbar would otherwise show the toolkit's default glyph. The
+    // native handle appears some time after the loop starts (later on X11
+    // than on Windows), so retry on a short ticker until it sticks.
+    #[cfg(any(windows, target_os = "linux"))]
     {
         let icon_weak = ui.as_weak();
-        slint::Timer::single_shot(std::time::Duration::from_millis(80), move || {
-            if let Some(ui) = icon_weak.upgrade() {
-                set_window_icon(&ui);
-            }
-        });
+        let icon_timer = slint::Timer::default();
+        let mut tries = 0u32;
+        icon_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(100),
+            move || {
+                tries += 1;
+                let done = icon_weak
+                    .upgrade()
+                    .map(|ui| set_window_icon(&ui))
+                    .unwrap_or(true);
+                if done || tries >= 50 {
+                    // Defer the stop+drop out of the timer's own dispatch —
+                    // never drop a Timer from inside its own callback (same
+                    // rule as the toast windows).
+                    let _ = slint::invoke_from_event_loop(|| {
+                        ICON_TIMER.with(|t| {
+                            if let Some(t) = t.borrow_mut().take() {
+                                t.stop();
+                            }
+                        });
+                    });
+                }
+            },
+        );
+        ICON_TIMER.with(|t| *t.borrow_mut() = Some(icon_timer));
     }
 
     // Show the window, then run the loop in "stay alive past the last window"
@@ -6069,6 +6364,8 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         .map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid, message_id: b.message_id.clone(), seen: true })
                         .collect();
                     *sh.current_bodies.borrow_mut() = bodies.clone();
+                    // Freshly fetched bodies can change the Re:-subject hint.
+                    refresh_composer_hints(ui, sh);
                     // Last render after open is THIS one (it aborts the
                     // optimistic cached render) — consume the pending scroll.
                     let scroll = take_scroll_target(sh, &bodies, true);
@@ -6198,6 +6495,23 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                 }
                 EngineEvent::CalendarUpdated { calendar_id } => {
                     println!("engine event: calendar {calendar_id} updated");
+                    // A server-side re-sync may have re-created events under
+                    // new ids and shifted times — refresh the displayed week
+                    // (which also re-seeds reminders) at most once per 2 min:
+                    // the push arrives in bursts, one per calendar per cycle.
+                    SHARED.with(|s| {
+                        if let Some(sh) = s.borrow().as_ref() {
+                            let stale = sh
+                                .last_cal_refetch
+                                .get()
+                                .map(|t| t.elapsed().as_secs() >= 120)
+                                .unwrap_or(true);
+                            if stale {
+                                sh.last_cal_refetch.set(Some(std::time::Instant::now()));
+                                refetch_calendar_events(ui, sh);
+                            }
+                        }
+                    });
                 }
                 EngineEvent::TokenRefreshed { account_id, token } => {
                     // Persist the rotated JWT — otherwise the next launch
@@ -6322,7 +6636,7 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                 }
             });
         }
-        engine::EngineResult::CalendarEvents(events) => {
+        engine::EngineResult::CalendarEvents { events, from_ms, to_ms, complete } => {
             println!("engine: {} calendar events", events.len());
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
@@ -6332,6 +6646,24 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         let vis = sh.calendar_visible.borrow();
                         let hidden = |cal_id: i64| !*vis.get(&cal_id).unwrap_or(&true);
                         reminders::seed(c, &events, &hidden, now_ms);
+                        // Deleted-upstream events must stop toasting: cull
+                        // reminders whose event vanished from this window and
+                        // close any toast already on screen for them. Only a
+                        // COMPLETE fetch is trusted — a failed account's
+                        // missing events are not deletions.
+                        if complete {
+                            let keep: std::collections::HashSet<i64> =
+                                events.iter().map(|e| e.id).collect();
+                            match c.prune_orphan_reminders(from_ms, to_ms, &keep) {
+                                Ok(orphans) => {
+                                    for id in orphans {
+                                        println!("[cal] reminder cull: event {id} vanished — closing its toasts");
+                                        toast_window::close_for_event(id);
+                                    }
+                                }
+                                Err(e) => eprintln!("reminder cull: {e}"),
+                            }
+                        }
                     }
                     // Remember each event's owning account for write routing.
                     {
@@ -6350,8 +6682,39 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     let pend = sh.pending_open_event.get();
                     if pend != 0 {
                         sh.pending_open_event.set(0);
-                        if sh.calendar_events.borrow().iter().any(|e| e.id == pend) {
-                            ui.invoke_event_clicked(pend as i32);
+                        let occ = sh.pending_open_occ.get();
+                        let summary = sh.pending_open_summary.borrow().clone();
+                        let open_id = {
+                            let events = sh.calendar_events.borrow();
+                            if events.iter().any(|e| e.id == pend) {
+                                Some(pend)
+                            } else {
+                                // Stale reminder id: the server re-creates
+                                // events under new ids on calendar re-sync,
+                                // so the id this reminder was seeded with may
+                                // be dead. Recover the meeting by occurrence:
+                                // same summary, and either an exact start
+                                // match or a recurring master that can own
+                                // this occurrence.
+                                events
+                                    .iter()
+                                    .filter(|e| e.summary == summary && !summary.is_empty())
+                                    .filter(|e| e.dtstart == occ || !e.rrule.is_empty())
+                                    .min_by_key(|e| if e.dtstart == occ { 0 } else { 1 })
+                                    .map(|e| e.id)
+                            }
+                        };
+                        match open_id {
+                            Some(id) => {
+                                println!(
+                                    "[cal] toast-open: event {pend} → card (resolved id {id}{})",
+                                    if id == pend { "" } else { ", stale-id fallback" }
+                                );
+                                ui.invoke_event_clicked(id as i32);
+                            }
+                            None => println!(
+                                "[cal] toast-open: event {pend} \"{summary}\" occ={occ} not in week payload — no card"
+                            ),
                         }
                     }
                 }
@@ -6717,6 +7080,96 @@ fn parse_headers(raw: &str) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// Open the native file picker and return the chosen attachment paths.
+///
+/// Windows/macOS use rfd's synchronous Win32/AppKit backend, parented to our
+/// window. Linux can NOT: rfd's only sync backend there is gtk3, and gtk is
+/// already owned by the WebKitGTK render worker thread (`render_webkit.rs`
+/// calls `gtk::init()` there). Driving a second gtk dialog from the UI thread
+/// deadlocks — the UI thread parks in the gtk main loop and the dialog window
+/// never maps. So on Linux we shell out to a native picker (kdialog on KDE,
+/// zenity as fallback) in its own process — no in-process gtk at all.
+#[cfg(not(target_os = "linux"))]
+fn pick_attachment_files(ui: &MainWindow) -> Vec<std::path::PathBuf> {
+    use raw_window_handle::HasWindowHandle;
+    let handle = ui.window().window_handle();
+    rfd::FileDialog::new()
+        .set_parent(&handle)
+        .pick_files()
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+fn pick_attachment_files(ui: &MainWindow) -> Vec<std::path::PathBuf> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    // X11 window id lets the picker open transient-for our window (modal,
+    // centered, above). Wayland has no portable id here — the picker just
+    // opens unparented, which is fine.
+    let xid = ui
+        .window()
+        .window_handle()
+        .window_handle()
+        .ok()
+        .and_then(|wh| match wh.as_raw() {
+            RawWindowHandle::Xlib(h) => Some(h.window),
+            _ => None,
+        });
+
+    // kdialog: native on KDE. `--separate-output --multiple` → one path per
+    // line, so filenames with spaces parse cleanly.
+    if let Ok(kdialog) = which_bin("kdialog") {
+        let mut c = std::process::Command::new(kdialog);
+        if let Some(xid) = xid {
+            c.arg("--attach").arg(xid.to_string());
+        }
+        c.args(["--getopenfilename", "", "--multiple", "--separate-output"]);
+        if let Ok(out) = c.output() {
+            if out.status.success() {
+                return String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .map(|l| l.trim())
+                    .filter(|l| !l.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .collect();
+            }
+            return Vec::new(); // user cancelled → non-zero exit, no paths
+        }
+    }
+    // zenity fallback: GTK-themed but works everywhere. Newline separator so
+    // multi-select parses even with spaces in names.
+    if let Ok(zenity) = which_bin("zenity") {
+        if let Ok(out) = std::process::Command::new(zenity)
+            .args(["--file-selection", "--multiple", "--separator=\n"])
+            .output()
+        {
+            if out.status.success() {
+                return String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .map(|l| l.trim())
+                    .filter(|l| !l.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .collect();
+            }
+        }
+    }
+    eprintln!("attach: no native file picker found (install kdialog or zenity)");
+    Vec::new()
+}
+
+/// Resolve a binary name to a full path via `PATH`. Avoids a `which` crate
+/// dependency for the one place we need it.
+#[cfg(target_os = "linux")]
+fn which_bin(name: &str) -> Result<std::path::PathBuf, ()> {
+    let path = std::env::var_os("PATH").ok_or(())?;
+    for dir in std::env::split_paths(&path) {
+        let cand = dir.join(name);
+        if cand.is_file() {
+            return Ok(cand);
+        }
+    }
+    Err(())
 }
 
 /// Open a URL in the system default browser. Per-OS launcher — the previous

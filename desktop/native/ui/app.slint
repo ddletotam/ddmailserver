@@ -342,6 +342,10 @@ export component MainWindow inherits Window {
     // prefill it (e.g. a forwarded message body) and clear it after send.
     in-out property <string> composer-text: "";
     in property <string> composer-subject-auto: "";
+    // Effective recipients of an implicit send (the dialog's counterparts,
+    // reply-all style) — shown as ghost text in the empty «Кому» field so
+    // the user can SEE where a plain reply goes before trusting it.
+    in property <string> composer-to-auto: "";
     // Staged attachments for the next outgoing message. Filled by the Rust
     // side after the native file dialog; cleared once the message is staged.
     in property <[AttachChip]> composer-attachments;
@@ -434,6 +438,15 @@ export component MainWindow inherits Window {
     // time gutter (vertical) and day-header row (horizontal) track scrolling.
     in-out property <length> grid-vp-x: 0;
     in-out property <length> grid-vp-y: 0;
+    // Programmatic grid scroll (same pattern as chat-scroll-seq): Rust sets
+    // grid-scroll-y (positive offset from the content top), raises pending
+    // and bumps the seq. The seq bridge fires when the calendar pane is
+    // already alive; pending covers the pane being instantiated right now —
+    // the Flickable applies it on its first real layout. A plain binding
+    // would be destroyed by the user's first manual scroll.
+    in-out property <length> grid-scroll-y: 0;
+    in-out property <int> grid-scroll-seq: 0;
+    in-out property <bool> grid-scroll-pending: false;
     // Day-of-week labels Rust fills, parallel to the day columns.
     in property <[string]> day-headers;
     // Column index of "today" within the displayed week (-1 = not shown).
@@ -1605,10 +1618,13 @@ export component MainWindow inherits Window {
                                 x: 10px;
                                 width: parent.width - 20px;
                                 height: parent.height;
-                                text: "(текущий диалог)";
+                                text: root.composer-to-auto != ""
+                                    ? root.composer-to-auto
+                                    : "(текущий диалог)";
                                 color: #b5bcc6;
                                 font-size: 13px;
                                 vertical-alignment: center;
+                                overflow: elide;
                             }
                         }
                     }
@@ -1831,20 +1847,29 @@ export component MainWindow inherits Window {
                             vertical-alignment: center;
                         }
                     }
-                    // Attach files — opens the native picker.
+                    // Attach files — opens the native picker. Drawn paperclip
+                    // (the 📎 emoji has no glyph in the default font — same
+                    // story as the burger / chevron above, which are Paths).
                     Rectangle {
                         width: 42px;
                         height: 42px;
                         border-radius: 21px;
                         background: att-ta.has-hover ? #eef0f4 : transparent;
                         att-ta := TouchArea { clicked => { root.attach-files(); } }
-                        Text {
-                            width: parent.width;
-                            height: parent.height;
-                            text: "📎";
-                            font-size: 18px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                        Path {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 22px;
+                            height: 22px;
+                            viewbox-width: 24;
+                            viewbox-height: 24;
+                            // Lucide "paperclip" — an open stroked outline
+                            // (fill-rule for the closed bootstrap glyph isn't
+                            // reliable in Slint, so it filled solid).
+                            commands: "M 21.44 11.05 L 12.25 20.24 A 6 6 0 0 1 3.76 11.75 L 12.33 3.18 A 4 4 0 0 1 18 8.84 L 9.41 17.41 A 2 2 0 0 1 6.58 14.58 L 15.07 6.1";
+                            stroke: att-ta.has-hover ? #4b5563 : #8b95a1;
+                            stroke-width: 2px;
+                            fill: transparent;
                         }
                     }
                     Rectangle {
@@ -2056,9 +2081,12 @@ export component MainWindow inherits Window {
                         vertical-alignment: center;
                         horizontal-alignment: left;
                     }
-                    // Loading pill + spacer
+                    // Loading pill. The layout is alignment:start, so a
+                    // stretch spacer collapses to 0 and «+ Событие» painted
+                    // right over the pill — reserve the pill's width
+                    // explicitly while it's visible instead.
                     Rectangle {
-                        horizontal-stretch: 1;
+                        width: root.calendar-loading ? 126px : 0px;
                         if root.calendar-loading: Rectangle {
                             x: 8px; y: (parent.height - self.height) / 2;
                             width: 110px; height: 26px; border-radius: 13px; background: #10b98122;
@@ -2183,6 +2211,24 @@ export component MainWindow inherits Window {
                 property <length> content-w: 48px + root.day-count * root.col-width;
                 property <length> content-h: (root.hour-end - root.hour-start) * root.hour-height;
 
+                // Programmatic scroll bridge: reacts to grid-scroll-seq bumps
+                // from Rust while the pane is alive (see the property block
+                // for the pending half of the pattern).
+                Rectangle {
+                    visible: false;
+                    width: 0;
+                    height: 0;
+                    x: root.grid-scroll-seq * 1px;
+                    changed x => {
+                        // Degenerate geometry (pane mid-instantiation) —
+                        // keep pending; a later trigger applies it for real.
+                        if (gridflick.height > 0) {
+                            root.grid-scroll-pending = false;
+                            gridflick.viewport-y = -max(0px, min(root.grid-scroll-y,
+                                gridflick.viewport-height - gridflick.height));
+                        }
+                    }
+                }
                 gridflick := Flickable {
                     width: parent.width;
                     height: parent.height;
@@ -2190,6 +2236,25 @@ export component MainWindow inherits Window {
                     viewport-height: max(parent.height, gb.content-h);
                     changed viewport-x => { root.grid-vp-x = self.viewport-x; }
                     changed viewport-y => { root.grid-vp-y = self.viewport-y; }
+                    // The pane is conditional (view-mode == 1): a scroll asked
+                    // for while it was being instantiated missed the seq
+                    // bridge — apply it on the next real layout change instead
+                    // (height settles, or the content grows once the zoom /
+                    // event data lands).
+                    changed height => {
+                        if (root.grid-scroll-pending && self.height > 0) {
+                            root.grid-scroll-pending = false;
+                            self.viewport-y = -max(0px, min(root.grid-scroll-y,
+                                self.viewport-height - self.height));
+                        }
+                    }
+                    changed viewport-height => {
+                        if (root.grid-scroll-pending && self.height > 0) {
+                            root.grid-scroll-pending = false;
+                            self.viewport-y = -max(0px, min(root.grid-scroll-y,
+                                self.viewport-height - self.height));
+                        }
+                    }
 
                     // Non-work shading (above work-start / below work-end).
                     if root.work-start > root.hour-start: Rectangle {

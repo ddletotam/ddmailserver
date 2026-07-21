@@ -436,8 +436,16 @@ pub enum EngineResult {
     /// drop stale answers when typing faster than the engine answers.
     Contacts { query: String, list: Vec<DesktopContact> },
     /// Events for the currently displayed week — echoed back from
-    /// FetchCalendarEvents.
-    CalendarEvents(Vec<DesktopCalendarEvent>),
+    /// FetchCalendarEvents. `from_ms`/`to_ms` echo the requested window and
+    /// `complete` says every account answered — orphaned-reminder pruning
+    /// must only trust a complete fetch (a failed account's events being
+    /// absent is not a deletion).
+    CalendarEvents {
+        events: Vec<DesktopCalendarEvent>,
+        from_ms: i64,
+        to_ms: i64,
+        complete: bool,
+    },
     /// A Send command failed — surfaced to the user (toast), unlike the
     /// generic Error which only logs. Carries the human-readable reason.
     SendFailed(String),
@@ -621,7 +629,45 @@ pub fn spawn(
         // provider-agnostic avatar fetch still uses the first provider.
         let provider = conns[0].provider.clone();
 
-        while let Ok(cmd) = rx.recv() {
+        // Avatar fetches are bulk background work (one network round-trip
+        // per cache miss, ~150 queued right after the first conversation
+        // load). Everything else is interactive — a calendar/contacts click
+        // must not queue behind that backlog, so avatars are parked and
+        // served only while the channel is empty.
+        let mut avatar_backlog: std::collections::VecDeque<String> = Default::default();
+        loop {
+            let mut next: Option<EngineCmd> = None;
+            let mut disconnected = false;
+            loop {
+                match rx.try_recv() {
+                    Ok(EngineCmd::FetchAvatar { email }) => avatar_backlog.push_back(email),
+                    Ok(c) => {
+                        next = Some(c);
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+            let cmd = match next {
+                Some(c) => c,
+                None => {
+                    if let Some(email) = avatar_backlog.pop_front() {
+                        EngineCmd::FetchAvatar { email }
+                    } else if disconnected {
+                        break;
+                    } else {
+                        // Nothing queued, no backlog — block for the next one.
+                        match rx.recv() {
+                            Ok(c) => c,
+                            Err(_) => break,
+                        }
+                    }
+                }
+            };
             match cmd {
                 EngineCmd::FetchConversations { limit } => {
                     // Fan out: each account syncs into ITS cache namespace
@@ -898,6 +944,7 @@ pub fn spawn(
                 EngineCmd::FetchCalendars => {
                     // Fan out across every account and tag each calendar with
                     // its owner — one unified list, no primary account.
+                    let t0 = std::time::Instant::now();
                     let mut all = Vec::new();
                     for conn in &conns {
                         match rt.block_on(conn.provider.list_calendars()) {
@@ -910,6 +957,7 @@ pub fn spawn(
                             Err(e) => eprintln!("list_calendars [{}]: {e}", conn.key),
                         }
                     }
+                    println!("[cal] FetchCalendars: {} cals in {}ms", all.len(), t0.elapsed().as_millis());
                     on_result(EngineResult::Calendars(all));
                 }
                 EngineCmd::FetchContacts { query, limit } => {
@@ -954,7 +1002,11 @@ pub fn spawn(
                     }
                 }
                 EngineCmd::FetchCalendarEvents { from_ms, to_ms, calendar_ids } => {
+                    let t0 = std::time::Instant::now();
                     let mut all = Vec::new();
+                    // A calendar-filtered fetch is a subset by construction —
+                    // never let the orphan pruning treat it as the full truth.
+                    let mut complete = calendar_ids.is_empty();
                     for conn in &conns {
                         match rt.block_on(conn.provider.fetch_calendar_events(from_ms, to_ms, &calendar_ids)) {
                             Ok(mut evs) => {
@@ -963,10 +1015,19 @@ pub fn spawn(
                                 }
                                 all.extend(evs);
                             }
-                            Err(e) => eprintln!("fetch_calendar_events [{}]: {e}", conn.key),
+                            Err(e) => {
+                                complete = false;
+                                eprintln!("fetch_calendar_events [{}]: {e}", conn.key);
+                            }
                         }
                     }
-                    on_result(EngineResult::CalendarEvents(all));
+                    println!(
+                        "[cal] FetchCalendarEvents: {} events in {}ms{}",
+                        all.len(),
+                        t0.elapsed().as_millis(),
+                        if complete { "" } else { " (partial)" }
+                    );
+                    on_result(EngineResult::CalendarEvents { events: all, from_ms, to_ms, complete });
                 }
                 EngineCmd::Rsvp { event_id, partstat, account_key } => {
                     let provider = route(&conns, &account_key).provider.clone();
