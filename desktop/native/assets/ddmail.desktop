@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=DDMail
+GenericName=Mail Client
+GenericName[ru]=Почтовый клиент
+Comment=Mail as a messenger
+Comment[ru]=Почта как мессенджер
+Exec=ddmail-native
+Icon=ddmail
+Terminal=false
+Categories=Network;Email;
+StartupWMClass=ddmail-native
