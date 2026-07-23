@@ -653,6 +653,7 @@ where
             messages: regular_msgs.iter().map(|m| MessageRef { folder: m.folder.clone(), uid: m.uid, message_id: m.message_id.clone(), seen: m.seen }).collect(),
             draft,
             account_key: String::new(), // stamped by the engine on merge
+            merged: false,
         });
     }
 

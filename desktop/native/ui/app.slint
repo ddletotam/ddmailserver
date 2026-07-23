@@ -45,6 +45,9 @@ struct ConvItem {
     unread: int,
     // One-second attention flash when new mail lands in this conversation.
     highlight: bool,
+    // Row is a user-made merge of several conversations (merges.json) —
+    // shows the «Разъединить» context-menu item.
+    is-merged: bool,
 }
 
 // One attendee row of the event-detail table: display name + localized
@@ -341,6 +344,12 @@ export component MainWindow inherits Window {
     // Two-way mirror of the composer input text, so the Rust side can
     // prefill it (e.g. a forwarded message body) and clear it after send.
     in-out property <string> composer-text: "";
+    // Inline send confirmation: flipped on by the Rust side once the server
+    // acks the send, back off ~2s later — the pill fades via animate.
+    in-out property <bool> send-confirm-visible: false;
+    // Текст плашки: «✓ Отправлено» после send, «✓ Сохранено» после
+    // сохранения вложения — один и тот же ненавязчивый механизм.
+    in-out property <string> send-confirm-text: "✓ Отправлено";
     in property <string> composer-subject-auto: "";
     // Effective recipients of an implicit send (the dialog's counterparts,
     // reply-all style) — shown as ghost text in the empty «Кому» field so
@@ -356,6 +365,10 @@ export component MainWindow inherits Window {
     in property <[IdentityItem]> composer-identities;
     in-out property <int> composer-identity-index: 0;
     in-out property <bool> identity-menu-open: false;
+    // Явный выбор отправителя в дропдауне. Rust закрепляет его (побеждает
+    // авто-наведение на identity беседы И переустановку при дельта-refetch)
+    // и читает приоритетно на отправке — тот же принцип, что «Кому»/тема в §1.
+    callback identity-picked(int);
 
     // Render progress: while a conversation's bubbles stream in from
     // Ultralight, a thin bar above the bubble list shows "M of N done".
@@ -560,6 +573,11 @@ export component MainWindow inherits Window {
     callback new-event();
 
     callback select(int);
+    // Объединение диалогов: правый клик по строке сайдбара. merge — клик
+    // по строке при другом ОТКРЫТОМ диалоге (склеить с ним); unmerge —
+    // разобрать склейку обратно.
+    callback conv-merge(int);
+    callback conv-unmerge(int);
     callback hit-test(int, length, length);
     // Hover query for the pointer cursor: true when (x, y) inside row
     // `idx` sits on a link rect. Pure — it's evaluated from a binding.
@@ -699,6 +717,13 @@ export component MainWindow inherits Window {
     callback attach-files();
     callback remove-attachment(int);
     callback msg-action(int, string);
+    // Контекст вложения под правым кликом: перед показом меню Rust
+    // хит-тестит точку (ctx-menu-probe) и заполняет ctx-attach-name;
+    // пункты «Открыть/Сохранить вложение» видимы, пока имя непустое.
+    callback ctx-menu-probe(int, length, length);
+    in property <string> ctx-attach-name: "";
+    callback open-attachment();
+    callback save-attachment();
     // Live-dropdown wiring.
     callback search-typed(string);
     callback search-cleared();
@@ -951,8 +976,33 @@ export component MainWindow inherits Window {
                             opacity: conv.highlight ? 1.0 : 0.0;
                             animate opacity { duration: 900ms; easing: ease-out; }
                         }
+                        conv-cm := ContextMenuArea {
+                            width: 100%;
+                            height: 100%;
+                            Menu {
+                                MenuItem {
+                                    title: "Объединить с открытым диалогом";
+                                    enabled: idx != root.selected;
+                                    activated => { root.conv-merge(idx); }
+                                }
+                                if conv.is-merged: MenuItem {
+                                    title: "Разъединить диалоги";
+                                    activated => { root.conv-unmerge(idx); }
+                                }
+                            }
+                            Rectangle { }
+                        }
                         conv-ta := TouchArea {
                             clicked => { root.select(idx); }
+                            // Правый клик — меню объединения диалогов; TouchArea
+                            // перехватывает pointer-события, так что показываем
+                            // ContextMenuArea вручную (как у пузырей).
+                            pointer-event(e) => {
+                                if (e.button == PointerEventButton.right
+                                    && e.kind == PointerEventKind.down) {
+                                    conv-cm.show({ x: self.mouse-x, y: self.mouse-y });
+                                }
+                            }
                         }
                         HorizontalLayout {
                             padding: 9px;
@@ -1433,6 +1483,18 @@ export component MainWindow inherits Window {
                         height: msg.h;
                         cma := ContextMenuArea {
                             Menu {
+                                // Вложение под курсором (ctx-menu-probe перед
+                                // show): открыть — как левый клик по чипу;
+                                // сохранить — диалог «Сохранить как…».
+                                if root.ctx-attach-name != "": MenuItem {
+                                    title: "Открыть «" + root.ctx-attach-name + "»";
+                                    activated => { root.open-attachment(); }
+                                }
+                                if root.ctx-attach-name != "": MenuItem {
+                                    title: "Сохранить «" + root.ctx-attach-name + "»…";
+                                    activated => { root.save-attachment(); }
+                                }
+                                if root.ctx-attach-name != "": MenuSeparator { }
                                 MenuItem { title: "Ответить"; activated => { root.msg-action(idx, "reply"); } }
                                 MenuItem { title: "Переслать"; activated => { root.msg-action(idx, "forward"); } }
                                 MenuItem { title: "Копировать текст"; activated => { root.msg-action(idx, "copy"); } }
@@ -1554,6 +1616,9 @@ export component MainWindow inherits Window {
                             pointer-event(e) => {
                                 if (e.button == PointerEventButton.right
                                     && e.kind == PointerEventKind.down) {
+                                    // Сначала хит-тест точки: если под курсором
+                                    // чип вложения, меню получит его пункты.
+                                    root.ctx-menu-probe(idx, self.mouse-x * self.fx, self.mouse-y);
                                     cma.show({ x: self.mouse-x, y: self.mouse-y });
                                 }
                                 if (e.button == PointerEventButton.left) {
@@ -1876,21 +1941,48 @@ export component MainWindow inherits Window {
                         horizontal-stretch: 1;
                         background: #f0f2f5;
                         border-radius: 20px;
-                        // VerticalLayout lets the TextInput size to its content
-                        // (no fixed height ⇒ it reports its wrapped preferred
-                        // height), so the whole composer grows line by line.
-                        VerticalLayout {
-                            padding-left: 16px;
-                            padding-right: 16px;
-                            padding-top: 8px;
-                            padding-bottom: 8px;
-                            alignment: center;
+                        // Пузырь растёт вместе с текстом (preferred-height
+                        // пробрасывает высоту контента в строку композера,
+                        // капы min/max задаёт родительская строка). Когда кап
+                        // достигнут, содержимое прокручивается во Flickable —
+                        // курсор всегда остаётся в видимой области (паттерн
+                        // слинтовского TextEdit), а clip не даёт тексту
+                        // рисоваться за пределами пузыря.
+                        preferred-height: ti.preferred-height + 16px;
+                        clip: true;
+                        fli := Flickable {
+                            x: 16px;
+                            y: 8px;
+                            width: parent.width - 32px;
+                            height: parent.height - 16px;
+                            // Драг-флик выключен: перетаскивание мышью — это
+                            // выделение текста, не прокрутка. Скролл едет за
+                            // курсором (cursor-position-changed ниже).
+                            interactive: false;
+                            viewport-width: self.width;
+                            viewport-height: max(self.height, ti.preferred-height);
                             ti := TextInput {
+                                width: fli.viewport-width;
+                                height: fli.viewport-height;
                                 text <=> root.composer-text;
                                 color: #0f1419;
                                 font-size: 15px;
                                 single-line: false;
                                 wrap: word-wrap;
+                                vertical-alignment: center;
+                                // Курсор ушёл под край — подвозим вьюпорт;
+                                // финальный clamp держит его в диапазоне и
+                                // после удаления строк.
+                                cursor-position-changed(cpos) => {
+                                    if (cpos.y + self.font-size + 8px > fli.height - fli.viewport-y) {
+                                        fli.viewport-y = -(cpos.y + self.font-size + 8px - fli.height);
+                                    }
+                                    if (cpos.y < -fli.viewport-y) {
+                                        fli.viewport-y = -cpos.y;
+                                    }
+                                    fli.viewport-y = max(fli.height - fli.viewport-height,
+                                        min(0px, fli.viewport-y));
+                                }
                                 // Enter sends; Shift+Enter inserts a newline
                                 // (Telegram-style, matching the rest of the UI).
                                 key-pressed(event) => {
@@ -1955,6 +2047,28 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
+                // Inline «✓ Отправлено» — floats above the composer for ~2s
+                // after the server acks a send (subtle confirmation, no
+                // toasts). Negative y: Rectangles don't clip children.
+                Rectangle {
+                    x: parent.width - self.width - 20px;
+                    y: -38px;
+                    width: send-confirm-label.preferred-width + 26px;
+                    height: 30px;
+                    border-radius: 15px;
+                    background: #10b981;
+                    opacity: root.send-confirm-visible ? 0.95 : 0;
+                    animate opacity { duration: 250ms; }
+                    send-confirm-label := Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: root.send-confirm-text;
+                        color: white;
+                        font-size: 13px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
                 // From-picker list — floats above the composer (negative y;
                 // Rectangles don't clip children). Later sibling of the
                 // input row, so it paints over the bubble list.
@@ -1980,6 +2094,7 @@ export component MainWindow inherits Window {
                                 clicked => {
                                     root.composer-identity-index = ii;
                                     root.identity-menu-open = false;
+                                    root.identity-picked(ii);
                                 }
                             }
                             HorizontalLayout {

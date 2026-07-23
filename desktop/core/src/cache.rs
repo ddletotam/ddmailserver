@@ -499,6 +499,7 @@ impl Cache {
                 messages,
                 draft: None, // Drafts not cached
                 account_key: String::new(), // stamped by the engine on merge
+                merged: false,
             });
         }
 
@@ -1011,6 +1012,54 @@ impl Cache {
                 .map_err(|e| format!("delete: {e}"))?;
         }
         Ok(orphans)
+    }
+
+    /// Cull reminder rows whose occurrence no longer exists: the event is
+    /// still present (same id) but was MOVED — rows keyed by the old
+    /// occurrence_start stay armed and fire at the old time otherwise.
+    /// `valid` maps event_id → the occurrence starts the current fetch
+    /// actually derives inside [from_ms, to_ms); rows of events absent from
+    /// `valid` are `prune_orphan_reminders`' job. Returns affected event ids
+    /// so the UI can close their stale toasts.
+    pub fn prune_moved_reminders(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+        valid: &std::collections::HashMap<i64, std::collections::HashSet<i64>>,
+    ) -> Result<Vec<i64>, String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT event_id, occurrence_start_ms FROM reminders2 \
+                 WHERE occurrence_start_ms >= ?1 AND occurrence_start_ms < ?2",
+            )
+            .map_err(|e| format!("prepare: {e}"))?;
+        let rows = stmt
+            .query_map(params![from_ms, to_ms], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(|e| format!("query: {e}"))?;
+        let mut stale: Vec<(i64, i64)> = Vec::new();
+        for r in rows {
+            let (id, occ) = r.map_err(|e| format!("row: {e}"))?;
+            if let Some(starts) = valid.get(&id) {
+                if !starts.contains(&occ) {
+                    stale.push((id, occ));
+                }
+            }
+        }
+        let mut affected: Vec<i64> = Vec::new();
+        for (id, occ) in &stale {
+            conn.execute(
+                "DELETE FROM reminders2 WHERE event_id = ?1 AND occurrence_start_ms = ?2",
+                params![id, occ],
+            )
+            .map_err(|e| format!("delete: {e}"))?;
+            if !affected.contains(id) {
+                affected.push(*id);
+            }
+        }
+        Ok(affected)
     }
 }
 

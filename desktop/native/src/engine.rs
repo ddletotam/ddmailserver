@@ -345,7 +345,9 @@ pub enum EngineCmd {
         message_ids: Vec<i64>,
         account_key: String,
     },
-    DownloadAttachment { folder: String, uid: u32, index: usize, filename: String, account_key: String },
+    /// `save_to = None` → в Downloads + автооткрытие (клик по чипу);
+    /// `save_to = Some(path)` → в выбранный пользователем файл, без открытия.
+    DownloadAttachment { folder: String, uid: u32, index: usize, filename: String, account_key: String, save_to: Option<String> },
     /// Live dropdown lookup for the search-as-compose bar: matching contacts
     /// (name/email) AND matching messages (subject/body) in one round-trip.
     /// The query is echoed back in the result so the UI can drop stale answers
@@ -428,6 +430,9 @@ pub enum EngineResult {
     Avatar { email: String, rgba: Vec<u8>, w: u32, h: u32 },
     /// An attachment was downloaded and saved at this path; UI opens it.
     AttachmentSaved(String),
+    /// Вложение записано в явно выбранный пользователем путь («Сохранить
+    /// как…») — подтверждаем инлайн-плашкой, файл НЕ открываем.
+    AttachmentSavedTo(String),
     /// Raw RFC-822 source for a FetchSource request.
     Source { uid: u32, raw: String },
     /// Calendar list (sidebar) — echoed back from FetchCalendars.
@@ -904,12 +909,18 @@ pub fn spawn(
                         Err(e) => on_result(EngineResult::Error(e)),
                     }
                 }
-                EngineCmd::DownloadAttachment { folder, uid, index, filename, account_key } => {
+                EngineCmd::DownloadAttachment { folder, uid, index, filename, account_key, save_to } => {
                     let provider = route(&conns, &account_key).provider.clone();
                     match rt.block_on(provider.fetch_attachment(&folder, uid, index)) {
-                        Ok((bytes, _mime)) => match save_download(&filename, &bytes) {
-                            Ok(path) => on_result(EngineResult::AttachmentSaved(path)),
-                            Err(e) => on_result(EngineResult::Error(e)),
+                        Ok((bytes, _mime)) => match save_to {
+                            Some(path) => match std::fs::write(&path, &bytes) {
+                                Ok(()) => on_result(EngineResult::AttachmentSavedTo(path)),
+                                Err(e) => on_result(EngineResult::Error(format!("write {path}: {e}"))),
+                            },
+                            None => match save_download(&filename, &bytes) {
+                                Ok(path) => on_result(EngineResult::AttachmentSaved(path)),
+                                Err(e) => on_result(EngineResult::Error(e)),
+                            },
                         },
                         Err(e) => on_result(EngineResult::Error(e)),
                     }

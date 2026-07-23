@@ -158,6 +158,11 @@ pub struct Conversation {
     /// UI knows which account a reply / open / delete should target.
     #[serde(default)]
     pub account_key: String,
+    /// Client-view flag: this row is a user-made merge of several source
+    /// conversations (merges.json). Never serialized — providers and the
+    /// cache only ever see raw conversations.
+    #[serde(skip)]
+    pub merged: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

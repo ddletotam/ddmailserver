@@ -52,8 +52,14 @@ pub fn setup(
     let quit_id = quit_item.id().clone();
 
     let icon = Icon::from_rgba(solid_icon_rgba(), 32, 32).ok()?;
+    // Version + git stamp in the tooltip — hover the tray icon to tell
+    // exactly which build is running (contract §7).
     let tray = TrayIconBuilder::new()
-        .with_tooltip("ddmail")
+        .with_tooltip(format!(
+            "ddmail {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            env!("BUILD_GIT"),
+        ))
         .with_menu(Box::new(menu))
         .with_icon(icon)
         .build()

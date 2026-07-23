@@ -128,6 +128,38 @@ pub fn seed(
     }
 }
 
+/// Occurrence starts each event actually produces inside [from_ms, to_ms) —
+/// та же деривация, что у seed(): plain event = свой dtstart, rrule-мастер =
+/// разворот в окне. Скармливается в `cache.prune_moved_reminders`: строка
+/// напоминания, чьё вхождение событие больше НЕ производит (перенос 12→13),
+/// иначе остаётся взведённой и стреляет по старому времени.
+pub fn valid_starts(
+    events: &[DesktopCalendarEvent],
+    from_ms: i64,
+    to_ms: i64,
+) -> std::collections::HashMap<i64, std::collections::HashSet<i64>> {
+    let mut valid: std::collections::HashMap<i64, std::collections::HashSet<i64>> =
+        std::collections::HashMap::new();
+    for ev in events {
+        let entry = valid.entry(ev.id).or_default();
+        if ev.rrule.is_empty() {
+            // Plain event / override row: единственное вхождение — dtstart
+            // (вне окна — безвредно, window-фильтр cull'а такие строки
+            // не рассматривает).
+            entry.insert(ev.dtstart);
+        } else {
+            // Мастер: только реальные развороты (exdates учтены). Перенос
+            // одного вхождения (EXDATE + override) валидирует старый слот
+            // ТОЛЬКО если разворот его всё ещё производит — как в seed().
+            for o in recurrence::expand(ev.dtstart, ev.dtend, &ev.rrule, &ev.exdates, from_ms, to_ms)
+            {
+                entry.insert(o.start_ms);
+            }
+        }
+    }
+    valid
+}
+
 /// Prune stale rows, then run the state machine over the due set:
 ///   - occurrence over        → expire silently (spec: «прошло — тихо удаляем»);
 ///   - occurrence in progress → ONE «уже идёт» toast per occurrence, the
@@ -335,6 +367,29 @@ mod tests {
         assert_eq!(due.len(), 1, "one logical occurrence → one toast");
         // The retired duplicate never resurfaces on later scans either.
         assert_eq!(scan(&cache, now).len(), 0);
+    }
+
+    #[test]
+    fn moved_event_drops_stale_occurrence() {
+        let cache = temp_cache();
+        let now = 7_000_000_000_000;
+        let start12 = now + 60 * 60_000;
+        // Посеяли на «12:00»…
+        seed(&cache, &[event(7, "Move12to13", start12, &[10])], &no_hidden, now);
+        // …событие перенесли на час позже; пришёл полный фетч окна.
+        let start13 = start12 + 60 * 60_000;
+        let moved = event(7, "Move12to13", start13, &[10]);
+        seed(&cache, &[moved.clone()], &no_hidden, now);
+        let valid = valid_starts(&[moved], now, now + 7 * 24 * 3_600_000);
+        let affected = cache
+            .prune_moved_reminders(now, now + 7 * 24 * 3_600_000, &valid)
+            .unwrap();
+        assert_eq!(affected, vec![7], "stale occurrence culled");
+        // Старое время молчит, новое стреляет.
+        assert_eq!(scan(&cache, start12 - 10 * 60_000).len(), 0, "old slot silent");
+        let due = scan(&cache, start13 - 10 * 60_000);
+        assert_eq!(due.len(), 1, "new slot fires");
+        assert_eq!(due[0].row.occurrence_start_ms, start13);
     }
 
     #[test]

@@ -11,6 +11,7 @@ slint::include_modules!();
 
 mod calendar_settings;
 mod engine;
+mod merges;
 mod notify;
 mod policy;
 mod recurrence;
@@ -137,6 +138,8 @@ struct Disp {
     ident_color: String,
     /// Unread badge value (0 = no badge).
     unread: u32,
+    /// Строка — пользовательская склейка нескольких диалогов (merges.json).
+    merged: bool,
 }
 
 /// Pastel palette for identities lacking a server-side colour. Used as the
@@ -191,11 +194,15 @@ fn identity_color_map(cache: &Cache, key: &str) -> HashMap<String, String> {
 fn refresh_composer_identities(ui: &MainWindow, sh: &Shared) {
     let Some(cache) = &sh.cache else { return };
     let idents = cache.load_identities(&sh.key).unwrap_or_default();
-    let prev_email = {
+    // Явно выбранный отправитель закреплён — он выигрывает у восстановления
+    // по индексу (иначе дельта-refetch, прилетающая каждые пару секунд, сбивала
+    // выбор обратно на дефолтную identity: ровно этот баг «выбрал dd, ушло
+    // info»). Без явного выбора — прежнее поведение (сохранить по email).
+    let prev_email = sh.picked_identity.borrow().clone().or_else(|| {
         let list = sh.composer_identities.borrow();
         let idx = ui.get_composer_identity_index();
         list.get(idx.max(0) as usize).cloned()
-    };
+    });
     let mut items: Vec<IdentityItem> = Vec::with_capacity(idents.len());
     let mut emails: Vec<String> = Vec::with_capacity(idents.len());
     let mut selected: i32 = -1;
@@ -420,9 +427,117 @@ fn displays_from(convs: &[Conversation], ident_colors: &HashMap<String, String>)
                 email: c.counterparts.first().map(|cp| cp.addr.clone()).unwrap_or_default(),
                 ident_color,
                 unread: c.unread_count,
+                merged: c.merged,
             }
         })
         .collect()
+}
+
+/// Effective account key диалога: загрузка из кэша на старте оставляет
+/// account_key пустым — это первичный аккаунт.
+fn eff_account(fallback: &str, c: &Conversation) -> String {
+    if c.account_key.is_empty() {
+        fallback.to_string()
+    } else {
+        c.account_key.clone()
+    }
+}
+
+fn conv_merge_key(fallback: &str, c: &Conversation) -> merges::MergeKey {
+    merges::MergeKey { account: eff_account(fallback, c), id: c.id.clone() }
+}
+
+/// Свернуть сырой список бесед по merges.json: члены группы склеиваются в
+/// один синтетический диалог на позиции самого свежего из них. Имя, аватар
+/// и identity — от первичного (головы группы); дата/тема-превью — от самого
+/// свежего; счётчики суммируются, refs сообщений конкатенируются (тела
+/// потом сортируются по date_ts в load_message_bodies). Группа, от которой
+/// в списке остался один диалог, рендерится как есть.
+fn apply_merges(
+    raw: &[Conversation],
+    m: &merges::Merges,
+    fallback: &str,
+) -> Vec<Conversation> {
+    if m.groups.is_empty() {
+        return raw.to_vec();
+    }
+    let mut group_of: HashMap<(String, String), usize> = HashMap::new();
+    for (gi, g) in m.groups.iter().enumerate() {
+        for k in g {
+            group_of.insert((k.account.clone(), k.id.clone()), gi);
+        }
+    }
+    enum Slot {
+        Single(usize), // index into raw
+        Group(usize),  // index into m.groups, placed at first member seen
+    }
+    let mut slots: Vec<Slot> = Vec::new();
+    let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, c) in raw.iter().enumerate() {
+        match group_of.get(&(eff_account(fallback, c), c.id.clone())) {
+            Some(&gi) => {
+                let v = members.entry(gi).or_default();
+                if v.is_empty() {
+                    slots.push(Slot::Group(gi));
+                }
+                v.push(i);
+            }
+            None => slots.push(Slot::Single(i)),
+        }
+    }
+    let mut out = Vec::with_capacity(slots.len());
+    for s in slots {
+        match s {
+            Slot::Single(i) => out.push(raw[i].clone()),
+            Slot::Group(gi) => {
+                let idxs = &members[&gi];
+                if idxs.len() == 1 {
+                    out.push(raw[idxs[0]].clone());
+                    continue;
+                }
+                let head = m.groups[gi].first();
+                let primary = idxs
+                    .iter()
+                    .find(|&&i| {
+                        head.is_some_and(|h| {
+                            h.id == raw[i].id && h.account == eff_account(fallback, &raw[i])
+                        })
+                    })
+                    .copied()
+                    .unwrap_or(idxs[0]);
+                let newest = idxs
+                    .iter()
+                    .max_by_key(|&&i| raw[i].last_date_ts)
+                    .copied()
+                    .unwrap_or(idxs[0]);
+                let mut combined = raw[primary].clone();
+                combined.merged = true;
+                combined.last_date = raw[newest].last_date.clone();
+                combined.last_date_ts = raw[newest].last_date_ts;
+                combined.last_subject = raw[newest].last_subject.clone();
+                combined.unread_count = idxs.iter().map(|&i| raw[i].unread_count).sum();
+                combined.total_count = idxs.iter().map(|&i| raw[i].total_count).sum();
+                combined.is_group = idxs.iter().any(|&i| raw[i].is_group);
+                combined.messages = Vec::new();
+                combined.counterparts = Vec::new();
+                combined.draft = None;
+                let mut seen_addr: HashSet<String> = HashSet::new();
+                for &i in idxs {
+                    combined.messages.extend(raw[i].messages.iter().cloned());
+                    for cp in &raw[i].counterparts {
+                        if seen_addr.insert(cp.addr.to_lowercase()) {
+                            combined.counterparts.push(cp.clone());
+                        }
+                    }
+                    if combined.draft.is_none() {
+                        combined.draft = raw[i].draft.clone();
+                    }
+                }
+                out.push(combined);
+            }
+        }
+    }
+    out
 }
 
 fn synthetic_displays() -> Vec<Disp> {
@@ -435,6 +550,7 @@ fn synthetic_displays() -> Vec<Disp> {
             email: String::new(),
             ident_color: String::new(),
             unread: 0,
+            merged: false,
         })
         .collect()
 }
@@ -778,10 +894,18 @@ fn enter_forward_mode(sh: &Shared, ui: &MainWindow, body: MessageBody) {
 fn enter_compose_mode(sh: &Shared, ui: &MainWindow, email: &str) {
     let email = email.trim().to_lowercase();
     *sh.pending_compose.borrow_mut() = Some(email.clone());
+    // Свежий контекст — снимаем закреплённый ручной выбор отправителя от
+    // предыдущей беседы/письма; для нового письма действует дефолтная
+    // identity, пока пользователь не выберет другую в дропдауне.
+    sh.picked_identity.borrow_mut().take();
     // Any staged explicit-reply target is invalidated by jumping into
     // a fresh compose: the new conversation has no bubble to quote.
     exit_reply_mode(sh, ui);
     sh.current_msgs.borrow_mut().clear();
+    // The pane is empty in compose mode; stale bodies of the previously
+    // open conversation must not resurface when a send stub re-renders it.
+    sh.current_bodies.borrow_mut().clear();
+    sh.pending_sends.borrow_mut().clear();
     let initial = email
         .chars()
         .next()
@@ -995,7 +1119,24 @@ struct RowMeta {
 struct Shared {
     cache: Option<Arc<Cache>>,
     key: String,
+    /// Склеенный вид (merges.json применён) — то, что показывает сайдбар;
+    /// все индексы UI указывают сюда.
     convs: RefCell<Vec<Conversation>>,
+    /// Сырой список от движка/кэша, ДО применения склеек. Дельта-мерж
+    /// Conversations работает по нему (id склейки — синтетический и в
+    /// дельтах не встречается), merge/unmerge пересобирают convs из него.
+    raw_convs: RefCell<Vec<Conversation>>,
+    /// Пользовательские объединения диалогов; персистятся в merges.json.
+    merges: RefCell<merges::Merges>,
+    /// Вложение под правым кликом (folder, uid, index, filename) — цель
+    /// пунктов «Открыть/Сохранить вложение» контекстного меню пузыря.
+    ctx_attach: RefCell<Option<(String, u32, usize, String)>>,
+    /// Явно выбранный в дропдауне отправитель (lowercase email). Закрепляет
+    /// пользовательский выбор: побеждает авто-наведение на identity беседы и
+    /// переустановку индекса при дельта-refetch; on_send читает его
+    /// приоритетно. None = явного выбора нет, действует авто-логика.
+    /// Сбрасывается при смене контекста (открытие беседы / новое письмо).
+    picked_identity: RefCell<Option<String>>,
     displays: RefCell<Vec<Disp>>,
     avatars: RefCell<HashMap<String, Image>>,
     /// account_key of the currently open conversation. Addressed engine
@@ -1108,6 +1249,21 @@ struct Shared {
     /// at send time, the Re: subject + In-Reply-To / References
     /// threading. Cleared by Send or by the ribbon's × button.
     pending_reply: RefCell<Option<MessageBody>>,
+    /// Optimistic-send stubs: an outgoing bubble goes into the open pane
+    /// the moment «Отправить» is clicked, mirrored here so it can be
+    /// reconciled (dropped when the real message comes back in a
+    /// FetchMessages answer) or rolled back (send failed → bubble removed,
+    /// text restored to the composer). Cleared on conversation switch —
+    /// the stub lives and dies with the pane it was drawn in.
+    pending_sends: RefCell<Vec<PendingSend>>,
+    /// Synthetic uid source for stub bodies (folder = PENDING_FOLDER);
+    /// unique within the session so render-cache keys never collide.
+    pending_send_seq: Cell<u32>,
+    /// Recipient of a just-sent transient compose. Set by
+    /// EngineResult::Sent, consumed by the Conversations handler: as soon
+    /// as the delta brings the (possibly brand-new) conversation row, the
+    /// UI redirects to it instead of leaving the user on the stub pane.
+    compose_sent_target: RefCell<Option<String>>,
     /// Content-permission policy (per-sender media/scripts, per-domain
     /// allowlist) — port of the svelte permissionStore. Persisted to
     /// disk on every toggle.
@@ -1495,6 +1651,51 @@ fn tray_set_dot(on: bool) {
 /// to the event loop through it).
 static UI_WEAK: std::sync::OnceLock<slint::Weak<MainWindow>> = std::sync::OnceLock::new();
 
+/// Зеркалит optimistic-mark-seen в сырой список (raw_convs): без этого
+/// пересборка склеенного вида (merge/unmerge) воскресила бы уже погашенный
+/// unread-бейдж до прихода серверной дельты.
+fn mark_raw_seen(sh: &Shared, conv_key: &merges::MergeKey, conv_merged: bool) {
+    let keys: Vec<merges::MergeKey> = if conv_merged {
+        sh.merges.borrow().members_of(conv_key)
+    } else {
+        vec![conv_key.clone()]
+    };
+    let mut raw = sh.raw_convs.borrow_mut();
+    for c in raw.iter_mut() {
+        if keys.contains(&conv_merge_key(&sh.key, c)) {
+            c.unread_count = 0;
+            for m in c.messages.iter_mut() {
+                m.seen = true;
+            }
+        }
+    }
+}
+
+/// Пересобрать склеенный вид из raw_convs (после merge/unmerge), обновить
+/// сайдбар и заново найти диалог `select_id`. `reopen` — перечитать его
+/// содержимое (набор сообщений изменился); false — только поправить индекс
+/// выделения, не трогая открытую панель.
+fn rebuild_merged_view(ui: &MainWindow, sh: &Shared, select_id: Option<String>, reopen: bool) {
+    let merged = apply_merges(&sh.raw_convs.borrow(), &sh.merges.borrow(), &sh.key);
+    let displays = displays_from(&merged, &sh.identity_colors.borrow());
+    *sh.convs.borrow_mut() = merged;
+    *sh.displays.borrow_mut() = displays;
+    refresh_sidebar(sh, ui);
+    if let Some(id) = select_id {
+        let idx = sh.convs.borrow().iter().position(|c| c.id == id);
+        if let Some(idx) = idx {
+            sh.current.set(idx);
+            ui.set_selected(idx as i32);
+            apply_active_header(ui, sh, idx);
+            if reopen {
+                open_conversation(ui, sh, idx);
+            }
+            ui.set_sidebar_row_y(idx as f32 * 64.0);
+            ui.set_sidebar_scroll_seq(ui.get_sidebar_scroll_seq() + 1);
+        }
+    }
+}
+
 /// Open a conversation by index: show cached bodies immediately, and (if a live
 /// engine is running) fire a background fetch to refresh them.
 fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
@@ -1516,6 +1717,10 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
         c.account_key.clone()
     };
     sh.cur_account_key.replace(akey.clone());
+    // Смена контекста — сбрасываем закреплённый ручной выбор отправителя:
+    // новая беседа по умолчанию отвечает со своей received_by identity, и
+    // aim ниже её проставляет. Пользователь снова может переопределить.
+    sh.picked_identity.borrow_mut().take();
     // Replies default to the identity that received this conversation; the
     // from-picker shows it and the user can still override before sending.
     aim_composer_identity(ui, sh, &c.received_by);
@@ -1530,6 +1735,8 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
     ui.set_render_progress(0);
     sh.current_msgs.borrow_mut().clear();
     sh.current_bodies.borrow_mut().clear();
+    // Optimistic-send stubs live and die with the pane they were drawn in.
+    sh.pending_sends.borrow_mut().clear();
 
     // Unread snapshot BEFORE we mark anything read — it anchors the
     // scroll (first unread at top; none unread → scroll to the end).
@@ -1599,11 +1806,19 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
     // delta refetch a second later, but the sidebar must not keep showing
     // an unread pill for the conversation the user is literally reading.
     if had_unread {
-        if let Some(c) = sh.convs.borrow_mut().get_mut(idx) {
-            c.unread_count = 0;
-            for m in c.messages.iter_mut() {
-                m.seen = true;
-            }
+        let key_flag = sh
+            .convs
+            .borrow_mut()
+            .get_mut(idx)
+            .map(|c| {
+                c.unread_count = 0;
+                for m in c.messages.iter_mut() {
+                    m.seen = true;
+                }
+                (conv_merge_key(&sh.key, c), c.merged)
+            });
+        if let Some((k, merged)) = key_flag {
+            mark_raw_seen(sh, &k, merged);
         }
         let displays = displays_from(&sh.convs.borrow(), &sh.identity_colors.borrow());
         *sh.displays.borrow_mut() = displays;
@@ -1863,6 +2078,67 @@ fn send_render_job(sh: &Shared, bodies: Vec<MessageBody>, scroll_to: Option<i32>
     });
 }
 
+/// Folder name of optimistic-send stub bodies. Never a real IMAP folder —
+/// doubles as the marker that keeps stubs out of `current_msgs`, out of
+/// the texture disk cache and out of server-bound refs.
+const PENDING_FOLDER: &str = "__pending__";
+
+/// One in-flight optimistic send: the stub body appended to the open pane
+/// plus the conversation it belongs to ("" for a transient compose — no
+/// conversation exists yet). `created` bounds the stub's lifetime: if the
+/// server echo never text-matches (edge case), the ghost dies in 2 min
+/// instead of living forever.
+struct PendingSend {
+    conv_id: String,
+    body: MessageBody,
+    created: Instant,
+}
+
+/// Body text normalised for stub↔real matching: the server may CRLF-fold
+/// or trim what we sent, so compare modulo '\r' and outer whitespace.
+fn norm_send_text(s: &str) -> String {
+    s.replace('\r', "").trim().to_string()
+}
+
+/// Optimistic send: append an outgoing stub bubble to the open pane the
+/// moment «Отправить» is clicked, so the message is visible before the
+/// server confirms. The stub is reconciled in the Messages handler and
+/// rolled back in SendFailed.
+fn append_send_stub(sh: &Shared, text: &str, from: &str, conv_id: &str) {
+    let uid = sh.pending_send_seq.get() + 1;
+    sh.pending_send_seq.set(uid);
+    let body = MessageBody {
+        uid,
+        folder: PENDING_FOLDER.into(),
+        subject: String::new(),
+        from: from.to_string(),
+        from_addr: from.to_string(),
+        to: Vec::new(),
+        cc: Vec::new(),
+        date: String::new(),
+        date_ts: chrono::Local::now().timestamp(),
+        html: None,
+        text: Some(text.to_string()),
+        attachments: Vec::new(),
+        is_outgoing: true,
+        message_id: String::new(),
+        in_reply_to: String::new(),
+        references: Vec::new(),
+    };
+    sh.pending_sends.borrow_mut().push(PendingSend {
+        conv_id: conv_id.to_string(),
+        body: body.clone(),
+        created: Instant::now(),
+    });
+    let bodies = {
+        let mut cur = sh.current_bodies.borrow_mut();
+        cur.push(body);
+        cur.clone()
+    };
+    // Scroll to the end — the user's own message always lands at the bottom.
+    send_render_job(sh, bodies, Some(-1));
+}
+
 /// Rebuild the sidebar ConvItem list from displays + the avatar map.
 fn sidebar_items(displays: &[Disp], avatars: &HashMap<String, Image>) -> Vec<ConvItem> {
     displays
@@ -1884,6 +2160,7 @@ fn sidebar_items(displays: &[Disp], avatars: &HashMap<String, Image>) -> Vec<Con
                 },
                 unread: d.unread as i32,
                 highlight: false,
+                is_merged: d.merged,
             }
         })
         .collect()
@@ -1909,6 +2186,7 @@ fn pending_compose_item(target: &str) -> ConvItem {
         ident_color: slint::Brush::SolidColor(slint::Color::from_argb_u8(0, 0, 0, 0)),
         unread: 0,
         highlight: false,
+        is_merged: false,
     }
 }
 
@@ -3526,13 +3804,21 @@ fn main() {
     );
 
     let account = open_account();
+    let loaded_merges = merges::load();
     let startup_ident_colors = match &account {
         Some((c, k, _)) => identity_color_map(c, k),
         None => HashMap::new(),
     };
-    let displays = match &account {
-        Some((_, _, convs)) => displays_from(convs, &startup_ident_colors),
-        None => synthetic_displays(),
+    // Стартовый сайдбар показывает уже склеенный вид (merges.json применён
+    // к сырому списку из кэша); сырой список уходит в raw_convs.
+    let startup_merged = match &account {
+        Some((_, k, convs)) => apply_merges(convs, &loaded_merges, k),
+        None => Vec::new(),
+    };
+    let displays = if startup_merged.is_empty() {
+        synthetic_displays()
+    } else {
+        displays_from(&startup_merged, &startup_ident_colors)
     };
 
     ui.set_conversations(ModelRc::new(VecModel::from(sidebar_items(&displays, &HashMap::new()))));
@@ -3748,7 +4034,10 @@ fn main() {
                                     body.uid, bitmap.height, result.painted_height,
                                     result.view_ready, entry.2.len(), entry.3.len(), succeeded
                                 );
-                                if succeeded {
+                                // Pending-send stubs are transient — never
+                                // persist their textures (the synthetic uid
+                                // restarts every session and would collide).
+                                if succeeded && body.folder != PENDING_FOLDER {
                                     if let Some(t) = tex_disk.as_ref() {
                                         t.store(
                                             &body.folder, body.uid, width, policy_gen, mode, fp,
@@ -3958,7 +4247,11 @@ fn main() {
     let shared = Rc::new(Shared {
         cache,
         key,
-        convs: RefCell::new(init_convs),
+        convs: RefCell::new(startup_merged),
+        raw_convs: RefCell::new(init_convs),
+        merges: RefCell::new(loaded_merges),
+        ctx_attach: RefCell::new(None),
+        picked_identity: RefCell::new(None),
         displays: RefCell::new(displays.clone()),
         avatars: RefCell::new(HashMap::new()),
         cur_account_key: RefCell::new(String::new()),
@@ -4001,6 +4294,9 @@ fn main() {
         search_messages: RefCell::new(Vec::new()),
         pending_compose: RefCell::new(None),
         pending_reply: RefCell::new(None),
+        pending_sends: RefCell::new(Vec::new()),
+        pending_send_seq: Cell::new(0),
+        compose_sent_target: RefCell::new(None),
         policy_gen: Cell::new(loaded_policy.generation),
         policy: RefCell::new(loaded_policy),
         calendars: RefCell::new(Vec::new()),
@@ -4122,6 +4418,96 @@ fn main() {
         // click (typing in the composer moves focus there as usual).
         ui.invoke_grab_key_focus();
         open_conversation(&ui, &sh_sel, real_idx);
+    });
+
+    // ── Объединение диалогов (правый клик по строке сайдбара) ──
+    // «Объединить с открытым диалогом»: кликнутая строка вливается в группу
+    // открытого; открытый остаётся первичным (его имя/аватар/identity).
+    let ui_weak_cm = ui.as_weak();
+    let sh_cm = shared.clone();
+    ui.on_conv_merge(move |model_idx| {
+        let Some(ui) = ui_weak_cm.upgrade() else { return };
+        if sh_cm.pending_compose.borrow().is_some() {
+            return; // transient compose: индексы сдвинуты, открытого диалога нет
+        }
+        let src_idx = model_idx as usize;
+        let dst_idx = sh_cm.current.get();
+        if src_idx == dst_idx {
+            return;
+        }
+        let resolved = {
+            let convs = sh_cm.convs.borrow();
+            match (convs.get(dst_idx), convs.get(src_idx)) {
+                (Some(dst), Some(src)) => Some((
+                    conv_merge_key(&sh_cm.key, dst),
+                    conv_merge_key(&sh_cm.key, src),
+                    dst.id.clone(),
+                )),
+                _ => None,
+            }
+        };
+        let Some((dst_key, src_key, dst_id)) = resolved else { return };
+        // Refs сообщений склейки ходят в движок под ОДНИМ account_key —
+        // диалоги разных подключений склеить нельзя.
+        if dst_key.account != src_key.account {
+            toast_window::show(
+                2, // amber
+                0,
+                "Объединение недоступно",
+                "Диалоги из разных подключений объединить нельзя.",
+                false,
+                600,
+                || {},
+                || {},
+                || {},
+            );
+            return;
+        }
+        {
+            let mut m = sh_cm.merges.borrow_mut();
+            let target = m.members_of(&dst_key);
+            let source = m.members_of(&src_key);
+            m.merge(target, source);
+            merges::save(&m);
+        }
+        println!("merge: {} + {} (primary {})", dst_key.id, src_key.id, dst_id);
+        // Открытый диалог получил новые сообщения — перечитываем его.
+        rebuild_merged_view(&ui, &sh_cm, Some(dst_id), true);
+    });
+
+    // «Разъединить диалоги»: группа удаляется, члены возвращаются в сайдбар
+    // отдельными строками. Выделение остаётся на первичном (тот же id).
+    let ui_weak_um = ui.as_weak();
+    let sh_um = shared.clone();
+    ui.on_conv_unmerge(move |model_idx| {
+        let Some(ui) = ui_weak_um.upgrade() else { return };
+        if sh_um.pending_compose.borrow().is_some() {
+            return;
+        }
+        let idx = model_idx as usize;
+        let resolved = {
+            let convs = sh_um.convs.borrow();
+            match convs.get(idx) {
+                Some(c) if c.merged => Some((conv_merge_key(&sh_um.key, c), c.id.clone())),
+                _ => None,
+            }
+        };
+        let Some((key, id)) = resolved else { return };
+        {
+            let mut m = sh_um.merges.borrow_mut();
+            m.unmerge(&key);
+            merges::save(&m);
+        }
+        println!("unmerge: {}", key.id);
+        // Если распустили ОТКРЫТУЮ склейку — перечитать панель (в ней
+        // останется только первичный); чужую — не дёргать открытый диалог.
+        let was_open = idx == sh_um.current.get();
+        let keep_id = if was_open {
+            Some(id)
+        } else {
+            sh_um.convs.borrow().get(sh_um.current.get()).map(|c| c.id.clone())
+        };
+        rebuild_merged_view(&ui, &sh_um, keep_id, was_open);
     });
 
     // ↑/↓ over the conversation list: select + open the neighbour and keep
@@ -4355,6 +4741,93 @@ fn main() {
             .unwrap_or(false)
     });
 
+    // ── Вложения: контекст правого клика ──
+    // Перед показом меню пузыря Slint зовёт probe: если под курсором чип
+    // вложения (ddmail-attach:-ссылка), меню получает пункты
+    // «Открыть/Сохранить»; цель откладывается в sh.ctx_attach.
+    let ui_weak_probe = ui.as_weak();
+    let sh_probe = shared.clone();
+    ui.on_ctx_menu_probe(move |row, x, y| {
+        let Some(ui) = ui_weak_probe.upgrade() else { return };
+        let href = sh_probe
+            .row_links
+            .borrow()
+            .get(row as usize)
+            .and_then(|links| links.iter().find(|l| l.contains(x, y)).map(|l| l.href.clone()));
+        let att = href
+            .as_deref()
+            .and_then(|u| u.strip_prefix("ddmail-attach:"))
+            .and_then(|rest| {
+                let p: Vec<&str> = rest.splitn(4, '|').collect();
+                if p.len() == 4 {
+                    if let (Ok(uid), Ok(index)) = (p[1].parse::<u32>(), p[2].parse::<usize>()) {
+                        return Some((p[0].to_string(), uid, index, p[3].to_string()));
+                    }
+                }
+                None
+            });
+        ui.set_ctx_attach_name(
+            att.as_ref().map(|a| a.3.clone()).unwrap_or_default().into(),
+        );
+        *sh_probe.ctx_attach.borrow_mut() = att;
+    });
+
+    // «Открыть …» — тот же путь, что левый клик по чипу: Downloads + запуск.
+    let sh_oa = shared.clone();
+    ui.on_open_attachment(move || {
+        let Some((folder, uid, index, filename)) = sh_oa.ctx_attach.borrow().clone() else {
+            return;
+        };
+        if let Some(etx) = sh_oa.engine_tx.borrow().as_ref() {
+            let _ = etx.send(engine::EngineCmd::DownloadAttachment {
+                folder,
+                uid,
+                index,
+                filename,
+                account_key: sh_oa.cur_account_key.borrow().clone(),
+                save_to: None,
+            });
+        }
+    });
+
+    // «Сохранить … как…» — системный диалог сохранения; файл пишется по
+    // выбранному пути и НЕ открывается (подтверждение — плашка «✓ Сохранено»).
+    let ui_weak_sa = ui.as_weak();
+    let sh_sa = shared.clone();
+    ui.on_save_attachment(move || {
+        let Some(ui) = ui_weak_sa.upgrade() else { return };
+        let Some((folder, uid, index, filename)) = sh_sa.ctx_attach.borrow().clone() else {
+            return;
+        };
+        let Some(path) = pick_save_path(&ui, &filename) else { return };
+        if let Some(etx) = sh_sa.engine_tx.borrow().as_ref() {
+            println!("save attachment: {filename} -> {}", path.display());
+            let _ = etx.send(engine::EngineCmd::DownloadAttachment {
+                folder,
+                uid,
+                index,
+                filename,
+                account_key: sh_sa.cur_account_key.borrow().clone(),
+                save_to: Some(path.to_string_lossy().into_owned()),
+            });
+        }
+    });
+
+    // Явный выбор отправителя из дропдауна — закрепляем email, чтобы он
+    // пережил дельта-refresh и авто-наведение (см. picked_identity).
+    let sh_ip = shared.clone();
+    ui.on_identity_picked(move |ii| {
+        let email = sh_ip
+            .composer_identities
+            .borrow()
+            .get(ii.max(0) as usize)
+            .cloned();
+        if let Some(email) = email {
+            println!("identity picked: {email}");
+            *sh_ip.picked_identity.borrow_mut() = Some(email);
+        }
+    });
+
     // ── Mouse text selection over bubbles ──
     let ui_weak_ss = ui.as_weak();
     let sh_ss = shared.clone();
@@ -4461,17 +4934,38 @@ fn main() {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        // Sending identity from the from-picker (None until identities sync;
-        // the engine then falls back to the account email). Resolved through
-        // the Shared email list — the Slint model is draw-only.
-        let from_identity: Option<String> = ui_now.as_ref().and_then(|u| {
-            let idx = u.get_composer_identity_index();
-            sh_send
-                .composer_identities
-                .borrow()
-                .get(idx.max(0) as usize)
-                .cloned()
-        });
+        // Explicit «Кому» override — same contract as the subject override:
+        // a filled field is the user's explicit order and beats EVERY
+        // auto-derivation, reply-all included. Ignoring it while showing an
+        // editable field once sent a reply to 18 people instead of one.
+        let to_override: Vec<String> = ui_now
+            .as_ref()
+            .map(|u| u.get_composer_to().to_string())
+            .unwrap_or_default()
+            .split(|c: char| c == ',' || c == ';')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        // Sending identity: закреплённый ручной выбор (picked_identity) имеет
+        // приоритет над индексом пикера — индекс могла сбить дельта-refetch
+        // между выбором и отправкой (баг «выбрал dd, ушло info»). Без явного
+        // выбора — резолвим по индексу через Shared-список (Slint-модель
+        // только для отрисовки). None до синка identities → движок подставит
+        // адрес аккаунта.
+        let from_identity: Option<String> = sh_send
+            .picked_identity
+            .borrow()
+            .clone()
+            .or_else(|| {
+                ui_now.as_ref().and_then(|u| {
+                    let idx = u.get_composer_identity_index();
+                    sh_send
+                        .composer_identities
+                        .borrow()
+                        .get(idx.max(0) as usize)
+                        .cloned()
+                })
+            });
         // Staged attachment paths for this send, snapshotted up front so the
         // per-branch Send commands all carry the same list.
         let attachments: Vec<String> = sh_send
@@ -4488,6 +4982,7 @@ fn main() {
             if let Some(u) = ui_weak_send.upgrade() {
                 u.set_composer_subject("".into());
                 u.set_composer_cc("".into());
+                u.set_composer_to("".into());
                 refresh_attachment_chips(&u, &sh_send);
             }
         };
@@ -4496,14 +4991,7 @@ fn main() {
         // the typed text is the covering note, the original's text goes
         // below it after a separator, attachments re-attach engine-side.
         if let Some(orig) = sh_send.pending_forward.borrow().clone() {
-            let to: Vec<String> = ui_now
-                .as_ref()
-                .map(|u| u.get_composer_to().to_string())
-                .unwrap_or_default()
-                .split(|c: char| c == ',' || c == ';')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+            let to = to_override.clone();
             if to.is_empty() {
                 eprintln!("forward: адресат не указан — заполните «Кому»");
                 if let Some(u) = ui_now.as_ref() {
@@ -4569,10 +5057,14 @@ fn main() {
             if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
                 println!("sending new message to {target}");
                 let _ = etx.send(engine::EngineCmd::Send {
-                    to: vec![target],
+                    to: if to_override.is_empty() {
+                        vec![target]
+                    } else {
+                        to_override.clone()
+                    },
                     cc: cc.clone(),
                     subject,
-                    body: text,
+                    body: text.clone(),
                     in_reply_to: None,
                     references: None,
                     from: from_identity.clone(),
@@ -4581,6 +5073,14 @@ fn main() {
                     account_key: sh_send.cur_account_key.borrow().clone(),
                 });
                 clear_overrides();
+                // Optimistic bubble in the (empty) compose pane; no
+                // conversation exists yet, so the stub carries no conv id.
+                append_send_stub(
+                    &sh_send,
+                    &text,
+                    &from_identity.clone().unwrap_or_else(|| sh_send.key.clone()),
+                    "",
+                );
             } else {
                 eprintln!("send: no live engine (set DDMAIL_* env)");
             }
@@ -4624,6 +5124,8 @@ fn main() {
                     push(extract_addr(a));
                 }
             }
+            // Explicit «Кому» beats the reply-all derivation entirely.
+            let to = if to_override.is_empty() { to } else { to_override.clone() };
             if to.is_empty() {
                 eprintln!("reply: no recipient resolved");
                 return;
@@ -4645,13 +5147,25 @@ fn main() {
             if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
                 println!("sending explicit reply to {to:?}");
                 let _ = etx.send(engine::EngineCmd::Send {
-                    to, cc: cc.clone(), subject, body: text, in_reply_to, references,
+                    to, cc: cc.clone(), subject, body: text.clone(), in_reply_to, references,
                     from: from_identity.clone(),
                     attachments: attachments.clone(),
                     forward_attachments: None,
                     account_key: sh_send.cur_account_key.borrow().clone(),
                 });
                 clear_overrides();
+                let conv_id = sh_send
+                    .convs
+                    .borrow()
+                    .get(sh_send.current.get())
+                    .map(|c| c.id.clone())
+                    .unwrap_or_default();
+                append_send_stub(
+                    &sh_send,
+                    &text,
+                    &from_identity.clone().unwrap_or_else(|| sh_send.key.clone()),
+                    &conv_id,
+                );
             } else {
                 eprintln!("send: no live engine (set DDMAIL_* env)");
             }
@@ -4664,12 +5178,16 @@ fn main() {
         // Branch 3: implicit reply within the currently selected conversation.
         let convs = sh_send.convs.borrow();
         let Some(c) = convs.get(sh_send.current.get()) else { return };
-        let to: Vec<String> = c
-            .counterparts
-            .iter()
-            .map(|cp| cp.addr.clone())
-            .filter(|a| !a.is_empty())
-            .collect();
+        let to: Vec<String> = if !to_override.is_empty() {
+            // Explicit «Кому» beats the conversation's counterparts.
+            to_override.clone()
+        } else {
+            c.counterparts
+                .iter()
+                .map(|cp| cp.addr.clone())
+                .filter(|a| !a.is_empty())
+                .collect()
+        };
         if to.is_empty() {
             eprintln!("send: no recipient for this conversation");
             return;
@@ -4703,16 +5221,27 @@ fn main() {
                 (irt, refs)
             })
             .unwrap_or((None, None));
+        // Release the convs/current_bodies borrows before the stub append —
+        // it re-borrows current_bodies mutably.
+        let conv_id = c.id.clone();
+        drop(cached);
+        drop(convs);
         if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
             println!("sending reply to {to:?}");
             let _ = etx.send(engine::EngineCmd::Send {
-                to, cc, subject, body: text, in_reply_to, references,
+                to, cc, subject, body: text.clone(), in_reply_to, references,
                 from: from_identity.clone(),
                 attachments,
                 forward_attachments: None,
                 account_key: sh_send.cur_account_key.borrow().clone(),
             });
             clear_overrides();
+            append_send_stub(
+                &sh_send,
+                &text,
+                &from_identity.clone().unwrap_or_else(|| sh_send.key.clone()),
+                &conv_id,
+            );
         } else {
             eprintln!("send: no live engine (set DDMAIL_* env)");
         }
@@ -6235,10 +6764,14 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         return;
                     }
                     // Remember the open conversation's identity: merging or a
-                    // refetch can reorder the list and shift its index.
+                    // refetch can reorder the list and shift its index. Для
+                    // склейки это id её первичного диалога — стабилен.
                     let current_id = sh.convs.borrow().get(sh.current.get()).map(|c| c.id.clone());
-                    let merged: Vec<Conversation> = if partial {
-                        let mut all = sh.convs.borrow().clone();
+                    // Дельта-мерж идёт по СЫРОМУ списку (до склеек): дельта
+                    // приносит исходные диалоги, а склеенный вид собирается
+                    // заново из результата.
+                    let raw: Vec<Conversation> = if partial {
+                        let mut all = sh.raw_convs.borrow().clone();
                         for nc in list.drain(..) {
                             match all.iter_mut().find(|c| c.id == nc.id) {
                                 Some(slot) => *slot = nc,
@@ -6250,8 +6783,11 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     } else {
                         list
                     };
+                    *sh.raw_convs.borrow_mut() = raw.clone();
+                    let merged = apply_merges(&raw, &sh.merges.borrow(), &sh.key);
                     println!(
-                        "engine: {} conversations (delta={})",
+                        "engine: {} conversations, {} after merges (delta={})",
+                        raw.len(),
                         merged.len(),
                         if partial { "merge" } else { "full" }
                     );
@@ -6297,7 +6833,7 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         if ui.window().is_visible() && ui.get_view_mode() == 0 {
                             let cur = sh.current.get();
                             let mut to_mark: Vec<MessageRef> = Vec::new();
-                            let had_unread = {
+                            let cleared_key = {
                                 let mut convs = sh.convs.borrow_mut();
                                 match convs.get_mut(cur) {
                                     Some(c) if c.unread_count > 0 => {
@@ -6306,11 +6842,15 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                                             m.seen = true;
                                         }
                                         c.unread_count = 0;
-                                        true
+                                        Some((conv_merge_key(&sh.key, c), c.merged))
                                     }
-                                    _ => false,
+                                    _ => None,
                                 }
                             };
+                            let had_unread = cleared_key.is_some();
+                            if let Some((k, mflag)) = cleared_key {
+                                mark_raw_seen(sh, &k, mflag);
+                            }
                             if had_unread {
                                 let displays = displays_from(
                                     &sh.convs.borrow(),
@@ -6328,6 +6868,48 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                                         account_key: sh.cur_account_key.borrow().clone(),
                                     });
                                 }
+                            }
+                        }
+                    }
+                    // Optimistic-send follow-ups.
+                    // A transient-compose send landed: jump to its conversation
+                    // as soon as the delta brings the row — per the agreed spec,
+                    // instead of leaving the user on the stub pane.
+                    let redirect = sh.compose_sent_target.borrow().clone();
+                    if let Some(addr) = redirect {
+                        let idx = sh.convs.borrow().iter().position(|c| {
+                            c.counterparts
+                                .iter()
+                                .any(|cp| cp.addr.eq_ignore_ascii_case(&addr))
+                        });
+                        if let Some(idx) = idx {
+                            *sh.compose_sent_target.borrow_mut() = None;
+                            ui.set_selected(idx as i32);
+                            apply_active_header(ui, sh, idx);
+                            open_conversation(ui, sh, idx);
+                            ui.set_sidebar_row_y(idx as f32 * 64.0);
+                            ui.set_sidebar_scroll_seq(ui.get_sidebar_scroll_seq() + 1);
+                        }
+                    } else if !sh.pending_sends.borrow().is_empty() {
+                        // Stubs wait in the open dialog: refetch its bodies so
+                        // the real sent message (now in the refreshed refs)
+                        // replaces the stub.
+                        let cur = sh.current.get();
+                        let refetch = sh.convs.borrow().get(cur).and_then(|c| {
+                            let has_here = sh
+                                .pending_sends
+                                .borrow()
+                                .iter()
+                                .any(|p| !p.conv_id.is_empty() && p.conv_id == c.id);
+                            has_here.then(|| c.messages.clone())
+                        });
+                        if let Some(messages) = refetch {
+                            if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                                let _ = etx.send(engine::EngineCmd::FetchMessages {
+                                    messages,
+                                    generation: sh.open_gen.get(),
+                                    account_key: sh.cur_account_key.borrow().clone(),
+                                });
                             }
                         }
                     }
@@ -6359,8 +6941,44 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         );
                         return;
                     }
+                    // Optimistic-send reconcile: a fetched outgoing body with
+                    // the same text = the stub's real message landed — drop
+                    // the stub. Still-unconfirmed stubs are re-appended so an
+                    // in-flight send doesn't vanish from screen; ones without
+                    // an echo after 2 min die instead of ghosting forever.
+                    let mut bodies = bodies;
+                    {
+                        let cur_id = sh
+                            .convs
+                            .borrow()
+                            .get(sh.current.get())
+                            .map(|c| c.id.clone())
+                            .unwrap_or_default();
+                        let mut stubs = sh.pending_sends.borrow_mut();
+                        if !stubs.is_empty() {
+                            stubs.retain(|p| {
+                                p.created.elapsed().as_secs() < 120
+                                    && !bodies.iter().any(|b| {
+                                        b.is_outgoing
+                                            && b.folder != PENDING_FOLDER
+                                            && norm_send_text(b.text.as_deref().unwrap_or(""))
+                                                == norm_send_text(
+                                                    p.body.text.as_deref().unwrap_or(""),
+                                                )
+                                    })
+                            });
+                            for p in stubs
+                                .iter()
+                                .filter(|p| !cur_id.is_empty() && p.conv_id == cur_id)
+                            {
+                                bodies.push(p.body.clone());
+                            }
+                        }
+                    }
+                    // Stubs never leave the client: they carry no server refs.
                     *sh.current_msgs.borrow_mut() = bodies
                         .iter()
+                        .filter(|b| b.folder != PENDING_FOLDER)
                         .map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid, message_id: b.message_id.clone(), seen: true })
                         .collect();
                     *sh.current_bodies.borrow_mut() = bodies.clone();
@@ -6524,14 +7142,26 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
         }
         engine::EngineResult::Sent(id) => {
             println!("engine: message sent ({id}) — refetching conversations");
+            // Inline «✓ Отправлено» above the composer — the agreed subtle
+            // confirmation (no toasts); dissolves after ~2s. Текст ставим
+            // явно: плашку делит с собой «✓ Сохранено» вложений.
+            ui.set_send_confirm_text("✓ Отправлено".into());
+            ui.set_send_confirm_visible(true);
+            let uiw = ui.as_weak();
+            slint::Timer::single_shot(std::time::Duration::from_millis(2000), move || {
+                if let Some(u) = uiw.upgrade() {
+                    u.set_send_confirm_visible(false);
+                }
+            });
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
                     // Leaving transient-compose mode now that the message
-                    // landed; the new conversation row will appear on the
-                    // next FetchConversations and the user can pick it up
-                    // from the sidebar.
-                    let was_pending = sh.pending_compose.borrow_mut().take().is_some();
-                    if was_pending {
+                    // landed; remember the recipient so the Conversations
+                    // delta can redirect to the (possibly brand-new)
+                    // conversation as soon as its row exists.
+                    let target = sh.pending_compose.borrow_mut().take();
+                    if let Some(t) = target {
+                        *sh.compose_sent_target.borrow_mut() = Some(t);
                         refresh_sidebar(sh, ui);
                     }
                     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
@@ -6581,6 +7211,19 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
         engine::EngineResult::AttachmentSaved(path) => {
             println!("attachment saved: {path} — opening");
             open_external(&path);
+        }
+        engine::EngineResult::AttachmentSavedTo(path) => {
+            // Явное «Сохранить как…»: файл не открываем, подтверждаем той же
+            // ненавязчивой плашкой, что и отправку (~2 с, без тостов).
+            println!("attachment saved to: {path}");
+            ui.set_send_confirm_text("✓ Сохранено".into());
+            ui.set_send_confirm_visible(true);
+            let uiw = ui.as_weak();
+            slint::Timer::single_shot(std::time::Duration::from_millis(2000), move || {
+                if let Some(u) = uiw.upgrade() {
+                    u.set_send_confirm_visible(false);
+                }
+            });
         }
         engine::EngineResult::Source { uid, raw } => {
             SHARED.with(|s| {
@@ -6663,6 +7306,21 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                                 }
                                 Err(e) => eprintln!("reminder cull: {e}"),
                             }
+                            // Событие осталось (тот же id), но ПЕРЕЕХАЛО:
+                            // строки напоминаний со старым occurrence_start
+                            // иначе остаются взведёнными и стреляют по
+                            // старому времени. Валидны только вхождения,
+                            // которые текущий фетч реально производит.
+                            let valid = reminders::valid_starts(&events, from_ms, to_ms);
+                            match c.prune_moved_reminders(from_ms, to_ms, &valid) {
+                                Ok(moved) => {
+                                    for id in moved {
+                                        println!("[cal] reminder cull: event {id} moved — dropping stale occurrences");
+                                        toast_window::close_for_event(id);
+                                    }
+                                }
+                                Err(e) => eprintln!("reminder move-cull: {e}"),
+                            }
                         }
                     }
                     // Remember each event's owning account for write routing.
@@ -6723,6 +7381,33 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
         }
         engine::EngineResult::SendFailed(e) => {
             eprintln!("engine: send failed: {e}");
+            // Roll back the optimistic bubble(s) — a stub that looks sent
+            // would be a lie. The text returns to the composer so a retry is
+            // one click away. (The error path carries no send id, so every
+            // in-flight stub drops; overlapping sends are rare enough that
+            // this stays simple.)
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    let stubs: Vec<PendingSend> =
+                        sh.pending_sends.borrow_mut().drain(..).collect();
+                    if !stubs.is_empty() {
+                        let bodies = {
+                            let mut cur = sh.current_bodies.borrow_mut();
+                            cur.retain(|b| b.folder != PENDING_FOLDER);
+                            cur.clone()
+                        };
+                        send_render_job(sh, bodies, None);
+                        // Don't clobber text the user already started typing.
+                        if ui.get_composer_text().is_empty() {
+                            if let Some(p) = stubs.last() {
+                                ui.set_composer_text(
+                                    p.body.text.clone().unwrap_or_default().into(),
+                                );
+                            }
+                        }
+                    }
+                }
+            });
             // Make the failure visible — the composer optimistically looked
             // like it sent, so without this the user only finds out by asking.
             // Translate the two common causes into plain Russian.
@@ -6990,6 +7675,7 @@ fn handle_link(_ui: &MainWindow, url: String) {
                                 index,
                                 filename,
                                 account_key: sh.cur_account_key.borrow().clone(),
+                                save_to: None,
                             });
                         } else {
                             eprintln!("attachment: no live engine");
@@ -7156,6 +7842,64 @@ fn pick_attachment_files(ui: &MainWindow) -> Vec<std::path::PathBuf> {
     }
     eprintln!("attach: no native file picker found (install kdialog or zenity)");
     Vec::new()
+}
+
+/// Диалог «Сохранить как…» для вложения (None = отмена). Разделение по ОС —
+/// то же, что у pick_attachment_files: rfd на Windows/macOS; на Linux
+/// kdialog/zenity отдельным процессом (in-process gtk занят рендер-воркером).
+#[cfg(not(target_os = "linux"))]
+fn pick_save_path(ui: &MainWindow, filename: &str) -> Option<std::path::PathBuf> {
+    use raw_window_handle::HasWindowHandle;
+    let handle = ui.window().window_handle();
+    rfd::FileDialog::new()
+        .set_parent(&handle)
+        .set_file_name(filename)
+        .save_file()
+}
+
+#[cfg(target_os = "linux")]
+fn pick_save_path(ui: &MainWindow, filename: &str) -> Option<std::path::PathBuf> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let xid = ui
+        .window()
+        .window_handle()
+        .window_handle()
+        .ok()
+        .and_then(|wh| match wh.as_raw() {
+            RawWindowHandle::Xlib(h) => Some(h.window),
+            _ => None,
+        });
+    if let Ok(kdialog) = which_bin("kdialog") {
+        let mut c = std::process::Command::new(kdialog);
+        if let Some(xid) = xid {
+            c.arg("--attach").arg(xid.to_string());
+        }
+        c.args(["--getsavefilename", filename]);
+        if let Ok(out) = c.output() {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return Some(std::path::PathBuf::from(s));
+                }
+            }
+            return None; // отмена
+        }
+    }
+    if let Ok(zenity) = which_bin("zenity") {
+        if let Ok(out) = std::process::Command::new(zenity)
+            .args(["--file-selection", "--save", &format!("--filename={filename}")])
+            .output()
+        {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return Some(std::path::PathBuf::from(s));
+                }
+            }
+        }
+    }
+    eprintln!("save: no native file picker found (install kdialog or zenity)");
+    None
 }
 
 /// Resolve a binary name to a full path via `PATH`. Avoids a `which` crate
