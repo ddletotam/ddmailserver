@@ -12,6 +12,7 @@
 - Run `gofmt -w .` before committing
 
 ## Conventions
+- Desktop client behavior contract: `docs/desktop-behavior-contract.md` — читать перед правками desktop/, обновлять в том же коммите при изменении поведения
 - Go backend, JS/HTMX/Alpine.js frontend
 - Database: SQLite, migrations in /migrations
 - Always check `err != nil` for error handling
