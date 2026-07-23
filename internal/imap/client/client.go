@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/emersion/go-imap"
 	uidplus "github.com/emersion/go-imap-uidplus"
@@ -154,6 +155,77 @@ func (c *Client) SelectFolder(name string) (*imap.MailboxStatus, error) {
 	return mbox, nil
 }
 
+// specialUseForName maps a stored folder NAME to the RFC 6154 SPECIAL-USE
+// attribute it most likely stands for. The flag-sync / delete-sync queue only
+// records the folder name captured at sync time, but providers rename or
+// localize system folders (Yandex serves "Отправленные", not "Sent"), so a
+// later Select by the stale name fails ("No such folder"). When that happens
+// we re-resolve the folder by its role instead. Empty = no role inferred
+// (a user folder) — nothing to fall back to.
+func specialUseForName(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "sent", "sent messages", "sent items", "отправленные", "отправленная почта":
+		return `\Sent`
+	case "trash", "deleted", "deleted items", "корзина", "удалённые", "удаленные":
+		return `\Trash`
+	case "junk", "spam", "bulk mail", "спам", "нежелательная почта":
+		return `\Junk`
+	case "drafts", "черновики":
+		return `\Drafts`
+	case "archive", "архив":
+		return `\Archive`
+	default:
+		return ""
+	}
+}
+
+// resolveFolderBySpecialUse lists the mailboxes and returns the name of the
+// one carrying the given SPECIAL-USE attribute (\Sent, \Trash, …). Empty if
+// none advertises it (server doesn't support RFC 6154, or the role is
+// genuinely absent). Servers that volunteer special-use attributes inline on
+// LIST — Yandex, Gmail, mail.ru, Fastmail — are covered; that's exactly the
+// set where a localized rename breaks name-based Select.
+func (c *Client) resolveFolderBySpecialUse(attr string) string {
+	mailboxes := make(chan *imap.MailboxInfo, 50)
+	done := make(chan error, 1)
+	go func() { done <- c.conn.List("", "*", mailboxes) }()
+	found := ""
+	for m := range mailboxes {
+		for _, a := range m.Attributes {
+			if strings.EqualFold(a, attr) && found == "" {
+				found = m.Name
+			}
+		}
+	}
+	if err := <-done; err != nil {
+		log.Printf("resolveFolderBySpecialUse(%s): LIST failed: %v", attr, err)
+		return ""
+	}
+	return found
+}
+
+// selectResilient selects a folder by name, and — if the server rejects the
+// name — retries by resolving the folder's SPECIAL-USE role (see
+// specialUseForName). Returns the name that actually selected so callers can
+// target the same folder for follow-up UID operations. This is the fix for
+// "select Sent: SELECT No such folder" on providers that localize system
+// folder names.
+func (c *Client) selectResilient(name string) (string, error) {
+	if _, err := c.conn.Select(name, false); err == nil {
+		return name, nil
+	} else if attr := specialUseForName(name); attr != "" {
+		if real := c.resolveFolderBySpecialUse(attr); real != "" && real != name {
+			if _, err2 := c.conn.Select(real, false); err2 == nil {
+				log.Printf("selectResilient: %q not found, resolved %s → %q", name, attr, real)
+				return real, nil
+			}
+		}
+		return "", fmt.Errorf("select %s (role %s): %w", name, attr, err)
+	} else {
+		return "", fmt.Errorf("select %s: %w", name, err)
+	}
+}
+
 // FetchMessages fetches messages from the current mailbox by sequence numbers
 // Returns a channel of messages and an error channel for async error handling
 func (c *Client) FetchMessages(seqSet *imap.SeqSet, items []imap.FetchItem) (chan *imap.Message, chan error) {
@@ -193,8 +265,10 @@ func (c *Client) IsConnected() bool {
 // StoreFlags updates flags on a message on the remote IMAP server
 // This is used for bidirectional sync - pushing local flag changes to source
 func (c *Client) StoreFlags(folder string, uid uint32, seen, flagged, answered, deleted bool) error {
-	// Select folder
-	if _, err := c.conn.Select(folder, false); err != nil {
+	// Select folder (resilient to localized/renamed system folders — the
+	// queue may hold a stale name like "Sent" that the provider now serves
+	// as "Отправленные").
+	if _, err := c.selectResilient(folder); err != nil {
 		return fmt.Errorf("failed to select folder %s: %w", folder, err)
 	}
 
@@ -237,7 +311,7 @@ func (c *Client) StoreFlags(folder string, uid uint32, seen, flagged, answered, 
 // too, otherwise the message stays in their "real" inbox on the upstream
 // provider.
 func (c *Client) DeleteMessageRemote(folder string, uid uint32) error {
-	if _, err := c.conn.Select(folder, false); err != nil {
+	if _, err := c.selectResilient(folder); err != nil {
 		return fmt.Errorf("select %s: %w", folder, err)
 	}
 

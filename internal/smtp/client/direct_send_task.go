@@ -10,6 +10,7 @@ import (
 	"github.com/yourusername/mailserver/internal/dkimsign"
 	"github.com/yourusername/mailserver/internal/logmask"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/parser"
 	"github.com/yourusername/mailserver/internal/task"
 )
 
@@ -20,6 +21,7 @@ type DirectSendTask struct {
 	hostname      string
 	signer        *dkimsign.Signer // nil → send unsigned
 	priority      int
+	messageID     string // Message-ID for Sent dedup (from raw or generated)
 }
 
 // NewDirectSendTask creates a new direct send task
@@ -60,14 +62,29 @@ func (t *DirectSendTask) Execute(ctx context.Context) error {
 
 	recipients := parseRecipientsFromOutbox(t.outboxMessage)
 	if len(recipients) == 0 {
+		// Terminal validation error: mark failed explicitly, otherwise the
+		// row is stranded in status='sending' forever (the scheduler only
+		// picks up 'pending').
+		if err := t.database.UpdateOutboxMessageStatus(t.outboxMessage.ID, "failed", "no recipients"); err != nil {
+			log.Printf("Failed to mark message as failed: %v", err)
+		}
 		return fmt.Errorf("no recipients found")
 	}
 
 	var emailData []byte
 	if len(t.outboxMessage.RawEmail) > 0 {
 		emailData = t.outboxMessage.RawEmail
+		// Extract Message-ID from raw email for Sent dedup
+		p := parser.New()
+		if parsed, err := p.ParseBytes(emailData); err == nil {
+			t.messageID = parsed.GetMessageID()
+		}
 	} else {
-		return fmt.Errorf("no raw email data for direct delivery")
+		// Плоское письмо (без threading-заголовков и вложений) приходит из
+		// desktop-хендлера без raw_email — собираем RFC 5322 из полей, как
+		// делает relay-путь. Раньше эта ветка возвращала ошибку ДО обновления
+		// статуса, и сообщение застревало в status='sending' навсегда.
+		emailData, t.messageID = constructOutboxEmail(t.database, t.outboxMessage)
 	}
 
 	// DKIM: sign with the From-domain key when one is configured. Without
@@ -99,6 +116,11 @@ func (t *DirectSendTask) Execute(ctx context.Context) error {
 		log.Printf("Failed to mark message as sent: %v", err)
 		return err
 	}
+
+	// Save to Sent folder — без копии диалог, начатый пользователем,
+	// не существует в списке бесед, пока собеседник не ответит
+	// (relay-путь через SendTask делает то же самое).
+	saveToSentFolder(t.database, t.outboxMessage.UserID, emailData, t.messageID)
 
 	log.Printf("Message %d sent directly via MX", t.outboxMessage.ID)
 	return nil

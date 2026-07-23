@@ -436,7 +436,7 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 				log.Printf("IMAP sync: remote-spam %s reclassified as spam (folder=%s)", messageID, remoteFolderName)
 			}
 			if err := t.database.ReclassifyMessageFromRemoteSpam(
-				t.account.UserID, messageID, imapMsg.Uid, remoteFolderName, !rescue,
+				t.account.UserID, t.account.ID, messageID, imapMsg.Uid, remoteFolderName, !rescue,
 			); err != nil {
 				log.Printf("IMAP sync: reclassify failed for %s: %v", messageID, err)
 			}
@@ -459,7 +459,7 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 		}
 		downgrade := ruleAction != "spam" // spam-rule keeps is_spam=true; allow / no-rule lets remote INBOX rescue
 		changed, err := t.database.RefreshExistingFromRemote(
-			t.account.UserID, messageID, imapMsg.Uid, remoteFolderName,
+			t.account.UserID, t.account.ID, messageID, imapMsg.Uid, remoteFolderName,
 			hasFlag(imapMsg.Flags, imap.SeenFlag),
 			hasFlag(imapMsg.Flags, imap.FlaggedFlag),
 			hasFlag(imapMsg.Flags, imap.AnsweredFlag),
@@ -475,7 +475,7 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 			// spam_rule_id points at the rule. Cheap UPDATE; if the
 			// row is already in this state, RowsAffected is 0.
 			if err := t.database.ReclassifyMessageFromRemoteSpam(
-				t.account.UserID, messageID, imapMsg.Uid, remoteFolderName, true,
+				t.account.UserID, t.account.ID, messageID, imapMsg.Uid, remoteFolderName, true,
 			); err != nil {
 				log.Printf("IMAP sync: re-flag spam on existing %s: %v", messageID, err)
 			}

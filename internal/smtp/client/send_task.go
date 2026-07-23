@@ -81,6 +81,12 @@ func (t *SendTask) Execute(ctx context.Context) error {
 	// Prepare recipients
 	recipients := t.parseRecipients()
 	if len(recipients) == 0 {
+		// Terminal validation error: without the explicit failed status the
+		// message would be stranded in status='sending' forever (the
+		// scheduler only picks up 'pending').
+		if err := t.database.UpdateOutboxMessageStatus(t.outboxMessage.ID, "failed", "no recipients"); err != nil {
+			log.Printf("Failed to mark message as failed: %v", err)
+		}
 		return fmt.Errorf("no recipients found")
 	}
 
@@ -94,7 +100,7 @@ func (t *SendTask) Execute(ctx context.Context) error {
 			t.messageID = parsed.GetMessageID()
 		}
 	} else {
-		emailData = t.constructEmail()
+		emailData, t.messageID = constructOutboxEmail(t.database, t.outboxMessage)
 	}
 
 	// Send email
@@ -177,14 +183,16 @@ func randomBoundary() string {
 	return fmt.Sprintf("----=_Part_%x", b)
 }
 
-// constructEmail builds an RFC 5322 email from message fields.
+// constructOutboxEmail builds an RFC 5322 email from outbox message fields.
 // If the database contains outbox_attachments for this message, they are
-// included as MIME parts inside a multipart/mixed envelope.
-func (t *SendTask) constructEmail() []byte {
+// included as MIME parts inside a multipart/mixed envelope. Shared by the
+// relay (SendTask) and direct-MX (DirectSendTask) paths. Returns the wire
+// bytes and the generated Message-ID (used for Sent-folder dedup).
+func constructOutboxEmail(database *db.DB, msg *models.OutboxMessage) ([]byte, string) {
 	// Load attachments from DB
 	var attachments []*models.OutboxAttachment
-	if t.database != nil {
-		atts, err := t.database.GetOutboxAttachmentsByMessageID(t.outboxMessage.ID)
+	if database != nil {
+		atts, err := database.GetOutboxAttachmentsByMessageID(msg.ID)
 		if err == nil {
 			attachments = atts
 		}
@@ -194,7 +202,7 @@ func (t *SendTask) constructEmail() []byte {
 
 	// Generate Message-ID
 	domain := "localhost"
-	if parts := strings.SplitN(t.outboxMessage.From, "@", 2); len(parts) == 2 {
+	if parts := strings.SplitN(msg.From, "@", 2); len(parts) == 2 {
 		// Extract domain from "Name <user@domain>" or "user@domain"
 		d := parts[1]
 		d = strings.TrimRight(d, ">")
@@ -205,38 +213,41 @@ func (t *SendTask) constructEmail() []byte {
 	}
 	randBytes := make([]byte, 8)
 	rand.Read(randBytes)
-	t.messageID = fmt.Sprintf("<%d.%s@%s>", time.Now().UnixNano(), hex.EncodeToString(randBytes), domain)
+	messageID := fmt.Sprintf("<%d.%s@%s>", time.Now().UnixNano(), hex.EncodeToString(randBytes), domain)
 
-	// Headers
-	email.WriteString(fmt.Sprintf("Message-ID: %s\r\n", t.messageID))
+	// Headers. Free-text (Subject) and display-names (From/To/Cc) are
+	// RFC 2047-encoded so the header section stays 7-bit ASCII — otherwise a
+	// Cyrillic Subject forces relays to require SMTPUTF8, which legacy
+	// receivers reject (see parser.EncodeHeaderWord).
+	email.WriteString(fmt.Sprintf("Message-ID: %s\r\n", messageID))
 	email.WriteString(fmt.Sprintf("Date: %s\r\n", time.Now().Format("Mon, 02 Jan 2006 15:04:05 -0700")))
-	email.WriteString(fmt.Sprintf("From: %s\r\n", t.outboxMessage.From))
-	email.WriteString(fmt.Sprintf("To: %s\r\n", t.outboxMessage.To))
-	if t.outboxMessage.Cc != "" {
-		email.WriteString(fmt.Sprintf("Cc: %s\r\n", t.outboxMessage.Cc))
+	email.WriteString(fmt.Sprintf("From: %s\r\n", parser.EncodeAddressHeader(msg.From)))
+	email.WriteString(fmt.Sprintf("To: %s\r\n", parser.EncodeAddressHeader(msg.To)))
+	if msg.Cc != "" {
+		email.WriteString(fmt.Sprintf("Cc: %s\r\n", parser.EncodeAddressHeader(msg.Cc)))
 	}
-	if t.outboxMessage.Subject != "" {
-		email.WriteString(fmt.Sprintf("Subject: %s\r\n", t.outboxMessage.Subject))
+	if msg.Subject != "" {
+		email.WriteString(fmt.Sprintf("Subject: %s\r\n", parser.EncodeHeaderWord(msg.Subject)))
 	}
 	email.WriteString("MIME-Version: 1.0\r\n")
 
 	// Build body part
 	var bodyBuf strings.Builder
-	hasPlain := t.outboxMessage.Body != ""
-	hasHTML := t.outboxMessage.BodyHTML != ""
+	hasPlain := msg.Body != ""
+	hasHTML := msg.BodyHTML != ""
 
 	if hasPlain && hasHTML {
 		altBoundary := randomBoundary()
 		bodyBuf.WriteString(fmt.Sprintf("Content-Type: multipart/alternative; boundary=\"%s\"\r\n\r\n", altBoundary))
-		bodyBuf.WriteString(fmt.Sprintf("--%s\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n", altBoundary, t.outboxMessage.Body))
-		bodyBuf.WriteString(fmt.Sprintf("--%s\r\nContent-Type: text/html; charset=utf-8\r\n\r\n%s\r\n", altBoundary, t.outboxMessage.BodyHTML))
+		bodyBuf.WriteString(fmt.Sprintf("--%s\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n", altBoundary, msg.Body))
+		bodyBuf.WriteString(fmt.Sprintf("--%s\r\nContent-Type: text/html; charset=utf-8\r\n\r\n%s\r\n", altBoundary, msg.BodyHTML))
 		bodyBuf.WriteString(fmt.Sprintf("--%s--\r\n", altBoundary))
 	} else if hasHTML {
 		bodyBuf.WriteString("Content-Type: text/html; charset=utf-8\r\n\r\n")
-		bodyBuf.WriteString(t.outboxMessage.BodyHTML)
+		bodyBuf.WriteString(msg.BodyHTML)
 	} else {
 		bodyBuf.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
-		bodyBuf.WriteString(t.outboxMessage.Body)
+		bodyBuf.WriteString(msg.Body)
 	}
 
 	if len(attachments) > 0 {
@@ -268,7 +279,7 @@ func (t *SendTask) constructEmail() []byte {
 		email.WriteString(bodyBuf.String())
 	}
 
-	return []byte(email.String())
+	return []byte(email.String()), messageID
 }
 
 // saveToSentFolder saves a copy of a sent email to the user's Sent folder
