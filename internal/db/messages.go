@@ -449,7 +449,12 @@ func (db *DB) GetMessageByMessageID(userID int64, messageID string) (*models.Mes
 // the caller has already consulted the user's whitelist to decide
 // whether the rescue applies. spam_status / spam_reasons get a marker
 // noting the upstream classification when isSpam is true.
-func (db *DB) ReclassifyMessageFromRemoteSpam(userID int64, messageID string, remoteUID uint32, remoteFolder string, isSpam bool) error {
+//
+// Scoped to accountID: the row's identity is (user_id, Message-ID), but the
+// same email delivered to SEVERAL of the user's sources shares that one row —
+// only the account that created the row may reclassify it (see the ownership
+// note on RefreshExistingFromRemote).
+func (db *DB) ReclassifyMessageFromRemoteSpam(userID, accountID int64, messageID string, remoteUID uint32, remoteFolder string, isSpam bool) error {
 	if messageID == "" {
 		return nil
 	}
@@ -461,9 +466,9 @@ func (db *DB) ReclassifyMessageFromRemoteSpam(userID int64, messageID string, re
 			   remote_uid = $1, remote_folder = $2,
 			   is_spam = true, spam_status = 'spam', spam_reasons = $3,
 			   updated_at = $4
-			 WHERE user_id = $5 AND message_id = $6 AND
+			 WHERE user_id = $5 AND message_id = $6 AND account_id = $7 AND
 			       (is_spam = false OR is_spam IS NULL)`,
-			remoteUID, remoteFolder, reason, now, userID, messageID,
+			remoteUID, remoteFolder, reason, now, userID, messageID, accountID,
 		)
 		if err != nil {
 			return fmt.Errorf("reclassify as spam: %w", err)
@@ -477,8 +482,8 @@ func (db *DB) ReclassifyMessageFromRemoteSpam(userID int64, messageID string, re
 		`UPDATE messages SET
 		   remote_uid = $1, remote_folder = $2,
 		   is_spam = false, updated_at = $3
-		 WHERE user_id = $4 AND message_id = $5`,
-		remoteUID, remoteFolder, now, userID, messageID,
+		 WHERE user_id = $4 AND message_id = $5 AND account_id = $6`,
+		remoteUID, remoteFolder, now, userID, messageID, accountID,
 	)
 	if err != nil {
 		return fmt.Errorf("rescue from spam: %w", err)
@@ -502,8 +507,19 @@ func (db *DB) ReclassifyMessageFromRemoteSpam(userID int64, messageID string, re
 //     and drop the spam metadata. Used by the inbox-pull path: a
 //     message landing in the upstream INBOX is the strongest possible
 //     "not spam" signal, overriding our prior verdict.
+//
+// ВЛАДЕЛЕЦ: обновление скоуплено `account_id = accountID`. Идентичность
+// строки — (user_id, Message-ID), поэтому письмо, доставленное сразу в
+// несколько источников пользователя (рассылка на два ящика, форвардинг),
+// живёт ОДНОЙ строкой. Без скоупа каждый аккаунт-совладелец по очереди
+// утверждал флаги СВОЕЙ копии на общей строке: прочитанное локально письмо
+// каждые полминуты сбрасывалось обратно в unseen тем аккаунтом, чья копия
+// не прочитана, а remote_uid переписывался на чужую копию — и очередь
+// flag_sync пушила флаги на uid ДРУГОГО сервера. Теперь строку зеркалит
+// только создавший её аккаунт; копии в остальных источниках дрейфуют
+// независимо (это осознанный компромисс агрегации).
 func (db *DB) RefreshExistingFromRemote(
-	userID int64,
+	userID, accountID int64,
 	messageID string,
 	remoteUID uint32,
 	remoteFolder string,
@@ -530,14 +546,14 @@ func (db *DB) RefreshExistingFromRemote(
 			   is_spam = false, spam_status = 'clean',
 			   spam_reasons = '', spam_rule_id = NULL,
 			   updated_at = $6
-			 WHERE user_id = $7 AND message_id = $8
+			 WHERE user_id = $7 AND message_id = $8 AND account_id = $9
 			   AND (remote_uid IS DISTINCT FROM $1
 			     OR remote_folder IS DISTINCT FROM $2
 			     OR seen IS DISTINCT FROM $3
 			     OR flagged IS DISTINCT FROM $4
 			     OR answered IS DISTINCT FROM $5
 			     OR is_spam IS DISTINCT FROM false)`,
-			remoteUID, remoteFolder, seen, flagged, answered, now, userID, messageID,
+			remoteUID, remoteFolder, seen, flagged, answered, now, userID, messageID, accountID,
 		)
 		if err != nil {
 			return false, fmt.Errorf("refresh + downgrade: %w", err)
@@ -550,13 +566,13 @@ func (db *DB) RefreshExistingFromRemote(
 		   remote_uid = $1, remote_folder = $2,
 		   seen = $3, flagged = $4, answered = $5,
 		   updated_at = $6
-		 WHERE user_id = $7 AND message_id = $8
+		 WHERE user_id = $7 AND message_id = $8 AND account_id = $9
 		   AND (remote_uid IS DISTINCT FROM $1
 		     OR remote_folder IS DISTINCT FROM $2
 		     OR seen IS DISTINCT FROM $3
 		     OR flagged IS DISTINCT FROM $4
 		     OR answered IS DISTINCT FROM $5)`,
-		remoteUID, remoteFolder, seen, flagged, answered, now, userID, messageID,
+		remoteUID, remoteFolder, seen, flagged, answered, now, userID, messageID, accountID,
 	)
 	if err != nil {
 		return false, fmt.Errorf("refresh existing: %w", err)

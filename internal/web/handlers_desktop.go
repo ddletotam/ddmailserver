@@ -1722,16 +1722,18 @@ func buildRawEmail(from, to, cc, subject, text, html, inReplyTo, references stri
 
 	var b strings.Builder
 
-	// Headers
+	// Headers. Subject + address display-names are RFC 2047-encoded to keep
+	// the header section 7-bit ASCII (a raw Cyrillic Subject otherwise forces
+	// SMTPUTF8, which legacy receivers reject — see parser.EncodeHeaderWord).
 	fmt.Fprintf(&b, "Message-ID: %s\r\n", messageID)
 	fmt.Fprintf(&b, "Date: %s\r\n", time.Now().Format("Mon, 02 Jan 2006 15:04:05 -0700"))
-	fmt.Fprintf(&b, "From: %s\r\n", from)
-	fmt.Fprintf(&b, "To: %s\r\n", to)
+	fmt.Fprintf(&b, "From: %s\r\n", parser.EncodeAddressHeader(from))
+	fmt.Fprintf(&b, "To: %s\r\n", parser.EncodeAddressHeader(to))
 	if cc != "" {
-		fmt.Fprintf(&b, "Cc: %s\r\n", cc)
+		fmt.Fprintf(&b, "Cc: %s\r\n", parser.EncodeAddressHeader(cc))
 	}
 	if subject != "" {
-		fmt.Fprintf(&b, "Subject: %s\r\n", subject)
+		fmt.Fprintf(&b, "Subject: %s\r\n", parser.EncodeHeaderWord(subject))
 	}
 	if inReplyTo != "" {
 		fmt.Fprintf(&b, "In-Reply-To: %s\r\n", inReplyTo)
