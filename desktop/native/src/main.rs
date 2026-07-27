@@ -1003,10 +1003,60 @@ fn build_source_html(text: &str) -> String {
     )
 }
 
+/// Percent-кодирование частей `ddmail-attach:`-URL. Хит-тест ссылок читает
+/// `a.href` (LINK_RECTS_JS) — НОРМАЛИЗОВАННОЕ свойство: WebKit/Chromium сами
+/// percent-кодируют в нём всё не-ASCII, так что кириллическое имя вложения
+/// прилетало бы в Rust уже изуродованным (%D0%9E…). Поэтому кодируем сами,
+/// детерминированно (всё, кроме ASCII-букв/цифр и `.-_~`), а att_url_decode
+/// на выходе восстанавливает исходную строку байт-в-байт.
+fn att_url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'.' | b'-' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Обратное к att_url_encode. Терпимо к легаси-строкам: сырые байты без `%`
+/// проходят как есть (старые кэшированные рендеры со старым форматом href),
+/// а %-последовательности от нормализации браузера декодируются так же.
+fn att_url_decode(s: &str) -> String {
+    fn hex(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(hi << 4 | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Attachment-chip HTML appended below every bubble's main body. Clickable via
 /// the body link hit-test using an internal
 /// `ddmail-attach:folder|uid|index|filename` scheme decoded on the UI thread
-/// (handle_link → DownloadAttachment → AttachmentSaved → open_external).
+/// (handle_link → DownloadAttachment → AttachmentSaved → open_saved_file).
+/// folder/filename идут через att_url_encode (см. выше — иначе браузерная
+/// нормализация href ломает не-ASCII имена).
 fn attachment_chips(b: &MessageBody) -> String {
     if b.attachments.is_empty() {
         return String::new();
@@ -1015,7 +1065,10 @@ fn attachment_chips(b: &MessageBody) -> String {
     for a in &b.attachments {
         let href = format!(
             "ddmail-attach:{}|{}|{}|{}",
-            b.folder, b.uid, a.index, a.filename
+            att_url_encode(&b.folder),
+            b.uid,
+            a.index,
+            att_url_encode(&a.filename)
         );
         s.push_str(&format!(
             "<a class=\"att\" href=\"{}\">\u{1F4CE} {} · {} \u{041A}\u{0411}</a>",
@@ -1647,6 +1700,15 @@ fn tray_set_dot(on: bool) {
     let _ = on;
 }
 
+/// Гасит unread-точку в трее, когда непрочитанных диалогов не осталось.
+/// Только сброс: точку ставит приход новой почты, а погашенная кликом по
+/// трею точка не должна пересвечиваться от одного факта наличия unread.
+fn tray_clear_dot_if_all_read(sh: &Shared) {
+    if sh.convs.borrow().iter().all(|c| c.unread_count == 0) {
+        tray_set_dot(false);
+    }
+}
+
 /// UI weak handle reachable from non-UI threads (toast click callbacks hop
 /// to the event loop through it).
 static UI_WEAK: std::sync::OnceLock<slint::Weak<MainWindow>> = std::sync::OnceLock::new();
@@ -1823,6 +1885,7 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
         let displays = displays_from(&sh.convs.borrow(), &sh.identity_colors.borrow());
         *sh.displays.borrow_mut() = displays;
         refresh_sidebar(sh, ui);
+        tray_clear_dot_if_all_read(sh);
     }
 }
 
@@ -2595,6 +2658,45 @@ fn compute_vertical(
     let bottom = we + pad;
     let rows = (bottom - top).max(1);
     (top, bottom, h / rows as f32)
+}
+
+#[cfg(test)]
+mod att_url_tests {
+    use super::{att_url_decode, att_url_encode};
+
+    /// Кириллица, пробелы и скобки — типовое «долбанутое» имя — должны
+    /// пережить раунд-трип чип → href → парсер байт-в-байт.
+    #[test]
+    fn cyrillic_roundtrip() {
+        let name = "Отчёт за март (итоговый) №7.pdf";
+        assert_eq!(att_url_decode(&att_url_encode(name)), name);
+    }
+
+    /// Разделитель схемы `|`, `%`, `#` и `?` не должны ломать формат
+    /// folder|uid|index|filename и не должны меняться при раунд-трипе.
+    #[test]
+    fn url_special_chars_roundtrip() {
+        let name = "a|b%20c#d?e&f.txt";
+        let enc = att_url_encode(name);
+        assert!(!enc.contains('|') && !enc.contains('#') && !enc.contains('?'));
+        assert_eq!(att_url_decode(&enc), name);
+    }
+
+    /// Нормализация WebKit (a.href в LINK_RECTS_JS) percent-кодирует
+    /// не-ASCII сама — декодер обязан понимать её вывод для легаси-ссылок
+    /// из кэшированных рендеров.
+    #[test]
+    fn decodes_webkit_normalized_legacy() {
+        assert_eq!(att_url_decode("%D0%9E%D1%82%D1%87%D1%91%D1%82.pdf"), "Отчёт.pdf");
+    }
+
+    /// Сырые (некодированные) легаси-строки проходят без изменений,
+    /// включая одинокий `%` без хекс-пары.
+    #[test]
+    fn raw_legacy_passthrough() {
+        assert_eq!(att_url_decode("plain-name.txt"), "plain-name.txt");
+        assert_eq!(att_url_decode("100% готово"), "100% готово");
+    }
 }
 
 #[cfg(test)]
@@ -4761,7 +4863,9 @@ fn main() {
                 let p: Vec<&str> = rest.splitn(4, '|').collect();
                 if p.len() == 4 {
                     if let (Ok(uid), Ok(index)) = (p[1].parse::<u32>(), p[2].parse::<usize>()) {
-                        return Some((p[0].to_string(), uid, index, p[3].to_string()));
+                        // folder/filename percent-кодированы (att_url_encode) —
+                        // в меню и в диалог сохранения идёт человеческое имя.
+                        return Some((att_url_decode(p[0]), uid, index, att_url_decode(p[3])));
                     }
                 }
                 None
@@ -6871,6 +6975,10 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                             }
                         }
                     }
+                    // Непрочитанных не осталось (прочитано здесь, из меню
+                    // «прочитано» или на другом устройстве — дельта приносит
+                    // свежие seen) → погасить точку на трее.
+                    tray_clear_dot_if_all_read(sh);
                     // Optimistic-send follow-ups.
                     // A transient-compose send landed: jump to its conversation
                     // as soon as the delta brings the row — per the agreed spec,
@@ -7210,7 +7318,21 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
         }
         engine::EngineResult::AttachmentSaved(path) => {
             println!("attachment saved: {path} — opening");
-            open_external(&path);
+            open_saved_file(&path);
+        }
+        engine::EngineResult::AttachmentFailed(e) => {
+            eprintln!("engine: attachment failed: {e}");
+            toast_window::show(
+                2, // amber — как у SendFailed
+                0,
+                "Не удалось сохранить вложение",
+                &format!("Причина: {}", e.chars().take(160).collect::<String>()),
+                false,
+                600,
+                || {},
+                || {},
+                || {},
+            );
         }
         engine::EngineResult::AttachmentSavedTo(path) => {
             // Явное «Сохранить как…»: файл не открываем, подтверждаем той же
@@ -7659,12 +7781,12 @@ fn open_message_from_toast(ui: &MainWindow, sh: &Shared, folder: &str, uid: u32,
 /// in the system browser.
 fn handle_link(_ui: &MainWindow, url: String) {
     if let Some(rest) = url.strip_prefix("ddmail-attach:") {
-        // folder|uid|index|filename
+        // folder|uid|index|filename (folder/filename percent-кодированы)
         let parts: Vec<&str> = rest.splitn(4, '|').collect();
         if parts.len() == 4 {
             if let (Ok(uid), Ok(index)) = (parts[1].parse::<u32>(), parts[2].parse::<usize>()) {
-                let folder = parts[0].to_string();
-                let filename = parts[3].to_string();
+                let folder = att_url_decode(parts[0]);
+                let filename = att_url_decode(parts[3]);
                 SHARED.with(|s| {
                     if let Some(sh) = s.borrow().as_ref() {
                         if let Some(etx) = sh.engine_tx.borrow().as_ref() {
@@ -7940,4 +8062,56 @@ fn open_external(url: &str) {
     if let Err(e) = cmd.spawn() {
         eprintln!("open_external: failed to launch browser for {url}: {e}");
     }
+}
+
+/// Открыть сохранённый файл системным обработчиком — в отличие от
+/// open_external, ДОЖИДАЕМСЯ exit-кода в фоновом потоке: xdg-open молча
+/// возвращает ненулевой код, когда обработчика нет или путь его не устроил,
+/// и без проверки клик по вложению «просто ничего не делает». Провал
+/// показывается тостом (та же янтарная плашка, что и у ошибок отправки).
+fn open_saved_file(path: &str) {
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", "", path]);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(path);
+        c
+    };
+    #[cfg(target_os = "linux")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path);
+        c
+    };
+    let path = path.to_string();
+    std::thread::spawn(move || {
+        let verdict = match cmd.status() {
+            Ok(st) if st.success() => None,
+            Ok(st) => Some(format!("обработчик вернул код {}", st.code().unwrap_or(-1))),
+            Err(e) => Some(e.to_string()),
+        };
+        let Some(reason) = verdict else { return };
+        eprintln!("open_saved_file: {path}: {reason}");
+        // Тостовые окна — только с UI-потока.
+        if let Some(weak) = UI_WEAK.get() {
+            let _ = weak.clone().upgrade_in_event_loop(move |_ui| {
+                toast_window::show(
+                    2, // amber
+                    0,
+                    "Не удалось открыть вложение",
+                    &format!("Файл сохранён: {path}\nПричина: {reason}"),
+                    false,
+                    600,
+                    || {},
+                    || {},
+                    || {},
+                );
+            });
+        }
+    });
 }

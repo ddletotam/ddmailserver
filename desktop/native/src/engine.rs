@@ -454,6 +454,9 @@ pub enum EngineResult {
     /// A Send command failed — surfaced to the user (toast), unlike the
     /// generic Error which only logs. Carries the human-readable reason.
     SendFailed(String),
+    /// DownloadAttachment failed (fetch or write) — surfaced to the user
+    /// (toast), unlike the generic Error which only logs.
+    AttachmentFailed(String),
     Error(String),
 }
 
@@ -464,11 +467,21 @@ fn save_download(filename: &str, bytes: &[u8]) -> Result<String, String> {
         .map_err(|_| "no home dir".to_string())?;
     let dir = std::path::Path::new(&home).join("Downloads");
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+    // Долбанутые имена: помимо запрещённых на Windows символов, глушим
+    // управляющие (переводы строк из криво разобранных MIME-заголовков) и
+    // хвостовые точки/пробелы (Windows их молча отрезает — путь разъезжается).
     let safe: String = filename
         .chars()
-        .map(|c| if "\\/:*?\"<>|".contains(c) { '_' } else { c })
+        .map(|c| {
+            if "\\/:*?\"<>|".contains(c) || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
-    let safe = if safe.trim().is_empty() { "attachment".to_string() } else { safe };
+    let safe = safe.trim().trim_end_matches(['.', ' ']).to_string();
+    let safe = if safe.is_empty() { "attachment".to_string() } else { safe };
     let path = dir.join(&safe);
     std::fs::write(&path, bytes).map_err(|e| format!("write: {e}"))?;
     Ok(path.to_string_lossy().into_owned())
@@ -915,14 +928,16 @@ pub fn spawn(
                         Ok((bytes, _mime)) => match save_to {
                             Some(path) => match std::fs::write(&path, &bytes) {
                                 Ok(()) => on_result(EngineResult::AttachmentSavedTo(path)),
-                                Err(e) => on_result(EngineResult::Error(format!("write {path}: {e}"))),
+                                Err(e) => on_result(EngineResult::AttachmentFailed(format!(
+                                    "запись {path}: {e}"
+                                ))),
                             },
                             None => match save_download(&filename, &bytes) {
                                 Ok(path) => on_result(EngineResult::AttachmentSaved(path)),
-                                Err(e) => on_result(EngineResult::Error(e)),
+                                Err(e) => on_result(EngineResult::AttachmentFailed(e)),
                             },
                         },
-                        Err(e) => on_result(EngineResult::Error(e)),
+                        Err(e) => on_result(EngineResult::AttachmentFailed(e)),
                     }
                 }
                 EngineCmd::SearchDropdown { query, limit } => {
