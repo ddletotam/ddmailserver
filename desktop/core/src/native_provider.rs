@@ -324,19 +324,20 @@ impl MailProvider for NativeProvider {
         Ok(())
     }
 
-    async fn blacklist_and_purge(&self, domain: &str, address: &str, message_ids: &[i64]) -> Result<i64, String> {
-        if domain.is_empty() && address.is_empty() {
-            return Err("domain or address required".into());
+    async fn blacklist_and_purge(&self, scope: &str, fallback_addr: &str, message_ids: &[i64]) -> Result<PurgeOutcome, String> {
+        if message_ids.is_empty() && fallback_addr.is_empty() {
+            return Err("no sender to block".into());
         }
-        #[derive(serde::Deserialize)]
-        struct Resp { deleted: i64 }
+        // Server resolves the real sender from message_ids; `address` is only
+        // a fallback for when they resolve nothing. `scope` picks address vs
+        // domain blocking.
         let body = serde_json::json!({
-            "domain": domain,
-            "address": address,
+            "scope": scope,
+            "address": fallback_addr,
             "message_ids": message_ids,
         });
-        let resp: Resp = self.post("/spam/blacklist-and-purge", &body).await?;
-        Ok(resp.deleted)
+        let resp: PurgeOutcome = self.post("/spam/blacklist-and-purge", &body).await?;
+        Ok(resp)
     }
 
     async fn fetch_message_source(

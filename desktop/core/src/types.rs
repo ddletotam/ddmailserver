@@ -50,6 +50,22 @@ pub struct ContactInfo {
     pub addr: String,
 }
 
+/// Result of a spam blacklist-and-purge: how many rows were deleted and what
+/// the server actually blocked (resolved from the real sender, so the client
+/// can confirm «Заблокирован домен rulane.life» even if its counterpart guess
+/// differed). `rule_count` > 1 when a group had several distinct senders.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PurgeOutcome {
+    #[serde(default)]
+    pub deleted: i64,
+    #[serde(default)]
+    pub rule_type: String,
+    #[serde(default)]
+    pub rule_value: String,
+    #[serde(default)]
+    pub rule_count: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Contact {
     pub email: String,
