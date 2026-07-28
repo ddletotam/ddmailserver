@@ -337,11 +337,13 @@ pub enum EngineCmd {
     /// Raw RFC-822 source of one message — feeds the «Показать →
     /// Заголовки / Исходник сообщения» views.
     FetchSource { folder: String, uid: u32, account_key: String },
-    /// «Спам»: blacklist the sender (domain rule) and purge all their
-    /// messages, including the given conversation rows.
+    /// «Спам»: blacklist the sender and purge their messages, including the
+    /// given conversation rows. The real sender is resolved server-side from
+    /// `message_ids`; `scope` = "address" | "domain"; `fallback_addr` is only
+    /// used when the ids resolve no sender (IMAP).
     BlacklistAndPurge {
-        domain: String,
-        address: String,
+        scope: String,
+        fallback_addr: String,
         message_ids: Vec<i64>,
         account_key: String,
     },
@@ -457,6 +459,11 @@ pub enum EngineResult {
     /// DownloadAttachment failed (fetch or write) — surfaced to the user
     /// (toast), unlike the generic Error which only logs.
     AttachmentFailed(String),
+    /// Spam blacklist-and-purge succeeded: what was blocked + rows removed.
+    /// The client confirms with a «✓ …» plashka.
+    SpamPurged { rule_type: String, rule_value: String, deleted: i64 },
+    /// Spam blacklist-and-purge failed — surfaced to the user (toast).
+    SpamFailed(String),
     Error(String),
 }
 
@@ -907,19 +914,26 @@ pub fn spawn(
                         Err(e) => on_result(EngineResult::Error(e)),
                     }
                 }
-                EngineCmd::BlacklistAndPurge { domain, address, message_ids, account_key } => {
+                EngineCmd::BlacklistAndPurge { scope, fallback_addr, message_ids, account_key } => {
                     let conn = route(&conns, &account_key);
                     let provider = conn.provider.clone();
                     let key = conn.key.clone();
-                    match rt.block_on(provider.blacklist_and_purge(&domain, &address, &message_ids)) {
-                        Ok(n) => {
-                            println!("engine: spam purge of {address} removed {n} messages");
+                    match rt.block_on(provider.blacklist_and_purge(&scope, &fallback_addr, &message_ids)) {
+                        Ok(outcome) => {
+                            println!(
+                                "engine: spam purge blocked {}={} ({} rule(s)), removed {} messages",
+                                outcome.rule_type, outcome.rule_value, outcome.rule_count, outcome.deleted
+                            );
                             // Conversations vanish — force the next list
                             // refetch to run full (same as Delete).
                             cache.set_meta(&format!("conv_full_ts:{key}"), "0").ok();
-                            on_result(EngineResult::Done("delete".into()));
+                            on_result(EngineResult::SpamPurged {
+                                rule_type: outcome.rule_type,
+                                rule_value: outcome.rule_value,
+                                deleted: outcome.deleted,
+                            });
                         }
-                        Err(e) => on_result(EngineResult::Error(e)),
+                        Err(e) => on_result(EngineResult::SpamFailed(e)),
                     }
                 }
                 EngineCmd::DownloadAttachment { folder, uid, index, filename, account_key, save_to } => {

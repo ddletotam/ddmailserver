@@ -544,46 +544,72 @@ func (s *Server) HandleDesktopBlacklistAndPurge(w http.ResponseWriter, r *http.R
 	}
 
 	var req struct {
-		Domain  string `json:"domain"`  // either domain OR address must be set
-		Address string `json:"address"` // takes priority if both supplied
-		// MessageIDs identifies the conversation rows the user is
-		// looking at right now. Hard-deleted in addition to the from-
-		// pattern sweep so outgoing-from-us threads (where from_addr
-		// is OUR address, not the counterpart's) actually disappear.
+		// Domain/Address are the client's best guess — used ONLY as a
+		// fallback when MessageIDs resolve no sender (e.g. IMAP provider).
+		Domain  string `json:"domain"`
+		Address string `json:"address"`
+		// Scope: "address" blocks the exact sender, "domain" blocks the
+		// whole domain (needed for spammers rotating random local-parts).
+		Scope string `json:"scope"`
+		// MessageIDs identifies the conversation rows the user is looking
+		// at. The REAL sender is resolved from these rows server-side —
+		// the client's counterpart guess is unreliable for BCC-blasts,
+		// where From and To both land in the participant set (the old
+		// code blacklisted counterparts.first(), often the To address).
+		// Also hard-deleted directly so outgoing-from-us threads vanish.
 		MessageIDs []int64 `json:"message_ids"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	addr := strings.ToLower(strings.TrimSpace(req.Address))
-	domain := strings.ToLower(strings.TrimSpace(req.Domain))
-	if addr == "" && domain == "" {
-		respondError(w, http.StatusBadRequest, "domain or address required")
+	scope := strings.ToLower(strings.TrimSpace(req.Scope))
+	if scope != "domain" {
+		scope = "address"
+	}
+
+	// Resolve the REAL sender(s) from the message rows the user selected.
+	// Trusting the rows (not the client's counterpart guess) is what fixes
+	// the group/BCC-blast case: a spam blast with From=spammer, To=someone
+	// else lands both addresses in the participant set, and the old code
+	// blacklisted whichever sorted first — often the innocent To address.
+	var fromAddrs []string
+	if len(req.MessageIDs) > 0 {
+		rows, err := s.database.Query(
+			`SELECT from_addr FROM messages WHERE user_id = $1 AND id = ANY($2)`,
+			user.ID, pq.Array(req.MessageIDs),
+		)
+		if err != nil {
+			log.Printf("blacklist-and-purge: sender lookup failed: %v", err)
+		} else {
+			defer rows.Close()
+			for rows.Next() {
+				var fa string
+				if rows.Scan(&fa) == nil {
+					fromAddrs = append(fromAddrs, fa)
+				}
+			}
+		}
+	}
+	rules := spamBlockRules(fromAddrs, req.Address, req.Domain, scope)
+	if len(rules) == 0 {
+		respondError(w, http.StatusBadRequest, "no sender to block")
 		return
 	}
 
-	// Insert blacklist rule. Most specific available wins: an address
-	// rule covers exactly one sender; a domain rule covers the whole
-	// domain. The UI is expected to pass whichever the user clicked.
-	var rule *db.SpamRule
-	if addr != "" {
-		rule = &db.SpamRule{UserID: user.ID, RuleType: "address", RuleValue: addr, Action: "spam"}
-	} else {
-		rule = &db.SpamRule{UserID: user.ID, RuleType: "domain", RuleValue: domain, Action: "spam"}
-	}
-	if err := s.database.CreateSpamRule(rule); err != nil {
-		log.Printf("blacklist-and-purge: create rule failed: %v", err)
-		respondError(w, http.StatusInternalServerError, "create rule failed")
-		return
+	for _, br := range rules {
+		rule := &db.SpamRule{UserID: user.ID, RuleType: br.ruleType, RuleValue: br.ruleValue, Action: "spam"}
+		if err := s.database.CreateSpamRule(rule); err != nil {
+			// Duplicate rule (unique constraint) is fine — already blocked.
+			log.Printf("blacklist-and-purge: create rule (%s=%s): %v", br.ruleType, br.ruleValue, err)
+		}
 	}
 
 	// Two deletion passes:
-	//   1. By ID for the conversation the user is staring at. Covers
-	//      outgoing-from-us threads where the from-pattern misses.
-	//   2. By from-pattern across the user's whole mailbox. Covers
-	//      historical inbound from the same sender that wasn't in
-	//      the current conversation view.
+	//   1. By ID for the exact conversation rows (covers outgoing-from-us
+	//      threads where the from-pattern misses).
+	//   2. By from-pattern for each resolved sender/domain across the whole
+	//      mailbox (historical mail from the same source).
 	totalDeleted := int64(0)
 	if len(req.MessageIDs) > 0 {
 		res, err := s.database.Exec(
@@ -597,24 +623,37 @@ func (s *Server) HandleDesktopBlacklistAndPurge(w http.ResponseWriter, r *http.R
 			totalDeleted += n
 		}
 	}
-	var pattern string
-	if addr != "" {
-		pattern = "%<" + addr + ">%"
-	} else {
-		pattern = "%@" + domain + ">%"
+	for _, br := range rules {
+		var pattern string
+		if br.ruleType == "domain" {
+			pattern = "%@" + br.ruleValue + ">%"
+		} else {
+			pattern = "%<" + br.ruleValue + ">%"
+		}
+		res, err := s.database.Exec(
+			`DELETE FROM messages WHERE user_id = $1 AND from_addr ILIKE $2`,
+			user.ID, pattern,
+		)
+		if err != nil {
+			log.Printf("blacklist-and-purge: pattern-delete (%s) failed: %v", pattern, err)
+		} else {
+			n, _ := res.RowsAffected()
+			totalDeleted += n
+		}
 	}
-	res, err := s.database.Exec(
-		`DELETE FROM messages WHERE user_id = $1 AND from_addr ILIKE $2`,
-		user.ID, pattern,
-	)
-	if err != nil {
-		log.Printf("blacklist-and-purge: pattern-delete failed: %v", err)
-	} else {
-		n, _ := res.RowsAffected()
-		totalDeleted += n
+
+	primaryType, primaryValue := "", ""
+	if len(rules) > 0 {
+		primaryType, primaryValue = rules[0].ruleType, rules[0].ruleValue
 	}
-	log.Printf("blacklist-and-purge: user=%d rule=%d (%s=%s) deleted=%d", user.ID, rule.ID, rule.RuleType, rule.RuleValue, totalDeleted)
-	respondJSON(w, http.StatusOK, map[string]any{"rule_id": rule.ID, "deleted": totalDeleted})
+	log.Printf("blacklist-and-purge: user=%d scope=%s rules=%d primary=%s=%s deleted=%d",
+		user.ID, scope, len(rules), primaryType, primaryValue, totalDeleted)
+	respondJSON(w, http.StatusOK, map[string]any{
+		"deleted":    totalDeleted,
+		"rule_type":  primaryType,
+		"rule_value": primaryValue,
+		"rule_count": len(rules),
+	})
 }
 
 // HandleDesktopDeleteMessages soft-deletes a batch of messages by ID. Used by
@@ -1578,7 +1617,7 @@ func (s *Server) HandleDesktopConversationMessages(w http.ResponseWriter, r *htt
 		dbAtts, err := s.database.GetAttachmentsByMessageID(msg.ID)
 		if err == nil {
 			for i, a := range dbAtts {
-				if a.IsInline {
+				if hideInlineAttachment(a, msg.BodyHTML) {
 					continue
 				}
 				atts = append(atts, DesktopAttachment{
@@ -1632,6 +1671,73 @@ func (s *Server) HandleDesktopConversationMessages(w http.ResponseWriter, r *htt
 	}
 
 	respondJSON(w, http.StatusOK, bodies)
+}
+
+// hideInlineAttachment reports whether an "inline" attachment row should stay
+// hidden in the desktop chat view. The ingress parser marks EVERY part with a
+// Content-ID as inline (parser.go), but only genuine body resources — images
+// the HTML references via cid: — belong hidden. Directum RX and friends ship
+// real documents (.docx) as Content-Disposition: inline + Content-ID; dropping
+// those loses the attachment entirely (the web view shows all rows, so the
+// same message looked intact there). Synthetic text/calendar parts stay hidden
+// too — the iTIP pipeline consumes them, they are not user files.
+func hideInlineAttachment(a *models.Attachment, bodyHTML string) bool {
+	if !a.IsInline {
+		return false
+	}
+	if strings.HasPrefix(a.ContentType, "text/calendar") ||
+		strings.HasPrefix(a.ContentType, "application/ics") {
+		return true
+	}
+	return a.ContentID != "" && strings.Contains(bodyHTML, a.ContentID)
+}
+
+// spamRule is a resolved blacklist entry: rule type ("address"|"domain") + value.
+type spamRule struct{ ruleType, ruleValue string }
+
+// spamBlockRules resolves the block set from the REAL senders (fromAddrs, raw
+// "Name <addr>" headers of the selected messages) under `scope`. When no
+// senders resolve (IMAP provider, stale ids) it falls back to the client's
+// hint. Order is deterministic (by value) so the reported "primary" rule and
+// tests are stable. This is the fix for grouped/BCC conversations: the sender
+// comes from the message rows, not the client's ambiguous counterpart guess.
+func spamBlockRules(fromAddrs []string, fallbackAddr, fallbackDomain, scope string) []spamRule {
+	senders := map[string]bool{}
+	domains := map[string]bool{}
+	for _, fa := range fromAddrs {
+		email := strings.ToLower(extractEmail(fa))
+		if email == "" {
+			continue
+		}
+		senders[email] = true
+		if at := strings.LastIndex(email, "@"); at >= 0 {
+			domains[email[at+1:]] = true
+		}
+	}
+	if len(senders) == 0 {
+		addr := strings.ToLower(strings.TrimSpace(fallbackAddr))
+		dom := strings.ToLower(strings.TrimSpace(fallbackDomain))
+		if addr != "" {
+			senders[addr] = true
+			if at := strings.LastIndex(addr, "@"); at >= 0 {
+				domains[addr[at+1:]] = true
+			}
+		} else if dom != "" {
+			domains[dom] = true
+		}
+	}
+	var rules []spamRule
+	if scope == "domain" {
+		for d := range domains {
+			rules = append(rules, spamRule{"domain", d})
+		}
+	} else {
+		for a := range senders {
+			rules = append(rules, spamRule{"address", a})
+		}
+	}
+	sort.Slice(rules, func(i, j int) bool { return rules[i].ruleValue < rules[j].ruleValue })
+	return rules
 }
 
 func splitAndTrim(s string) []string {

@@ -102,7 +102,7 @@ pub trait MailProvider: Send + Sync {
     /// outgoing-from-us threads (where from_addr is OUR address,
     /// not the counterpart's) actually disappear instead of just
     /// the rule being created and the row left to re-sync back.
-    async fn blacklist_and_purge(&self, domain: &str, address: &str, message_ids: &[i64]) -> Result<i64, String>;
+    async fn blacklist_and_purge(&self, scope: &str, fallback_addr: &str, message_ids: &[i64]) -> Result<PurgeOutcome, String>;
 
     /// Fetch raw RFC-822 source of a message.
     async fn fetch_message_source(

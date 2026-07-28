@@ -1700,13 +1700,46 @@ fn tray_set_dot(on: bool) {
     let _ = on;
 }
 
-/// Гасит unread-точку в трее, когда непрочитанных диалогов не осталось.
-/// Только сброс: точку ставит приход новой почты, а погашенная кликом по
-/// трею точка не должна пересвечиваться от одного факта наличия unread.
-fn tray_clear_dot_if_all_read(sh: &Shared) {
-    if sh.convs.borrow().iter().all(|c| c.unread_count == 0) {
-        tray_set_dot(false);
+/// Синхронизировать unread-точку трея с фактом: точка ⇔ есть хоть один
+/// диалог с непрочитанным. Вызывается везде, где unread_count меняется
+/// (открытие диалога, дельты движка) и один раз после создания трея —
+/// чтобы письма, пришедшие пока клиент был выключен, зажигали точку.
+fn tray_sync_dot(sh: &Shared) {
+    tray_set_dot(sh.convs.borrow().iter().any(|c| c.unread_count > 0));
+}
+
+/// Optimistic local removal of the conversation at `cur` (delete + spam-purge
+/// share it): drop the cache row, rebuild the sidebar, and select a neighbour.
+/// The engine resets the full-sync stamp on success, so the follow-up refetch
+/// reconciles with the server.
+fn optimistic_remove_conversation(ui: &MainWindow, sh: &Shared, cur: usize, conv_id: &str) {
+    if let Some(cache) = &sh.cache {
+        cache.delete_conversation(&sh.key, conv_id).ok();
     }
+    {
+        let mut convs = sh.convs.borrow_mut();
+        if cur < convs.len() {
+            convs.remove(cur);
+        }
+        let displays = displays_from(&convs, &sh.identity_colors.borrow());
+        let items = sidebar_items(&displays, &sh.avatars.borrow());
+        ui.set_conversations(ModelRc::new(VecModel::from(items)));
+        *sh.displays.borrow_mut() = displays;
+    }
+    let len = sh.convs.borrow().len();
+    if len == 0 {
+        ui.set_messages(ModelRc::new(VecModel::from(Vec::<RowItem>::new())));
+        ui.set_render_total(0);
+        sh.current_msgs.borrow_mut().clear();
+        sh.current_bodies.borrow_mut().clear();
+        return;
+    }
+    let next = cur.min(len - 1);
+    ui.set_selected(next as i32);
+    apply_active_header(ui, sh, next);
+    open_conversation(ui, sh, next);
+    ui.set_sidebar_row_y(next as f32 * 64.0);
+    ui.set_sidebar_scroll_seq(ui.get_sidebar_scroll_seq() + 1);
 }
 
 /// UI weak handle reachable from non-UI threads (toast click callbacks hop
@@ -1885,7 +1918,7 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
         let displays = displays_from(&sh.convs.borrow(), &sh.identity_colors.borrow());
         *sh.displays.borrow_mut() = displays;
         refresh_sidebar(sh, ui);
-        tray_clear_dot_if_all_read(sh);
+        tray_sync_dot(sh);
     }
 }
 
@@ -4046,7 +4079,21 @@ fn main() {
                             // texture must miss when the content changed. The
                             // rasterization scale is folded in too: the same
                             // width at a different DPI is a different bitmap.
+                            // Attachments тоже входят: чипы — часть пузыря
+                            // (build_body_html), а серверный список вложений
+                            // может поменяться при неизменном HTML (фикс
+                            // inline-фильтра) — иначе старая текстура без
+                            // чипа наслуживается с диска вечно.
+                            let mut att_fp: u64 = 0;
+                            for a in &body.attachments {
+                                att_fp = att_fp.rotate_left(7)
+                                    ^ texture_cache::fnv1a(&format!(
+                                        "{}|{}|{}",
+                                        a.index, a.filename, a.size
+                                    ));
+                            }
                             let fp = texture_cache::fnv1a(body.html.as_deref().unwrap_or(""))
+                                ^ att_fp
                                 ^ ((scale.to_bits() as u64) << 32);
                             let key = (body.folder.clone(), body.uid, width, policy_gen, mode, fp);
                             let mut remember =
@@ -4652,6 +4699,7 @@ fn main() {
         let convs = sh_delc.convs.borrow();
         let Some(c) = convs.get(sh_delc.current.get()) else { return };
         sh_delc.confirm_mode.set(1);
+        ui.set_confirm_is_spam(false);
         ui.set_confirm_delete_title("Удалить диалог?".into());
         ui.set_confirm_delete_text(
             format!(
@@ -4677,12 +4725,19 @@ fn main() {
         }
         let convs = sh_spam.convs.borrow();
         let Some(c) = convs.get(sh_spam.current.get()) else { return };
-        let Some(cp) = c.counterparts.first().filter(|cp| !cp.addr.is_empty()) else { return };
-        let label = if cp.name.is_empty() { cp.addr.clone() } else { cp.name.clone() };
+        // A conversation must have at least one counterpart to be spam-worthy,
+        // but we DON'T trust which one is the sender — for BCC-blasts the
+        // participant set mixes From and To. The server resolves the real
+        // sender from the message ids; here we only gate on non-emptiness.
+        if c.counterparts.iter().all(|cp| cp.addr.is_empty()) {
+            return;
+        }
         sh_spam.confirm_mode.set(2);
+        ui.set_confirm_is_spam(true);
         ui.set_confirm_delete_title("В спам?".into());
         ui.set_confirm_delete_text(
-            format!("Удалить все письма от «{label}» и добавить отправителя в чёрный список?")
+            "Удалить письма этого диалога и заблокировать отправителя. \
+             «Домен» останавливает спам с меняющихся адресов одного домена."
                 .into(),
         );
         ui.set_confirm_delete_visible(true);
@@ -4692,10 +4747,35 @@ fn main() {
     ui.on_delete_conversation_confirmed(move || {
         let Some(ui) = ui_weak_delk.upgrade() else { return };
         let cur = sh_delk.current.get();
-        let mode = sh_delk.confirm_mode.get();
         sh_delk.confirm_mode.set(0);
-        let (conv_id, refs, cp_addr) = {
+        let (conv_id, refs) = {
             let convs = sh_delk.convs.borrow();
+            let Some(c) = convs.get(cur) else { return };
+            (c.id.clone(), c.messages.clone())
+        };
+        if let Some(etx) = sh_delk.engine_tx.borrow().as_ref() {
+            println!("delete conversation {conv_id} ({} messages)", refs.len());
+            let _ = etx.send(engine::EngineCmd::Delete {
+                messages: refs,
+                account_key: sh_delk.cur_account_key.borrow().clone(),
+            });
+        }
+        optimistic_remove_conversation(&ui, &sh_delk, cur, &conv_id);
+    });
+
+    // Spam: blacklist + purge. `scope` ("address"|"domain") comes from which
+    // button the user pressed. We send the conversation's message ids so the
+    // SERVER resolves the real sender (the client can't tell From from To in a
+    // grouped/BCC conversation); `fallback_addr` is only a hint for sources
+    // that resolve no ids. On success a «✓ …» plashka names what was blocked.
+    let ui_weak_spamc = ui.as_weak();
+    let sh_spamc = shared.clone();
+    ui.on_spam_confirmed(move |scope| {
+        let Some(ui) = ui_weak_spamc.upgrade() else { return };
+        let cur = sh_spamc.current.get();
+        sh_spamc.confirm_mode.set(0);
+        let (conv_id, refs, fallback_addr) = {
+            let convs = sh_spamc.convs.borrow();
             let Some(c) = convs.get(cur) else { return };
             (
                 c.id.clone(),
@@ -4703,61 +4783,17 @@ fn main() {
                 c.counterparts.first().map(|cp| cp.addr.to_lowercase()).unwrap_or_default(),
             )
         };
-        if let Some(etx) = sh_delk.engine_tx.borrow().as_ref() {
-            if mode == 2 {
-                // Spam: domain blacklist + purge everything from the sender;
-                // the conversation's own rows go by id so outgoing-from-us
-                // threads disappear too.
-                if cp_addr.is_empty() {
-                    return;
-                }
-                let domain = cp_addr.split('@').nth(1).unwrap_or("").to_string();
-                let ids: Vec<i64> = refs.iter().map(|m| m.uid as i64).collect();
-                println!("spam purge {cp_addr} (domain {domain}, {} rows)", ids.len());
-                let _ = etx.send(engine::EngineCmd::BlacklistAndPurge {
-                    domain,
-                    address: cp_addr,
-                    message_ids: ids,
-                    account_key: sh_delk.cur_account_key.borrow().clone(),
-                });
-            } else {
-                println!("delete conversation {conv_id} ({} messages)", refs.len());
-                let _ = etx.send(engine::EngineCmd::Delete {
-                    messages: refs,
-                    account_key: sh_delk.cur_account_key.borrow().clone(),
-                });
-            }
+        let ids: Vec<i64> = refs.iter().map(|m| m.uid as i64).collect();
+        if let Some(etx) = sh_spamc.engine_tx.borrow().as_ref() {
+            println!("spam purge scope={scope} ({} rows)", ids.len());
+            let _ = etx.send(engine::EngineCmd::BlacklistAndPurge {
+                scope: scope.to_string(),
+                fallback_addr,
+                message_ids: ids,
+                account_key: sh_spamc.cur_account_key.borrow().clone(),
+            });
         }
-        // Optimistic local removal; the engine resets the full-sync stamp on
-        // success, so the Done-triggered refetch reconciles with the server.
-        if let Some(cache) = &sh_delk.cache {
-            cache.delete_conversation(&sh_delk.key, &conv_id).ok();
-        }
-        {
-            let mut convs = sh_delk.convs.borrow_mut();
-            if cur < convs.len() {
-                convs.remove(cur);
-            }
-            let displays = displays_from(&convs, &sh_delk.identity_colors.borrow());
-            let items = sidebar_items(&displays, &sh_delk.avatars.borrow());
-            ui.set_conversations(ModelRc::new(VecModel::from(items)));
-            *sh_delk.displays.borrow_mut() = displays;
-        }
-        let len = sh_delk.convs.borrow().len();
-        if len == 0 {
-            ui.set_messages(ModelRc::new(VecModel::from(Vec::<RowItem>::new())));
-            ui.set_render_total(0);
-            sh_delk.current_msgs.borrow_mut().clear();
-            sh_delk.current_bodies.borrow_mut().clear();
-            return;
-        }
-        // Show the neighbour (same index now points at the next conversation).
-        let next = cur.min(len - 1);
-        ui.set_selected(next as i32);
-        apply_active_header(&ui, &sh_delk, next);
-        open_conversation(&ui, &sh_delk, next);
-        ui.set_sidebar_row_y(next as f32 * 64.0);
-        ui.set_sidebar_scroll_seq(ui.get_sidebar_scroll_seq() + 1);
+        optimistic_remove_conversation(&ui, &sh_spamc, cur, &conv_id);
     });
 
     // Resize = pure relayout: re-render the in-memory bodies at the new
@@ -6754,8 +6790,8 @@ fn main() {
                 if let Some(ui) = ui_open.upgrade() {
                     raise_window(&ui);
                 }
-                // Showing the window acknowledges the unread dot.
-                tray_set_dot(false);
+                // Точку НЕ гасим: она отражает факт непрочитанного и гаснет
+                // сама, когда всё прочитано (tray_sync_dot по дельте).
             },
             || slint::quit_event_loop().unwrap(),
         );
@@ -6776,8 +6812,8 @@ fn main() {
                     if let Some(ui) = ui_open.upgrade() {
                         raise_window(&ui);
                     }
-                    // Showing the window acknowledges the unread dot.
-                    tray_set_dot(false);
+                    // Точку НЕ гасим: она отражает факт непрочитанного и
+                    // гаснет сама, когда всё прочитано (tray_sync_dot).
                 });
             },
             || {
@@ -6788,6 +6824,12 @@ fn main() {
         );
         TRAY.with(|t| *t.borrow_mut() = tray);
     }
+
+    // Первичная синхронизация точки: диалоги из кэша уже загружены, и письма,
+    // пришедшие пока клиент был выключен, должны зажечь точку сразу — не
+    // дожидаясь первой дельты движка (та её всё равно пере-подтвердит).
+    #[cfg(any(windows, target_os = "linux"))]
+    tray_sync_dot(&shared);
 
     // Set the window icon once the native window is realized (the HWND / X11
     // window doesn't exist yet here). Slint/winit doesn't pick up the exe's
@@ -6975,10 +7017,11 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                             }
                         }
                     }
-                    // Непрочитанных не осталось (прочитано здесь, из меню
-                    // «прочитано» или на другом устройстве — дельта приносит
-                    // свежие seen) → погасить точку на трее.
-                    tray_clear_dot_if_all_read(sh);
+                    // Точка трея = факт наличия непрочитанного: дельта несёт
+                    // свежие seen (прочитано здесь, из меню «прочитано» или
+                    // на другом устройстве) и непрочитанное с других устройств
+                    // / стартовой синхронизации.
+                    tray_sync_dot(sh);
                     // Optimistic-send follow-ups.
                     // A transient-compose send landed: jump to its conversation
                     // as soon as the delta brings the row — per the agreed spec,
@@ -7326,6 +7369,45 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                 2, // amber — как у SendFailed
                 0,
                 "Не удалось сохранить вложение",
+                &format!("Причина: {}", e.chars().take(160).collect::<String>()),
+                false,
+                600,
+                || {},
+                || {},
+                || {},
+            );
+        }
+        engine::EngineResult::SpamPurged { rule_type, rule_value, deleted } => {
+            println!("engine: spam purged {rule_type}={rule_value}, deleted={deleted}");
+            // Structural change — reconcile the list with the server (same as
+            // a delete). The engine already reset the full-sync stamp.
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                        let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
+                    }
+                }
+            });
+            let what = match rule_type.as_str() {
+                "domain" => format!("домен {rule_value}"),
+                "address" => format!("адрес {rule_value}"),
+                _ => "отправитель".to_string(),
+            };
+            ui.set_send_confirm_text(format!("✓ В спам: {what}").into());
+            ui.set_send_confirm_visible(true);
+            let uiw = ui.as_weak();
+            slint::Timer::single_shot(std::time::Duration::from_millis(2200), move || {
+                if let Some(u) = uiw.upgrade() {
+                    u.set_send_confirm_visible(false);
+                }
+            });
+        }
+        engine::EngineResult::SpamFailed(e) => {
+            eprintln!("engine: spam failed: {e}");
+            toast_window::show(
+                2, // amber
+                0,
+                "Не удалось отметить спам",
                 &format!("Причина: {}", e.chars().take(160).collect::<String>()),
                 false,
                 600,
@@ -7730,7 +7812,8 @@ fn handle_new_mail(
             let addr = click_addr.clone();
             let _ = weak.clone().upgrade_in_event_loop(move |ui| {
                 raise_window(&ui);
-                tray_set_dot(false);
+                // Точку не гасим вручную: открытие диалога прочтёт его, и
+                // tray_sync_dot погасит точку, если непрочитанного не осталось.
                 SHARED.with(|s| {
                     if let Some(sh) = s.borrow().as_ref() {
                         open_message_from_toast(&ui, sh, &folder, click_uid, &addr);

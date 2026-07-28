@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/yourusername/mailserver/internal/models"
 )
 
 func TestHandleDDMailDiscovery(t *testing.T) {
@@ -191,5 +193,91 @@ func TestGravatarHash(t *testing.T) {
 	h := gravatarHash("test@example.com")
 	if len(h) != 32 {
 		t.Errorf("expected 32-char hex, got %q (%d chars)", h, len(h))
+	}
+}
+
+// Directum RX и подобные шлют настоящие документы (.docx) с
+// Content-Disposition: inline + Content-ID — такие вложения обязаны
+// показываться в desktop-клиенте. Прятать можно только реально встроенные
+// в HTML ресурсы (cid:-картинки) и синтетические text/calendar части.
+func TestHideInlineAttachment(t *testing.T) {
+	docx := models.Attachment{
+		Filename:    "Уведомление.docx",
+		ContentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		ContentID:   "LFJHWWWBWTU4.ZAQSERX0BZ5J2@host",
+		IsInline:    true,
+	}
+	bodyNoCID := "<html><body>Текст письма без встроенных ресурсов</body></html>"
+	if hideInlineAttachment(&docx, bodyNoCID) {
+		t.Error("inline .docx not referenced in HTML must be visible")
+	}
+
+	img := models.Attachment{
+		Filename:    "logo.png",
+		ContentType: "image/png",
+		ContentID:   "logo123@host",
+		IsInline:    true,
+	}
+	bodyWithCID := `<html><body><img src="cid:logo123@host"></body></html>`
+	if !hideInlineAttachment(&img, bodyWithCID) {
+		t.Error("cid-referenced inline image must stay hidden")
+	}
+	if hideInlineAttachment(&img, bodyNoCID) {
+		t.Error("inline image NOT referenced in HTML must be visible")
+	}
+
+	ics := models.Attachment{
+		Filename:    "invite.ics",
+		ContentType: "text/calendar; method=REQUEST",
+		IsInline:    true,
+	}
+	if !hideInlineAttachment(&ics, bodyNoCID) {
+		t.Error("synthetic text/calendar part must stay hidden")
+	}
+
+	regular := models.Attachment{
+		Filename:    "report.pdf",
+		ContentType: "application/pdf",
+		IsInline:    false,
+	}
+	if hideInlineAttachment(&regular, bodyWithCID) {
+		t.Error("regular attachment must always be visible")
+	}
+}
+
+// Спам-рассылка приходит с From=спамер, To=жертва (пользователь в скрытой
+// копии). Клиент склеивает обоих в «участников» диалога и не знает, кто
+// отправитель — поэтому блокировать нужно по реальному From из строк письма,
+// а не по догадке клиента. Домен-scope обязателен против random-логинов.
+func TestSpamBlockRules(t *testing.T) {
+	// From = rulane (спамер), To = hsmedia — участники диалога оба.
+	from := []string{"Mакitа <uptolwh@rulane.life>"}
+
+	addr := spamBlockRules(from, "", "", "address")
+	if len(addr) != 1 || addr[0].ruleType != "address" || addr[0].ruleValue != "uptolwh@rulane.life" {
+		t.Fatalf("address scope: got %+v, want address=uptolwh@rulane.life", addr)
+	}
+
+	dom := spamBlockRules(from, "", "", "domain")
+	if len(dom) != 1 || dom[0].ruleType != "domain" || dom[0].ruleValue != "rulane.life" {
+		t.Fatalf("domain scope: got %+v, want domain=rulane.life", dom)
+	}
+
+	// Fallback (IMAP: no rows) uses the client hint, not the real sender.
+	fb := spamBlockRules(nil, "spammer@bad.tld", "", "domain")
+	if len(fb) != 1 || fb[0].ruleValue != "bad.tld" {
+		t.Fatalf("fallback: got %+v, want domain=bad.tld", fb)
+	}
+
+	// Multiple distinct senders in a group → one rule each, sorted, deduped.
+	multi := spamBlockRules(
+		[]string{"A <x@a.tld>", "B <y@b.tld>", "C <z@a.tld>"}, "", "", "domain")
+	if len(multi) != 2 || multi[0].ruleValue != "a.tld" || multi[1].ruleValue != "b.tld" {
+		t.Fatalf("multi domain: got %+v, want [a.tld b.tld]", multi)
+	}
+
+	// Nothing to block → empty (handler turns this into 400).
+	if got := spamBlockRules(nil, "", "", "address"); len(got) != 0 {
+		t.Fatalf("empty: got %+v, want none", got)
 	}
 }
