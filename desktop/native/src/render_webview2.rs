@@ -48,6 +48,12 @@ const MAX_H: u32 = 6000;
 /// stall the whole render for the full timeout. Kept short; on expiry we fall
 /// back to rendering the already-parsed DOM (see navigate_sync).
 const LOAD_TIMEOUT_MS: u128 = 2500;
+/// NavigateToString rejects documents over 2 MB of UTF-16 outright (documented
+/// WebView2 limit) — one ~1.3 MB inline image blows past it once cid:→data:
+/// substitution lands, and the mail renders as an empty bubble. Documents
+/// above this threshold (safety margin below the hard 2 MB) go through a temp
+/// file + file:// Navigate instead.
+const NAVIGATE_STRING_MAX_UTF16_BYTES: usize = 1_500_000;
 
 pub struct Bitmap {
     pub rgba: Vec<u8>,
@@ -83,6 +89,9 @@ pub struct Engine {
     controller3: Option<ICoreWebView2Controller3>,
     webview: ICoreWebView2,
     cur_scale: f64,
+    /// Bumped per file-based navigation; folded into the file:// URL query so
+    /// the renderer can't serve a stale document cached under the same path.
+    nav_seq: std::cell::Cell<u64>,
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -175,6 +184,7 @@ impl Engine {
                 controller3,
                 webview,
                 cur_scale: 1.0,
+                nav_seq: std::cell::Cell::new(0),
             }
         }
     }
@@ -362,25 +372,79 @@ impl Engine {
         );
 
         let html_w = wide(html);
-        if self.webview.NavigateToString(PCWSTR(html_w.as_ptr())).is_err() {
-            return false;
-        }
+        // NUL-terminated, so len-1 UTF-16 units; ×2 = the byte size WebView2
+        // checks against its 2 MB NavigateToString cap.
+        let utf16_bytes = html_w.len().saturating_sub(1) * 2;
+        let temp_file = if utf16_bytes > NAVIGATE_STRING_MAX_UTF16_BYTES {
+            match self.navigate_via_temp_file(html) {
+                Some(path) => Some(path),
+                None => return false,
+            }
+        } else {
+            if self.webview.NavigateToString(PCWSTR(html_w.as_ptr())).is_err() {
+                return false;
+            }
+            None
+        };
 
         // Pump until the navigation completes (or times out).
         let start = std::time::Instant::now();
-        loop {
+        let ok = loop {
             if let Ok(ok) = rx.try_recv() {
-                return ok;
+                break ok;
             }
             if start.elapsed().as_millis() > LOAD_TIMEOUT_MS {
                 // `load` never fired — almost always a slow/hung external
                 // image (media allowed). If the DOM itself parsed, render what
                 // we have (text + whatever images already arrived) rather than
                 // returning a blank bubble.
-                return self.dom_parsed();
+                break self.dom_parsed();
             }
             pump_a_bit();
+        };
+        // The document is parsed (or given up on) — don't leave mail content
+        // sitting in %TEMP%.
+        if let Some(path) = temp_file {
+            let _ = std::fs::remove_file(path);
         }
+        ok
+    }
+
+    /// Fallback navigation for documents too large for NavigateToString:
+    /// write the HTML (UTF-8; the bubble template carries an explicit
+    /// `<meta charset>`) to a fixed temp file and Navigate to its file://
+    /// URL. Returns the path so the caller can delete it after the load,
+    /// or None when the write/navigate failed.
+    unsafe fn navigate_via_temp_file(&self, html: &str) -> Option<std::path::PathBuf> {
+        let path = std::env::temp_dir().join("ddmail_render_body.html");
+        if let Err(e) = std::fs::write(&path, html) {
+            eprintln!("render: temp-file write for oversized body failed: {e}");
+            return None;
+        }
+        let seq = self.nav_seq.get().wrapping_add(1);
+        self.nav_seq.set(seq);
+        let mut url = String::from("file:///");
+        for ch in path.to_string_lossy().chars() {
+            match ch {
+                '\\' => url.push('/'),
+                c if c.is_ascii_alphanumeric() || "/:._-".contains(c) => url.push(c),
+                // Anything else (spaces, Cyrillic profile names, …)
+                // percent-encoded byte-wise.
+                c => {
+                    let mut buf = [0u8; 4];
+                    for b in c.encode_utf8(&mut buf).as_bytes() {
+                        url.push_str(&format!("%{b:02X}"));
+                    }
+                }
+            }
+        }
+        url.push_str(&format!("?v={seq}"));
+        let url_w = wide(&url);
+        if self.webview.Navigate(PCWSTR(url_w.as_ptr())).is_err() {
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
+        Some(path)
     }
 
     /// True once the document has finished parsing (DOMContentLoaded), even if
@@ -497,6 +561,34 @@ fn empty_bitmap(width: u32) -> Bitmap {
     // the render worker — every later conversation then hangs on the loader.
     let w = width.max(1);
     Bitmap { rgba: vec![255u8; (w as usize) * 4], width: w, height: 1 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Documents past NavigateToString's 2 MB-of-UTF-16 cap must go through
+    /// the temp-file path and still paint — the regression was an empty
+    /// bubble for any mail whose inline images pushed the substituted HTML
+    /// over the cap. Needs the WebView2 runtime and a real window station,
+    /// so it's opt-in: `cargo test render_oversized -- --ignored`.
+    #[test]
+    #[ignore]
+    fn render_oversized_document() {
+        let filler = "проверка ".repeat(150_000); // ~2.7 MB of UTF-16 — over the cap
+        let html = format!(
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head>\
+             <body><div>{filler}</div></body></html>"
+        );
+        let mut engine = Engine::new();
+        let r = engine.render_one(&html, 700, 1.0);
+        assert!(
+            r.successful(),
+            "oversized body must paint (view_ready={}, painted_height={})",
+            r.view_ready,
+            r.painted_height
+        );
+    }
 }
 
 /// Pump pending Win32 messages briefly so WebView2 can lay out / paint.

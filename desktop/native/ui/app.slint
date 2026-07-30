@@ -295,6 +295,274 @@ component CalField inherits VerticalLayout {
     }
 }
 
+// Дата/время пикер карточки события: поле «ДД.ММ.ГГГГ ЧЧ:ММ» + всплывающий
+// месяц-календарь и степперы времени (шаг минут — 5). Источник истины —
+// числовые компоненты (year/month/day/hour/minute), которые Rust заполняет
+// при открытии формы и читает при сохранении; всю дата-математику
+// (григорианский календарь, день недели, длина месяца) компонент делает сам,
+// без раунд-трипов в Rust. PopupWindow рисуется поверх модалки и закрывается
+// по клику вне себя.
+component DateTimeField inherits VerticalLayout {
+    in property <string> label;
+    in property <bool> all-day;
+    in-out property <int> year: 2026;
+    in-out property <int> month: 1;   // 1–12
+    in-out property <int> day: 1;     // 1–31
+    in-out property <int> hour: 0;    // 0–23
+    in-out property <int> minute: 0;  // 0–59
+    // Месяц, показываемый в сетке (навигация ‹ ›), отдельно от выбранной даты.
+    property <int> view-year: 2026;
+    property <int> view-month: 1;
+
+    property <[int]> sakamoto: [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    property <[string]> months: ["Январь", "Февраль", "Март", "Апрель", "Май",
+        "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
+
+    pure function pad(n: int) -> string { return n < 10 ? "0\{n}" : "\{n}"; }
+    // Число дней в месяце (с високосным февралём).
+    pure function dim(y: int, m: int) -> int {
+        return m == 2
+            ? ((Math.mod(y, 4) == 0 && (Math.mod(y, 100) != 0 || Math.mod(y, 400) == 0)) ? 29 : 28)
+            : ((m == 4 || m == 6 || m == 9 || m == 11) ? 30 : 31);
+    }
+    // День недели 1-го числа, Пн=0..Вс=6 (Сакамото, затем сдвиг с Вс на Пн).
+    pure function fwd(y: int, m: int) -> int {
+        return Math.mod(Math.mod(
+            (m < 3 ? y - 1 : y)
+            + Math.floor((m < 3 ? y - 1 : y) / 4)
+            - Math.floor((m < 3 ? y - 1 : y) / 100)
+            + Math.floor((m < 3 ? y - 1 : y) / 400)
+            + root.sakamoto[m - 1] + 1, 7) + 6, 7);
+    }
+
+    spacing: 3px;
+    Text { text: root.label; font-size: 12px; color: #5b6672; }
+    field := Rectangle {
+        height: 34px;
+        background: white;
+        border-radius: 7px;
+        border-width: 1px;
+        border-color: fta.has-hover || pop-open ? #10b981 : #c8d4e4;
+        property <bool> pop-open: false;
+        HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 10px;
+            Text {
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+                color: #0f1419;
+                font-size: 14px;
+                text: root.all-day
+                    ? "\{root.pad(root.day)}.\{root.pad(root.month)}.\{root.year}"
+                    : "\{root.pad(root.day)}.\{root.pad(root.month)}.\{root.year}   \{root.pad(root.hour)}:\{root.pad(root.minute)}";
+            }
+            Text {
+                vertical-alignment: center;
+                text: "▾";
+                color: #8b95a1;
+                font-size: 12px;
+            }
+        }
+        fta := TouchArea {
+            clicked => {
+                root.view-year = root.year;
+                root.view-month = root.month;
+                pop.show();
+            }
+        }
+        pop := PopupWindow {
+            // Дефолт close-on-click закрывал пикер при ЛЮБОМ клике внутри
+            // (навигация, выбор дня, степперы). Закрываем только по клику вне;
+            // выбор дня в all-day и кнопка «Готово» закрывают явно.
+            close-policy: close-on-click-outside;
+            x: 0;
+            y: field.height + 4px;
+            width: 288px;
+            height: root.all-day ? 244px : 292px;
+            Rectangle {
+                background: white;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: #d8dde6;
+                drop-shadow-blur: 18px;
+                drop-shadow-color: #00000022;
+                drop-shadow-offset-y: 4px;
+            }
+            VerticalLayout {
+                padding: 10px;
+                spacing: 6px;
+                // Навигация по месяцам.
+                HorizontalLayout {
+                    height: 26px;
+                    Rectangle {
+                        width: 30px;
+                        prev-ta := TouchArea {
+                            clicked => {
+                                if (root.view-month == 1) {
+                                    root.view-month = 12;
+                                    root.view-year -= 1;
+                                } else {
+                                    root.view-month -= 1;
+                                }
+                            }
+                        }
+                        Text { text: "‹"; font-size: 18px; color: prev-ta.has-hover ? #10b981 : #5b6672;
+                            horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "\{root.months[root.view-month - 1]} \{root.view-year}";
+                        font-size: 14px;
+                        font-weight: 700;
+                        color: #2b3640;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    Rectangle {
+                        width: 30px;
+                        next-ta := TouchArea {
+                            clicked => {
+                                if (root.view-month == 12) {
+                                    root.view-month = 1;
+                                    root.view-year += 1;
+                                } else {
+                                    root.view-month += 1;
+                                }
+                            }
+                        }
+                        Text { text: "›"; font-size: 18px; color: next-ta.has-hover ? #10b981 : #5b6672;
+                            horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+                // Заголовок дней недели.
+                Rectangle {
+                    height: 18px;
+                    HorizontalLayout {
+                        for wd in ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]: Text {
+                            width: 38px;
+                            text: wd;
+                            font-size: 11px;
+                            color: #9aa5b1;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+                // Сетка дней: 6 недель × 7. Номер дня в ячейке i выводится из
+                // дня недели 1-го числа (leading) — пустые ячейки скрыты.
+                grid := Rectangle {
+                    height: 180px;
+                    property <int> leading: root.fwd(root.view-year, root.view-month);
+                    property <int> ndays: root.dim(root.view-year, root.view-month);
+                    for i in 42: cell := Rectangle {
+                        property <int> daynum: i - grid.leading + 1;
+                        property <bool> valid: daynum >= 1 && daynum <= grid.ndays;
+                        property <bool> selected: valid && daynum == root.day
+                            && root.view-month == root.month && root.view-year == root.year;
+                        x: mod(i, 7) * 38px;
+                        y: floor(i / 7) * 30px;
+                        width: 38px;
+                        height: 30px;
+                        Rectangle {
+                            width: 30px;
+                            height: 28px;
+                            border-radius: 7px;
+                            background: cell.selected ? #10b981
+                                : (day-ta.has-hover && cell.valid ? #eef2f7 : transparent);
+                            Text {
+                                text: cell.valid ? "\{cell.daynum}" : "";
+                                color: cell.selected ? white : #2b3640;
+                                font-size: 13px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            day-ta := TouchArea {
+                                clicked => {
+                                    if (cell.valid) {
+                                        root.year = root.view-year;
+                                        root.month = root.view-month;
+                                        root.day = cell.daynum;
+                                        if (root.all-day) { pop.close(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Время (скрыто для «весь день»): часы и минуты степперами,
+                // шаг минут — 5.
+                if !root.all-day: Rectangle {
+                    height: 34px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Text { text: "Время:"; font-size: 13px; color: #5b6672; vertical-alignment: center; }
+                        // Часы.
+                        Rectangle {
+                            width: 44px;
+                            height: 30px;
+                            border-radius: 7px;
+                            background: #eef2f7;
+                            Text { text: root.pad(root.hour); font-size: 14px; color: #2b3640;
+                                horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        VerticalLayout {
+                            width: 20px;
+                            Rectangle {
+                                hup := TouchArea { clicked => { root.hour = mod(root.hour + 1, 24); } }
+                                Text { text: "▲"; font-size: 9px; color: hup.has-hover ? #10b981 : #5b6672;
+                                    horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                            Rectangle {
+                                hdn := TouchArea { clicked => { root.hour = mod(root.hour + 23, 24); } }
+                                Text { text: "▼"; font-size: 9px; color: hdn.has-hover ? #10b981 : #5b6672;
+                                    horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+                        Text { text: ":"; font-size: 15px; color: #2b3640; vertical-alignment: center; }
+                        // Минуты (шаг 5, со снапом к сетке кратных пяти).
+                        Rectangle {
+                            width: 44px;
+                            height: 30px;
+                            border-radius: 7px;
+                            background: #eef2f7;
+                            Text { text: root.pad(root.minute); font-size: 14px; color: #2b3640;
+                                horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        VerticalLayout {
+                            width: 20px;
+                            Rectangle {
+                                mup := TouchArea {
+                                    clicked => { root.minute = mod(floor(root.minute / 5) * 5 + 5, 60); }
+                                }
+                                Text { text: "▲"; font-size: 9px; color: mup.has-hover ? #10b981 : #5b6672;
+                                    horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                            Rectangle {
+                                mdn := TouchArea {
+                                    clicked => { root.minute = mod(floor(root.minute / 5) * 5 + 55, 60); }
+                                }
+                                Text { text: "▼"; font-size: 9px; color: mdn.has-hover ? #10b981 : #5b6672;
+                                    horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        // Готово — закрывает попап.
+                        Rectangle {
+                            width: 64px;
+                            height: 30px;
+                            border-radius: 7px;
+                            background: done-ta.has-hover ? #0ea372 : #10b981;
+                            Text { text: "Готово"; color: white; font-size: 13px;
+                                horizontal-alignment: center; vertical-alignment: center; }
+                            done-ta := TouchArea { clicked => { pop.close(); } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component MainWindow inherits Window {
     title: "ddmail";
     preferred-width: 1100px;
@@ -550,8 +818,19 @@ export component MainWindow inherits Window {
     in-out property <bool> edit-visible: false;
     in property <bool> edit-is-create: true;
     in-out property <string> edit-title;
-    in-out property <string> edit-start;       // "YYYY-MM-DD HH:MM" (or date if all-day)
-    in-out property <string> edit-end;
+    // Дата/время начала и конца как числовые компоненты (заполняет и читает
+    // Rust: open_*_form / save_edit_form). Заменили строку «YYYY-MM-DD HH:MM»
+    // на пикер DateTimeField.
+    in-out property <int> edit-s-year: 2026;
+    in-out property <int> edit-s-month: 1;
+    in-out property <int> edit-s-day: 1;
+    in-out property <int> edit-s-hour: 0;
+    in-out property <int> edit-s-min: 0;
+    in-out property <int> edit-e-year: 2026;
+    in-out property <int> edit-e-month: 1;
+    in-out property <int> edit-e-day: 1;
+    in-out property <int> edit-e-hour: 0;
+    in-out property <int> edit-e-min: 0;
     in-out property <string> edit-location;
     in-out property <string> edit-description;
     in-out property <bool> edit-all-day: false;
@@ -3500,15 +3779,23 @@ export component MainWindow inherits Window {
                             vertical-alignment: center;
                         }
                     }
-                    CalField {
+                    DateTimeField {
                         label: "Начало";
-                        placeholder: "ГГГГ-ММ-ДД ЧЧ:ММ";
-                        value <=> root.edit-start;
+                        all-day: root.edit-all-day;
+                        year <=> root.edit-s-year;
+                        month <=> root.edit-s-month;
+                        day <=> root.edit-s-day;
+                        hour <=> root.edit-s-hour;
+                        minute <=> root.edit-s-min;
                     }
-                    CalField {
+                    DateTimeField {
                         label: "Конец";
-                        placeholder: "ГГГГ-ММ-ДД ЧЧ:ММ";
-                        value <=> root.edit-end;
+                        all-day: root.edit-all-day;
+                        year <=> root.edit-e-year;
+                        month <=> root.edit-e-month;
+                        day <=> root.edit-e-day;
+                        hour <=> root.edit-e-hour;
+                        minute <=> root.edit-e-min;
                     }
                     CalField {
                         label: "Место";
