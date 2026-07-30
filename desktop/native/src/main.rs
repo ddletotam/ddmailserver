@@ -3123,28 +3123,52 @@ fn refetch_calendar_events(ui: &MainWindow, sh: &Shared) {
 
 /// Parse a form date/time string ("YYYY-MM-DD HH:MM", or "YYYY-MM-DD" when
 /// all-day) as LOCAL time → ms since epoch. None on parse failure.
-fn parse_form_ms(s: &str, all_day: bool) -> Option<i64> {
-    use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
-    let s = s.trim();
-    let naive = if all_day {
-        NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?.and_hms_opt(0, 0, 0)?
-    } else {
-        NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").ok()?
-    };
-    Local.from_local_datetime(&naive).single().map(|d| d.timestamp_millis())
+/// ms → (year, month, day, hour, minute) в локальной зоне — для заполнения
+/// числовых полей пикера DateTimeField при открытии формы события.
+fn dt_parts(ms: i64) -> (i32, i32, i32, i32, i32) {
+    use chrono::{Datelike, Local, TimeZone, Timelike};
+    let d = Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .unwrap_or_else(|| Local.timestamp_millis_opt(0).unwrap());
+    (
+        d.year(),
+        d.month() as i32,
+        d.day() as i32,
+        d.hour() as i32,
+        d.minute() as i32,
+    )
 }
 
-/// Format ms → form string (date-only when all-day).
-fn fmt_form(ms: i64, all_day: bool) -> String {
-    use chrono::{Datelike, Local, TimeZone, Timelike};
-    match chrono::Local.timestamp_millis_opt(ms).single() {
-        Some(d) if all_day => format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day()),
-        Some(d) => format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}",
-            d.year(), d.month(), d.day(), d.hour(), d.minute()
-        ),
-        None => String::new(),
-    }
+/// (year, month, day, hour, minute) из пикера → ms в локальной зоне. Для
+/// «весь день» время обнуляется. None, если компоненты не образуют реальную
+/// дату (например, 31 апреля) — вызывающий показывает ошибку вместо отправки.
+fn parts_to_ms(y: i32, mo: i32, d: i32, h: i32, mi: i32, all_day: bool) -> Option<i64> {
+    use chrono::{Local, NaiveDate, TimeZone};
+    let (h, mi) = if all_day { (0, 0) } else { (h, mi) };
+    let naive = NaiveDate::from_ymd_opt(y, mo as u32, d as u32)?
+        .and_hms_opt(h as u32, mi as u32, 0)?;
+    Local.from_local_datetime(&naive).single().map(|x| x.timestamp_millis())
+}
+
+/// Разложить ms в числовые поля start-пикера на UI.
+fn set_form_start(ui: &MainWindow, ms: i64) {
+    let (y, mo, d, h, mi) = dt_parts(ms);
+    ui.set_edit_s_year(y);
+    ui.set_edit_s_month(mo);
+    ui.set_edit_s_day(d);
+    ui.set_edit_s_hour(h);
+    ui.set_edit_s_min(mi);
+}
+
+/// Разложить ms в числовые поля end-пикера на UI.
+fn set_form_end(ui: &MainWindow, ms: i64) {
+    let (y, mo, d, h, mi) = dt_parts(ms);
+    ui.set_edit_e_year(y);
+    ui.set_edit_e_month(mo);
+    ui.set_edit_e_day(d);
+    ui.set_edit_e_hour(h);
+    ui.set_edit_e_min(mi);
 }
 
 /// Populate the edit-form's writable-calendar ComboBox; returns the ids
@@ -3193,8 +3217,8 @@ fn open_create_form_at(ui: &MainWindow, sh: &Shared, start_ms: i64) {
     ui.set_edit_is_create(true);
     ui.set_edit_title("".into());
     ui.set_edit_all_day(false);
-    ui.set_edit_start(fmt_form(start_ms, false).into());
-    ui.set_edit_end(fmt_form(start_ms + 3_600_000, false).into());
+    set_form_start(ui, start_ms);
+    set_form_end(ui, start_ms + 3_600_000);
     ui.set_edit_location("".into());
     ui.set_edit_description("".into());
     ui.set_edit_calendar_idx(0);
@@ -3301,8 +3325,8 @@ fn open_edit_form(ui: &MainWindow, sh: &Shared, ev: &ddmail_core::types::Desktop
     ui.set_edit_is_create(false);
     ui.set_edit_title(ev.summary.clone().into());
     ui.set_edit_all_day(ev.all_day);
-    ui.set_edit_start(fmt_form(ev.dtstart, ev.all_day).into());
-    ui.set_edit_end(fmt_form(ev.dtend.unwrap_or(ev.dtstart), ev.all_day).into());
+    set_form_start(ui, ev.dtstart);
+    set_form_end(ui, ev.dtend.unwrap_or(ev.dtstart));
     ui.set_edit_location(ev.location.clone().into());
     ui.set_edit_description(ev.description.clone().into());
     ui.set_edit_calendar_idx(idx);
@@ -3359,11 +3383,17 @@ fn open_edit_form(ui: &MainWindow, sh: &Shared, ev: &ddmail_core::types::Desktop
 /// Validate the form and dispatch Create or Patch to the engine.
 fn save_edit_form(ui: &MainWindow, sh: &Shared) {
     let all_day = ui.get_edit_all_day();
-    let Some(start) = parse_form_ms(&ui.get_edit_start(), all_day) else {
+    let Some(start) = parts_to_ms(
+        ui.get_edit_s_year(), ui.get_edit_s_month(), ui.get_edit_s_day(),
+        ui.get_edit_s_hour(), ui.get_edit_s_min(), all_day,
+    ) else {
         eprintln!("edit: bad start time");
         return;
     };
-    let end = parse_form_ms(&ui.get_edit_end(), all_day);
+    let end = parts_to_ms(
+        ui.get_edit_e_year(), ui.get_edit_e_month(), ui.get_edit_e_day(),
+        ui.get_edit_e_hour(), ui.get_edit_e_min(), all_day,
+    );
     let title = ui.get_edit_title().to_string();
     let location = ui.get_edit_location().to_string();
     let description = ui.get_edit_description().to_string();
@@ -4310,12 +4340,15 @@ fn main() {
                             if let Some(y) = scroll_y {
                                 ui.set_chat_scroll_y(y);
                                 ui.set_chat_scroll_seq(ui.get_chat_scroll_seq() + 1);
-                            } else {
-                                // Scroll-less render (width change, new mail,
-                                // policy toggle): stop re-anchoring on future
-                                // viewport-height changes.
-                                ui.set_chat_scroll_pending(false);
                             }
+                            // Scroll-less render (width change, scale change,
+                            // policy toggle) НЕ трогает chat-scroll-pending:
+                            // раньше он его сбрасывал, но на старте scale-render
+                            // прилетает между анкор-bump'ом и первым layout —
+                            // и убивал ещё-не-применённый скролл (первый диалог
+                            // открывался в начале, а не на свежем письме). После
+                            // применения layout сам гасит флаг в viewport-height
+                            // handler, так что повторного re-anchor нет.
                         });
                     }
                     Job::HitTest { row, x, y } => {
@@ -4492,6 +4525,17 @@ fn main() {
             vis.insert(*id, false);
         }
         *shared.calendar_colors.borrow_mut() = cal_set.colors.clone();
+    }
+
+    // Seed the real display scale BEFORE the startup render so the first
+    // conversation rasterizes at the right DPI immediately — otherwise the
+    // width-watcher notices scale 1.0 → real and fires a scroll-less
+    // re-render, which used to also cost the startup scroll anchor.
+    {
+        let sf = ui.window().scale_factor();
+        if sf.is_finite() && sf > 0.0 {
+            shared.render_scale.set(sf);
+        }
     }
 
     // Open the first conversation that has cached bodies.
