@@ -2,7 +2,7 @@
 name = "ddmail-native"
 # Kept in sync with installer/ddmail.iss AppVersion — bump both together
 # (docs/desktop-behavior-contract.md §7).
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 
 [[bin]]
