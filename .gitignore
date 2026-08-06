@@ -52,3 +52,7 @@ desktop/src-tauri/
 desktop/dist/
 desktop/native/target/
 desktop/core/target/
+
+# AI-контекст ведёт Syncthing, не git (workspace rule 2)
+/CLAUDE.md
+/.claude/
