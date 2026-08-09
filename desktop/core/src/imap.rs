@@ -407,6 +407,59 @@ pub async fn list_folders(
     connect(host, port, username, password, use_tls).await
 }
 
+/// Набор адресов письма — он же ключ диалога. From, To и Cc сваливаются в одно
+/// множество: роли для опознания диалога не значат ничего, значим только состав.
+///
+/// Bcc сюда не входит намеренно — он виден только на своей копии в
+/// «Отправленных», ответ собеседника его не принесёт, и письмо оказалось бы в
+/// наборе, в который никто больше не может попасть.
+pub fn conversation_participants(from: &str, to: &[String], cc: &[String]) -> Vec<String> {
+    let mut participants: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut push = |a: &str| {
+        let lc = a.trim().to_lowercase();
+        if !lc.is_empty() && seen.insert(lc.clone()) {
+            participants.push(lc);
+        }
+    };
+    push(from);
+    for a in to.iter().chain(cc.iter()) {
+        push(a);
+    }
+    drop(push);
+    participants.sort();
+    participants
+}
+
+/// id диалога — функция набора и только набора: один и тот же состав всегда
+/// даёт один и тот же id, кто бы кому ни писал.
+///
+/// Формат для «одна моя айдентика» совпадает со старым байт в байт, поэтому
+/// закрепления и склейки (`merges.json`) переживают смену схемы; новые формы
+/// появляются только там, где диалога раньше не было вовсе.
+///
+/// ```text
+///   одна моя + один чужой   →  "me@a|bob"
+///   одна моя + несколько    →  "me@a|group:bob,carol"
+///   две моих + чужие        →  "me@a+me@b|bob"
+///   только мои              →  "me@a+me@b|self"
+///   меня в наборе нет (bcc) →  "|bob"
+/// ```
+///
+/// Обязан совпадать с серверной реализацией в
+/// `internal/web/handlers_desktop.go` — один и тот же ящик может приехать и
+/// оттуда, и по IMAP напрямую.
+pub fn conversation_id(mine: &[String], others: &[String]) -> String {
+    let mine_key = mine.join("+");
+    if others.is_empty() {
+        format!("{mine_key}|self")
+    } else if others.len() > 1 {
+        format!("{mine_key}|group:{}", others.join(","))
+    } else {
+        format!("{mine_key}|{}", others.join(","))
+    }
+}
+
 pub async fn fetch_conversations(
     cache: &Cache,
     host: String, port: u16, username: String, password: String, use_tls: bool,
@@ -503,55 +556,35 @@ where
         }
     }
 
-    // Group into conversations by (my_id, sorted_counterparts). 1:1 mail produces
-    // a single-counterpart key — collapsing to the historical "{my_id}|{cp}" id
-    // string so pinned-conversation localStorage stays valid. Multi-recipient
-    // mail (To+Cc has >1 non-self address) keeps the full participant set in
-    // the key so each unique group is its own row.
+    // Диалог опознаётся набором участвующих адресов, и только им. Кто из них
+    // отправитель, кто в «Кому», кто в копии — для ключа не важно: набор тот
+    // же, значит это тот же диалог. Меняется набор — меняется диалог.
+    //
+    // Bcc в набор не входит: он виден только на своей копии в «Отправленных»,
+    // ответ собеседника его не принесёт, и письмо повисло бы в наборе, куда
+    // никто не может ответить.
     let is_ours = |a: &str| {
         let lc = a.to_lowercase();
         our_addrs.iter().any(|o| *o == lc)
     };
 
-    let mut conv_map: HashMap<(String, String), (Vec<String>, Vec<RawEnvelope>)> = HashMap::new();
+    let mut conv_map: HashMap<String, (Vec<String>, Vec<RawEnvelope>)> = HashMap::new();
     for env in all_envelopes {
-        let from_lc = env.from_addr.to_lowercase();
-
-        // Pick myID: outgoing → sender, incoming → first of our addrs in To/Cc.
-        let my_id = if is_ours(&from_lc) {
-            from_lc.clone()
-        } else {
-            env.to_addrs.iter().chain(env.cc_addrs.iter())
-                .map(|a| a.to_lowercase())
-                .find(|a| is_ours(a))
-                .unwrap_or_else(|| user_addr.to_string())
-        };
-
-        // Counterparts = unique sorted (from ∪ to ∪ cc) minus our identities.
-        let mut cps: Vec<String> = Vec::new();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut push = |a: &str| {
-            let lc = a.to_lowercase();
-            if lc.is_empty() || is_ours(&lc) { return None; }
-            if seen.insert(lc.clone()) { Some(lc) } else { None }
-        };
-        if let Some(v) = push(&from_lc) { cps.push(v); }
-        for a in env.to_addrs.iter().chain(env.cc_addrs.iter()) {
-            if let Some(v) = push(a) { cps.push(v); }
+        let participants = conversation_participants(&env.from_addr, &env.to_addrs, &env.cc_addrs);
+        if participants.is_empty() {
+            continue;
         }
-        if cps.is_empty() { continue; }
-        cps.sort();
 
-        let cps_key = cps.join(",");
-        conv_map.entry((my_id, cps_key))
-            .or_insert_with(|| (cps.clone(), Vec::new()))
+        conv_map
+            .entry(participants.join(","))
+            .or_insert_with(|| (participants.clone(), Vec::new()))
             .1
             .push(env);
     }
 
     let mut conversations: Vec<Conversation> = Vec::new();
 
-    for ((my_id, cps_key), (cp_addrs, mut msgs)) in conv_map {
+    for (_, (participants, mut msgs)) in conv_map {
         msgs.sort_by_key(|m| m.date_ts);
 
         // Same physical message can appear in multiple folders (e.g. self-mail lands in
@@ -582,6 +615,53 @@ where
             msgs.retain(|_| iter.next().unwrap_or(true));
         }
 
+        // Separate drafts from regular messages.
+        let draft = msgs.iter().rev().find(|m| m.is_draft)
+            .map(|m| MessageRef { folder: m.folder.clone(), uid: m.uid, message_id: m.message_id.clone(), seen: true });
+        let regular_msgs: Vec<&RawEnvelope> = msgs.iter().filter(|m| !m.is_draft).collect();
+
+        // Drafts alone don't make a conversation — see HandleDesktopConversations
+        // in the Go server for the matching server-side rule.
+        if regular_msgs.is_empty() { continue; }
+
+        let first = regular_msgs.first().copied().unwrap();
+        let last = regular_msgs.last().copied().unwrap();
+
+        // Роли внутри диалога. Ключ ролей не знает — он множество адресов; но
+        // показать надо одного собеседника, а отвечать с одной айдентики.
+        let mine: Vec<String> = participants.iter().filter(|a| is_ours(a)).cloned().collect();
+        let others: Vec<String> = participants.iter().filter(|a| !is_ours(a)).cloned().collect();
+
+        let (cp_addrs, my_id) = if !others.is_empty() {
+            // Айдентика — та, что участвовала в первом письме: с неё писали или
+            // ей адресовали. Первое письмо, а не последнее: диалог принадлежит
+            // тому адресу, на котором начался.
+            let first_from = first.from_addr.to_lowercase();
+            let my = if is_ours(&first_from) {
+                first_from
+            } else {
+                first.to_addrs.iter().chain(first.cc_addrs.iter())
+                    .map(|a| a.to_lowercase())
+                    .find(|a| is_ours(a))
+                    .or_else(|| mine.first().cloned())
+                    .unwrap_or_else(|| user_addr.to_string())
+            };
+            (others.clone(), my)
+        } else {
+            // Все адреса набора — мои (письмо с одной своей айдентики на
+            // другую). Логика тупая и на том держится: собеседник тот, чьё
+            // письмо первое, оставшийся адрес — айдентика. Письмо самому себе
+            // на тот же адрес даёт один адрес в обеих ролях.
+            let from_lc = first.from_addr.to_lowercase();
+            let cp = if participants.iter().any(|a| *a == from_lc) {
+                from_lc
+            } else {
+                participants[0].clone()
+            };
+            let my = participants.iter().find(|a| **a != cp).cloned().unwrap_or_else(|| cp.clone());
+            (vec![cp], my)
+        };
+
         // Display name for each counterpart: scan the thread for FROM names
         // (when they wrote to us) or To/Cc names (when we wrote to them).
         // Drop names that look like raw addresses — those are useless labels.
@@ -602,37 +682,30 @@ where
             .map(|a| ContactInfo { name: name_for(a), addr: a.clone() })
             .collect();
 
-        // Separate drafts from regular messages.
-        let draft = msgs.iter().rev().find(|m| m.is_draft)
-            .map(|m| MessageRef { folder: m.folder.clone(), uid: m.uid, message_id: m.message_id.clone(), seen: true });
-        let regular_msgs: Vec<&RawEnvelope> = msgs.iter().filter(|m| !m.is_draft).collect();
+        let is_group = others.len() > 1;
 
-        // Drafts alone don't make a conversation — see HandleDesktopConversations
-        // in the Go server for the matching server-side rule.
-        if regular_msgs.is_empty() { continue; }
-
-        let first = regular_msgs.first().copied().unwrap();
-        let last = regular_msgs.last().copied().unwrap();
-
-        let is_group = cp_addrs.len() > 1;
-
-        // 1:1: label = counterpart name (or addr).
-        // Group: label = first message subject + " (N чел)" where N counts all
-        // human participants (counterparts + me).
-        let (id, label) = if is_group {
+        // id — функция набора и только набора: один и тот же набор адресов
+        // всегда даёт один и тот же id, кто бы кому ни писал. Формат для
+        // «одна моя айдентика» совпадает со старым байт в байт, поэтому
+        // закрепления и склейки (merges.json) переживают смену схемы; новые
+        // формы появляются только там, где диалога раньше не было вовсе.
+        //
+        //   одна моя + один чужой   →  "me@a|bob"            (как было)
+        //   одна моя + несколько    →  "me@a|group:bob,carol" (как было)
+        //   две моих + чужие        →  "me@a+me@b|bob"
+        //   только мои              →  "me@a+me@b|self"
+        //   меня в наборе нет (bcc) →  "|bob"
+        let id = conversation_id(&mine, &others);
+        let label = if is_group {
             let subject = if first.subject.trim().is_empty() {
                 "(без темы)".to_string()
             } else {
                 first.subject.clone()
             };
-            (
-                format!("{}|group:{}", my_id, cps_key),
-                format!("{} ({} чел)", subject, cp_addrs.len() + 1),
-            )
+            format!("{} ({} чел)", subject, participants.len())
         } else {
             let cp_name = &counterparts[0].name;
-            let label = if cp_name.is_empty() { cp_addrs[0].clone() } else { cp_name.clone() };
-            (format!("{}|{}", my_id, cps_key), label)
+            if cp_name.is_empty() { cp_addrs[0].clone() } else { cp_name.clone() }
         };
 
         // Avatar seed: for both 1:1 and groups, use the first counterpart for now.
@@ -1360,4 +1433,66 @@ pub async fn start_watching(
     let creds = Credentials { host, port, username, password, use_tls, user_email };
     pool.start_idle(notifier, creds).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod conversation_key_tests {
+    use super::{conversation_id, conversation_participants};
+
+    fn v(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn participants_ignore_roles() {
+        // Одни и те же люди, разные роли — один и тот же набор.
+        let a = conversation_participants("bob@x.ru", &v(&["me@a.ru"]), &v(&["carol@x.ru"]));
+        let b = conversation_participants("me@a.ru", &v(&["carol@x.ru"]), &v(&["bob@x.ru"]));
+        assert_eq!(a, b);
+        assert_eq!(a, v(&["bob@x.ru", "carol@x.ru", "me@a.ru"]));
+    }
+
+    #[test]
+    fn participants_normalise_case_and_dedup() {
+        let p = conversation_participants("  Bob@X.RU ", &v(&["me@a.ru", "bob@x.ru"]), &v(&[""]));
+        assert_eq!(p, v(&["bob@x.ru", "me@a.ru"]));
+    }
+
+    #[test]
+    fn different_set_is_a_different_conversation() {
+        let two = conversation_participants("bob@x.ru", &v(&["me@a.ru"]), &[]);
+        let three = conversation_participants("bob@x.ru", &v(&["me@a.ru", "carol@x.ru"]), &[]);
+        assert_ne!(two, three);
+    }
+
+    #[test]
+    fn id_matches_the_old_format_for_a_single_identity() {
+        // Ради этого схема и подобрана так: закрепления и merges.json,
+        // записанные до перехода, продолжают указывать на тот же диалог.
+        assert_eq!(conversation_id(&v(&["me@a.ru"]), &v(&["bob@x.ru"])), "me@a.ru|bob@x.ru");
+        assert_eq!(
+            conversation_id(&v(&["me@a.ru"]), &v(&["bob@x.ru", "carol@x.ru"])),
+            "me@a.ru|group:bob@x.ru,carol@x.ru"
+        );
+    }
+
+    #[test]
+    fn id_separates_conversations_that_differ_only_by_my_second_identity() {
+        let one = conversation_id(&v(&["me@a.ru"]), &v(&["bob@x.ru"]));
+        let two = conversation_id(&v(&["me@a.ru", "me@b.ru"]), &v(&["bob@x.ru"]));
+        assert_ne!(one, two);
+        assert_eq!(two, "me@a.ru+me@b.ru|bob@x.ru");
+    }
+
+    #[test]
+    fn id_for_mail_between_my_own_identities() {
+        assert_eq!(conversation_id(&v(&["me@a.ru", "me@b.ru"]), &[]), "me@a.ru+me@b.ru|self");
+    }
+
+    #[test]
+    fn id_when_i_am_not_among_the_visible_addresses() {
+        // Доставка по bcc: меня в наборе нет, id всё равно остаётся функцией
+        // набора, а не того, какой ящик его принял.
+        assert_eq!(conversation_id(&[], &v(&["bob@x.ru"])), "|bob@x.ru");
+    }
 }

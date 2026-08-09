@@ -251,6 +251,73 @@ fn refresh_composer_identities(ui: &MainWindow, sh: &Shared) {
 
 
 
+/// id диалога, которому будет принадлежать письмо, отправленное с адреса
+/// `chosen`.
+///
+/// Диалог опознаётся набором адресов, поэтому смена отправителя переносит
+/// письмо в другую беседу — эта функция считает, в какую именно. Получатели
+/// берутся по тому же правилу, что и в самой отправке (контракт §1): непустое
+/// «Кому» побеждает собеседников открытого диалога.
+fn target_conversation_id(ui: &MainWindow, sh: &Shared, chosen: &str) -> Option<String> {
+    let split = |raw: &str| -> Vec<String> {
+        raw.split([',', ';'])
+            .map(|p| p.trim().to_lowercase())
+            .filter(|p| !p.is_empty())
+            .collect()
+    };
+
+    let to = split(ui.get_composer_to().as_str());
+    let cc = split(ui.get_composer_cc().as_str());
+    let mut recipients = if to.is_empty() {
+        let convs = sh.convs.borrow();
+        let c = convs.get(sh.current.get())?;
+        c.counterparts.iter().map(|cp| cp.addr.to_lowercase()).collect::<Vec<_>>()
+    } else {
+        to
+    };
+    recipients.extend(cc);
+    if recipients.is_empty() {
+        return None;
+    }
+
+    let participants = ddmail_core::imap::conversation_participants(chosen, &recipients, &[]);
+    let identities = sh.composer_identities.borrow();
+    let is_mine = |a: &String| identities.iter().any(|i| i.eq_ignore_ascii_case(a));
+    let mine: Vec<String> = participants.iter().filter(|a| is_mine(a)).cloned().collect();
+    let others: Vec<String> = participants.iter().filter(|a| !is_mine(a)).cloned().collect();
+    Some(ddmail_core::imap::conversation_id(&mine, &others))
+}
+
+/// Перейти в диалог, которого ждали после отправки с другого адреса, — если он
+/// уже приехал. Склеенный диалог показывается под id своего первичного, поэтому
+/// цель ищется и через merges.
+///
+/// `true` — переход состоялся; тогда восстанавливать выделение по прежнему
+/// диалогу уже нельзя, иначе оно тут же вернёт нас обратно.
+fn try_pending_switch(ui: &MainWindow, sh: &Shared) -> bool {
+    let Some(target) = sh.pending_switch.borrow().clone() else { return false };
+    let idx = {
+        let convs = sh.convs.borrow();
+        convs.iter().position(|c| c.id == target).or_else(|| {
+            let key = merges::MergeKey {
+                account: sh.cur_account_key.borrow().clone(),
+                id: target.clone(),
+            };
+            let primary = sh.merges.borrow().members_of(&key).first().cloned()?;
+            convs.iter().position(|c| c.id == primary.id)
+        })
+    };
+    let Some(idx) = idx else { return false };
+    *sh.pending_switch.borrow_mut() = None;
+    sh.current.set(idx);
+    ui.set_selected(idx as i32);
+    apply_active_header(ui, sh, idx);
+    open_conversation(ui, sh, idx);
+    ui.set_sidebar_row_y(idx as f32 * 64.0);
+    ui.set_sidebar_scroll_seq(ui.get_sidebar_scroll_seq() + 1);
+    true
+}
+
 /// Отправитель не тот, на кого пишут в этом диалоге?
 ///
 /// Возвращает (адрес диалога, выбранный адрес), когда они разошлись. Оба —
@@ -1239,6 +1306,12 @@ struct Shared {
     /// приоритетно. None = явного выбора нет, действует авто-логика.
     /// Сбрасывается при смене контекста (открытие беседы / новое письмо).
     picked_identity: RefCell<Option<String>>,
+    /// Диалог, в который надо перейти, когда он появится в списке: отправка с
+    /// другого адреса образует свой набор адресов, то есть свою беседу, и она
+    /// возникает не мгновенно — сначала письмо должно долететь до «Отправленных»
+    /// и вернуться синком. Ставится галочкой в диалоге «не тот адрес».
+    pending_switch: RefCell<Option<String>>,
+
     /// Отправка, задержанная диалогом «отвечаешь не с того адреса»: текст
     /// письма ждёт решения. Set → показан диалог; on_send при повторном входе
     /// забирает текст отсюда и проверку уже не делает.
@@ -4459,7 +4532,21 @@ fn main() {
     );
 
     let account = open_account();
-    let loaded_merges = merges::load();
+    let mut loaded_merges = merges::load();
+    // Разовый перевод сохранённых склеек на новую схему id. Трогает только
+    // диалоги, где все адреса мои: их id раньше строился из пары
+    // «айдентика|отправитель», а теперь из всего набора (`migrate_self_chat_ids`).
+    // Остальные формы совпадают со старыми байт в байт и не переписываются.
+    if let Some((cache, key, _)) = &account {
+        let ids: Vec<String> = cache
+            .load_identities(key)
+            .map(|v| v.into_iter().map(|i| i.email).collect())
+            .unwrap_or_default();
+        if !ids.is_empty() && loaded_merges.migrate_self_chat_ids(&ids) {
+            merges::save(&loaded_merges);
+            println!("merges: id диалогов переведены на схему «набор адресов»");
+        }
+    }
     let startup_ident_colors = match &account {
         Some((c, k, _)) => identity_color_map(c, k),
         None => HashMap::new(),
@@ -4925,6 +5012,7 @@ fn main() {
         merges: RefCell::new(loaded_merges),
         ctx_attach: RefCell::new(None),
         picked_identity: RefCell::new(None),
+        pending_switch: RefCell::new(None),
         held_send: RefCell::new(None),
         displays: RefCell::new(displays.clone()),
         avatars: RefCell::new(HashMap::new()),
@@ -5586,19 +5674,28 @@ fn main() {
                 // индекс пикера обратно, и уйдёт снова не то.
                 *sh.picked_identity.borrow_mut() = Some(email.clone());
                 aim_composer_identity(&ui, &sh, &email);
+                // Письмо уедет в диалог своего набора адресов. Переходим туда
+                // только если попросили галочкой и адрес действительно другой.
+                let switching = ui.get_from_mismatch_switch()
+                    && ui.get_from_mismatch_index() != ui.get_from_mismatch_expected_index();
+                *sh.pending_switch.borrow_mut() = if switching {
+                    target_conversation_id(&ui, &sh, &email)
+                } else {
+                    None
+                };
             }
             let text = sh.held_send.borrow().clone().unwrap_or_default();
             ui.invoke_send(text.into());
         });
     }
     {
-        let weak = ui.as_weak();
         let sh = shared.clone();
         ui.on_from_mismatch_cancel(move || {
-            let Some(ui) = weak.upgrade() else { return };
             // Возвращать текст не нужно: композер чистится только на
             // успешной ветке отправки (clear_overrides), документ на месте.
+            // Снимаем и задержанную отправку, и ожидание перехода.
             sh.held_send.borrow_mut().take();
+            sh.pending_switch.borrow_mut().take();
         });
     }
 
@@ -5639,6 +5736,10 @@ fn main() {
                         addresses.iter().map(|e| slint::SharedString::from(e.as_str())).collect::<Vec<_>>(),
                     )));
                     ui.set_from_mismatch_index(picked as i32);
+                    ui.set_from_mismatch_expected_index(picked as i32);
+                    // Галочка каждый раз с нуля: переход — осознанный выбор,
+                    // а не залипшая настройка.
+                    ui.set_from_mismatch_switch(false);
                     ui.set_from_mismatch_expected(expected.into());
                     ui.set_from_mismatch_current(current.into());
                     ui.set_from_mismatch_visible(true);
@@ -7703,10 +7804,14 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     }
                     *sh.convs.borrow_mut() = merged;
                     *sh.displays.borrow_mut() = displays;
+                    // Диалог, созданный отправкой с другого адреса, мог
+                    // приехать именно сейчас — тогда переходим в него, и
+                    // восстанавливать выделение по старому id уже незачем.
+                    let switched = try_pending_switch(ui, sh);
                     // Re-locate the selection by id (skip in transient-compose
                     // mode, where the sidebar has a synthetic first row).
                     if sh.pending_compose.borrow().is_none() {
-                        if let Some(id) = current_id {
+                        if let Some(id) = current_id.filter(|_| !switched) {
                             if let Some(idx) = sh.convs.borrow().iter().position(|c| c.id == id) {
                                 if idx != sh.current.get() {
                                     sh.current.set(idx);
