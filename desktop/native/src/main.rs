@@ -2270,10 +2270,6 @@ fn rich_refresh(ui: &MainWindow, sh: &Shared) {
     ui.set_rt_caret_y(out.caret_y);
     ui.set_rt_caret_h(out.caret_h);
     ui.set_rt_has_selection(ed.has_selection());
-    let style = ed.current_style();
-    ui.set_rt_bold(style.bold);
-    ui.set_rt_italic(style.italic);
-    ui.set_rt_underline(style.underline);
     ui.set_rt_can_send(!ed.is_empty());
     ui.set_rt_empty(ed.is_empty());
     ui.set_composer_text(ed.plain_text().into());
@@ -6201,24 +6197,6 @@ fn main() {
         }
         rich_refresh(&u, &sh_rtp);
     });
-    let ui_weak_rtt = ui.as_weak();
-    let sh_rtt = shared.clone();
-    ui.on_rt_toggle(move |bit| {
-        let Some(u) = ui_weak_rtt.upgrade() else { return };
-        let bit = match bit {
-            0 => richtext::StyleBit::Bold,
-            1 => richtext::StyleBit::Italic,
-            _ => richtext::StyleBit::Underline,
-        };
-        sh_rtt.rich.borrow_mut().toggle_style(bit);
-        rich_refresh(&u, &sh_rtt);
-    });
-    let ui_weak_rtf = ui.as_weak();
-    ui.on_rt_focus_changed(move |focused| {
-        let Some(u) = ui_weak_rtf.upgrade() else { return };
-        u.set_composer_format_bar_visible(focused);
-    });
-
     // ── Search-as-compose dropdown wiring ──
     //
     // Each keystroke fires `search-typed` → we cache the latest query on
@@ -8162,9 +8140,46 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         *sh.compose_sent_target.borrow_mut() = Some(t);
                         refresh_sidebar(sh, ui);
                     }
+                    // Письмо принято сервером, но в «Отправленных» оно
+                    // оказывается не в тот же миг: копию туда кладёт сервер
+                    // (для внешнего ящика — удалённый провайдер) уже после
+                    // того, как SMTP ответил «принято».
+                    //
+                    // Отсюда два следствия для синка. Он должен быть полным:
+                    // дельта отдаёт только изменившиеся беседы, а беседы
+                    // отправленного письма может ещё не существовать вовсе —
+                    // особенно теперь, когда отправка с другого адреса заводит
+                    // свой диалог (§4). И он должен повториться: первый запрос
+                    // почти наверняка обгонит раскладку по папкам, и без
+                    // второго отправленное всплыло бы только со следующим
+                    // периодическим синком.
+                    let force_full = |sh: &Shared| {
+                        if let Some(cache) = &sh.cache {
+                            let key = sh.cur_account_key.borrow().clone();
+                            let key = if key.is_empty() { sh.key.clone() } else { key };
+                            cache.set_meta(&format!("conv_full_ts:{key}"), "0").ok();
+                        }
+                    };
+                    force_full(sh);
                     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
                         let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
                     }
+                    slint::Timer::single_shot(std::time::Duration::from_millis(2500), || {
+                        SHARED.with(|s| {
+                            let b = s.borrow();
+                            let Some(sh) = b.as_ref() else { return };
+                            if let Some(cache) = &sh.cache {
+                                let key = sh.cur_account_key.borrow().clone();
+                                let key = if key.is_empty() { sh.key.clone() } else { key };
+                                cache.set_meta(&format!("conv_full_ts:{key}"), "0").ok();
+                            }
+                            if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                                let _ = etx.send(engine::EngineCmd::FetchConversations {
+                                    limit: CONV_FETCH_LIMIT,
+                                });
+                            }
+                        });
+                    });
                 }
             });
         }
