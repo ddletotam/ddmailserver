@@ -710,27 +710,17 @@ export component MainWindow inherits Window {
     in property <length> rt-caret-h: 21px;
     // Есть выделение — каретку не мигаем (как в любом текстовом поле).
     in property <bool> rt-has-selection: false;
-    // Состояние кнопок форматирования (стиль под кареткой/выделением).
-    in property <bool> rt-bold: false;
-    in property <bool> rt-italic: false;
-    in property <bool> rt-underline: false;
     // Есть что отправлять: текст ИЛИ картинка (письмо из одной картинки —
     // валидное письмо, а composer-text у него пустой). Инверсия — `rt-empty`,
     // по ней показывается плейсхолдер.
     in property <bool> rt-can-send: false;
     in property <bool> rt-empty: true;
-    // Панель форматирования видна, пока композер в фокусе (её взводит
-    // rt-focus-changed со стороны Rust — так же, как гасит).
-    in-out property <bool> composer-format-bar-visible: false;
     // Ширина колонки текста изменилась — Rust переверстает под неё.
     callback rt-resize(width: length);
     // Клавиша: текст события + модификаторы. true — обработали.
     callback rt-key(text: string, ctrl: bool, shift: bool, alt: bool) -> bool;
     // Мышь: 0 — нажали, 1 — тянем, 2 — отпустили, 3 — двойной клик.
     callback rt-pointer(x: length, y: length, kind: int);
-    // Тулбар: 0 — жирный, 1 — курсив, 2 — подчёркнутый.
-    callback rt-toggle(bit: int);
-    callback rt-focus-changed(focused: bool);
     // Inline send confirmation: flipped on by the Rust side once the server
     // acks the send, back off ~2s later — the pill fades via animate.
     in-out property <bool> send-confirm-visible: false;
@@ -2311,55 +2301,6 @@ export component MainWindow inherits Window {
                 }
             }
 
-            // Панель форматирования: показывается, только когда композер в
-            // фокусе — в покое пузырь остаётся телеграмно-чистым. Ж/К/Ч
-            // дублируют Ctrl+B/I/U (те работают в любой раскладке).
-            if root.composer-format-bar-visible: Rectangle {
-                height: 30px;
-                background: white;
-                HorizontalLayout {
-                    padding-left: 66px;
-                    spacing: 4px;
-                    alignment: start;
-                    for b[i] in [
-                        { label: "Ж", weight: 800, italic: false, hint: "Полужирный (Ctrl+B)" },
-                        { label: "К", weight: 500, italic: true, hint: "Курсив (Ctrl+I)" },
-                        { label: "Ч", weight: 500, italic: false, hint: "Подчёркнутый (Ctrl+U)" },
-                    ]: Rectangle {
-                        property <bool> active: i == 0 ? root.rt-bold
-                            : (i == 1 ? root.rt-italic : root.rt-underline);
-                        width: 26px;
-                        height: 26px;
-                        border-radius: 6px;
-                        background: active ? #d7f2e8 : (fmt-ta.has-hover ? #eef0f4 : transparent);
-                        fmt-ta := TouchArea {
-                            // Кнопку жмём, фокус остаётся в тексте: тулбар не
-                            // забирает его на себя (иначе выделение слетало бы).
-                            clicked => { root.rt-toggle(i); }
-                        }
-                        Text {
-                            width: parent.width;
-                            height: parent.height;
-                            text: b.label;
-                            font-size: 14px;
-                            font-weight: parent.active ? 800 : b.weight;
-                            font-italic: b.italic;
-                            color: parent.active ? #0b8f66 : #5b6672;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                        // Подчёркивание рисуем сами: font-underline у Slint нет.
-                        if i == 2: Rectangle {
-                            x: 8px;
-                            y: 18px;
-                            width: 10px;
-                            height: 1px;
-                            background: parent.active ? #0b8f66 : #5b6672;
-                        }
-                    }
-                }
-            }
-
             Rectangle {
                 // Grows with the message up to a cap: Shift+Enter adds a
                 // newline, Enter sends. Single-line messages stay at 64px.
@@ -2447,7 +2388,6 @@ export component MainWindow inherits Window {
                         // TouchArea выше), но при этом имеет геометрию —
                         // нулевой по размеру элемент фокус не берёт.
                         rt-scope := FocusScope {
-                            changed has-focus => { root.rt-focus-changed(self.has-focus); }
                             key-pressed(ev) => {
                                 // Разбор — целиком в Rust: там и модель, и
                                 // раскладко-независимые шорткаты, и буфер обмена.
