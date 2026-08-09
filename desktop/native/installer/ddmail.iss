@@ -3,9 +3,9 @@
 ; Input:  target\release\ddmail-native.exe (cargo build --release)
 ; Output: installer\out\ddmail-setup-<version>.exe
 ;
-; Per-user install (no UAC): %LOCALAPPDATA%\Programs\ddmail. WebView2 Runtime
-; is required for message rendering — present on stock Windows 11, checked and
-; bootstrapped on systems where it's missing.
+; Per-user install (no UAC): %LOCALAPPDATA%\Programs\ddmail. Внешних
+; зависимостей нет: тела писем рендерит собственный движок (desktop/emlrender),
+; браузерного рантайма в поставке не требуется.
 
 #define AppName "ddmail"
 #define AppVersion "0.1.6"
@@ -62,46 +62,3 @@ Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; \
 ; Cache is regenerable (bodies/textures re-fetch); accounts.json holds the
 ; login token — remove both so uninstall leaves no credentials behind.
 Type: filesandordirs; Name: "{userappdata}\ru.letotam.ddmail"
-
-[Code]
-// WebView2 Runtime detection: per-machine, then per-user (Evergreen).
-function WebView2Installed(): Boolean;
-var
-  Ver: String;
-begin
-  Result :=
-    RegQueryStringValue(HKLM,
-      'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
-      'pv', Ver) or
-    RegQueryStringValue(HKCU,
-      'Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
-      'pv', Ver);
-  Result := Result and (Ver <> '') and (Ver <> '0.0.0.0');
-end;
-
-procedure InstallWebView2();
-var
-  Path: String;
-  ResultCode: Integer;
-begin
-  Path := ExpandConstant('{tmp}\MicrosoftEdgeWebView2Setup.exe');
-  if not FileExists(Path) then begin
-    try
-      // Evergreen bootstrapper (~2 MB), official fwlink.
-      DownloadTemporaryFile(
-        'https://go.microsoft.com/fwlink/p/?LinkId=2124703',
-        'MicrosoftEdgeWebView2Setup.exe', '', nil);
-    except
-      // No network / blocked download: the app itself will show a clear
-      // render error; don't fail the install over it.
-      exit;
-    end;
-  end;
-  Exec(Path, '/silent /install', '', SW_SHOW, ewWaitUntilTerminated, ResultCode);
-end;
-
-procedure CurStepChanged(CurStep: TSetupStep);
-begin
-  if (CurStep = ssPostInstall) and not WebView2Installed() then
-    InstallWebView2();
-end;
