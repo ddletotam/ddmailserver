@@ -1,0 +1,28 @@
+[package]
+name = "render-lab"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone harness: render all cached inbox emails as bubbles in a scroll panel"
+
+[dependencies]
+slint = "1.13"
+rusqlite = { version = "0.31", features = ["bundled"] }
+# `net`: the harness loads every image the mail asks for. This is a rendering
+# bench — the point is to see what the HTML actually looks like — so it does no
+# permission gating of its own. Loading an image tells its sender the message
+# was opened; the client gates that per sender, the bench does not.
+emlrender = { path = "../emlrender", features = ["net"] }
+# Same clipboard crate the client uses, so "select and copy" behaves here
+# exactly as it will there.
+arboard = "3"
+
+[build-dependencies]
+slint-build = "1.13"
+
+[profile.dev]
+# The harness renders a few hundred real mails on startup; unoptimized shaping
+# and image resampling make that a coffee break instead of a few seconds.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

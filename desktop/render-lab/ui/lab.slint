@@ -1,0 +1,177 @@
+// The panel, and nothing but the panel.
+//
+// Point 2 of the brief is a hard constraint here: no toolbar, no header, no
+// status line, no labels. One scroll view, bubbles inside it, in order. Every
+// bubble is a bitmap from `emlrender` plus two transparent layers on top —
+// selection highlights and a hit area — because a raster page is exactly what
+// a PDF viewer selects text on, and this is the same trick.
+//
+// Resizing: `content-w` is the authority on how wide a bubble's content is,
+// and Rust re-renders every mail at that width once the drag settles. Until it
+// does, each bubble scales its existing bitmap by `zoom` — proportionally, so
+// text never squashes — and the crisp re-render swaps in underneath.
+
+import { ScrollView } from "std-widgets.slint";
+
+struct Bubble {
+    img: image,
+    // Logical (CSS px) size the bitmap was *rendered* at. Display size is this
+    // times `zoom`; the two agree again as soon as the re-render lands.
+    w: length,
+    h: length,
+    outgoing: bool,
+}
+
+// One merged selection-highlight rect, in rendered CSS px (so it scales with
+// the bubble exactly like the bitmap does).
+struct SelRect {
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+}
+
+export { Bubble, SelRect }
+
+export component LabWindow inherits Window {
+    title: "render-lab";
+    preferred-width: 520px;
+    preferred-height: 940px;
+    min-width: 320px;
+    background: #eef1f5;
+
+    in property <[Bubble]> bubbles;
+    // Selection lives in one bubble at a time, like the client's.
+    in property <int> sel-row: -1;
+    in property <[SelRect]> sel-rects: [];
+    // What the pointer is over, decided in Rust against the render geometry:
+    // 0 nothing, 1 a link, 2 selectable text.
+    in property <int> hover-kind: 0;
+
+    // How wide a bubble's *content* may get. Deliberately the host's call, not
+    // the renderer's: layout will happily reflow to any width.
+    //
+    // The floor is technical — below it mail stops being mail, every table
+    // linearises and the panel becomes a column of fragments. The ceiling is
+    // typographic — mail is authored for about 600 px, so past that a design
+    // just floats in whitespace while text-only mail grows 120-character
+    // lines. Neither is a limit of the renderer.
+    in property <length> min-content-w: 260px;
+    // Uncapped by default: the panel is the host here, and its policy is that
+    // a bubble follows the window. A client that wants a reading measure can
+    // set this to 640px or so — that is what the property is for.
+    in property <length> max-content-w: 100000px;
+
+    callback press(int, length, length);
+    callback drag(int, length, length);
+    callback release(int, length, length);
+    callback hover(int, length, length);
+    callback copy-selection();
+
+    // Breathing room the mail itself no longer has: a 600 px design clamped
+    // into a narrow bubble loses the margins its author relied on.
+    property <length> pad: 12px;
+    // Room for the panel padding, the bubble padding and the scrollbar.
+    property <length> chrome: 60px;
+
+    out property <length> content-w:
+        min(max(root.width - root.chrome, root.min-content-w), root.max-content-w);
+
+    forward-focus: keys;
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == "c" && event.modifiers.control) {
+                root.copy-selection();
+                return accept;
+            }
+            return reject;
+        }
+
+        ScrollView {
+            VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+
+                for b[idx] in root.bubbles: HorizontalLayout {
+                    alignment: b.outgoing ? end : start;
+
+                    bubble := Rectangle {
+                        // 1.0 once the re-render for this width has landed.
+                        property <float> zoom: b.w > 0px ? root.content-w / b.w : 1.0;
+                        property <length> vw: b.w * self.zoom;
+                        property <length> vh: b.h * self.zoom;
+
+                        width: self.vw + 2 * root.pad;
+                        height: self.vh + 2 * root.pad;
+                        background: b.outgoing ? #dcf5e3 : #ffffff;
+                        border-radius: 14px;
+                        border-width: 1px;
+                        border-color: b.outgoing ? #bfe6cb : #e3e7ee;
+
+                        Image {
+                            x: root.pad;
+                            y: root.pad;
+                            width: bubble.vw;
+                            height: bubble.vh;
+                            source: b.img;
+                            image-fit: fill;
+                        }
+
+                        if idx == root.sel-row: Rectangle {
+                            x: root.pad;
+                            y: root.pad;
+                            width: bubble.vw;
+                            height: bubble.vh;
+                            for sr in root.sel-rects: Rectangle {
+                                x: sr.x * bubble.zoom;
+                                y: sr.y * bubble.zoom;
+                                width: sr.w * bubble.zoom;
+                                height: sr.h * bubble.zoom;
+                                background: #3b82f64d;
+                                border-radius: 2px;
+                            }
+                        }
+
+                        touch := TouchArea {
+                            x: root.pad;
+                            y: root.pad;
+                            width: bubble.vw;
+                            height: bubble.vh;
+                            mouse-cursor: root.hover-kind == 1 ? MouseCursor.pointer
+                                        : root.hover-kind == 2 ? MouseCursor.text
+                                        : MouseCursor.default;
+                            pointer-event(event) => {
+                                // Hover has to come from here: `moved` only
+                                // fires while a button is held, and a plain
+                                // move carries no button at all — so the
+                                // button check has to come *after* this.
+                                if (event.kind == PointerEventKind.move) {
+                                    if (!touch.pressed) {
+                                        root.hover(idx, touch.mouse-x, touch.mouse-y);
+                                    }
+                                    return;
+                                }
+                                if (event.button != PointerEventButton.left) {
+                                    return;
+                                }
+                                if (event.kind == PointerEventKind.down) {
+                                    keys.focus();
+                                    root.press(idx, touch.mouse-x, touch.mouse-y);
+                                }
+                                if (event.kind == PointerEventKind.up) {
+                                    root.release(idx, touch.mouse-x, touch.mouse-y);
+                                }
+                            }
+                            moved => {
+                                if (touch.pressed) {
+                                    root.drag(idx, touch.mouse-x, touch.mouse-y);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
