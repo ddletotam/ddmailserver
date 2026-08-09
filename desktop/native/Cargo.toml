@@ -1,8 +1,8 @@
-﻿[package]
+[package]
 name = "ddmail-native"
 # Kept in sync with installer/ddmail.iss AppVersion — bump both together
 # (docs/desktop-behavior-contract.md §7).
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 
 [[bin]]
@@ -78,6 +78,7 @@ arboard = "3"
 # allow-listed domains). Stored as JSON via serde_json (declared above)
 # next to the cache db; serde-derive used for the policy/window-state structs.
 serde = { version = "1", features = ["derive"] }
+cosmic-text = "0.19.0"
 
 # в”Ђв”Ђ Platform body-render backends (only render_* differs per OS) в”Ђв”Ђ
 
