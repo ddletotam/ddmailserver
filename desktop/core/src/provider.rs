@@ -111,6 +111,22 @@ pub trait MailProvider: Send + Sync {
         uid: u32,
     ) -> Result<String, String>;
 
+    /// Just the header block.
+    ///
+    /// The headers viewer wants thirty lines; fetching the whole message for
+    /// them means downloading every attachment as base64 first. Providers that
+    /// can ask the server for only the headers should; the default is the
+    /// honest fallback of cutting them out of the full source.
+    async fn fetch_message_headers(&self, folder: &str, uid: u32) -> Result<String, String> {
+        let raw = self.fetch_message_source(folder, uid).await?;
+        let end = raw.find("
+
+").or_else(|| raw.find("
+
+")).unwrap_or(raw.len());
+        Ok(raw[..end].to_string())
+    }
+
     /// Fetch one inline body part (e.g. an inline image referenced as `cid:…`
     /// in the HTML body). Used by SandboxedEmail to substitute `cid:` URLs
     /// with renderable `data:` URLs before mounting the shadow DOM.

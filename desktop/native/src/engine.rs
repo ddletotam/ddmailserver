@@ -43,6 +43,27 @@ pub struct AccountConfig {
     pub oauth_refresh_token: Option<String>,
 }
 
+
+/// Заменить парные маркеры на тег. Непарный хвост остаётся текстом.
+fn apply_marker(text: &str, marker: &str, tag: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find(marker) {
+        let after = &rest[open + marker.len()..];
+        // Пустая пара (`****`) — не разметка, а просто звёздочки.
+        match after.find(marker).filter(|end| *end > 0) {
+            Some(end) => {
+                out.push_str(&rest[..open]);
+                out.push_str(&format!("<{tag}>{}</{tag}>", &after[..end]));
+                rest = &after[end + marker.len()..];
+            }
+            None => break,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 impl AccountConfig {
     /// Load from environment. Returns None if the IMAP basics aren't set.
     pub fn from_env() -> Option<Self> {
@@ -336,7 +357,9 @@ pub enum EngineCmd {
     Delete { messages: Vec<MessageRef>, account_key: String },
     /// Raw RFC-822 source of one message — feeds the «Показать →
     /// Заголовки / Исходник сообщения» views.
-    FetchSource { folder: String, uid: u32, account_key: String },
+    /// `headers_only` fetches just the header block — the viewer that wants
+    /// thirty lines should not pull every attachment down first.
+    FetchSource { folder: String, uid: u32, account_key: String, headers_only: bool },
     /// «Спам»: blacklist the sender and purge their messages, including the
     /// given conversation rows. The real sender is resolved server-side from
     /// `message_ids`; `scope` = "address" | "domain"; `fallback_addr` is only
@@ -914,9 +937,14 @@ pub fn spawn(
                         Err(e) => on_result(EngineResult::Error(e)),
                     }
                 }
-                EngineCmd::FetchSource { folder, uid, account_key } => {
+                EngineCmd::FetchSource { folder, uid, account_key, headers_only } => {
                     let provider = route(&conns, &account_key).provider.clone();
-                    match rt.block_on(provider.fetch_message_source(&folder, uid)) {
+                    let fetched = if headers_only {
+                        rt.block_on(provider.fetch_message_headers(&folder, uid))
+                    } else {
+                        rt.block_on(provider.fetch_message_source(&folder, uid))
+                    };
+                    match fetched {
                         Ok(raw) => on_result(EngineResult::Source { uid, raw }),
                         Err(e) => on_result(EngineResult::Error(e)),
                     }

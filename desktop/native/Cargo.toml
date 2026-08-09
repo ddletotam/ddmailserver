@@ -22,10 +22,23 @@ slint-build = "1.13"
 # Embeds assets/ddmail.ico into the exe (see build.rs).
 winresource = "0.1"
 
+[features]
+# Message bodies render through the in-house `emlrender` — no browser engine on
+# either platform. The old WebView2 / WebKitGTK backends are still here and one
+# flag away (`--no-default-features`) until this has been lived with; see
+# desktop/emlrender/PROGRESS.md.
+default = ["eml-render"]
+eml-render = ["dep:emlrender"]
+
 [dependencies]
 # raw-window-handle-06 exposes the OS window handle (HasWindowHandle), which
 # we hand to rfd's set_parent so the file dialog opens in front + modal.
 slint = { version = "1.13", features = ["raw-window-handle-06"] }
+
+# `net`: the browser backends loaded a permitted sender's images themselves, so
+# the replacement has to as well. The fetcher lives in the crate because the
+# harness needs the same one.
+emlrender = { path = "../emlrender", features = ["net"], optional = true }
 
 # Shared engine (data model, cache, IMAP/SMTP/native providers).
 ddmail-core = { path = "../core" }

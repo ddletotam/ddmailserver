@@ -1,3 +1,4 @@
+pub mod tls;
 pub mod auth;
 pub mod cache;
 pub mod caldav_client;
