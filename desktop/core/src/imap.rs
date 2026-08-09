@@ -298,12 +298,12 @@ where
 
 // Macro-like helper: connect, login, get session (TLS)
 pub(crate) async fn connect_tls(host: &str, port: u16, username: &str, password: &str)
-    -> Result<async_imap::Session<async_native_tls::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>>, String>
+    -> Result<async_imap::Session<futures_rustls::client::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>>, String>
 {
-    let tls = async_native_tls::TlsConnector::new();
+    let tls = crate::tls::connector();
     let tcp = tokio::net::TcpStream::connect((host, port))
         .await.map_err(|e| format!("TCP: {e}"))?;
-    let tls_stream = tls.connect(host, tcp.compat())
+    let tls_stream = tls.connect(crate::tls::server_name(host)?, tcp.compat())
         .await.map_err(|e| format!("TLS: {e}"))?;
     let client = async_imap::Client::new(tls_stream);
     client.login(username, password).await.map_err(|e| crate::session::friendly_login_error(e.0))
@@ -325,12 +325,12 @@ impl async_imap::Authenticator for &XOAuth2 {
 
 /// TLS IMAP connect using XOAUTH2 (OAuth access token) instead of a password.
 pub(crate) async fn connect_tls_xoauth2(host: &str, port: u16, email: &str, access_token: &str)
-    -> Result<async_imap::Session<async_native_tls::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>>, String>
+    -> Result<async_imap::Session<futures_rustls::client::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>>, String>
 {
-    let tls = async_native_tls::TlsConnector::new();
+    let tls = crate::tls::connector();
     let tcp = tokio::net::TcpStream::connect((host, port))
         .await.map_err(|e| format!("TCP: {e}"))?;
-    let tls_stream = tls.connect(host, tcp.compat())
+    let tls_stream = tls.connect(crate::tls::server_name(host)?, tcp.compat())
         .await.map_err(|e| format!("TLS: {e}"))?;
     let client = async_imap::Client::new(tls_stream);
     let auth = XOAuth2 { user: email.to_string(), token: access_token.to_string() };
@@ -763,17 +763,35 @@ where
             let from_addr_lc = from_addr.to_lowercase();
             let is_outgoing = our_addrs.iter().any(|a| a == &from_addr_lc);
 
+            // Free: the whole message is already in hand, and the viewer
+            // that wants these would otherwise re-fetch it over the network.
+            let raw_headers = header_block(body_raw);
+
             bodies.push(MessageBody {
                 uid, folder: folder.clone(), subject, from, from_addr: from_addr.clone(),
                 to, cc, date, date_ts, html, text, attachments,
                 is_outgoing,
-                message_id, in_reply_to, references,
+                message_id, in_reply_to, references, raw_headers,
             });
         }
     }
 
     bodies.sort_by_key(|b| b.date_ts);
     Ok(bodies)
+}
+
+/// The header block of a raw message: everything before the first blank line.
+fn header_block(raw: &[u8]) -> String {
+    let end = raw
+        .windows(4)
+        .position(|w| w == b"
+
+")
+        .or_else(|| raw.windows(2).position(|w| w == b"
+
+"))
+        .unwrap_or(raw.len());
+    String::from_utf8_lossy(&raw[..end]).into_owned()
 }
 
 fn walk_parts(part: &mailparse::ParsedMail, html: &mut Option<String>, text: &mut Option<String>, attachments: &mut Vec<Attachment>, idx: &mut usize) {
@@ -1107,6 +1125,23 @@ where
     let msg = msgs.first().ok_or("Message not found")?;
     let body = msg.body().ok_or("Empty body")?;
     Ok(body.to_vec())
+}
+
+/// The header block alone — kilobytes, where the full message is megabytes.
+pub(crate) async fn fetch_message_headers<T>(
+    session: &mut async_imap::Session<T>, folder: &str, uid: u32,
+) -> Result<Vec<u8>, String>
+where
+    T: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + std::fmt::Debug,
+{
+    session.select(folder).await.map_err(|e| format!("SELECT {folder}: {e}"))?;
+    let fetched = session.uid_fetch(uid.to_string(), "BODY.PEEK[HEADER]")
+        .await.map_err(|e| format!("FETCH: {e}"))?;
+    let msgs: Vec<_> = fetched.try_collect().await.map_err(|e| format!("Collect: {e}"))?;
+    let msg = msgs.first().ok_or("Message not found")?;
+    // `header()` is the BODY[HEADER] section; `body()` is empty for this fetch.
+    let bytes = msg.header().or_else(|| msg.body()).ok_or("Empty headers")?;
+    Ok(bytes.to_vec())
 }
 
 pub(crate) fn find_attachment(

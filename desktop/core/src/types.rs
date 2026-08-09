@@ -228,6 +228,15 @@ pub struct MessageBody {
     pub in_reply_to: String,
     #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub references: Vec<String>,
+    /// The RFC-822 header block exactly as it arrived, undecoded and in
+    /// message order — what the headers viewer shows.
+    ///
+    /// Kept because the parsed fields above cannot reconstruct it: they hold
+    /// five headers out of thirty, decoded and reordered. Empty for messages
+    /// cached before this existed, and for providers that never see the wire
+    /// bytes; the viewer then falls back to asking the server.
+    #[serde(default)]
+    pub raw_headers: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

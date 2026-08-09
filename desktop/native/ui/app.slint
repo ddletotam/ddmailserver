@@ -20,6 +20,15 @@ struct ConnRow {
     subtitle: string,   // server + mode
 }
 
+// One row of the connection-light dropdown: an account and whether it is
+// currently up. Binary on purpose — the aggregate light already carries the
+// «частично» state, a per-account row is either connected or it is not.
+struct ConnDotRow {
+    title: string,
+    subtitle: string,
+    ok: bool,
+}
+
 // One row of the unified address book (view-mode 2). Aggregated server-side;
 // the client shows one book and never groups by source.
 struct AddrBookRow {
@@ -180,26 +189,6 @@ struct EventExtraItem {
 // классифицируем событие сами — по кириллическим буквам тех же клавиш.
 //
 // Латиницу не перехватываем: там штатный путь Slint работает.
-global Kb {
-    // C, X, V, A на ЙЦУКЕН. Прописные — для CapsLock (Ctrl+Shift здесь
-    // отсекается: это другой набор шорткатов).
-    pure public function is-copy(ev: KeyEvent) -> bool {
-        return ev.modifiers.control && !ev.modifiers.shift && !ev.modifiers.alt
-            && (ev.text == "с" || ev.text == "С");
-    }
-    pure public function is-cut(ev: KeyEvent) -> bool {
-        return ev.modifiers.control && !ev.modifiers.shift && !ev.modifiers.alt
-            && (ev.text == "ч" || ev.text == "Ч");
-    }
-    pure public function is-paste(ev: KeyEvent) -> bool {
-        return ev.modifiers.control && !ev.modifiers.shift && !ev.modifiers.alt
-            && (ev.text == "м" || ev.text == "М");
-    }
-    pure public function is-select-all(ev: KeyEvent) -> bool {
-        return ev.modifiers.control && !ev.modifiers.shift && !ev.modifiers.alt
-            && (ev.text == "ф" || ev.text == "Ф");
-    }
-}
 
 // TextInput с починенными шорткатами (см. global Kb). Все поля ввода в
 // приложении — это он, а не голый TextInput.
@@ -210,13 +199,17 @@ global Kb {
 // перекрыл бы наш обработчик и починка потерялась бы молча.
 component KTextInput inherits TextInput {
     callback extra-key-pressed(event: KeyEvent) -> EventResult;
+    // Ctrl зажат, Alt нет, Shift нет: AltGr представляется как Ctrl+Alt, а
+    // Ctrl+Shift — это другой набор шорткатов.
+    property <bool> held: false;
     key-pressed(ev) => {
-        if (Kb.is-copy(ev)) { self.copy(); return accept; }
-        if (Kb.is-select-all(ev)) { self.select-all(); return accept; }
+        self.held = ev.modifiers.control && !ev.modifiers.alt && !ev.modifiers.shift;
+        if (Shortcuts.action(ev.text, self.held) == 1) { self.copy(); return accept; }
+        if (Shortcuts.action(ev.text, self.held) == 4) { self.select-all(); return accept; }
         // Мутирующие — только в редактируемом поле (штатный путь Slint
         // проверяет read-only так же).
-        if (!self.read-only && Kb.is-cut(ev)) { self.cut(); return accept; }
-        if (!self.read-only && Kb.is-paste(ev)) { self.paste(); return accept; }
+        if (!self.read-only && Shortcuts.action(ev.text, self.held) == 3) { self.cut(); return accept; }
+        if (!self.read-only && Shortcuts.action(ev.text, self.held) == 2) { self.paste(); return accept; }
         return self.extra-key-pressed(ev);
     }
 }
@@ -224,17 +217,41 @@ component KTextInput inherits TextInput {
 // То же для std-widget LineEdit (настройки/логин/контакты) — у него
 // шорткаты ломаются по той же причине.
 component KLineEdit inherits LineEdit {
+    property <bool> held: false;
     key-pressed(ev) => {
-        if (Kb.is-copy(ev)) { self.copy(); return accept; }
-        if (Kb.is-select-all(ev)) { self.select-all(); return accept; }
-        if (!self.read-only && Kb.is-cut(ev)) { self.cut(); return accept; }
-        if (!self.read-only && Kb.is-paste(ev)) { self.paste(); return accept; }
+        self.held = ev.modifiers.control && !ev.modifiers.alt && !ev.modifiers.shift;
+        if (Shortcuts.action(ev.text, self.held) == 1) { self.copy(); return accept; }
+        if (Shortcuts.action(ev.text, self.held) == 4) { self.select-all(); return accept; }
+        if (!self.read-only && Shortcuts.action(ev.text, self.held) == 3) { self.cut(); return accept; }
+        if (!self.read-only && Shortcuts.action(ev.text, self.held) == 2) { self.paste(); return accept; }
         return reject;
     }
 }
 
 // A horizontal dashed hairline — Slint has no stroke-dash, so we tile fixed
 // dash segments. `count` (period 24px) comes from Rust, sized to the grid.
+// Which editing action a key press means, decided in Rust against the
+// *current* keyboard layout.
+//
+// Slint cannot answer this: its own shortcut matcher compares `event.text`
+// with the latin letters "c"/"x"/"v"/"a" (i-slint-core/input.rs), so on any
+// non-latin layout neither the built-in handling nor anything written in
+// `.slint` fires. The character is all we get — so Rust asks the OS which
+// physical key produces that character right now, and answers by key.
+//
+// 0 none, 1 copy, 2 paste, 3 cut, 4 select-all.
+export global Shortcuts {
+    // `held` must be "Ctrl is down and Alt is not". It is a parameter rather
+    // than something the caller is trusted to check first, because forgetting
+    // it turns every letter into a shortcut — plain "a" selected all and "x"
+    // cut the selection.
+    //
+    // Alt is excluded because AltGr reports itself as Ctrl+Alt on Windows, and
+    // on layouts that put characters there, typing would fire shortcuts.
+    callback action(string, bool) -> int;
+}
+
+
 component DashLine inherits Rectangle {
     in property <int> count: 0;
     in property <color> seg-color: #cfd6df;
@@ -639,6 +656,9 @@ export component MainWindow inherits Window {
     in-out property <int> selected: 0;
     in property <string> active-name;
     in property <string> active-initials;
+    // Аватарка собеседника в шапке — та же, что в строке списка диалогов.
+    in property <image> active-avatar;
+    in property <bool> active-has-avatar;
     in property <brush> active-color;
 
     // Search-as-compose state. The Rust side debounces typing → fires
@@ -836,6 +856,9 @@ export component MainWindow inherits Window {
     // Aggregate connection light: 2 = green (all accounts connected),
     // 1 = yellow (some down), 0 = red (none). Drives the corner indicator.
     in property <int> conn-status: 2;
+    // Список для выпадашки под точкой + её открытость.
+    in property <[ConnDotRow]> conn-accounts;
+    in-out property <bool> conn-menu-open: false;
 
     callback view-changed(int);
     callback calendar-prev();
@@ -997,6 +1020,32 @@ export component MainWindow inherits Window {
     in-out property <bool> chat-scroll-pending: false;
     // Confirmation modal (delete conversation / spam-purge — the Rust side
     // dispatches by its own mode flag).
+    // «Отвечаешь не с того адреса» — подтверждение перед отправкой, когда
+    // выбранный отправитель не совпадает с адресом, на который пишут в этом
+    // диалоге. Список адресов здесь текстовый, а не цветными кружками: в
+    // момент, когда человек ошибся адресом, ему нужно прочитать адрес.
+    in-out property <bool> from-mismatch-visible: false;
+    // Адрес, на который пишут в диалоге, и адрес, с которого уйдёт письмо.
+    in property <string> from-mismatch-expected;
+    in property <string> from-mismatch-current;
+    // Отправить как есть / отправить с выбранного адреса (индекс в
+    // composer-identities) / отменить.
+    // Адреса для выпадающего списка и текущий выбор в нём.
+    in property <[string]> from-mismatch-options;
+    in-out property <int> from-mismatch-index;
+    callback from-mismatch-pick(int);
+    // Композер очищает поле сразу при отправке, поэтому отмена обязана вернуть
+    // текст обратно — иначе письмо просто исчезнет.
+    callback from-mismatch-cancel();
+
+    // Форматирование выделения в композере: (начало, конец, вид), смещения —
+    // байтовые, как их отдаёт TextInput. Вид: 5 жирный, 6 курсив,
+    // 7 подчёркнутый, 8 зачёркнутый — те же коды, что у резолвера клавиш.
+    // Rust возвращает выделение на место после вставки маркеров. Через
+    // свойства, а не функцию: id композера из корня не виден, а `changed`
+    // внутри самого поля — виден.  `rev` нужен, чтобы повтор той же пары
+    // смещений тоже срабатывал.
+
     in-out property <bool> confirm-delete-visible: false;
     in property <string> confirm-delete-title: "Удалить диалог?";
     in property <string> confirm-delete-text: "";
@@ -1133,7 +1182,7 @@ export component MainWindow inherits Window {
         key-pressed(ev) => {
             // Source/headers viewer is modal: it owns the keyboard while open.
             if (root.source-view-visible) {
-                if (ev.modifiers.control && (ev.text == "c" || ev.text == "C" || ev.text == "с" || ev.text == "С" || ev.text == "ц" || ev.text == "Ц" || ev.text == "\u{0003}")) {
+                if (Shortcuts.action(ev.text, ev.modifiers.control && !ev.modifiers.alt) == 1) {
                     root.src-copy-selection();
                     return accept;
                 }
@@ -1147,11 +1196,10 @@ export component MainWindow inherits Window {
                 root.delete-conversation();
                 return accept;
             }
-            // Ctrl+C — copy the bubble text selection. Match the C key
-            // layout-independently: Slint reports the produced character, so a
-            // Cyrillic (ЙЦУКЕН) layout sends "с" (U+0441), not "c". Also accept
-            // ETX, which some backends emit for Ctrl+C.
-            if (ev.modifiers.control && (ev.text == "c" || ev.text == "C" || ev.text == "с" || ev.text == "С" || ev.text == "ц" || ev.text == "Ц" || ev.text == "\u{0003}")) {
+            // Ctrl+C — copy the bubble text selection. Matched on the control
+            // code (ETX) rather than the letter: the code belongs to the key,
+            // the letter to whatever layout happens to be active.
+            if (Shortcuts.action(ev.text, ev.modifiers.control && !ev.modifiers.alt) == 1) {
                 root.copy-selection();
                 return accept;
             }
@@ -1683,7 +1731,8 @@ export component MainWindow inherits Window {
                         height: 40px;
                         border-radius: 20px;
                         background: root.active-color;
-                        Text {
+                        clip: true;
+                        if !root.active-has-avatar: Text {
                             width: parent.width;
                             height: parent.height;
                             text: root.active-initials;
@@ -1691,6 +1740,12 @@ export component MainWindow inherits Window {
                             font-weight: 700;
                             horizontal-alignment: center;
                             vertical-alignment: center;
+                        }
+                        if root.active-has-avatar: Image {
+                            width: parent.width;
+                            height: parent.height;
+                            source: root.active-avatar;
+                            image-fit: cover;
                         }
                     }
                     VerticalLayout {
@@ -2305,7 +2360,10 @@ export component MainWindow inherits Window {
                 // Grows with the message up to a cap: Shift+Enter adds a
                 // newline, Enter sends. Single-line messages stay at 64px.
                 min-height: 64px;
-                max-height: 160px;
+                // Десять строк, дальше — скролл внутри пузыря (Flickable ниже
+                // уже это умеет). 15px кегль даёт строку около 21px, плюс
+                // 16px вертикальных отступов пузыря и запас на отступы строки.
+                max-height: 10 * 21px + 32px;
                 background: white;
                 HorizontalLayout {
                     padding: 12px;
@@ -2607,7 +2665,9 @@ export component MainWindow inherits Window {
                                 }
                                 Text {
                                     horizontal-stretch: 1;
-                                    text: ident.label;
+                                    // Только адрес: имя здесь ничего не решает,
+                                    // а ошибаются именно адресом.
+                                    text: ident.email;
                                     color: #0f1419;
                                     font-size: 13px;
                                     vertical-alignment: center;
@@ -4214,6 +4274,101 @@ export component MainWindow inherits Window {
     }
 
     // ---------- Delete-conversation confirmation (modal) ----------
+    if root.from-mismatch-visible: TouchArea {
+        // Swallows clicks behind the dialog; clicking the dimmed area cancels.
+        clicked => {
+            root.from-mismatch-visible = false;
+            kb.focus();
+            root.from-mismatch-cancel();
+        }
+        FocusScope {
+            init => { self.focus(); }
+            key-pressed(ev) => {
+                if (ev.text == Key.Escape) {
+                    root.from-mismatch-visible = false;
+                    kb.focus();
+                    root.from-mismatch-cancel();
+                    return accept;
+                }
+                // No Enter-to-confirm here on purpose: this dialog exists
+                // because a reflex already sent the wrong thing once.
+                reject
+            }
+            Rectangle {
+                background: #00000066;
+                Rectangle {
+                    width: min(520px, root.width - 80px);
+                    height: fm-body.preferred-height + 40px;
+                    background: white;
+                    border-radius: 14px;
+                    drop-shadow-blur: 24px;
+                    drop-shadow-color: #00000044;
+                    TouchArea {} // keep clicks inside the card from closing it
+                    fm-body := VerticalLayout {
+                        padding: 20px;
+                        spacing: 14px;
+                        Text {
+                            text: "Адрес отправителя не совпадает";
+                            font-size: 17px; font-weight: 700; color: #0f1419;
+                        }
+                        Text {
+                            text: "В этом диалоге вам пишут на " + root.from-mismatch-expected
+                                + ", а отвечаете вы с " + root.from-mismatch-current + ".";
+                            wrap: word-wrap;
+                            font-size: 14px;
+                            color: #2b3640;
+                        }
+                        Text {
+                            text: "Отправить с адреса:";
+                            font-size: 13px;
+                            color: #64707d;
+                        }
+                        // Выпадающий список, а не строки: адресов может быть
+                        // полсотни, и полсотни строк — это не диалог, это
+                        // простыня. Предзаполнен тем адресом, на который пишут
+                        // в диалоге, — то есть правильный выбор уже выбран.
+                        ComboBox {
+                            model: root.from-mismatch-options;
+                            current-index: root.from-mismatch-index;
+                            selected(value) => {
+                                root.from-mismatch-index = self.current-index;
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle { horizontal-stretch: 1; }
+                            Button {
+                                text: "Отмена";
+                                clicked => {
+                                    root.from-mismatch-visible = false;
+                                    kb.focus();
+                                    root.from-mismatch-cancel();
+                                }
+                            }
+                            Rectangle {
+                                width: 190px; height: 34px;
+                                border-radius: 8px;
+                                background: fm-as-is.has-hover ? #d98324 : #f0994a;
+                                Text {
+                                    text: "Отправить";
+                                    color: white; font-size: 13px; font-weight: 700;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                                fm-as-is := TouchArea {
+                                    clicked => {
+                                        root.from-mismatch-visible = false;
+                                        kb.focus();
+                                        root.from-mismatch-pick(root.from-mismatch-index);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if root.confirm-delete-visible: TouchArea {
         // Swallows clicks behind the dialog; clicking the dimmed area cancels.
         clicked => { root.confirm-delete-visible = false; kb.focus(); }
@@ -4752,9 +4907,9 @@ export component MainWindow inherits Window {
         }
     }
 
-    // Connection status light (P2): an unobtrusive corner dot. Green = all
-    // accounts connected, yellow = some down, red = none. The hover panel with
-    // the per-account list + quick-fixes lands in P2-b.
+    // Connection light: green = every account connected, yellow = some down,
+    // red = none. Clicking it opens the per-account list; clicking a row goes
+    // to Settings → Аккаунты, which is where anything can be done about it.
     Rectangle {
         width: 12px;
         height: 12px;
@@ -4766,6 +4921,88 @@ export component MainWindow inherits Window {
                   : #ff5630;
         border-width: 2px;
         border-color: #ffffffcc;
+        // A 12px target is too small to hit; the touch area is bigger than
+        // the dot it belongs to.
+        TouchArea {
+            x: -8px;
+            y: -8px;
+            width: 28px;
+            height: 28px;
+            clicked => { root.conn-menu-open = !root.conn-menu-open; }
+        }
+    }
+
+    // Click-away catcher, below the panel in z-order.
+    if root.conn-menu-open: TouchArea {
+        clicked => { root.conn-menu-open = false; }
+    }
+    if root.conn-menu-open: Rectangle {
+        x: 10px;
+        y: root.height - self.height - 30px;
+        width: 300px;
+        height: cd-list.preferred-height + 8px;
+        background: white;
+        border-radius: 10px;
+        border-width: 1px;
+        border-color: #e3e6ea;
+        drop-shadow-blur: 14px;
+        drop-shadow-color: #00000026;
+        drop-shadow-offset-y: 2px;
+        TouchArea {} // keep clicks inside the panel from closing it
+        cd-list := VerticalLayout {
+            padding: 4px;
+            if root.conn-accounts.length == 0: Text {
+                height: 32px;
+                text: "Нет настроенных учётных записей";
+                font-size: 13px;
+                color: #8b95a1;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+            }
+            for acc in root.conn-accounts: Rectangle {
+                height: 42px;
+                border-radius: 8px;
+                background: acc-ta.has-hover ? #f0f4fa : transparent;
+                acc-ta := TouchArea {
+                    clicked => {
+                        root.conn-menu-open = false;
+                        root.settings-tab = 3;
+                        root.settings-visible = true;
+                    }
+                }
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 8px;
+                    Rectangle {
+                        width: 10px;
+                        Rectangle {
+                            y: 16px;
+                            width: 10px;
+                            height: 10px;
+                            border-radius: 5px;
+                            background: acc.ok ? #36b37e : #ff5630;
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: acc.title;
+                            font-size: 13px;
+                            color: #0f1419;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: acc.subtitle;
+                            font-size: 11px;
+                            color: #8b95a1;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

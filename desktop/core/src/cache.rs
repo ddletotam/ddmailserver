@@ -182,6 +182,9 @@ impl Cache {
         conn.execute("ALTER TABLE message_bodies ADD COLUMN message_id TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE message_bodies ADD COLUMN in_reply_to TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE message_bodies ADD COLUMN references_json TEXT NOT NULL DEFAULT '[]'", []).ok();
+        // Empty for rows cached before this column; the viewer falls back to
+        // the network for those and they fill in on the next sync.
+        conn.execute("ALTER TABLE message_bodies ADD COLUMN raw_headers TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE avatar_cache ADD COLUMN mime TEXT NOT NULL DEFAULT ''", []).ok();
         // Existing rows pre-MIME stored Gravatar PNG bytes — purge so the
         // next lookup uses the new chain (and labels the result with a MIME).
@@ -535,8 +538,9 @@ impl Cache {
                 "INSERT OR REPLACE INTO message_bodies \
                  (folder, uid, account_key, subject, from_header, from_addr, to_header, cc_header, \
                   date_header, date_ts, html, text_body, attachments_json, is_outgoing, \
-                  message_id, in_reply_to, references_json, cached_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                  message_id, in_reply_to, references_json, raw_headers, cached_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, \
+                         ?16, ?17, ?18, ?19)",
                 params![
                     body.folder, body.uid, account_key,
                     body.subject, body.from, body.from_addr,
@@ -544,7 +548,8 @@ impl Cache {
                     body.date, body.date_ts,
                     body.html, body.text, att_json,
                     body.is_outgoing as i32,
-                    body.message_id, body.in_reply_to, refs_json, now
+                    body.message_id, body.in_reply_to, refs_json,
+                    body.raw_headers, now
                 ],
             ).map_err(|e| format!("ins body: {e}"))?;
         }
@@ -559,7 +564,7 @@ impl Cache {
         let mut stmt = conn.prepare(
             "SELECT folder, uid, subject, from_header, from_addr, to_header, cc_header, \
              date_header, date_ts, html, text_body, attachments_json, is_outgoing, \
-             message_id, in_reply_to, references_json \
+             message_id, in_reply_to, references_json, raw_headers \
              FROM message_bodies WHERE folder = ?1 AND uid = ?2 AND account_key = ?3"
         ).map_err(|e| format!("prepare: {e}"))?;
 
@@ -587,11 +592,18 @@ impl Cache {
                     message_id: row.get(13)?,
                     in_reply_to: row.get(14)?,
                     references: serde_json::from_str(&refs_json).unwrap_or_default(),
+                    raw_headers: row.get(16)?,
                 })
             });
 
-            if let Ok(body) = result {
-                bodies.push(body);
+            match result {
+                Ok(body) => bodies.push(body),
+                // `QueryReturnedNoRows` is the ordinary "not cached yet" case;
+                // anything else means the query itself is wrong, and silence
+                // there reads as an empty cache — which is exactly how a
+                // column-index mistake turned into "nothing loads".
+                Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                Err(e) => eprintln!("cache: load body {}/{} failed: {e}", mr.folder, mr.uid),
             }
         }
 

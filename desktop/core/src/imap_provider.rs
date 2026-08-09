@@ -300,6 +300,13 @@ impl MailProvider for ImapProvider {
         })
     }
 
+    async fn fetch_message_headers(&self, folder: &str, uid: u32) -> Result<String, String> {
+        let bytes = with_session!(self, |session| {
+            imap::fetch_message_headers(&mut session, folder, uid).await
+        })?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     async fn fetch_attachment(
         &self,
         folder: &str,

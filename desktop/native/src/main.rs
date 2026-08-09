@@ -21,10 +21,16 @@ mod richtext;
 mod richtext_render;
 #[cfg(any(windows, target_os = "linux"))]
 mod tray;
-#[cfg(target_os = "linux")]
+// The browser-free renderer, when asked for: `--features eml-render`. It wins
+// over the platform backends on both platforms — the whole point is that it
+// does not depend on one.
+#[cfg(feature = "eml-render")]
+#[path = "render_eml.rs"]
+mod render;
+#[cfg(all(target_os = "linux", not(feature = "eml-render")))]
 #[path = "render_webkit.rs"]
 mod render;
-#[cfg(windows)]
+#[cfg(all(windows, not(feature = "eml-render")))]
 #[path = "render_webview2.rs"]
 mod render;
 mod sanitize;
@@ -241,6 +247,36 @@ fn refresh_composer_identities(ui: &MainWindow, sh: &Shared) {
     ui.set_composer_identities(ModelRc::new(VecModel::from(items)));
     ui.set_composer_identity_index(if selected >= 0 { selected } else { default_idx });
     *sh.composer_identities.borrow_mut() = emails;
+}
+
+
+
+/// Отправитель не тот, на кого пишут в этом диалоге?
+///
+/// Возвращает (адрес диалога, выбранный адрес), когда они разошлись. Оба —
+/// нормализованные. `None`, если сравнивать нечего: диалог не открыт, адрес
+/// получателя неизвестен, или он не среди наших identity — предупреждать про
+/// алиас, который всё равно не выбрать, значит учить пользователя жать «всё
+/// равно отправить» не глядя.
+fn from_mismatch(ui: &MainWindow, sh: &Shared) -> Option<(String, String)> {
+    // Та же логика, что и в on_send: закреплённый выбор важнее индекса пикера.
+    let current = sh
+        .picked_identity
+        .borrow()
+        .clone()
+        .or_else(|| {
+            let idx = ui.get_composer_identity_index();
+            sh.composer_identities.borrow().get(idx.max(0) as usize).cloned()
+        })?
+        .to_lowercase();
+    let expected = sh.convs.borrow().get(sh.current.get())?.received_by.to_lowercase();
+    if expected.is_empty() || expected == current {
+        return None;
+    }
+    if !sh.composer_identities.borrow().iter().any(|e| *e == expected) {
+        return None;
+    }
+    Some((expected, current))
 }
 
 /// Aim the from-picker at a specific identity email (case-insensitive).
@@ -1083,9 +1119,16 @@ fn attachment_chips(b: &MessageBody) -> String {
     s
 }
 
+/// Bump whenever the bubble/render HTML template or its CSS changes: the
+/// texture cache keys renders by fnv1a(body.html) only, so without this a
+/// template/CSS edit would keep serving stale cached bitmaps (RAM + disk).
+const RENDER_TEMPLATE_EPOCH: u64 = 3;
+
 fn bubble_template(is_outgoing: bool, time: &str, inner: &str) -> String {
     let side = if is_outgoing { "out" } else { "in" };
-    let bg = if is_outgoing { "#cfe6ff" } else { "#ffffff" };
+    // Own messages in the app's green, not a blue from somewhere else: the
+    // accent, links and the selection highlight are all #10b981.
+    let bg = if is_outgoing { "#d7f0e3" } else { "#ffffff" };
     // Bottom-right timestamp inside the bubble (as in the old Tauri client).
     // Empty date_ts → no stamp.
     let time_html = if time.is_empty() {
@@ -1097,16 +1140,20 @@ fn bubble_template(is_outgoing: bool, time: &str, inner: &str) -> String {
         r#"<!DOCTYPE html><html><head><meta charset="utf-8"><style>
         html, body {{ margin: 0; padding: 0; background: #e9eef5; }}
         body {{ font-family: 'Segoe UI', system-ui, sans-serif; }}
-        .row {{ display: flex; padding: 6px 60px; }}
-        .row.out {{ justify-content: flex-end; }}
-        .row.in  {{ justify-content: flex-start; }}
+        /* Auto margins, not flex: the standard way to align a block, and it
+           renders the same in a browser. Single-class selectors on the bubble
+           itself rather than `.row.out .bubble` — the in-house renderer
+           matches one class and no combinators (see docs/backlog.md). */
+        .row {{ padding: 6px 60px; }}
+        .bubble-out {{ margin-left: auto; margin-right: 0; }}
+        .bubble-in  {{ margin-left: 0; margin-right: auto; }}
         .bubble {{
             max-width: 72%; background: {bg}; border-radius: 16px; padding: 10px 14px;
             font-size: 15px; line-height: 1.4; color: #0f1419;
             box-shadow: 0 1px 2px rgba(0,0,0,0.12); overflow-wrap: anywhere;
         }}
-        .row.out .bubble {{ border-bottom-right-radius: 4px; }}
-        .row.in  .bubble {{ border-bottom-left-radius: 4px; }}
+        .bubble-out {{ border-bottom-right-radius: 4px; }}
+        .bubble-in  {{ border-bottom-left-radius: 4px; }}
         .bubble * {{ max-width: 100% !important; border: 0 !important; background-image: none !important; }}
         .bubble table, .bubble td, .bubble th {{ border-collapse: collapse !important; }}
         .bubble img {{ max-width: 100% !important; height: auto !important; }}
@@ -1118,7 +1165,7 @@ fn bubble_template(is_outgoing: bool, time: &str, inner: &str) -> String {
         .time {{ text-align: right; font-size: 11px; color: #8a97a5;
                  margin-top: 4px; user-select: none; }}
         </style></head>
-        <body><div class="row {side}"><div class="bubble">{inner}{time_html}</div></div></body></html>"#
+        <body><div class="row"><div class="bubble bubble-{side}">{inner}{time_html}</div></div></body></html>"#
     )
 }
 
@@ -1192,6 +1239,13 @@ struct Shared {
     /// приоритетно. None = явного выбора нет, действует авто-логика.
     /// Сбрасывается при смене контекста (открытие беседы / новое письмо).
     picked_identity: RefCell<Option<String>>,
+    /// Отправка, задержанная диалогом «отвечаешь не с того адреса»: текст
+    /// письма ждёт решения. Set → показан диалог; on_send при повторном входе
+    /// забирает текст отсюда и проверку уже не делает.
+    ///
+    /// Задержка нужна потому, что композер очищает поле сразу при отправке:
+    /// без этого отменённое письмо просто пропало бы.
+    held_send: RefCell<Option<String>>,
     displays: RefCell<Vec<Disp>>,
     avatars: RefCell<HashMap<String, Image>>,
     /// account_key of the currently open conversation. Addressed engine
@@ -2207,21 +2261,18 @@ fn rich_key(ui: &MainWindow, sh: &Rc<Shared>, text: &str, ctrl: bool, shift: boo
     let is = |k: Key| ch == Some(char::from(k));
 
     if ctrl && !alt {
-        let hit = |latin: char, ru: char| {
-            ch.map(|c| {
-                let c = c.to_lowercase().next().unwrap_or(c);
-                c == latin || c == ru
-            })
-            .unwrap_or(false)
-        };
-        if hit('c', 'с') {
+        // Та же клавиша, что и в остальных полях ввода: спрашиваем раскладку,
+        // а не сравниваем букву (см. `shortcut_key`).
+        let key = shortcut_key(text);
+        let hit = |latin: char| key == Some(latin.to_ascii_uppercase() as u8);
+        if hit('c') {
             let sel = sh.rich.borrow().selection_text();
             if !sel.is_empty() {
                 clipboard_set(&sel);
             }
             return true;
         }
-        if hit('x', 'ч') {
+        if hit('x') {
             let sel = sh.rich.borrow().selection_text();
             if !sel.is_empty() {
                 clipboard_set(&sel);
@@ -2230,19 +2281,19 @@ fn rich_key(ui: &MainWindow, sh: &Rc<Shared>, text: &str, ctrl: bool, shift: boo
             }
             return true;
         }
-        if hit('v', 'м') {
+        if hit('v') {
             rich_paste(ui, sh);
             return true;
         }
-        if hit('a', 'ф') {
+        if hit('a') {
             sh.rich.borrow_mut().select_all();
             rich_refresh(ui, sh);
             return true;
         }
-        if hit('b', 'и') || hit('i', 'ш') || hit('u', 'г') {
-            let bit = if hit('b', 'и') {
+        if hit('b') || hit('i') || hit('u') {
+            let bit = if hit('b') {
                 StyleBit::Bold
-            } else if hit('i', 'ш') {
+            } else if hit('i') {
                 StyleBit::Italic
             } else {
                 StyleBit::Underline
@@ -2251,7 +2302,7 @@ fn rich_key(ui: &MainWindow, sh: &Rc<Shared>, text: &str, ctrl: bool, shift: boo
             rich_refresh(ui, sh);
             return true;
         }
-        if hit('k', 'л') {
+        if hit('k') {
             // Ctrl+K — ссылка из буфера обмена на выделенный текст. Диалога
             // ввода URL нет намеренно: адрес почти всегда уже скопирован.
             if let Some(url) = clipboard_text() {
@@ -2263,7 +2314,7 @@ fn rich_key(ui: &MainWindow, sh: &Rc<Shared>, text: &str, ctrl: bool, shift: boo
             }
             return true;
         }
-        if hit('z', 'я') {
+        if hit('z') {
             if shift {
                 sh.rich.borrow_mut().redo();
             } else {
@@ -2272,7 +2323,7 @@ fn rich_key(ui: &MainWindow, sh: &Rc<Shared>, text: &str, ctrl: bool, shift: boo
             rich_refresh(ui, sh);
             return true;
         }
-        if hit('y', 'н') {
+        if hit('y') {
             sh.rich.borrow_mut().redo();
             rich_refresh(ui, sh);
             return true;
@@ -2404,6 +2455,11 @@ fn apply_active_header(ui: &MainWindow, sh: &Shared, idx: usize) {
         ui.set_active_name(d.name.clone().into());
         ui.set_active_initials(d.initials.clone().into());
         ui.set_active_color(slint::Brush::SolidColor(hex(&d.color)));
+        // Та же аватарка, что в строке списка — из того же кэша по тому же
+        // ключу; инициалы остаются запасным вариантом.
+        let avatar = sh.avatars.borrow().get(&d.email).cloned();
+        ui.set_active_has_avatar(avatar.is_some());
+        ui.set_active_avatar(avatar.unwrap_or_default());
         ui.set_active_ident_color(if d.ident_color.is_empty() {
             slint::Brush::SolidColor(hex("#ffffff"))
         } else {
@@ -2516,6 +2572,8 @@ fn append_send_stub(sh: &Shared, text: &str, from: &str, conv_id: &str) {
     sh.pending_send_seq.set(uid);
     let body = MessageBody {
         uid,
+        // A stub the user just typed: it has never been on the wire.
+        raw_headers: String::new(),
         folder: PENDING_FOLDER.into(),
         subject: String::new(),
         from: from.to_string(),
@@ -4120,9 +4178,128 @@ fn refresh_connections(ui: &MainWindow, shared: &Rc<Shared>) {
     ui.set_connections(ModelRc::new(VecModel::from(rows)));
 }
 
+/// Which editing action a key press means, on the keyboard layout in force
+/// right now. 0 none, 1 copy, 2 paste, 3 cut, 4 select-all.
+///
+/// Slint hands the UI only the character a key produced, and its own shortcut
+/// matcher compares that against the latin `"c"/"x"/"v"/"a"`
+/// (`i-slint-core/input.rs`). On a non-latin layout the character is Cyrillic,
+/// nothing matches, and neither the built-in clipboard nor anything written in
+/// `.slint` fires. Enumerating layouts is not a fix — there are more than two,
+/// and the list is never done.
+///
+/// So ask the OS the inverse question: *which key produces this character?*
+/// `VkKeyScanEx` answers against the active layout, and the virtual key is a
+/// property of the physical key rather than of what is printed on it.
+fn shortcut_action(text: &str, held: bool) -> i32 {
+    // Without a modifier this is someone typing, and every letter would
+    // otherwise resolve to a virtual key and fire its shortcut.
+    if !held {
+        return 0;
+    }
+    shortcut_key(text).map_or(0, |vk| match vk {
+        b'C' => 1,
+        b'V' => 2,
+        b'X' => 3,
+        b'A' => 4,
+        b'B' => 5, // жирный
+        b'I' => 6, // курсив
+        b'U' => 7, // подчёркнутый
+        b'S' => 8, // зачёркнутый (X занят вырезанием, а резать текст в
+                   // композере нужнее, чем зачёркивать)
+        _ => 0,
+    })
+}
+
+/// Which letter key a press means, as an uppercase ASCII byte — decided
+/// against the *current* keyboard layout, never against the letter printed on
+/// the key.
+///
+/// Enumerating layouts does not work: there are more than two, and the list is
+/// never finished. Ctrl+C on ЙЦУКЕН reports "с", on ΕΛΛΗΝΙΚΆ "ψ", and neither
+/// Slint's own matcher (it compares against latin "c") nor a hand-written
+/// table of pairs covers the next one.
+///
+/// Only for a press with Ctrl held — the caller checks that. Uncombined, every
+/// letter typed would resolve to a key and fire its shortcut.
+fn shortcut_key(text: &str) -> Option<u8> {
+    let mut chars = text.chars();
+    let ch = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    // Some backends send the control code Ctrl+letter produces (A→U+0001 …
+    // Z→U+001A). It names the key outright, so take it. Note U+0009 is both
+    // Tab and Ctrl+I: reached only with the modifier down, so plain Tab is
+    // untouched.
+    let code = ch as u32;
+    if (1..=26).contains(&code) {
+        return Some(b'A' + code as u8 - 1);
+    }
+    let mut utf16 = [0u16; 2];
+    if ch.encode_utf16(&mut utf16).len() != 1 {
+        return None; // outside the BMP: never a shortcut key
+    }
+    virtual_key(utf16[0]).or_else(|| cyrillic_key(ch))
+}
+
+/// Last resort where the OS cannot be asked (X11/Wayland report the layout's
+/// own character for some Ctrl combinations): the ЙЦУКЕН positions of the keys
+/// the app binds. Windows never reaches this — `VkKeyScanExW` answers first.
+fn cyrillic_key(ch: char) -> Option<u8> {
+    let lower = ch.to_lowercase().next().unwrap_or(ch);
+    Some(match lower {
+        'с' => b'C',
+        'м' => b'V',
+        'ч' => b'X',
+        'ф' => b'A',
+        'и' => b'B',
+        'ш' => b'I',
+        'г' => b'U',
+        'ы' => b'S',
+        'я' => b'Z',
+        'н' => b'Y',
+        'л' => b'K',
+        _ => return None,
+    })
+}
+
+/// The virtual key that produces `ch` on the active layout.
+#[cfg(windows)]
+fn virtual_key(ch: u16) -> Option<u8> {
+    // Declared here rather than through the `windows` crate: two calls, and
+    // pulling in another feature of that crate for them is not worth it.
+    unsafe extern "system" {
+        fn GetKeyboardLayout(thread_id: u32) -> isize;
+        fn VkKeyScanExW(ch: u16, layout: isize) -> i16;
+    }
+    // Thread 0 means "the foreground thread's layout", which is the one the
+    // user is typing on.
+    let scan = unsafe { VkKeyScanExW(ch, GetKeyboardLayout(0)) };
+    if scan == -1 {
+        return None;
+    }
+    Some((scan & 0xFF) as u8)
+}
+
+/// Elsewhere: the latin letter, which is what X11 and Wayland report for a
+/// Ctrl combination on every layout worth the name.
+#[cfg(not(windows))]
+fn virtual_key(ch: u16) -> Option<u8> {
+    char::from_u32(ch as u32)
+        .map(|c| c.to_ascii_uppercase())
+        .filter(|c| c.is_ascii_uppercase())
+        .map(|c| c as u8)
+}
+
 fn main() {
     let _ = log::set_logger(&STDOUT_LOGGER)
         .map(|()| log::set_max_level(log::LevelFilter::Info));
+    // Name the rustls crypto backend before anything opens a connection:
+    // reqwest, lettre and tungstenite each build their own client config off
+    // the process default, and rustls panics rather than guess. See
+    // `ddmail_core::tls`.
+    ddmail_core::tls::init();
     // Single-instance guard: a second launch exits instead of opening a
     // duplicate window. (Focusing the existing window needs IPC — TODO.)
     let _instance = single_instance::SingleInstance::new("ddmail-native-single").ok();
@@ -4139,6 +4316,8 @@ fn main() {
     // time). See rebuild_engine + the connections settings panel.
 
     let ui = MainWindow::new().unwrap();
+    // Answer "which editing action is this key?" against the live layout.
+    ui.global::<Shortcuts>().on_action(|text, held| shortcut_action(text.as_str(), held));
 
     // Restore the persisted window geometry + sidebar width before the
     // first paint, so the UI opens exactly where the user left it instead
@@ -4434,6 +4613,7 @@ fn main() {
                                     ));
                             }
                             let fp = texture_cache::fnv1a(body.html.as_deref().unwrap_or(""))
+                                .wrapping_add(RENDER_TEMPLATE_EPOCH.wrapping_mul(0x9E37_79B9_7F4A_7C15))
                                 ^ att_fp
                                 ^ ((scale.to_bits() as u64) << 32);
                             let key = (body.folder.clone(), body.uid, width, policy_gen, mode, fp);
@@ -4745,6 +4925,7 @@ fn main() {
         merges: RefCell::new(loaded_merges),
         ctx_attach: RefCell::new(None),
         picked_identity: RefCell::new(None),
+        held_send: RefCell::new(None),
         displays: RefCell::new(displays.clone()),
         avatars: RefCell::new(HashMap::new()),
         cur_account_key: RefCell::new(String::new()),
@@ -5389,6 +5570,38 @@ fn main() {
     //   1. Transient compose target (search dropdown).
     //   2. Explicit reply to a specific bubble (quote ribbon).
     //   3. Implicit reply to the currently open conversation.
+    // ---- «Отвечаешь не с того адреса»: решения по задержанной отправке ----
+    {
+        let weak = ui.as_weak();
+        let sh = shared.clone();
+        ui.on_from_mismatch_pick(move |index| {
+            let Some(ui) = weak.upgrade() else { return };
+            let email = sh
+                .composer_identities
+                .borrow()
+                .get(index.max(0) as usize)
+                .cloned();
+            if let Some(email) = email {
+                // Закрепляем как ручной выбор — иначе дельта-refetch собьёт
+                // индекс пикера обратно, и уйдёт снова не то.
+                *sh.picked_identity.borrow_mut() = Some(email.clone());
+                aim_composer_identity(&ui, &sh, &email);
+            }
+            let text = sh.held_send.borrow().clone().unwrap_or_default();
+            ui.invoke_send(text.into());
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let sh = shared.clone();
+        ui.on_from_mismatch_cancel(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            // Возвращать текст не нужно: композер чистится только на
+            // успешной ветке отправки (clear_overrides), документ на месте.
+            sh.held_send.borrow_mut().take();
+        });
+    }
+
     let ui_weak_send = ui.as_weak();
     let sh_send = shared.clone();
     ui.on_send(move |text| {
@@ -5412,6 +5625,27 @@ fn main() {
                 content_id: Some(img.cid.clone()),
             })
             .collect();
+        // Отправка, возвращённая диалогом «не тот адрес», проверку уже прошла.
+        let resumed = sh_send.held_send.borrow_mut().take().is_some();
+        if !resumed {
+            if let Some(ui) = ui_weak_send.upgrade() {
+                if let Some((expected, current)) = from_mismatch(&ui, &sh_send) {
+                    *sh_send.held_send.borrow_mut() = Some(text.clone());
+                    // Список для дропдауна + предвыбор на адресе диалога:
+                    // правильный вариант уже выбран, подтвердить — один клик.
+                    let addresses = sh_send.composer_identities.borrow().clone();
+                    let picked = addresses.iter().position(|e| *e == expected).unwrap_or(0);
+                    ui.set_from_mismatch_options(ModelRc::new(VecModel::from(
+                        addresses.iter().map(|e| slint::SharedString::from(e.as_str())).collect::<Vec<_>>(),
+                    )));
+                    ui.set_from_mismatch_index(picked as i32);
+                    ui.set_from_mismatch_expected(expected.into());
+                    ui.set_from_mismatch_current(current.into());
+                    ui.set_from_mismatch_visible(true);
+                    return;
+                }
+            }
+        }
         // Graceful guard: if this thread belongs to a connection that was
         // since removed, the send has nowhere to go — say so plainly instead
         // of misrouting to another account.
@@ -6202,6 +6436,24 @@ fn main() {
         // RFC-822 source; the result handler opens the viewer with the
         // requested slice.
         if action == "show-headers" || action == "show-source" {
+            // Headers come out of the cache when they are there: the sync
+            // already had the whole message in hand and kept the wire header
+            // block, so asking the server again would be a login and a
+            // multi-megabyte download for thirty lines.
+            if action == "show-headers" {
+                let cached = sh_act
+                    .current_bodies
+                    .borrow()
+                    .get(row)
+                    .map(|b| b.raw_headers.clone())
+                    .filter(|h| !h.is_empty());
+                if let Some(raw) = cached {
+                    if let Some(ui) = ui_weak_act.upgrade() {
+                        show_headers(&ui, msg.uid, &raw);
+                    }
+                    return;
+                }
+            }
             sh_act
                 .pending_source_view
                 .set(if action == "show-headers" { 1 } else { 2 });
@@ -6210,6 +6462,7 @@ fn main() {
                     folder: msg.folder.clone(),
                     uid: msg.uid,
                     account_key: sh_act.cur_account_key.borrow().clone(),
+                    headers_only: action == "show-headers",
                 });
             }
             return;
@@ -7361,6 +7614,30 @@ fn apply_conn_status(ui: &MainWindow, sh: &Shared) {
         0
     };
     ui.set_conn_status(status);
+
+    // Тот же список, что в настройках, но с бинарным состоянием на строку:
+    // агрегат «частично» уже несёт сама точка.
+    let accounts = engine::AccountConfig::load_all();
+    let rows: Vec<ConnDotRow> = accounts
+        .iter()
+        .map(|a| {
+            let key = a.account_key();
+            let title = if a.email.is_empty() { key.clone() } else { a.email.clone() };
+            let mode = if a.native_url.is_some() {
+                "наш сервер"
+            } else if a.oauth_refresh_token.is_some() {
+                "Google OAuth"
+            } else {
+                "IMAP/SMTP"
+            };
+            ConnDotRow {
+                title: title.into(),
+                subtitle: format!("{} · {}", a.host, mode).into(),
+                ok: states.get(&key).map(|s| s == "connected").unwrap_or(false),
+            }
+        })
+        .collect();
+    ui.set_conn_accounts(ModelRc::new(VecModel::from(rows)));
 }
 
 fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
@@ -7900,18 +8177,7 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     let what = sh.pending_source_view.get();
                     sh.pending_source_view.set(0);
                     if what == 1 {
-                        // Headers: a name/value table, in message order.
-                        let rows: Vec<HeaderRow> = parse_headers(&raw)
-                            .into_iter()
-                            .map(|(name, value)| HeaderRow {
-                                name: name.into(),
-                                value: value.into(),
-                            })
-                            .collect();
-                        ui.set_source_view_title(format!("Заголовки (id {uid})").into());
-                        ui.set_source_view_headers(ModelRc::new(VecModel::from(rows)));
-                        ui.set_source_view_is_headers(true);
-                        ui.set_source_view_visible(true);
+                        show_headers(ui, uid, &raw);
                     } else {
                         // Source: the raw RFC-822 bytes, verbatim, no processing.
                         set_source_text(ui, sh, format!("Исходник сообщения (id {uid})"), raw);
@@ -8368,7 +8634,21 @@ fn handle_link(_ui: &MainWindow, url: String) {
 /// string (no text virtualization), so a multi-MB source — a big message is
 /// mostly base64 — would freeze rendering and selection. We show the first
 /// chunk; «Копировать всё» still copies the full text from `source_view_full`.
-const SOURCE_VIEW_MAX: usize = 128 * 1024;
+/// How much of the raw source the viewer renders.
+///
+/// The renderer stops laying out at 8000 CSS px, and this text is ~17 CSS px
+/// per line, so past roughly 32 KB nothing more can appear on screen no matter
+/// how much is fed in — the old 128 KB bought a bigger bitmap and no extra
+/// content. «Копировать всё» still copies the whole message.
+const SOURCE_VIEW_MAX: usize = 32 * 1024;
+
+/// The source viewer renders at 1×, not at the display scale.
+///
+/// It is a monospace dump of a whole message, so the bitmap is thousands of px
+/// tall: at 2× it came out 1520 × 16000 — 93 MB, and past the 8192 px texture
+/// limit most GPUs have, which is where the ten seconds went. At 1× the same
+/// content is 24 MB and well inside every limit.
+const SOURCE_RENDER_SCALE: f32 = 1.0;
 
 /// Stash the full text and push a capped, render-safe slice into the viewer.
 fn set_source_text(ui: &MainWindow, sh: &Shared, title: String, full: String) {
@@ -8404,8 +8684,20 @@ fn set_source_text(ui: &MainWindow, sh: &Shared, title: String, full: String) {
     let _ = sh.tx.send(Job::RenderSource {
         text: display,
         width: SOURCE_RENDER_W,
-        scale: sh.render_scale.get(),
+        scale: SOURCE_RENDER_SCALE,
     });
+}
+
+/// Open the headers viewer on a raw header block.
+fn show_headers(ui: &MainWindow, uid: u32, raw: &str) {
+    let rows: Vec<HeaderRow> = parse_headers(raw)
+        .into_iter()
+        .map(|(name, value)| HeaderRow { name: name.into(), value: value.into() })
+        .collect();
+    ui.set_source_view_title(format!("Заголовки (id {uid})").into());
+    ui.set_source_view_headers(ModelRc::new(VecModel::from(rows)));
+    ui.set_source_view_is_headers(true);
+    ui.set_source_view_visible(true);
 }
 
 /// Parse the RFC-822 header block into ordered (name, value) pairs.
