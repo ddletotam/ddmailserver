@@ -1,0 +1,4 @@
+# Real user mail exported for iteration — NEVER commit.
+samples/
+out/
+target/

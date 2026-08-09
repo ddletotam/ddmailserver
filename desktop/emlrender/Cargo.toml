@@ -1,0 +1,60 @@
+[package]
+name = "emlrender"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust email HTML → RGBA bitmap renderer (no browser engine)"
+
+[dependencies]
+# Spec-compliant HTML parsing — email HTML is malformed far more often than
+# not, and html5ever's error recovery is the same one browsers use.
+html5ever = "0.39"
+markup5ever_rcdom = "0.39"
+
+# Shaping + line breaking + system font fallback in one. Matters most for
+# Cyrillic and for emoji/CJK falling back to another family mid-run.
+cosmic-text = "0.19"
+
+# Software rasterizer (Skia's geometry/AA port). No GPU, no window, no engine.
+tiny-skia = "0.12"
+
+# Decoding inline images from data: URIs. Email carries png/jpeg/gif and
+# occasionally bmp/ico; the exotic formats only cost compile time.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "bmp",
+    "ico",
+    # Senders have been shipping WebP for years; without it their hero image is
+    # a placeholder for no reason.
+    "webp",
+] }
+
+# Logos in mail are SVG often enough to matter, and no raster decoder will ever
+# read one. Same version the client already uses for BIMI avatars, so this adds
+# nothing new to the application's dependency surface. Text rendering is off:
+# these are brand shapes, and pulling a second font stack in would be silly.
+resvg = { version = "0.44", default-features = false }
+base64 = "0.23"
+
+# Optional, and off by default: an HTTP resolver for hosts that have already
+# decided a message's images may be loaded (see src/net.rs). Nothing in the
+# default build opens a socket.
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "rustls-tls-native-roots",
+], optional = true }
+
+[features]
+net = ["dep:reqwest"]
+
+[dev-dependencies]
+# for the `dump` example (render samples/*.html → out/*.png)
+
+[profile.dev]
+# The sample corpus is 3 MB of HTML with megabyte inline images; unoptimized
+# decode/raster makes the dump example take minutes instead of seconds.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
