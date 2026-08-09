@@ -169,6 +169,70 @@ struct EventExtraItem {
     is-link: bool,
 }
 
+// Раскладко-независимые Ctrl+C/X/V/A.
+//
+// Slint сопоставляет клавиатурные шорткаты по СИМВОЛУ события
+// (i-slint-core/input.rs: `match key_event.text { "c" => Copy, ... }`), а
+// winit кладёт в `text` символ ТЕКУЩЕЙ раскладки. Под ЙЦУКЕН приходят
+// «с»/«ч»/«м»/«ф» — ни один шорткат не матчится, и буфер обмена молча
+// перестаёт работать во всех полях ввода (карточка события, композер,
+// поиск, логин). Физических кодов клавиш Slint наружу не отдаёт, поэтому
+// классифицируем событие сами — по кириллическим буквам тех же клавиш.
+//
+// Латиницу не перехватываем: там штатный путь Slint работает.
+global Kb {
+    // C, X, V, A на ЙЦУКЕН. Прописные — для CapsLock (Ctrl+Shift здесь
+    // отсекается: это другой набор шорткатов).
+    pure public function is-copy(ev: KeyEvent) -> bool {
+        return ev.modifiers.control && !ev.modifiers.shift && !ev.modifiers.alt
+            && (ev.text == "с" || ev.text == "С");
+    }
+    pure public function is-cut(ev: KeyEvent) -> bool {
+        return ev.modifiers.control && !ev.modifiers.shift && !ev.modifiers.alt
+            && (ev.text == "ч" || ev.text == "Ч");
+    }
+    pure public function is-paste(ev: KeyEvent) -> bool {
+        return ev.modifiers.control && !ev.modifiers.shift && !ev.modifiers.alt
+            && (ev.text == "м" || ev.text == "М");
+    }
+    pure public function is-select-all(ev: KeyEvent) -> bool {
+        return ev.modifiers.control && !ev.modifiers.shift && !ev.modifiers.alt
+            && (ev.text == "ф" || ev.text == "Ф");
+    }
+}
+
+// TextInput с починенными шорткатами (см. global Kb). Все поля ввода в
+// приложении — это он, а не голый TextInput.
+//
+// Собственные шорткаты поля (Enter=отправить, Esc, стрелки) вешаются на
+// `extra-key-pressed`: `key-pressed` уже занят и вызывает его последним,
+// после clipboard-шорткатов. Без хука биндинг на месте использования
+// перекрыл бы наш обработчик и починка потерялась бы молча.
+component KTextInput inherits TextInput {
+    callback extra-key-pressed(event: KeyEvent) -> EventResult;
+    key-pressed(ev) => {
+        if (Kb.is-copy(ev)) { self.copy(); return accept; }
+        if (Kb.is-select-all(ev)) { self.select-all(); return accept; }
+        // Мутирующие — только в редактируемом поле (штатный путь Slint
+        // проверяет read-only так же).
+        if (!self.read-only && Kb.is-cut(ev)) { self.cut(); return accept; }
+        if (!self.read-only && Kb.is-paste(ev)) { self.paste(); return accept; }
+        return self.extra-key-pressed(ev);
+    }
+}
+
+// То же для std-widget LineEdit (настройки/логин/контакты) — у него
+// шорткаты ломаются по той же причине.
+component KLineEdit inherits LineEdit {
+    key-pressed(ev) => {
+        if (Kb.is-copy(ev)) { self.copy(); return accept; }
+        if (Kb.is-select-all(ev)) { self.select-all(); return accept; }
+        if (!self.read-only && Kb.is-cut(ev)) { self.cut(); return accept; }
+        if (!self.read-only && Kb.is-paste(ev)) { self.paste(); return accept; }
+        return reject;
+    }
+}
+
 // A horizontal dashed hairline — Slint has no stroke-dash, so we tile fixed
 // dash segments. `count` (period 24px) comes from Rust, sized to the grid.
 component DashLine inherits Rectangle {
@@ -282,7 +346,7 @@ component CalField inherits VerticalLayout {
             font-size: 14px;
             overflow: elide;
         }
-        ti := TextInput {
+        ti := KTextInput {
             x: 10px;
             width: parent.width - 20px;
             height: 100%;
@@ -609,9 +673,44 @@ export component MainWindow inherits Window {
     in-out property <bool> composer-expanded: false;
     in-out property <string> composer-subject: "";
     in-out property <string> composer-cc: "";
-    // Two-way mirror of the composer input text, so the Rust side can
-    // prefill it (e.g. a forwarded message body) and clear it after send.
+    // Plain-текст композера — зеркало rich-документа, который живёт в Rust
+    // (`richtext::Editor`). Пишет его Rust на каждую правку; читают ветки
+    // отправки, восстановление после SendFailed и заглушка optimistic send.
     in-out property <string> composer-text: "";
+
+    // ── Rich-text композер ────────────────────────────────────────────────
+    // Модель, вёрстка и растеризация — в Rust (richtext.rs / richtext_render.rs);
+    // Slint показывает готовый битмап и рисует поверх каретку. Всё, что ниже —
+    // односторонний канал «Rust нарисовал» + обратные вызовы ввода.
+    in property <image> rt-image;
+    // Высота содержимого: ею растёт пузырь (до капа строки композера).
+    in property <length> rt-height: 21px;
+    in property <length> rt-caret-x: 0px;
+    in property <length> rt-caret-y: 0px;
+    in property <length> rt-caret-h: 21px;
+    // Есть выделение — каретку не мигаем (как в любом текстовом поле).
+    in property <bool> rt-has-selection: false;
+    // Состояние кнопок форматирования (стиль под кареткой/выделением).
+    in property <bool> rt-bold: false;
+    in property <bool> rt-italic: false;
+    in property <bool> rt-underline: false;
+    // Есть что отправлять: текст ИЛИ картинка (письмо из одной картинки —
+    // валидное письмо, а composer-text у него пустой). Инверсия — `rt-empty`,
+    // по ней показывается плейсхолдер.
+    in property <bool> rt-can-send: false;
+    in property <bool> rt-empty: true;
+    // Панель форматирования видна, пока композер в фокусе (её взводит
+    // rt-focus-changed со стороны Rust — так же, как гасит).
+    in-out property <bool> composer-format-bar-visible: false;
+    // Ширина колонки текста изменилась — Rust переверстает под неё.
+    callback rt-resize(width: length);
+    // Клавиша: текст события + модификаторы. true — обработали.
+    callback rt-key(text: string, ctrl: bool, shift: bool, alt: bool) -> bool;
+    // Мышь: 0 — нажали, 1 — тянем, 2 — отпустили, 3 — двойной клик.
+    callback rt-pointer(x: length, y: length, kind: int);
+    // Тулбар: 0 — жирный, 1 — курсив, 2 — подчёркнутый.
+    callback rt-toggle(bit: int);
+    callback rt-focus-changed(focused: bool);
     // Inline send confirmation: flipped on by the Rust side once the server
     // acks the send, back off ~2s later — the pill fades via animate.
     in-out property <bool> send-confirm-visible: false;
@@ -1113,7 +1212,7 @@ export component MainWindow inherits Window {
                         height: 36px;
                         background: #eceef0;
                         border-radius: 18px;
-                        si := TextInput {
+                        si := KTextInput {
                             x: 14px;
                             width: parent.width - 28px;
                             height: parent.height;
@@ -1133,7 +1232,7 @@ export component MainWindow inherits Window {
                                     root.search-typed(self.text);
                                 }
                             }
-                            key-pressed(ev) => {
+                            extra-key-pressed(ev) => {
                                 // Esc — close, keep text.
                                 if (ev.text == Key.Escape) {
                                     root.search-open = false;
@@ -1951,7 +2050,7 @@ export component MainWindow inherits Window {
                             background: #f0f2f5;
                             border-radius: 8px;
                             height: 30px;
-                            si-to := TextInput {
+                            si-to := KTextInput {
                                 x: 10px;
                                 width: parent.width - 20px;
                                 height: parent.height;
@@ -1989,7 +2088,7 @@ export component MainWindow inherits Window {
                             background: #f0f2f5;
                             border-radius: 8px;
                             height: 30px;
-                            si-subj := TextInput {
+                            si-subj := KTextInput {
                                 x: 10px;
                                 width: parent.width - 20px;
                                 height: parent.height;
@@ -2027,7 +2126,7 @@ export component MainWindow inherits Window {
                             background: #f0f2f5;
                             border-radius: 8px;
                             height: 30px;
-                            si-cc := TextInput {
+                            si-cc := KTextInput {
                                 x: 10px;
                                 width: parent.width - 20px;
                                 height: parent.height;
@@ -2153,6 +2252,55 @@ export component MainWindow inherits Window {
                 }
             }
 
+            // Панель форматирования: показывается, только когда композер в
+            // фокусе — в покое пузырь остаётся телеграмно-чистым. Ж/К/Ч
+            // дублируют Ctrl+B/I/U (те работают в любой раскладке).
+            if root.composer-format-bar-visible: Rectangle {
+                height: 30px;
+                background: white;
+                HorizontalLayout {
+                    padding-left: 66px;
+                    spacing: 4px;
+                    alignment: start;
+                    for b[i] in [
+                        { label: "Ж", weight: 800, italic: false, hint: "Полужирный (Ctrl+B)" },
+                        { label: "К", weight: 500, italic: true, hint: "Курсив (Ctrl+I)" },
+                        { label: "Ч", weight: 500, italic: false, hint: "Подчёркнутый (Ctrl+U)" },
+                    ]: Rectangle {
+                        property <bool> active: i == 0 ? root.rt-bold
+                            : (i == 1 ? root.rt-italic : root.rt-underline);
+                        width: 26px;
+                        height: 26px;
+                        border-radius: 6px;
+                        background: active ? #d7f2e8 : (fmt-ta.has-hover ? #eef0f4 : transparent);
+                        fmt-ta := TouchArea {
+                            // Кнопку жмём, фокус остаётся в тексте: тулбар не
+                            // забирает его на себя (иначе выделение слетало бы).
+                            clicked => { root.rt-toggle(i); }
+                        }
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: b.label;
+                            font-size: 14px;
+                            font-weight: parent.active ? 800 : b.weight;
+                            font-italic: b.italic;
+                            color: parent.active ? #0b8f66 : #5b6672;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        // Подчёркивание рисуем сами: font-underline у Slint нет.
+                        if i == 2: Rectangle {
+                            x: 8px;
+                            y: 18px;
+                            width: 10px;
+                            height: 1px;
+                            background: parent.active ? #0b8f66 : #5b6672;
+                        }
+                    }
+                }
+            }
+
             Rectangle {
                 // Grows with the message up to a cap: Shift+Enter adds a
                 // newline, Enter sends. Single-line messages stay at 64px.
@@ -2219,19 +2367,33 @@ export component MainWindow inherits Window {
                             fill: transparent;
                         }
                     }
+                    // Rich-text пузырь: битмап от Rust + каретка поверх.
+                    // Пузырь растёт вместе с содержимым (preferred-height
+                    // пробрасывает высоту в строку композера, капы min/max
+                    // задаёт родительская строка). Когда кап достигнут,
+                    // содержимое прокручивается во Flickable — каретка всегда
+                    // остаётся в видимой области, clip не даёт рисоваться за
+                    // пределами пузыря.
                     Rectangle {
                         horizontal-stretch: 1;
                         background: #f0f2f5;
                         border-radius: 20px;
-                        // Пузырь растёт вместе с текстом (preferred-height
-                        // пробрасывает высоту контента в строку композера,
-                        // капы min/max задаёт родительская строка). Когда кап
-                        // достигнут, содержимое прокручивается во Flickable —
-                        // курсор всегда остаётся в видимой области (паттерн
-                        // слинтовского TextEdit), а clip не даёт тексту
-                        // рисоваться за пределами пузыря.
-                        preferred-height: ti.preferred-height + 16px;
+                        preferred-height: root.rt-height + 16px;
                         clip: true;
+                        // Фокус-скоуп идёт ПЕРВЫМ и на всю площадь пузыря:
+                        // так он лежит под содержимым (клики достаются
+                        // TouchArea выше), но при этом имеет геометрию —
+                        // нулевой по размеру элемент фокус не берёт.
+                        rt-scope := FocusScope {
+                            changed has-focus => { root.rt-focus-changed(self.has-focus); }
+                            key-pressed(ev) => {
+                                // Разбор — целиком в Rust: там и модель, и
+                                // раскладко-независимые шорткаты, и буфер обмена.
+                                return root.rt-key(ev.text, ev.modifiers.control,
+                                    ev.modifiers.shift, ev.modifiers.alt)
+                                    ? EventResult.accept : EventResult.reject;
+                            }
+                        }
                         fli := Flickable {
                             x: 16px;
                             y: 8px;
@@ -2239,44 +2401,90 @@ export component MainWindow inherits Window {
                             height: parent.height - 16px;
                             // Драг-флик выключен: перетаскивание мышью — это
                             // выделение текста, не прокрутка. Скролл едет за
-                            // курсором (cursor-position-changed ниже).
+                            // кареткой (changed rt-caret-y ниже).
                             interactive: false;
                             viewport-width: self.width;
-                            viewport-height: max(self.height, ti.preferred-height);
-                            ti := TextInput {
+                            viewport-height: max(self.height, root.rt-height);
+                            // Ширина колонки — единственный вход вёрстки со
+                            // стороны Slint: поменялась (ресайз окна, шеврон) —
+                            // Rust переверстает и пришлёт новый битмап. `init`
+                            // отдаёт стартовую ширину: без неё первый кадр
+                            // рисовать не по чему и композер остался бы пустым.
+                            init => { root.rt-resize(self.width); }
+                            changed width => { root.rt-resize(self.width); }
+                            Image {
+                                x: 0;
+                                y: 0;
+                                width: fli.viewport-width;
+                                height: root.rt-height;
+                                source: root.rt-image;
+                                // fill + 1:1 логический размер: битмап уже
+                                // отрисован в физических пикселях окна, любое
+                                // масштабирование здесь мылило бы текст.
+                                image-fit: fill;
+                                image-rendering: smooth;
+                            }
+                            // Каретка. Мигает только когда поле в фокусе и нет
+                            // выделения — при выделении курсор в текстовых
+                            // полях не мигает нигде.
+                            if rt-scope.has-focus && !root.rt-has-selection: Rectangle {
+                                x: root.rt-caret-x;
+                                y: root.rt-caret-y;
+                                width: 2px;
+                                height: root.rt-caret-h;
+                                background: #10b981;
+                                opacity: blink.on ? 1.0 : 0.0;
+                            }
+                            TouchArea {
                                 width: fli.viewport-width;
                                 height: fli.viewport-height;
-                                text <=> root.composer-text;
-                                color: #0f1419;
-                                font-size: 15px;
-                                single-line: false;
-                                wrap: word-wrap;
-                                vertical-alignment: center;
-                                // Курсор ушёл под край — подвозим вьюпорт;
-                                // финальный clamp держит его в диапазоне и
-                                // после удаления строк.
-                                cursor-position-changed(cpos) => {
-                                    if (cpos.y + self.font-size + 8px > fli.height - fli.viewport-y) {
-                                        fli.viewport-y = -(cpos.y + self.font-size + 8px - fli.height);
+                                pointer-event(e) => {
+                                    if (e.button != PointerEventButton.left) { return; }
+                                    if (e.kind == PointerEventKind.down) {
+                                        rt-scope.focus();
+                                        root.rt-pointer(self.mouse-x, self.mouse-y, 0);
+                                    } else if (e.kind == PointerEventKind.up) {
+                                        root.rt-pointer(self.mouse-x, self.mouse-y, 2);
                                     }
-                                    if (cpos.y < -fli.viewport-y) {
-                                        fli.viewport-y = -cpos.y;
-                                    }
-                                    fli.viewport-y = max(fli.height - fli.viewport-height,
-                                        min(0px, fli.viewport-y));
                                 }
-                                // Enter sends; Shift+Enter inserts a newline
-                                // (Telegram-style, matching the rest of the UI).
-                                key-pressed(event) => {
-                                    if (event.text == Key.Return && !event.modifiers.shift) {
-                                        if (self.text != "") { root.send(self.text); self.text = ""; }
-                                        return EventResult.accept;
+                                // Двойной клик — выделить слово (приходит
+                                // ПОСЛЕ down, поэтому просто переопределяет
+                                // выделение, поставленное кликом).
+                                double-clicked => {
+                                    root.rt-pointer(self.mouse-x, self.mouse-y, 3);
+                                }
+                                moved => {
+                                    if (self.pressed) {
+                                        root.rt-pointer(self.mouse-x, self.mouse-y, 1);
                                     }
-                                    return EventResult.reject;
                                 }
                             }
                         }
-                        if ti.text == "": Text {
+                        // Фазу мигания держим здесь, а не в Rust: перерисовка
+                        // битмапа ради курсора — расточительство.
+                        blink := Timer {
+                            interval: 530ms;
+                            running: rt-scope.has-focus;
+                            property <bool> on: true;
+                            triggered => { self.on = !self.on; }
+                        }
+                        // Скролл едет за кареткой: ушла под край — подвозим
+                        // вьюпорт, финальный clamp держит его в диапазоне и
+                        // после удаления строк. `changed` умеет следить только
+                        // за свойством своего элемента — отсюда локальное
+                        // зеркало каретки.
+                        property <length> caret-y: root.rt-caret-y;
+                        changed caret-y => {
+                            if (self.caret-y + root.rt-caret-h > fli.height - fli.viewport-y) {
+                                fli.viewport-y = -(self.caret-y + root.rt-caret-h - fli.height);
+                            }
+                            if (self.caret-y < -fli.viewport-y) {
+                                fli.viewport-y = -self.caret-y;
+                            }
+                            fli.viewport-y = max(fli.height - fli.viewport-height,
+                                min(0px, fli.viewport-y));
+                        }
+                        if root.rt-empty: Text {
                             x: 16px;
                             width: parent.width - 32px;
                             height: parent.height;
@@ -2301,7 +2509,11 @@ export component MainWindow inherits Window {
                         }
                         TouchArea {
                             clicked => {
-                                if (ti.text != "") { root.send(ti.text); ti.text = ""; }
+                                // Текст берём из зеркала rich-документа; сам
+                                // документ (стиль, картинки) читает Rust в
+                                // on_send. Очистка — тоже там, только на
+                                // успешной ветке.
+                                if (root.rt-can-send) { root.send(root.composer-text); }
                             }
                         }
                     }
@@ -3031,7 +3243,7 @@ export component MainWindow inherits Window {
                 // Search box.
                 HorizontalLayout {
                     padding-left: 12px; padding-right: 12px; padding-bottom: 8px;
-                    cb-search := LineEdit {
+                    cb-search := KLineEdit {
                         placeholder-text: "Поиск контактов";
                         text <=> root.contacts-query;
                         edited => { root.contacts-search(root.contacts-query); }
@@ -3252,13 +3464,13 @@ export component MainWindow inherits Window {
                     current-index <=> root.ce-account-idx;
                 }
                 Text { text: "Имя"; font-size: 12px; color: #6b7480; }
-                LineEdit { text <=> root.ce-name; font-size: 14px; }
+                KLineEdit { text <=> root.ce-name; font-size: 14px; }
                 Text { text: "Email"; font-size: 12px; color: #6b7480; }
-                LineEdit { text <=> root.ce-email; font-size: 14px; }
+                KLineEdit { text <=> root.ce-email; font-size: 14px; }
                 Text { text: "Телефон"; font-size: 12px; color: #6b7480; }
-                LineEdit { text <=> root.ce-phone; font-size: 14px; }
+                KLineEdit { text <=> root.ce-phone; font-size: 14px; }
                 Text { text: "Организация"; font-size: 12px; color: #6b7480; }
-                LineEdit { text <=> root.ce-org; font-size: 14px; }
+                KLineEdit { text <=> root.ce-org; font-size: 14px; }
                 Rectangle { height: 4px; }
                 HorizontalLayout {
                     spacing: 8px;
@@ -3979,7 +4191,7 @@ export component MainWindow inherits Window {
                                         color: #0f1419;
                                         wrap: word-wrap;
                                     }
-                                    TextInput {
+                                    KTextInput {
                                         text: h.value;
                                         read-only: true;
                                         single-line: false;
@@ -4779,33 +4991,33 @@ export component LoginWindow inherits Window {
 
                 // ── Native fields ──
                 if root.mode == 0: Text { text: "Сервер"; font-size: 12px; color: #aeb6c2; }
-                if root.mode == 0: LineEdit {
+                if root.mode == 0: KLineEdit {
                     text <=> root.server-url; font-size: 14px; enabled: !root.busy;
                 }
 
                 // ── Standalone fields ──
                 if root.mode == 1: Text { text: "Email"; font-size: 12px; color: #aeb6c2; }
-                if root.mode == 1: LineEdit {
+                if root.mode == 1: KLineEdit {
                     text <=> root.email; font-size: 14px; enabled: !root.busy;
                     placeholder-text: "you@example.com";
                 }
                 if root.mode == 1: Text { text: "IMAP-сервер"; font-size: 12px; color: #aeb6c2; }
-                if root.mode == 1: LineEdit {
+                if root.mode == 1: KLineEdit {
                     text <=> root.imap-host; font-size: 14px; enabled: !root.busy;
                     placeholder-text: "imap.example.com";
                 }
                 if root.mode == 1: Text { text: "IMAP-порт"; font-size: 12px; color: #aeb6c2; }
-                if root.mode == 1: LineEdit {
+                if root.mode == 1: KLineEdit {
                     text <=> root.imap-port; font-size: 14px; enabled: !root.busy;
                 }
 
                 // ── Shared credentials ──
                 Text { text: "Логин"; font-size: 12px; color: #aeb6c2; }
-                LineEdit {
+                KLineEdit {
                     text <=> root.username; font-size: 14px; enabled: !root.busy;
                 }
                 Text { text: "Пароль"; font-size: 12px; color: #aeb6c2; }
-                pass-edit := LineEdit {
+                pass-edit := KLineEdit {
                     text <=> root.password; font-size: 14px;
                     input-type: InputType.password; enabled: !root.busy;
                     accepted => { root.submit(); }
@@ -4813,12 +5025,12 @@ export component LoginWindow inherits Window {
 
                 // ── Optional standalone calendar/contacts ──
                 if root.mode == 1: Text { text: "CalDAV URL (необязательно)"; font-size: 12px; color: #aeb6c2; }
-                if root.mode == 1: LineEdit {
+                if root.mode == 1: KLineEdit {
                     text <=> root.caldav-url; font-size: 14px; enabled: !root.busy;
                     placeholder-text: "https://…/calendars/…/";
                 }
                 if root.mode == 1: Text { text: "CardDAV URL (необязательно)"; font-size: 12px; color: #aeb6c2; }
-                if root.mode == 1: LineEdit {
+                if root.mode == 1: KLineEdit {
                     text <=> root.carddav-url; font-size: 14px; enabled: !root.busy;
                     placeholder-text: "https://…/addressbooks/…/";
                 }

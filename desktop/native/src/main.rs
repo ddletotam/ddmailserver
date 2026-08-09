@@ -17,6 +17,8 @@ mod policy;
 mod recurrence;
 mod reminders;
 mod render_common;
+mod richtext;
+mod richtext_render;
 #[cfg(any(windows, target_os = "linux"))]
 mod tray;
 #[cfg(target_os = "linux")]
@@ -1384,6 +1386,18 @@ struct Shared {
     /// attach button. Parallel to the `composer-attachments` Slint model
     /// (which holds just the basenames). Cleared once a message is staged.
     compose_attachments: RefCell<Vec<std::path::PathBuf>>,
+    /// Rich-text документ композера — источник истины для тела письма
+    /// (Slint-свойство `composer-text` лишь его plain-зеркало).
+    rich: RefCell<richtext::Editor>,
+    /// Вёрстка/растеризация композера. Ленивая: сборка `FontSystem` читает
+    /// системные шрифты (сотни мс), а композер нужен не в первую секунду.
+    rich_renderer: RefCell<Option<richtext_render::Renderer>>,
+    /// Ширина колонки текста, логические px — приходит из Slint (`rt-resize`).
+    rich_width: Cell<f32>,
+    /// Идёт протяжка выделения мышью.
+    rich_dragging: Cell<bool>,
+    /// Источник уникальных Content-ID для вставленных картинок.
+    rich_cid_seq: Cell<u64>,
     /// Event a reminder toast asked to open (0 = none); consumed once the
     /// calendar events for its week arrive from the engine. The occurrence
     /// start + summary ride along for the stale-id fallback: the server
@@ -2064,6 +2078,303 @@ fn clipboard_set(text: &str) {
             }
         }
     });
+}
+
+/// Экранировать plain-текст для вставки в HTML-тело (цитата пересылки).
+fn html_escape_plain(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// Текст из буфера обмена (None — там не текст либо буфер пуст).
+fn clipboard_text() -> Option<String> {
+    CLIPBOARD.with(|c| {
+        let mut slot = c.borrow_mut();
+        if slot.is_none() {
+            slot.replace(arboard::Clipboard::new().ok()?);
+        }
+        slot.as_mut()?.get_text().ok()
+    })
+}
+
+/// Картинка из буфера обмена, перекодированная в PNG (байты, ширина, высота).
+/// Буфер отдаёт сырой RGBA — в письмо такое не положишь, нужен нормальный
+/// формат с сжатием.
+fn clipboard_image() -> Option<(Vec<u8>, u32, u32)> {
+    let raw = CLIPBOARD.with(|c| {
+        let mut slot = c.borrow_mut();
+        if slot.is_none() {
+            slot.replace(arboard::Clipboard::new().ok()?);
+        }
+        slot.as_mut()?.get_image().ok()
+    })?;
+    let (w, h) = (raw.width as u32, raw.height as u32);
+    let buf = image::RgbaImage::from_raw(w, h, raw.bytes.into_owned())?;
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(buf)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .ok()?;
+    Some((png, w, h))
+}
+
+// ── Rich-text композер ─────────────────────────────────────────────────────
+// Модель и вёрстка живут в richtext.rs / richtext_render.rs; здесь — только
+// мост в UI: перерисовка, клавиши, мышь, буфер обмена.
+
+/// Переверстать документ, отдать в UI битмап + геометрию каретки и обновить
+/// производные свойства (plain-зеркало, состояние кнопок форматирования).
+/// Вызывается после КАЖДОЙ правки — другого пути обновить картинку нет.
+fn rich_refresh(ui: &MainWindow, sh: &Shared) {
+    let width = sh.rich_width.get();
+    if width <= 1.0 {
+        // Ширина ещё не приехала из Slint (первый кадр) — рисовать не по чему.
+        return;
+    }
+    let scale = ui.window().scale_factor();
+    let ed = sh.rich.borrow();
+    let sel = ed.has_selection().then(|| ed.selection());
+    let mut slot = sh.rich_renderer.borrow_mut();
+    let renderer = slot.get_or_insert_with(richtext_render::Renderer::new);
+    let out = renderer.render(ed.doc(), ed.caret(), sel, width, scale);
+    renderer.forget_unused(ed.doc());
+
+    ui.set_rt_image(out.image);
+    ui.set_rt_height(out.height);
+    ui.set_rt_caret_x(out.caret_x);
+    ui.set_rt_caret_y(out.caret_y);
+    ui.set_rt_caret_h(out.caret_h);
+    ui.set_rt_has_selection(ed.has_selection());
+    let style = ed.current_style();
+    ui.set_rt_bold(style.bold);
+    ui.set_rt_italic(style.italic);
+    ui.set_rt_underline(style.underline);
+    ui.set_rt_can_send(!ed.is_empty());
+    ui.set_rt_empty(ed.is_empty());
+    ui.set_composer_text(ed.plain_text().into());
+}
+
+/// Заменить содержимое композера plain-текстом (восстановление черновика
+/// после неудачной отправки) и перерисовать.
+fn rich_set_text(ui: &MainWindow, sh: &Shared, text: &str) {
+    *sh.rich.borrow_mut() = richtext::Editor::from_text(text);
+    rich_refresh(ui, sh);
+}
+
+fn rich_clear(ui: &MainWindow, sh: &Shared) {
+    sh.rich.borrow_mut().clear();
+    rich_refresh(ui, sh);
+}
+
+/// Вставка из буфера: сначала пробуем картинку (скриншот из Ножниц —
+/// самый частый сценарий), затем текст.
+fn rich_paste(ui: &MainWindow, sh: &Shared) {
+    if let Some((png, w, h)) = clipboard_image() {
+        let seq = sh.rich_cid_seq.get() + 1;
+        sh.rich_cid_seq.set(seq);
+        // cid должен быть уникален в пределах письма; время старта разводит
+        // ещё и разные письма одной сессии.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        sh.rich.borrow_mut().insert_image(richtext::InlineImage {
+            cid: format!("img{seq}.{stamp}@ddmail"),
+            mime: "image/png".into(),
+            bytes: Arc::new(png),
+            w,
+            h,
+        });
+        rich_refresh(ui, sh);
+        return;
+    }
+    if let Some(text) = clipboard_text() {
+        if !text.is_empty() {
+            sh.rich.borrow_mut().insert_str(&text);
+            rich_refresh(ui, sh);
+        }
+    }
+}
+
+/// Клавиша в композере. `true` — обработали (событие не всплывает дальше).
+///
+/// Раскладка: шорткаты сверяются и с латиницей, и с кириллицей тех же клавиш —
+/// Slint матчит их по символу, а под ЙЦУКЕН приходит «с»/«м»/«и»…
+/// (см. `global Kb` в app.slint — здесь та же болезнь, своё лечение).
+fn rich_key(ui: &MainWindow, sh: &Rc<Shared>, text: &str, ctrl: bool, shift: bool, alt: bool) -> bool {
+    use richtext::{Motion, StyleBit};
+    use slint::platform::Key;
+
+    let ch = text.chars().next();
+    let is = |k: Key| ch == Some(char::from(k));
+
+    if ctrl && !alt {
+        let hit = |latin: char, ru: char| {
+            ch.map(|c| {
+                let c = c.to_lowercase().next().unwrap_or(c);
+                c == latin || c == ru
+            })
+            .unwrap_or(false)
+        };
+        if hit('c', 'с') {
+            let sel = sh.rich.borrow().selection_text();
+            if !sel.is_empty() {
+                clipboard_set(&sel);
+            }
+            return true;
+        }
+        if hit('x', 'ч') {
+            let sel = sh.rich.borrow().selection_text();
+            if !sel.is_empty() {
+                clipboard_set(&sel);
+                sh.rich.borrow_mut().delete_selection();
+                rich_refresh(ui, sh);
+            }
+            return true;
+        }
+        if hit('v', 'м') {
+            rich_paste(ui, sh);
+            return true;
+        }
+        if hit('a', 'ф') {
+            sh.rich.borrow_mut().select_all();
+            rich_refresh(ui, sh);
+            return true;
+        }
+        if hit('b', 'и') || hit('i', 'ш') || hit('u', 'г') {
+            let bit = if hit('b', 'и') {
+                StyleBit::Bold
+            } else if hit('i', 'ш') {
+                StyleBit::Italic
+            } else {
+                StyleBit::Underline
+            };
+            sh.rich.borrow_mut().toggle_style(bit);
+            rich_refresh(ui, sh);
+            return true;
+        }
+        if hit('k', 'л') {
+            // Ctrl+K — ссылка из буфера обмена на выделенный текст. Диалога
+            // ввода URL нет намеренно: адрес почти всегда уже скопирован.
+            if let Some(url) = clipboard_text() {
+                let url = url.trim().to_string();
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    sh.rich.borrow_mut().insert_link(&url);
+                    rich_refresh(ui, sh);
+                }
+            }
+            return true;
+        }
+        if hit('z', 'я') {
+            if shift {
+                sh.rich.borrow_mut().redo();
+            } else {
+                sh.rich.borrow_mut().undo();
+            }
+            rich_refresh(ui, sh);
+            return true;
+        }
+        if hit('y', 'н') {
+            sh.rich.borrow_mut().redo();
+            rich_refresh(ui, sh);
+            return true;
+        }
+        // Прочие Ctrl-сочетания — не наши: пусть всплывают к общим хоткеям.
+        if !is(Key::LeftArrow)
+            && !is(Key::RightArrow)
+            && !is(Key::Home)
+            && !is(Key::End)
+            && !is(Key::Backspace)
+        {
+            return false;
+        }
+    }
+
+    // Escape и Tab отдаём наружу: закрытие панелей и обход фокуса — не дело
+    // текстового поля.
+    if is(Key::Escape) || is(Key::Tab) || is(Key::Backtab) {
+        return false;
+    }
+
+    if is(Key::Return) {
+        if shift {
+            sh.rich.borrow_mut().split_block();
+            rich_refresh(ui, sh);
+        } else {
+            // Enter отправляет (контракт композера, §3). Текст снимаем ДО
+            // вызова — on_send читает документ и не должен встретить
+            // одолженный RefCell.
+            let (empty, plain) = {
+                let ed = sh.rich.borrow();
+                (ed.is_empty(), ed.plain_text())
+            };
+            if !empty {
+                ui.invoke_send(plain.into());
+            }
+        }
+        return true;
+    }
+    if is(Key::Backspace) {
+        sh.rich.borrow_mut().backspace();
+        rich_refresh(ui, sh);
+        return true;
+    }
+    if is(Key::Delete) {
+        sh.rich.borrow_mut().delete_forward();
+        rich_refresh(ui, sh);
+        return true;
+    }
+    if is(Key::LeftArrow) || is(Key::RightArrow) {
+        let right = is(Key::RightArrow);
+        let m = match (right, ctrl) {
+            (true, true) => Motion::WordRight,
+            (true, false) => Motion::Right,
+            (false, true) => Motion::WordLeft,
+            (false, false) => Motion::Left,
+        };
+        sh.rich.borrow_mut().move_caret(m, shift);
+        rich_refresh(ui, sh);
+        return true;
+    }
+    if is(Key::UpArrow) || is(Key::DownArrow) {
+        // Вертикаль знает только слой раскладки: шаг идёт по ВИЗУАЛЬНЫМ
+        // строкам, а переносы живут там.
+        let up = is(Key::UpArrow);
+        let pos = {
+            let ed = sh.rich.borrow();
+            let slot = sh.rich_renderer.borrow();
+            slot.as_ref().map(|r| r.move_vertical(ed.caret(), up))
+        };
+        if let Some(pos) = pos {
+            sh.rich.borrow_mut().set_caret(pos, shift);
+            rich_refresh(ui, sh);
+        }
+        return true;
+    }
+    if is(Key::Home) || is(Key::End) {
+        let m = match (is(Key::Home), ctrl) {
+            (true, true) => Motion::DocStart,
+            (true, false) => Motion::LineStart,
+            (false, true) => Motion::DocEnd,
+            (false, false) => Motion::LineEnd,
+        };
+        sh.rich.borrow_mut().move_caret(m, shift);
+        rich_refresh(ui, sh);
+        return true;
+    }
+
+    // Печатаемый ввод. Именованные клавиши Slint кодирует управляющими
+    // символами и приватной областью U+F700…U+F8FF — их в текст пускать нельзя.
+    if !ctrl
+        && !alt
+        && !text.is_empty()
+        && text
+            .chars()
+            .all(|c| !c.is_control() && !matches!(c, '\u{F700}'..='\u{F8FF}'))
+    {
+        sh.rich.borrow_mut().insert_str(text);
+        rich_refresh(ui, sh);
+        return true;
+    }
+    false
 }
 
 /// Tauri-era header meta line: counterpart address (1:1) or participants
@@ -4503,6 +4814,11 @@ fn main() {
         add_conn_window: RefCell::new(None),
         settings_conn_keys: RefCell::new(Vec::new()),
         compose_attachments: RefCell::new(Vec::new()),
+        rich: RefCell::new(richtext::Editor::new()),
+        rich_renderer: RefCell::new(None),
+        rich_width: Cell::new(0.0),
+        rich_dragging: Cell::new(false),
+        rich_cid_seq: Cell::new(0),
         pending_open_event: Cell::new(0),
         pending_open_occ: Cell::new(0),
         pending_open_summary: RefCell::new(String::new()),
@@ -5077,9 +5393,25 @@ fn main() {
     let sh_send = shared.clone();
     ui.on_send(move |text| {
         let text = text.to_string();
-        if text.trim().is_empty() {
-            return;
-        }
+        // Тело письма — rich-документ композера; `text` (plain-зеркало) идёт
+        // в text/plain-часть и в заглушку optimistic send. Пустой текст ещё
+        // не значит «нечего отправлять»: письмо из одной картинки — валидное.
+        let (rich_html, rich_images) = {
+            let ed = sh_send.rich.borrow();
+            if ed.is_empty() && text.trim().is_empty() {
+                return;
+            }
+            (ed.html(), ed.images())
+        };
+        let inline_atts: Vec<ddmail_core::types::OutgoingAttachment> = rich_images
+            .iter()
+            .map(|img| ddmail_core::types::OutgoingAttachment {
+                filename: format!("{}.png", img.cid.split('@').next().unwrap_or("image")),
+                mime_type: img.mime.clone(),
+                content: img.bytes.as_ref().clone(),
+                content_id: Some(img.cid.clone()),
+            })
+            .collect();
         // Graceful guard: if this thread belongs to a connection that was
         // since removed, the send has nowhere to go — say so plainly instead
         // of misrouting to another account.
@@ -5167,6 +5499,10 @@ fn main() {
                 u.set_composer_subject("".into());
                 u.set_composer_cc("".into());
                 u.set_composer_to("".into());
+                // Тело чистим здесь, а не в Slint при клике: до этой точки
+                // ветка могла отказаться отправлять (нет адресата, мёртвое
+                // подключение) — набранное тогда обязано остаться на месте.
+                rich_clear(&u, &sh_send);
                 refresh_attachment_chips(&u, &sh_send);
             }
         };
@@ -5202,6 +5538,16 @@ fn main() {
                  От: {from_line}\nДата: {}\nТема: {}\n\n{orig_text}",
                 orig.date, orig.subject
             );
+            // HTML-версия: набранная сопроводиловка (со стилями) + тот же
+            // блок пересылки, экранированный как обычный текст.
+            let body_html = format!(
+                "{rich_html}<br><div>---------- Пересланное сообщение ----------</div>\
+                 <div>От: {}</div><div>Дата: {}</div><div>Тема: {}</div><br><div>{}</div>",
+                html_escape_plain(&from_line),
+                html_escape_plain(&orig.date),
+                html_escape_plain(&orig.subject),
+                html_escape_plain(&orig_text).replace('\n', "<br>")
+            );
             if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
                 println!("forwarding {}/{} to {to:?}", orig.folder, orig.uid);
                 let _ = etx.send(engine::EngineCmd::Send {
@@ -5209,6 +5555,8 @@ fn main() {
                     cc: cc.clone(),
                     subject,
                     body: body_text,
+                    html: body_html,
+                    inline: inline_atts.clone(),
                     in_reply_to: None,
                     references: None,
                     from: from_identity.clone(),
@@ -5249,6 +5597,8 @@ fn main() {
                     cc: cc.clone(),
                     subject,
                     body: text.clone(),
+                    html: rich_html.clone(),
+                    inline: inline_atts.clone(),
                     in_reply_to: None,
                     references: None,
                     from: from_identity.clone(),
@@ -5331,7 +5681,9 @@ fn main() {
             if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
                 println!("sending explicit reply to {to:?}");
                 let _ = etx.send(engine::EngineCmd::Send {
-                    to, cc: cc.clone(), subject, body: text.clone(), in_reply_to, references,
+                    to, cc: cc.clone(), subject, body: text.clone(),
+                    html: rich_html.clone(), inline: inline_atts.clone(),
+                    in_reply_to, references,
                     from: from_identity.clone(),
                     attachments: attachments.clone(),
                     forward_attachments: None,
@@ -5413,7 +5765,9 @@ fn main() {
         if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
             println!("sending reply to {to:?}");
             let _ = etx.send(engine::EngineCmd::Send {
-                to, cc, subject, body: text.clone(), in_reply_to, references,
+                to, cc, subject, body: text.clone(),
+                html: rich_html.clone(), inline: inline_atts.clone(),
+                in_reply_to, references,
                 from: from_identity.clone(),
                 attachments,
                 forward_attachments: None,
@@ -5461,6 +5815,73 @@ fn main() {
         if let Some(u) = ui_weak_rm.upgrade() {
             refresh_attachment_chips(&u, &sh_rm);
         }
+    });
+
+    // ── Rich-text композер ──
+    //
+    // Slint отдаёт сюда ширину колонки, клавиши и мышь; обратно уезжают
+    // битмап и геометрия каретки (rich_refresh). Модель — sh.rich.
+    let ui_weak_rtw = ui.as_weak();
+    let sh_rtw = shared.clone();
+    ui.on_rt_resize(move |w| {
+        let Some(u) = ui_weak_rtw.upgrade() else { return };
+        // Ширина скачет на каждом кадре ресайза — перевёрстываем только на
+        // реальном изменении (сравнение в логических px с допуском ½ px).
+        if (sh_rtw.rich_width.get() - w).abs() < 0.5 {
+            return;
+        }
+        sh_rtw.rich_width.set(w);
+        rich_refresh(&u, &sh_rtw);
+    });
+    let ui_weak_rtk = ui.as_weak();
+    let sh_rtk = shared.clone();
+    ui.on_rt_key(move |text, ctrl, shift, alt| {
+        let Some(u) = ui_weak_rtk.upgrade() else { return false };
+        rich_key(&u, &sh_rtk, text.as_str(), ctrl, shift, alt)
+    });
+    let ui_weak_rtp = ui.as_weak();
+    let sh_rtp = shared.clone();
+    ui.on_rt_pointer(move |x, y, kind| {
+        let Some(u) = ui_weak_rtp.upgrade() else { return };
+        let pos = {
+            let slot = sh_rtp.rich_renderer.borrow();
+            let Some(r) = slot.as_ref() else { return };
+            r.pos_at(x, y)
+        };
+        match kind {
+            // Нажатие ставит каретку и начинает протяжку; Shift+клик тянет
+            // выделение от прежнего якоря (как в любом текстовом поле).
+            0 => {
+                sh_rtp.rich_dragging.set(true);
+                sh_rtp.rich.borrow_mut().set_caret(pos, false);
+            }
+            1 => {
+                if !sh_rtp.rich_dragging.get() {
+                    return;
+                }
+                sh_rtp.rich.borrow_mut().set_caret(pos, true);
+            }
+            2 => sh_rtp.rich_dragging.set(false),
+            _ => sh_rtp.rich.borrow_mut().select_word_at(pos),
+        }
+        rich_refresh(&u, &sh_rtp);
+    });
+    let ui_weak_rtt = ui.as_weak();
+    let sh_rtt = shared.clone();
+    ui.on_rt_toggle(move |bit| {
+        let Some(u) = ui_weak_rtt.upgrade() else { return };
+        let bit = match bit {
+            0 => richtext::StyleBit::Bold,
+            1 => richtext::StyleBit::Italic,
+            _ => richtext::StyleBit::Underline,
+        };
+        sh_rtt.rich.borrow_mut().toggle_style(bit);
+        rich_refresh(&u, &sh_rtt);
+    });
+    let ui_weak_rtf = ui.as_weak();
+    ui.on_rt_focus_changed(move |focused| {
+        let Some(u) = ui_weak_rtf.upgrade() else { return };
+        u.set_composer_format_bar_visible(focused);
     });
 
     // ── Search-as-compose dropdown wiring ──
@@ -7646,10 +8067,14 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         };
                         send_render_job(sh, bodies, None);
                         // Don't clobber text the user already started typing.
+                        // Возвращается plain-версия: разметку неудавшегося
+                        // письма мы не храним, а терять текст нельзя.
                         if ui.get_composer_text().is_empty() {
                             if let Some(p) = stubs.last() {
-                                ui.set_composer_text(
-                                    p.body.text.clone().unwrap_or_default().into(),
+                                rich_set_text(
+                                    &ui,
+                                    sh,
+                                    &p.body.text.clone().unwrap_or_default(),
                                 );
                             }
                         }

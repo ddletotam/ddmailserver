@@ -388,6 +388,13 @@ pub enum EngineCmd {
         cc: Vec<String>,
         subject: String,
         body: String,
+        /// HTML-версия тела из rich-text композера (пустая — уходит только
+        /// text/plain-часть). Ссылается на inline-картинки через `cid:`.
+        html: String,
+        /// Inline-картинки тела: уже готовые вложения с `content_id`,
+        /// на которые ссылается `html`. Отличаются от `attachments` (те —
+        /// пути к файлам, которые читает движок).
+        inline: Vec<OutgoingAttachment>,
         in_reply_to: Option<String>,
         references: Option<String>,
         /// Sending identity ("From"). None → the account's own email.
@@ -1097,12 +1104,15 @@ pub fn spawn(
                         Err(e) => on_result(EngineResult::Error(format!("delete_event: {e}"))),
                     }
                 }
-                EngineCmd::Send { to, cc, subject, body, in_reply_to, references, from, attachments, forward_attachments, account_key } => {
+                EngineCmd::Send { to, cc, subject, body, html, inline, in_reply_to, references, from, attachments, forward_attachments, account_key } => {
                     let conn = route(&conns, &account_key);
                     let provider = conn.provider.clone();
                     let key = conn.key.clone();
                     let cfg = conn.cfg.clone();
                     let mut outgoing = resolve_attachments(&attachments);
+                    // Inline-картинки тела идут теми же вложениями, но с
+                    // content_id — SMTP-слой сам завернёт их в multipart/related.
+                    outgoing.extend(inline);
                     // Forward mode: pull the original's attachments from the
                     // provider and re-attach them as-is. Failures of single
                     // parts are logged, not fatal — the text still goes out.
@@ -1137,7 +1147,7 @@ pub fn spawn(
                         to,
                         cc,
                         subject,
-                        html: String::new(),
+                        html,
                         text: body,
                         in_reply_to,
                         references,
