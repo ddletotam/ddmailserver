@@ -1033,6 +1033,10 @@ export component MainWindow inherits Window {
     // Адреса для выпадающего списка и текущий выбор в нём.
     in property <[string]> from-mismatch-options;
     in-out property <int> from-mismatch-index;
+    // Индекс адреса, на который пишут в этом диалоге. Совпал с выбранным —
+    // письмо остаётся здесь, и переходить некуда.
+    in property <int> from-mismatch-expected-index;
+    in-out property <bool> from-mismatch-switch: false;
     callback from-mismatch-pick(int);
     // Композер очищает поле сразу при отправке, поэтому отмена обязана вернуть
     // текст обратно — иначе письмо просто исчезнет.
@@ -4333,6 +4337,14 @@ export component MainWindow inherits Window {
                             selected(value) => {
                                 root.from-mismatch-index = self.current-index;
                             }
+                        }
+                        // Другой адрес — другой набор адресов, то есть другой
+                        // диалог: отправленное окажется не здесь. Чекбокс
+                        // доступен только когда это действительно так.
+                        CheckBox {
+                            enabled: root.from-mismatch-index != root.from-mismatch-expected-index;
+                            checked <=> root.from-mismatch-switch;
+                            text: "Перейти в этот диалог после отправки";
                         }
                         HorizontalLayout {
                             spacing: 8px;

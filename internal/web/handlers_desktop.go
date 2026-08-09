@@ -1186,98 +1186,49 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	// Group by (my_id, sorted_counterparts). For 1:1 messages this collapses to
-	// the historical (my_id, single_cp) key — preserving the "{my_id}|{cp}" id
-	// format that pinned-conversation localStorage and search-result handlers
-	// depend on. For multi-recipient mail (To+Cc has >1 non-self address, or
-	// the sender is not among our identities and other recipients exist) we
-	// keep all counterparts in the key so each unique participant set forms its
-	// own group conversation.
-	type convKey struct {
-		myID string
-		cps  string // comma-joined sorted unique counterpart addresses
-	}
+	// Диалог опознаётся набором участвующих адресов, и только им. Кто из них
+	// отправитель, кто в «Кому», кто в копии — для ключа не важно: набор тот же,
+	// значит это тот же диалог. Меняется набор — меняется диалог.
+	//
+	// Bcc в набор не входит: он виден только на своей копии в «Отправленных»,
+	// ответ собеседника его не принесёт, и письмо повисло бы в наборе, куда
+	// никто не может ответить. `parseRecipientAddrs` и так читает только To/Cc.
+	//
+	// Ключ обязан совпадать с десктопным (`desktop/core/src/imap.rs`): один и
+	// тот же почтовый ящик может приехать и отсюда, и по IMAP напрямую.
 	type convMeta struct {
-		entries []msgEntry
-		cpAddrs []string // canonical sorted counterpart list for this key
+		entries      []msgEntry
+		participants []string // canonical sorted unique visible addresses
 	}
-	convMap := make(map[convKey]*convMeta)
+	convMap := make(map[string]*convMeta)
 
 	for _, msg := range messages {
 		fromLc := strings.ToLower(extractEmail(msg.From))
 		fname := folderNames[msg.FolderID]
 
-		recipients := parseRecipientAddrs(msg.To, msg.Cc)
-
-		// Pick myID: for outgoing, the sender; for incoming, the first of our
-		// addresses present in To/Cc.
-		var myID string
-		if isOurs(fromLc) {
-			myID = fromLc
-		} else {
-			for _, r := range recipients {
-				if isOurs(r) {
-					myID = r
-					break
-				}
-			}
-			if myID == "" {
-				// Recipient parsing missed (BCC-only, stripped header, etc.).
-				// Walk a priority chain that never returns a random identity.
-				if e, ok := accountEmail[msg.AccountID]; ok && identities[e] {
-					myID = e
-				}
-			}
-			if myID == "" {
-				if accID, ok := folderAccount[msg.FolderID]; ok {
-					if e, ok := accountEmail[accID]; ok && identities[e] {
-						myID = e
-					}
-				}
-			}
-			if myID == "" && len(sortedIdentities) > 0 {
-				// Deterministic last resort — picks the alphabetically first
-				// identity. Still wrong sometimes, but at least stable across
-				// reloads and across users with the same identity set.
-				myID = sortedIdentities[0]
-			}
-		}
-
-		// Counterparts = union of (from, to, cc) minus our identities, deduped
-		// and sorted for canonical key form.
 		seen := map[string]bool{}
-		cps := []string{}
+		participants := []string{}
 		add := func(a string) {
-			if a == "" || isOurs(a) || seen[a] {
+			a = strings.ToLower(strings.TrimSpace(a))
+			if a == "" || seen[a] {
 				return
 			}
 			seen[a] = true
-			cps = append(cps, a)
+			participants = append(participants, a)
 		}
 		add(fromLc)
-		for _, r := range recipients {
+		for _, r := range parseRecipientAddrs(msg.To, msg.Cc) {
 			add(r)
 		}
-		if len(cps) == 0 {
-			// Pure self-traffic: the sender AND every recipient are our own
-			// identities — notes-to-self, or service mail from a local
-			// domain's no-reply mailbox. Dropping these makes an unread
-			// inbox message silently unfindable; key the conversation on
-			// the sender instead (a Telegram-style "self" chat).
-			if fromLc != "" {
-				cps = []string{fromLc}
-			} else if myID != "" {
-				cps = []string{myID}
-			} else {
-				continue
-			}
+		if len(participants) == 0 {
+			continue
 		}
-		sort.Strings(cps)
+		sort.Strings(participants)
 
-		key := convKey{myID: myID, cps: strings.Join(cps, ",")}
+		key := strings.Join(participants, ",")
 		meta, ok := convMap[key]
 		if !ok {
-			meta = &convMeta{cpAddrs: cps}
+			meta = &convMeta{participants: participants}
 			convMap[key] = meta
 		}
 		meta.entries = append(meta.entries, msgEntry{msg: msg, folderName: fname})
@@ -1286,7 +1237,7 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 	// Build conversation objects
 	convs := []DesktopConversation{}
 
-	for key, meta := range convMap {
+	for _, meta := range convMap {
 		entries := meta.entries
 		// Sort by date ascending
 		sortEntriesByDate(entries)
@@ -1340,35 +1291,128 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 			firstMsg = lastMsg
 		}
 
+		// Роли внутри диалога. Ключ ролей не знает — он множество адресов; но
+		// показать надо одного собеседника, а отвечать с одной айдентики.
+		mine := []string{}
+		others := []string{}
+		for _, a := range meta.participants {
+			if isOurs(a) {
+				mine = append(mine, a)
+			} else {
+				others = append(others, a)
+			}
+		}
+
+		var cpAddrs []string
+		var myID string
+		if len(others) > 0 {
+			cpAddrs = others
+			// Айдентика — та, что участвовала в первом письме: с неё писали или
+			// ей адресовали. Первое, а не последнее: диалог принадлежит адресу,
+			// на котором начался.
+			firstFrom := strings.ToLower(extractEmail(firstMsg.msg.From))
+			if isOurs(firstFrom) {
+				myID = firstFrom
+			} else {
+				for _, r := range parseRecipientAddrs(firstMsg.msg.To, firstMsg.msg.Cc) {
+					if isOurs(r) {
+						myID = r
+						break
+					}
+				}
+			}
+			if myID == "" && len(mine) > 0 {
+				myID = mine[0]
+			}
+			if myID == "" {
+				// Меня в видимых адресах нет: доставка по bcc, срезанные
+				// заголовки, письмо восстановленное из спама. Цепочка, которая
+				// никогда не возвращает случайную айдентику.
+				if e, ok := accountEmail[firstMsg.msg.AccountID]; ok && identities[e] {
+					myID = e
+				}
+			}
+			if myID == "" {
+				if accID, ok := folderAccount[firstMsg.msg.FolderID]; ok {
+					if e, ok := accountEmail[accID]; ok && identities[e] {
+						myID = e
+					}
+				}
+			}
+			if myID == "" && len(sortedIdentities) > 0 {
+				myID = sortedIdentities[0]
+			}
+		} else {
+			// Все адреса набора — мои (письмо с одной своей айдентики на
+			// другую). Логика тупая и на том держится: собеседник тот, чьё
+			// письмо первое, оставшийся адрес — айдентика. Письмо самому себе
+			// на тот же адрес даёт один адрес в обеих ролях.
+			cp := strings.ToLower(extractEmail(firstMsg.msg.From))
+			found := false
+			for _, a := range meta.participants {
+				if a == cp {
+					found = true
+					break
+				}
+			}
+			if !found {
+				cp = meta.participants[0]
+			}
+			cpAddrs = []string{cp}
+			myID = cp
+			for _, a := range meta.participants {
+				if a != cp {
+					myID = a
+					break
+				}
+			}
+		}
+
 		// Resolve display names for each counterpart from any message in the
 		// thread that referenced them (From for incoming, To/Cc names for
 		// outgoing). First match wins. Anything that looks like a raw address
 		// is dropped — those are useless as labels.
-		cpInfos := make([]DesktopContactInfo, 0, len(meta.cpAddrs))
-		for _, addr := range meta.cpAddrs {
+		cpInfos := make([]DesktopContactInfo, 0, len(cpAddrs))
+		for _, addr := range cpAddrs {
 			cpInfos = append(cpInfos, DesktopContactInfo{Addr: addr, Name: nameForAddr(entries, addr)})
 		}
 
-		isGroup := len(meta.cpAddrs) > 1
+		isGroup := len(others) > 1
 
-		// 1:1: label = counterpart name (or addr).
-		// Group: label = first message subject + " (N чел)" where N counts all
-		// human participants (counterparts + me).
+		// id — функция набора и только набора: один и тот же набор адресов всегда
+		// даёт один и тот же id, кто бы кому ни писал. Формат для «одна моя
+		// айдентика» совпадает со старым байт в байт, поэтому закрепления и
+		// склейки переживают смену схемы; новые формы появляются только там, где
+		// диалога раньше не было вовсе. Должен совпадать с `imap.rs`.
+		//
+		//   одна моя + один чужой   →  "me@a|bob"
+		//   одна моя + несколько    →  "me@a|group:bob,carol"
+		//   две моих + чужие        →  "me@a+me@b|bob"
+		//   только мои              →  "me@a+me@b|self"
+		//   меня в наборе нет (bcc) →  "|bob"
+		mineKey := strings.Join(mine, "+")
 		var label string
 		var id string
-		if isGroup {
-			subject := strings.TrimSpace(firstMsg.msg.Subject)
-			if subject == "" {
-				subject = "(без темы)"
-			}
-			label = fmt.Sprintf("%s (%d чел)", subject, len(meta.cpAddrs)+1)
-			id = fmt.Sprintf("%s|group:%s", key.myID, key.cps)
-		} else {
+		switch {
+		case len(others) == 0:
 			label = cpInfos[0].Name
 			if label == "" {
 				label = cpInfos[0].Addr
 			}
-			id = fmt.Sprintf("%s|%s", key.myID, key.cps)
+			id = fmt.Sprintf("%s|self", mineKey)
+		case isGroup:
+			subject := strings.TrimSpace(firstMsg.msg.Subject)
+			if subject == "" {
+				subject = "(без темы)"
+			}
+			label = fmt.Sprintf("%s (%d чел)", subject, len(meta.participants))
+			id = fmt.Sprintf("%s|group:%s", mineKey, strings.Join(others, ","))
+		default:
+			label = cpInfos[0].Name
+			if label == "" {
+				label = cpInfos[0].Addr
+			}
+			id = fmt.Sprintf("%s|%s", mineKey, strings.Join(others, ","))
 		}
 
 		// Build message refs
@@ -1400,7 +1444,7 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 			ID:           id,
 			Label:        label,
 			AvatarHash:   gravatarHash(avatarSeed),
-			ReceivedBy:   key.myID,
+			ReceivedBy:   myID,
 			Counterparts: cpInfos,
 			IsGroup:      isGroup,
 			LastDate:     timeutil.FromMs(lastMsg.msg.Date).Format(time.RFC1123Z),
