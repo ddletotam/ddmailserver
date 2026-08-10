@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	caldavutil "github.com/yourusername/mailserver/internal/caldav"
@@ -65,6 +66,14 @@ func (t *ICSSyncTask) doSync(ctx context.Context) error {
 		return fmt.Errorf("failed to fetch ICS: %w", err)
 	}
 
+	// A 200 response is not proof that we were handed a calendar: a captive
+	// portal, an expired share link or a proxy error page all arrive with the
+	// right status and the wrong body. Nothing below distinguishes "the feed is
+	// now empty" from "this is not a feed", so check before parsing.
+	if !strings.Contains(icsData, "BEGIN:VCALENDAR") {
+		return fmt.Errorf("response is not iCalendar data (%d bytes, no BEGIN:VCALENDAR)", len(icsData))
+	}
+
 	// Get or create calendar for this source
 	calendars, err := t.database.GetCalendarsBySourceID(t.source.ID)
 	if err != nil {
@@ -110,6 +119,16 @@ func (t *ICSSyncTask) doSync(ctx context.Context) error {
 	existingUIDs, err := t.database.GetAllEventUIDsForCalendar(calendar.ID)
 	if err != nil {
 		return fmt.Errorf("failed to get existing UIDs: %w", err)
+	}
+
+	// Every UID absent from the feed is queued for deletion below, so a payload
+	// that yields no events at all would empty the calendar in one transaction.
+	// ParseICS reports no error for input that simply is not iCalendar, which
+	// makes that the default outcome of a malformed feed rather than an edge
+	// case. Treat it as a failed sync: the events stay, the error surfaces on
+	// the source, and the next cycle tries again.
+	if len(events) == 0 && len(existingUIDs) > 0 {
+		return fmt.Errorf("feed parsed to 0 events while the calendar holds %d; refusing to read that as a full delete", len(existingUIDs))
 	}
 
 	// Collect changes for transactional application
