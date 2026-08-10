@@ -79,8 +79,37 @@ func New(account *models.Account) *Client {
 	}
 }
 
+// envelopeAddress reduces one address to the bare addr-spec the SMTP envelope
+// takes. The envelope is not a header: `MAIL FROM:<Имя <addr>>` is a syntax
+// error, and receivers say so with 555 5.5.2.
+func envelopeAddress(addr string) string {
+	if extracted := extractEmailAddr(addr); extracted != "" {
+		return extracted
+	}
+	return strings.TrimSpace(addr)
+}
+
+// envelopeAddresses is envelopeAddress over a list, dropping anything that
+// reduces to nothing.
+func envelopeAddresses(addrs []string) []string {
+	out := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		if normalised := envelopeAddress(addr); normalised != "" {
+			out = append(out, normalised)
+		}
+	}
+	return out
+}
+
 // Send sends an email through the external SMTP server
 func (c *Client) Send(from string, to []string, message []byte) error {
+	// Normalised here rather than in the callers so no path out of this
+	// function can put a display name on the wire: an identity configured as
+	// "АппСек <user@example.org>" used to fail every send with 555 5.5.2 on
+	// MAIL FROM.
+	from = envelopeAddress(from)
+	to = envelopeAddresses(to)
+
 	addr := fmt.Sprintf("%s:%d", c.account.SMTPHost, c.account.SMTPPort)
 
 	log.Printf("Sending email via SMTP %s", addr)
@@ -182,6 +211,12 @@ func (c *Client) sendTLS(addr string, auth smtp.Auth, from string, to []string, 
 
 // SendDirect sends email directly via MX lookup (for local domain senders)
 func SendDirect(from string, to []string, message []byte, hostname string) error {
+	// As in Send: the envelope takes addr-specs only. Here a stray display name
+	// also breaks the domain grouping below, since splitting "Имя <u@host>" on
+	// "@" yields "host>" and the MX lookup goes looking for that.
+	from = envelopeAddress(from)
+	to = envelopeAddresses(to)
+
 	// Group recipients by domain
 	byDomain := make(map[string][]string)
 	for _, rcpt := range to {
