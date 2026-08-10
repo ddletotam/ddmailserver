@@ -78,8 +78,10 @@ func (t *SendTask) Execute(ctx context.Context) error {
 	// Create SMTP client
 	client := New(t.account)
 
-	// Prepare recipients
-	recipients := t.parseRecipients()
+	// Prepare recipients. Shared with the direct-MX path: both need addr-specs
+	// with the display names stripped, and this used to be the one place that
+	// handed RCPT TO the whole "Name <addr>" string.
+	recipients := parseRecipientsFromOutbox(t.outboxMessage)
 	if len(recipients) == 0 {
 		// Terminal validation error: without the explicit failed status the
 		// message would be stranded in status='sending' forever (the
@@ -139,41 +141,6 @@ func (t *SendTask) Execute(ctx context.Context) error {
 
 	log.Printf("Message %d sent successfully", t.outboxMessage.ID)
 	return nil
-}
-
-// parseRecipients extracts all recipient email addresses
-func (t *SendTask) parseRecipients() []string {
-	var recipients []string
-
-	// Add To recipients
-	if t.outboxMessage.To != "" {
-		recipients = append(recipients, t.splitEmails(t.outboxMessage.To)...)
-	}
-
-	// Add Cc recipients
-	if t.outboxMessage.Cc != "" {
-		recipients = append(recipients, t.splitEmails(t.outboxMessage.Cc)...)
-	}
-
-	// Add Bcc recipients
-	if t.outboxMessage.Bcc != "" {
-		recipients = append(recipients, t.splitEmails(t.outboxMessage.Bcc)...)
-	}
-
-	return recipients
-}
-
-// splitEmails splits a comma-separated list of emails
-func (t *SendTask) splitEmails(emails string) []string {
-	parts := strings.Split(emails, ",")
-	var result []string
-	for _, part := range parts {
-		trimmed := strings.TrimSpace(part)
-		if trimmed != "" {
-			result = append(result, trimmed)
-		}
-	}
-	return result
 }
 
 // randomBoundary generates a random MIME boundary string.

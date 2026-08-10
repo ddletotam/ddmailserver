@@ -117,7 +117,7 @@ func (c *Client) Send(from string, to []string, message []byte) error {
 		return fmt.Errorf("failed to send email: %w", err)
 	}
 
-	log.Printf("Email sent successfully from %s to %v", from, to)
+	log.Printf("Email sent successfully from %s to %s", logmask.Addr(from), logmask.AddrSlice(to))
 	return nil
 }
 
@@ -154,7 +154,9 @@ func (c *Client) sendTLS(addr string, auth smtp.Auth, from string, to []string, 
 	// Set recipients
 	for _, recipient := range to {
 		if err = client.Rcpt(recipient); err != nil {
-			return fmt.Errorf("failed to set recipient %s: %w", recipient, err)
+			// Masked: this error lands in logs and in outbox last_error, and
+			// the recipient address is personal data — same as in SendDirect.
+			return fmt.Errorf("failed to set recipient %s: %w", logmask.Addr(recipient), err)
 		}
 	}
 
