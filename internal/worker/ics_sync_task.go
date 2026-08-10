@@ -116,9 +116,9 @@ func (t *ICSSyncTask) doSync(ctx context.Context) error {
 	}
 
 	// Get existing events for comparison
-	existingUIDs, err := t.database.GetAllEventUIDsForCalendar(calendar.ID)
+	identities, err := t.database.GetEventIdentitiesForCalendar(calendar.ID)
 	if err != nil {
-		return fmt.Errorf("failed to get existing UIDs: %w", err)
+		return fmt.Errorf("failed to get existing events: %w", err)
 	}
 
 	// Every UID absent from the feed is queued for deletion below, so a payload
@@ -127,54 +127,53 @@ func (t *ICSSyncTask) doSync(ctx context.Context) error {
 	// makes that the default outcome of a malformed feed rather than an edge
 	// case. Treat it as a failed sync: the events stay, the error surfaces on
 	// the source, and the next cycle tries again.
-	if len(events) == 0 && len(existingUIDs) > 0 {
-		return fmt.Errorf("feed parsed to 0 events while the calendar holds %d; refusing to read that as a full delete", len(existingUIDs))
+	if len(events) == 0 && len(identities) > 0 {
+		return fmt.Errorf("feed parsed to 0 events while the calendar holds %d; refusing to read that as a full delete", len(identities))
 	}
+
+	for _, event := range events {
+		event.CalendarID = calendar.ID
+	}
+
+	matches, creates, deleteUIDs := matchFeedEvents(identities, events)
 
 	// Collect changes for transactional application
 	changes := &db.SyncEventChanges{
 		CalendarID: calendar.ID,
-		Creates:    make([]*models.CalendarEvent, 0),
-		Updates:    make([]*models.CalendarEvent, 0),
-		DeleteUIDs: make([]string, 0),
+		Creates:    creates,
+		Updates:    make([]*models.CalendarEvent, 0, len(matches)),
+		DeleteUIDs: deleteUIDs,
 	}
 
-	seenUIDs := make(map[string]bool)
-
-	for _, event := range events {
-		event.CalendarID = calendar.ID
-		seenUIDs[event.UID] = true
-
-		existing, err := t.database.GetEventByUID(calendar.ID, event.UID)
-		if err != nil {
-			log.Printf("Failed to check existing event: %v", err)
+	readopted := 0
+	for _, match := range matches {
+		existing, err := t.database.GetEventByID(match.ExistingID)
+		if err != nil || existing == nil {
+			log.Printf("Failed to load event %d for update: %v", match.ExistingID, err)
 			continue
 		}
 
-		if existing != nil {
-			// Check if event changed (compare ICalData hash/etag)
-			if existing.ETag != event.ETag {
-				existing.ICalData = event.ICalData
-				existing.Summary = event.Summary
-				existing.Description = event.Description
-				existing.Location = event.Location
-				existing.DTStart = event.DTStart
-				existing.DTEnd = event.DTEnd
-				existing.AllDay = event.AllDay
-				existing.RRule = event.RRule
-				existing.ETag = event.ETag
-				changes.Updates = append(changes.Updates, existing)
-			}
-		} else {
-			changes.Creates = append(changes.Creates, event)
+		// An unchanged event is left alone. A re-adopted one is always written:
+		// its stored UID is stale by definition, and that is the whole point of
+		// having matched it.
+		if existing.ETag == match.Event.ETag && !match.ByContent {
+			continue
 		}
-	}
+		if match.ByContent {
+			readopted++
+		}
 
-	// Queue deletes for events no longer in ICS
-	for uid := range existingUIDs {
-		if !seenUIDs[uid] {
-			changes.DeleteUIDs = append(changes.DeleteUIDs, uid)
-		}
+		existing.UID = match.Event.UID
+		existing.ICalData = match.Event.ICalData
+		existing.Summary = match.Event.Summary
+		existing.Description = match.Event.Description
+		existing.Location = match.Event.Location
+		existing.DTStart = match.Event.DTStart
+		existing.DTEnd = match.Event.DTEnd
+		existing.AllDay = match.Event.AllDay
+		existing.RRule = match.Event.RRule
+		existing.ETag = match.Event.ETag
+		changes.Updates = append(changes.Updates, existing)
 	}
 
 	// Apply all changes in a single transaction
@@ -182,8 +181,13 @@ func (t *ICSSyncTask) doSync(ctx context.Context) error {
 		if err := t.database.ApplySyncChanges(changes); err != nil {
 			return fmt.Errorf("failed to apply sync changes: %w", err)
 		}
-		log.Printf("ICS sync applied: %d created, %d updated, %d deleted",
-			len(changes.Creates), len(changes.Updates), len(changes.DeleteUIDs))
+		if readopted > 0 {
+			log.Printf("ICS sync applied: %d created, %d updated, %d deleted (%d matched by content — this feed reissues its UIDs)",
+				len(changes.Creates), len(changes.Updates), len(changes.DeleteUIDs), readopted)
+		} else {
+			log.Printf("ICS sync applied: %d created, %d updated, %d deleted",
+				len(changes.Creates), len(changes.Updates), len(changes.DeleteUIDs))
+		}
 
 		if t.notifyHub != nil {
 			t.notifyHub.Publish(notify.Event{
