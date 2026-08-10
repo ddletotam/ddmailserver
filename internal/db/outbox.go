@@ -135,12 +135,25 @@ func (db *DB) MarkOutboxMessageSent(id int64) error {
 // indexed by the retries count BEFORE this failure. Past the last step the
 // delay stays 12h, but the send tasks mark the message failed after
 // maxRetries attempts anyway.
-func (db *DB) IncrementOutboxMessageRetries(id int64, lastError string) error {
+// Returns the new retry count, so callers decide whether to give up from the
+// stored value rather than from the copy they read when the task was created.
+func (db *DB) IncrementOutboxMessageRetries(id int64, lastError string) (int, error) {
 	now := timeutil.Now()
+
+	// $2 is cast explicitly. It appears both as a bigint column value and as
+	// the left operand of an addition with integer literals, and Postgres will
+	// not deduce one type for both — it fails the whole statement with
+	// "inconsistent types deduced for parameter $2". Which it did, on every
+	// attempt: no failure was ever counted, next_attempt_at stayed 0, and a
+	// permanently rejected message went on being retried once per scheduler
+	// cycle indefinitely instead of backing off and being marked failed.
+	//
+	// The CASE reads the pre-update value of retries, so the first failure
+	// waits a minute.
 	query := `
 		UPDATE outbox_messages
-		SET retries = retries + 1, last_error = $1, updated_at = $2,
-		    next_attempt_at = $2 + (CASE LEAST(retries, 5)
+		SET retries = COALESCE(retries, 0) + 1, last_error = $1, updated_at = $2::bigint,
+		    next_attempt_at = $2::bigint + (CASE LEAST(COALESCE(retries, 0), 5)
 		        WHEN 0 THEN 60000
 		        WHEN 1 THEN 300000
 		        WHEN 2 THEN 900000
@@ -149,14 +162,44 @@ func (db *DB) IncrementOutboxMessageRetries(id int64, lastError string) error {
 		        ELSE 43200000
 		    END)
 		WHERE id = $3
+		RETURNING retries
 	`
 
-	_, err := db.Exec(query, lastError, now, id)
-	if err != nil {
-		return fmt.Errorf("failed to increment retries: %w", err)
+	var retries int
+	if err := db.QueryRow(query, lastError, now, id).Scan(&retries); err != nil {
+		return 0, fmt.Errorf("failed to increment retries: %w", err)
 	}
 
-	return nil
+	return retries, nil
+}
+
+// RecoverStrandedOutboxMessages moves messages left in 'sending' back to
+// 'pending' and reports how many were freed.
+//
+// Nothing else ever clears that status. It is set just before a send begins, and
+// if the process stops in between — a restart, a crash — the row becomes
+// untouchable, because the scheduler only ever picks up 'pending'. One such
+// message sat in 'sending' for two months.
+//
+// Meant to be called at startup, where nothing can be genuinely in flight yet.
+// It assumes a single mailserver instance per database; with two running, one
+// starting up could hand the other's in-flight message back to the queue.
+func (db *DB) RecoverStrandedOutboxMessages() (int64, error) {
+	result, err := db.Exec(`
+		UPDATE outbox_messages
+		SET status = 'pending', updated_at = $1
+		WHERE status = 'sending'
+	`, timeutil.Now())
+	if err != nil {
+		return 0, fmt.Errorf("failed to recover stranded outbox messages: %w", err)
+	}
+
+	freed, err := result.RowsAffected()
+	if err != nil {
+		return 0, nil // the update itself succeeded; the count is cosmetic
+	}
+
+	return freed, nil
 }
 
 // DeleteOutboxMessage deletes an outbox message

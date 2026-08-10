@@ -109,13 +109,17 @@ func (t *SendTask) Execute(ctx context.Context) error {
 	err := client.Send(t.outboxMessage.From, recipients, emailData)
 
 	if err != nil {
-		// Increment retries
-		if err := t.database.IncrementOutboxMessageRetries(t.outboxMessage.ID, err.Error()); err != nil {
-			log.Printf("Failed to increment retries: %v", err)
+		// Increment retries. The stored count decides when to give up —
+		// t.outboxMessage.Retries is a copy taken when the task was created and
+		// says nothing about attempts made since.
+		retries, incErr := t.database.IncrementOutboxMessageRetries(t.outboxMessage.ID, err.Error())
+		if incErr != nil {
+			log.Printf("Failed to increment retries: %v", incErr)
+			retries = t.outboxMessage.Retries + 1
 		}
 
 		// Check if we should mark as failed
-		if t.outboxMessage.Retries+1 >= maxRetries {
+		if retries >= maxRetries {
 			log.Printf("Message %d exceeded max retries, marking as failed", t.outboxMessage.ID)
 			if err := t.database.UpdateOutboxMessageStatus(t.outboxMessage.ID, "failed", err.Error()); err != nil {
 				log.Printf("Failed to mark message as failed: %v", err)
