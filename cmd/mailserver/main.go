@@ -204,6 +204,16 @@ func main() {
 	go idleManager.Start()
 	defer idleManager.Stop()
 
+	// Free anything the previous run left mid-send. status='sending' is set just
+	// before a send starts and cleared only when it finishes, so a restart in
+	// between strands the row: the scheduler picks up 'pending' and nothing
+	// else. Done before the scheduler starts, while nothing can be in flight.
+	if freed, err := database.RecoverStrandedOutboxMessages(); err != nil {
+		log.Printf("Failed to recover stranded outbox messages: %v", err)
+	} else if freed > 0 {
+		log.Printf("Recovered %d outbox message(s) stranded in 'sending' by a previous run", freed)
+	}
+
 	// Start scheduler last — all dependencies must be ready before first sync cycle.
 	go scheduler.Start()
 	defer scheduler.Stop()
