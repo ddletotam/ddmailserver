@@ -117,6 +117,42 @@ func TestMalformedEntryDoesNotCostTheOtherRecipients(t *testing.T) {
 	}
 }
 
+// TestSenderIsReducedToAnAddress covers MAIL FROM, which had the same defect as
+// RCPT TO and outlived the first fix: an identity configured as "АппСек <addr>"
+// produced `MAIL FROM:<АппСек <addr>>` and failed every send with 555 5.5.2.
+func TestSenderIsReducedToAnAddress(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{in: "АппСек <user@example.org>", want: "user@example.org"},
+		{in: "Apple <dd@example.org>", want: "dd@example.org"},
+		{in: "user@example.org", want: "user@example.org"},
+		{in: "  user@example.org  ", want: "user@example.org"},
+		{in: "=?utf-8?B?0JjQstCw0L0=?= <user@example.org>", want: "user@example.org"},
+	}
+
+	for _, c := range cases {
+		if got := envelopeAddress(c.in); got != c.want {
+			t.Errorf("envelopeAddress(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestEnvelopeAddressesDropsNothingUsable: normalising the recipient list must
+// not quietly lose a recipient, since that would mean mail silently not arriving.
+func TestEnvelopeAddressesDropsNothingUsable(t *testing.T) {
+	in := []string{"Имя <a@example.org>", "b@example.org", "  c@example.org  "}
+	got := envelopeAddresses(in)
+	want := []string{"a@example.org", "b@example.org", "c@example.org"}
+
+	if len(got) != len(want) {
+		t.Fatalf("envelopeAddresses(%v) = %v, want %v", in, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("envelopeAddresses[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 // TestAllRecipientFieldsAreCollected: To, Cc and Bcc all belong in the envelope.
 func TestAllRecipientFieldsAreCollected(t *testing.T) {
 	msg := &models.OutboxMessage{
