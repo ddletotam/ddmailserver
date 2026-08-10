@@ -354,6 +354,48 @@ func (db *DB) GetAllEventUIDsForCalendar(calendarID int64) (map[string]string, e
 	return uids, nil
 }
 
+// EventIdentity is the least a sync needs to recognise an event it has seen
+// before: the UID the feed gave it, and the content a feed cannot regenerate.
+// Some feeds mint a fresh UID on every render, so the UID alone cannot answer
+// "is this the same meeting" — see matchFeedEvents in internal/worker.
+type EventIdentity struct {
+	ID      int64
+	UID     string
+	ETag    string
+	Summary string
+	DTStart int64
+}
+
+// GetEventIdentitiesForCalendar returns one row per event, cheap enough to load
+// for a whole calendar on every sync: no ical_data, no bodies.
+func (db *DB) GetEventIdentitiesForCalendar(calendarID int64) ([]EventIdentity, error) {
+	query := `
+		SELECT id, uid, COALESCE(etag, ''), COALESCE(summary, ''), COALESCE(dtstart, 0)
+		FROM calendar_events
+		WHERE calendar_id = $1
+	`
+
+	rows, err := db.Query(query, calendarID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get event identities: %w", err)
+	}
+	defer rows.Close()
+
+	var out []EventIdentity
+	for rows.Next() {
+		var e EventIdentity
+		if err := rows.Scan(&e.ID, &e.UID, &e.ETag, &e.Summary, &e.DTStart); err != nil {
+			return nil, fmt.Errorf("failed to scan event identity: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read event identities: %w", err)
+	}
+
+	return out, nil
+}
+
 // GetEventCountForCalendar returns the number of events in a calendar
 func (db *DB) GetEventCountForCalendar(calendarID int64) (int, error) {
 	query := `SELECT COUNT(*) FROM calendar_events WHERE calendar_id = $1`
@@ -460,19 +502,22 @@ func (db *DB) ApplySyncChanges(changes *SyncEventChanges) error {
 	for _, event := range changes.Updates {
 		event.UpdatedAt = now
 
+		// uid is written too: a feed that regenerates UIDs still describes the
+		// same events, and re-pointing the stored row at the new UID is what
+		// keeps it from being deleted and recreated on every sync.
 		query := `
 			UPDATE calendar_events
-			SET ical_data = $1, summary = $2, description = $3, location = $4,
-			    dtstart = $5, dtend = $6, all_day = $7,
-			    organizer_email = $8, organizer_name = $9, sequence = $10, status = $11,
-			    rrule = $12, recurrence_id = $13,
-			    etag = $14, local_modified = $15, updated_at = $16
-			WHERE id = $17
+			SET uid = $1, ical_data = $2, summary = $3, description = $4, location = $5,
+			    dtstart = $6, dtend = $7, all_day = $8,
+			    organizer_email = $9, organizer_name = $10, sequence = $11, status = $12,
+			    rrule = $13, recurrence_id = $14,
+			    etag = $15, local_modified = $16, updated_at = $17
+			WHERE id = $18
 		`
 
 		_, err := tx.Exec(
 			query,
-			event.ICalData, event.Summary, event.Description, event.Location,
+			event.UID, event.ICalData, event.Summary, event.Description, event.Location,
 			event.DTStart, event.DTEnd, event.AllDay,
 			event.OrganizerEmail, event.OrganizerName, event.Sequence, event.Status,
 			event.RRule, event.RecurrenceID,
