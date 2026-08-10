@@ -3,6 +3,8 @@ package importer
 import (
 	"crypto/sha256"
 	"fmt"
+	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 // Use this when you need transactional control over the import
 func ParseICS(icsData string) ([]*models.CalendarEvent, error) {
 	decoder := ical.NewDecoder(strings.NewReader(icsData))
+	tz := newZoneResolver(icsData)
 	var events []*models.CalendarEvent
 
 	for {
@@ -25,8 +28,9 @@ func ParseICS(icsData string) ([]*models.CalendarEvent, error) {
 		}
 
 		for _, event := range cal.Events() {
-			modelEvent, err := parseICalEvent(&event, 0, cal)
+			modelEvent, err := parseICalEvent(&event, 0, tz, time.UTC)
 			if err != nil {
+				log.Printf("importer: skipping event: %v", err)
 				continue
 			}
 			modelEvent.ETag = generateETag(modelEvent.ICalData)
@@ -38,7 +42,7 @@ func ParseICS(icsData string) ([]*models.CalendarEvent, error) {
 	if len(events) == 0 {
 		vevents := extractVEvents(icsData)
 		for _, vevent := range vevents {
-			event := parseVEvent(vevent, 0)
+			event := parseVEvent(vevent, 0, tz, time.UTC)
 			if event != nil && event.UID != "" {
 				event.ETag = generateETag(event.ICalData)
 				events = append(events, event)
@@ -54,6 +58,7 @@ func ParseICS(icsData string) ([]*models.CalendarEvent, error) {
 func ImportICS(database *db.DB, calendarID int64, icsData []byte) (int, error) {
 	// Parse the ICS data using go-ical
 	decoder := ical.NewDecoder(strings.NewReader(string(icsData)))
+	tz := newZoneResolver(string(icsData))
 
 	imported := 0
 
@@ -65,8 +70,9 @@ func ImportICS(database *db.DB, calendarID int64, icsData []byte) (int, error) {
 
 		// Process each VEVENT in the calendar
 		for _, event := range cal.Events() {
-			modelEvent, err := parseICalEvent(&event, calendarID, cal)
+			modelEvent, err := parseICalEvent(&event, calendarID, tz, time.UTC)
 			if err != nil {
+				log.Printf("importer: skipping event: %v", err)
 				continue // Skip invalid events
 			}
 
@@ -111,10 +117,11 @@ func ImportICS(database *db.DB, calendarID int64, icsData []byte) (int, error) {
 func ImportICSSimple(database *db.DB, calendarID int64, icsData []byte) (int, error) {
 	content := string(icsData)
 	events := extractVEvents(content)
+	tz := newZoneResolver(content)
 
 	imported := 0
 	for _, vevent := range events {
-		event := parseVEvent(vevent, calendarID)
+		event := parseVEvent(vevent, calendarID, tz, time.UTC)
 		if event == nil || event.UID == "" {
 			continue
 		}
@@ -154,8 +161,10 @@ func ImportICSSimple(database *db.DB, calendarID int64, icsData []byte) (int, er
 	return imported, nil
 }
 
-// parseICalEvent parses a go-ical event into our model
-func parseICalEvent(event *ical.Event, calendarID int64, cal *ical.Calendar) (*models.CalendarEvent, error) {
+// parseICalEvent parses a go-ical event into our model. Zone-qualified times
+// are resolved through tz; times with no zone of their own fall back to
+// fallback (see zoneResolver).
+func parseICalEvent(event *ical.Event, calendarID int64, tz *zoneResolver, fallback *time.Location) (*models.CalendarEvent, error) {
 	modelEvent := &models.CalendarEvent{
 		CalendarID: calendarID,
 	}
@@ -198,25 +207,34 @@ func parseICalEvent(event *ical.Event, calendarID int64, cal *ical.Calendar) (*m
 		modelEvent.RRule = prop.Value
 	}
 
-	// Get DTSTART
-	if prop := event.Props.Get(ical.PropDateTimeStart); prop != nil {
-		t, err := prop.DateTime(nil)
-		if err == nil {
-			modelEvent.DTStart = timeutil.ToMs(t)
+	// DTSTART and DTEND go through the zone resolver rather than go-ical's
+	// prop.DateTime. DateTime resolves TZID against this host only: it ignores
+	// whatever VTIMEZONE the feed shipped, and it returns an error for a zone
+	// name the host does not know — which this function used to discard, leaving
+	// DTStart at zero and silently parking the event at the Unix epoch.
+	//
+	// A missing DTSTART is left alone rather than rejected: this function also
+	// parses invitations arriving by mail, and a METHOD:CANCEL or METHOD:REPLY
+	// identifies its event by UID, with no start of its own to carry. Only a
+	// DTSTART that is present and unreadable fails the event.
+	if startProp := event.Props.Get(ical.PropDateTimeStart); startProp != nil {
+		allDay := isDateValue(startProp.Params.Get(ical.ParamValue), startProp.Value)
+		start, err := tz.parseProp(startProp.Value, startProp.Params.Get(ical.ParamTimezoneID), allDay, fallback)
+		if err != nil {
+			return nil, fmt.Errorf("event %s: DTSTART %q: %w", modelEvent.UID, startProp.Value, err)
 		}
-		// Check if all-day event
-		if prop.Params.Get(ical.ParamValue) == "DATE" {
-			modelEvent.AllDay = true
-		}
+		modelEvent.DTStart = timeutil.ToMs(start)
+		modelEvent.AllDay = allDay
 	}
 
-	// Get DTEND
 	if prop := event.Props.Get(ical.PropDateTimeEnd); prop != nil {
-		t, err := prop.DateTime(nil)
-		if err == nil {
-			ms := timeutil.ToMs(t)
-			modelEvent.DTEnd = &ms
+		end, err := tz.parseProp(prop.Value, prop.Params.Get(ical.ParamTimezoneID),
+			isDateValue(prop.Params.Get(ical.ParamValue), prop.Value), fallback)
+		if err != nil {
+			return nil, fmt.Errorf("event %s: DTEND %q: %w", modelEvent.UID, prop.Value, err)
 		}
+		ms := timeutil.ToMs(end)
+		modelEvent.DTEnd = &ms
 	}
 
 	// Serialize just this single event wrapped in a VCALENDAR
@@ -229,13 +247,45 @@ func parseICalEvent(event *ical.Event, calendarID int64, cal *ical.Calendar) (*m
 	var buf strings.Builder
 	encoder := ical.NewEncoder(&buf)
 	if err := encoder.Encode(singleCal); err == nil {
-		modelEvent.ICalData = buf.String()
+		modelEvent.ICalData = withVTimezones(buf.String(), tz, eventTZIDs(event))
 	} else {
 		// Generate minimal iCal data
 		modelEvent.ICalData = wrapVEvent(generateVEvent(modelEvent))
 	}
 
 	return modelEvent, nil
+}
+
+// eventTZIDs lists every zone the event's properties reference, sorted. The
+// order matters: ical_data is hashed into the ETag, and Props is a map, so an
+// unsorted walk would reshuffle the stored form on every parse and make every
+// event look changed on every sync.
+func eventTZIDs(event *ical.Event) []string {
+	var ids []string
+	seen := make(map[string]bool)
+
+	for _, props := range event.Props {
+		for _, prop := range props {
+			id := prop.Params.Get(ical.ParamTimezoneID)
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+
+	sort.Strings(ids)
+	return ids
+}
+
+// isDateValue reports whether a property value is a DATE rather than a
+// DATE-TIME — either because VALUE says so, or because it is eight digits long.
+func isDateValue(valueParam, value string) bool {
+	if strings.EqualFold(valueParam, "DATE") {
+		return true
+	}
+	return len(strings.TrimSpace(value)) == len(icalDate)
 }
 
 // extractVEvents extracts VEVENT blocks from ICS content
@@ -268,8 +318,11 @@ func extractVEvents(content string) []string {
 	return events
 }
 
-// parseVEvent parses a VEVENT string into a CalendarEvent
-func parseVEvent(vevent string, calendarID int64) *models.CalendarEvent {
+// parseVEvent parses a VEVENT string into a CalendarEvent. This is the fallback
+// for payloads go-ical refuses outright; it shares the zone resolver with the
+// decoder path so that the same TZID cannot mean two different things depending
+// on which parser happened to run.
+func parseVEvent(vevent string, calendarID int64, tz *zoneResolver, fallback *time.Location) *models.CalendarEvent {
 	event := &models.CalendarEvent{
 		CalendarID: calendarID,
 		ICalData:   wrapVEvent(vevent),
@@ -291,14 +344,25 @@ func parseVEvent(vevent string, calendarID int64) *models.CalendarEvent {
 			event.RRule = strings.TrimPrefix(line, "RRULE:")
 		} else if strings.HasPrefix(line, "DTSTART") {
 			value := extractValue(line)
-			t, allDay := parseDateTimeSimple(value, line)
+			t, allDay, err := parseDateTimeSimple(value, line, tz, fallback)
+			if err != nil {
+				// Without a start there is nothing to show and nothing to
+				// remind about, so drop the event rather than store it at the
+				// epoch.
+				log.Printf("importer: skipping event with unusable DTSTART %q: %v", value, err)
+				return nil
+			}
 			event.DTStart = timeutil.ToMs(t)
 			event.AllDay = allDay
 		} else if strings.HasPrefix(line, "DTEND") {
 			value := extractValue(line)
-			dtend, _ := parseDateTimeSimple(value, line)
-			ms := timeutil.ToMs(dtend)
-			event.DTEnd = &ms
+			dtend, _, err := parseDateTimeSimple(value, line, tz, fallback)
+			if err != nil {
+				log.Printf("importer: ignoring unusable DTEND %q: %v", value, err)
+			} else {
+				ms := timeutil.ToMs(dtend)
+				event.DTEnd = &ms
+			}
 		}
 	}
 
@@ -314,36 +378,15 @@ func extractValue(line string) string {
 	return ""
 }
 
-// parseDateTimeSimple parses iCalendar date/time formats
-func parseDateTimeSimple(value, line string) (time.Time, bool) {
-	allDay := false
-
-	// Check for VALUE=DATE in the line
-	if strings.Contains(line, "VALUE=DATE") && !strings.Contains(line, "VALUE=DATE-TIME") {
-		allDay = true
-	}
-
-	value = strings.TrimSpace(value)
-
-	// Try various formats
-	formats := []string{
-		"20060102T150405Z",     // UTC
-		"20060102T150405",      // Local time
-		"20060102",             // Date only
-		"2006-01-02T15:04:05Z", // ISO format
-		"2006-01-02",           // ISO date
-	}
-
-	for _, format := range formats {
-		if t, err := time.Parse(format, value); err == nil {
-			if len(value) == 8 { // Date only
-				allDay = true
-			}
-			return t, allDay
-		}
-	}
-
-	return time.Time{}, allDay
+// parseDateTimeSimple parses one DTSTART/DTEND content line from the text
+// fallback path. The zone question is delegated to the resolver, so a bare local
+// time here is treated as floating rather than silently assumed to be UTC — the
+// assumption that shifted an entire feed by the difference between its zone and
+// ours.
+func parseDateTimeSimple(value, line string, tz *zoneResolver, fallback *time.Location) (time.Time, bool, error) {
+	isDate := isDateValue(icalParam(line, "VALUE"), value)
+	t, err := tz.parseProp(value, icalParam(line, "TZID"), isDate, fallback)
+	return t, isDate, err
 }
 
 // wrapVEvent wraps a VEVENT in a VCALENDAR
