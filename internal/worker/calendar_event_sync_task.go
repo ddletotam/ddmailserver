@@ -109,10 +109,13 @@ func (t *CalendarEventSyncTask) Execute(ctx context.Context) error {
 			// truth instead of shielding the stale local copy.
 			const giveUpAfter = 8
 			if entry.RetryCount+1 >= giveUpAfter && isPermanentSyncError(err) {
-				log.Printf("Calendar event sync: giving up on %s (%s) after %d attempts — dropping; remote state wins",
+				log.Printf("Calendar event sync: giving up on %s (%s) after %d attempts — retiring to dead letters; remote state wins",
 					entry.UID, entry.Operation, entry.RetryCount+1)
-				if dbErr := t.database.DeleteCalendarEventSyncEntry(entry.ID); dbErr != nil {
-					log.Printf("drop poisoned sync entry %d: %v", entry.ID, dbErr)
+				// Retired, not deleted: the body is the only evidence of what
+				// the server refused, and deleting it once cost days of
+				// guesswork (see migrations/046).
+				if dbErr := t.database.DeadLetterCalendarEventSync(entry.ID, err.Error()); dbErr != nil {
+					log.Printf("retire poisoned sync entry %d: %v", entry.ID, dbErr)
 				}
 				if entry.Operation != "delete" {
 					t.database.MarkEventSynced(entry.EventID, "")
