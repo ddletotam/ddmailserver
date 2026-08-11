@@ -101,7 +101,14 @@ func (t *CalendarSyncWarningTask) sendWarning(src *models.CalendarSource, count 
 	samples, _ := t.database.SampleFailingSyncEntries(src.ID, calendarSyncWarningMinRetries, 10)
 
 	var body strings.Builder
-	body.WriteString(fmt.Sprintf("Не удалось синхронизировать %d событий с календарём «%s».\n\n", count, src.Name))
+	// The источник and the identity it belongs to go in the first line: with
+	// several sources configured, "не удалось синхронизировать" on its own does
+	// not say which account to go and look at.
+	if src.IdentityEmail != "" {
+		body.WriteString(fmt.Sprintf("Не удалось синхронизировать %d событий с источником «%s» (%s).\n\n", count, src.Name, src.IdentityEmail))
+	} else {
+		body.WriteString(fmt.Sprintf("Не удалось синхронизировать %d событий с источником «%s».\n\n", count, src.Name))
+	}
 	body.WriteString("Сервер несколько раз пытался отправить изменения на удалённый CalDAV — \nи получил ошибку. Возможные причины:\n")
 	body.WriteString("  • протух пароль/токен (особенно у iCloud — нужен app-specific password);\n")
 	body.WriteString("  • удалённый сервер временно отказывает (5xx, 4xx);\n")
@@ -112,16 +119,29 @@ func (t *CalendarSyncWarningTask) sendWarning(src *models.CalendarSource, count 
 	if len(samples) > 0 {
 		body.WriteString("Примеры застрявших операций:\n")
 		for _, e := range samples {
-			body.WriteString(fmt.Sprintf("  • %s (%s, попыток: %d)", e.UID, e.Operation, e.RetryCount))
+			// Name the event and its calendar first. The UID identifies the row
+			// for us; it tells the reader nothing.
+			title := e.Summary
+			if title == "" {
+				title = "(без названия)"
+			}
+			body.WriteString(fmt.Sprintf("  • %s", title))
+			if e.CalendarName != "" {
+				body.WriteString(fmt.Sprintf(" — календарь «%s»", e.CalendarName))
+			}
+			body.WriteString(fmt.Sprintf("\n    операция: %s, попыток: %d\n", e.Operation, e.RetryCount))
 			if e.LastError != "" {
 				snippet := strings.TrimSpace(e.LastError)
-				if len(snippet) > 160 {
-					snippet = snippet[:160] + "…"
+				if len(snippet) > 300 {
+					snippet = snippet[:300] + "…"
 				}
-				body.WriteString(fmt.Sprintf("\n    → %s", snippet))
+				body.WriteString(fmt.Sprintf("    ошибка: %s\n", snippet))
 			}
-			body.WriteString("\n")
+			body.WriteString(fmt.Sprintf("    UID: %s\n", e.UID))
 		}
+		body.WriteString("\nЗаписи, по которым сервер сдался окончательно, сохраняются в\n")
+		body.WriteString("calendar_event_sync_dead_letters вместе с телом запроса — оттуда видно,\n")
+		body.WriteString("что именно отвергла удалённая сторона.\n")
 	}
 
 	hostname := t.hostname

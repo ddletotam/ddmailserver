@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -645,13 +646,40 @@ func (c *Client) PutEventRaw(ctx context.Context, remotePath string, icalData st
 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
+		// Headers go to the log rather than into the error: the error is stored
+		// per queue entry and must stay short, but when the body comes back
+		// empty — as iCloud's 403 did — the headers are the only thing left that
+		// might name the precondition that failed.
+		logResponseHeaders("PUT", fullURL, resp)
 		// The URL belongs in the message: this error is all the sync queue
-		// keeps, and "PUT failed with status 403:" on its own — servers often
-		// answer with an empty body — says nothing about where it was sent.
+		// keeps, and "PUT failed with status 403:" on its own says nothing about
+		// where it was sent.
 		return fmt.Errorf("PUT %s failed with status %d: %s", fullURL, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	return nil
+}
+
+// logResponseHeaders dumps a failed CalDAV response's headers, sorted so two
+// failures can be diffed against each other.
+func logResponseHeaders(method, url string, resp *http.Response) {
+	names := make([]string, 0, len(resp.Header))
+	for name := range resp.Header {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	for i, name := range names {
+		if i > 0 {
+			b.WriteString("; ")
+		}
+		b.WriteString(name)
+		b.WriteString(": ")
+		b.WriteString(strings.Join(resp.Header[name], ", "))
+	}
+
+	log.Printf("CalDAV %s %s → %d; response headers: %s", method, url, resp.StatusCode, b.String())
 }
 
 // DeleteEvent deletes an event from a remote CalDAV server
@@ -676,7 +704,8 @@ func (c *Client) DeleteEvent(ctx context.Context, remotePath string) error {
 
 	if resp.StatusCode >= 400 && resp.StatusCode != 404 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("DELETE failed with status %d: %s", resp.StatusCode, string(body))
+		logResponseHeaders("DELETE", fullURL, resp)
+		return fmt.Errorf("DELETE %s failed with status %d: %s", fullURL, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	return nil

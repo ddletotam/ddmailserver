@@ -124,16 +124,30 @@ func (db *DB) CountPendingCalendarSyncFailures(sourceID int64, minRetries int) (
 	return n, nil
 }
 
-// SampleFailingSyncEntries returns up to `limit` failing entries for a
-// source. Used in the warning-email body to show concrete examples.
-func (db *DB) SampleFailingSyncEntries(sourceID int64, minRetries, limit int) ([]*models.CalendarEventSyncEntry, error) {
+// FailingSyncSample describes one stuck operation the way a person reading a
+// warning email needs it: which calendar, which event by name, what went wrong.
+// A bare UID — which is all the email used to carry — does not answer any of
+// the questions the reader actually has.
+type FailingSyncSample struct {
+	UID          string
+	Operation    string
+	RetryCount   int
+	LastError    string
+	CalendarName string
+	Summary      string
+}
+
+// SampleFailingSyncEntries returns up to `limit` failing entries for a source,
+// joined to the calendar and the event so they can be named.
+func (db *DB) SampleFailingSyncEntries(sourceID int64, minRetries, limit int) ([]FailingSyncSample, error) {
 	rows, err := db.Query(
-		`SELECT id, event_id, calendar_id, source_id, uid, COALESCE(remote_id, ''),
-		        COALESCE(ical_data, ''), operation, created_at,
-		        COALESCE(retry_count, 0), COALESCE(last_error, '')
-		 FROM calendar_event_sync_queue
-		 WHERE source_id = $1 AND retry_count >= $2
-		 ORDER BY retry_count DESC, created_at ASC
+		`SELECT q.uid, q.operation, COALESCE(q.retry_count, 0), COALESCE(q.last_error, ''),
+		        COALESCE(c.name, ''), COALESCE(e.summary, '')
+		 FROM calendar_event_sync_queue q
+		 LEFT JOIN calendars c ON c.id = q.calendar_id
+		 LEFT JOIN calendar_events e ON e.id = q.event_id
+		 WHERE q.source_id = $1 AND q.retry_count >= $2
+		 ORDER BY q.retry_count DESC, q.created_at ASC
 		 LIMIT $3`,
 		sourceID, minRetries, limit,
 	)
@@ -141,17 +155,19 @@ func (db *DB) SampleFailingSyncEntries(sourceID int64, minRetries, limit int) ([
 		return nil, fmt.Errorf("sample failing entries: %w", err)
 	}
 	defer rows.Close()
-	var out []*models.CalendarEventSyncEntry
+	var out []FailingSyncSample
 	for rows.Next() {
-		e := &models.CalendarEventSyncEntry{}
+		var s FailingSyncSample
 		if err := rows.Scan(
-			&e.ID, &e.EventID, &e.CalendarID, &e.SourceID,
-			&e.UID, &e.RemoteID, &e.ICalData, &e.Operation, &e.CreatedAt,
-			&e.RetryCount, &e.LastError,
+			&s.UID, &s.Operation, &s.RetryCount, &s.LastError,
+			&s.CalendarName, &s.Summary,
 		); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
-		out = append(out, e)
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read failing entries: %w", err)
 	}
 	return out, nil
 }
@@ -220,6 +236,58 @@ func (db *DB) DeleteCalendarEventSyncEntry(id int64) error {
 	_, err := db.Exec(query, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete calendar event sync entry: %w", err)
+	}
+	return nil
+}
+
+// DeadLetterCalendarEventSync retires a queue entry by moving it into
+// calendar_event_sync_dead_letters, body and all, and removing it from the
+// queue. Both halves run in one transaction so an entry can never be lost
+// between them.
+//
+// This replaces deleting the entry outright. A retired entry is the only record
+// that a local change never reached the remote server, and its ical_data is the
+// only copy of what the server refused — deleting it turned a diagnosable
+// failure into a guessing game (see migrations/046).
+func (db *DB) DeadLetterCalendarEventSync(id int64, lastError string) error {
+	if len(lastError) > 4096 {
+		lastError = lastError[:4096] + "…"
+	}
+	now := timeutil.Now()
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("dead-letter sync entry: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	// INSERT … SELECT keeps the copy exact: no round-trip through Go, nothing
+	// re-encoded on the way.
+	result, err := tx.Exec(`
+		INSERT INTO calendar_event_sync_dead_letters (
+			event_id, calendar_id, source_id, uid, remote_id, ical_data,
+			operation, retry_count, last_error, queued_at, died_at
+		)
+		SELECT event_id, calendar_id, source_id, uid, COALESCE(remote_id, ''),
+		       COALESCE(ical_data, ''), operation, COALESCE(retry_count, 0),
+		       $1, COALESCE(created_at, 0), $2::bigint
+		FROM calendar_event_sync_queue
+		WHERE id = $3
+	`, lastError, now, id)
+	if err != nil {
+		return fmt.Errorf("dead-letter sync entry: copy: %w", err)
+	}
+	if moved, err := result.RowsAffected(); err == nil && moved == 0 {
+		// Already gone — nothing to retire, and nothing to complain about.
+		return tx.Commit()
+	}
+
+	if _, err := tx.Exec(`DELETE FROM calendar_event_sync_queue WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("dead-letter sync entry: remove from queue: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("dead-letter sync entry: commit: %w", err)
 	}
 	return nil
 }
