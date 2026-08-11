@@ -4601,7 +4601,7 @@ export component MainWindow inherits Window {
                         }
                     }
                     // ── Right pane: active section ──
-                    Rectangle {
+                    pane := Rectangle {
                         horizontal-stretch: 1;
                         VerticalLayout {
                             padding: 22px;
@@ -4626,6 +4626,22 @@ export component MainWindow inherits Window {
                                     }
                                 }
                             }
+
+                            // The sections scroll. Some are taller than the
+                            // modal — «Календарь» lists one row per calendar,
+                            // and ten of them do not fit — and the parent has
+                            // clip: true, so before this the overflow was
+                            // simply cut off with no way to reach it.
+                            //
+                            // The content width is pinned to the pane instead of
+                            // being derived from the ScrollView, so wrapped
+                            // paragraphs lay out against a known width and no
+                            // horizontal scrollbar appears.
+                            ScrollView {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                            width: pane.width - 44px;
+                            spacing: 6px;
 
                             // ===== Уведомления =====
                             if root.settings-tab == 0: VerticalLayout {
@@ -4851,6 +4867,21 @@ export component MainWindow inherits Window {
                             }
 
                             Rectangle { vertical-stretch: 1; }
+                            }
+                            }
+
+                            // Pinned under the scroller: every setting here is
+                            // applied and persisted the moment it is changed, so
+                            // there is no Save and nothing to cancel. Without
+                            // saying so the absence of buttons reads as «my
+                            // changes went nowhere».
+                            Text {
+                                text: "Изменения применяются сразу — кнопки «Сохранить» здесь нет.";
+                                font-size: 11px;
+                                color: #8b95a1;
+                                horizontal-alignment: left;
+                                wrap: word-wrap;
+                            }
                         }
                     }
                 }
