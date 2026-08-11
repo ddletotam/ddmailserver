@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"github.com/gorilla/mux"
+	caldavutil "github.com/yourusername/mailserver/internal/caldav"
 	"github.com/yourusername/mailserver/internal/caldav/importer"
 	"github.com/yourusername/mailserver/internal/calendar"
 	"github.com/yourusername/mailserver/internal/models"
@@ -754,21 +755,27 @@ func generateICalData(event *models.CalendarEvent) string {
 	ical += "VERSION:2.0\r\n"
 	ical += "PRODID:-//DDMailServer//Calendar//EN\r\n"
 	ical += "BEGIN:VEVENT\r\n"
-	ical += "UID:" + event.UID + "\r\n"
+	ical += caldavutil.ContentLine("UID", event.UID)
 	// REQUIRED by RFC 5545. Without it a CalDAV server may refuse the object
 	// outright — iCloud answers 403 — and the event can never be pushed out.
 	ical += "DTSTAMP:" + timeutil.FromMs(timeutil.Now()).Format("20060102T150405Z") + "\r\n"
-	ical += "SUMMARY:" + event.Summary + "\r\n"
+	// TEXT values go through ContentLine: unescaped commas, semicolons and line
+	// breaks make the object invalid, and an unfolded line busts the 75-octet
+	// limit at half the characters once the text is Cyrillic. Both are why an
+	// event carrying a real description could not be pushed to iCloud at all.
+	ical += caldavutil.ContentLine("SUMMARY", event.Summary)
 	if event.Description != "" {
-		ical += "DESCRIPTION:" + event.Description + "\r\n"
+		ical += caldavutil.ContentLine("DESCRIPTION", event.Description)
 	}
 	if event.Location != "" {
-		ical += "LOCATION:" + event.Location + "\r\n"
+		ical += caldavutil.ContentLine("LOCATION", event.Location)
 	}
 	ical += "DTSTART:" + dtstart + "\r\n"
 	ical += "DTEND:" + dtend + "\r\n"
 	if event.RRule != "" {
-		ical += "RRULE:" + event.RRule + "\r\n"
+		// Not TEXT: a recurrence rule spells its own syntax with semicolons and
+		// commas, so it is folded but never escaped.
+		ical += caldavutil.RawContentLine("RRULE", event.RRule)
 	}
 	ical += "END:VEVENT\r\n"
 	ical += "END:VCALENDAR\r\n"

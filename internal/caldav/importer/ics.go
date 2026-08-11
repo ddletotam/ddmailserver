@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/emersion/go-ical"
+	caldavutil "github.com/yourusername/mailserver/internal/caldav"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/timeutil"
@@ -405,21 +406,24 @@ func generateVEvent(event *models.CalendarEvent) string {
 	}
 
 	vevent := "BEGIN:VEVENT\r\n"
-	vevent += "UID:" + event.UID + "\r\n"
+	vevent += caldavutil.ContentLine("UID", event.UID)
 	// REQUIRED by RFC 5545, and go-ical refuses to encode a VEVENT without it —
 	// which is how this fallback gets used in the first place.
 	vevent += "DTSTAMP:" + timeutil.FromMs(timeutil.Now()).Format("20060102T150405Z") + "\r\n"
-	vevent += "SUMMARY:" + event.Summary + "\r\n"
+	// TEXT values are escaped and folded; see caldav.ContentLine. This function
+	// is the fallback writer, but its output goes on the wire just the same.
+	vevent += caldavutil.ContentLine("SUMMARY", event.Summary)
 	if event.Description != "" {
-		vevent += "DESCRIPTION:" + event.Description + "\r\n"
+		vevent += caldavutil.ContentLine("DESCRIPTION", event.Description)
 	}
 	if event.Location != "" {
-		vevent += "LOCATION:" + event.Location + "\r\n"
+		vevent += caldavutil.ContentLine("LOCATION", event.Location)
 	}
 	vevent += "DTSTART:" + dtstart + "\r\n"
 	vevent += "DTEND:" + dtend + "\r\n"
 	if event.RRule != "" {
-		vevent += "RRULE:" + event.RRule + "\r\n"
+		// Structured value: folded, never escaped.
+		vevent += caldavutil.RawContentLine("RRULE", event.RRule)
 	}
 	vevent += "END:VEVENT\r\n"
 
