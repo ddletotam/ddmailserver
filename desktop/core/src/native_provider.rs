@@ -686,6 +686,11 @@ impl MailProvider for NativeProvider {
                                                     .and_then(|v| v.as_i64())
                                                     .unwrap_or(0),
                                             });
+                                        } else if event_type == "message_sent" {
+                                            // Our own message reached Sent — the
+                                            // conversation it belongs to exists
+                                            // now. Quiet by design: no toast.
+                                            notifier(EngineEvent::MessageSent);
                                         } else if event_type == "calendar_updated" {
                                             let calendar_id = event
                                                 .get("calendar_id")

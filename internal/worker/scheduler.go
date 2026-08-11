@@ -77,6 +77,24 @@ func NewScheduler(deps SchedulerDeps) *Scheduler {
 	}
 }
 
+// TriggerOutbox picks up queued outbound mail right now instead of waiting for
+// the next scheduler tick.
+//
+// Sending is asynchronous: the send handler only inserts an outbox row. Without
+// this, that row waited for the periodic cycle — up to a full interval (60s in
+// the shipped config) before the message even reached SMTP. Everything
+// downstream inherited the delay, most visibly the copy in Sent, which only
+// exists once the send succeeds: the desktop refetches conversations right after
+// «Отправить» and found nothing there, so a reply sent from a different address
+// had no conversation to jump to (contract §1).
+//
+// Safe to call from a request handler: scheduleSMTPSend only submits tasks to the
+// pool, and a message already picked up is in status 'sending' so a second call
+// cannot double-send it.
+func (s *Scheduler) TriggerOutbox() {
+	go s.scheduleSMTPSend()
+}
+
 // TriggerSyncForAccount submits an immediate sync task for a single account.
 // This is called by the IDLE manager when new mail is detected.
 func (s *Scheduler) TriggerSyncForAccount(account *models.Account) {
@@ -321,9 +339,28 @@ func (s *Scheduler) scheduleSMTPSend() {
 	for _, msg := range messages {
 		var sendTask taskpkg.Task
 
+		// Tell the user's clients the moment the copy lands in Sent. Queueing
+		// is not sending, so «отправлено» reaches the client long before the
+		// conversation the message belongs to exists — a quiet refresh signal
+		// is what closes that gap (see notify.EventMessageSent).
+		notifySent := func(userID int64) func() {
+			if s.notifyHub == nil {
+				return nil
+			}
+			return func() {
+				s.notifyHub.Publish(notify.Event{
+					UserID:  userID,
+					Type:    notify.EventMessageSent,
+					Mailbox: "Sent",
+				})
+			}
+		}(msg.UserID)
+
 		if msg.AccountID == 0 {
 			// Direct delivery for local domain senders
-			sendTask = smtpclient.NewDirectSendTask(msg, s.database, s.getHostname(), s.dkimSigner)
+			direct := smtpclient.NewDirectSendTask(msg, s.database, s.getHostname(), s.dkimSigner)
+			direct.SetSentNotifyFunc(notifySent)
+			sendTask = direct
 		} else {
 			// Relay through external SMTP account
 			account, err := s.database.GetAccountByID(msg.AccountID)
@@ -331,7 +368,9 @@ func (s *Scheduler) scheduleSMTPSend() {
 				log.Printf("Failed to get account %d for message %d: %v", msg.AccountID, msg.ID, err)
 				continue
 			}
-			sendTask = smtpclient.NewSendTask(msg, account, s.database)
+			relay := smtpclient.NewSendTask(msg, account, s.database)
+			relay.SetSentNotifyFunc(notifySent)
+			sendTask = relay
 		}
 
 		task := sendTask

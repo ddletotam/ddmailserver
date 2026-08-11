@@ -28,6 +28,16 @@ pub enum EngineEvent {
     /// from the source account by the sync). A cheap conversations delta is
     /// enough: flag changes bump updated_at, so the changed threads come back.
     FlagsChanged { folder: String },
+    /// Our own outgoing message has landed in Sent.
+    ///
+    /// Deliberately separate from `NewMail`: no toast, no sound — the user just
+    /// pressed Send. What it does mean is that the conversation the message
+    /// belongs to now exists server-side, which is the one moment worth
+    /// refetching. Sending is asynchronous, so this arrives well after the
+    /// client was told «отправлено»; before it existed the client guessed with a
+    /// 2.5s timer and a reply sent from a different address had nothing to jump
+    /// to yet.
+    MessageSent,
     /// A calendar changed server-side.
     CalendarUpdated { calendar_id: i64 },
     /// The session token was refreshed (native provider); persist it.

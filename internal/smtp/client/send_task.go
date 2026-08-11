@@ -32,6 +32,21 @@ type SendTask struct {
 	database      *db.DB
 	priority      int
 	messageID     string // Generated Message-ID for Sent dedup
+
+	// notifySent fires once the copy is in Sent, so clients can refresh their
+	// conversation list at the moment there is something new to see. Optional.
+	notifySent func()
+}
+
+// SetSentNotifyFunc registers the «copy is in Sent» callback.
+//
+// Sending is asynchronous: the client is told «отправлено» when the message is
+// queued, but the copy in Sent — and therefore the conversation it belongs to —
+// appears only after delivery succeeds. Without this signal a client has to
+// guess when to refetch, and guessing is what broke the post-send jump for a
+// reply sent from a different address (contract §1).
+func (t *SendTask) SetSentNotifyFunc(fn func()) {
+	t.notifySent = fn
 }
 
 // NewSendTask creates a new SMTP send task
@@ -142,6 +157,9 @@ func (t *SendTask) Execute(ctx context.Context) error {
 
 	// Save to Sent folder
 	saveToSentFolder(t.database, t.outboxMessage.UserID, emailData, t.messageID)
+	if t.notifySent != nil {
+		t.notifySent()
+	}
 
 	log.Printf("Message %d sent successfully", t.outboxMessage.ID)
 	return nil

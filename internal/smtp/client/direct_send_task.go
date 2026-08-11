@@ -23,6 +23,14 @@ type DirectSendTask struct {
 	signer        *dkimsign.Signer // nil → send unsigned
 	priority      int
 	messageID     string // Message-ID for Sent dedup (from raw or generated)
+
+	// notifySent fires once the copy is in Sent — see SendTask.SetSentNotifyFunc.
+	notifySent func()
+}
+
+// SetSentNotifyFunc registers the «copy is in Sent» callback.
+func (t *DirectSendTask) SetSentNotifyFunc(fn func()) {
+	t.notifySent = fn
 }
 
 // NewDirectSendTask creates a new direct send task
@@ -126,6 +134,9 @@ func (t *DirectSendTask) Execute(ctx context.Context) error {
 	// не существует в списке бесед, пока собеседник не ответит
 	// (relay-путь через SendTask делает то же самое).
 	saveToSentFolder(t.database, t.outboxMessage.UserID, emailData, t.messageID)
+	if t.notifySent != nil {
+		t.notifySent()
+	}
 
 	log.Printf("Message %d sent directly via MX", t.outboxMessage.ID)
 	return nil
