@@ -625,6 +625,12 @@ func (c *Client) PutEventRaw(ctx context.Context, remotePath string, icalData st
 	// Build full URL from source's CalDAV URL and remote path
 	fullURL := c.buildFullURL(remotePath)
 
+	// A calendar object missing DTSTAMP is invalid per RFC 5545 and a CalDAV
+	// server may — and iCloud does — reject it with 403. Repairing here covers
+	// bodies that were generated before the writers were fixed and are already
+	// sitting in the sync queue.
+	icalData = caldavutil.EnsureDTSTAMP(icalData, timeutil.Now())
+
 	req, err := http.NewRequestWithContext(ctx, "PUT", fullURL, strings.NewReader(icalData))
 	if err != nil {
 		return fmt.Errorf("failed to create PUT request: %w", err)
@@ -639,7 +645,10 @@ func (c *Client) PutEventRaw(ctx context.Context, remotePath string, icalData st
 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("PUT failed with status %d: %s", resp.StatusCode, string(body))
+		// The URL belongs in the message: this error is all the sync queue
+		// keeps, and "PUT failed with status 403:" on its own — servers often
+		// answer with an empty body — says nothing about where it was sent.
+		return fmt.Errorf("PUT %s failed with status %d: %s", fullURL, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	return nil
