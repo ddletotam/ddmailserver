@@ -100,6 +100,13 @@ func (t *ICSSyncTask) doSync(ctx context.Context) error {
 		calendar = calendars[0]
 	}
 
+	// A disabled calendar does not sync with its source. An ICS source owns
+	// exactly one calendar, so turning it off silences the whole source.
+	if !calendar.Enabled {
+		log.Printf("Skipping ICS sync for %s — calendar %q is disabled", t.source.Name, calendar.Name)
+		return nil
+	}
+
 	// Parse ICS events
 	events, err := importer.ParseICS(icsData)
 	if err != nil {

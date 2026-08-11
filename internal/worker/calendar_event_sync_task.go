@@ -66,6 +66,22 @@ func (t *CalendarEventSyncTask) Execute(ctx context.Context) error {
 			return ctx.Err()
 		}
 
+		// A disabled calendar writes nothing to its source. An entry can only
+		// be here if it was queued before the calendar was switched off — the
+		// CalDAV server and the desktop payload both hide disabled calendars,
+		// so nothing new can be queued for one. Retire it rather than skip it:
+		// skipping leaves it in the queue forever, retrying daily and mailing a
+		// warning about it, while the dead-letter row keeps the change that
+		// never went out.
+		if cal, calErr := t.database.GetCalendarByID(entry.CalendarID); calErr == nil && cal != nil && !cal.Enabled {
+			log.Printf("Calendar event sync: retiring %s (%s) — calendar %q is disabled",
+				entry.UID, entry.Operation, cal.Name)
+			if dbErr := t.database.DeadLetterCalendarEventSync(entry.ID, "calendar disabled"); dbErr != nil {
+				log.Printf("retire sync entry %d for disabled calendar: %v", entry.ID, dbErr)
+			}
+			continue
+		}
+
 		var err error
 		switch entry.Operation {
 		case "create", "update":
