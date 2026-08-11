@@ -755,6 +755,9 @@ func generateICalData(event *models.CalendarEvent) string {
 	ical += "PRODID:-//DDMailServer//Calendar//EN\r\n"
 	ical += "BEGIN:VEVENT\r\n"
 	ical += "UID:" + event.UID + "\r\n"
+	// REQUIRED by RFC 5545. Without it a CalDAV server may refuse the object
+	// outright — iCloud answers 403 — and the event can never be pushed out.
+	ical += "DTSTAMP:" + timeutil.FromMs(timeutil.Now()).Format("20060102T150405Z") + "\r\n"
 	ical += "SUMMARY:" + event.Summary + "\r\n"
 	if event.Description != "" {
 		ical += "DESCRIPTION:" + event.Description + "\r\n"

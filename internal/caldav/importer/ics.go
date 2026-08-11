@@ -406,6 +406,9 @@ func generateVEvent(event *models.CalendarEvent) string {
 
 	vevent := "BEGIN:VEVENT\r\n"
 	vevent += "UID:" + event.UID + "\r\n"
+	// REQUIRED by RFC 5545, and go-ical refuses to encode a VEVENT without it —
+	// which is how this fallback gets used in the first place.
+	vevent += "DTSTAMP:" + timeutil.FromMs(timeutil.Now()).Format("20060102T150405Z") + "\r\n"
 	vevent += "SUMMARY:" + event.Summary + "\r\n"
 	if event.Description != "" {
 		vevent += "DESCRIPTION:" + event.Description + "\r\n"
