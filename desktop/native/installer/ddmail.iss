@@ -8,7 +8,7 @@
 ; браузерного рантайма в поставке не требуется.
 
 #define AppName "ddmail"
-#define AppVersion "0.1.7"
+#define AppVersion "0.1.8"
 #define AppPublisher "letotam.ru"
 #define AppURL "https://mail.letotam.ru"
 #define AppExe "ddmail-native.exe"

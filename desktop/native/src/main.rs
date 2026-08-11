@@ -7719,6 +7719,57 @@ fn apply_conn_status(ui: &MainWindow, sh: &Shared) {
     ui.set_conn_accounts(ModelRc::new(VecModel::from(rows)));
 }
 
+/// Keep refetching conversations after a send until what we are waiting for has
+/// arrived.
+///
+/// Sending is asynchronous: the server queues the message and writes the copy to
+/// Sent only once delivery succeeds. A single timer could therefore never be
+/// right — the old «через 2.5 с» shot looked for a conversation that was still
+/// sitting in the outbox, which is exactly why a reply sent from a different
+/// address had nothing to jump to.
+///
+/// The `message_sent` WS event is the primary signal now; this is the fallback
+/// for a socket that is down. Attempt 0 always fires (it is the ordinary
+/// «отправленное всплыло в открытом диалоге» case); later attempts only while a
+/// post-send target is still outstanding, so a plain send costs one extra fetch
+/// and nothing more.
+fn schedule_post_send_refetch(attempt: usize) {
+    // Roughly two minutes in total, front-loaded: delivery usually takes about a
+    // second now that queueing kicks the scheduler, but a refusing MX with
+    // retries can push it much further out.
+    const DELAYS_MS: [u64; 5] = [2_500, 7_000, 15_000, 30_000, 60_000];
+    let Some(&delay) = DELAYS_MS.get(attempt) else { return };
+
+    slint::Timer::single_shot(std::time::Duration::from_millis(delay), move || {
+        let keep_going = SHARED.with(|s| {
+            let b = s.borrow();
+            let Some(sh) = b.as_ref() else { return false };
+
+            // Nothing left to wait for — stop, so a quiet client is not woken
+            // every half minute for no reason.
+            let waiting = sh.pending_switch.borrow().is_some()
+                || sh.compose_sent_target.borrow().is_some();
+            if attempt > 0 && !waiting {
+                return false;
+            }
+
+            if let Some(cache) = &sh.cache {
+                for k in sh.account_keys.borrow().iter() {
+                    cache.set_meta(&format!("conv_full_ts:{k}"), "0").ok();
+                }
+            }
+            if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
+            }
+            waiting
+        });
+
+        if keep_going {
+            schedule_post_send_refetch(attempt + 1);
+        }
+    });
+}
+
 fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
     match res {
         engine::EngineResult::Conversations { mut list, partial } => {
@@ -8071,6 +8122,31 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         }
                     });
                 }
+                EngineEvent::MessageSent => {
+                    // Our own message reached Sent. This is the moment the
+                    // conversation it belongs to starts existing server-side —
+                    // and the whole reason the post-send jump used to fail: the
+                    // client refetched on a 2.5s timer while sending is
+                    // asynchronous, so it looked for a conversation that was
+                    // still in the outbox.
+                    //
+                    // Full, not delta: for a reply sent from a different address
+                    // the conversation is brand new, and a full sync is what
+                    // replaces the cache rather than merging into it.
+                    println!("engine event: message landed in Sent — full refetch");
+                    SHARED.with(|s| {
+                        if let Some(sh) = s.borrow().as_ref() {
+                            if let Some(cache) = &sh.cache {
+                                for k in sh.account_keys.borrow().iter() {
+                                    cache.set_meta(&format!("conv_full_ts:{k}"), "0").ok();
+                                }
+                            }
+                            if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                                let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
+                            }
+                        }
+                    });
+                }
                 EngineEvent::FlagsChanged { folder } => {
                     // Read/starred in another client (or pulled from the
                     // source account by the server sync). No toast — just a
@@ -8164,22 +8240,7 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
                         let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
                     }
-                    slint::Timer::single_shot(std::time::Duration::from_millis(2500), || {
-                        SHARED.with(|s| {
-                            let b = s.borrow();
-                            let Some(sh) = b.as_ref() else { return };
-                            if let Some(cache) = &sh.cache {
-                                let key = sh.cur_account_key.borrow().clone();
-                                let key = if key.is_empty() { sh.key.clone() } else { key };
-                                cache.set_meta(&format!("conv_full_ts:{key}"), "0").ok();
-                            }
-                            if let Some(etx) = sh.engine_tx.borrow().as_ref() {
-                                let _ = etx.send(engine::EngineCmd::FetchConversations {
-                                    limit: CONV_FETCH_LIMIT,
-                                });
-                            }
-                        });
-                    });
+                    schedule_post_send_refetch(0);
                 }
             });
         }

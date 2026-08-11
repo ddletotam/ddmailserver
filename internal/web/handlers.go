@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gorilla/mux"
+	"github.com/yourusername/mailserver/internal/logmask"
 	"github.com/yourusername/mailserver/internal/models"
 )
 
@@ -774,7 +775,12 @@ func (s *Server) HandleSendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	log.Printf("Outbox message created: %d (from %s to %s)", outboxMsg.ID, outboxMsg.From, outboxMsg.To)
+	log.Printf("Outbox message created: %d (from %s to %s)", outboxMsg.ID, logmask.Addr(outboxMsg.From), logmask.AddrList(outboxMsg.To))
+
+	// Send it now rather than on the next scheduler tick. Deliberately after the
+	// attachments are stored: the send task reads them from the database, and a
+	// trigger fired earlier could race it into sending the message without them.
+	s.kickOutbox()
 
 	w.Header().Set("Content-Type", "text/html")
 	w.WriteHeader(http.StatusOK)

@@ -956,6 +956,11 @@ func (s *Server) HandleDesktopSend(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// Send it now rather than on the next scheduler tick. After the attachments
+	// are stored: the send task loads them from the database, so an earlier
+	// trigger could race it into sending the message without them.
+	s.kickOutbox()
+
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"status":     "queued",
 		"message_id": outboxMsg.ID,

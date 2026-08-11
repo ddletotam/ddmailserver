@@ -9,9 +9,20 @@ import (
 type EventType string
 
 const (
-	EventNewMessage      EventType = "new_message"
-	EventFlagsChanged    EventType = "flags_changed"
-	EventExpunge         EventType = "expunge"
+	EventNewMessage   EventType = "new_message"
+	EventFlagsChanged EventType = "flags_changed"
+	EventExpunge      EventType = "expunge"
+
+	// EventMessageSent — our own outgoing message has landed in Sent.
+	//
+	// Deliberately not EventNewMessage: this must refresh the conversation list
+	// without a toast or a sound, since the user just pressed Send and knows.
+	// Sending is asynchronous, so the copy in Sent appears well after the client
+	// was told «отправлено» — without this the client could only guess when to
+	// look, and a reply sent from a different address had no conversation to
+	// jump to yet (contract §1).
+	EventMessageSent EventType = "message_sent"
+
 	EventCalendarUpdated EventType = "calendar_updated"
 )
 

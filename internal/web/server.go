@@ -35,6 +35,9 @@ type Server struct {
 	searchIndexer   *search.Indexer
 	notifyHub       *notify.Hub
 	syncIntervalSec int
+	// triggerOutbox asks the scheduler to send queued mail immediately instead
+	// of waiting for its next tick. Optional; see SetOutboxTrigger.
+	triggerOutbox func()
 }
 
 // New creates a new web server
@@ -401,6 +404,22 @@ func (s *Server) SetSearchIndexer(indexer *search.Indexer) {
 // SetNotifyHub sets the notification hub for WebSocket push events.
 func (s *Server) SetNotifyHub(hub *notify.Hub) {
 	s.notifyHub = hub
+}
+
+// SetOutboxTrigger wires the scheduler's «send queued mail now» hook.
+//
+// Queueing a message is not sending it: without this the row waited for the
+// periodic cycle, so every send was delayed by up to one interval. Optional —
+// nil just means the message goes out on the next tick, as before.
+func (s *Server) SetOutboxTrigger(trigger func()) {
+	s.triggerOutbox = trigger
+}
+
+// kickOutbox asks the scheduler to send queued mail now, if a trigger is wired.
+func (s *Server) kickOutbox() {
+	if s.triggerOutbox != nil {
+		s.triggerOutbox()
+	}
 }
 
 // SetSyncIntervalSec sets the sync interval for display in the UI

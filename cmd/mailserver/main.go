@@ -313,6 +313,10 @@ func main() {
 	webSrv := web.New(database, cfg.Security.JWTSecret, cfg.Server.WebHost, cfg.Server.WebPort, cfg.Server.Locale, &cfg.OAuth)
 	webSrv.SetSyncIntervalSec(cfg.Sync.Interval)
 	webSrv.SetNotifyHub(notifyHub)
+	// Queueing a message is not sending it: without this hook the outbox row
+	// waits for the next scheduler cycle, delaying every send by up to one
+	// interval.
+	webSrv.SetOutboxTrigger(scheduler.TriggerOutbox)
 	if searchIndexer != nil {
 		webSrv.SetSearchIndexer(searchIndexer)
 	}
