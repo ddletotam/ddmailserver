@@ -45,6 +45,29 @@ func (db *DB) GetCalendarsByUserID(userID int64) ([]*models.Calendar, error) {
 	return db.GetCalendarsByUserIDFiltered(userID, false)
 }
 
+// SetCalendarEnabled flips a calendar's master switch.
+//
+// `enabled` is the whole of it: a disabled calendar is not handed to clients, is
+// not synced with its source, and pushes nothing back to it. So this is the only
+// place that needs to change for a calendar to go quiet, and it is deliberately
+// separate from UpdateCalendar, which rewrites presentation fields and must not
+// be able to turn a calendar off as a side effect.
+//
+// Scoped by user so a guessed id cannot reach somebody else's calendar.
+func (db *DB) SetCalendarEnabled(id, userID int64, enabled bool) error {
+	result, err := db.Exec(
+		`UPDATE calendars SET enabled = $1, updated_at = $2 WHERE id = $3 AND user_id = $4`,
+		enabled, timeutil.Now(), id, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to set calendar enabled: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+		return fmt.Errorf("calendar %d not found for this user", id)
+	}
+	return nil
+}
+
 // GetEnabledCalendarsByUserID retrieves only enabled calendars for a user
 func (db *DB) GetEnabledCalendarsByUserID(userID int64) ([]*models.Calendar, error) {
 	return db.GetCalendarsByUserIDFiltered(userID, true)

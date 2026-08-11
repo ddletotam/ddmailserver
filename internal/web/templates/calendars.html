@@ -423,7 +423,8 @@
 <div class="row row-cards">
     {{range .Calendars}}
     <div class="col-md-6 col-lg-4">
-        <div class="card">
+        <div class="card {{if not .Enabled}}opacity-75{{end}}">
+            <div class="card-status-top {{if .Enabled}}bg-success{{else}}bg-secondary{{end}}"></div>
             <div class="card-body">
                 <div class="d-flex align-items-center mb-3">
                     <div class="me-3">
@@ -435,6 +436,11 @@
                         <h3 class="card-title mb-0">{{.Name}}</h3>
                         {{if .Description}}
                         <div class="text-muted small">{{.Description}}</div>
+                        {{end}}
+                        {{if not .Enabled}}
+                        <div class="text-secondary small">
+                            <i class="ti ti-plug-off me-1"></i>Выключен: не синхронизируется и не виден в клиентах
+                        </div>
                         {{end}}
                     </div>
                 </div>
@@ -454,6 +460,12 @@
                 <div class="d-flex gap-2">
                     <button onclick="openImportModal({{.ID}})" class="btn btn-sm btn-outline-secondary">
                         <i class="ti ti-upload me-1"></i>Import ICS
+                    </button>
+                    <button hx-post="/calendars/{{.ID}}/enabled"
+                            hx-target="#calendars-list"
+                            hx-swap="innerHTML"
+                            class="btn btn-sm {{if .Enabled}}btn-outline-warning{{else}}btn-outline-success{{end}}">
+                        {{if .Enabled}}<i class="ti ti-plug-off me-1"></i>Выключить{{else}}<i class="ti ti-plug me-1"></i>Включить{{end}}
                     </button>
                     <button hx-delete="/calendars/{{.ID}}"
                             hx-confirm="Delete calendar '{{.Name}}'?"

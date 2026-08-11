@@ -202,6 +202,13 @@ func (c *Client) SyncCalendar(ctx context.Context, cal *models.Calendar) error {
 		return fmt.Errorf("client not connected")
 	}
 
+	// A disabled calendar does not talk to its source in either direction. The
+	// guard sits here rather than in the callers so no sync path can miss it.
+	if !cal.Enabled {
+		log.Printf("Skipping calendar %s — disabled", cal.Name)
+		return nil
+	}
+
 	log.Printf("Syncing calendar %s (%s)", cal.Name, cal.RemoteID)
 
 	// Get all current events from the server

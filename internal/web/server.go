@@ -291,6 +291,7 @@ func (s *Server) setupRoutes() {
 	web.HandleFunc("/calendars/sources/{id}/sync", s.HandleSyncCalendarSource).Methods("POST")
 	web.HandleFunc("/calendars/sources/{id}/update", s.HandleUpdateCalendarSourceWeb).Methods("POST")
 	web.HandleFunc("/calendars/sources/{id}", s.HandleDeleteCalendarSourceWeb).Methods("DELETE")
+	web.HandleFunc("/calendars/{id}/enabled", s.HandleToggleCalendarEnabled).Methods("POST")
 	web.HandleFunc("/calendars/{id}", s.HandleDeleteCalendarWeb).Methods("DELETE")
 	web.HandleFunc("/calendars/import", s.HandleImportICSWeb).Methods("POST")
 

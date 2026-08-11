@@ -142,6 +142,41 @@ func (s *Server) HandleCalendarsList(w http.ResponseWriter, r *http.Request) {
 	s.renderTemplatePartial(w, "calendars.html", "calendars-list", data)
 }
 
+// HandleToggleCalendarEnabled flips a calendar's master switch and re-renders
+// the list.
+//
+// This control lives only in the web UI on purpose: a disabled calendar is not
+// transmitted to clients at all, so a client has no way to know about one and
+// could not offer to switch it back on.
+func (s *Server) HandleToggleCalendarEnabled(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	id, err := strconv.ParseInt(mux.Vars(r)["id"], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid calendar id", http.StatusBadRequest)
+		return
+	}
+
+	cal, err := s.database.GetCalendarByID(id)
+	if err != nil || cal == nil || cal.UserID != user.ID {
+		http.Error(w, "Calendar not found", http.StatusNotFound)
+		return
+	}
+
+	if err := s.database.SetCalendarEnabled(id, user.ID, !cal.Enabled); err != nil {
+		log.Printf("Failed to toggle calendar %d: %v", id, err)
+		http.Error(w, "Failed to update calendar", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("Calendar %d (%s) %s", id, cal.Name, map[bool]string{true: "disabled", false: "enabled"}[cal.Enabled])
+
+	s.HandleCalendarsList(w, r)
+}
+
 // HandleCreateCalendarSourceWeb creates a new CalDAV source (web form handler)
 func (s *Server) HandleCreateCalendarSourceWeb(w http.ResponseWriter, r *http.Request) {
 	user := s.GetUserFromContext(r.Context())

@@ -540,9 +540,15 @@ func overridesFromICal(master *models.CalendarEvent) ([]int64, []DesktopCalendar
 	return excluded, out
 }
 
-// HandleDesktopCalendars returns all of the user's calendars (enabled + disabled).
-// The client decides which to display via local visibility settings; server-side
-// "enabled" is the soft-delete flag rather than a UI preference.
+// HandleDesktopCalendars returns the user's enabled calendars.
+//
+// A disabled calendar is not transmitted at all: it must not appear anywhere in
+// the client, not even greyed out. The client's own per-calendar toggle is a
+// separate, local thing — it decides what is drawn in the grid among the
+// calendars it was given.
+//
+// This is why the master switch lives in the web UI: a client never learns about
+// a disabled calendar, so it could not offer to turn one back on.
 func (s *Server) HandleDesktopCalendars(w http.ResponseWriter, r *http.Request) {
 	user := s.GetUserFromContext(r.Context())
 	if user == nil {
@@ -550,7 +556,7 @@ func (s *Server) HandleDesktopCalendars(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	cals, err := s.database.GetCalendarsByUserID(user.ID)
+	cals, err := s.database.GetEnabledCalendarsByUserID(user.ID)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to load calendars")
 		return
@@ -603,7 +609,11 @@ func (s *Server) HandleDesktopCalendarEvents(w http.ResponseWriter, r *http.Requ
 	// Resolve calendar set: explicit ids → filtered to user's; missing → user's
 	// full set. Filtering against user's set prevents another user's calendar
 	// from being queried by ID guessing.
-	allCals, err := s.database.GetCalendarsByUserID(user.ID)
+	//
+	// Enabled only, and it matters that the gate is here: `allowed` covers both
+	// the explicit-ids case and the no-ids case, so a disabled calendar cannot
+	// leak events even if a client still remembers its id from before.
+	allCals, err := s.database.GetEnabledCalendarsByUserID(user.ID)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to load calendars")
 		return
