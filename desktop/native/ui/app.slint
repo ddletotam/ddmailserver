@@ -2302,13 +2302,20 @@ export component MainWindow inherits Window {
             }
 
             Rectangle {
-                // Grows with the message up to a cap: Shift+Enter adds a
-                // newline, Enter sends. Single-line messages stay at 64px.
-                min-height: 64px;
-                // Десять строк, дальше — скролл внутри пузыря (Flickable ниже
-                // уже это умеет). 15px кегль даёт строку около 21px, плюс
-                // 16px вертикальных отступов пузыря и запас на отступы строки.
-                max-height: 10 * 21px + 32px;
+                // Растёт вместе с текстом: Shift+Enter — перенос, Enter —
+                // отправка. Одна строка — 64px, дальше по 21px на строку,
+                // до десяти; после капа содержимое скроллится внутри пузыря
+                // (Flickable ниже это умеет).
+                //
+                // Высота задана ЯВНО, а не через min/max + preferred пузыря:
+                // на строке композера четыре кнопки с фиксированными 42px, и
+                // в кросс-оси HorizontalLayout их max (42) сужает max самой
+                // строки — при этом Rectangle отдаёт наружу stretch 1, так
+                // что вертикальная раскладка прибивает строку к капу и
+                // preferred пузыря не спрашивает. Явный binding убирает всю
+                // эту арифметику: 21px строка + 16px отступов пузыря + 24px
+                // отступов ряда.
+                height: clamp(root.rt-height + 40px, 64px, 10 * 21px + 40px);
                 background: white;
                 HorizontalLayout {
                     padding: 12px;
@@ -2458,6 +2465,59 @@ export component MainWindow inherits Window {
                                 moved => {
                                     if (self.pressed) {
                                         root.rt-pointer(self.mouse-x, self.mouse-y, 1);
+                                    }
+                                }
+                            }
+                        }
+                        // Скролл-бар пузыря. Появляется только когда текст
+                        // перестал влезать в кап строки — до этого прятать
+                        // нечего. Позже Flickable по порядку, значит рисуется
+                        // поверх текста и первым получает клики у правого края.
+                        //
+                        // Бегунок именно тянущийся, а не просто индикатор:
+                        // перетаскивать текст мышью нельзя (это выделение), так
+                        // что без него мышиных способов проехать длинное письмо
+                        // не остаётся — только колесо.
+                        if root.rt-height > fli.height: Rectangle {
+                            x: parent.width - 11px;
+                            y: 8px;
+                            width: 4px;
+                            height: fli.height;
+                            thumb := Rectangle {
+                                width: parent.width;
+                                // Доля видимого от общего — но не тоньше 28px,
+                                // иначе на длинном письме бегунок не поймать.
+                                height: max(28px, fli.height * (fli.height / fli.viewport-height));
+                                y: (parent.height - self.height)
+                                    * (-fli.viewport-y / max(1px, fli.viewport-height - fli.height));
+                                border-radius: 2px;
+                                background: sb-ta.pressed ? #8b95a1
+                                    : (sb-ta.has-hover ? #a8b1bc : #c3cad3);
+                            }
+                            // Зона захвата шире самой полоски: 4px мышью не
+                            // берутся. Влево — за счёт отступа пузыря, текст
+                            // там не начинается.
+                            sb-ta := TouchArea {
+                                x: -6px;
+                                width: parent.width + 10px;
+                                height: parent.height;
+                                // Вьюпорт на момент нажатия: тянем от него, а не
+                                // от текущего — иначе рывки на каждом кадре.
+                                property <length> grab-viewport-y;
+                                pointer-event(e) => {
+                                    if (e.kind == PointerEventKind.down) {
+                                        self.grab-viewport-y = fli.viewport-y;
+                                    }
+                                }
+                                moved => {
+                                    if (self.pressed) {
+                                        // px бегунка → px содержимого: дорожка
+                                        // короче содержимого во столько же раз.
+                                        fli.viewport-y = clamp(self.grab-viewport-y
+                                            - (fli.viewport-height - fli.height)
+                                                * ((self.mouse-y - self.pressed-y)
+                                                    / max(1px, parent.height - thumb.height)),
+                                            fli.height - fli.viewport-height, 0px);
                                     }
                                 }
                             }
