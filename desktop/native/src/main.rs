@@ -1058,6 +1058,7 @@ fn message_hits(envs: &[MessageEnvelope]) -> Vec<MessageHit> {
 /// are replaced with empty `src=""` (kept as `data-blocked-src` for the
 /// future "show domain X" UX).
 fn build_body_html(b: &MessageBody, policy: &policy::Policy) -> String {
+    let has_html = b.html.as_deref().map(|h| !h.trim().is_empty()).unwrap_or(false);
     let inner = match b.html.as_deref() {
         Some(h) if !h.trim().is_empty() => {
             let sanitized = sanitize::sanitize_email_html_for(h, policy, &b.from_addr);
@@ -1068,10 +1069,11 @@ fn build_body_html(b: &MessageBody, policy: &policy::Policy) -> String {
             html_escape(b.text.as_deref().unwrap_or(""))
         ),
     };
-    bubble_template(
+    bubble_template_wide(
         b.is_outgoing,
         &fmt_bubble_time(b.date_ts),
         &format!("{inner}{}{}", attachment_chips(b), empty_body_note(b)),
+        has_html,
     )
 }
 
@@ -1202,7 +1204,7 @@ fn attachment_chips(b: &MessageBody) -> String {
 /// Bump whenever the bubble/render HTML template or its CSS changes: the
 /// texture cache keys renders by fnv1a(body.html) only, so without this a
 /// template/CSS edit would keep serving stale cached bitmaps (RAM + disk).
-const RENDER_TEMPLATE_EPOCH: u64 = 5;
+const RENDER_TEMPLATE_EPOCH: u64 = 6;
 
 /// ВСЕ классы обвязки пузыря пишутся с этим префиксом. Документ пузыря —
 /// общая песочница для нашей вёрстки и присланного HTML, а письма сплошь
@@ -1218,7 +1220,17 @@ const RENDER_TEMPLATE_EPOCH: u64 = 5;
 const CSS_NS: &str = "ddm";
 
 fn bubble_template(is_outgoing: bool, time: &str, inner: &str) -> String {
+    bubble_template_wide(is_outgoing, time, inner, false)
+}
+
+/// `wide` снимает чатное ограничение ширины пузыря (72%) — для писем с HTML.
+/// Рассыльные шаблоны свёрстаны фиксированной таблицей на 600 px, и в узком
+/// пузыре `emlrender` вынужден их ужимать или линеаризовать: вёрстка цела, но
+/// читается как сплющенная. Короткое HTML-письмо всё равно остаётся узким —
+/// `max-width` не растягивает, ширина = min(max-content, max-width).
+fn bubble_template_wide(is_outgoing: bool, time: &str, inner: &str, wide: bool) -> String {
     let side = if is_outgoing { "out" } else { "in" };
+    let wide_class = if wide { format!(" {CSS_NS}-wide") } else { String::new() };
     // Own messages in the app's green, not a blue from somewhere else: the
     // accent, links and the selection highlight are all #10b981.
     let bg = if is_outgoing { "#d7f0e3" } else { "#ffffff" };
@@ -1245,6 +1257,10 @@ fn bubble_template(is_outgoing: bool, time: &str, inner: &str) -> String {
             font-size: 15px; line-height: 1.4; color: #0f1419;
             box-shadow: 0 1px 2px rgba(0,0,0,0.12); overflow-wrap: anywhere;
         }}
+        /* Одноклассовый и ПОСЛЕ .ddm-bubble: специфичность у них равная, так
+           что переопределяет порядок в стилях. В `.ddm-bubble.ddm-wide` смысла
+           нет — второй класс в селекторе матчер emlrender не понимает. */
+        .{CSS_NS}-wide {{ max-width: 100%; }}
         .{CSS_NS}-bubble-out {{ border-bottom-right-radius: 4px; }}
         .{CSS_NS}-bubble-in  {{ border-bottom-left-radius: 4px; }}
         .{CSS_NS}-bubble * {{ max-width: 100% !important; border: 0 !important; background-image: none !important; }}
@@ -1259,7 +1275,7 @@ fn bubble_template(is_outgoing: bool, time: &str, inner: &str) -> String {
         .{CSS_NS}-time {{ text-align: right; font-size: 11px; color: #8a97a5;
                  margin-top: 4px; user-select: none; }}
         </style></head>
-        <body><div class="{CSS_NS}-row"><div class="{CSS_NS}-bubble {CSS_NS}-bubble-{side}">{inner}{time_html}</div></div></body></html>"#
+        <body><div class="{CSS_NS}-row"><div class="{CSS_NS}-bubble {CSS_NS}-bubble-{side}{wide_class}">{inner}{time_html}</div></div></body></html>"#
     )
 }
 
@@ -3295,6 +3311,29 @@ mod bubble_css_tests {
         assert!(css.contains(".ddm-row"), "своя вёрстка должна остаться стилизованной");
         // Разметка письма проходит как есть — её класс мы не переписываем.
         assert!(doc.contains(r#"class="row""#), "класс письма не должен переписываться");
+    }
+
+    /// Широкий пузырь — только письмам с HTML: рассыльный шаблон на 600 px в
+    /// 72%-пузыре пришлось бы ужимать. У текстового письма ширину снимать
+    /// незачем, чатная геометрия для него и есть правильная.
+    #[test]
+    fn wide_bubble_only_for_html() {
+        let p = policy::Policy::default();
+        // Смотреть надо РАЗМЕТКУ: правило `.ddm-wide` лежит в стилях любого
+        // пузыря, поэтому поиск по всему документу всегда находил бы его.
+        let markup = |doc: &str| doc[doc.find("</style>").expect("есть <style>")..].to_string();
+
+        let html = build_body_html(&html_body("<table><tr><td>рассылка</td></tr></table>"), &p);
+        assert!(
+            markup(&html).contains("ddm-wide"),
+            "HTML-письмо должно получить широкий пузырь"
+        );
+
+        let mut plain = html_body("");
+        plain.html = None;
+        plain.text = Some("просто текст".into());
+        let doc = build_body_html(&plain, &p);
+        assert!(!markup(&doc).contains("ddm-wide"), "текстовое письмо остаётся узким");
     }
 }
 
