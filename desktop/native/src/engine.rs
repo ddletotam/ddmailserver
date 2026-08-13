@@ -295,6 +295,20 @@ fn resolve_inline_parts(
     rewritten
 }
 
+/// A body with literally nothing to draw: no HTML, no text, no attachment
+/// chips. Cached rows like this are the one case where the "bodies are
+/// immutable, never refetch" rule bites: the bubble stays blank forever, and
+/// a letter whose whole content WAS the attachment list (gov/EDMS mail: empty
+/// text/plain part + PDFs) reads as "не отображается вообще" while the web UI
+/// shows it fine. Server-side fixes to the attachment list or body extraction
+/// can't reach such a row either (see docs/desktop-behavior-contract.md §4а),
+/// so the fetch path treats it as missing and re-asks the server.
+pub(crate) fn body_is_blank(b: &MessageBody) -> bool {
+    b.attachments.is_empty()
+        && b.html.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true)
+        && b.text.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true)
+}
+
 fn build_provider(cfg: &AccountConfig) -> Arc<dyn MailProvider> {
     if let (Some(url), Some(token)) = (&cfg.native_url, &cfg.native_token) {
         Arc::new(NativeProvider::new(
@@ -850,8 +864,18 @@ pub fn spawn(
                         println!("engine: resolved inline parts in {healed} cached bodies");
                         cache.save_message_bodies(&key, &cached).ok();
                     }
+                    // Blank cached rows don't count as "have" — refetching them
+                    // is the only way a poisoned cache heals (see
+                    // body_is_blank). Costs one request per open for a letter
+                    // that really is empty; the alternative is a bubble that
+                    // stays blank until someone deletes cache.db by hand.
+                    let blank = cached.iter().filter(|b| body_is_blank(b)).count();
+                    if blank > 0 {
+                        println!("engine: {blank} cached bodies are blank — refetching them");
+                    }
                     let have: std::collections::HashSet<(String, u32)> = cached
                         .iter()
+                        .filter(|b| !body_is_blank(b))
                         .map(|b| (b.folder.clone(), b.uid))
                         .collect();
                     let missing: Vec<MessageRef> = messages

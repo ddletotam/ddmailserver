@@ -1068,7 +1068,22 @@ fn build_body_html(b: &MessageBody, policy: &policy::Policy) -> String {
             html_escape(b.text.as_deref().unwrap_or(""))
         ),
     };
-    bubble_template(b.is_outgoing, &fmt_bubble_time(b.date_ts), &format!("{inner}{}", attachment_chips(b)))
+    bubble_template(
+        b.is_outgoing,
+        &fmt_bubble_time(b.date_ts),
+        &format!("{inner}{}{}", attachment_chips(b), empty_body_note(b)),
+    )
+}
+
+/// Заметка «в письме нет ни текста, ни вложений» — единственный контент
+/// пузыря для тела, у которого рисовать нечего. Без неё такой пузырь —
+/// пустой прямоугольник с одним временем, визуально неотличимый от
+/// «письмо вообще не отобразилось» (и именно так это и читается).
+fn empty_body_note(b: &MessageBody) -> String {
+    if !engine::body_is_blank(b) {
+        return String::new();
+    }
+    format!("<div class=\"{CSS_NS}-nobody\">(в письме нет ни текста, ни вложений)</div>")
 }
 
 /// Text-only bubble — the fallback we render when the HTML body paints nothing
@@ -1077,7 +1092,11 @@ fn build_body_html(b: &MessageBody, policy: &policy::Policy) -> String {
 fn build_text_only_html(b: &MessageBody) -> String {
     let escaped = html_escape(b.text.as_deref().unwrap_or(""));
     let inner = format!("<div style=\"white-space:pre-wrap\">{escaped}</div>");
-    bubble_template(b.is_outgoing, &fmt_bubble_time(b.date_ts), &format!("{inner}{}", attachment_chips(b)))
+    bubble_template(
+        b.is_outgoing,
+        &fmt_bubble_time(b.date_ts),
+        &format!("{inner}{}{}", attachment_chips(b), empty_body_note(b)),
+    )
 }
 
 /// Render width (CSS px) for the source/headers viewer bitmap. The Image is
@@ -1183,7 +1202,7 @@ fn attachment_chips(b: &MessageBody) -> String {
 /// Bump whenever the bubble/render HTML template or its CSS changes: the
 /// texture cache keys renders by fnv1a(body.html) only, so without this a
 /// template/CSS edit would keep serving stale cached bitmaps (RAM + disk).
-const RENDER_TEMPLATE_EPOCH: u64 = 4;
+const RENDER_TEMPLATE_EPOCH: u64 = 5;
 
 /// ВСЕ классы обвязки пузыря пишутся с этим префиксом. Документ пузыря —
 /// общая песочница для нашей вёрстки и присланного HTML, а письма сплошь
@@ -1236,6 +1255,7 @@ fn bubble_template(is_outgoing: bool, time: &str, inner: &str) -> String {
         .{CSS_NS}-att {{ display: inline-block; background: rgba(0,0,0,0.06); border-radius: 8px;
                 padding: 4px 10px; margin: 2px 4px 2px 0; color: #10b981;
                 text-decoration: none; font-size: 13px; }}
+        .{CSS_NS}-nobody {{ color: #8a97a5; font-size: 13px; font-style: italic; }}
         .{CSS_NS}-time {{ text-align: right; font-size: 11px; color: #8a97a5;
                  margin-top: 4px; user-select: none; }}
         </style></head>
@@ -3279,6 +3299,71 @@ mod bubble_css_tests {
 }
 
 #[cfg(test)]
+mod blank_body_tests {
+    use super::{build_body_html, engine, policy};
+    use ddmail_core::types::{Attachment, MessageBody};
+
+    fn body(html: Option<&str>, text: Option<&str>, atts: usize) -> MessageBody {
+        MessageBody {
+            uid: 1,
+            folder: "INBOX".into(),
+            subject: "тема".into(),
+            from: "Кто-то <a@b.ru>".into(),
+            from_addr: "a@b.ru".into(),
+            to: vec![],
+            cc: vec![],
+            date: String::new(),
+            date_ts: 1_700_000_000,
+            html: html.map(String::from),
+            text: text.map(String::from),
+            attachments: (0..atts)
+                .map(|i| Attachment {
+                    filename: format!("f{i}.pdf"),
+                    mime_type: "application/pdf".into(),
+                    size: 1024,
+                    index: i,
+                })
+                .collect(),
+            is_outgoing: false,
+            message_id: String::new(),
+            in_reply_to: String::new(),
+            references: vec![],
+            raw_headers: String::new(),
+        }
+    }
+
+    /// Письмо-«только вложение» (пустая text/plain-часть + PDF, типовая
+    /// госпочта) — это НЕ пустое тело: чипы вложений и есть его содержимое,
+    /// перезапрашивать его незачем.
+    #[test]
+    fn attachment_only_is_not_blank() {
+        assert!(!engine::body_is_blank(&body(None, Some("\r\n"), 1)));
+        assert!(!engine::body_is_blank(&body(None, None, 4)));
+    }
+
+    /// Ни HTML, ни текста, ни вложений — вот это пусто: такую строку кэша
+    /// надо перезапрашивать, иначе пузырь останется пустым навсегда.
+    #[test]
+    fn nothing_at_all_is_blank() {
+        assert!(engine::body_is_blank(&body(None, None, 0)));
+        assert!(engine::body_is_blank(&body(Some("   "), Some("\n"), 0)));
+    }
+
+    /// Пузырь письма-«только вложение» содержит чип и НЕ содержит заметку
+    /// о пустом теле; полностью пустое письмо — наоборот.
+    #[test]
+    fn empty_note_only_when_nothing_to_draw() {
+        let p = policy::Policy::default();
+        let atts = build_body_html(&body(None, None, 1), &p);
+        assert!(atts.contains("class=\"ddm-att\""), "чип вложения обязателен");
+        assert!(!atts.contains("class=\"ddm-nobody\""));
+
+        let empty = build_body_html(&body(None, None, 0), &p);
+        assert!(empty.contains("class=\"ddm-nobody\""), "пустое тело должно быть подписано");
+    }
+}
+
+#[cfg(test)]
 mod event_link_tests {
     use super::{extract_urls, link_target};
 
@@ -4906,9 +4991,19 @@ fn main() {
                                         a.index, a.filename, a.size
                                     ));
                             }
+                            // Текст — обязательная часть отпечатка, а не
+                            // «на всякий случай»: пустую строку кэша движок
+                            // теперь перезапрашивает (engine::body_is_blank), и
+                            // у текстового письма без вложений после перезапроса
+                            // HTML так и остаётся пустым. Без текста в fp
+                            // отпечаток совпал бы с прежним, и с диска
+                            // наслужилась бы та самая пустая текстура — база
+                            // вылечилась, а пузырь остался пустым.
                             let fp = texture_cache::fnv1a(body.html.as_deref().unwrap_or(""))
                                 .wrapping_add(RENDER_TEMPLATE_EPOCH.wrapping_mul(0x9E37_79B9_7F4A_7C15))
                                 ^ att_fp
+                                ^ texture_cache::fnv1a(body.text.as_deref().unwrap_or(""))
+                                    .rotate_left(21)
                                 ^ ((scale.to_bits() as u64) << 32);
                             let key = (body.folder.clone(), body.uid, width, policy_gen, mode, fp);
                             let mut remember =
