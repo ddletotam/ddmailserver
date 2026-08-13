@@ -1908,7 +1908,21 @@ export component MainWindow inherits Window {
                                 lv.viewport-height - lv.height));
                         }
                     }
-                    changed height => { root.chat-view-h = self.height; }
+                    changed height => {
+                        root.chat-view-h = self.height;
+                        // Панель почты условная (view-mode == 0): при возврате
+                        // из календаря ListView создаётся заново и стоит в
+                        // начале, а bump seq в этот момент до моста не доходит
+                        // (у пересозданного элемента это начальное значение, а
+                        // не изменение). Поэтому Rust ставит chat-scroll-pending
+                        // напрямую, а применяем мы на первом реальном layout —
+                        // тот же приём, что у сетки календаря.
+                        if (root.chat-scroll-pending && self.height > 0) {
+                            root.chat-scroll-pending = false;
+                            self.viewport-y = -max(0px, min(root.chat-scroll-y,
+                                self.viewport-height - self.height));
+                        }
+                    }
                     for msg[idx] in root.messages: Rectangle {
                         height: msg.h;
                         cma := ContextMenuArea {

@@ -1391,6 +1391,14 @@ struct Shared {
     /// True until the first render after open has applied its scroll;
     /// lets the network Messages path scroll when the cache had nothing.
     scroll_pending: Cell<bool>,
+    /// Где стоял скролл чата, когда мы уходили из почты в календарь/книгу.
+    /// Положительный отступ от верха; -1 = ещё не уходили.
+    ///
+    /// Панель почты условная (`if root.view-mode == 0` в app.slint), а `if` в
+    /// Slint уничтожает поддерево — возврат даёт новый ListView с viewport-y = 0.
+    /// Без этого снимка диалог открывался в начале, а не там, где его
+    /// оставили (для непрочитанного — не на свежем письме).
+    chat_vp_y: Cell<f32>,
     /// Per-message render-view override: present = force the text-only
     /// bubble even when an HTML part exists («Показать → Текстовую
     /// версию»). Session-scoped on purpose.
@@ -5365,6 +5373,7 @@ fn main() {
         open_gen: Cell::new(0),
         open_unread: RefCell::new(HashSet::new()),
         scroll_pending: Cell::new(false),
+        chat_vp_y: Cell::new(-1.0),
         body_view_text: RefCell::new(HashSet::new()),
         pending_forward: RefCell::new(None),
         pending_source_view: Cell::new(0),
@@ -6972,6 +6981,33 @@ fn main() {
     let sh_view = shared.clone();
     ui.on_view_changed(move |mode| {
         if let Some(ui) = ui_weak_view.upgrade() {
+            if mode == 0 {
+                // Возврат в почту. Панель почты условная, поэтому ListView
+                // здесь СВЕЖИЙ и стоит в начале — вернуть скролл туда, где
+                // его оставили, обязаны мы.
+                //
+                // Снимок ОДНОРАЗОВЫЙ: «Почта» при уже открытой почте зовёт
+                // этот же обработчик, но панель не пересоздаётся, и
+                // восстановление дёрнуло бы вид на старую позицию без
+                // причины. Нечего восстанавливать → не трогаем вообще: на
+                // первом входе анкор ставит сам open_conversation.
+                //
+                // Флаг ставим напрямую, а не бампом chat-scroll-seq: мост
+                // (`changed x`) живёт внутри той же условной панели, и при её
+                // пересоздании новое значение seq — начальное, а не
+                // изменение, так что `changed` не сработает. Применит скролл
+                // сам ListView на первом реальном layout (`viewport-height` /
+                // `height`), как это уже сделано для сетки календаря.
+                let saved = sh_view.chat_vp_y.replace(-1.0);
+                if saved >= 0.0 {
+                    ui.set_chat_scroll_y(saved);
+                    ui.set_chat_scroll_pending(true);
+                }
+            } else {
+                // Уходим из почты — снять позицию ДО того, как панель
+                // уничтожится. chat-vp-y отрицательный (offset вверх).
+                sh_view.chat_vp_y.set((-ui.get_chat_vp_y()).max(0.0));
+            }
             if mode == 1 {
                 // Land the viewport on the working day, not on 00:00 —
                 // consumed by apply_calendar_view once the layout is real.
