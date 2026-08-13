@@ -40,7 +40,7 @@ graph TD
 ```mermaid
 graph TD
     subgraph client["Десктоп-клиент (Rust)"]
-        native["ddmail-native<br/>UI на Slint + рендер тела WebKitGTK"]
+        native["ddmail-native<br/>UI на Slint + рендер тела emlrender"]
         corec["ddmail-core<br/>движок, провайдеры, кэш"]
         lcache[("локальный кэш<br/>SQLite")]
         native --> corec
@@ -157,7 +157,7 @@ graph TD
 ```mermaid
 graph TD
     ui["UI на Slint (native/main.rs)<br/>диалоги, сетка календаря, композер, просмотр исходника, трей, индикатор"]
-    rworker["рендер-воркер<br/>WebKitGTK → bitmap + text-runs/link-rects"]
+    rworker["рендер-воркер<br/>emlrender → bitmap + text-runs/link-rects"]
     engine["движок (оркестратор)<br/>Vec&lt;AccountConn&gt;, командный цикл"]
     np["NativeProvider<br/>HTTP + WS, обновление токена"]
     ip["ImapProvider<br/>IMAP IDLE"]

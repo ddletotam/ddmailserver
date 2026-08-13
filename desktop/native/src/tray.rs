@@ -4,10 +4,9 @@
 //! events are polled from a Slint timer so we never touch a second event loop.
 //!
 //! Linux: ksni (StatusNotifierItem), which runs its own D-Bus service on a
-//! background thread and never touches gtk — so, unlike tray-icon, it can't
-//! fight the WebKitGTK render worker's gtk main loop. Its menu/activate
-//! callbacks fire on the ksni thread, so the closures handed in from main.rs
-//! marshal UI work back to the Slint event loop themselves.
+//! background thread and never touches gtk — this build links no gtk at all.
+//! Its menu/activate callbacks fire on the ksni thread, so the closures handed
+//! in from main.rs marshal UI work back to the Slint event loop themselves.
 //!
 //! macOS tray is still deferred.
 //!
