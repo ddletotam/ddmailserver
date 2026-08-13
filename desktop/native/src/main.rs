@@ -2057,26 +2057,115 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
     }
 }
 
-/// Pull every http(s) URL out of free text (calendar event fields keep
-/// meeting links as plain text more often than not). Trailing punctuation
-/// is trimmed; order preserved, duplicates dropped.
+/// Pull every meeting link out of free text (calendar event fields keep them as
+/// plain text more often than not) — both `http(s)://` URLs and bare hosts
+/// without a scheme. Trailing punctuation is trimmed; order preserved,
+/// duplicates dropped.
 fn extract_urls(texts: &[&str]) -> Vec<String> {
-    use std::sync::OnceLock;
-    static URL_RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = URL_RE.get_or_init(|| {
-        regex::Regex::new(r#"https?://[^\s<>"'\)\]]+"#).unwrap()
-    });
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for t in texts {
-        for m in re.find_iter(t) {
-            let url = m.as_str().trim_end_matches(['.', ',', ';', ':', '!', '?', '»']);
+        // Полноценные URL со схемой — и заодно их границы: голый хост внутри
+        // уже найденного URL повторно ссылкой становиться не должен.
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        for m in full_url_re().find_iter(t) {
+            spans.push((m.start(), m.end()));
+            let url = trim_url_tail(m.as_str());
             if !url.is_empty() && seen.insert(url.to_string()) {
                 out.push(url.to_string());
             }
         }
+        let field = t.trim();
+        for c in bare_host_re().captures_iter(t) {
+            let Some(g) = c.get(1) else { continue };
+            if spans.iter().any(|(s, e)| g.start() < *e && g.end() > *s) {
+                continue;
+            }
+            // Символ перед кандидатом: `@` — это адрес почты, буква/цифра/
+            // точка/дефис — обрезок более длинной строки, не хост.
+            if let Some(prev) = t[..g.start()].chars().next_back() {
+                if prev == '@'
+                    || prev == '.'
+                    || prev == '-'
+                    || prev == '/'
+                    || prev == ':'
+                    || prev.is_alphanumeric()
+                {
+                    continue;
+                }
+            }
+            let cand = trim_url_tail(g.as_str());
+            let whole_field = cand == field;
+            if let Some(url) = bare_host_to_url(cand, whole_field) {
+                if seen.insert(url.clone()) {
+                    out.push(url);
+                }
+            }
+        }
     }
     out
+}
+
+fn full_url_re() -> &'static regex::Regex {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r#"https?://[^\s<>"'\)\]]+"#).unwrap())
+}
+
+/// Голый хост (без схемы) с необязательным портом и путём. Ведущий
+/// разделитель нужен вместо look-behind, которого нет в `regex`.
+fn bare_host_re() -> &'static regex::Regex {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?i)(?:^|[\s,;(\[<«"'])((?:[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)+[a-z]{2,24}(?::\d{2,5})?(?:/[^\s<>"'\)\]»]*)?)"#,
+        )
+        .unwrap()
+    })
+}
+
+fn trim_url_tail(s: &str) -> &str {
+    s.trim_end_matches(['.', ',', ';', ':', '!', '?', '»'])
+}
+
+/// Признать голый хост ссылкой и достроить ему схему. Календарные ссылки
+/// сплошь без схемы: Jitsi/«кабинет» кладут в LOCATION `meet.example.kz/room`,
+/// CONFERENCE/X-…-CONFERENCE — такой же голый хост. Требовать `https?://`
+/// значит показывать такую встречу просто текстом, кликать нечего.
+///
+/// Ложные срабатывания душим тремя правилами: TLD — буквы и не расширение
+/// файла (`отчет.docx`), кандидат должен быть либо с путём/портом, либо
+/// `www.`, либо занимать поле целиком (LOCATION, который И ЕСТЬ хост).
+fn bare_host_to_url(cand: &str, whole_field: bool) -> Option<String> {
+    let host = cand.split(['/', ':']).next().unwrap_or(cand);
+    let tld = host.rsplit('.').next().unwrap_or("");
+    if tld.len() < 2 || !tld.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    const FILE_EXT: &[&str] = &[
+        "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pdf", "txt", "csv", "rtf", "odt", "ods",
+        "zip", "rar", "png", "jpg", "jpeg", "gif", "bmp", "svg", "mp3", "mp4", "avi", "mov",
+        "exe", "msi", "dll", "ics", "eml", "msg", "sig", "json", "xml", "html", "htm",
+    ];
+    if FILE_EXT.contains(&tld.to_ascii_lowercase().as_str()) {
+        return None;
+    }
+    let has_path_or_port = cand.contains('/') || cand.contains(':');
+    if !has_path_or_port && !whole_field && !host.to_ascii_lowercase().starts_with("www.") {
+        return None;
+    }
+    Some(format!("https://{cand}"))
+}
+
+/// Что открывать по клику в значении свойства события: полноценный URL —
+/// как есть, голый хост — с достроенной схемой. None → это не ссылка.
+fn link_target(value: &str) -> Option<String> {
+    let v = value.trim();
+    if v.starts_with("http://") || v.starts_with("https://") {
+        return Some(trim_url_tail(v).to_string());
+    }
+    bare_host_to_url(trim_url_tail(v), true)
 }
 
 /// Index of the text run nearest to (x, y): the containing run when there
@@ -3126,6 +3215,67 @@ fn compute_vertical(
 }
 
 #[cfg(test)]
+mod event_link_tests {
+    use super::{extract_urls, link_target};
+
+    /// Реальный кейс: LOCATION вида `meet.small.kz/dit_leads` — Jitsi-ссылка
+    /// без схемы. Раньше регексп требовал `https?://`, и встреча показывалась
+    /// просто текстом.
+    #[test]
+    fn schemeless_location_becomes_link() {
+        assert_eq!(
+            extract_urls(&["meet.small.kz/dit_leads", ""]),
+            vec!["https://meet.small.kz/dit_leads".to_string()]
+        );
+    }
+
+    /// Голый хост без пути — ссылка, когда он и есть всё поле (LOCATION) или
+    /// начинается с www.; внутри фразы — нет (там это, скорее всего, не хост).
+    #[test]
+    fn bare_host_needs_path_www_or_whole_field() {
+        assert_eq!(extract_urls(&["telemost.yandex.ru"]), vec!["https://telemost.yandex.ru"]);
+        assert_eq!(
+            extract_urls(&["см. www.example.com за деталями"]),
+            vec!["https://www.example.com"]
+        );
+        assert!(extract_urls(&["созвон в 13.00, ответственный за подготовку — Иванов"]).is_empty());
+    }
+
+    /// Ложные срабатывания: имена файлов, адреса почты, числа.
+    #[test]
+    fn not_links() {
+        assert!(extract_urls(&["во вложении report.docx и smeta.xlsx"]).is_empty());
+        assert!(extract_urls(&["пишите на ivanov@small.kz"]).is_empty());
+        assert!(extract_urls(&["версия 1.2.3"]).is_empty());
+    }
+
+    /// URL со схемой не должен продублироваться голым хостом из своей же
+    /// середины.
+    #[test]
+    fn full_url_not_duplicated() {
+        assert_eq!(
+            extract_urls(&["ссылка: https://meet.small.kz/dit_leads"]),
+            vec!["https://meet.small.kz/dit_leads".to_string()]
+        );
+    }
+
+    /// Клик по свойству события открывает нормализованную ссылку, а не
+    /// «относительный путь», который системный обработчик молча проглотит.
+    #[test]
+    fn link_target_normalizes() {
+        assert_eq!(
+            link_target("meet.small.kz/dit_leads").as_deref(),
+            Some("https://meet.small.kz/dit_leads")
+        );
+        assert_eq!(
+            link_target("https://telemost.yandex.ru/j/123").as_deref(),
+            Some("https://telemost.yandex.ru/j/123")
+        );
+        assert_eq!(link_target("Переговорная 3"), None);
+    }
+}
+
+#[cfg(test)]
 mod att_url_tests {
     use super::{att_url_decode, att_url_encode};
 
@@ -3786,7 +3936,10 @@ fn open_edit_form(ui: &MainWindow, sh: &Shared, ev: &ddmail_core::types::Desktop
         .iter()
         .map(|x| {
             let (label, value) = extra_label(&x.name, &x.value);
-            let is_link = value.starts_with("http://") || value.starts_with("https://");
+            // Голый хост тоже ссылка (CONFERENCE/X-…-CONFERENCE часто без
+            // схемы) — схему достраивает handle_link на клике. Правило то же,
+            // что в карточке просмотра: строки здесь так же кликабельны.
+            let is_link = link_target(&value).is_some();
             EventExtraItem {
                 label: label.into(),
                 value: value.into(),
@@ -7141,14 +7294,18 @@ fn main() {
             .iter()
             .map(|x| {
                 let (label, value) = extra_label(&x.name, &x.value);
-                let is_link = value.starts_with("http://") || value.starts_with("https://");
+                // Голый хост тоже ссылка (CONFERENCE/X-…-CONFERENCE часто без
+                // схемы) — схему достраивает handle_link на клике.
+                let is_link = link_target(&value).is_some();
                 EventExtraItem { label: label.into(), value: value.into(), is_link }
             })
             .collect();
+        // Сравнивать с найденными в тексте ссылками надо по нормализованному
+        // виду: в extras лежит голый хост, а extract_urls отдаёт его со схемой.
         let extra_urls: std::collections::HashSet<String> = extras
             .iter()
             .filter(|x| x.is_link)
-            .map(|x| x.value.to_string())
+            .filter_map(|x| link_target(&x.value))
             .collect();
         ui.set_detail_extras(ModelRc::new(VecModel::from(extras)));
         // Meeting links live as plain text in location/description more
@@ -8802,7 +8959,14 @@ fn handle_link(_ui: &MainWindow, url: String) {
         return;
     }
     println!("link click -> {url}");
-    open_external(&url);
+    // Значения событий (LOCATION/CONFERENCE) бывают без схемы: xdg-open/start
+    // приняли бы «meet.example.kz/room» за относительный путь и молча ничего
+    // не сделали. Достраиваем https:// на выходе — единая точка для всех
+    // кликов (строки-ссылки карточки, свойства события, чипы пузыря).
+    match link_target(&url) {
+        Some(target) => open_external(&target),
+        None => open_external(&url),
+    }
 }
 
 /// Max raw text fed to the source-viewer widget. Slint lays out the entire
