@@ -22,23 +22,16 @@ slint-build = "1.13"
 # Embeds assets/ddmail.ico into the exe (see build.rs).
 winresource = "0.1"
 
-[features]
-# Message bodies render through the in-house `emlrender` — no browser engine on
-# either platform. The old WebView2 / WebKitGTK backends are still here and one
-# flag away (`--no-default-features`) until this has been lived with; see
-# desktop/emlrender/PROGRESS.md.
-default = ["eml-render"]
-eml-render = ["dep:emlrender"]
-
 [dependencies]
 # raw-window-handle-06 exposes the OS window handle (HasWindowHandle), which
 # we hand to rfd's set_parent so the file dialog opens in front + modal.
 slint = { version = "1.13", features = ["raw-window-handle-06"] }
 
-# `net`: the browser backends loaded a permitted sender's images themselves, so
-# the replacement has to as well. The fetcher lives in the crate because the
-# harness needs the same one.
-emlrender = { path = "../emlrender", features = ["net"], optional = true }
+# The one and only body-render path on both platforms — there is no browser
+# engine in this build and no flag that brings one back.
+# `net`: a permitted sender's remote images are fetched inside the crate,
+# because the render-lab harness needs the same fetcher.
+emlrender = { path = "../emlrender", features = ["net"] }
 
 # Shared engine (data model, cache, IMAP/SMTP/native providers).
 ddmail-core = { path = "../core" }
@@ -48,11 +41,11 @@ log = "0.4"
 
 # Decode avatar bytes to RGBA for Slint. ico/bmp matter: the server's
 # avatar chain ends at /favicon.ico, and Chromium (the old Tauri webview)
-# happily rendered those вЂ” the native decoder must too.
+# happily rendered those — the native decoder must too.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "ico", "bmp"] }
 
 # Rasterize SVG avatars (BIMI logos are SVG by spec). default-features off
-# drops text shaping / system fonts вЂ” brand logos are pure vector shapes.
+# drops text shaping / system fonts — brand logos are pure vector shapes.
 resvg = { version = "0.44", default-features = false }
 
 # "Today / DD.MM / DD.MM.YY" date formatter for the search-dropdown rows.
@@ -61,28 +54,22 @@ resvg = { version = "0.44", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # Cross-platform desktop notifications (Linux zbus / Windows WinRT toast /
-# macOS NSUserNotification) behind one API вЂ” fired on new-mail events.
+# macOS NSUserNotification) behind one API — fired on new-mail events.
 notify-rust = "4"
 
 # Single-instance guard (named mutex on Windows / lock file on Linux) so a
 # second launch exits instead of opening a duplicate window.
 single-instance = "0.3"
 
-# Native file-open dialog for the composer's attach button. We call the
-# blocking API on the UI thread вЂ” the OS dialog is modal anyway. Windows uses
-# the built-in Win32 backend (no feature needed); Linux needs the gtk3 backend
-# for the sync API (declared in the linux target block below).
-rfd = { version = "0.15", default-features = false }
-
 # Already in the tree via slint's raw-window-handle-06 feature; declared
 # directly so we can match RawWindowHandle::Win32 to raise/focus the window
 # from tray and toast clicks (plain slint show() can't un-minimize).
 raw-window-handle = "0.6"
 
-# Regex passes for sanitizing inbound email HTML before it reaches the
-# Ultralight renderer (strip <script>, <iframe>, MS Outlook conditionals,
-# event handlers вЂ” they confuse the old WebKit fork and cost us bubbles
-# that quietly render blank).
+# Regex passes for sanitizing inbound email HTML before it reaches `emlrender`
+# (strip <script>, <iframe>, MS Outlook conditionals, event handlers — the
+# renderer ignores them, but dropping them early keeps the layout honest and
+# the permission gate simple).
 regex = "1"
 # System clipboard for text selection / context-menu copy.
 arboard = "3"
@@ -93,22 +80,19 @@ arboard = "3"
 serde = { version = "1", features = ["derive"] }
 cosmic-text = "0.19.0"
 
-# в”Ђв”Ђ Platform body-render backends (only render_* differs per OS) в”Ђв”Ђ
+# ── Platform integration (tray, window activation, file dialogs) ──
 
-# Linux: real WebKitGTK (libwebkit2gtk-4.1) в†’ offscreen snapshot в†’ RGBA.
+# Native file dialogs, everywhere except Linux. rfd's synchronous API needs the
+# gtk3 backend on Linux (the default xdg-portal one is async-only), and linking
+# gtk for a file dialog is exactly what dropping WebKitGTK got rid of — so Linux
+# shells out to kdialog/zenity instead (see `pick_attachment_files` in main.rs).
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+rfd = { version = "0.15", default-features = false }
+
 [target.'cfg(target_os = "linux")'.dependencies]
-# Sync file dialog on Linux needs the gtk3 backend (default xdg-portal is
-# async-only). gtk 0.18 already in our Linux deps, so no new toolkit.
-rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
-webkit2gtk = { version = "2.0", features = ["v2_40"] }
-gtk = "0.18"
-glib = "0.18"
-gio = "0.18"
-cairo-rs = "0.18"
-javascriptcore-rs = "1"
 # System tray via StatusNotifierItem (KDE/Plasma native). ksni runs its own
-# D-Bus service on a background thread and never touches gtk — so, unlike the
-# Windows tray-icon, it doesn't fight the WebKitGTK render worker's gtk loop.
+# D-Bus service on a background thread and never touches gtk — with the
+# WebKitGTK backend gone there is no gtk in the process at all.
 ksni = "0.2"
 # Raise + focus the window from tray/toast clicks on X11. plain Slint show()
 # is a no-op for an already-mapped window; we send _NET_ACTIVE_WINDOW (EWMH)
@@ -116,16 +100,12 @@ ksni = "0.2"
 # SetForegroundWindow.
 x11 = { version = "2", features = ["xlib"] }
 
-# Windows: WebView2 (Edge/Chromium) в†’ offscreen CapturePreview(PNG) в†’ RGBA.
 [target.'cfg(windows)'.dependencies]
-# System-tray icon + menu (Linux tray deferred вЂ” it needs gtk on the main
-# thread, which conflicts with our render worker's gtk; the Linux dev wires
-# it separately).
+# System-tray icon + menu.
 tray-icon = "0.19"
 # WinRT toast with in-process on_activated (click-through works while the
 # app is running; no AUMID/COM activator needed). Standalone, no tauri dep.
 tauri-winrt-notification = "0.7"
-webview2-com = "0.33"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Diagnostics_Debug",

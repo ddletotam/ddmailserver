@@ -1,16 +1,16 @@
-//! Render backend built on `emlrender` — no browser engine at all.
+//! The render backend, built on `emlrender` — no browser engine at all, on
+//! either platform. There is no second backend and no flag that selects one.
 //!
-//! Drop-in for `render_webview2` / `render_webkit`: same `Engine` surface, same
-//! `RenderResult`, same coordinate contract (bitmap px = CSS px × `scale`,
-//! links and runs in CSS px). Everything above this file — the bubble bitmaps,
-//! the PDF-style selection layer, the link hit-test — is unchanged.
+//! Coordinate contract: bitmap px = CSS px × `scale`, links and runs in CSS px.
+//! Everything above this file — the bubble bitmaps, the PDF-style selection
+//! layer, the link hit-test — is unchanged from when this was one of three.
 //!
-//! Why replace a working WebView2 path: a browser engine lays out to its own
-//! idea of a viewport and overflows horizontally out of the bubble, and there
-//! is no setting that makes it stop. `emlrender` treats "never wider than the
-//! width you were given" as its one inviolable rule.
-//!
-//! Enable with `--features eml-render`.
+//! Why the browser engines went: WebView2 and WebKitGTK each lay out to their
+//! own idea of a viewport and overflow horizontally out of the bubble, and no
+//! setting makes them stop. `emlrender` treats "never wider than the width you
+//! were given" as its one inviolable rule. Dropping them also took WebKitGTK's
+//! system dependencies out of the Linux build and WebView2 out of the Windows
+//! installer.
 
 use crate::render_common::{LinkRect, TextRun};
 

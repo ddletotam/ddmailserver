@@ -1,6 +1,6 @@
-//! ddmail-native — Slint shell + Ultralight (WebKit) body rendering.
+//! ddmail-native — Slint shell + `emlrender` body rendering.
 //! Sidebar = real conversations from the desktop cache; selecting one renders
-//! its real message bodies as Ultralight bitmaps composited as Slint images.
+//! its real message bodies as bitmaps composited as Slint images.
 
 // Release builds run under the GUI subsystem so Windows doesn't spawn a console
 // window at launch. Debug builds keep the console — that's where our `println!`
@@ -16,23 +16,14 @@ mod notify;
 mod policy;
 mod recurrence;
 mod reminders;
+// The browser-free renderer — the only one. Same module on both platforms,
+// which is the whole point: nothing here depends on a browser engine.
+mod render;
 mod render_common;
 mod richtext;
 mod richtext_render;
 #[cfg(any(windows, target_os = "linux"))]
 mod tray;
-// The browser-free renderer, when asked for: `--features eml-render`. It wins
-// over the platform backends on both platforms — the whole point is that it
-// does not depend on one.
-#[cfg(feature = "eml-render")]
-#[path = "render_eml.rs"]
-mod render;
-#[cfg(all(target_os = "linux", not(feature = "eml-render")))]
-#[path = "render_webkit.rs"]
-mod render;
-#[cfg(all(windows, not(feature = "eml-render")))]
-#[path = "render_webview2.rs"]
-mod render;
 mod sanitize;
 mod texture_cache;
 mod toast;
@@ -1080,9 +1071,9 @@ fn build_body_html(b: &MessageBody, policy: &policy::Policy) -> String {
     bubble_template(b.is_outgoing, &fmt_bubble_time(b.date_ts), &format!("{inner}{}", attachment_chips(b)))
 }
 
-/// Text-only bubble — the fallback we render when WebKit chokes on an
-/// HTML body (timeout or empty paint). Preserves linebreaks via
-/// `white-space: pre-wrap`, and still appends attachment chips.
+/// Text-only bubble — the fallback we render when the HTML body paints nothing
+/// at all. Preserves linebreaks via `white-space: pre-wrap`, and still appends
+/// attachment chips.
 fn build_text_only_html(b: &MessageBody) -> String {
     let escaped = html_escape(b.text.as_deref().unwrap_or(""));
     let inner = format!("<div style=\"white-space:pre-wrap\">{escaped}</div>");
@@ -1108,12 +1099,15 @@ fn build_source_html(text: &str) -> String {
     )
 }
 
-/// Percent-кодирование частей `ddmail-attach:`-URL. Хит-тест ссылок читает
-/// `a.href` (LINK_RECTS_JS) — НОРМАЛИЗОВАННОЕ свойство: WebKit/Chromium сами
-/// percent-кодируют в нём всё не-ASCII, так что кириллическое имя вложения
-/// прилетало бы в Rust уже изуродованным (%D0%9E…). Поэтому кодируем сами,
+/// Percent-кодирование частей `ddmail-attach:`-URL: кодируем сами,
 /// детерминированно (всё, кроме ASCII-букв/цифр и `.-_~`), а att_url_decode
 /// на выходе восстанавливает исходную строку байт-в-байт.
+///
+/// Потребовалось это из-за браузерных бэкендов, которых в сборке больше нет:
+/// они отдавали хит-тесту НОРМАЛИЗОВАННЫЙ `a.href` и сами percent-кодировали
+/// в нём всё не-ASCII, так что кириллическое имя вложения прилетало в Rust
+/// изуродованным (%D0%9E…). Своя кодировка снимает вопрос независимо от того,
+/// кто формирует href, поэтому остаётся.
 fn att_url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
@@ -1405,7 +1399,7 @@ struct Shared {
     current: Cell<usize>,
     width: Cell<u32>,
     /// UI window scale factor last seen by the width watcher; render jobs
-    /// carry it so WebView2 rasterizes at the display's real DPI.
+    /// carry it so the renderer rasterizes at the display's real DPI.
     render_scale: Cell<f32>,
     tx: mpsc::Sender<Job>,
     engine_tx: RefCell<Option<mpsc::Sender<engine::EngineCmd>>>,
@@ -3153,9 +3147,9 @@ mod att_url_tests {
         assert_eq!(att_url_decode(&enc), name);
     }
 
-    /// Нормализация WebKit (a.href в LINK_RECTS_JS) percent-кодирует
-    /// не-ASCII сама — декодер обязан понимать её вывод для легаси-ссылок
-    /// из кэшированных рендеров.
+    /// Браузерные бэкенды percent-кодировали не-ASCII в `a.href` сами —
+    /// декодер обязан понимать их вывод для легаси-ссылок, оставшихся
+    /// в кэшированных рендерах.
     #[test]
     fn decodes_webkit_normalized_legacy() {
         assert_eq!(att_url_decode("%D0%9E%D1%82%D1%87%D1%91%D1%82.pdf"), "Отчёт.pdf");
@@ -4729,8 +4723,8 @@ fn main() {
                                 entry
                             } else {
                                 // First render: try the full HTML (unless the
-                                // text view is forced). If WebKit doesn't manage
-                                // to paint anything we retry with the text-only
+                                // text view is forced). If the renderer doesn't
+                                // paint anything we retry with the text-only
                                 // bubble — keeps "missing bubble" failures from
                                 // being silent.
                                 let html = if force_text {
@@ -5453,7 +5447,7 @@ fn main() {
     // every bubble stretched to the real (wider) column. This watcher feeds
     // the actual chat-column width through the same resize path — covering
     // the first frame and any future missed events. It also tracks the
-    // window scale factor: a DPI change re-renders so WebView2 rasterizes
+    // window scale factor: a DPI change re-renders so the bitmap comes out
     // at the display's real scale (crisp bubbles after a monitor move).
     let ui_weak_ww = ui.as_weak();
     let sh_ww = shared.clone();
@@ -8917,13 +8911,12 @@ fn parse_headers(raw: &str) -> Vec<(String, String)> {
 
 /// Open the native file picker and return the chosen attachment paths.
 ///
-/// Windows/macOS use rfd's synchronous Win32/AppKit backend, parented to our
-/// window. Linux can NOT: rfd's only sync backend there is gtk3, and gtk is
-/// already owned by the WebKitGTK render worker thread (`render_webkit.rs`
-/// calls `gtk::init()` there). Driving a second gtk dialog from the UI thread
-/// deadlocks — the UI thread parks in the gtk main loop and the dialog window
-/// never maps. So on Linux we shell out to a native picker (kdialog on KDE,
-/// zenity as fallback) in its own process — no in-process gtk at all.
+/// Windows uses rfd's synchronous Win32 backend, parented to our window. Linux
+/// does not get rfd at all: its only sync backend there is gtk3, and this build
+/// deliberately links no gtk — that went out with the WebKitGTK renderer. So on
+/// Linux we shell out to a native picker (kdialog on KDE, zenity as fallback)
+/// in its own process, which also keeps the UI thread free of a second event
+/// loop.
 #[cfg(not(target_os = "linux"))]
 fn pick_attachment_files(ui: &MainWindow) -> Vec<std::path::PathBuf> {
     use raw_window_handle::HasWindowHandle;
@@ -8992,8 +8985,8 @@ fn pick_attachment_files(ui: &MainWindow) -> Vec<std::path::PathBuf> {
 }
 
 /// Диалог «Сохранить как…» для вложения (None = отмена). Разделение по ОС —
-/// то же, что у pick_attachment_files: rfd на Windows/macOS; на Linux
-/// kdialog/zenity отдельным процессом (in-process gtk занят рендер-воркером).
+/// то же, что у pick_attachment_files: rfd на Windows; на Linux
+/// kdialog/zenity отдельным процессом (gtk в сборке нет вовсе).
 #[cfg(not(target_os = "linux"))]
 fn pick_save_path(ui: &MainWindow, filename: &str) -> Option<std::path::PathBuf> {
     use raw_window_handle::HasWindowHandle;

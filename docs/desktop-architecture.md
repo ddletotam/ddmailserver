@@ -26,8 +26,9 @@
 
 Тяжёлые и независимые вещи из цикла **вынесены**:
 
-- **Рендер писем** — отдельный поток с WebKitGTK/WebView2 (тулкиты сами
-  требуют один выделенный поток: GTK-цикл на Linux, COM STA на Windows).
+- **Рендер писем** — отдельный поток со своим движком `emlrender` (браузерного
+  движка в сборке нет ни на одной платформе; поток нужен, чтобы вёрстка и
+  растеризация не подвешивали UI-поток).
 - **WebSocket-вотчеры** аккаунтов — tokio-задачи на воркерах рантайма движка,
   пуши приходят независимо от очереди команд.
 - **UI** никогда не ждёт движок: команды уходят в очередь, результаты
@@ -47,7 +48,7 @@
 | UI (main) | Slint | event loop, состояние `Shared`, таймеры (reminders scan, geometry saver), тост-окна |
 | Engine | `engine.rs:608` | последовательный командный цикл + tokio Runtime |
 | tokio workers | Runtime движка | WS-вотчеры аккаунтов (push) |
-| Render worker | `main.rs` | WebKitGTK / WebView2 offscreen-рендер тел писем |
+| Render worker | `main.rs` | `emlrender`: вёрстка и растеризация тел писем в RGBA |
 | ksni tray | `tray.rs` | D-Bus StatusNotifierItem (Linux) |
 | One-shot login | по кнопке | login/OAuth без блокировки UI |
 
@@ -60,7 +61,7 @@ flowchart TB
     subgraph app["DDMail Desktop (процесс ddmail-native)"]
         ui["UI-поток<br/>Slint event loop, Shared,<br/>тосты, трей, reminders-таймер"]
         engine["Движок<br/>последовательный командный цикл,<br/>avatar-backlog, tokio Runtime"]
-        render["Render worker<br/>WebKitGTK (Linux) / WebView2 (Win)<br/>offscreen HTML → RGBA"]
+        render["Render worker<br/>emlrender (обе платформы)<br/>HTML → RGBA"]
         cache[("SQLite cache.db<br/>диалоги, тела, контакты,<br/>reminders2, watermarks")]
         texcache[("Texture cache<br/>RAM + PNG на диске")]
         cfg[/"accounts.json, calendar.json,<br/>window.json, policy"/]
@@ -115,8 +116,8 @@ flowchart LR
     end
 
     subgraph renderthread["Render worker"]
-        rengine["render_webkit /<br/>render_webview2"]
-        rcommon["render_common<br/>(link rects, text runs,<br/>hide scrollbars)"]
+        rengine["render.rs<br/>(emlrender)"]
+        rcommon["render_common<br/>(link rects, text runs)"]
         texc["texture_cache<br/>RAM LRU + disk PNG"]
         sanitize["sanitize + policy<br/>(media/scripts per sender)"]
     end
@@ -155,7 +156,7 @@ sequenceDiagram
     S-->>E: тела писем
     E-->>UI: Bodies → invoke_from_event_loop
     UI->>R: render job (bodies, width, scale, seq)
-    Note over R: cache-иерархия:<br/>RAM → disk PNG → WebKit render
+    Note over R: cache-иерархия:<br/>RAM → disk PNG → emlrender
     R->>R: sanitize → HTML → bitmap +<br/>link rects + text runs
     R-->>UI: SharedPixelBuffer на каждое письмо
     UI->>UI: Image + слои кликов/выделения
