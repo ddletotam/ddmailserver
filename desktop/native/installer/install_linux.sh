@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ddmail — Linux per-user install (the analogue of ddmail.iss on Windows).
 # Build:  cargo build --release (done here unless --no-build)
-# Input:  target/release/ddmail-native
+# Input:  $CARGO_TARGET_DIR/release/ddmail-native, else target/release/…
 # Output: ~/.local/bin/ddmail-native + desktop entry + hicolor icons
 set -euo pipefail
 
@@ -11,7 +11,12 @@ if [[ "${1:-}" != "--no-build" ]]; then
     cargo build --release
 fi
 
-BIN=target/release/ddmail-native
+# Ask cargo where the artefacts went instead of assuming ./target: the build
+# dir is expected to live outside the source tree (CARGO_TARGET_DIR, see the
+# workspace rules), and hardcoding the relative path made this script fail
+# with "not found — build first" right after a successful build.
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+BIN="$TARGET_DIR/release/ddmail-native"
 [[ -x "$BIN" ]] || { echo "error: $BIN not found — build first" >&2; exit 1; }
 
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
