@@ -1160,7 +1160,7 @@ fn attachment_chips(b: &MessageBody) -> String {
     if b.attachments.is_empty() {
         return String::new();
     }
-    let mut s = String::from("<div class=\"atts\">");
+    let mut s = format!("<div class=\"{CSS_NS}-atts\">");
     for a in &b.attachments {
         let href = format!(
             "ddmail-attach:{}|{}|{}|{}",
@@ -1170,7 +1170,7 @@ fn attachment_chips(b: &MessageBody) -> String {
             att_url_encode(&a.filename)
         );
         s.push_str(&format!(
-            "<a class=\"att\" href=\"{}\">\u{1F4CE} {} · {} \u{041A}\u{0411}</a>",
+            "<a class=\"{CSS_NS}-att\" href=\"{}\">\u{1F4CE} {} · {} \u{041A}\u{0411}</a>",
             html_escape(&href),
             html_escape(&a.filename),
             (a.size / 1024).max(1)
@@ -1183,7 +1183,20 @@ fn attachment_chips(b: &MessageBody) -> String {
 /// Bump whenever the bubble/render HTML template or its CSS changes: the
 /// texture cache keys renders by fnv1a(body.html) only, so without this a
 /// template/CSS edit would keep serving stale cached bitmaps (RAM + disk).
-const RENDER_TEMPLATE_EPOCH: u64 = 3;
+const RENDER_TEMPLATE_EPOCH: u64 = 4;
+
+/// ВСЕ классы обвязки пузыря пишутся с этим префиксом. Документ пузыря —
+/// общая песочница для нашей вёрстки и присланного HTML, а письма сплошь
+/// используют «обычные» имена: `class="row"` (Альфа-Лизинг и любой сборщик
+/// рассылок — 9–13 таких элементов в письме), `time`, `image`, `inner`,
+/// `button`. Без префикса наши правила молча меняли чужую разметку: `.row`
+/// добавлял письму 60 px отбивки внутри пузыря, `.time` разворачивал ячейку
+/// вправо и снимал с неё выделение.
+///
+/// Инвариант держит тест `bubble_css_tests::chrome_classes_are_namespaced`.
+/// Намеренно достают до письма только два селектора: `.ddm-bubble *` (сбросы
+/// max-width/border/background-image) и `a` (ссылки в цвет акцента).
+const CSS_NS: &str = "ddm";
 
 fn bubble_template(is_outgoing: bool, time: &str, inner: &str) -> String {
     let side = if is_outgoing { "out" } else { "in" };
@@ -1195,7 +1208,7 @@ fn bubble_template(is_outgoing: bool, time: &str, inner: &str) -> String {
     let time_html = if time.is_empty() {
         String::new()
     } else {
-        format!("<div class=\"time\">{}</div>", html_escape(time))
+        format!("<div class=\"{CSS_NS}-time\">{}</div>", html_escape(time))
     };
     format!(
         r#"<!DOCTYPE html><html><head><meta charset="utf-8"><style>
@@ -1205,28 +1218,28 @@ fn bubble_template(is_outgoing: bool, time: &str, inner: &str) -> String {
            renders the same in a browser. Single-class selectors on the bubble
            itself rather than `.row.out .bubble` — the in-house renderer
            matches one class and no combinators (see docs/backlog.md). */
-        .row {{ padding: 6px 60px; }}
-        .bubble-out {{ margin-left: auto; margin-right: 0; }}
-        .bubble-in  {{ margin-left: 0; margin-right: auto; }}
-        .bubble {{
+        .{CSS_NS}-row {{ padding: 6px 60px; }}
+        .{CSS_NS}-bubble-out {{ margin-left: auto; margin-right: 0; }}
+        .{CSS_NS}-bubble-in  {{ margin-left: 0; margin-right: auto; }}
+        .{CSS_NS}-bubble {{
             max-width: 72%; background: {bg}; border-radius: 16px; padding: 10px 14px;
             font-size: 15px; line-height: 1.4; color: #0f1419;
             box-shadow: 0 1px 2px rgba(0,0,0,0.12); overflow-wrap: anywhere;
         }}
-        .bubble-out {{ border-bottom-right-radius: 4px; }}
-        .bubble-in  {{ border-bottom-left-radius: 4px; }}
-        .bubble * {{ max-width: 100% !important; border: 0 !important; background-image: none !important; }}
-        .bubble table, .bubble td, .bubble th {{ border-collapse: collapse !important; }}
-        .bubble img {{ max-width: 100% !important; height: auto !important; }}
+        .{CSS_NS}-bubble-out {{ border-bottom-right-radius: 4px; }}
+        .{CSS_NS}-bubble-in  {{ border-bottom-left-radius: 4px; }}
+        .{CSS_NS}-bubble * {{ max-width: 100% !important; border: 0 !important; background-image: none !important; }}
+        .{CSS_NS}-bubble table, .{CSS_NS}-bubble td, .{CSS_NS}-bubble th {{ border-collapse: collapse !important; }}
+        .{CSS_NS}-bubble img {{ max-width: 100% !important; height: auto !important; }}
         a {{ color: #10b981; }}
-        .atts {{ margin-top: 8px; }}
-        .att {{ display: inline-block; background: rgba(0,0,0,0.06); border-radius: 8px;
+        .{CSS_NS}-atts {{ margin-top: 8px; }}
+        .{CSS_NS}-att {{ display: inline-block; background: rgba(0,0,0,0.06); border-radius: 8px;
                 padding: 4px 10px; margin: 2px 4px 2px 0; color: #10b981;
                 text-decoration: none; font-size: 13px; }}
-        .time {{ text-align: right; font-size: 11px; color: #8a97a5;
+        .{CSS_NS}-time {{ text-align: right; font-size: 11px; color: #8a97a5;
                  margin-top: 4px; user-select: none; }}
         </style></head>
-        <body><div class="row"><div class="bubble bubble-{side}">{inner}{time_html}</div></div></body></html>"#
+        <body><div class="{CSS_NS}-row"><div class="{CSS_NS}-bubble {CSS_NS}-bubble-{side}">{inner}{time_html}</div></div></body></html>"#
     )
 }
 
@@ -3212,6 +3225,57 @@ fn compute_vertical(
     let bottom = we + pad;
     let rows = (bottom - top).max(1);
     (top, bottom, h / rows as f32)
+}
+
+#[cfg(test)]
+mod bubble_css_tests {
+    use super::{build_body_html, policy};
+    use ddmail_core::types::MessageBody;
+
+    fn html_body(html: &str) -> MessageBody {
+        MessageBody {
+            uid: 1,
+            folder: "INBOX".into(),
+            subject: "s".into(),
+            from: "Альфа Лизинг <noreply@example.ru>".into(),
+            from_addr: "noreply@example.ru".into(),
+            to: vec![],
+            cc: vec![],
+            date: String::new(),
+            date_ts: 1_785_000_000,
+            html: Some(html.into()),
+            text: None,
+            attachments: vec![],
+            is_outgoing: false,
+            message_id: String::new(),
+            in_reply_to: String::new(),
+            references: vec![],
+            raw_headers: String::new(),
+        }
+    }
+
+    /// Классы обвязки пузыря обязаны быть в своём пространстве имён: письма
+    /// сплошь используют `class="row"`/`time`/`image` (у Альфа-Лизинга 9–13
+    /// таких элементов), а документ у нашей вёрстки и присланного HTML один.
+    /// Голый `.row { padding: 6px 60px }` добавлял письму 60 px отбивки
+    /// внутри пузыря, `.time` разворачивал его ячейку вправо.
+    #[test]
+    fn chrome_classes_are_namespaced() {
+        let doc = build_body_html(
+            &html_body(r#"<table class="row"><tr><td class="row">текст</td></tr></table>"#),
+            &policy::Policy::default(),
+        );
+        let css = &doc[..doc.find("</style>").expect("есть <style>")];
+        for bare in [".row", ".bubble", ".time", ".att", ".atts"] {
+            assert!(
+                !css.contains(&format!("{bare} ")) && !css.contains(&format!("{bare}{{")),
+                "селектор {bare} без префикса ddm- поймает разметку письма"
+            );
+        }
+        assert!(css.contains(".ddm-row"), "своя вёрстка должна остаться стилизованной");
+        // Разметка письма проходит как есть — её класс мы не переписываем.
+        assert!(doc.contains(r#"class="row""#), "класс письма не должен переписываться");
+    }
 }
 
 #[cfg(test)]
