@@ -2076,6 +2076,77 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
+
+                // Своя полоса прокрутки для переписки.
+                //
+                // Штатная от std-widgets тут не годится: в стиле fluent (он у
+                // нас по умолчанию) ползунок шириной 2px цветом #00000073 и
+                // расширяется до 6px только под курсором — на светлом фоне
+                // переписки его попросту не видно. `always-on` не помогает: он
+                // меняет только `visible`, но не размер. А ещё её видимость
+                // висит на `maximum`, который у ListView считается из ОЦЕНКИ
+                // viewport-height и в момент проверки может быть нулём.
+                //
+                // Своя считается из уже зеркалируемых chat-vp-* (их и так
+                // ведёт проверка «пользователь внизу?»), поэтому не зависит ни
+                // от оценки, ни от стиля. Сиблинг ПОСЛЕ lv — значит рисуется
+                // поверх; chat-area это Rectangle, дети позиционируются
+                // абсолютно.
+                if root.chat-vp-h > root.chat-view-h + 1px: Rectangle {
+                    // Геометрия целиком в координатах ListView: высота у полосы
+                    // его видимая высота, а не высота chat-area (в ней ещё
+                    // оверлей прогресс-бара, и ползунок был бы соврал).
+                    property <length> track: self.height - 8px;
+                    // Минимум 32px, иначе на длинной переписке ползунок
+                    // превращается в точку и его нечем поймать.
+                    property <length> thumb-h: max(32px,
+                        track * (root.chat-view-h / root.chat-vp-h));
+                    property <length> span: root.chat-vp-h - root.chat-view-h;
+                    // chat-vp-y отрицательный — offset вверх.
+                    property <float> frac: span <= 0px ? 0 : (-root.chat-vp-y) / span;
+
+                    x: parent.width - 12px;
+                    y: 0;
+                    width: 10px;
+                    height: root.chat-view-h;
+
+                    sb-thumb := Rectangle {
+                        x: 2px;
+                        y: 4px + (parent.track - parent.thumb-h) * parent.frac;
+                        width: 6px;
+                        height: parent.thumb-h;
+                        border-radius: 3px;
+                        background: sb-touch.pressed
+                            ? #00000080
+                            : (sb-touch.has-hover ? #00000059 : #00000033);
+                        animate background { duration: 120ms; }
+                    }
+
+                    sb-touch := TouchArea {
+                        property <length> grab-y: 0;
+                        property <length> grab-vp: 0;
+
+                        width: parent.width;
+                        height: parent.height;
+                        mouse-cursor: MouseCursor.default;
+
+                        pointer-event(e) => {
+                            if (e.button == PointerEventButton.left
+                                && e.kind == PointerEventKind.down) {
+                                self.grab-y = self.mouse-y;
+                                self.grab-vp = lv.viewport-y;
+                            }
+                        }
+                        moved => {
+                            if (self.pressed && parent.track > parent.thumb-h) {
+                                lv.viewport-y = -max(0px, min(parent.span,
+                                    -self.grab-vp
+                                    + (self.mouse-y - self.grab-y)
+                                        * (parent.span / (parent.track - parent.thumb-h))));
+                            }
+                        }
+                    }
+                }
             }
 
             // Composer header — Subject + Cc fields, hidden by default.
