@@ -393,6 +393,61 @@ mod tests {
     }
 
     #[test]
+    fn user_choice_survives_event_id_churn() {
+        let cache = temp_cache();
+        let now = 8_000_000_000_000;
+        let start = now + 10 * 60_000; // созвон через 10 минут
+        // Встреча под id 30: штатный -10 срабатывает сразу.
+        seed(&cache, &[event(30, "Синк", start, &[10])], &no_hidden, now);
+        assert_eq!(scan(&cache, now).len(), 1);
+        // «В момент начала»: ручная строка seq=100 на start.
+        cache
+            .user_choice_reminder(30, start, start + 3_600_000, start, true, "Синк")
+            .unwrap();
+        assert_eq!(scan(&cache, now + 4 * 60_000).len(), 0, "тихо после снуза");
+
+        // Ресинк сервера пересоздал ту же встречу под НОВЫМ id 31 (churn).
+        seed(&cache, &[event(31, "Синк", start, &[10])], &no_hidden, now + 4 * 60_000);
+        // Новый id НЕ должен переармить просроченный -10.
+        assert_eq!(
+            scan(&cache, now + 4 * 60_000).len(),
+            0,
+            "churned id не воскрешает пре-аларм"
+        );
+
+        // Настоящий ресинк ещё и удаляет исчезнувший старый id — решение уже
+        // должно жить под новым id к этому моменту.
+        let keep: std::collections::HashSet<i64> = [31].into_iter().collect();
+        cache
+            .prune_orphan_reminders(now, now + 30 * 24 * 3_600_000, &keep)
+            .unwrap();
+
+        // Выбор пользователя срабатывает ровно один раз, в момент начала
+        // (в этот момент occurrence_start ≤ now → презентация «уже идёт»,
+        // как и у штатного at-start будильника).
+        let due = scan(&cache, start);
+        assert_eq!(due.len(), 1, "ручное напоминание пережило churn + prune");
+        assert_eq!(due[0].row.occurrence_start_ms, start);
+        assert_eq!(due[0].mode, ToastMode::AlreadyRunning);
+        // И только один раз — повторный скан молчит.
+        assert_eq!(scan(&cache, start).len(), 0, "без повторов");
+    }
+
+    #[test]
+    fn dismissal_survives_event_id_churn() {
+        let cache = temp_cache();
+        let now = 9_000_000_000_000;
+        let start = now + 10 * 60_000;
+        seed(&cache, &[event(40, "Спам-инвайт", start, &[10])], &no_hidden, now);
+        assert_eq!(scan(&cache, now).len(), 1);
+        // ✕ — убить всю оккурренцию.
+        cache.cancel_occurrence_reminders(40, start).unwrap();
+        // Новый id той же встречи не должен воскресить напоминание.
+        seed(&cache, &[event(41, "Спам-инвайт", start, &[10])], &no_hidden, now + 60_000);
+        assert_eq!(scan(&cache, start - 60_000).len(), 0, "✕ переживает churn");
+    }
+
+    #[test]
     fn event_change_resets_cascade() {
         let cache = temp_cache();
         let now = 5_000_000_000_000;

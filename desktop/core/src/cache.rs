@@ -766,6 +766,84 @@ impl Cache {
         signature: &str,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+
+        // A user decision for this LOGICAL occurrence (occurrence_start +
+        // summary) must survive event-id churn. The server re-creates the same
+        // meeting under a fresh event_id whenever the feed's identity is
+        // ambiguous; without this guard a new id would re-arm the whole -N
+        // cascade, resurrecting the pre-alarm the user just snoozed to «в
+        // момент начала» (or dismissed with ✕).
+        //
+        // The key is deliberately the same pair `dedup_occurrence` uses, and
+        // the same identity the server-side feed matcher keys on: three
+        // mechanisms disagreeing about what "the same occurrence" means would
+        // be worse than the residual risk here — two genuinely different
+        // meetings sharing a title AND a start time also share the decision.
+        //
+        // We look across ALL event_ids: a manual reminder is seq=100, a
+        // dismissal is status='cancelled'. seq=100 wins when both are present
+        // (user_choice_reminder leaves cancelled rows alongside its seq=100).
+        let decision: Option<(i64, i64, i64, i32)> = conn
+            .query_row(
+                "SELECT seq, fire_at_ms, occurrence_end_ms, at_start FROM reminders2 \
+                 WHERE occurrence_start_ms = ?1 AND summary = ?2 \
+                   AND (seq = 100 OR status = 'cancelled') \
+                   AND status NOT IN ('done', 'expired') \
+                 ORDER BY (seq = 100) DESC, fire_at_ms DESC LIMIT 1",
+                params![occ_start_ms, summary],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .ok();
+        if let Some((seq, fire_at, dec_end, at_start)) = decision {
+            // Carry the decision onto THIS event_id if it doesn't already hold
+            // it, so it outlives the old id being pruned. Never arm the cascade.
+            let have: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM reminders2 \
+                     WHERE event_id = ?1 AND occurrence_start_ms = ?2 \
+                       AND (seq = 100 OR status = 'cancelled') \
+                       AND status NOT IN ('done', 'expired')",
+                    params![event_id, occ_start_ms],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            if have == 0 {
+                let manual = seq == 100;
+                let end = if dec_end > 0 { dec_end } else { occ_end_ms };
+                if manual {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO reminders2 \
+                         (event_id, occurrence_start_ms, occurrence_end_ms, seq, fire_at_ms, \
+                          lead_min, at_start, status, summary, signature) \
+                         VALUES (?1, ?2, ?3, 100, ?4, ?5, ?6, 'armed', ?7, ?8)",
+                        params![
+                            event_id,
+                            occ_start_ms,
+                            end,
+                            fire_at,
+                            ((occ_start_ms - fire_at) / 60_000).max(0),
+                            at_start,
+                            summary,
+                            signature
+                        ],
+                    )
+                    .map_err(|e| format!("carry manual: {e}"))?;
+                } else {
+                    // Dismissal marker: seq=100 + cancelled → scan never arms it,
+                    // and this same guard keeps re-seeds quiet forever.
+                    conn.execute(
+                        "INSERT OR REPLACE INTO reminders2 \
+                         (event_id, occurrence_start_ms, occurrence_end_ms, seq, fire_at_ms, \
+                          lead_min, at_start, status, summary, signature) \
+                         VALUES (?1, ?2, ?3, 100, ?4, 0, 0, 'cancelled', ?5, ?6)",
+                        params![event_id, occ_start_ms, end, occ_start_ms, summary, signature],
+                    )
+                    .map_err(|e| format!("carry dismissal: {e}"))?;
+                }
+            }
+            return Ok(());
+        }
+
         let existing: Option<String> = conn
             .query_row(
                 "SELECT signature FROM reminders2 \
