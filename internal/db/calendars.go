@@ -196,8 +196,9 @@ func (db *DB) GetCalendarByRemoteID(sourceID int64, remoteID string) (*models.Ca
 	query := `
 		SELECT c.id, c.source_id, c.user_id, COALESCE(c.remote_id, ''), c.name,
 		       COALESCE(c.description, ''), COALESCE(c.color, s.color), c.timezone,
-		       COALESCE(c.ctag, ''), c.can_write, c.created_at, c.updated_at,
-		       s.source_type
+		       COALESCE(c.ctag, ''), c.can_write, COALESCE(c.reverse_sync, false),
+		       COALESCE(c.enabled, true), c.created_at, c.updated_at,
+		       s.source_type, COALESCE(s.identity_email, '')
 		FROM calendars c
 		JOIN calendar_sources s ON c.source_id = s.id
 		WHERE c.source_id = $1 AND c.remote_id = $2
@@ -206,8 +207,9 @@ func (db *DB) GetCalendarByRemoteID(sourceID int64, remoteID string) (*models.Ca
 	err := db.QueryRow(query, sourceID, remoteID).Scan(
 		&cal.ID, &cal.SourceID, &cal.UserID, &cal.RemoteID, &cal.Name,
 		&cal.Description, &cal.Color, &cal.Timezone,
-		&cal.CTag, &cal.CanWrite, &cal.CreatedAt, &cal.UpdatedAt,
-		&cal.SourceType,
+		&cal.CTag, &cal.CanWrite, &cal.ReverseSync,
+		&cal.Enabled, &cal.CreatedAt, &cal.UpdatedAt,
+		&cal.SourceType, &cal.IdentityEmail,
 	)
 
 	if err == sql.ErrNoRows {
