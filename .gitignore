@@ -56,3 +56,4 @@ desktop/core/target/
 # AI-контекст ведёт Syncthing, не git (workspace rule 2)
 /CLAUDE.md
 /.claude/
+test-results/
