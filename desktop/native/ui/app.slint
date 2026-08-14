@@ -264,6 +264,78 @@ component DashLine inherits Rectangle {
     }
 }
 
+// Полоса прокрутки для ListView — своя, вместо штатной из std-widgets.
+//
+// Зачем своя: в стиле fluent (он по умолчанию) ползунок шириной 2px цветом
+// #00000073 и расширяется до 6px только под курсором — его просто не видно.
+// `ScrollBarPolicy.always-on` не лечит, он меняет только `visible`, но не
+// размер.
+//
+// Почему не берём геометрию у самого ListView: его `viewport-height` —
+// ОЦЕНКА (средняя высота элемента × их число). У списка писем высоты пузырей
+// различаются на два порядка, поэтому оценка врёт и меняется по мере
+// прокрутки: ползунок ездил не туда и менял размер на ходу. Точную высоту
+// содержимого знает вызывающий — для писем её считает Rust (сумма высот
+// строк), для списка диалогов это 64px × число строк.
+//
+// `offset` — положительный отступ от верха (у ListView `viewport-y`
+// отрицательный, знак снимает вызывающий). Это ТОЧНОЕ значение в пикселях
+// содержимого даже когда оценка виснет, поэтому позиция считается по нему.
+component ListScrollBar inherits Rectangle {
+    in property <length> content-h;
+    in property <length> view-h;
+    in property <length> offset;
+    callback scrolled(new-offset: length);
+
+    property <length> track: self.height - 8px;
+    property <length> span: max(0px, root.content-h - root.view-h);
+    // Не меньше 32px, иначе на длинном списке ползунок превращается в точку
+    // и его нечем поймать.
+    property <length> thumb-h: max(32px,
+        min(root.track, root.track * (root.view-h / max(1px, root.content-h))));
+    property <float> frac: root.span <= 0px ? 0.0 : min(1.0, root.offset / root.span);
+
+    width: 10px;
+    height: root.view-h;
+    // Нечего прокручивать — полосы нет. 1px, чтобы не мигала на округлениях.
+    visible: root.span > 1px;
+
+    sb-thumb := Rectangle {
+        x: 2px;
+        y: 4px + (root.track - root.thumb-h) * root.frac;
+        width: 6px;
+        height: root.thumb-h;
+        border-radius: 3px;
+        background: sb-touch.pressed
+            ? #00000080
+            : (sb-touch.has-hover ? #00000059 : #00000033);
+        animate background { duration: 120ms; }
+    }
+
+    sb-touch := TouchArea {
+        property <length> grab-y: 0;
+        property <length> grab-offset: 0;
+
+        width: parent.width;
+        height: parent.height;
+
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                self.grab-y = self.mouse-y;
+                self.grab-offset = root.offset;
+            }
+        }
+        moved => {
+            if (self.pressed && root.track > root.thumb-h) {
+                root.scrolled(max(0px, min(root.span,
+                    self.grab-offset
+                    + (self.mouse-y - self.grab-y)
+                        * (root.span / (root.track - root.thumb-h)))));
+            }
+        }
+    }
+}
+
 // iOS-style pill switch used across the settings modal. `on` drives the
 // look; `toggled` fires on click — the parent owns the state.
 component Toggle inherits Rectangle {
@@ -1089,8 +1161,12 @@ export component MainWindow inherits Window {
     // Live chat-list scroll state, mirrored from the ListView so Rust can
     // answer "is the user at the bottom?" for new-mail behaviour.
     in-out property <length> chat-vp-y: 0;      // viewport-y (negative)
-    in-out property <length> chat-vp-h: 0;      // content height
+    in-out property <length> chat-vp-h: 0;      // content height ОЦЕНКА от ListView
     in-out property <length> chat-view-h: 0;    // visible height
+    // Точная высота содержимого — сумма высот строк, считает Rust при сборке
+    // модели. chat-vp-h для полосы прокрутки не годится: у ListView это оценка
+    // по средней высоте элемента, а пузыри различаются на два порядка.
+    in-out property <length> chat-content-h: 0;
     // New-mail sound toggle (persisted client-side).
     in-out property <bool> notify-sound-on: true;
     callback toggle-notify-sound();
@@ -1382,6 +1458,12 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
+                // Обёртка нужна только под полосу прокрутки: в VerticalLayout
+                // сиблинг стал бы ещё одной строкой раскладки, а полоса должна
+                // лежать поверх списка. Внутри Rectangle дети позиционируются
+                // абсолютно, а ListView заполняет его сам (preferred-* = 100%).
+                Rectangle {
+                    vertical-stretch: 1;
                 conv-lv := ListView {
                     for conv[idx] in root.conversations: Rectangle {
                         height: 64px;
@@ -1494,6 +1576,17 @@ export component MainWindow inherits Window {
                                 }
                             }
                         }
+                    }
+                }
+                    // Здесь высота содержимого точная и без Rust: все строки
+                    // ровно 64px (как и в мосте arrow-key ниже).
+                    ListScrollBar {
+                        x: parent.width - 12px;
+                        y: 0;
+                        content-h: root.conversations.length * 64px;
+                        view-h: conv-lv.height;
+                        offset: -conv-lv.viewport-y;
+                        scrolled(v) => { conv-lv.viewport-y = -v; }
                     }
                 }
                 // Scroll bridge: arrow-key navigation bumps the seq and the
@@ -2077,75 +2170,21 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // Своя полоса прокрутки для переписки.
+                // Полоса прокрутки переписки. Сиблинг ПОСЛЕ lv — значит
+                // рисуется поверх; chat-area это Rectangle, дети
+                // позиционируются абсолютно.
                 //
-                // Штатная от std-widgets тут не годится: в стиле fluent (он у
-                // нас по умолчанию) ползунок шириной 2px цветом #00000073 и
-                // расширяется до 6px только под курсором — на светлом фоне
-                // переписки его попросту не видно. `always-on` не помогает: он
-                // меняет только `visible`, но не размер. А ещё её видимость
-                // висит на `maximum`, который у ListView считается из ОЦЕНКИ
-                // viewport-height и в момент проверки может быть нулём.
-                //
-                // Своя считается из уже зеркалируемых chat-vp-* (их и так
-                // ведёт проверка «пользователь внизу?»), поэтому не зависит ни
-                // от оценки, ни от стиля. Сиблинг ПОСЛЕ lv — значит рисуется
-                // поверх; chat-area это Rectangle, дети позиционируются
-                // абсолютно.
-                if root.chat-vp-h > root.chat-view-h + 1px: Rectangle {
-                    // Геометрия целиком в координатах ListView: высота у полосы
-                    // его видимая высота, а не высота chat-area (в ней ещё
-                    // оверлей прогресс-бара, и ползунок был бы соврал).
-                    property <length> track: self.height - 8px;
-                    // Минимум 32px, иначе на длинной переписке ползунок
-                    // превращается в точку и его нечем поймать.
-                    property <length> thumb-h: max(32px,
-                        track * (root.chat-view-h / root.chat-vp-h));
-                    property <length> span: root.chat-vp-h - root.chat-view-h;
-                    // chat-vp-y отрицательный — offset вверх.
-                    property <float> frac: span <= 0px ? 0 : (-root.chat-vp-y) / span;
-
+                // Высота содержимого приходит из Rust (chat-content-h — сумма
+                // высот строк), а НЕ из lv.viewport-height: у ListView это
+                // оценка по средней высоте элемента, а высоты пузырей
+                // различаются на два порядка.
+                ListScrollBar {
                     x: parent.width - 12px;
                     y: 0;
-                    width: 10px;
-                    height: root.chat-view-h;
-
-                    sb-thumb := Rectangle {
-                        x: 2px;
-                        y: 4px + (parent.track - parent.thumb-h) * parent.frac;
-                        width: 6px;
-                        height: parent.thumb-h;
-                        border-radius: 3px;
-                        background: sb-touch.pressed
-                            ? #00000080
-                            : (sb-touch.has-hover ? #00000059 : #00000033);
-                        animate background { duration: 120ms; }
-                    }
-
-                    sb-touch := TouchArea {
-                        property <length> grab-y: 0;
-                        property <length> grab-vp: 0;
-
-                        width: parent.width;
-                        height: parent.height;
-                        mouse-cursor: MouseCursor.default;
-
-                        pointer-event(e) => {
-                            if (e.button == PointerEventButton.left
-                                && e.kind == PointerEventKind.down) {
-                                self.grab-y = self.mouse-y;
-                                self.grab-vp = lv.viewport-y;
-                            }
-                        }
-                        moved => {
-                            if (self.pressed && parent.track > parent.thumb-h) {
-                                lv.viewport-y = -max(0px, min(parent.span,
-                                    -self.grab-vp
-                                    + (self.mouse-y - self.grab-y)
-                                        * (parent.span / (parent.track - parent.thumb-h))));
-                            }
-                        }
-                    }
+                    content-h: root.chat-content-h;
+                    view-h: root.chat-view-h;
+                    offset: -root.chat-vp-y;
+                    scrolled(v) => { lv.viewport-y = -v; }
                 }
             }
 

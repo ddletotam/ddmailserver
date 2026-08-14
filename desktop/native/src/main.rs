@@ -5260,6 +5260,13 @@ fn main() {
                                     rows.iter().take(sr as usize).map(|r| r.h).sum()
                                 }
                             });
+                            // Точная высота содержимого для полосы прокрутки.
+                            // У ListView viewport-height — оценка по средней
+                            // высоте элемента, а пузыри различаются на два
+                            // порядка: ползунок ездил не туда и менял размер на
+                            // ходу. Сумму мы и так уже считаем строкой выше.
+                            let content_h: f32 = rows.iter().map(|r| r.h).sum();
+                            ui.set_chat_content_h(content_h);
                             ui.set_messages(ModelRc::new(VecModel::from(rows)));
                             // Hide the progress bar.
                             ui.set_render_total(0);
