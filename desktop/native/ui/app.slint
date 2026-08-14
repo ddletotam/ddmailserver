@@ -1222,6 +1222,13 @@ export component MainWindow inherits Window {
     // пункты «Открыть/Сохранить вложение» видимы, пока имя непустое.
     callback ctx-menu-probe(int, length, length);
     in property <string> ctx-attach-name: "";
+    // Ссылка под курсором на момент показа меню (заполняет ctx-menu-probe) и
+    // приложения, умеющие её открыть (Rust читает .desktop один раз при старте).
+    in property <string> ctx-link-url: "";
+    in property <[string]> ctx-link-apps: [];
+    callback open-link();
+    callback copy-link();
+    callback open-link-with(int);
     callback open-attachment();
     callback save-attachment();
     // Live-dropdown wiring.
@@ -2029,6 +2036,27 @@ export component MainWindow inherits Window {
                         height: msg.h;
                         cma := ContextMenuArea {
                             Menu {
+                                // Ссылка под курсором (тот же ctx-menu-probe).
+                                // Идёт первой: это самое конкретное, во что
+                                // попал курсор.
+                                if root.ctx-link-url != "": MenuItem {
+                                    title: "Открыть ссылку";
+                                    activated => { root.open-link(); }
+                                }
+                                if root.ctx-link-url != "": MenuItem {
+                                    title: "Копировать ссылку";
+                                    activated => { root.copy-link(); }
+                                }
+                                // Список приложений заполняет Rust из .desktop;
+                                // пусто (в том числе на Windows) — подменю нет.
+                                if root.ctx-link-url != "" && root.ctx-link-apps.length > 0: Menu {
+                                    title: "Открыть с помощью…";
+                                    for app[ai] in root.ctx-link-apps: MenuItem {
+                                        title: app;
+                                        activated => { root.open-link-with(ai); }
+                                    }
+                                }
+                                if root.ctx-link-url != "": MenuSeparator { }
                                 // Вложение под курсором (ctx-menu-probe перед
                                 // show): открыть — как левый клик по чипу;
                                 // сохранить — диалог «Сохранить как…».

@@ -35,7 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use slint::{Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
@@ -1455,6 +1455,16 @@ struct Shared {
     /// Set when a drag-selection just ended — the click that Slint fires
     /// on release must NOT open a link.
     sel_suppress_click: Cell<bool>,
+    /// Серия кликов для выделения слова (второй) и строки (третий). Slint даёт
+    /// только `clicked`, ни двойного, ни тройного события у него нет, поэтому
+    /// серию считаем сами по нажатиям: время, строка и точка предыдущего.
+    sel_click_streak: Cell<u32>,
+    sel_click_at: Cell<Option<Instant>>,
+    sel_click_pos: Cell<(i32, f32, f32)>,
+    /// Ссылка под курсором на момент показа контекстного меню и приложения,
+    /// умеющие её открыть (имя + .desktop). Список читается один раз при старте.
+    ctx_link: RefCell<Option<String>>,
+    link_apps: Vec<(String, std::path::PathBuf)>,
     /// Toast-click navigation: scroll to this (folder, uid) once its body
     /// is rendered. Takes priority over the unread-anchor logic.
     pending_open_ref: RefCell<Option<(String, u32)>>,
@@ -2246,6 +2256,33 @@ fn nearest_run(runs: &[render_common::TextRun], x: f32, y: f32) -> Option<usize>
             da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
         })
         .map(|(i, _)| i)
+}
+
+/// Границы визуальной строки, на которой лежит прогон `i` — для выделения
+/// тройным кликом. Прогоны идут в порядке документа, строка это непрерывный
+/// отрезок с той же вертикалью; признак «та же строка» тот же, что в
+/// `selection_rects_for` и `selection_text_for` — `|Δy| < h * 0.6`.
+///
+/// Пустая строка (`h == 0`) сама себе строка: без этого допуск обнулялся бы и
+/// отрезок схлопывался в один прогон.
+fn line_bounds(runs: &[render_common::TextRun], i: usize) -> (usize, usize) {
+    if runs.is_empty() {
+        return (0, 0);
+    }
+    let i = i.min(runs.len() - 1);
+    let same_line = |a: &render_common::TextRun| {
+        let tol = (runs[i].h.max(a.h)) * 0.6;
+        (a.y - runs[i].y).abs() < tol.max(0.5)
+    };
+    let mut lo = i;
+    while lo > 0 && same_line(&runs[lo - 1]) {
+        lo -= 1;
+    }
+    let mut hi = i;
+    while hi + 1 < runs.len() && same_line(&runs[hi + 1]) {
+        hi += 1;
+    }
+    (lo, hi)
 }
 
 /// Merged highlight rects for a run range: consecutive selected words on the
@@ -3276,6 +3313,106 @@ fn compute_vertical(
     let bottom = we + pad;
     let rows = (bottom - top).max(1);
     (top, bottom, h / rows as f32)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod url_handler_tests {
+    use super::url_handler_apps_in;
+
+    fn write(dir: &std::path::Path, name: &str, body: &str) {
+        std::fs::write(dir.join(name), body).unwrap();
+    }
+
+    /// Берём только обработчиков http(s), пропускаем NoDisplay/Terminal и
+    /// схлопываем дубли по имени — один браузер обычно лежит и в пользовательском
+    /// каталоге, и в системном.
+    #[test]
+    fn picks_url_handlers_and_dedupes() {
+        let base = std::env::temp_dir().join(format!("ddmail-urlh-{}", std::process::id()));
+        let user = base.join("user");
+        let sys = base.join("sys");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&sys).unwrap();
+
+        write(&user, "chrome.desktop", "[Desktop Entry]\nType=Application\nName=Chrome\nExec=chrome %U\nMimeType=text/html;x-scheme-handler/https;\n");
+        // Тот же браузер в системном каталоге — в меню должен попасть один раз.
+        write(&sys, "chrome.desktop", "[Desktop Entry]\nType=Application\nName=Chrome\nExec=/usr/bin/chrome %U\nMimeType=x-scheme-handler/https;\n");
+        write(&sys, "yandex.desktop", "[Desktop Entry]\nType=Application\nName=Yandex\nName[ru]=Яндекс Браузер\nExec=yb %U\nMimeType=x-scheme-handler/http;\n");
+        // Не обработчик ссылок.
+        write(&sys, "gimp.desktop", "[Desktop Entry]\nType=Application\nName=GIMP\nExec=gimp %F\nMimeType=image/png;\n");
+        // Скрытые и терминальные не показываем.
+        write(&sys, "hidden.desktop", "[Desktop Entry]\nType=Application\nName=Hidden\nNoDisplay=true\nMimeType=x-scheme-handler/https;\n");
+        write(&sys, "lynx.desktop", "[Desktop Entry]\nType=Application\nName=Lynx\nTerminal=true\nMimeType=x-scheme-handler/http;\n");
+        // Name из секции [Desktop Action] не должен подменять основной.
+        write(&sys, "acts.desktop", "[Desktop Entry]\nType=Application\nName=WithActions\nMimeType=x-scheme-handler/https;\n\n[Desktop Action new]\nName=Новое окно\n");
+
+        let dirs = [user.to_string_lossy().to_string(), sys.to_string_lossy().to_string()];
+        let apps = url_handler_apps_in(&dirs);
+        let names: Vec<&str> = apps.iter().map(|(n, _)| n.as_str()).collect();
+
+        assert!(names.contains(&"Chrome"), "обработчик https обязателен: {names:?}");
+        assert_eq!(names.iter().filter(|n| **n == "Chrome").count(), 1, "дубль по имени");
+        assert!(names.contains(&"Яндекс Браузер"), "берём Name[ru]: {names:?}");
+        assert!(names.contains(&"WithActions"), "Name основной секции: {names:?}");
+        for skipped in ["GIMP", "Hidden", "Lynx", "Новое окно"] {
+            assert!(!names.contains(&skipped), "{skipped} не должен попасть: {names:?}");
+        }
+        // Пользовательский каталог первым: у Chrome должен остаться его путь.
+        let chrome = apps.iter().find(|(n, _)| n == "Chrome").unwrap();
+        assert!(chrome.1.starts_with(&user), "пользовательский каталог приоритетнее");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+}
+
+#[cfg(test)]
+mod line_bounds_tests {
+    use super::line_bounds;
+    use crate::render_common::TextRun;
+
+    fn run(x: f32, y: f32, text: &str) -> TextRun {
+        TextRun { x, y, w: 40.0, h: 18.0, text: text.into(), cont: false }
+    }
+
+    /// Три строки по два слова. Тройной клик по любому слову даёт отрезок
+    /// ровно своей строки — ни соседней сверху, ни снизу.
+    #[test]
+    fn line_bounds_covers_only_its_line() {
+        let runs = vec![
+            run(0.0, 0.0, "первая"),
+            run(50.0, 0.0, "строка"),
+            run(0.0, 20.0, "вторая"),
+            run(50.0, 20.0, "строка"),
+            run(0.0, 40.0, "третья"),
+        ];
+        assert_eq!(line_bounds(&runs, 0), (0, 1));
+        assert_eq!(line_bounds(&runs, 1), (0, 1));
+        assert_eq!(line_bounds(&runs, 2), (2, 3));
+        assert_eq!(line_bounds(&runs, 3), (2, 3));
+        assert_eq!(line_bounds(&runs, 4), (4, 4));
+    }
+
+    /// Строка из одного слова и пустой список не должны ломать индексы.
+    #[test]
+    fn line_bounds_degenerate() {
+        assert_eq!(line_bounds(&[], 0), (0, 0));
+        let one = vec![run(0.0, 0.0, "одно")];
+        assert_eq!(line_bounds(&one, 0), (0, 0));
+        // Индекс за пределами зажимается, а не паникует.
+        assert_eq!(line_bounds(&one, 99), (0, 0));
+    }
+
+    /// Нулевая высота прогона не должна обнулять допуск и схлопывать строку.
+    #[test]
+    fn line_bounds_zero_height() {
+        let runs = vec![
+            TextRun { x: 0.0, y: 0.0, w: 10.0, h: 0.0, text: "a".into(), cont: false },
+            TextRun { x: 20.0, y: 0.0, w: 10.0, h: 0.0, text: "b".into(), cont: false },
+            TextRun { x: 0.0, y: 30.0, w: 10.0, h: 0.0, text: "c".into(), cont: false },
+        ];
+        assert_eq!(line_bounds(&runs, 0), (0, 1));
+        assert_eq!(line_bounds(&runs, 2), (2, 2));
+    }
 }
 
 #[cfg(test)]
@@ -5420,6 +5557,11 @@ fn main() {
         sel_dragging: Cell::new(false),
         sel_moved: Cell::new(false),
         sel_suppress_click: Cell::new(false),
+        sel_click_streak: Cell::new(0),
+        sel_click_at: Cell::new(None),
+        sel_click_pos: Cell::new((-1, 0.0, 0.0)),
+        ctx_link: RefCell::new(None),
+        link_apps: url_handler_apps(),
         pending_open_ref: RefCell::new(None),
         render_seq,
         current: Cell::new(0),
@@ -5473,6 +5615,14 @@ fn main() {
         cal_occ: RefCell::new(HashMap::new()),
     });
     SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
+    // Подменю «Открыть с помощью…»: список фиксируется на старте (см.
+    // url_handler_apps). Пусто — подменю не показывается вовсе.
+    {
+        let names: Vec<slint::SharedString> =
+            shared.link_apps.iter().map(|(n, _)| n.as_str().into()).collect();
+        println!("link handlers: {}", names.len());
+        ui.set_ctx_link_apps(ModelRc::new(VecModel::from(names)));
+    }
     sync_media_globals(&ui, &shared.policy.borrow());
     // Seed the composer from-picker from cached identities; refreshed again
     // whenever the engine resyncs identities.
@@ -5914,7 +6064,41 @@ fn main() {
         ui.set_ctx_attach_name(
             att.as_ref().map(|a| a.3.clone()).unwrap_or_default().into(),
         );
+        // Внешняя ссылка под курсором. `ddmail-attach:` сюда не попадает — это
+        // вложение, у него свои пункты выше; всё остальное отдаёт `link_target`,
+        // он же достраивает схему голому хосту.
+        let link = href
+            .as_deref()
+            .filter(|u| !u.starts_with("ddmail-attach:"))
+            .and_then(link_target);
+        ui.set_ctx_link_url(link.clone().unwrap_or_default().into());
+        *sh_probe.ctx_link.borrow_mut() = link;
         *sh_probe.ctx_attach.borrow_mut() = att;
+    });
+
+    // «Открыть ссылку» / «Копировать ссылку» / «Открыть с помощью…».
+    let sh_ol = shared.clone();
+    ui.on_open_link(move || {
+        if let Some(url) = sh_ol.ctx_link.borrow().clone() {
+            println!("ctx open link -> {url}");
+            open_external(&url);
+        }
+    });
+    let sh_cl = shared.clone();
+    ui.on_copy_link(move || {
+        if let Some(url) = sh_cl.ctx_link.borrow().clone() {
+            clipboard_set(&url);
+        }
+    });
+    let sh_lw = shared.clone();
+    ui.on_open_link_with(move |idx| {
+        let Some(url) = sh_lw.ctx_link.borrow().clone() else { return };
+        // Индекс приходит из того же списка, которым заполнено подменю, но
+        // проверяем: модель и обработчик живут в разных потоках событий.
+        if let Some((name, desktop)) = sh_lw.link_apps.get(idx.max(0) as usize) {
+            println!("ctx open link with {name} -> {url}");
+            open_with_app(desktop, &url);
+        }
     });
 
     // «Открыть …» — тот же путь, что левый клик по чипу: Downloads + запуск.
@@ -5978,15 +6162,43 @@ fn main() {
     let sh_ss = shared.clone();
     ui.on_sel_start(move |row, x, y| {
         let Some(ui) = ui_weak_ss.upgrade() else { return };
+        // Серия кликов: второй выделяет слово, третий — строку. Считаем сами,
+        // у Slint нет ни двойного, ни тройного события. Порог 4px гасит дрожь
+        // руки, но не даёт склеить клики по разным словам.
+        let now = Instant::now();
+        let (prow, px, py) = sh_ss.sel_click_pos.get();
+        let same_spot = prow == row && (px - x).abs() < 4.0 && (py - y).abs() < 4.0;
+        let quick = sh_ss
+            .sel_click_at
+            .get()
+            .is_some_and(|t| now.duration_since(t) < Duration::from_millis(450));
+        let streak = if same_spot && quick { sh_ss.sel_click_streak.get() + 1 } else { 1 };
+        sh_ss.sel_click_streak.set(streak);
+        sh_ss.sel_click_at.set(Some(now));
+        sh_ss.sel_click_pos.set((row, x, y));
+
         sh_ss.sel_dragging.set(false);
         sh_ss.sel_moved.set(false);
         sh_ss.sel_row.set(-1);
         if let Some(runs) = sh_ss.row_text_runs.borrow().get(row as usize) {
             if let Some(i) = nearest_run(runs, x, y) {
                 sh_ss.sel_row.set(row);
-                sh_ss.sel_anchor.set(i);
-                sh_ss.sel_head.set(i);
+                let (anchor, head) = match streak {
+                    1 => (i, i),
+                    // Прогон и есть слово, так что двойной клик — это ровно он.
+                    2 => (i, i),
+                    _ => line_bounds(runs, i),
+                };
+                sh_ss.sel_anchor.set(anchor);
+                sh_ss.sel_head.set(head);
                 sh_ss.sel_dragging.set(true);
+                if streak >= 2 {
+                    // Выделение уже состоялось: пусть держится после отпускания
+                    // (иначе `sel_end` сочтёт это кликом) и не открывает ссылку,
+                    // если кликнули по ней.
+                    sh_ss.sel_moved.set(true);
+                    sh_ss.sel_suppress_click.set(true);
+                }
             }
         }
         // Clear any previous highlight; Ctrl+C must reach the key sink.
@@ -9482,6 +9694,105 @@ fn which_bin(name: &str) -> Result<std::path::PathBuf, ()> {
 
 /// Open a URL in the system default browser. Per-OS launcher — the previous
 /// `cmd /C start` was Windows-only, so links silently did nothing on Linux.
+/// Приложения, умеющие открыть http(s)-ссылку — для подменю «Открыть с
+/// помощью…». Читаются один раз при старте: набор меняется установкой
+/// программ, а не в течение сессии.
+///
+/// Смотрим `MimeType` у .desktop-файлов. Пользовательский каталог идёт первым,
+/// и дубли по имени отбрасываются: один и тот же браузер обычно лежит и в
+/// `~/.local/share/applications`, и в `/usr/share/applications` (Chrome у нас
+/// втроём), а в меню он нужен один раз.
+#[cfg(target_os = "linux")]
+fn url_handler_apps() -> Vec<(String, std::path::PathBuf)> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    url_handler_apps_in(&[
+        format!("{home}/.local/share/applications"),
+        "/usr/share/applications".to_string(),
+    ])
+}
+
+/// Разбор каталогов .desktop — отдельно от путей, чтобы это можно было
+/// проверить тестом на подставном каталоге.
+#[cfg(target_os = "linux")]
+fn url_handler_apps_in(dirs: &[String]) -> Vec<(String, std::path::PathBuf)> {
+    let mut out: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for dir in dirs {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let mut paths: Vec<std::path::PathBuf> = rd
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "desktop"))
+            .collect();
+        // Порядок каталога произволен — сортируем, чтобы меню не перетасовывалось
+        // от запуска к запуску.
+        paths.sort();
+        for path in paths {
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            // Нас интересует только секция [Desktop Entry]: у Actions свои
+            // Name= и они бы перебили основное.
+            let entry = match text.split("\n[").next() {
+                Some(first) if first.contains("[Desktop Entry]") => first,
+                _ => continue,
+            };
+            let field = |key: &str| -> Option<&str> {
+                entry
+                    .lines()
+                    .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+                    .map(str::trim)
+            };
+            if !field("MimeType").is_some_and(|m| {
+                m.contains("x-scheme-handler/https") || m.contains("x-scheme-handler/http")
+            }) {
+                continue;
+            }
+            if field("NoDisplay").is_some_and(|v| v.eq_ignore_ascii_case("true"))
+                || field("Hidden").is_some_and(|v| v.eq_ignore_ascii_case("true"))
+                || field("Terminal").is_some_and(|v| v.eq_ignore_ascii_case("true"))
+            {
+                continue;
+            }
+            let name = field("Name[ru]").or_else(|| field("Name")).unwrap_or("");
+            if name.is_empty() || !seen.insert(name.to_lowercase()) {
+                continue;
+            }
+            out.push((name.to_string(), path));
+        }
+    }
+    out
+}
+
+#[cfg(not(target_os = "linux"))]
+fn url_handler_apps() -> Vec<(String, std::path::PathBuf)> {
+    // На Windows выбор приложения для URL живёт в системных настройках, а не в
+    // per-app списке: подменю там просто не показываем.
+    Vec::new()
+}
+
+/// Открыть ссылку конкретным приложением из `url_handler_apps`.
+#[cfg(target_os = "linux")]
+fn open_with_app(desktop: &std::path::Path, url: &str) {
+    // `gio launch` сам разбирает Exec с его %u/%U/%f и полями вроде
+    // DBusActivatable — руками это воспроизводить незачем.
+    match std::process::Command::new("gio")
+        .arg("launch")
+        .arg(desktop)
+        .arg(url)
+        .spawn()
+    {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("open_with_app: gio launch failed ({e}) — открываю по умолчанию");
+            open_external(url);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_with_app(_desktop: &std::path::Path, url: &str) {
+    open_external(url);
+}
+
 fn open_external(url: &str) {
     #[cfg(target_os = "windows")]
     let mut cmd = {
