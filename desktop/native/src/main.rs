@@ -1069,11 +1069,18 @@ fn build_body_html(b: &MessageBody, policy: &policy::Policy) -> String {
             html_escape(b.text.as_deref().unwrap_or(""))
         ),
     };
+    // Широкий пузырь — только ВХОДЯЩИМ. Выравнивание «своё справа» держится на
+    // `margin-left: auto`, а он работает лишь пока блок уже строки: с
+    // `max-width: 100%` пузырь занимает её целиком, и своё письмо уезжало
+    // влево во всю ширину. Ради чего вводился широкий пузырь — рассыльные
+    // шаблоны на 600 px — приходит только входящим; свои ответы такого не
+    // содержат.
+    let wide = has_html && !b.is_outgoing;
     bubble_template_wide(
         b.is_outgoing,
         &fmt_bubble_time(b.date_ts),
         &format!("{inner}{}{}", attachment_chips(b), empty_body_note(b)),
-        has_html,
+        wide,
     )
 }
 
@@ -1204,7 +1211,7 @@ fn attachment_chips(b: &MessageBody) -> String {
 /// Bump whenever the bubble/render HTML template or its CSS changes: the
 /// texture cache keys renders by fnv1a(body.html) only, so without this a
 /// template/CSS edit would keep serving stale cached bitmaps (RAM + disk).
-const RENDER_TEMPLATE_EPOCH: u64 = 6;
+const RENDER_TEMPLATE_EPOCH: u64 = 7;
 
 /// ВСЕ классы обвязки пузыря пишутся с этим префиксом. Документ пузыря —
 /// общая песочница для нашей вёрстки и присланного HTML, а письма сплошь
@@ -3321,9 +3328,10 @@ mod bubble_css_tests {
         assert!(doc.contains(r#"class="row""#), "класс письма не должен переписываться");
     }
 
-    /// Широкий пузырь — только письмам с HTML: рассыльный шаблон на 600 px в
-    /// 72%-пузыре пришлось бы ужимать. У текстового письма ширину снимать
-    /// незачем, чатная геометрия для него и есть правильная.
+    /// Широкий пузырь — только ВХОДЯЩЕМУ письму с HTML: рассыльный шаблон на
+    /// 600 px в 72%-пузыре пришлось бы ужимать. Текстовому ширину снимать
+    /// незачем, а своему нельзя — на `max-width: 100%` ломается выравнивание
+    /// «своё справа» (оно держится на `margin-left: auto`).
     #[test]
     fn wide_bubble_only_for_html() {
         let p = policy::Policy::default();
@@ -3342,6 +3350,17 @@ mod bubble_css_tests {
         plain.text = Some("просто текст".into());
         let doc = build_body_html(&plain, &p);
         assert!(!markup(&doc).contains("ddm-wide"), "текстовое письмо остаётся узким");
+
+        // Своё письмо с HTML: широким быть не должно, иначе оно уедет влево
+        // во всю ширину вместо выравнивания вправо.
+        let mut own = html_body("<table><tr><td>мой ответ</td></tr></table>");
+        own.is_outgoing = true;
+        let doc_own = build_body_html(&own, &p);
+        assert!(
+            !markup(&doc_own).contains("ddm-wide"),
+            "своё письмо остаётся узким, иначе ломается выравнивание вправо"
+        );
+        assert!(markup(&doc_own).contains("ddm-bubble-out"), "и остаётся исходящим");
     }
 }
 
