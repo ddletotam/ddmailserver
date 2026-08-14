@@ -1989,6 +1989,15 @@ export component MainWindow inherits Window {
                     changed viewport-y => { root.chat-vp-y = self.viewport-y; }
                     changed viewport-height => {
                         root.chat-vp-h = self.viewport-height;
+                        // Заодно обновляем видимую высоту. Свой `changed
+                        // height` ниже при первой раскладке может не
+                        // сработать, а от chat-view-h зависит проверка
+                        // «пользователь внизу?» в Rust: при нуле условие
+                        // `vp_h <= view_h` даёт 0 <= 0, то есть «всегда внизу»,
+                        // и новое письмо дёргает вьюпорт вместо flash строки
+                        // в сайдбаре (контракт §5). Этот обработчик срабатывает
+                        // при каждой перекладке содержимого.
+                        root.chat-view-h = self.height;
                         // Re-run the pending post-open jump now that the rows
                         // are actually laid out — ONCE. The flag must drop
                         // here: the lazy ListView keeps adjusting
@@ -2178,12 +2187,19 @@ export component MainWindow inherits Window {
                 // высот строк), а НЕ из lv.viewport-height: у ListView это
                 // оценка по средней высоте элемента, а высоты пузырей
                 // различаются на два порядка.
+                // Видимая высота и смещение берутся у lv НАПРЯМУЮ, а не из
+                // root.chat-view-h / root.chat-vp-y: те заполняются
+                // обработчиками `changed`, а те при первой раскладке могут не
+                // сработать вовсе (это уже описано выше про chat-width). При
+                // нулевой view-h трек выходил отрицательным, и ползунок ехал
+                // ВВЕРХ при прокрутке вниз, ростом в минимальные 32px у самого
+                // верха. Прямой биндинг всегда живой.
                 ListScrollBar {
                     x: parent.width - 12px;
                     y: 0;
                     content-h: root.chat-content-h;
-                    view-h: root.chat-view-h;
-                    offset: -root.chat-vp-y;
+                    view-h: lv.height;
+                    offset: -lv.viewport-y;
                     scrolled(v) => { lv.viewport-y = -v; }
                 }
             }
