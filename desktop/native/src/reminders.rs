@@ -119,9 +119,15 @@ pub fn seed(
                 continue;
             }
             let end = if duration > 0 { start + duration } else { 0 };
-            if let Err(e) =
-                cache.seed_occurrence(ev.id, start, end, ev.summary.trim(), &leads, &signature)
-            {
+            if let Err(e) = cache.seed_occurrence(
+                ev.id,
+                ev.calendar_id,
+                start,
+                end,
+                ev.summary.trim(),
+                &leads,
+                &signature,
+            ) {
                 eprintln!("reminders: seed failed for event {}: {e}", ev.id);
             }
         }
@@ -269,8 +275,18 @@ mod tests {
     }
 
     fn event(id: i64, summary: &str, dtstart: i64, leads: &[i32]) -> DesktopCalendarEvent {
+        event_in(id, 1, summary, dtstart, leads)
+    }
+
+    fn event_in(
+        id: i64,
+        calendar_id: i64,
+        summary: &str,
+        dtstart: i64,
+        leads: &[i32],
+    ) -> DesktopCalendarEvent {
         serde_json::from_value(serde_json::json!({
-            "id": id, "calendar_id": 1, "uid": format!("uid-{id}"),
+            "id": id, "calendar_id": calendar_id, "uid": format!("uid-{id}"),
             "summary": summary, "dtstart": dtstart, "dtend": dtstart + 3_600_000,
             "all_day": false, "alarm_leads": leads,
         }))
@@ -462,5 +478,50 @@ mod tests {
         seed(&cache, &[event(6, "Move", start2, &[10])], &no_hidden, now);
         let due = scan(&cache, start2 - 60_000);
         assert_eq!(due.len(), 1, "changed event re-arms as if new");
+    }
+
+    #[test]
+    fn disabling_a_calendar_silences_what_was_already_armed() {
+        let cache = temp_cache();
+        let now = 6_000_000_000_000;
+        let start = now + 20 * 60_000;
+        // Два календаря, по событию в каждом — оба взведены.
+        let events = vec![
+            event_in(70, 7, "Планёрка", start, &[10]),
+            event_in(80, 8, "Созвон", start + 60_000, &[10]),
+        ];
+        seed(&cache, &events, &no_hidden, now);
+
+        // Выключили календарь 7: его строки сняты, чужие целы.
+        let hit = cache.purge_calendar_reminders(7).expect("purge");
+        assert_eq!(hit, vec![70], "гасим только события выключенного календаря");
+        let due = scan(&cache, start + 60_000);
+        assert_eq!(due.len(), 1, "звонит лишь оставшийся календарь");
+        assert_eq!(due[0].row.event_id, 80);
+
+        // Включили обратно — пересев из того же снимка возвращает напоминание.
+        seed(&cache, &events, &no_hidden, now);
+        let due = scan(&cache, start + 60_000);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].row.event_id, 70, "включённый календарь снова звонит");
+    }
+
+    #[test]
+    fn purge_by_calendar_reaches_rows_seeded_before_the_column() {
+        let cache = temp_cache();
+        let now = 6_100_000_000_000;
+        let start = now + 20 * 60_000;
+        let ev = event_in(90, 9, "Ретро", start, &[10]);
+        seed(&cache, std::slice::from_ref(&ev), &no_hidden, now);
+        // Иммитируем строку из старой схемы: календарь не проставлен.
+        cache.debug_clear_reminder_calendar(90).expect("clear");
+        assert!(
+            cache.purge_calendar_reminders(9).expect("purge").is_empty(),
+            "строка без календаря на выключение не реагирует"
+        );
+        // Пересев проставляет привязку даже без изменений в событии...
+        seed(&cache, std::slice::from_ref(&ev), &no_hidden, now);
+        assert_eq!(cache.purge_calendar_reminders(9).expect("purge"), vec![90]);
+        assert_eq!(scan(&cache, start).len(), 0);
     }
 }

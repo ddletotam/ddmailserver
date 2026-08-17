@@ -3200,6 +3200,57 @@ fn week_range_ms(week_start_days: i64, day_count: i32) -> (i64, i64) {
     (from, to)
 }
 
+/// Переключение календаря — это и переключение его напоминаний.
+///
+/// Выключили: снимаем ВСЕ строки напоминаний этого календаря (не только по
+/// событиям загруженного окна — за этим и заведён `calendar_id` в reminders2)
+/// и гасим уже висящие тосты. Без этого выключенный календарь продолжал
+/// звонить по всему, что успело взвестись до выключения: `seed` скрытые
+/// пропускает, но взведённое раньше никто не отзывал.
+///
+/// Включили: пересеваем из текущего снимка событий, не дожидаясь следующего
+/// фетча календаря — иначе до ближайшего обновления календарь был бы виден,
+/// но нем.
+fn apply_reminder_visibility(sh: &Shared, cal_id: i64, visible: bool) {
+    let Some(cache) = sh.cache.as_ref() else { return };
+    let events = sh.calendar_events.borrow();
+    if visible {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let vis = sh.calendar_visible.borrow();
+        let hidden = |c: i64| !*vis.get(&c).unwrap_or(&true);
+        reminders::seed(cache, &events, &hidden, now_ms);
+        println!("[cal] календарь {cal_id} включён — напоминания пересеяны");
+    } else {
+        let mut hit: Vec<i64> = match cache.purge_calendar_reminders(cal_id) {
+            Ok(ids) => ids,
+            Err(e) => {
+                eprintln!("reminders: purge календаря {cal_id}: {e}");
+                Vec::new()
+            }
+        };
+        // Добивка по событиям снимка: строки, посеянные до появления
+        // `calendar_id`, лежат с нулём и под удаление по календарю не
+        // подпадают. Пересев бы их проставил, но скрытый календарь как раз
+        // не пересевается — без этой добивки они звонили бы вечно.
+        for ev in events.iter().filter(|e| e.calendar_id == cal_id) {
+            if hit.contains(&ev.id) {
+                continue;
+            }
+            match cache.purge_event_reminders(ev.id) {
+                Ok(()) => hit.push(ev.id),
+                Err(e) => eprintln!("reminders: purge события {}: {e}", ev.id),
+            }
+        }
+        for id in &hit {
+            toast_window::close_for_event(*id);
+        }
+        println!(
+            "[cal] календарь {cal_id} выключен — снято напоминаний по {} событиям",
+            hit.len()
+        );
+    }
+}
+
 /// Snapshot the current calendar-view preferences into calendar.json.
 /// Called immediately after every change (visibility / colour /
 /// day- and hour-range toggles) — never deferred to exit.
@@ -7486,6 +7537,7 @@ fn main() {
             let id = cal_id as i64;
             let cur = *sh_vis.calendar_visible.borrow().get(&id).unwrap_or(&true);
             sh_vis.calendar_visible.borrow_mut().insert(id, !cur);
+            apply_reminder_visibility(&sh_vis, id, !cur);
             apply_calendar_view(&ui, &sh_vis);
             save_calendar_settings(&ui, &sh_vis);
         }

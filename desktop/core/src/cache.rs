@@ -159,6 +159,12 @@ impl Cache {
                 status TEXT NOT NULL DEFAULT 'armed',
                 summary TEXT NOT NULL DEFAULT '',
                 signature TEXT NOT NULL DEFAULT '',
+                -- Чей это календарь. Нужен ровно для одного: выключение
+                -- календаря должно гасить ВСЕ его напоминания, а не только те,
+                -- чьи события сейчас лежат в загруженном окне. 0 — строка,
+                -- посеянная до появления колонки; ближайший пересев её
+                -- проставит.
+                calendar_id INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (event_id, occurrence_start_ms, seq)
             );
             CREATE INDEX IF NOT EXISTS idx_reminders2_due
@@ -179,6 +185,7 @@ impl Cache {
         conn.execute("ALTER TABLE conversations ADD COLUMN received_by TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE conversations ADD COLUMN last_subject TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE conversations ADD COLUMN counterparts_json TEXT NOT NULL DEFAULT '[]'", []).ok();
+        conn.execute("ALTER TABLE reminders2 ADD COLUMN calendar_id INTEGER NOT NULL DEFAULT 0", []).ok();
         conn.execute("ALTER TABLE message_bodies ADD COLUMN message_id TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE message_bodies ADD COLUMN in_reply_to TEXT NOT NULL DEFAULT ''", []).ok();
         conn.execute("ALTER TABLE message_bodies ADD COLUMN references_json TEXT NOT NULL DEFAULT '[]'", []).ok();
@@ -759,6 +766,7 @@ impl Cache {
     pub fn seed_occurrence(
         &self,
         event_id: i64,
+        calendar_id: i64,
         occ_start_ms: i64,
         occ_end_ms: i64,
         summary: &str,
@@ -766,6 +774,17 @@ impl Cache {
         signature: &str,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+
+        // Проставить календарь строкам, посеянным до появления колонки (или
+        // переехавшим между календарями). Идёт до всех ранних возвратов:
+        // неизменившееся событие дальше не идёт, а привязка нужна и ему —
+        // иначе выключение календаря его не погасит.
+        conn.execute(
+            "UPDATE reminders2 SET calendar_id = ?1 \
+             WHERE event_id = ?2 AND occurrence_start_ms = ?3 AND calendar_id <> ?1",
+            params![calendar_id, event_id, occ_start_ms],
+        )
+        .map_err(|e| format!("backfill calendar_id: {e}"))?;
 
         // A user decision for this LOGICAL occurrence (occurrence_start +
         // summary) must survive event-id churn. The server re-creates the same
@@ -814,8 +833,8 @@ impl Cache {
                     conn.execute(
                         "INSERT OR REPLACE INTO reminders2 \
                          (event_id, occurrence_start_ms, occurrence_end_ms, seq, fire_at_ms, \
-                          lead_min, at_start, status, summary, signature) \
-                         VALUES (?1, ?2, ?3, 100, ?4, ?5, ?6, 'armed', ?7, ?8)",
+                          lead_min, at_start, status, summary, signature, calendar_id) \
+                         VALUES (?1, ?2, ?3, 100, ?4, ?5, ?6, 'armed', ?7, ?8, ?9)",
                         params![
                             event_id,
                             occ_start_ms,
@@ -824,7 +843,8 @@ impl Cache {
                             ((occ_start_ms - fire_at) / 60_000).max(0),
                             at_start,
                             summary,
-                            signature
+                            signature,
+                            calendar_id
                         ],
                     )
                     .map_err(|e| format!("carry manual: {e}"))?;
@@ -834,9 +854,9 @@ impl Cache {
                     conn.execute(
                         "INSERT OR REPLACE INTO reminders2 \
                          (event_id, occurrence_start_ms, occurrence_end_ms, seq, fire_at_ms, \
-                          lead_min, at_start, status, summary, signature) \
-                         VALUES (?1, ?2, ?3, 100, ?4, 0, 0, 'cancelled', ?5, ?6)",
-                        params![event_id, occ_start_ms, end, occ_start_ms, summary, signature],
+                          lead_min, at_start, status, summary, signature, calendar_id) \
+                         VALUES (?1, ?2, ?3, 100, ?4, 0, 0, 'cancelled', ?5, ?6, ?7)",
+                        params![event_id, occ_start_ms, end, occ_start_ms, summary, signature, calendar_id],
                     )
                     .map_err(|e| format!("carry dismissal: {e}"))?;
                 }
@@ -868,8 +888,8 @@ impl Cache {
             conn.execute(
                 "INSERT OR IGNORE INTO reminders2 \
                  (event_id, occurrence_start_ms, occurrence_end_ms, seq, fire_at_ms, \
-                  lead_min, at_start, status, summary, signature) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                  lead_min, at_start, status, summary, signature, calendar_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     event_id,
                     occ_start_ms,
@@ -880,7 +900,8 @@ impl Cache {
                     (*lead == 0) as i32,
                     status,
                     summary,
-                    signature
+                    signature,
+                    calendar_id
                 ],
             )
             .map_err(|e| format!("seed row: {e}"))?;
@@ -1028,6 +1049,41 @@ impl Cache {
             params![event_id],
         )
         .map_err(|e| format!("purge event: {e}"))?;
+        Ok(())
+    }
+
+    /// Снять все напоминания календаря — целиком, а не только по событиям из
+    /// загруженного окна. Возвращает event_id, у которых что-то удалилось:
+    /// вызывающая сторона гасит по ним уже висящие тосты.
+    ///
+    /// Строки с calendar_id = 0 (посеяны до появления колонки и с тех пор не
+    /// пересевались) сюда не попадают — их проставит ближайший seed_occurrence.
+    pub fn purge_calendar_reminders(&self, calendar_id: i64) -> Result<Vec<i64>, String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT event_id FROM reminders2 WHERE calendar_id = ?1")
+            .map_err(|e| format!("prepare purge calendar: {e}"))?;
+        let ids: Vec<i64> = stmt
+            .query_map(params![calendar_id], |r| r.get(0))
+            .map_err(|e| format!("query purge calendar: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        conn.execute("DELETE FROM reminders2 WHERE calendar_id = ?1", params![calendar_id])
+            .map_err(|e| format!("purge calendar: {e}"))?;
+        Ok(ids)
+    }
+
+    /// Обнулить привязку к календарю у строк события. Существует ради тестов
+    /// в соседнем крейте: воспроизводит строку, посеянную до появления
+    /// колонки `calendar_id`, чтобы проверить, что пересев её чинит.
+    pub fn debug_clear_reminder_calendar(&self, event_id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        conn.execute(
+            "UPDATE reminders2 SET calendar_id = 0 WHERE event_id = ?1",
+            params![event_id],
+        )
+        .map_err(|e| format!("clear calendar_id: {e}"))?;
         Ok(())
     }
 
