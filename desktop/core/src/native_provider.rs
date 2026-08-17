@@ -21,7 +21,13 @@ pub struct NativeProvider {
     token: Arc<RwLock<String>>,
     user_email: String,
     http: Client,
-    notifier: Option<Notifier>,
+    /// Куда уходит `TokenRefreshed` — фронтенд по этому событию кладёт
+    /// ротированный JWT на диск. Слот меняемый, потому что провайдер строится
+    /// раньше, чем существует настоящий notifier: он приезжает первым же
+    /// `start_watching` и там же встаёт сюда. Пока слот пуст, ротация живёт
+    /// только в памяти — и следующий холодный старт поднимает токен с диска,
+    /// который за 30 суток протухает без права на refresh.
+    notifier: Arc<std::sync::Mutex<Option<Notifier>>>,
     account_id: String,
     // Serializes concurrent refreshes so parallel 401s don't fan out into N
     // refresh round trips (each using the same stale token, with only the
@@ -106,7 +112,7 @@ impl NativeProvider {
             token: Arc::new(RwLock::new(token)),
             user_email,
             http,
-            notifier,
+            notifier: Arc::new(std::sync::Mutex::new(notifier)),
             account_id,
             refresh_lock: Arc::new(Mutex::new(())),
         }
@@ -114,6 +120,12 @@ impl NativeProvider {
 
     fn api_url(&self, path: &str) -> String {
         format!("{}/api/desktop/v1{}", self.server_url, path)
+    }
+
+    /// Снимок текущего notifier'а. Владеющая копия (Notifier — это Arc), чтобы
+    /// не держать sync-гард через await.
+    fn current_notifier(&self) -> Option<Notifier> {
+        self.notifier.lock().ok().and_then(|slot| slot.clone())
     }
 
     /// Exchange the current (possibly expired) token for a fresh one.
@@ -125,12 +137,13 @@ impl NativeProvider {
     /// immediately. Otherwise we perform the exchange. This is the standard
     /// single-flight pattern: N concurrent 401s produce one refresh.
     async fn refresh_token(&self, seen_token: &str) -> Result<(), String> {
+        let notifier = self.current_notifier();
         refresh_token_standalone(
             &self.http,
             &self.server_url,
             &self.token,
             &self.refresh_lock,
-            self.notifier.as_ref(),
+            notifier.as_ref(),
             &self.account_id,
             seen_token,
         )
@@ -585,6 +598,13 @@ impl MailProvider for NativeProvider {
     }
 
     async fn start_watching(&self, notifier: Notifier) -> Result<(), String> {
+        // Настоящий notifier появляется только здесь — с этого момента и
+        // REST-путь, и watcher шлют `TokenRefreshed` фронтенду, а тот пишет
+        // токен в accounts.json. До этой строки слот держал заглушку из
+        // build_provider, и ротация никуда не сообщалась.
+        if let Ok(mut slot) = self.notifier.lock() {
+            *slot = Some(notifier.clone());
+        }
         let ws_base = self
             .server_url
             .replace("https://", "wss://")
@@ -738,12 +758,14 @@ impl MailProvider for NativeProvider {
                         // (the handshake is rejected with 401 before upgrade).
                         // Try a refresh with the token we just failed on; the
                         // next iteration reads the rotated token from the lock.
+                        let watcher_notifier =
+                            self_notifier.lock().ok().and_then(|slot| slot.clone());
                         if let Err(re) = refresh_token_standalone(
                             &http,
                             &server_url,
                             &token,
                             &refresh_lock,
-                            self_notifier.as_ref(),
+                            watcher_notifier.as_ref(),
                             &account_id,
                             &current_token,
                         )

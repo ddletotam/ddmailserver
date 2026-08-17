@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 
 use ddmail_core::cache::Cache;
-use ddmail_core::event::{noop_notifier, EngineEvent, Notifier};
+use ddmail_core::event::{EngineEvent, Notifier};
 use ddmail_core::imap;
 use ddmail_core::imap_provider::ImapProvider;
 use ddmail_core::native_provider::NativeProvider;
@@ -315,7 +315,10 @@ fn build_provider(cfg: &AccountConfig) -> Arc<dyn MailProvider> {
             url.clone(),
             token.clone(),
             cfg.email.clone(),
-            Some(noop_notifier()),
+            // Настоящий notifier провайдер получает в start_watching и ставит
+            // себе сам. Заглушка здесь означала бы, что ротированный токен
+            // некуда сообщить, и persist_native_token не вызовется никогда.
+            None,
             cfg.email.clone(),
         ))
     } else {
