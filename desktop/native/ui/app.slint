@@ -1472,6 +1472,11 @@ export component MainWindow inherits Window {
                 Rectangle {
                     vertical-stretch: 1;
                 conv-lv := ListView {
+                    // Полоса тут своя (ListScrollBar ниже) — родную гасим,
+                    // иначе их две. Строки здесь ровные по 64px, так что
+                    // родная не дёргалась бы, но выглядели бы они всё равно
+                    // как две полосы рядом.
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     for conv[idx] in root.conversations: Rectangle {
                         height: 64px;
                         // Identity tint on idle rows (Tauri-era behaviour):
@@ -1991,6 +1996,14 @@ export component MainWindow inherits Window {
                     }
                 }
                 lv := ListView {
+                    // Своя полоса (ListScrollBar ниже) — родная выключена.
+                    // Две сразу не просто дублируют друг друга: родная ездит
+                    // по `viewport-height`, а это ОЦЕНКА (средняя высота
+                    // элемента × их число). На письмах, где пузыри
+                    // различаются на два порядка, оценка пересчитывается по
+                    // ходу прокрутки — вверху бегунки идут вместе, ниже
+                    // родной прыгает и дёргается.
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     // Mirror scroll state for the Rust-side "at bottom?" check
                     // (new-mail append behaviour).
                     changed viewport-y => { root.chat-vp-y = self.viewport-y; }
