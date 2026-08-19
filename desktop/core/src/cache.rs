@@ -212,7 +212,12 @@ impl Cache {
         // v3: dedup of the same meeting carried under two event_ids landed;
         // clear the transitional mix (incl. any orphaned user-snooze row) so
         // the cascade reseeds clean.
-        const REMINDERS_DATA_VERSION: &str = "3";
+        // v4: строки, посеянные до колонки `calendar_id`, лежат с нулём —
+        // такую ни выключение календаря не гасит (нечего сопоставить), ни
+        // проверка видимости в момент выстрела. Пока они живы (горизонт посева
+        // — 30 дней вперёд), скрытый календарь продолжает звонить. Стираем
+        // один раз: после этого каждая строка знает свой календарь.
+        const REMINDERS_DATA_VERSION: &str = "4";
         let rv: String = conn
             .query_row(
                 "SELECT value FROM meta WHERE key = 'reminders_data_version'",
@@ -1093,7 +1098,7 @@ impl Cache {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         let mut stmt = conn.prepare(
             "SELECT event_id, occurrence_start_ms, occurrence_end_ms, seq, \
-                    fire_at_ms, lead_min, at_start, summary \
+                    fire_at_ms, lead_min, at_start, summary, calendar_id \
              FROM reminders2 \
              WHERE status = 'armed' AND fire_at_ms <= ?1 \
              ORDER BY fire_at_ms ASC"
@@ -1108,6 +1113,7 @@ impl Cache {
                 lead_min: r.get(5)?,
                 at_start: r.get::<_, i32>(6)? != 0,
                 summary: r.get(7)?,
+                calendar_id: r.get(8)?,
             })
         }).map_err(|e| format!("query: {e}"))?;
         let mut out = Vec::new();
@@ -1224,4 +1230,7 @@ pub struct ReminderRow {
     /// "At the moment of start" presentation: ✕ + body only, no snooze.
     pub at_start: bool,
     pub summary: String,
+    /// Чей календарь — сканер проверяет видимость в момент выстрела, а не
+    /// только при посеве. 0 = не атрибутировано (строка старой схемы).
+    pub calendar_id: i64,
 }

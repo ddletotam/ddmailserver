@@ -8181,10 +8181,30 @@ fn main() {
         || {
             let now_ms = chrono::Utc::now().timestamp_millis();
             let due = SHARED.with(|s| {
-                s.borrow()
-                    .as_ref()
-                    .and_then(|sh| sh.cache.as_ref().map(|c| reminders::scan(c, now_ms)))
-                    .unwrap_or_default()
+                let borrow = s.borrow();
+                let Some(sh) = borrow.as_ref() else { return Vec::new() };
+                let Some(c) = sh.cache.as_ref() else { return Vec::new() };
+                // Видимость календаря проверяется здесь, в момент выстрела, а
+                // не только при посеве и на переключателе: строка могла
+                // взвестись до выключения и не попасть под purge (событие вне
+                // загруженного окна, переезд между календарями). Строка
+                // остаётся взведённой — включат календарь, зазвонит сама.
+                let vis = sh.calendar_visible.borrow();
+                let events = sh.calendar_events.borrow();
+                let hidden = |row: &ddmail_core::cache::ReminderRow| -> bool {
+                    let cal = if row.calendar_id != 0 {
+                        row.calendar_id
+                    } else {
+                        // Строка старой схемы: календарь берём из снимка.
+                        events
+                            .iter()
+                            .find(|e| e.id == row.event_id)
+                            .map(|e| e.calendar_id)
+                            .unwrap_or(0)
+                    };
+                    cal != 0 && !*vis.get(&cal).unwrap_or(&true)
+                };
+                reminders::scan(c, now_ms, &hidden)
             });
             for t in due {
                 // One toast per event on screen at a time (dedup a burst).
