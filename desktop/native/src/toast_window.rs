@@ -273,7 +273,7 @@ pub fn close_for_event(event_id: i64) {
 }
 
 fn reposition() {
-    let (sw, sh) = screen_size();
+    let (sw, sh) = stack_anchor();
     REG.with(|r| {
         let r = r.borrow();
         let mut y = sh;
@@ -292,8 +292,12 @@ fn reposition() {
     });
 }
 
+/// Правый нижний угол, от которого стопка растёт вверх, в ФИЗИЧЕСКИХ пикселях
+/// (`set_position` принимает именно их). Захардкоженные 1920×1080 роняли тост
+/// в середину любого экрана крупнее FullHD — там, где его никто не ищет и где
+/// он перекрывается чужими окнами.
 #[cfg(target_os = "linux")]
-fn screen_size() -> (f32, f32) {
+fn stack_anchor() -> (f32, f32) {
     use x11::xlib;
     unsafe {
         let dpy = xlib::XOpenDisplay(std::ptr::null());
@@ -308,8 +312,33 @@ fn screen_size() -> (f32, f32) {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn screen_size() -> (f32, f32) {
+/// Рабочая область ОСНОВНОГО монитора (`rcWork`, а не `rcMonitor` — иначе
+/// стопка залезает под панель задач). Процесс per-monitor-DPI-aware (winit это
+/// ставит), поэтому Win32 отдаёт реальные пиксели, а не отмасштабированные под
+/// 96 dpi. Ограничение: тост всегда на основном мониторе, за главным окном по
+/// экранам не ходит.
+#[cfg(target_os = "windows")]
+fn stack_anchor() -> (f32, f32) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
+    };
+    unsafe {
+        // (0,0) по определению лежит на основном мониторе.
+        let mon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(mon, &mut mi).as_bool() {
+            return (mi.rcWork.right as f32, mi.rcWork.bottom as f32);
+        }
+    }
+    (1920.0, 1080.0)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn stack_anchor() -> (f32, f32) {
     (1920.0, 1080.0)
 }
 
