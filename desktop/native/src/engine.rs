@@ -401,10 +401,15 @@ pub enum EngineCmd {
     FetchCalendars,
     /// Events overlapping `[from_ms, to_ms)`. `calendar_ids` empty =
     /// fetch from all the user's calendars (the engine-default).
+    ///
+    /// `for_reminders` — фетч ради посева напоминаний, а не ради сетки: окно
+    /// считается от `now`, а не от отображаемой недели, и результат в сетку не
+    /// попадает (иначе он бы её перетёр чужим окном).
     FetchCalendarEvents {
         from_ms: i64,
         to_ms: i64,
         calendar_ids: Vec<i64>,
+        for_reminders: bool,
     },
     /// The unified address book. Empty `query` = the full book; a non-empty
     /// query is autocomplete/search. `query` is echoed in the result so the UI
@@ -493,12 +498,14 @@ pub enum EngineResult {
     /// FetchCalendarEvents. `from_ms`/`to_ms` echo the requested window and
     /// `complete` says every account answered — orphaned-reminder pruning
     /// must only trust a complete fetch (a failed account's events being
-    /// absent is not a deletion).
+    /// absent is not a deletion). `for_reminders` echoes the request flag:
+    /// такой результат только сеет напоминания, сетку не трогает.
     CalendarEvents {
         events: Vec<DesktopCalendarEvent>,
         from_ms: i64,
         to_ms: i64,
         complete: bool,
+        for_reminders: bool,
     },
     /// A Send command failed — surfaced to the user (toast), unlike the
     /// generic Error which only logs. Carries the human-readable reason.
@@ -1103,12 +1110,15 @@ pub fn spawn(
                         Err(e) => on_result(EngineResult::Error(format!("delete_contact: {e}"))),
                     }
                 }
-                EngineCmd::FetchCalendarEvents { from_ms, to_ms, calendar_ids } => {
+                EngineCmd::FetchCalendarEvents { from_ms, to_ms, calendar_ids, for_reminders } => {
                     let t0 = std::time::Instant::now();
                     let mut all = Vec::new();
                     // A calendar-filtered fetch is a subset by construction —
                     // never let the orphan pruning treat it as the full truth.
-                    let mut complete = calendar_ids.is_empty();
+                    // Ни одного подключения — тоже не истина: пустой ответ
+                    // «полного» фетча вычистил бы все напоминания окна, хотя
+                    // мы просто ничего не спросили (фетч до коннекта).
+                    let mut complete = calendar_ids.is_empty() && !conns.is_empty();
                     for conn in &conns {
                         match rt.block_on(conn.provider.fetch_calendar_events(from_ms, to_ms, &calendar_ids)) {
                             Ok(mut evs) => {
@@ -1124,12 +1134,19 @@ pub fn spawn(
                         }
                     }
                     println!(
-                        "[cal] FetchCalendarEvents: {} events in {}ms{}",
+                        "[cal] FetchCalendarEvents{}: {} events in {}ms{}",
+                        if for_reminders { " (посев)" } else { "" },
                         all.len(),
                         t0.elapsed().as_millis(),
                         if complete { "" } else { " (partial)" }
                     );
-                    on_result(EngineResult::CalendarEvents { events: all, from_ms, to_ms, complete });
+                    on_result(EngineResult::CalendarEvents {
+                        events: all,
+                        from_ms,
+                        to_ms,
+                        complete,
+                        for_reminders,
+                    });
                 }
                 EngineCmd::Rsvp { event_id, partstat, account_key } => {
                     let provider = route(&conns, &account_key).provider.clone();

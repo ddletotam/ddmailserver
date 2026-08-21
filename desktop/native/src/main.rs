@@ -1540,6 +1540,13 @@ struct Shared {
     /// time, as days since the unix epoch. Stored as i64 so the
     /// timezone-conversion math is straightforward.
     calendar_week_start_days: Cell<i64>,
+    /// Сетка стоит на «этой» неделе не потому, что её туда увели, а потому что
+    /// это сегодняшняя неделя — значит при перекате суток её надо подтянуть.
+    /// Ставится на каждом явном смещении недели (`неделя == сегодняшняя`), в
+    /// момент проверки сравнить уже нельзя: после переката отображаемая неделя
+    /// в любом случае не равна сегодняшней, и «оставили сами» от «убежало
+    /// время» не отличить.
+    week_follows_today: Cell<bool>,
     /// Live size of the calendar grid body (px), mirrored from Slint so the
     /// layout math can decide day-count / hour-height / what to hide.
     grid_canvas_w: Cell<f32>,
@@ -3096,7 +3103,10 @@ fn handle_reminder_action(
                 toast_window::stop_timer(toast_window::id_for_event(event_id));
             }
             raise_window(ui);
-            sh.calendar_week_start_days.set(week_start_days_for_ms(occ_ms));
+            let jump_week = week_start_days_for_ms(occ_ms);
+            sh.calendar_week_start_days.set(jump_week);
+            sh.week_follows_today
+                .set(jump_week == week_start_days_today());
             sh.pending_open_event.set(event_id);
             sh.pending_open_occ.set(occ_ms);
             *sh.pending_open_summary.borrow_mut() = summary.to_string();
@@ -4102,6 +4112,48 @@ fn refetch_calendar_events(ui: &MainWindow, sh: &Shared) {
             from_ms,
             to_ms,
             calendar_ids: Vec::new(),
+            for_reminders: false,
+        });
+    }
+}
+
+/// Как часто перепроверять окно посева (и перекат суток). Фетч дешёвый
+/// (~100 мс на сервере), а цена промаха — молчащий на весь день клиент.
+const REMINDER_WINDOW_REFRESH_SECS: u64 = 300;
+
+/// Сколько суток вперёд от сегодняшней полуночи держать засеянными.
+/// Больше горизонта посева (30 дней) смысла не имеет, меньше суток — опасно:
+/// напоминание должно взвестись ЗАРАНЕЕ, а не в момент выстрела.
+const REMINDER_WINDOW_DAYS: i64 = 8;
+
+/// Фетч ради посева напоминаний, а не ради сетки.
+///
+/// Посев живёт исключительно на результатах фетча календаря, а окно фетча до
+/// этого было ровно отображаемой неделей — со двумя дырами. Первая: на старте
+/// фетча нет вовсе, и свежий клиент нем, пока не придёт серверный push (а он
+/// не обязан). Вторая: `calendar_week_start_days` считается один раз при
+/// запуске, поэтому клиент, проживший выходные, всю следующую неделю
+/// перефетчивал ПРОШЛУЮ и не сеял ничего; симметрично — пролистанная вперёд
+/// сетка глушила текущую неделю.
+///
+/// Это окно привязано к `now`, а не к сетке, и переоценивается на каждом тике,
+/// так что перекат суток/недели лечится сам. Результат помечен
+/// `for_reminders` и в сетку не попадает.
+fn fetch_reminder_window(sh: &Shared) {
+    use chrono::{Duration, Local};
+    let today = Local::now().date_naive();
+    let from_ms = match local_midnight_ms(today) {
+        Some(ms) => ms,
+        None => return, // DST-провал ровно в полночь — пропускаем тик
+    };
+    let to_ms = local_midnight_ms(today + Duration::days(REMINDER_WINDOW_DAYS))
+        .unwrap_or(from_ms + REMINDER_WINDOW_DAYS * 24 * 3600 * 1000);
+    if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+        let _ = etx.send(engine::EngineCmd::FetchCalendarEvents {
+            from_ms,
+            to_ms,
+            calendar_ids: Vec::new(),
+            for_reminders: true,
         });
     }
 }
@@ -5635,6 +5687,7 @@ fn main() {
         calendar_colors: RefCell::new(HashMap::new()),
         calendar_events: RefCell::new(Vec::new()),
         calendar_week_start_days: Cell::new(week_start_days_today()),
+        week_follows_today: Cell::new(true),
         grid_canvas_w: Cell::new(1000.0),
         grid_canvas_h: Cell::new(680.0),
         work_start: Cell::new(cal_set.work_start_hour.clamp(0, 23)),
@@ -7436,6 +7489,7 @@ fn main() {
                 sh.calendar_week_start_days.get() + delta_days
             };
             sh.calendar_week_start_days.set(new_start);
+            sh.week_follows_today.set(new_start == week_start_days_today());
             apply_calendar_view(&ui, &sh);
             refetch_calendar_events(&ui, &sh);
         }
@@ -8267,6 +8321,34 @@ fn main() {
         },
     );
 
+    // Окно посева напоминаний — отдельно от сетки и привязано к `now`.
+    // Пересчитывается на каждом тике, поэтому перекат суток (и недели) лечится
+    // сам: раньше посев жил только на фетчах отображаемой недели, и клиент,
+    // проживший выходные, всю следующую неделю тянул прошлую и молчал.
+    // Тем же тиком сетка подтягивается за сегодняшним днём, если пользователь
+    // её сам не увёл на другую неделю.
+    let ui_weak_rw = ui.as_weak();
+    let _reminder_window_timer = slint::Timer::default();
+    _reminder_window_timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_secs(REMINDER_WINDOW_REFRESH_SECS),
+        move || {
+            let Some(ui) = ui_weak_rw.upgrade() else { return };
+            SHARED.with(|s| {
+                let borrow = s.borrow();
+                let Some(sh) = borrow.as_ref() else { return };
+                fetch_reminder_window(sh);
+                let today = week_start_days_today();
+                if sh.week_follows_today.get() && sh.calendar_week_start_days.get() != today {
+                    println!("[cal] перекат недели: сетка идёт за сегодня → {today}");
+                    sh.calendar_week_start_days.set(today);
+                    apply_calendar_view(&ui, sh);
+                    refetch_calendar_events(&ui, sh);
+                }
+            });
+        },
+    );
+
     // System tray (Windows): left-click / "Открыть" re-shows the window,
     // "Выход" quits. Kept alive until the event loop ends.
     // Toast click callbacks (non-UI threads) reach the event loop through
@@ -8775,6 +8857,11 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                                 limit: CONV_FETCH_LIMIT,
                             });
                         }
+                        // Тем же движением сеем напоминания: до коннекта
+                        // спрашивать было некого, а ждать серверного push
+                        // (единственного, кто раньше запускал посев) значит
+                        // молчать неопределённое время после старта.
+                        fetch_reminder_window(sh);
                     }
                     sh.account_states
                         .borrow_mut()
@@ -9090,8 +9177,12 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                 }
             });
         }
-        engine::EngineResult::CalendarEvents { events, from_ms, to_ms, complete } => {
-            println!("engine: {} calendar events", events.len());
+        engine::EngineResult::CalendarEvents { events, from_ms, to_ms, complete, for_reminders } => {
+            println!(
+                "engine: {} calendar events{}",
+                events.len(),
+                if for_reminders { " (посев)" } else { "" }
+            );
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
                     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -9133,6 +9224,12 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                                 Err(e) => eprintln!("reminder move-cull: {e}"),
                             }
                         }
+                    }
+                    // Фетч ради посева: его окно — не отображаемая неделя, и
+                    // подставлять эти события в сетку нельзя (перетёрли бы
+                    // чужим окном). Напоминания уже посеяны выше — выходим.
+                    if for_reminders {
+                        return;
                     }
                     // Remember each event's owning account for write routing.
                     {
@@ -9188,7 +9285,12 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     }
                 }
             });
-            ui.set_calendar_loading(false);
+            // Пилюля «Загрузка…» принадлежит фетчу сетки: посевной её не
+            // зажигал и гасить не должен — иначе снял бы её с идущего рядом
+            // фетча недели.
+            if !for_reminders {
+                ui.set_calendar_loading(false);
+            }
         }
         engine::EngineResult::SendFailed(e) => {
             eprintln!("engine: send failed: {e}");
