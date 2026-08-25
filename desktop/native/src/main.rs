@@ -2249,6 +2249,65 @@ fn link_target(value: &str) -> Option<String> {
     bare_host_to_url(trim_url_tail(v), true)
 }
 
+/// Откуда пришла ссылка — это решает, можно ли её править.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LinkOrigin {
+    /// `<a href>` из письма: строка уже готова и трогать её нельзя.
+    Html,
+    /// Свободный текст (LOCATION/CONFERENCE, свойства события, поля правки):
+    /// схемы может не быть, а хвостовая пунктуация — часть фразы, не ссылки.
+    Text,
+}
+
+/// Схема URL, если она есть: всё до первого `:`, начинается с буквы, дальше
+/// буквы/цифры/`+`/`-`. Точку в схеме не допускаем намеренно — иначе
+/// `meet.example.kz:8443/room` выглядел бы схемой `meet.example.kz`.
+fn url_scheme(v: &str) -> Option<String> {
+    let head = v.split(':').next()?;
+    if head.len() == v.len() || head.is_empty() {
+        return None;
+    }
+    let mut chars = head.chars();
+    if !chars.next()?.is_ascii_alphabetic() {
+        return None;
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-') {
+        return None;
+    }
+    Some(head.to_ascii_lowercase())
+}
+
+/// Схемы, которые вообще передаём системе. Письмо — враждебный ввод, а
+/// системный обработчик открывает не только браузер: `file:` тянет с сетевой
+/// шары, `search-ms:`/`ms-*:` — целое семейство хэндлеров, которыми рассылки
+/// запускают что попало. Всё, чего тут нет, до `ShellExecute`/`xdg-open`
+/// не доходит.
+const CLICKABLE_SCHEMES: &[&str] = &["http", "https", "mailto", "tel"];
+
+/// Что открывать по клику по ссылке. Единственная точка, где решается судьба
+/// клика — и в пузыре письма, и в карточке события.
+///
+/// href из письма уходит обработчику байт в байт: параметры кнопки бывают
+/// одноразовыми, а хвостовой `?`/`.` в них — значимым, так что подчистка
+/// пунктуации (`trim_url_tail`, она для плоского текста) сломала бы ссылку.
+/// Голому хосту схему достраиваем в обоих случаях — календари кладут созвон в
+/// LOCATION без схемы, да и в письмах `www.example.com/x` без `https://`
+/// встречается.
+fn click_target(value: &str, origin: LinkOrigin) -> Option<String> {
+    let v = value.trim();
+    match url_scheme(v) {
+        Some(s) if !CLICKABLE_SCHEMES.contains(&s.as_str()) => {
+            eprintln!("link: схему {s:?} не открываем — {v}");
+            None
+        }
+        // `mailto:`/`tel:` через link_target гнать нельзя: он бы принял
+        // `mailto` за хост и выдал `https://mailto:info@example.com`.
+        Some(_) if origin == LinkOrigin::Html => Some(v.to_string()),
+        Some(_) => Some(trim_url_tail(v).to_string()),
+        None => link_target(v),
+    }
+}
+
 /// Index of the text run nearest to (x, y): the containing run when there
 /// is one, otherwise the run with the closest centre. None for empty layers.
 fn nearest_run(runs: &[render_common::TextRun], x: f32, y: f32) -> Option<usize> {
@@ -3689,6 +3748,79 @@ mod event_link_tests {
 }
 
 #[cfg(test)]
+mod click_target_tests {
+    use super::{click_target, LinkOrigin};
+
+    /// Тот самый баг: href кнопки уходил в браузер через `cmd /C start`, и `&`
+    /// обрывал командную строку — сервер получал ссылку без токена и отвечал
+    /// 4xx. Открывать обязаны ровно то, что стоит в href, до последнего
+    /// символа. Менять эту проверку — только вместе с `shellopen`.
+    #[test]
+    fn html_href_survives_byte_for_byte() {
+        let url = "https://example.invalid/c?token=abc&utm_source=mail&id=42";
+        assert_eq!(click_target(url, LinkOrigin::Html).as_deref(), Some(url));
+    }
+
+    /// Хвостовую пунктуацию режем только у ссылок из текста: в href она бывает
+    /// значимой (`?` пустого query, точка в пути), а во фразе «смотри
+    /// https://x.invalid/a.» точка — часть фразы.
+    #[test]
+    fn tail_trimmed_only_in_plain_text() {
+        assert_eq!(
+            click_target("https://x.invalid/a?", LinkOrigin::Html).as_deref(),
+            Some("https://x.invalid/a?")
+        );
+        assert_eq!(
+            click_target("https://x.invalid/a.", LinkOrigin::Text).as_deref(),
+            Some("https://x.invalid/a")
+        );
+    }
+
+    /// `mailto:`/`tel:` отдаём системе как есть: через `link_target` они бы
+    /// стали `https://mailto:info@example.invalid` — «хостом» он считал схему.
+    #[test]
+    fn mail_and_tel_pass_through() {
+        assert_eq!(
+            click_target("mailto:info@example.invalid", LinkOrigin::Html).as_deref(),
+            Some("mailto:info@example.invalid")
+        );
+        assert_eq!(
+            click_target("tel:+70000000000", LinkOrigin::Html).as_deref(),
+            Some("tel:+70000000000")
+        );
+    }
+
+    /// Письмо — враждебный ввод: системный обработчик открывает не только
+    /// браузер, поэтому всё вне белого списка не доходит до ShellExecute.
+    #[test]
+    fn hostile_schemes_refused() {
+        for url in [
+            "file:///C:/Windows/System32/calc.exe",
+            "search-ms:query=passwords",
+            "ms-msdt:/id",
+            "vbscript:msgbox",
+        ] {
+            assert_eq!(click_target(url, LinkOrigin::Html), None, "{url}");
+        }
+    }
+
+    /// Голый хост остаётся ссылкой, и хост с портом не должен выглядеть
+    /// схемой `meet.example.invalid` (в схеме точек не бывает).
+    #[test]
+    fn bare_host_still_gets_a_scheme() {
+        assert_eq!(
+            click_target("meet.example.invalid/room", LinkOrigin::Text).as_deref(),
+            Some("https://meet.example.invalid/room")
+        );
+        assert_eq!(
+            click_target("meet.example.invalid:8443/room", LinkOrigin::Html).as_deref(),
+            Some("https://meet.example.invalid:8443/room")
+        );
+        assert_eq!(click_target("Переговорная 3", LinkOrigin::Text), None);
+    }
+}
+
+#[cfg(test)]
 mod att_url_tests {
     use super::{att_url_decode, att_url_encode};
 
@@ -4394,7 +4526,9 @@ fn open_edit_form(ui: &MainWindow, sh: &Shared, ev: &ddmail_core::types::Desktop
             // Голый хост тоже ссылка (CONFERENCE/X-…-CONFERENCE часто без
             // схемы) — схему достраивает handle_link на клике. Правило то же,
             // что в карточке просмотра: строки здесь так же кликабельны.
-            let is_link = link_target(&value).is_some();
+            // Признак кликабельности и сам клик считает одна функция, иначе
+            // строка подсвечивалась бы ссылкой, а клик по ней ничего не делал.
+            let is_link = click_target(&value, LinkOrigin::Text).is_some();
             EventExtraItem {
                 label: label.into(),
                 value: value.into(),
@@ -5556,7 +5690,9 @@ fn main() {
                             .map(|l| l.href.clone());
                         match hit {
                             Some(url) => {
-                                let _ = ui_weak.upgrade_in_event_loop(move |ui| handle_link(&ui, url));
+                                let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+                                    handle_link(&ui, url, LinkOrigin::Html)
+                                });
                             }
                             None => println!("click row {row} @({x:.0},{y:.0}) — no link"),
                         }
@@ -6169,12 +6305,14 @@ fn main() {
             att.as_ref().map(|a| a.3.clone()).unwrap_or_default().into(),
         );
         // Внешняя ссылка под курсором. `ddmail-attach:` сюда не попадает — это
-        // вложение, у него свои пункты выше; всё остальное отдаёт `link_target`,
-        // он же достраивает схему голому хосту.
+        // вложение, у него свои пункты выше; всё остальное отдаёт
+        // `click_target`, он же достраивает схему голому хосту и отсеивает
+        // схемы не из белого списка. Origin::Html — «Копировать ссылку» обязано
+        // дать ту же строку, что откроет «Открыть ссылку», байт в байт.
         let link = href
             .as_deref()
             .filter(|u| !u.starts_with("ddmail-attach:"))
-            .and_then(link_target);
+            .and_then(|u| click_target(u, LinkOrigin::Html));
         ui.set_ctx_link_url(link.clone().unwrap_or_default().into());
         *sh_probe.ctx_link.borrow_mut() = link;
         *sh_probe.ctx_attach.borrow_mut() = att;
@@ -7873,8 +8011,9 @@ fn main() {
             .map(|x| {
                 let (label, value) = extra_label(&x.name, &x.value);
                 // Голый хост тоже ссылка (CONFERENCE/X-…-CONFERENCE часто без
-                // схемы) — схему достраивает handle_link на клике.
-                let is_link = link_target(&value).is_some();
+                // схемы) — схему достраивает handle_link на клике; признак и
+                // клик считает одна функция (см. карточку правки).
+                let is_link = click_target(&value, LinkOrigin::Text).is_some();
                 EventExtraItem { label: label.into(), value: value.into(), is_link }
             })
             .collect();
@@ -7902,7 +8041,9 @@ fn main() {
     let ui_weak_dol = ui.as_weak();
     ui.on_detail_open_link(move |url| {
         if let Some(ui) = ui_weak_dol.upgrade() {
-            handle_link(&ui, url.to_string());
+            // Свойства события — плоский текст: и схему достроить, и хвостовую
+            // пунктуацию срезать.
+            handle_link(&ui, url.to_string(), LinkOrigin::Text);
         }
     });
     let ui_weak_dc = ui.as_weak();
@@ -8220,7 +8361,12 @@ fn main() {
         }
     });
     ui.on_edit_open_url(move |url| {
-        open_external(url.as_str());
+        // Поля правки события — тот же плоский текст, что и в карточке
+        // просмотра, и тот же белый список схем.
+        match click_target(url.as_str(), LinkOrigin::Text) {
+            Some(target) => open_external(&target),
+            None => eprintln!("edit open url: нечего открывать — {url}"),
+        }
     });
 
     // Calendar reminders: a UI-thread timer scans the persisted reminder
@@ -9574,8 +9720,9 @@ fn open_message_from_toast(ui: &MainWindow, sh: &Shared, folder: &str, uid: u32,
 
 /// Handle a clicked link from a bubble (UI thread). Internal `ddmail-attach:`
 /// links trigger an attachment download via the engine; everything else opens
-/// in the system browser.
-fn handle_link(_ui: &MainWindow, url: String) {
+/// in the system browser. `origin` решает, можно ли ссылку нормализовать —
+/// см. `click_target`.
+fn handle_link(_ui: &MainWindow, url: String, origin: LinkOrigin) {
     if let Some(rest) = url.strip_prefix("ddmail-attach:") {
         // folder|uid|index|filename (folder/filename percent-кодированы)
         let parts: Vec<&str> = rest.splitn(4, '|').collect();
@@ -9609,9 +9756,12 @@ fn handle_link(_ui: &MainWindow, url: String) {
     // приняли бы «meet.example.kz/room» за относительный путь и молча ничего
     // не сделали. Достраиваем https:// на выходе — единая точка для всех
     // кликов (строки-ссылки карточки, свойства события, чипы пузыря).
-    match link_target(&url) {
+    //
+    // None — это не ссылка либо схема не из белого списка: открывать «как
+    // есть» на всякий случай нельзя, ровно от этого белый список и защищает.
+    match click_target(&url, origin) {
         Some(target) => open_external(&target),
-        None => open_external(&url),
+        None => eprintln!("link click: нечего открывать — {url}"),
     }
 }
 
@@ -9866,8 +10016,6 @@ fn which_bin(name: &str) -> Result<std::path::PathBuf, ()> {
     Err(())
 }
 
-/// Open a URL in the system default browser. Per-OS launcher — the previous
-/// `cmd /C start` was Windows-only, so links silently did nothing on Linux.
 /// Приложения, умеющие открыть http(s)-ссылку — для подменю «Открыть с
 /// помощью…». Читаются один раз при старте: набор меняется установкой
 /// программ, а не в течение сессии.
@@ -9967,62 +10115,31 @@ fn open_with_app(_desktop: &std::path::Path, url: &str) {
     open_external(url);
 }
 
+/// Отдать URL системному браузеру. Никакого шелла в середине — `cmd /C start`
+/// резал ссылку на первом `&`, и кнопка из письма приходила на сервер без
+/// параметров (подробности в `ddmail_core::shellopen`). Работа уходит в свой
+/// поток: `ShellExecuteW` может подождать shell-расширение, а мы на UI-потоке.
 fn open_external(url: &str) {
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "start", "", url]);
-        c
-    };
-    #[cfg(target_os = "macos")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("open");
-        c.arg(url);
-        c
-    };
-    #[cfg(target_os = "linux")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(url);
-        c
-    };
-    if let Err(e) = cmd.spawn() {
-        eprintln!("open_external: failed to launch browser for {url}: {e}");
-    }
+    let url = url.to_string();
+    std::thread::spawn(move || {
+        if let Err(e) = ddmail_core::shellopen::open_url(&url) {
+            eprintln!("open_external: не открылось {url}: {e}");
+        }
+    });
 }
 
 /// Открыть сохранённый файл системным обработчиком — в отличие от
-/// open_external, ДОЖИДАЕМСЯ exit-кода в фоновом потоке: xdg-open молча
-/// возвращает ненулевой код, когда обработчика нет или путь его не устроил,
-/// и без проверки клик по вложению «просто ничего не делает». Провал
-/// показывается тостом (та же янтарная плашка, что и у ошибок отправки).
+/// open_external, ЗАБИРАЕМ вердикт в фоновом потоке: `xdg-open` молча
+/// возвращает ненулевой код (а `ShellExecuteW` — код ≤ 32), когда обработчика
+/// нет или путь его не устроил, и без проверки клик по вложению «просто ничего
+/// не делает». Провал показывается тостом (та же янтарная плашка, что и у
+/// ошибок отправки). Поток нужен из-за Unix-ветки: там вердикт — exit-код
+/// обработчика, и его приходится ждать.
 fn open_saved_file(path: &str) {
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "start", "", path]);
-        c
-    };
-    #[cfg(target_os = "macos")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("open");
-        c.arg(path);
-        c
-    };
-    #[cfg(target_os = "linux")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(path);
-        c
-    };
     let path = path.to_string();
     std::thread::spawn(move || {
-        let verdict = match cmd.status() {
-            Ok(st) if st.success() => None,
-            Ok(st) => Some(format!("обработчик вернул код {}", st.code().unwrap_or(-1))),
-            Err(e) => Some(e.to_string()),
-        };
-        let Some(reason) = verdict else { return };
+        let verdict = ddmail_core::shellopen::open_path_checked(std::path::Path::new(&path));
+        let Err(reason) = verdict else { return };
         eprintln!("open_saved_file: {path}: {reason}");
         // Тостовые окна — только с UI-потока.
         if let Some(weak) = UI_WEAK.get() {

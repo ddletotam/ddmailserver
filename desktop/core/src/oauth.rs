@@ -99,14 +99,11 @@ pub fn build_auth_url(client_id: &str, redirect: &str) -> String {
     )
 }
 
+/// URL авторизации — это сплошные `&` (client_id, scope, redirect_uri,
+/// state), и через `cmd /C start` браузер получал его обрезанным по первому
+/// параметру. Открываем системным обработчиком напрямую (см. `shellopen`).
 fn open_browser(url: &str) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    let r = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
-    #[cfg(target_os = "linux")]
-    let r = std::process::Command::new("xdg-open").arg(url).spawn();
-    #[cfg(target_os = "macos")]
-    let r = std::process::Command::new("open").arg(url).spawn();
-    r.map(|_| ()).map_err(|e| format!("open browser: {e}"))
+    crate::shellopen::open_url(url).map_err(|e| format!("open browser: {e}"))
 }
 
 /// Block on the loopback listener for the redirect, extract `code`, and reply

@@ -1147,41 +1147,16 @@ pub(crate) fn unique_path_pub(dir: &std::path::Path, filename: &str) -> std::pat
     unique_path(dir, filename)
 }
 
+/// Открыть сохранённое вложение штатным приложением. Windows-часть — прямой
+/// `ShellExecuteW` (ровно то же, что двойной клик в Explorer): PowerShell
+/// `Invoke-Item` для этого поднимал целый интерпретатор, а его аргумент
+/// вдобавок трактуется как wildcard-шаблон, так что имя со скобками
+/// (`Отчёт [итог].pdf`) не открывалось. Unix-часть та же: `xdg-open`, при его
+/// провале — `gio open`. Провал только логируем: сюда некуда его показать.
 fn open_in_default_app(path: &std::path::Path) {
-    let path_str = path.to_string_lossy();
-    eprintln!("[attachment] opening: {path_str}");
-
-    // PowerShell Invoke-Item is the exact equivalent of double-clicking in
-    // Explorer — it calls ShellExecuteW with the registered default verb.
-    // rundll32/url.dll only handles URL schemes, not arbitrary file types.
-    #[cfg(target_os = "windows")]
-    let result = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &format!("Invoke-Item '{}'", path_str.replace('\'', "''")),
-        ])
-        .spawn();
-
-    #[cfg(target_os = "macos")]
-    let result = std::process::Command::new("open").arg(path).spawn();
-
-    // On Linux prefer `xdg-open`. Detach by spawning it: if no default
-    // handler is registered, xdg-open opens its own MIME-association
-    // chooser (which is the "choose app" dialog the user expects when
-    // there's nothing set). If even that fails we fall back to `gio
-    // open` and finally just log the failure — there's nowhere good
-    // to surface it from this synchronous helper.
-    #[cfg(target_os = "linux")]
-    let result = std::process::Command::new("xdg-open")
-        .arg(path)
-        .spawn()
-        .or_else(|_| std::process::Command::new("gio").args(["open", &path_str]).spawn());
-
-    match result {
-        Ok(_) => {}
-        Err(e) => eprintln!("[attachment] open failed: {e}"),
+    eprintln!("[attachment] opening: {}", path.to_string_lossy());
+    if let Err(e) = crate::shellopen::open_path(path) {
+        eprintln!("[attachment] open failed: {e}");
     }
 }
 
