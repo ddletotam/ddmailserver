@@ -11,5 +11,6 @@ pub mod native_provider;
 pub mod provider;
 pub mod registry;
 pub mod session;
+pub mod shellopen;
 pub mod smtp;
 pub mod types;

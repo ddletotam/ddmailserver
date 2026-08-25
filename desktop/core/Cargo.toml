@@ -32,3 +32,14 @@ url = "2"
 urlencoding = "2"
 base64 = "0.22"
 async-trait = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+# ShellExecuteW — открыть URL/файл системным обработчиком без шелла между
+# нами и им (почему не `cmd /C start` — см. src/shellopen.rs). Версия та же,
+# что у клиента (desktop/native), так что крейт собирается один раз.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
