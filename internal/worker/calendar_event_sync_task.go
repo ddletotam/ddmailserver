@@ -85,15 +85,39 @@ func (t *CalendarEventSyncTask) Execute(ctx context.Context) error {
 		var err error
 		switch entry.Operation {
 		case "create", "update":
+			cal, calErr := t.database.GetCalendarByID(entry.CalendarID)
+			if calErr != nil {
+				log.Printf("Calendar event sync: failed to get calendar %d: %v", entry.CalendarID, calErr)
+				failCount++
+				continue
+			}
+
+			// Never push a component the target collection does not accept.
+			//
+			// This is the failure that made tasks worth implementing: iOS
+			// Reminders landed in an event calendar, we forwarded them to
+			// iCloud's event collection, and every PUT came back 403 with an
+			// empty body — eight backoff rounds each, the last ones a day
+			// apart, before anything was retired. The remote is right to
+			// refuse, so there is nothing to retry: retire it immediately with
+			// a reason that names the problem instead of quoting a bare status
+			// code.
+			component := componentOf(entry.ICalData)
+			if !cal.Supports(component) {
+				reason := fmt.Sprintf("calendar %q accepts %s, not %s — a task cannot be stored in an event collection",
+					cal.Name, strings.Join(cal.ComponentList(), ","), component)
+				log.Printf("Calendar event sync: retiring %s (%s) — %s", entry.UID, entry.Operation, reason)
+				if dbErr := t.database.DeadLetterCalendarEventSync(entry.ID, reason); dbErr != nil {
+					log.Printf("retire mismatched sync entry %d: %v", entry.ID, dbErr)
+				}
+				t.database.MarkEventSynced(entry.EventID, "")
+				failCount++
+				continue
+			}
+
 			remotePath := entry.RemoteID
 			if remotePath == "" {
 				// New event — construct path from calendar's remote ID and UID
-				cal, calErr := t.database.GetCalendarByID(entry.CalendarID)
-				if calErr != nil {
-					log.Printf("Calendar event sync: failed to get calendar %d: %v", entry.CalendarID, calErr)
-					failCount++
-					continue
-				}
 				remotePath = fmt.Sprintf("%s%s.ics", cal.RemoteID, entry.UID)
 			}
 			err = client.PutEventRaw(ctx, remotePath, entry.ICalData)
@@ -164,6 +188,20 @@ func (t *CalendarEventSyncTask) Execute(ctx context.Context) error {
 	log.Printf("Calendar event sync completed for %s: %d success, %d failed",
 		t.source.Name, successCount, failCount)
 	return t.finish(failCount)
+}
+
+// componentOf reports which component a queued body carries.
+//
+// Read from the body rather than from the event row on purpose: by the time an
+// entry is retried the row may be gone — an inbound sync that could not see a
+// VTODO as an event deleted three of them out from under the queue — and the
+// body is the thing that would actually be sent.
+func componentOf(icalData string) string {
+	if strings.Contains(icalData, "BEGIN:"+models.ComponentTodo) &&
+		!strings.Contains(icalData, "BEGIN:"+models.ComponentEvent) {
+		return models.ComponentTodo
+	}
+	return models.ComponentEvent
 }
 
 // isPermanentSyncError reports whether the remote rejected the operation in
