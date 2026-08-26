@@ -93,16 +93,31 @@ func ImportICS(database *db.DB, calendarID int64, icsData []byte) (int, error) {
 				existing.DTEnd = modelEvent.DTEnd
 				existing.AllDay = modelEvent.AllDay
 				existing.RRule = modelEvent.RRule
+				existing.OrganizerEmail = modelEvent.OrganizerEmail
+				existing.OrganizerName = modelEvent.OrganizerName
+				existing.Attendees = modelEvent.Attendees
 				existing.ETag = generateETag(modelEvent.ICalData)
 
 				if err := database.UpdateCalendarEvent(existing); err != nil {
 					return imported, fmt.Errorf("failed to update event: %w", err)
+				}
+				// UpdateCalendarEvent writes the event row only; the guest list
+				// lives in its own table and has to be replaced separately, even
+				// when the new list is empty — otherwise a removed attendee
+				// survives the re-import.
+				if err := database.ReplaceAttendees(existing.ID, AttendeePtrs(existing.Attendees)); err != nil {
+					return imported, fmt.Errorf("failed to update attendees for %s: %w", existing.UID, err)
 				}
 			} else {
 				// Create new event
 				modelEvent.ETag = generateETag(modelEvent.ICalData)
 				if err := database.CreateCalendarEvent(modelEvent); err != nil {
 					return imported, fmt.Errorf("failed to create event: %w", err)
+				}
+				if len(modelEvent.Attendees) > 0 {
+					if err := database.ReplaceAttendees(modelEvent.ID, AttendeePtrs(modelEvent.Attendees)); err != nil {
+						return imported, fmt.Errorf("failed to write attendees for %s: %w", modelEvent.UID, err)
+					}
 				}
 			}
 
@@ -143,16 +158,27 @@ func ImportICSSimple(database *db.DB, calendarID int64, icsData []byte) (int, er
 			existing.DTEnd = event.DTEnd
 			existing.AllDay = event.AllDay
 			existing.RRule = event.RRule
+			existing.OrganizerEmail = event.OrganizerEmail
+			existing.OrganizerName = event.OrganizerName
+			existing.Attendees = event.Attendees
 			existing.ETag = generateETag(event.ICalData)
 
 			if err := database.UpdateCalendarEvent(existing); err != nil {
 				return imported, fmt.Errorf("failed to update event: %w", err)
+			}
+			if err := database.ReplaceAttendees(existing.ID, AttendeePtrs(existing.Attendees)); err != nil {
+				return imported, fmt.Errorf("failed to update attendees for %s: %w", existing.UID, err)
 			}
 		} else {
 			// Create new event
 			event.ETag = generateETag(event.ICalData)
 			if err := database.CreateCalendarEvent(event); err != nil {
 				return imported, fmt.Errorf("failed to create event: %w", err)
+			}
+			if len(event.Attendees) > 0 {
+				if err := database.ReplaceAttendees(event.ID, AttendeePtrs(event.Attendees)); err != nil {
+					return imported, fmt.Errorf("failed to write attendees for %s: %w", event.UID, err)
+				}
 			}
 		}
 
@@ -207,6 +233,13 @@ func parseICalEvent(event *ical.Event, calendarID int64, tz *zoneResolver, fallb
 	if prop := event.Props.Get(ical.PropRecurrenceRule); prop != nil {
 		modelEvent.RRule = prop.Value
 	}
+
+	// Organizer + attendees. The CalDAV client lifts these on its own sync path
+	// (caldav/client.parseEvent); without the same two calls here an ICS feed
+	// that ships a guest list lands with an empty calendar_attendees table and
+	// the desktop card's RSVP bar stays hidden.
+	modelEvent.OrganizerEmail, modelEvent.OrganizerName = ParseOrganizer(event)
+	modelEvent.Attendees = ParseAttendees(event)
 
 	// DTSTART and DTEND go through the zone resolver rather than go-ical's
 	// prop.DateTime. DateTime resolves TZID against this host only: it ignores
@@ -367,7 +400,22 @@ func parseVEvent(vevent string, calendarID int64, tz *zoneResolver, fallback *ti
 		}
 	}
 
+	// Same reason as in parseICalEvent — the text fallback must not silently
+	// drop the guest list just because go-ical choked on the payload.
+	event.OrganizerEmail, event.OrganizerName = ParseOrganizerSimple(vevent)
+	event.Attendees = ParseAttendeesSimple(vevent)
+
 	return event
+}
+
+// AttendeePtrs adapts a parsed attendee slice to the pointer slice the db
+// layer's ReplaceAttendees takes.
+func AttendeePtrs(in []models.CalendarAttendee) []*models.CalendarAttendee {
+	out := make([]*models.CalendarAttendee, len(in))
+	for i := range in {
+		out[i] = &in[i]
+	}
+	return out
 }
 
 // extractValue extracts the value from a line like "DTSTART;VALUE=DATE:20210101"
