@@ -279,3 +279,20 @@ func (db *DB) PruneDirectURLAddressBook(sourceID int64, sourceURL string) (bool,
 	}
 	return true, nil
 }
+
+// PruneDirectURLAddressBookIfDiscovered is the contacts counterpart of
+// PruneDirectURLCalendarIfDiscovered, and exists for the same reason: contact
+// sync also has two implementations, and the rule must be stated once.
+func (db *DB) PruneDirectURLAddressBookIfDiscovered(sourceID int64, sourceURL string, discovered []*models.AddressBook) (bool, error) {
+	worked := false
+	for _, b := range discovered {
+		if b.RemoteID != sourceURL {
+			worked = true
+			break
+		}
+	}
+	if !worked {
+		return false, nil
+	}
+	return db.PruneDirectURLAddressBook(sourceID, sourceURL)
+}

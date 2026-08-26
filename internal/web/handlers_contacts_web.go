@@ -457,6 +457,15 @@ func (s *Server) syncContactSource(ctx context.Context, source *models.ContactSo
 
 	log.Printf("Discovered %d address books for %s", len(addressBooks), source.Name)
 
+	// As in the worker. Contact sync, like calendar sync, is implemented twice;
+	// the rule for when a placeholder is dead lives in the db helper so the two
+	// copies cannot drift apart on it.
+	if pruned, err := s.database.PruneDirectURLAddressBookIfDiscovered(source.ID, source.CardDAVURL, addressBooks); err != nil {
+		log.Printf("Failed to prune placeholder address book for %s: %v", source.Name, err)
+	} else if pruned {
+		log.Printf("Removed placeholder address book for %s — discovery now returns real collections", source.Name)
+	}
+
 	var syncErrors []string
 
 	// Sync each address book
