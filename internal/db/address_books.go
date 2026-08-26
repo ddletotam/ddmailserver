@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/timeutil"
@@ -241,4 +242,40 @@ func (db *DB) GetOrCreateLocalAddressBook(userID int64, sourceID int64) (*models
 	}
 
 	return book, nil
+}
+
+// PruneDirectURLAddressBook is PruneDirectURLCalendar for contacts: it removes
+// the placeholder book created while CardDAV discovery was failing, once
+// discovery works and real books have been found.
+//
+// Same guard, same reason — only an EMPTY row is removed, because a server with
+// no discovery at all keeps its contacts in exactly such a row.
+// Returns whether a row was removed.
+func (db *DB) PruneDirectURLAddressBook(sourceID int64, sourceURL string) (bool, error) {
+	if strings.TrimSpace(sourceURL) == "" {
+		return false, nil
+	}
+
+	var id int64
+	var count int
+	err := db.QueryRow(`
+		SELECT ab.id, (SELECT COUNT(*) FROM contacts c WHERE c.address_book_id = ab.id)
+		FROM address_books ab
+		WHERE ab.source_id = $1 AND ab.remote_id = $2
+	`, sourceID, sourceURL).Scan(&id, &count)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to look up direct-URL address book: %w", err)
+	}
+
+	if count > 0 {
+		return false, nil
+	}
+
+	if _, err := db.Exec(`DELETE FROM address_books WHERE id = $1`, id); err != nil {
+		return false, fmt.Errorf("failed to delete direct-URL address book %d: %w", id, err)
+	}
+	return true, nil
 }
