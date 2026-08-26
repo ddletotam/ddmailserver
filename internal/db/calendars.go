@@ -300,3 +300,49 @@ func supportedComponents(cal *models.Calendar) string {
 	}
 	return cal.SupportedComponents
 }
+
+// PruneDirectURLCalendar removes the placeholder row that discovery falls back
+// to when it cannot enumerate a server's collections.
+//
+// That fallback stores the SOURCE URL as the calendar's remote_id — for a SOGo
+// server that is the principal, not a collection, so the row can never sync
+// anything. It is correct while discovery is broken (Yandex genuinely needs it,
+// and there the direct URL IS a calendar), and becomes dead weight the moment
+// discovery starts working: nothing returns it any more, so nothing syncs it,
+// and it lingers in the calendar list as a permanently empty entry. Two of
+// these accumulated in one day — one calendar, one address book — after a TLS
+// fix let discovery through.
+//
+// Only ever called once discovery has demonstrably succeeded, and only removes
+// an EMPTY row. A fallback holding events is the working calendar of a server
+// with no discovery at all; deleting that would cascade the events away.
+// Returns whether a row was removed.
+func (db *DB) PruneDirectURLCalendar(sourceID int64, sourceURL string) (bool, error) {
+	if strings.TrimSpace(sourceURL) == "" {
+		return false, nil
+	}
+
+	var id int64
+	var count int
+	err := db.QueryRow(`
+		SELECT c.id, (SELECT COUNT(*) FROM calendar_events e WHERE e.calendar_id = c.id)
+		FROM calendars c
+		WHERE c.source_id = $1 AND c.remote_id = $2
+	`, sourceID, sourceURL).Scan(&id, &count)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to look up direct-URL calendar: %w", err)
+	}
+
+	if count > 0 {
+		// Not ours to remove: something is using it.
+		return false, nil
+	}
+
+	if _, err := db.Exec(`DELETE FROM calendars WHERE id = $1`, id); err != nil {
+		return false, fmt.Errorf("failed to delete direct-URL calendar %d: %w", id, err)
+	}
+	return true, nil
+}
