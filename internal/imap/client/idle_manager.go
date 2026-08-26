@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"log"
 	"sync"
@@ -13,6 +12,7 @@ import (
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/oauth"
+	"github.com/yourusername/mailserver/internal/tlsverify"
 )
 
 // IdleManager maintains persistent IDLE connections to external IMAP servers.
@@ -193,7 +193,7 @@ func (m *IdleManager) runIdleSession(ctx context.Context, account *models.Accoun
 	var err error
 
 	if account.IMAPTLS {
-		conn, err = imapClient.DialTLS(addr, &tls.Config{ServerName: account.IMAPHost})
+		conn, err = imapClient.DialTLS(addr, tlsverify.Config(account.IMAPHost))
 	} else {
 		conn, err = imapClient.Dial(addr)
 	}

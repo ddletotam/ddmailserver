@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/yourusername/mailserver/internal/db"
+	"github.com/yourusername/mailserver/internal/netguard"
 )
 
 const (
@@ -284,7 +285,7 @@ func (f *Fetcher) fetchURL(ctx context.Context, urlStr string) ([]byte, string, 
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
 		return nil, "", false
 	}
-	if !hostIsPublic(ctx, u.Hostname()) {
+	if !netguard.HostIsPublic(ctx, u.Hostname()) {
 		return nil, "", false
 	}
 
@@ -329,43 +330,6 @@ func (f *Fetcher) fetchURL(ctx context.Context, urlStr string) ([]byte, string, 
 		return nil, "", false
 	}
 	return body, mime, true
-}
-
-// hostIsPublic resolves the hostname and refuses if any answer is in a
-// private / loopback / link-local / CGNAT range. Used by fetchURL to keep
-// attacker-controlled BIMI / favicon URLs from being weaponized as an SSRF
-// probe against internal infrastructure.
-//
-// Resolution is intentionally synchronous — the per-source deadline already
-// bounds it, and avoiding a TOCTOU between resolve and connect matters more
-// than the few ms saved by skipping the check on the hot path.
-func hostIsPublic(ctx context.Context, host string) bool {
-	if host == "" {
-		return false
-	}
-	resolver := &net.Resolver{}
-	cctx, cancel := context.WithTimeout(ctx, perSourceTimeout)
-	defer cancel()
-	addrs, err := resolver.LookupIPAddr(cctx, host)
-	if err != nil || len(addrs) == 0 {
-		return false
-	}
-	for _, a := range addrs {
-		ip := a.IP
-		if ip == nil {
-			return false
-		}
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-			ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() ||
-			ip.IsMulticast() || ip.IsUnspecified() {
-			return false
-		}
-		// 100.64.0.0/10 — Carrier-Grade NAT, also non-routable on the public Internet.
-		if ip4 := ip.To4(); ip4 != nil && ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
-			return false
-		}
-	}
-	return true
 }
 
 // decodeDataURL extracts MIME + payload from a `data:image/png;base64,...` URL.

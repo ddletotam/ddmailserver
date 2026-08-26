@@ -16,6 +16,7 @@ import (
 	"github.com/emersion/go-webdav/carddav"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/tlsverify"
 )
 
 // Client is a CardDAV client for syncing with external address books
@@ -41,8 +42,11 @@ func (c *Client) Connect() error {
 
 	var httpClient *http.Client
 	if c.source.AuthType == "password" {
+		// tlsverify.Transport(): a CardDAV host that omits its intermediate
+		// stays reachable, without giving up verification to get there.
 		httpClient = &http.Client{
-			Timeout: 30 * time.Second,
+			Transport: tlsverify.Transport(),
+			Timeout:   30 * time.Second,
 		}
 		authClient := webdav.HTTPClientWithBasicAuth(httpClient, c.source.CardDAVUsername, c.source.CardDAVPassword)
 		client, err = carddav.NewClient(authClient, c.source.CardDAVURL)
@@ -50,7 +54,7 @@ func (c *Client) Connect() error {
 	} else if c.source.AuthType == "oauth2_google" || c.source.AuthType == "oauth2_microsoft" {
 		// Use OAuth2 bearer token
 		transport := &oauthTransport{
-			base:  http.DefaultTransport,
+			base:  tlsverify.Transport(),
 			token: c.source.OAuthAccessToken,
 		}
 		httpClient = &http.Client{
@@ -599,7 +603,7 @@ func (c *Client) syncGoogleContacts(ctx context.Context, book *models.AddressBoo
 	}
 	req.Header.Set("Authorization", "Bearer "+c.source.OAuthAccessToken)
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := tlsverify.HTTPClient(30 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to fetch Google contacts: %w", err)
@@ -790,7 +794,7 @@ func (c *Client) syncMicrosoftContacts(ctx context.Context, book *models.Address
 
 	req.Header.Set("Authorization", "Bearer "+c.source.OAuthAccessToken)
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := tlsverify.HTTPClient(30 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to fetch Microsoft contacts: %w", err)
