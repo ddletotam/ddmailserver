@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/timeutil"
@@ -21,8 +22,8 @@ func (db *DB) CreateCalendar(cal *models.Calendar) error {
 	query := `
 		INSERT INTO calendars (
 			source_id, user_id, remote_id, name, description, color, timezone, ctag, can_write,
-			reverse_sync, enabled, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			reverse_sync, enabled, created_at, updated_at, supported_components
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		RETURNING id
 	`
 
@@ -30,7 +31,7 @@ func (db *DB) CreateCalendar(cal *models.Calendar) error {
 		query,
 		cal.SourceID, cal.UserID, remoteID, cal.Name, cal.Description,
 		cal.Color, cal.Timezone, cal.CTag, cal.CanWrite,
-		cal.ReverseSync, cal.Enabled, cal.CreatedAt, cal.UpdatedAt,
+		cal.ReverseSync, cal.Enabled, cal.CreatedAt, cal.UpdatedAt, supportedComponents(cal),
 	).Scan(&cal.ID)
 
 	if err != nil {
@@ -80,7 +81,7 @@ func (db *DB) GetCalendarsByUserIDFiltered(userID int64, enabledOnly bool) ([]*m
 		       COALESCE(c.description, ''), COALESCE(c.color, s.color), c.timezone,
 		       COALESCE(c.ctag, ''), c.can_write, COALESCE(c.reverse_sync, false),
 		       COALESCE(c.enabled, true), c.created_at, c.updated_at, s.source_type,
-		       COALESCE(s.identity_email, '')
+		       COALESCE(s.identity_email, ''), COALESCE(c.supported_components, 'VEVENT')
 		FROM calendars c
 		JOIN calendar_sources s ON c.source_id = s.id
 		WHERE c.user_id = $1
@@ -105,7 +106,7 @@ func (db *DB) GetCalendarsByUserIDFiltered(userID int64, enabledOnly bool) ([]*m
 			&cal.Description, &cal.Color, &cal.Timezone,
 			&cal.CTag, &cal.CanWrite, &cal.ReverseSync,
 			&cal.Enabled, &cal.CreatedAt, &cal.UpdatedAt, &cal.SourceType,
-			&cal.IdentityEmail,
+			&cal.IdentityEmail, &cal.SupportedComponents,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan calendar: %w", err)
@@ -126,7 +127,7 @@ func (db *DB) GetCalendarByID(id int64) (*models.Calendar, error) {
 		       COALESCE(c.description, ''), COALESCE(c.color, s.color), c.timezone,
 		       COALESCE(c.ctag, ''), c.can_write, COALESCE(c.reverse_sync, false),
 		       COALESCE(c.enabled, true), c.created_at, c.updated_at, s.source_type,
-		       COALESCE(s.identity_email, '')
+		       COALESCE(s.identity_email, ''), COALESCE(c.supported_components, 'VEVENT')
 		FROM calendars c
 		JOIN calendar_sources s ON c.source_id = s.id
 		WHERE c.id = $1
@@ -137,7 +138,7 @@ func (db *DB) GetCalendarByID(id int64) (*models.Calendar, error) {
 		&cal.Description, &cal.Color, &cal.Timezone,
 		&cal.CTag, &cal.CanWrite, &cal.ReverseSync,
 		&cal.Enabled, &cal.CreatedAt, &cal.UpdatedAt, &cal.SourceType,
-		&cal.IdentityEmail,
+		&cal.IdentityEmail, &cal.SupportedComponents,
 	)
 
 	if err == sql.ErrNoRows {
@@ -198,7 +199,7 @@ func (db *DB) GetCalendarByRemoteID(sourceID int64, remoteID string) (*models.Ca
 		       COALESCE(c.description, ''), COALESCE(c.color, s.color), c.timezone,
 		       COALESCE(c.ctag, ''), c.can_write, COALESCE(c.reverse_sync, false),
 		       COALESCE(c.enabled, true), c.created_at, c.updated_at,
-		       s.source_type, COALESCE(s.identity_email, '')
+		       s.source_type, COALESCE(s.identity_email, ''), COALESCE(c.supported_components, 'VEVENT')
 		FROM calendars c
 		JOIN calendar_sources s ON c.source_id = s.id
 		WHERE c.source_id = $1 AND c.remote_id = $2
@@ -209,7 +210,7 @@ func (db *DB) GetCalendarByRemoteID(sourceID int64, remoteID string) (*models.Ca
 		&cal.Description, &cal.Color, &cal.Timezone,
 		&cal.CTag, &cal.CanWrite, &cal.ReverseSync,
 		&cal.Enabled, &cal.CreatedAt, &cal.UpdatedAt,
-		&cal.SourceType, &cal.IdentityEmail,
+		&cal.SourceType, &cal.IdentityEmail, &cal.SupportedComponents,
 	)
 
 	if err == sql.ErrNoRows {
@@ -264,4 +265,17 @@ func (db *DB) UpdateCalendarCTag(calendarID int64, ctag string) error {
 		return fmt.Errorf("failed to update calendar ctag: %w", err)
 	}
 	return nil
+}
+
+// supportedComponents is what a new calendar row records as acceptable.
+//
+// Defaults to events only rather than to "whatever the caller left empty":
+// claiming component support that does not exist is the exact mistake that had
+// iOS filing Reminders into an event calendar and the reverse sync pushing them
+// at iCloud forever. See migrations/048.
+func supportedComponents(cal *models.Calendar) string {
+	if strings.TrimSpace(cal.SupportedComponents) == "" {
+		return models.ComponentEvent
+	}
+	return cal.SupportedComponents
 }
