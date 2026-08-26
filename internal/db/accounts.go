@@ -10,8 +10,19 @@ import (
 	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
-// CreateAccount creates a new external email account
+// CreateAccount creates a new external email account.
 func (db *DB) CreateAccount(account *models.Account) error {
+	return createAccount(db, db.encryptionKey, account)
+}
+
+// CreateAccount creates an account inside a transaction. Used by the
+// .mobileconfig import, where the account, its calendar source and its contact
+// source have to land together or not at all.
+func (tx *Tx) CreateAccount(account *models.Account) error {
+	return createAccount(tx, tx.encryptionKey, account)
+}
+
+func createAccount(q querier, encryptionKey string, account *models.Account) error {
 	account.CreatedAt = timeutil.Now()
 	account.UpdatedAt = timeutil.Now()
 
@@ -21,12 +32,12 @@ func (db *DB) CreateAccount(account *models.Account) error {
 	}
 
 	// Encrypt passwords before storing
-	encryptedIMAPPassword, err := crypto.EncryptPassword(account.IMAPPassword, db.encryptionKey)
+	encryptedIMAPPassword, err := crypto.EncryptPassword(account.IMAPPassword, encryptionKey)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt IMAP password: %w", err)
 	}
 
-	encryptedSMTPPassword, err := crypto.EncryptPassword(account.SMTPPassword, db.encryptionKey)
+	encryptedSMTPPassword, err := crypto.EncryptPassword(account.SMTPPassword, encryptionKey)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt SMTP password: %w", err)
 	}
@@ -34,13 +45,13 @@ func (db *DB) CreateAccount(account *models.Account) error {
 	// Encrypt OAuth tokens if present
 	var encryptedAccessToken, encryptedRefreshToken string
 	if account.OAuthAccessToken != "" {
-		encryptedAccessToken, err = crypto.EncryptPassword(account.OAuthAccessToken, db.encryptionKey)
+		encryptedAccessToken, err = crypto.EncryptPassword(account.OAuthAccessToken, encryptionKey)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt OAuth access token: %w", err)
 		}
 	}
 	if account.OAuthRefreshToken != "" {
-		encryptedRefreshToken, err = crypto.EncryptPassword(account.OAuthRefreshToken, db.encryptionKey)
+		encryptedRefreshToken, err = crypto.EncryptPassword(account.OAuthRefreshToken, encryptionKey)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt OAuth refresh token: %w", err)
 		}
@@ -70,7 +81,7 @@ func (db *DB) CreateAccount(account *models.Account) error {
 		tokenExpiry = sql.NullInt64{Int64: account.OAuthTokenExpiry, Valid: true}
 	}
 
-	err = db.QueryRow(
+	err = q.QueryRow(
 		query,
 		account.UserID, account.Name, account.Email,
 		account.IMAPHost, account.IMAPPort, account.IMAPUsername, encryptedIMAPPassword, account.IMAPTLS,
@@ -199,15 +210,19 @@ func (db *DB) GetAccountByID(id int64) (*models.Account, error) {
 
 // UpdateAccount updates an account
 func (db *DB) UpdateAccount(account *models.Account) error {
+	return updateAccount(db, db.encryptionKey, account)
+}
+
+func updateAccount(q querier, encryptionKey string, account *models.Account) error {
 	account.UpdatedAt = timeutil.Now()
 
 	// Encrypt passwords before storing
-	encryptedIMAPPassword, err := crypto.EncryptPassword(account.IMAPPassword, db.encryptionKey)
+	encryptedIMAPPassword, err := crypto.EncryptPassword(account.IMAPPassword, encryptionKey)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt IMAP password: %w", err)
 	}
 
-	encryptedSMTPPassword, err := crypto.EncryptPassword(account.SMTPPassword, db.encryptionKey)
+	encryptedSMTPPassword, err := crypto.EncryptPassword(account.SMTPPassword, encryptionKey)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt SMTP password: %w", err)
 	}
@@ -228,7 +243,7 @@ func (db *DB) UpdateAccount(account *models.Account) error {
 		WHERE id = $19
 	`
 
-	_, err = db.Exec(
+	_, err = q.Exec(
 		query,
 		account.Name, account.Email,
 		account.IMAPHost, account.IMAPPort, account.IMAPUsername, encryptedIMAPPassword, account.IMAPTLS,

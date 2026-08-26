@@ -9111,6 +9111,30 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         }
                     });
                 }
+                EngineEvent::IdentitiesChanged => {
+                    println!("engine event: identities changed — refreshing accounts, calendars, contacts");
+                    // A profile import can add a mailbox, a calendar source and
+                    // an address book in one go. Refresh all three: the
+                    // identity list (sidebar tints and the from-picker), the
+                    // calendar list, and the contacts. Not debounced like
+                    // CalendarUpdated — this arrives once per import, not in
+                    // per-calendar bursts.
+                    SHARED.with(|s| {
+                        if let Some(sh) = s.borrow().as_ref() {
+                            if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                                let _ = etx.send(engine::EngineCmd::RefreshIdentities);
+                                let _ = etx.send(engine::EngineCmd::FetchCalendars);
+                            }
+                            fetch_contacts(sh, "");
+                            // The new calendar has no events on screen yet.
+                            // Bypass the CalendarUpdated debounce: this is a
+                            // one-off, and waiting out its 2-minute window
+                            // would leave the imported calendar blank.
+                            sh.last_cal_refetch.set(Some(std::time::Instant::now()));
+                            refetch_calendar_events(ui, sh);
+                        }
+                    });
+                }
                 EngineEvent::TokenRefreshed { account_id, token } => {
                     // Persist the rotated JWT — otherwise the next launch
                     // starts from the stale token and, past the 30-day

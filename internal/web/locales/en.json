@@ -2,7 +2,6 @@
   "app.name": "DDMailServer",
   "app.subtitle": "Self-hosted Email Aggregator",
   "app.footer": "DDMailServer - Self-hosted Email Aggregator",
-
   "auth.login": "Login",
   "auth.register": "Register",
   "auth.username": "Username",
@@ -10,7 +9,6 @@
   "auth.password": "Password",
   "auth.password_confirm": "Confirm Password",
   "auth.logout": "Logout",
-
   "nav.dashboard": "Dashboard",
   "nav.inbox": "Inbox",
   "nav.compose": "Compose",
@@ -18,7 +16,6 @@
   "nav.domains": "Domains",
   "nav.settings": "Settings",
   "nav.admin": "Server Settings",
-
   "admin.users": "Users",
   "admin.username": "Username",
   "admin.email": "Email",
@@ -36,7 +33,6 @@
   "admin.delete": "Delete user",
   "admin.delete_confirm": "Permanently delete {u} and all their data? This cannot be undone.",
   "admin.no_users": "No users yet",
-
   "dashboard.welcome": "Welcome",
   "dashboard.email_accounts": "Email Accounts",
   "dashboard.total_messages": "Total Messages",
@@ -48,7 +44,6 @@
   "dashboard.read_emails": "Read your emails",
   "dashboard.write_email": "Write new email",
   "dashboard.manage_accounts": "Manage email accounts",
-
   "accounts.title": "Email Accounts",
   "accounts.add": "Add Account",
   "accounts.edit": "Edit Account",
@@ -65,7 +60,6 @@
   "accounts.no_accounts": "No email accounts yet",
   "accounts.add_first": "Add your first email account to get started",
   "accounts.loading": "Loading accounts...",
-
   "accounts.form.title_add": "Add Email Account",
   "accounts.form.title_edit": "Edit Email Account",
   "accounts.form.account_info": "Account Information",
@@ -98,7 +92,6 @@
   "accounts.form.update": "Update Account",
   "accounts.form.add": "Add Account",
   "accounts.form.cancel": "Cancel",
-
   "accounts.logs": "Logs",
   "accounts.logs.title": "Account Log",
   "accounts.logs.all": "All",
@@ -106,7 +99,6 @@
   "accounts.logs.empty": "No log entries",
   "accounts.logs.empty_description": "Log entries will appear here after sync operations.",
   "accounts.logs.back": "Back to Accounts",
-
   "inbox.title": "Inbox",
   "inbox.all_messages": "All Messages",
   "inbox.sent": "Sent",
@@ -122,7 +114,6 @@
   "inbox.of": "of",
   "inbox.previous": "Previous",
   "inbox.next": "Next",
-
   "message.back_to_inbox": "Back to Inbox",
   "message.reply": "Reply",
   "message.forward": "Forward",
@@ -133,7 +124,6 @@
   "message.cc": "Cc:",
   "message.date": "Date:",
   "message.attachments": "Attachments",
-
   "compose.title": "Compose Email",
   "compose.from_account": "From Account:",
   "compose.select_account": "Select account...",
@@ -160,17 +150,14 @@
   "compose.reply": "Reply",
   "compose.forward": "Forward",
   "compose.draft_saved": "Draft saved",
-
   "button.save": "Save",
   "button.cancel": "Cancel",
   "button.delete": "Delete",
   "button.close": "Close",
   "button.send": "Send",
-
   "status.loading": "Loading...",
   "status.error": "Error",
   "status.success": "Success",
-
   "recovery.title": "Your Recovery Key",
   "recovery.warning_title": "SAVE THIS NOW!",
   "recovery.warning_text": "This recovery key will be shown ONLY ONCE. If you lose your password AND this key, you will PERMANENTLY lose access to your account. We cannot help you recover it!",
@@ -181,7 +168,6 @@
   "recovery.instruction_3": "DO NOT screenshot or email it to yourself",
   "recovery.i_saved": "I have saved my recovery key in a safe place",
   "recovery.continue": "Continue to Dashboard",
-
   "forgot.title": "Forgot Password",
   "forgot.subtitle": "Reset your password using your recovery key",
   "forgot.username": "Username",
@@ -192,7 +178,6 @@
   "forgot.reset_button": "Reset Password",
   "forgot.back_to_login": "Back to Login",
   "forgot.success": "Password reset successfully! You can now login with your new password.",
-
   "settings.title": "Settings",
   "settings.user_info": "User Information",
   "settings.username": "Username",
@@ -211,7 +196,6 @@
   "settings.delete_account": "Delete Account",
   "settings.delete_confirm": "Are you sure you want to delete your account? This action cannot be undone.",
   "settings.delete_confirm_final": "This is your last chance. All your data will be permanently deleted. Continue?",
-
   "domains.title": "Domains & Mailboxes",
   "domains.add_domain": "Add Domain",
   "domains.domain_name": "Domain Name",
@@ -237,11 +221,9 @@
   "domains.no_mailboxes_hint": "Create a mailbox for users to receive email",
   "domains.dns_setup": "DNS Setup Instructions",
   "domains.dns_instructions": "Add the following DNS records to your domain to receive email:",
-
   "nav.calendars": "Calendars",
   "nav.search": "Search",
   "nav.vault": "Vault",
-
   "vault.title": "Deleted Messages",
   "vault.messages": "messages",
   "vault.restore": "Restore",
@@ -249,7 +231,6 @@
   "vault.confirm_delete": "Permanently delete this message? This cannot be undone.",
   "vault.empty": "Vault is empty",
   "vault.empty_description": "Deleted messages will appear here for recovery before permanent deletion.",
-
   "search.title": "Search",
   "search.placeholder": "Search messages and calendars...",
   "search.button": "Search",
@@ -262,11 +243,9 @@
   "search.try_different": "Try different search terms or check your spelling.",
   "search.start_title": "Search your data",
   "search.start_description": "Enter keywords to search across all your messages and calendar events.",
-
   "messages.from": "From",
   "messages.subject": "Subject",
   "messages.date": "Date",
-
   "calendars.title": "Calendars",
   "calendars.sources": "Calendar Sources",
   "calendars.all": "All Calendars",
@@ -284,9 +263,7 @@
   "calendars.caldav_info": "CalDAV Access",
   "calendars.caldav_connect": "Connect from Thunderbird or other CalDAV clients",
   "calendars.caldav_hint": "Use your mail server username and password to authenticate",
-
   "nav.contacts": "Contacts",
-
   "contacts.title": "Contacts",
   "contacts.sources": "Contact Sources",
   "contacts.address_books": "Address Books",
@@ -312,12 +289,10 @@
   "contacts.carddav_info": "CardDAV Access",
   "contacts.carddav_connect": "Connect from Thunderbird, iOS, or macOS Contacts",
   "contacts.carddav_hint": "Use your mail server username and password to authenticate",
-
   "common.loading": "Loading...",
   "common.add": "Add",
   "common.create": "Create",
   "common.cancel": "Cancel",
-
   "nav.spam": "Spam",
   "spam.title": "Spam",
   "spam.messages": "messages",
@@ -348,7 +323,6 @@
   "messages.body": "Message body",
   "messages.view_body": "View full body",
   "common.copy": "Copy",
-
   "spam.analyze.title": "Analyze Message",
   "spam.analyze.hint": "Enter Message-ID to analyze a message for spam indicators without marking it.",
   "spam.analyze.button": "Analyze",
@@ -375,7 +349,6 @@
   "spam.rules.help_domain": "Match all emails from a domain (e.g., example.com matches *@example.com).",
   "spam.rules.help_spam": "Messages from this sender will always be marked as spam.",
   "spam.rules.help_allow": "Messages from this sender will never be marked as spam (whitelist).",
-
   "spam.settings.title": "Spam Check Settings",
   "spam.settings.description": "Enable or disable specific spam detection methods. Disabled checks will not contribute to spam scores.",
   "spam.settings.check": "Check",
@@ -397,7 +370,6 @@
   "spam.settings.help_sender": "Brand-impersonation heuristics on the From display name.",
   "spam.settings.help_emojis": "Emojis in subject line — a noisy but consistent spam indicator.",
   "spam.settings.help_url_shortener": "Detects URL shorteners (bit.ly, etc.) often used in spam and phishing.",
-
   "spam.check.chain": "Received chain",
   "spam.check.spf": "SPF Check",
   "spam.check.dkim": "DKIM Signature",
@@ -412,8 +384,41 @@
   "spam.check.url_shortener": "URL Shorteners",
   "spam.rules.excluded_checks": "Skip checks (allow only)",
   "spam.rules.excluded_hint": "For whitelist rules: skip only these checks instead of trusting the sender entirely. Leave empty to bypass all checks.",
-
   "pagination.showing": "Showing",
   "pagination.of": "of",
-  "delete": "Delete"
+  "delete": "Delete",
+  "settings.device_profiles": "Device profiles",
+  "settings.profile_export": "Export",
+  "settings.profile_export_hint": "One file that sets up mail, calendars and contacts on an Apple device — everything this server already aggregates, behind a single account.",
+  "settings.profile_include_password": "Include a password in the profile",
+  "settings.profile_password_warning": "The profile format cannot encrypt secrets. A fresh application password will be embedded in the clear and the previous profile's one revoked. Do not email this file or leave it in a synced folder.",
+  "settings.profile_download": "Download profile",
+  "settings.profile_import": "Import",
+  "settings.profile_import_hint": "Read an Apple configuration profile and set up the accounts it describes. Nothing is written until you confirm.",
+  "settings.profile_mail": "Mail",
+  "settings.profile_calendar": "Calendar",
+  "settings.profile_contacts": "Contacts",
+  "settings.profile_no_password": "no password",
+  "settings.profile_ignored": "Skipped, unsupported here",
+  "settings.profile_email": "Email address",
+  "settings.profile_email_required": "This profile carries no address. Supply one — every calendar and address book here belongs to a concrete identity.",
+  "settings.profile_name": "Account name",
+  "settings.profile_conflict": "An account already exists for",
+  "settings.profile_conflict_abort": "Cancel the import — change nothing",
+  "settings.profile_conflict_replace": "Replace the existing account's settings",
+  "settings.profile_conflict_rename": "Import under a different address",
+  "settings.profile_rename_placeholder": "new@example.org",
+  "settings.profile_do_import": "Import",
+  "settings.app_passwords": "Application passwords",
+  "settings.app_passwords_hint": "A separate password for one device or program. Works for mail, calendars and contacts, but not for signing in here — so losing one costs a single revoke instead of an account-wide password change.",
+  "settings.app_password_label_placeholder": "iPhone, Thunderbird at home, …",
+  "settings.app_password_create": "Create",
+  "settings.app_password_shown_once": "Copy it now — this is the only time it is shown.",
+  "settings.app_password_label": "Label",
+  "settings.app_password_secret": "Password",
+  "settings.app_password_last_used": "Last used",
+  "settings.app_password_revoke": "Revoke",
+  "settings.app_password_revoked": "revoked",
+  "settings.app_password_revoke_confirm": "Revoke this password? Any device using it will stop connecting.",
+  "settings.app_passwords_empty": "No application passwords yet."
 }

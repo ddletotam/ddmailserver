@@ -103,6 +103,10 @@ func (db *DB) identitySet(query string, userID int64) (map[string]bool, error) {
 // the /identities handler: first local mailbox, else first external account
 // with an email, else the username.
 func (db *DB) DefaultIdentityEmail(userID int64) (string, error) {
+	return defaultIdentityEmail(db, userID)
+}
+
+func defaultIdentityEmail(q querier, userID int64) (string, error) {
 	query := `
 		SELECT COALESCE(
 			(SELECT m.local_part || '@' || d.domain
@@ -115,7 +119,7 @@ func (db *DB) DefaultIdentityEmail(userID int64) (string, error) {
 		)
 	`
 	var email string
-	if err := db.QueryRow(query, userID).Scan(&email); err != nil {
+	if err := q.QueryRow(query, userID).Scan(&email); err != nil {
 		return "", fmt.Errorf("failed to resolve default identity for user %d: %w", userID, err)
 	}
 	return email, nil

@@ -399,6 +399,13 @@ pub enum EngineCmd {
     /// the native provider is in use; ImapProvider returns an empty
     /// list (no calendar support there).
     FetchCalendars,
+    /// Re-read the identity list from the server and overwrite the cache.
+    ///
+    /// The ordinary refresh happens inside FetchConversations, and only on a
+    /// full sync — identities change rarely enough that asking on every delta
+    /// would be waste. A profile import changes them out of band, which is the
+    /// one case that needs to say so explicitly.
+    RefreshIdentities,
     /// Events overlapping `[from_ms, to_ms)`. `calendar_ids` empty =
     /// fetch from all the user's calendars (the engine-default).
     ///
@@ -1049,6 +1056,20 @@ pub fn spawn(
                         contacts,
                         messages,
                     });
+                }
+                EngineCmd::RefreshIdentities => {
+                    // Unconditional, unlike the cached check in
+                    // FetchConversations: the whole point of this command is
+                    // that the caller already knows the cache is stale.
+                    for conn in &conns {
+                        match rt.block_on(conn.provider.fetch_identities()) {
+                            Ok(idents) => {
+                                println!("[idents] refreshed {} for {}", idents.len(), conn.key);
+                                cache.save_identities(&conn.key, &idents).ok();
+                            }
+                            Err(e) => eprintln!("identities refresh [{}]: {e}", conn.key),
+                        }
+                    }
                 }
                 EngineCmd::FetchCalendars => {
                     // Fan out across every account and tag each calendar with

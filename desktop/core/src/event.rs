@@ -40,6 +40,14 @@ pub enum EngineEvent {
     MessageSent,
     /// A calendar changed server-side.
     CalendarUpdated { calendar_id: i64 },
+    /// The set of accounts, calendar sources or contact sources changed
+    /// server-side — a .mobileconfig import can add all three at once.
+    ///
+    /// Identities are cached and normally refreshed only on a full sync,
+    /// because they change rarely. Without this event an account imported
+    /// while the client was running stayed invisible — no sidebar tint, no
+    /// from-picker entry, no calendar — until the next restart.
+    IdentitiesChanged,
     /// The session token was refreshed (native provider); persist it.
     TokenRefreshed { account_id: String, token: String },
 }

@@ -17,7 +17,7 @@ var wsUpgrader = websocket.Upgrader{
 
 // WSEvent is the JSON frame sent to the client over WebSocket.
 type WSEvent struct {
-	Type       string `json:"type"`                  // "new_message", "flags_changed", "expunge", "calendar_updated"
+	Type       string `json:"type"`                  // "new_message", "flags_changed", "expunge", "calendar_updated", "identities_changed"
 	UserID     int64  `json:"user_id"`               // For filtering
 	Folder     string `json:"folder,omitempty"`      // Mailbox name (mail events)
 	Count      uint32 `json:"count,omitempty"`       // Message count for EXISTS (mail events)

@@ -11,6 +11,16 @@ import (
 
 // CreateContactSource creates a new contact source
 func (db *DB) CreateContactSource(source *models.ContactSource) error {
+	return createContactSource(db, db.encryptionKey, source)
+}
+
+// CreateContactSource creates a contact source inside a transaction. Used by the .mobileconfig
+// import, where every payload has to land together or not at all.
+func (tx *Tx) CreateContactSource(source *models.ContactSource) error {
+	return createContactSource(tx, tx.encryptionKey, source)
+}
+
+func createContactSource(q querier, encryptionKey string, source *models.ContactSource) error {
 	source.CreatedAt = timeutil.Now()
 	source.UpdatedAt = timeutil.Now()
 
@@ -20,7 +30,7 @@ func (db *DB) CreateContactSource(source *models.ContactSource) error {
 
 	// No orphan sources: fall back to the user's default identity.
 	if source.IdentityEmail == "" {
-		email, err := db.DefaultIdentityEmail(source.UserID)
+		email, err := defaultIdentityEmail(q, source.UserID)
 		if err != nil {
 			return err
 		}
@@ -31,7 +41,7 @@ func (db *DB) CreateContactSource(source *models.ContactSource) error {
 	var encryptedPassword string
 	var err error
 	if source.CardDAVPassword != "" {
-		encryptedPassword, err = crypto.EncryptPassword(source.CardDAVPassword, db.encryptionKey)
+		encryptedPassword, err = crypto.EncryptPassword(source.CardDAVPassword, encryptionKey)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt CardDAV password: %w", err)
 		}
@@ -40,13 +50,13 @@ func (db *DB) CreateContactSource(source *models.ContactSource) error {
 	// Encrypt OAuth tokens
 	var encryptedAccessToken, encryptedRefreshToken string
 	if source.OAuthAccessToken != "" {
-		encryptedAccessToken, err = crypto.EncryptPassword(source.OAuthAccessToken, db.encryptionKey)
+		encryptedAccessToken, err = crypto.EncryptPassword(source.OAuthAccessToken, encryptionKey)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt OAuth access token: %w", err)
 		}
 	}
 	if source.OAuthRefreshToken != "" {
-		encryptedRefreshToken, err = crypto.EncryptPassword(source.OAuthRefreshToken, db.encryptionKey)
+		encryptedRefreshToken, err = crypto.EncryptPassword(source.OAuthRefreshToken, encryptionKey)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt OAuth refresh token: %w", err)
 		}
@@ -66,7 +76,7 @@ func (db *DB) CreateContactSource(source *models.ContactSource) error {
 		RETURNING id
 	`
 
-	err = db.QueryRow(
+	err = q.QueryRow(
 		query,
 		source.UserID, source.Name, source.SourceType,
 		source.CardDAVURL, source.CardDAVUsername, encryptedPassword,
