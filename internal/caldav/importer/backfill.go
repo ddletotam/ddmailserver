@@ -95,11 +95,7 @@ func BackfillAttendees(database *db.DB) error {
 		}
 
 		if len(attendees) > 0 {
-			ptrs := make([]*models.CalendarAttendee, len(attendees))
-			for i := range attendees {
-				ptrs[i] = &attendees[i]
-			}
-			if err := database.ReplaceAttendees(p.id, ptrs); err != nil {
+			if err := database.ReplaceAttendees(p.id, AttendeePtrs(attendees)); err != nil {
 				log.Printf("backfill: ReplaceAttendees failed for event %d: %v", p.id, err)
 				continue
 			}

@@ -655,6 +655,13 @@ func (s *Server) syncICSURLSource(ctx context.Context, source *models.CalendarSo
 				existing.DTEnd = event.DTEnd
 				existing.AllDay = event.AllDay
 				existing.RRule = event.RRule
+				existing.OrganizerEmail = event.OrganizerEmail
+				existing.OrganizerName = event.OrganizerName
+				// GetEventByUID doesn't load the guest list, so this has to be
+				// carried over explicitly: ApplySyncChanges replaces attendees
+				// from whatever the struct holds, and a nil slice there would
+				// erase the rows the feed still lists.
+				existing.Attendees = event.Attendees
 				existing.ETag = event.ETag
 				changes.Updates = append(changes.Updates, existing)
 			}
