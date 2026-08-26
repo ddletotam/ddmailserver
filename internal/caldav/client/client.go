@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"log"
@@ -336,8 +337,12 @@ func (c *Client) SyncCalendar(ctx context.Context, cal *models.Calendar) error {
 			}
 			objects, err = c.client.QueryCalendar(ctx, calendarPath, query)
 			if err != nil {
-				log.Printf("CalDAV QueryCalendar failed for path '%s' (base URL: %s): %v", calendarPath, c.source.CalDAVURL, err)
-				return fmt.Errorf("failed to query calendar: %w", err)
+				// go-webdav gave up; read the multistatus ourselves.
+				log.Printf("CalDAV QueryCalendar failed for path '%s' (base URL: %s): %v — falling back to a lenient REPORT", calendarPath, c.source.CalDAVURL, err)
+				objects, err = c.queryObjectPathsLenient(ctx, calendarPath, component)
+				if err != nil {
+					return fmt.Errorf("failed to query calendar: %w", err)
+				}
 			}
 		}
 	}
@@ -618,6 +623,78 @@ func (c *Client) parseCalendarObject(obj *caldav.CalendarObject, calendarID int6
 	}
 
 	return event, nil
+}
+
+// queryObjectPathsLenient issues a calendar-query REPORT and returns the object
+// paths, tolerating responses go-webdav rejects outright.
+//
+// iCloud includes the collection itself as the first <response> of a
+// calendar-query, carrying `calendar-data` inside a 404 propstat — the
+// collection genuinely has no calendar data of its own. go-webdav reads that
+// 404 as a failure of the whole query and returns an error, so a reminder list
+// whose objects were all present and valid came back as
+// "property <calendar-data>: 404 Not Found" and synced nothing.
+//
+// Only hrefs are taken here. Every object is fetched in full by the GET loop
+// that follows, so anything else in the response is noise — which is precisely
+// what makes ignoring the broken parts safe.
+func (c *Client) queryObjectPathsLenient(ctx context.Context, calendarPath, component string) ([]caldav.CalendarObject, error) {
+	if c.httpClient == nil {
+		return nil, fmt.Errorf("client not connected")
+	}
+
+	body := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop><D:getetag/></D:prop>
+  <C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="%s"/></C:comp-filter></C:filter>
+</C:calendar-query>`, component)
+
+	reportURL := c.buildFullURL(calendarPath)
+	req, err := http.NewRequestWithContext(ctx, "REPORT", reportURL, strings.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to build REPORT: %w", err)
+	}
+	req.Header.Set("Depth", "1")
+	req.Header.Set("Content-Type", "application/xml; charset=utf-8")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("REPORT failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read REPORT response: %w", err)
+	}
+	if resp.StatusCode != http.StatusMultiStatus {
+		return nil, fmt.Errorf("REPORT returned %d", resp.StatusCode)
+	}
+
+	var doc struct {
+		Responses []struct {
+			Href string `xml:"href"`
+		} `xml:"response"`
+	}
+	if err := xml.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("failed to parse REPORT response: %w", err)
+	}
+
+	// The collection's own href is in there too; keeping it would send the GET
+	// loop after the directory instead of an object.
+	collection := strings.TrimSuffix(calendarPath, "/")
+
+	var out []caldav.CalendarObject
+	for _, r := range doc.Responses {
+		href := strings.TrimSpace(r.Href)
+		if href == "" || strings.TrimSuffix(href, "/") == collection || strings.HasSuffix(href, "/") {
+			continue
+		}
+		out = append(out, caldav.CalendarObject{Path: href})
+	}
+
+	log.Printf("CalDAV lenient REPORT: %d object paths for %s", len(out), calendarPath)
+	return out, nil
 }
 
 // createICalFromEvent creates an ical.Calendar from a CalendarEvent
