@@ -416,6 +416,58 @@ pub struct DesktopCalendarEvent {
     pub identity_email: String,
 }
 
+/// A task (VTODO), as the server's `/tasks` endpoint returns it.
+///
+/// Separate from `DesktopCalendarEvent` rather than a variant of it: a task has
+/// no end, often no start, and carries completion state an event has nowhere to
+/// put. Sharing one struct would leave most of it null whichever kind arrived,
+/// and the week grid would have to learn to skip half its input.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopTask {
+    pub id: i64,
+    pub calendar_id: i64,
+    /// Engine-tagged owning account (multi-account routing).
+    #[serde(default)]
+    pub account_key: String,
+    pub uid: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub description: String,
+    /// Both optional and independent: a task may be scheduled, deadlined,
+    /// both, or neither. Milliseconds since epoch.
+    #[serde(default)]
+    pub start: Option<i64>,
+    #[serde(default)]
+    pub due: Option<i64>,
+    #[serde(default)]
+    pub all_day: bool,
+    /// RFC 5545 spelling: NEEDS-ACTION, IN-PROCESS, COMPLETED, CANCELLED.
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub completed: bool,
+    #[serde(default)]
+    pub completed_at: Option<i64>,
+    #[serde(default)]
+    pub percent_complete: Option<i16>,
+    /// 0 undefined, 1 highest … 9 lowest (RFC 5545 §3.8.1.9).
+    #[serde(default)]
+    pub priority: Option<i16>,
+    #[serde(default)]
+    pub rrule: String,
+    /// Server-resolved presentation + capability, mirroring events so the
+    /// source-blind client can render one list.
+    #[serde(default)]
+    pub color: String,
+    #[serde(default)]
+    pub can_write: bool,
+    #[serde(default)]
+    pub identity_email: String,
+    #[serde(default)]
+    pub calendar_name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DesktopEventExtra {
     pub name: String,

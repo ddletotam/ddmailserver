@@ -509,6 +509,26 @@ impl MailProvider for NativeProvider {
         self.get(&path).await
     }
 
+    async fn fetch_tasks(&self, include_completed: bool) -> Result<Vec<DesktopTask>, String> {
+        let path = if include_completed {
+            "/tasks?include_completed=1"
+        } else {
+            "/tasks"
+        };
+        self.get(path).await
+    }
+
+    async fn set_task_completion(&self, task_id: i64, completed: bool) -> Result<bool, String> {
+        let body = serde_json::json!({ "completed": completed });
+        let resp: serde_json::Value = self
+            .post(&format!("/tasks/{task_id}/completion"), &body)
+            .await?;
+        Ok(resp
+            .get("completed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(completed))
+    }
+
     async fn rsvp_event(&self, event_id: i64, partstat: &str) -> Result<String, String> {
         let body = serde_json::json!({ "partstat": partstat });
         let resp: serde_json::Value = self.post(&format!("/events/{event_id}/rsvp"), &body).await?;

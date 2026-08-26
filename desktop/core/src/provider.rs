@@ -190,6 +190,27 @@ pub trait MailProvider: Send + Sync {
         calendar_ids: &[i64],
     ) -> Result<Vec<DesktopCalendarEvent>, String>;
 
+    /// Fetch the user's tasks (VTODO).
+    ///
+    /// No time window, unlike events: most tasks have no start and many have
+    /// no due date, so a window would silently hide the bulk of a reminders
+    /// list. `include_completed` adds the finished ones.
+    ///
+    /// Defaulted so IMAP-only providers degrade to an empty list rather than
+    /// an error — a mail-only account simply has no tasks.
+    async fn fetch_tasks(&self, _include_completed: bool) -> Result<Vec<DesktopTask>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Mark a task done or not done. Returns the state the server persisted.
+    ///
+    /// Defaulted to an error rather than a no-op: silently swallowing the click
+    /// would leave the checkbox ticked locally and the task outstanding
+    /// everywhere else.
+    async fn set_task_completion(&self, _task_id: i64, _completed: bool) -> Result<bool, String> {
+        Err("Tasks require a DDMail server.".into())
+    }
+
     /// Update the requesting user's PARTSTAT on an event. PartStat must be
     /// one of ACCEPTED / DECLINED / TENTATIVE. Returns the value the server
     /// persisted so the caller can reconcile.

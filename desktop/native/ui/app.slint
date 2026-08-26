@@ -39,6 +39,27 @@ struct AddrBookRow {
     email: string,    // primary email (for compose-to on click)
 }
 
+// One row of the task list (view-mode 3). Everything is pre-rendered on the
+// Rust side: Slint has no date formatting and no locale, so a due date arrives
+// as the string it will be drawn as, already coloured by how overdue it is.
+struct TaskRow {
+    id: int,
+    summary: string,
+    // "" when the task has no deadline — most of a reminders list does not.
+    due-text: string,
+    // Red for overdue, amber for today, grey otherwise.
+    due-color: brush,
+    done: bool,
+    // Owning list, shown as a subtle right-hand caption so a task's origin is
+    // visible without grouping the list by calendar.
+    calendar: string,
+    // Owning calendar's colour, as a leading dot.
+    color: brush,
+    // Read-only rows come from collections the server says we cannot write to;
+    // their checkbox does not respond.
+    can-write: bool,
+}
+
 struct ConvItem {
     name: string,
     preview: string,
@@ -844,6 +865,17 @@ export component MainWindow inherits Window {
     in property <bool> engine-reloading: false;
     // Empty-state CTA → open settings to add the first connection.
     callback add-first-connection();
+
+    // ── Tasks (view-mode 3) ──
+    in property <[TaskRow]> tasks;
+    // Finished tasks are hidden by default: a done reminder is history, and
+    // Apple's lists accumulate a lot of it.
+    in-out property <bool> tasks-show-done: false;
+    in property <bool> tasks-loading: false;
+    // Checkbox clicked — Rust flips the status and pushes it upstream.
+    callback task-toggle(int);
+    // Re-read the list from the server.
+    callback tasks-refresh();
 
     // ── Address book (view-mode 2) ──
     in property <[AddrBookRow]> address-book;
@@ -3554,6 +3586,159 @@ export component MainWindow inherits Window {
                 }
             }
         }
+
+        // ---------- Tasks (view-mode 3) ----------
+        if root.view-mode == 3: Rectangle {
+            horizontal-stretch: 1;
+            background: #f7f8fa;
+            VerticalLayout {
+                // Header: burger + title + "show done" toggle.
+                Rectangle {
+                    height: 56px;
+                    Rectangle {
+                        x: 10px; y: 10px; width: 36px; height: 36px;
+                        border-radius: 10px;
+                        background: burger-tk.has-hover ? #e1e6ee : transparent;
+                        burger-tk := TouchArea { clicked => { root.view-menu-open = !root.view-menu-open; } }
+                        VerticalLayout {
+                            padding-left: 9px; padding-right: 9px; spacing: 4px; alignment: center;
+                            Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
+                            Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
+                            Rectangle { height: 2px; border-radius: 1px; background: #6b7480; }
+                        }
+                    }
+                    Text {
+                        x: 60px; width: parent.width - 260px; height: 56px;
+                        text: "Задачи";
+                        font-size: 18px; font-weight: 700; color: #0f1419;
+                        vertical-alignment: center;
+                    }
+                    // "Показать выполненные" — a done reminder is history, and
+                    // Apple's lists carry a lot of it, so it is off by default.
+                    Rectangle {
+                        x: parent.width - 196px; y: 12px; width: 142px; height: 32px;
+                        border-radius: 8px;
+                        background: root.tasks-show-done ? #eaf2fe : (tk-done.has-hover ? #eef2f7 : transparent);
+                        tk-done := TouchArea {
+                            clicked => {
+                                root.tasks-show-done = !root.tasks-show-done;
+                                root.tasks-refresh();
+                            }
+                        }
+                        Text {
+                            text: root.tasks-show-done ? "☑ выполненные" : "☐ выполненные";
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: root.tasks-show-done ? #1d63c4 : #6b7480;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Rectangle {
+                        x: parent.width - 46px; y: 10px; width: 36px; height: 36px;
+                        border-radius: 10px;
+                        background: tk-refresh.has-hover ? #e1e6ee : transparent;
+                        tk-refresh := TouchArea { clicked => { root.tasks-refresh(); } }
+                        Text {
+                            text: "⟳";
+                            font-size: 18px; color: #6b7480;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Empty state. Distinguishes "still loading" from "genuinely
+                // none" — the two look identical otherwise, and a blank pane
+                // on a slow fetch reads as a broken feature.
+                if root.tasks.length == 0: Rectangle {
+                    vertical-stretch: 1;
+                    Text {
+                        text: root.tasks-loading
+                            ? "Загрузка…"
+                            : (root.tasks-show-done
+                                ? "Задач нет"
+                                : "Нет невыполненных задач");
+                        font-size: 14px; color: #8a94a0;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                }
+
+                if root.tasks.length > 0: ListView {
+                    vertical-stretch: 1;
+                    for t[idx] in root.tasks: Rectangle {
+                        height: 56px;
+                        background: tk-row.has-hover ? #eef2f7 : transparent;
+                        tk-row := TouchArea { }
+                        HorizontalLayout {
+                            padding-left: 14px; padding-right: 14px; spacing: 12px;
+                            alignment: start;
+
+                            // Checkbox. Its own TouchArea sits above the row's
+                            // so ticking a task does not also select it.
+                            Rectangle {
+                                width: 22px; height: 22px;
+                                y: (parent.height - self.height) / 2;
+                                border-radius: 6px;
+                                border-width: 2px;
+                                border-color: t.done ? #10b981 : (t.can-write ? #b3bcc7 : #dfe4ea);
+                                background: t.done ? #10b981 : transparent;
+                                tk-check := TouchArea {
+                                    clicked => { if (t.can-write) { root.task-toggle(t.id); } }
+                                }
+                                Text {
+                                    text: t.done ? "✓" : "";
+                                    color: white; font-size: 14px; font-weight: 700;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                            }
+
+                            VerticalLayout {
+                                alignment: center; spacing: 2px;
+                                Text {
+                                    text: t.summary;
+                                    font-size: 14px;
+                                    font-weight: 600;
+                                    color: t.done ? #9aa4b0 : #0f1419;
+                                    overflow: elide;
+                                }
+                                if t.due-text != "": Text {
+                                    text: t.due-text;
+                                    font-size: 12px;
+                                    color: t.done ? #b3bcc7 : t.due-color;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+
+                        // Owning list, right-aligned: origin stays visible
+                        // without splitting the list into per-calendar groups.
+                        HorizontalLayout {
+                            x: parent.width - 190px;
+                            width: 176px;
+                            alignment: end;
+                            spacing: 6px;
+                            Rectangle {
+                                width: 8px; height: 8px; border-radius: 4px;
+                                y: (parent.height - self.height) / 2;
+                                background: t.color;
+                            }
+                            Text {
+                                text: t.calendar;
+                                font-size: 11px; color: #8a94a0;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+
+                        Rectangle {
+                            x: 48px; y: parent.height - 1px;
+                            width: parent.width - 48px; height: 1px;
+                            background: #edf0f3;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // ---------- View switcher (burger) overlay ----------
@@ -3565,7 +3750,8 @@ export component MainWindow inherits Window {
             x: 10px;
             y: 54px;
             width: 220px;
-            height: 164px;
+            // 5 entries × 36px + 4 gaps × 2px + 2 × 6px padding.
+            height: 200px;
             background: white;
             border-radius: 10px;
             border-width: 1px;
@@ -3612,6 +3798,19 @@ export component MainWindow inherits Window {
                         padding-left: 12px; spacing: 10px; alignment: start;
                         Text { text: "👤"; font-size: 16px; vertical-alignment: center; }
                         Text { text: "Контакты"; font-size: 14px; font-weight: 600; color: #0f1419; vertical-alignment: center; }
+                    }
+                }
+                Rectangle {
+                    height: 36px;
+                    border-radius: 8px;
+                    background: root.view-mode == 3 ? #eaf2fe : (vm-task.has-hover ? #f0f2f5 : transparent);
+                    vm-task := TouchArea {
+                        clicked => { root.view-mode = 3; root.view-changed(3); root.view-menu-open = false; }
+                    }
+                    HorizontalLayout {
+                        padding-left: 12px; spacing: 10px; alignment: start;
+                        Text { text: "☑"; font-size: 16px; vertical-alignment: center; }
+                        Text { text: "Задачи"; font-size: 14px; font-weight: 600; color: #0f1419; vertical-alignment: center; }
                     }
                 }
                 Rectangle {

@@ -220,6 +220,10 @@ func (s *Server) setupRoutes() {
 	// they have no end, often no start, and would have nowhere to sit on a
 	// week grid. See handlers_desktop_tasks.go.
 	desktopAuthAPI.HandleFunc("/tasks", s.HandleDesktopTasks).Methods("GET")
+	// Completion is its own call, not a field on the event PATCH: that handler
+	// is shaped around recurrence scope and start/end, which a task has no use
+	// for.
+	desktopAuthAPI.HandleFunc("/tasks/{id}/completion", s.HandleDesktopTaskCompletion).Methods("POST")
 	desktopAuthAPI.HandleFunc("/events/{id}/rsvp", s.HandleDesktopEventRSVP).Methods("POST")
 	desktopAuthAPI.HandleFunc("/events/{id}", s.HandleDesktopEventPatch).Methods("PATCH")
 	desktopAuthAPI.HandleFunc("/events/{id}", s.HandleDesktopEventDelete).Methods("DELETE")
