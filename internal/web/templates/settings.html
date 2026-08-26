@@ -73,6 +73,116 @@
         </div>
     </div>
 
+    <!-- Device profiles: export ours, import someone else's -->
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">{{t "settings.device_profiles"}}</h3>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-lg-6 border-end">
+                        <h4>{{t "settings.profile_export"}}</h4>
+                        <p class="text-muted">{{t "settings.profile_export_hint"}}</p>
+                        <label class="form-check">
+                            <input class="form-check-input" type="checkbox" id="mc-include-password">
+                            <span class="form-check-label">{{t "settings.profile_include_password"}}</span>
+                        </label>
+                        <div class="alert alert-warning mt-2 d-none" id="mc-password-warning">
+                            <i class="ti ti-alert-triangle me-1"></i>{{t "settings.profile_password_warning"}}
+                        </div>
+                        <a class="btn btn-primary mt-2" id="mc-download" href="/api/settings/mobileconfig?password=0">
+                            <i class="ti ti-download me-2"></i>{{t "settings.profile_download"}}
+                        </a>
+                    </div>
+
+                    <div class="col-lg-6">
+                        <h4>{{t "settings.profile_import"}}</h4>
+                        <p class="text-muted">{{t "settings.profile_import_hint"}}</p>
+
+                        <input type="file" class="form-control" id="mc-file"
+                               accept=".mobileconfig,application/x-apple-aspen-config">
+                        <div class="text-danger mt-2 d-none" id="mc-error"></div>
+                        <div class="text-success mt-2 d-none" id="mc-done"></div>
+
+                        <div class="mt-3 d-none" id="mc-preview">
+                            <div class="datagrid" id="mc-summary"></div>
+                            <div class="alert alert-info mt-2 d-none" id="mc-ignored"></div>
+
+                            <div class="mb-2 mt-3">
+                                <label class="form-label">{{t "settings.profile_email"}}</label>
+                                <input type="email" class="form-control" id="mc-email">
+                                <small class="form-hint d-none" id="mc-email-hint">{{t "settings.profile_email_required"}}</small>
+                            </div>
+                            <div class="mb-2">
+                                <label class="form-label">{{t "settings.profile_name"}}</label>
+                                <input type="text" class="form-control" id="mc-name">
+                            </div>
+
+                            <div class="alert alert-warning d-none" id="mc-conflict">
+                                <div class="mb-2" id="mc-conflict-text"></div>
+                                <select class="form-select mb-2" id="mc-strategy">
+                                    <option value="abort">{{t "settings.profile_conflict_abort"}}</option>
+                                    <option value="replace">{{t "settings.profile_conflict_replace"}}</option>
+                                    <option value="rename">{{t "settings.profile_conflict_rename"}}</option>
+                                </select>
+                                <input type="email" class="form-control d-none" id="mc-rename"
+                                       placeholder="{{t "settings.profile_rename_placeholder"}}">
+                            </div>
+
+                            <button class="btn btn-primary" id="mc-import">
+                                <i class="ti ti-upload me-2"></i>{{t "settings.profile_do_import"}}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Application passwords -->
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">{{t "settings.app_passwords"}}</h3>
+            </div>
+            <div class="card-body">
+                <p class="text-muted">{{t "settings.app_passwords_hint"}}</p>
+
+                <div class="d-flex gap-2 mb-3">
+                    <input type="text" class="form-control" id="ap-label"
+                           placeholder="{{t "settings.app_password_label_placeholder"}}">
+                    <button class="btn btn-primary text-nowrap" id="ap-create">
+                        <i class="ti ti-plus me-2"></i>{{t "settings.app_password_create"}}
+                    </button>
+                </div>
+
+                <!-- Shown once and never again: the server keeps only a hash. -->
+                <div class="alert alert-success d-none" id="ap-secret-box">
+                    <div class="mb-1">{{t "settings.app_password_shown_once"}}</div>
+                    <code class="fs-3" id="ap-secret"></code>
+                    <button class="btn btn-sm btn-outline-secondary ms-2" id="ap-copy"><i class="ti ti-copy"></i></button>
+                </div>
+
+                <div class="text-danger mb-2 d-none" id="ap-error"></div>
+
+                <div class="table-responsive">
+                    <table class="table table-vcenter">
+                        <thead>
+                            <tr>
+                                <th>{{t "settings.app_password_label"}}</th>
+                                <th>{{t "settings.app_password_secret"}}</th>
+                                <th>{{t "settings.app_password_last_used"}}</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="ap-rows"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Danger Zone -->
     <div class="col-12">
         <div class="card border-danger">
@@ -88,4 +198,286 @@
         </div>
     </div>
 </div>
+
+<script>
+// Plain DOM, no framework. Alpine is not loaded on this page — the rest of the
+// UI is HTMX — and adding it for two panels would also wake the dormant x-data
+// in compose.html, which has never run in that state.
+//
+// Note on {{"{{t}}"}} inside this block: html/template knows it is in a JS
+// context and emits a quoted, escaped JS string literal, so these actions are
+// written without surrounding quotes.
+(function () {
+    var $ = function (id) { return document.getElementById(id); };
+    var show = function (el, on) { if (el) el.classList.toggle('d-none', !on); };
+    var text = function (el, s) { if (el) el.textContent = s; };
+
+    // --- device profile export -------------------------------------------
+    var includePw = $('mc-include-password');
+    if (includePw) {
+        includePw.addEventListener('change', function () {
+            show($('mc-password-warning'), includePw.checked);
+            $('mc-download').href = '/api/settings/mobileconfig?password=' + (includePw.checked ? '1' : '0');
+        });
+    }
+
+    // --- device profile import -------------------------------------------
+    // Two steps on purpose: preview says what the file would do and whether it
+    // collides with an existing account; nothing is written until the user
+    // answers. The previewed bytes travel back to the apply call, so the
+    // decision lands on exactly what was shown.
+    var parsed = null;
+    var fileInput = $('mc-file');
+
+    var row = function (title, value, badge) {
+        var d = document.createElement('div');
+        d.className = 'datagrid-item';
+        var t = document.createElement('div');
+        t.className = 'datagrid-title';
+        t.textContent = title;
+        var c = document.createElement('div');
+        c.className = 'datagrid-content';
+        c.textContent = value;
+        if (badge) {
+            var b = document.createElement('span');
+            b.className = 'badge bg-red-lt ms-1';
+            b.textContent = badge;
+            c.appendChild(b);
+        }
+        d.appendChild(t);
+        d.appendChild(c);
+        return d;
+    };
+
+    var renderPreview = function (data) {
+        parsed = data;
+        var summary = $('mc-summary');
+        summary.innerHTML = '';
+
+        if (data.mail) {
+            summary.appendChild(row(
+                {{t "settings.profile_mail"}},
+                data.mail.imap_host + ':' + data.mail.imap_port + '  /  ' +
+                    data.mail.smtp_host + ':' + data.mail.smtp_port,
+                data.mail.has_password ? '' : {{t "settings.profile_no_password"}}));
+        }
+        if (data.caldav) {
+            summary.appendChild(row({{t "settings.profile_calendar"}}, data.caldav.url, ''));
+        }
+        if (data.carddav) {
+            summary.appendChild(row({{t "settings.profile_contacts"}}, data.carddav.url, ''));
+        }
+
+        var ignored = $('mc-ignored');
+        if (data.ignored && data.ignored.length) {
+            text(ignored, {{t "settings.profile_ignored"}} + ': ' + data.ignored.join(', '));
+            show(ignored, true);
+        } else {
+            show(ignored, false);
+        }
+
+        $('mc-email').value = data.suggested_email || '';
+        $('mc-name').value = data.suggested_name || '';
+        show($('mc-email-hint'), !!data.email_required);
+
+        if (data.conflict) {
+            text($('mc-conflict-text'),
+                {{t "settings.profile_conflict"}} + ' ' + data.conflict.email +
+                ' (' + data.conflict.imap_host + ')');
+            // Default to the safe answer: cancel, rather than silently
+            // overwrite an account the user may not have in mind.
+            $('mc-strategy').value = 'abort';
+            show($('mc-rename'), false);
+            show($('mc-conflict'), true);
+        } else {
+            show($('mc-conflict'), false);
+        }
+
+        show($('mc-preview'), true);
+    };
+
+    if (fileInput) {
+        fileInput.addEventListener('change', function (ev) {
+            show($('mc-preview'), false);
+            show($('mc-error'), false);
+            show($('mc-done'), false);
+            var file = ev.target.files[0];
+            if (!file) { return; }
+
+            var body = new FormData();
+            body.append('profile', file);
+            fetch('/api/settings/mobileconfig/preview', {method: 'POST', body: body})
+                .then(function (r) { return r.json().then(function (d) { return {ok: r.ok, d: d}; }); })
+                .then(function (res) {
+                    if (!res.ok) {
+                        text($('mc-error'), res.d.error || 'Import failed');
+                        show($('mc-error'), true);
+                        return;
+                    }
+                    renderPreview(res.d);
+                })
+                .catch(function (e) { text($('mc-error'), String(e)); show($('mc-error'), true); });
+        });
+    }
+
+    var strategy = $('mc-strategy');
+    if (strategy) {
+        strategy.addEventListener('change', function () {
+            show($('mc-rename'), strategy.value === 'rename');
+        });
+    }
+
+    var importBtn = $('mc-import');
+    if (importBtn) {
+        importBtn.addEventListener('click', function () {
+            if (!parsed) { return; }
+            importBtn.disabled = true;
+            show($('mc-error'), false);
+            fetch('/api/settings/mobileconfig/import', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    profile: parsed.profile,
+                    email: $('mc-email').value,
+                    name: $('mc-name').value,
+                    strategy: $('mc-strategy').value,
+                    rename_email: $('mc-rename').value
+                })
+            })
+                .then(function (r) { return r.json().then(function (d) { return {ok: r.ok, d: d}; }); })
+                .then(function (res) {
+                    if (!res.ok) {
+                        text($('mc-error'), res.d.error || 'Import failed');
+                        show($('mc-error'), true);
+                        return;
+                    }
+                    show($('mc-preview'), false);
+                    text($('mc-done'), 'OK');
+                    show($('mc-done'), true);
+                    fileInput.value = '';
+                    setTimeout(function () { window.location.reload(); }, 800);
+                })
+                .catch(function (e) { text($('mc-error'), String(e)); show($('mc-error'), true); })
+                .then(function () { importBtn.disabled = false; });
+        });
+    }
+
+    // --- application passwords --------------------------------------------
+    var rowsBody = $('ap-rows');
+
+    var revoke = function (id) {
+        if (!confirm({{t "settings.app_password_revoke_confirm"}})) { return; }
+        show($('ap-error'), false);
+        fetch('/api/settings/app-passwords/' + id, {method: 'DELETE'})
+            .then(function (r) {
+                if (!r.ok) {
+                    return r.json().then(function (d) { throw new Error(d.error || 'Failed'); });
+                }
+                load();
+            })
+            .catch(function (e) { text($('ap-error'), e.message || String(e)); show($('ap-error'), true); });
+    };
+
+    var renderPasswords = function (list) {
+        rowsBody.innerHTML = '';
+        if (!list.length) {
+            var tr = document.createElement('tr');
+            var td = document.createElement('td');
+            td.colSpan = 4;
+            td.className = 'text-muted';
+            td.textContent = {{t "settings.app_passwords_empty"}};
+            tr.appendChild(td);
+            rowsBody.appendChild(tr);
+            return;
+        }
+        list.forEach(function (p) {
+            var tr = document.createElement('tr');
+            if (p.revoked_at) { tr.className = 'text-muted'; }
+
+            var label = document.createElement('td');
+            label.textContent = p.label;
+            if (p.revoked_at) {
+                var b = document.createElement('span');
+                b.className = 'badge bg-secondary-lt ms-1';
+                b.textContent = {{t "settings.app_password_revoked"}};
+                label.appendChild(b);
+            }
+
+            var secret = document.createElement('td');
+            var code = document.createElement('code');
+            code.textContent = '••••-••••-••••-' + p.last4;
+            secret.appendChild(code);
+
+            var used = document.createElement('td');
+            used.textContent = p.last_used_at ? new Date(p.last_used_at).toLocaleString() : '—';
+
+            var action = document.createElement('td');
+            action.className = 'text-end';
+            if (!p.revoked_at) {
+                var btn = document.createElement('button');
+                btn.className = 'btn btn-sm btn-outline-danger';
+                btn.textContent = {{t "settings.app_password_revoke"}};
+                btn.addEventListener('click', function () { revoke(p.id); });
+                action.appendChild(btn);
+            }
+
+            tr.appendChild(label);
+            tr.appendChild(secret);
+            tr.appendChild(used);
+            tr.appendChild(action);
+            rowsBody.appendChild(tr);
+        });
+    };
+
+    var load = function () {
+        fetch('/api/settings/app-passwords')
+            .then(function (r) { return r.json(); })
+            .then(function (d) { renderPasswords(d.app_passwords || []); })
+            .catch(function (e) { text($('ap-error'), String(e)); show($('ap-error'), true); });
+    };
+
+    var createBtn = $('ap-create');
+    var labelInput = $('ap-label');
+
+    var create = function () {
+        var label = (labelInput.value || '').trim();
+        if (!label) { return; }
+        createBtn.disabled = true;
+        show($('ap-error'), false);
+        show($('ap-secret-box'), false);
+        fetch('/api/settings/app-passwords', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({label: label})
+        })
+            .then(function (r) { return r.json().then(function (d) { return {ok: r.ok, d: d}; }); })
+            .then(function (res) {
+                if (!res.ok) {
+                    text($('ap-error'), res.d.error || 'Failed');
+                    show($('ap-error'), true);
+                    return;
+                }
+                // The only moment this value exists outside the device it gets
+                // typed into: the server stored a hash and cannot show it again.
+                text($('ap-secret'), res.d.secret);
+                show($('ap-secret-box'), true);
+                labelInput.value = '';
+                load();
+            })
+            .catch(function (e) { text($('ap-error'), String(e)); show($('ap-error'), true); })
+            .then(function () { createBtn.disabled = false; });
+    };
+
+    if (createBtn) {
+        createBtn.addEventListener('click', create);
+        labelInput.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') { create(); }
+        });
+        $('ap-copy').addEventListener('click', function () {
+            if (navigator.clipboard) { navigator.clipboard.writeText($('ap-secret').textContent); }
+        });
+        load();
+    }
+})();
+</script>
 {{end}}

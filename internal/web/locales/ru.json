@@ -2,7 +2,6 @@
   "app.name": "DDMailServer",
   "app.subtitle": "Самостоятельный агрегатор почты",
   "app.footer": "DDMailServer - Самостоятельный агрегатор почты",
-
   "auth.login": "Вход",
   "auth.register": "Регистрация",
   "auth.username": "Имя пользователя",
@@ -10,7 +9,6 @@
   "auth.password": "Пароль",
   "auth.password_confirm": "Подтвердите пароль",
   "auth.logout": "Выход",
-
   "nav.dashboard": "Панель управления",
   "nav.inbox": "Входящие",
   "nav.compose": "Написать",
@@ -18,7 +16,6 @@
   "nav.domains": "Домены",
   "nav.settings": "Настройки",
   "nav.admin": "Настройки сервера",
-
   "admin.users": "Пользователи",
   "admin.username": "Логин",
   "admin.email": "Email",
@@ -36,7 +33,6 @@
   "admin.delete": "Удалить пользователя",
   "admin.delete_confirm": "Удалить {u} и все его данные навсегда? Это действие необратимо.",
   "admin.no_users": "Пользователей пока нет",
-
   "dashboard.welcome": "Добро пожаловать",
   "dashboard.email_accounts": "Email аккаунты",
   "dashboard.total_messages": "Всего писем",
@@ -48,7 +44,6 @@
   "dashboard.read_emails": "Читать письма",
   "dashboard.write_email": "Написать письмо",
   "dashboard.manage_accounts": "Управление аккаунтами",
-
   "accounts.title": "Email аккаунты",
   "accounts.add": "Добавить аккаунт",
   "accounts.edit": "Редактировать аккаунт",
@@ -65,7 +60,6 @@
   "accounts.no_accounts": "Нет email аккаунтов",
   "accounts.add_first": "Добавьте первый email аккаунт для начала работы",
   "accounts.loading": "Загрузка аккаунтов...",
-
   "accounts.form.title_add": "Добавить Email аккаунт",
   "accounts.form.title_edit": "Редактировать Email аккаунт",
   "accounts.form.account_info": "Информация об аккаунте",
@@ -98,7 +92,6 @@
   "accounts.form.update": "Обновить аккаунт",
   "accounts.form.add": "Добавить аккаунт",
   "accounts.form.cancel": "Отмена",
-
   "accounts.logs": "Журнал",
   "accounts.logs.title": "Журнал аккаунта",
   "accounts.logs.all": "Все",
@@ -106,7 +99,6 @@
   "accounts.logs.empty": "Нет записей",
   "accounts.logs.empty_description": "Записи появятся после операций синхронизации.",
   "accounts.logs.back": "Назад к аккаунтам",
-
   "inbox.title": "Входящие",
   "inbox.all_messages": "Все сообщения",
   "inbox.sent": "Отправленные",
@@ -122,7 +114,6 @@
   "inbox.of": "из",
   "inbox.previous": "Назад",
   "inbox.next": "Далее",
-
   "message.back_to_inbox": "Вернуться к входящим",
   "message.reply": "Ответить",
   "message.forward": "Переслать",
@@ -133,7 +124,6 @@
   "message.cc": "Копия:",
   "message.date": "Дата:",
   "message.attachments": "Вложения",
-
   "compose.title": "Написать письмо",
   "compose.from_account": "От аккаунта:",
   "compose.select_account": "Выберите аккаунт...",
@@ -160,17 +150,14 @@
   "compose.reply": "Ответить",
   "compose.forward": "Переслать",
   "compose.draft_saved": "Черновик сохранён",
-
   "button.save": "Сохранить",
   "button.cancel": "Отмена",
   "button.delete": "Удалить",
   "button.close": "Закрыть",
   "button.send": "Отправить",
-
   "status.loading": "Загрузка...",
   "status.error": "Ошибка",
   "status.success": "Успешно",
-
   "recovery.title": "Ваш ключ восстановления",
   "recovery.warning_title": "СОХРАНИТЕ ПРЯМО СЕЙЧАС!",
   "recovery.warning_text": "Этот ключ восстановления будет показан ТОЛЬКО ОДИН РАЗ. Если вы потеряете пароль И этот ключ, вы НАВСЕГДА потеряете доступ к аккаунту. Мы не сможем вам помочь восстановить его!",
@@ -181,7 +168,6 @@
   "recovery.instruction_3": "НЕ делайте скриншот и не отправляйте себе на email",
   "recovery.i_saved": "Я сохранил ключ восстановления в безопасном месте",
   "recovery.continue": "Продолжить к панели управления",
-
   "forgot.title": "Забыли пароль",
   "forgot.subtitle": "Сбросьте пароль используя ключ восстановления",
   "forgot.username": "Имя пользователя",
@@ -192,7 +178,6 @@
   "forgot.reset_button": "Сбросить пароль",
   "forgot.back_to_login": "Вернуться ко входу",
   "forgot.success": "Пароль успешно сброшен! Теперь вы можете войти с новым паролем.",
-
   "settings.title": "Настройки",
   "settings.user_info": "Информация о пользователе",
   "settings.username": "Имя пользователя",
@@ -211,7 +196,6 @@
   "settings.delete_account": "Удалить аккаунт",
   "settings.delete_confirm": "Вы уверены, что хотите удалить свой аккаунт? Это действие невозможно отменить.",
   "settings.delete_confirm_final": "Это ваш последний шанс. Все ваши данные будут безвозвратно удалены. Продолжить?",
-
   "domains.title": "Домены и почтовые ящики",
   "domains.add_domain": "Добавить домен",
   "domains.domain_name": "Имя домена",
@@ -237,11 +221,9 @@
   "domains.no_mailboxes_hint": "Создайте почтовый ящик для получения писем",
   "domains.dns_setup": "Настройка DNS",
   "domains.dns_instructions": "Добавьте следующие DNS записи для вашего домена чтобы получать почту:",
-
   "nav.calendars": "Календари",
   "nav.search": "Поиск",
   "nav.vault": "Корзина",
-
   "vault.title": "Удалённые письма",
   "vault.messages": "писем",
   "vault.restore": "Восстановить",
@@ -249,7 +231,6 @@
   "vault.confirm_delete": "Удалить письмо безвозвратно? Это действие нельзя отменить.",
   "vault.empty": "Корзина пуста",
   "vault.empty_description": "Удалённые письма появятся здесь для возможности восстановления.",
-
   "search.title": "Поиск",
   "search.placeholder": "Поиск по письмам и календарям...",
   "search.button": "Искать",
@@ -262,11 +243,9 @@
   "search.try_different": "Попробуйте другие ключевые слова или проверьте написание.",
   "search.start_title": "Поиск по данным",
   "search.start_description": "Введите ключевые слова для поиска по всем письмам и событиям календаря.",
-
   "messages.from": "От",
   "messages.subject": "Тема",
   "messages.date": "Дата",
-
   "calendars.title": "Календари",
   "calendars.sources": "Источники календарей",
   "calendars.all": "Все календари",
@@ -284,9 +263,7 @@
   "calendars.caldav_info": "Доступ по CalDAV",
   "calendars.caldav_connect": "Подключение из Thunderbird или других CalDAV клиентов",
   "calendars.caldav_hint": "Используйте логин и пароль от почтового сервера для авторизации",
-
   "nav.contacts": "Контакты",
-
   "contacts.title": "Контакты",
   "contacts.sources": "Источники контактов",
   "contacts.address_books": "Адресные книги",
@@ -312,12 +289,10 @@
   "contacts.carddav_info": "Доступ по CardDAV",
   "contacts.carddav_connect": "Подключение из Thunderbird, iOS или macOS Контакты",
   "contacts.carddav_hint": "Используйте логин и пароль от почтового сервера для авторизации",
-
   "common.loading": "Загрузка...",
   "common.add": "Добавить",
   "common.create": "Создать",
   "common.cancel": "Отмена",
-
   "nav.spam": "Спам",
   "spam.title": "Спам",
   "spam.messages": "сообщений",
@@ -348,7 +323,6 @@
   "messages.body": "Текст письма",
   "messages.view_body": "Показать полностью",
   "common.copy": "Копировать",
-
   "spam.analyze.title": "Анализ письма",
   "spam.analyze.hint": "Введите Message-ID чтобы проанализировать письмо на признаки спама без пометки.",
   "spam.analyze.button": "Анализировать",
@@ -375,7 +349,6 @@
   "spam.rules.help_domain": "Совпадение со всеми письмами с домена (например, example.com для *@example.com).",
   "spam.rules.help_spam": "Сообщения от этого отправителя всегда будут помечены как спам.",
   "spam.rules.help_allow": "Сообщения от этого отправителя никогда не будут помечены как спам.",
-
   "spam.settings.title": "Настройки проверки спама",
   "spam.settings.description": "Включите или отключите отдельные методы обнаружения спама. Отключенные проверки не влияют на оценку спама.",
   "spam.settings.check": "Проверка",
@@ -383,13 +356,11 @@
   "spam.settings.enabled": "Включено",
   "spam.settings.disabled": "Отключено",
   "spam.settings.help_title": "О проверках спама",
-  "spam.settings.help_spf": "Sender Policy Framework - проверяет, что IP отправителя авторизован отправлять почту для домена.",
-  "spam.settings.help_dkim": "DomainKeys Identified Mail - проверяет подпись письма на соответствие домену.",
+  "spam.settings.help_spf": "Sender Policy Framework — проверяет, авторизован ли IP отправителя для домена.",
+  "spam.settings.help_dkim": "DKIM-подпись — проверяет, что подпись соответствует домену отправителя.",
   "spam.settings.weight": "Вес",
   "spam.settings.weight_hint": "Множитель для вклада каждой проверки. 0 — пропустить, 1.0 — по умолчанию, >1 — строже.",
   "spam.settings.help_chain": "Анализ цепочки Received: пропуски, аномалии по времени, подозрительные MTA.",
-  "spam.settings.help_spf": "Sender Policy Framework — проверяет, авторизован ли IP отправителя для домена.",
-  "spam.settings.help_dkim": "DKIM-подпись — проверяет, что подпись соответствует домену отправителя.",
   "spam.settings.help_rbl": "Real-time Blackhole Lists — проверяет IP отправителя по спискам спамеров.",
   "spam.settings.help_headers": "Заголовки: отсутствие Date/Message-ID, несоответствие freemail, аномалии Reply-To.",
   "spam.settings.help_content": "Содержимое тела: спам-фразы, КАПСЫ, подозрительная разметка.",
@@ -399,7 +370,6 @@
   "spam.settings.help_sender": "Эвристика бренд-имперсонации в From-имени.",
   "spam.settings.help_emojis": "Эмодзи в теме письма — шумный, но устойчивый индикатор спама.",
   "spam.settings.help_url_shortener": "Обнаружение сокращателей ссылок (bit.ly и др.), часто используемых в спаме и фишинге.",
-
   "spam.check.chain": "Цепочка Received",
   "spam.check.spf": "Проверка SPF",
   "spam.check.dkim": "Подпись DKIM",
@@ -414,8 +384,41 @@
   "spam.check.url_shortener": "Сокращатели ссылок",
   "spam.rules.excluded_checks": "Пропустить проверки (для allow)",
   "spam.rules.excluded_hint": "Для белых правил: пропустить только эти проверки, остальные оставить. Пусто = доверять полностью.",
-
   "pagination.showing": "Показано",
   "pagination.of": "из",
-  "delete": "Удалить"
+  "delete": "Удалить",
+  "settings.device_profiles": "Профили устройств",
+  "settings.profile_export": "Экспорт",
+  "settings.profile_import": "Импорт",
+  "settings.profile_export_hint": "Один файл, который настраивает на устройстве Apple почту, календари и контакты — всё, что этот сервер уже собрал, одной учётной записью.",
+  "settings.profile_include_password": "Положить пароль в профиль",
+  "settings.profile_password_warning": "Формат профиля не умеет шифровать секреты. В файл ляжет свежий пароль приложения открытым текстом, а пароль предыдущего профиля будет отозван. Не пересылайте такой файл почтой и не оставляйте в синхронизируемой папке.",
+  "settings.profile_download": "Скачать профиль",
+  "settings.profile_import_hint": "Прочитать конфигурационный профиль Apple и завести описанные в нём учётки. До подтверждения ничего не записывается.",
+  "settings.profile_mail": "Почта",
+  "settings.profile_calendar": "Календарь",
+  "settings.profile_contacts": "Контакты",
+  "settings.profile_no_password": "без пароля",
+  "settings.profile_ignored": "Пропущено, здесь не поддерживается",
+  "settings.profile_email": "Адрес почты",
+  "settings.profile_email_required": "В профиле нет адреса. Укажите его — каждый календарь и адресная книга здесь принадлежат конкретной идентичности.",
+  "settings.profile_name": "Название учётки",
+  "settings.profile_conflict": "Учётка уже существует для",
+  "settings.profile_conflict_abort": "Отменить импорт — ничего не менять",
+  "settings.profile_conflict_replace": "Заменить настройки существующей учётки",
+  "settings.profile_conflict_rename": "Импортировать под другим адресом",
+  "settings.profile_rename_placeholder": "new@example.org",
+  "settings.profile_do_import": "Импортировать",
+  "settings.app_passwords": "Пароли приложений",
+  "settings.app_passwords_hint": "Отдельный пароль для одного устройства или программы. Работает для почты, календарей и контактов, но не пускает в этот интерфейс — поэтому потеря стоит одного отзыва, а не смены пароля везде.",
+  "settings.app_password_label_placeholder": "iPhone, Thunderbird дома, …",
+  "settings.app_password_create": "Создать",
+  "settings.app_password_shown_once": "Скопируйте сейчас — больше он показан не будет.",
+  "settings.app_password_label": "Метка",
+  "settings.app_password_secret": "Пароль",
+  "settings.app_password_last_used": "Последнее использование",
+  "settings.app_password_revoke": "Отозвать",
+  "settings.app_password_revoked": "отозван",
+  "settings.app_password_revoke_confirm": "Отозвать этот пароль? Устройства, которые им пользуются, перестанут подключаться.",
+  "settings.app_passwords_empty": "Паролей приложений пока нет."
 }

@@ -162,6 +162,12 @@ func (s *Server) setupRoutes() {
 	// effect, which is why it lives behind the authenticated subrouter.
 	settingsAPI.HandleFunc("/mobileconfig", s.HandleExportMobileconfig).Methods("GET")
 
+	// Import is two calls on purpose: preview reports what the profile would
+	// do and whether it collides with an existing account, import applies it
+	// once the user has answered. Nothing is written until the second call.
+	settingsAPI.HandleFunc("/mobileconfig/preview", s.HandlePreviewMobileconfig).Methods("POST")
+	settingsAPI.HandleFunc("/mobileconfig/import", s.HandleImportMobileconfig).Methods("POST")
+
 	// Admin API (admin-only). Registered before general /api subrouter so the
 	// more-specific prefix wins in gorilla/mux's first-match-wins traversal.
 	adminAPI := s.router.PathPrefix("/api/admin").Subrouter()

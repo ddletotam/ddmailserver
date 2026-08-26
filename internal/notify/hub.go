@@ -24,6 +24,16 @@ const (
 	EventMessageSent EventType = "message_sent"
 
 	EventCalendarUpdated EventType = "calendar_updated"
+
+	// EventIdentitiesChanged — the set of accounts, calendar sources or
+	// contact sources this user owns has changed.
+	//
+	// Raised by the .mobileconfig import, which can add all three at once. The
+	// desktop caches identities and refreshes them only on a full sync (they
+	// change rarely), so without this an imported account stayed invisible —
+	// no sidebar tint, no from-picker entry, no calendar — until the client was
+	// restarted. That is the opposite of importing a profile and seeing it work.
+	EventIdentitiesChanged EventType = "identities_changed"
 )
 
 // Event represents a notification about a user-visible change.

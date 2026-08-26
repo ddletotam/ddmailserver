@@ -29,6 +29,18 @@ type Tx struct {
 	encryptionKey string
 }
 
+// querier is what *DB and *Tx have in common. It lets one implementation of a
+// write serve both the everyday path and a transactional caller, instead of the
+// INSERT being copied into a second function that then drifts from the first.
+//
+// Both *sql.DB and *sql.Tx already satisfy this; DB and Tx inherit it by
+// embedding.
+type querier interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+	Query(query string, args ...interface{}) (*sql.Rows, error)
+	QueryRow(query string, args ...interface{}) *sql.Row
+}
+
 // Connect establishes a connection to PostgreSQL
 func Connect(dsn string) (*DB, error) {
 	db, err := sql.Open("postgres", dsn)

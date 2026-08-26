@@ -11,6 +11,16 @@ import (
 
 // CreateCalendarSource creates a new calendar source
 func (db *DB) CreateCalendarSource(source *models.CalendarSource) error {
+	return createCalendarSource(db, db.encryptionKey, source)
+}
+
+// CreateCalendarSource creates a calendar source inside a transaction. Used by the .mobileconfig
+// import, where every payload has to land together or not at all.
+func (tx *Tx) CreateCalendarSource(source *models.CalendarSource) error {
+	return createCalendarSource(tx, tx.encryptionKey, source)
+}
+
+func createCalendarSource(q querier, encryptionKey string, source *models.CalendarSource) error {
 	source.CreatedAt = timeutil.Now()
 	source.UpdatedAt = timeutil.Now()
 
@@ -20,7 +30,7 @@ func (db *DB) CreateCalendarSource(source *models.CalendarSource) error {
 
 	// No orphan sources: fall back to the user's default identity.
 	if source.IdentityEmail == "" {
-		email, err := db.DefaultIdentityEmail(source.UserID)
+		email, err := defaultIdentityEmail(q, source.UserID)
 		if err != nil {
 			return err
 		}
@@ -31,7 +41,7 @@ func (db *DB) CreateCalendarSource(source *models.CalendarSource) error {
 	var encryptedPassword string
 	var err error
 	if source.CalDAVPassword != "" {
-		encryptedPassword, err = crypto.EncryptPassword(source.CalDAVPassword, db.encryptionKey)
+		encryptedPassword, err = crypto.EncryptPassword(source.CalDAVPassword, encryptionKey)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt CalDAV password: %w", err)
 		}
@@ -40,13 +50,13 @@ func (db *DB) CreateCalendarSource(source *models.CalendarSource) error {
 	// Encrypt OAuth tokens
 	var encryptedAccessToken, encryptedRefreshToken string
 	if source.OAuthAccessToken != "" {
-		encryptedAccessToken, err = crypto.EncryptPassword(source.OAuthAccessToken, db.encryptionKey)
+		encryptedAccessToken, err = crypto.EncryptPassword(source.OAuthAccessToken, encryptionKey)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt OAuth access token: %w", err)
 		}
 	}
 	if source.OAuthRefreshToken != "" {
-		encryptedRefreshToken, err = crypto.EncryptPassword(source.OAuthRefreshToken, db.encryptionKey)
+		encryptedRefreshToken, err = crypto.EncryptPassword(source.OAuthRefreshToken, encryptionKey)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt OAuth refresh token: %w", err)
 		}
@@ -67,7 +77,7 @@ func (db *DB) CreateCalendarSource(source *models.CalendarSource) error {
 		RETURNING id
 	`
 
-	err = db.QueryRow(
+	err = q.QueryRow(
 		query,
 		source.UserID, source.Name, source.SourceType,
 		source.CalDAVURL, source.CalDAVUsername, encryptedPassword,

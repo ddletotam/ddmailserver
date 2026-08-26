@@ -150,22 +150,49 @@ func (c *Client) Send(from string, to []string, message []byte) error {
 	return nil
 }
 
-// sendTLS sends email with TLS encryption
-func (c *Client) sendTLS(addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
-	// Connect to the server
-	client, err := smtp.Dial(addr)
-	if err != nil {
-		return fmt.Errorf("failed to dial: %w", err)
-	}
-	defer client.Close()
+// usesImplicitTLS reports whether the connection must be wrapped in TLS before
+// the first byte, rather than upgraded with STARTTLS afterwards.
+//
+// The two are not interchangeable. On an implicit-TLS port the server waits for
+// a ClientHello and says nothing; a plaintext dial there gets no greeting and
+// hangs until the timeout. 465 is the assigned port for implicit TLS
+// (RFC 8314) and is what device configuration profiles overwhelmingly specify,
+// so this is not an exotic case — it is most of them.
+func usesImplicitTLS(port int) bool {
+	return port == 465
+}
 
-	// Start TLS
+// sendTLS sends email over TLS, choosing implicit TLS or STARTTLS by port.
+func (c *Client) sendTLS(addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
 	tlsConfig := &tls.Config{
 		ServerName: c.account.SMTPHost,
 	}
 
-	if err = client.StartTLS(tlsConfig); err != nil {
-		return fmt.Errorf("failed to start TLS: %w", err)
+	var client *smtp.Client
+	var err error
+
+	if usesImplicitTLS(c.account.SMTPPort) {
+		// Handshake first, then speak SMTP inside it.
+		conn, dialErr := tls.Dial("tcp", addr, tlsConfig)
+		if dialErr != nil {
+			return fmt.Errorf("failed to dial with implicit TLS: %w", dialErr)
+		}
+		client, err = smtp.NewClient(conn, c.account.SMTPHost)
+		if err != nil {
+			conn.Close()
+			return fmt.Errorf("failed to start SMTP over TLS: %w", err)
+		}
+		defer client.Close()
+	} else {
+		client, err = smtp.Dial(addr)
+		if err != nil {
+			return fmt.Errorf("failed to dial: %w", err)
+		}
+		defer client.Close()
+
+		if err = client.StartTLS(tlsConfig); err != nil {
+			return fmt.Errorf("failed to start TLS: %w", err)
+		}
 	}
 
 	// Authenticate
