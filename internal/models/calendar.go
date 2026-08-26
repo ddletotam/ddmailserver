@@ -1,6 +1,8 @@
 package models
 
 import (
+	"strings"
+
 	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
@@ -82,9 +84,54 @@ type Calendar struct {
 	CreatedAt int64 `json:"created_at"`
 	UpdatedAt int64 `json:"updated_at"`
 
+	// SupportedComponents lists what this collection accepts, comma-separated:
+	// "VEVENT", "VTODO", or both. Stored rather than assumed — assuming it is
+	// what made us advertise task support we did not have, and push tasks at an
+	// iCloud event collection that answered 403 forever. See migrations/048.
+	SupportedComponents string `json:"supported_components,omitempty"`
+
 	// Joined fields
 	SourceType    string `json:"source_type,omitempty"`
 	IdentityEmail string `json:"identity_email,omitempty"`
+}
+
+// Calendar component names, as they appear in iCalendar and in the
+// `component` column.
+const (
+	ComponentEvent = "VEVENT"
+	ComponentTodo  = "VTODO"
+)
+
+// Supports reports whether this collection accepts the given component.
+// An empty SupportedComponents means events only: the conservative reading,
+// and the one that matches every calendar that existed before tasks did.
+func (c *Calendar) Supports(component string) bool {
+	list := c.SupportedComponents
+	if strings.TrimSpace(list) == "" {
+		return component == ComponentEvent
+	}
+	for _, part := range strings.Split(list, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), component) {
+			return true
+		}
+	}
+	return false
+}
+
+// ComponentList splits SupportedComponents into its parts, normalised to upper
+// case, defaulting to events only.
+func (c *Calendar) ComponentList() []string {
+	var out []string
+	for _, part := range strings.Split(c.SupportedComponents, ",") {
+		part = strings.ToUpper(strings.TrimSpace(part))
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	if len(out) == 0 {
+		return []string{ComponentEvent}
+	}
+	return out
 }
 
 // CalendarEvent represents a calendar event
@@ -95,6 +142,10 @@ type CalendarEvent struct {
 	RemoteID   string `json:"-"`
 	ICalData   string `json:"-"`
 
+	// Component is "VEVENT" or "VTODO". Tasks live in this table rather than a
+	// parallel one because they share nearly all of it; see migrations/048.
+	Component string `json:"component"`
+
 	// Indexed fields
 	Summary     string `json:"summary"`
 	Description string `json:"description"`
@@ -104,6 +155,19 @@ type CalendarEvent struct {
 	DTEnd       *int64 `json:"dtend"`      // nullable
 	DTEndTZ     int16  `json:"dtend_tz"`
 	AllDay      bool   `json:"all_day"`
+
+	// VTODO-only. Due is the deadline — deliberately not reused from DTEnd: an
+	// event with no DTEnd lasts an hour, a task with no Due has no deadline,
+	// and one nullable column per meaning beats a shared one every reader has
+	// to disambiguate.
+	Due   *int64 `json:"due,omitempty"`
+	DueTZ int16  `json:"due_tz,omitempty"`
+	// CompletedAt is when the task was finished (RFC 5545 COMPLETED), not a
+	// boolean — clients display the moment.
+	CompletedAt     *int64 `json:"completed_at,omitempty"`
+	PercentComplete *int16 `json:"percent_complete,omitempty"`
+	// Priority: 0 undefined, 1 highest … 9 lowest (RFC 5545 §3.8.1.9).
+	Priority *int16 `json:"priority,omitempty"`
 
 	// Organizer
 	OrganizerEmail string `json:"organizer_email,omitempty"`
@@ -127,6 +191,29 @@ type CalendarEvent struct {
 
 	// Joined fields
 	Attendees []CalendarAttendee `json:"attendees,omitempty"`
+}
+
+// IsTodo reports whether this row is a task rather than an event. An empty
+// Component reads as an event: everything that existed before tasks did was
+// one, and the column defaults that way.
+func (e *CalendarEvent) IsTodo() bool {
+	return e.Component == ComponentTodo
+}
+
+// ComponentOrDefault returns the component name, filling in VEVENT for rows
+// loaded from before the column existed.
+func (e *CalendarEvent) ComponentOrDefault() string {
+	if e.Component == "" {
+		return ComponentEvent
+	}
+	return e.Component
+}
+
+// IsCompleted reports whether a task is done — by STATUS or by carrying a
+// COMPLETED timestamp. Both spellings occur in the wild, and a client that
+// only set one would otherwise show a finished task as outstanding.
+func (e *CalendarEvent) IsCompleted() bool {
+	return e.CompletedAt != nil || strings.EqualFold(e.Status, "COMPLETED")
 }
 
 // DTStartAsTime returns DTStart as time.Time for CalDAV/iCal serialization.

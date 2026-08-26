@@ -45,21 +45,25 @@ func (db *DB) CreateCalendarEvent(event *models.CalendarEvent) error {
 		organizerName = sql.NullString{String: event.OrganizerName, Valid: true}
 	}
 
+	due, completedAt, percentComplete, priority := todoParams(event)
+
 	query := `
 		INSERT INTO calendar_events (
-			calendar_id, uid, remote_id, ical_data,
+			calendar_id, uid, remote_id, ical_data, component,
 			summary, description, location, dtstart, dtend, all_day,
+			due, due_tz, completed_at, percent_complete, priority,
 			organizer_email, organizer_name, sequence, status,
 			rrule, recurrence_id, etag, local_modified,
 			created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
 		RETURNING id
 	`
 
 	err := db.QueryRow(
 		query,
-		event.CalendarID, event.UID, remoteID, event.ICalData,
+		event.CalendarID, event.UID, remoteID, event.ICalData, event.ComponentOrDefault(),
 		event.Summary, description, location, event.DTStart, event.DTEnd, event.AllDay,
+		due, event.DueTZ, completedAt, percentComplete, priority,
 		organizerEmail, organizerName, event.Sequence, event.Status,
 		rrule, recurrenceID, etag, event.LocalModified,
 		event.CreatedAt, event.UpdatedAt,
@@ -72,15 +76,30 @@ func (db *DB) CreateCalendarEvent(event *models.CalendarEvent) error {
 	return nil
 }
 
+// todoParams converts the VTODO-only fields to their nullable SQL forms.
+// Absent is not the same as zero here: a task with priority 0 means "no
+// priority stated", and PERCENT-COMPLETE 0 means "started, nothing done" —
+// writing either as NULL vs 0 changes what a client shows.
+func todoParams(event *models.CalendarEvent) (due, completedAt sql.NullInt64, percentComplete, priority sql.NullInt16) {
+	if event.Due != nil {
+		due = sql.NullInt64{Int64: *event.Due, Valid: true}
+	}
+	if event.CompletedAt != nil {
+		completedAt = sql.NullInt64{Int64: *event.CompletedAt, Valid: true}
+	}
+	if event.PercentComplete != nil {
+		percentComplete = sql.NullInt16{Int16: *event.PercentComplete, Valid: true}
+	}
+	if event.Priority != nil {
+		priority = sql.NullInt16{Int16: *event.Priority, Valid: true}
+	}
+	return
+}
+
 // GetEventsByCalendarID retrieves all events for a calendar
 func (db *DB) GetEventsByCalendarID(calendarID int64) ([]*models.CalendarEvent, error) {
 	query := `
-		SELECT id, calendar_id, uid, COALESCE(remote_id, ''), ical_data,
-		       COALESCE(summary, ''), COALESCE(description, ''), COALESCE(location, ''),
-		       dtstart, dtend, all_day,
-		       COALESCE(organizer_email, ''), COALESCE(organizer_name, ''), COALESCE(sequence, 0), COALESCE(status, 'CONFIRMED'),
-		       COALESCE(rrule, ''), COALESCE(recurrence_id, ''), COALESCE(etag, ''), local_modified,
-		       created_at, updated_at
+		SELECT ` + calendarEventColumns + `
 		FROM calendar_events
 		WHERE calendar_id = $1
 		ORDER BY dtstart
@@ -100,36 +119,18 @@ func (db *DB) GetEventByID(id int64) (*models.CalendarEvent, error) {
 	event := &models.CalendarEvent{}
 
 	query := `
-		SELECT id, calendar_id, uid, COALESCE(remote_id, ''), ical_data,
-		       COALESCE(summary, ''), COALESCE(description, ''), COALESCE(location, ''),
-		       dtstart, dtend, all_day,
-		       COALESCE(organizer_email, ''), COALESCE(organizer_name, ''), COALESCE(sequence, 0), COALESCE(status, 'CONFIRMED'),
-		       COALESCE(rrule, ''), COALESCE(recurrence_id, ''), COALESCE(etag, ''), local_modified,
-		       created_at, updated_at
+		SELECT ` + calendarEventColumns + `
 		FROM calendar_events
 		WHERE id = $1
 	`
 
-	var dtEnd sql.NullInt64
-	err := db.QueryRow(query, id).Scan(
-		&event.ID, &event.CalendarID, &event.UID, &event.RemoteID, &event.ICalData,
-		&event.Summary, &event.Description, &event.Location,
-		&event.DTStart, &dtEnd, &event.AllDay,
-		&event.OrganizerEmail, &event.OrganizerName, &event.Sequence, &event.Status,
-		&event.RRule, &event.RecurrenceID, &event.ETag, &event.LocalModified,
-		&event.CreatedAt, &event.UpdatedAt,
-	)
+	err := scanCalendarEvent(db.QueryRow(query, id), event)
 
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("event not found")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get event: %w", err)
-	}
-
-	if dtEnd.Valid {
-		val := dtEnd.Int64
-		event.DTEnd = &val
 	}
 
 	return event, nil
@@ -140,36 +141,18 @@ func (db *DB) GetEventByUID(calendarID int64, uid string) (*models.CalendarEvent
 	event := &models.CalendarEvent{}
 
 	query := `
-		SELECT id, calendar_id, uid, COALESCE(remote_id, ''), ical_data,
-		       COALESCE(summary, ''), COALESCE(description, ''), COALESCE(location, ''),
-		       dtstart, dtend, all_day,
-		       COALESCE(organizer_email, ''), COALESCE(organizer_name, ''), COALESCE(sequence, 0), COALESCE(status, 'CONFIRMED'),
-		       COALESCE(rrule, ''), COALESCE(recurrence_id, ''), COALESCE(etag, ''), local_modified,
-		       created_at, updated_at
+		SELECT ` + calendarEventColumns + `
 		FROM calendar_events
 		WHERE calendar_id = $1 AND uid = $2
 	`
 
-	var dtEnd sql.NullInt64
-	err := db.QueryRow(query, calendarID, uid).Scan(
-		&event.ID, &event.CalendarID, &event.UID, &event.RemoteID, &event.ICalData,
-		&event.Summary, &event.Description, &event.Location,
-		&event.DTStart, &dtEnd, &event.AllDay,
-		&event.OrganizerEmail, &event.OrganizerName, &event.Sequence, &event.Status,
-		&event.RRule, &event.RecurrenceID, &event.ETag, &event.LocalModified,
-		&event.CreatedAt, &event.UpdatedAt,
-	)
+	err := scanCalendarEvent(db.QueryRow(query, calendarID, uid), event)
 
 	if err == sql.ErrNoRows {
 		return nil, nil // Not found, return nil without error
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get event: %w", err)
-	}
-
-	if dtEnd.Valid {
-		val := dtEnd.Int64
-		event.DTEnd = &val
 	}
 
 	return event, nil
@@ -188,12 +171,7 @@ func (db *DB) GetEventsForCalendarsInRange(calendarIDs []int64, startMs, endMs i
 	}
 
 	query := `
-		SELECT id, calendar_id, uid, COALESCE(remote_id, ''), ical_data,
-		       COALESCE(summary, ''), COALESCE(description, ''), COALESCE(location, ''),
-		       dtstart, dtend, all_day,
-		       COALESCE(organizer_email, ''), COALESCE(organizer_name, ''), COALESCE(sequence, 0), COALESCE(status, 'CONFIRMED'),
-		       COALESCE(rrule, ''), COALESCE(recurrence_id, ''), COALESCE(etag, ''), local_modified,
-		       created_at, updated_at
+		SELECT ` + calendarEventColumns + `
 		FROM calendar_events
 		WHERE calendar_id = ANY($1)
 		  AND soft_deleted_at IS NULL
@@ -216,12 +194,7 @@ func (db *DB) GetEventsForCalendarsInRange(calendarIDs []int64, startMs, endMs i
 // GetEventsByTimeRange retrieves events within a time range (ms since epoch)
 func (db *DB) GetEventsByTimeRange(calendarID int64, startMs, endMs int64) ([]*models.CalendarEvent, error) {
 	query := `
-		SELECT id, calendar_id, uid, COALESCE(remote_id, ''), ical_data,
-		       COALESCE(summary, ''), COALESCE(description, ''), COALESCE(location, ''),
-		       dtstart, dtend, all_day,
-		       COALESCE(organizer_email, ''), COALESCE(organizer_name, ''), COALESCE(sequence, 0), COALESCE(status, 'CONFIRMED'),
-		       COALESCE(rrule, ''), COALESCE(recurrence_id, ''), COALESCE(etag, ''), local_modified,
-		       created_at, updated_at
+		SELECT ` + calendarEventColumns + `
 		FROM calendar_events
 		WHERE calendar_id = $1
 		  AND ((dtstart >= $2 AND dtstart < $3)
@@ -244,20 +217,24 @@ func (db *DB) GetEventsByTimeRange(calendarID int64, startMs, endMs int64) ([]*m
 func (db *DB) UpdateCalendarEvent(event *models.CalendarEvent) error {
 	event.UpdatedAt = timeutil.Now()
 
+	due, completedAt, percentComplete, priority := todoParams(event)
+
 	query := `
 		UPDATE calendar_events
-		SET ical_data = $1, summary = $2, description = $3, location = $4,
-		    dtstart = $5, dtend = $6, all_day = $7,
-		    organizer_email = $8, organizer_name = $9, sequence = $10, status = $11,
-		    rrule = $12, recurrence_id = $13,
-		    etag = $14, local_modified = $15, updated_at = $16
-		WHERE id = $17
+		SET ical_data = $1, component = $2, summary = $3, description = $4, location = $5,
+		    dtstart = $6, dtend = $7, all_day = $8,
+		    due = $9, due_tz = $10, completed_at = $11, percent_complete = $12, priority = $13,
+		    organizer_email = $14, organizer_name = $15, sequence = $16, status = $17,
+		    rrule = $18, recurrence_id = $19,
+		    etag = $20, local_modified = $21, updated_at = $22
+		WHERE id = $23
 	`
 
 	_, err := db.Exec(
 		query,
-		event.ICalData, event.Summary, event.Description, event.Location,
+		event.ICalData, event.ComponentOrDefault(), event.Summary, event.Description, event.Location,
 		event.DTStart, event.DTEnd, event.AllDay,
+		due, event.DueTZ, completedAt, percentComplete, priority,
 		event.OrganizerEmail, event.OrganizerName, event.Sequence, event.Status,
 		event.RRule, event.RecurrenceID,
 		event.ETag, event.LocalModified, event.UpdatedAt, event.ID,
@@ -293,12 +270,7 @@ func (db *DB) DeleteCalendarEventByUID(calendarID int64, uid string) error {
 // GetLocallyModifiedEvents retrieves events that need to be pushed to remote
 func (db *DB) GetLocallyModifiedEvents(calendarID int64) ([]*models.CalendarEvent, error) {
 	query := `
-		SELECT id, calendar_id, uid, COALESCE(remote_id, ''), ical_data,
-		       COALESCE(summary, ''), COALESCE(description, ''), COALESCE(location, ''),
-		       dtstart, dtend, all_day,
-		       COALESCE(organizer_email, ''), COALESCE(organizer_name, ''), COALESCE(sequence, 0), COALESCE(status, 'CONFIRMED'),
-		       COALESCE(rrule, ''), COALESCE(recurrence_id, ''), COALESCE(etag, ''), local_modified,
-		       created_at, updated_at
+		SELECT ` + calendarEventColumns + `
 		FROM calendar_events
 		WHERE calendar_id = $1 AND local_modified = true
 	`
@@ -469,21 +441,25 @@ func (db *DB) ApplySyncChanges(changes *SyncEventChanges) error {
 			organizerName = sql.NullString{String: event.OrganizerName, Valid: true}
 		}
 
+		due, completedAt, percentComplete, priority := todoParams(event)
+
 		query := `
 			INSERT INTO calendar_events (
-				calendar_id, uid, remote_id, ical_data,
+				calendar_id, uid, remote_id, ical_data, component,
 				summary, description, location, dtstart, dtend, all_day,
+				due, due_tz, completed_at, percent_complete, priority,
 				organizer_email, organizer_name, sequence, status,
 				rrule, recurrence_id, etag, local_modified,
 				created_at, updated_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
 			RETURNING id
 		`
 
 		err := tx.QueryRow(
 			query,
-			event.CalendarID, event.UID, remoteID, event.ICalData,
+			event.CalendarID, event.UID, remoteID, event.ICalData, event.ComponentOrDefault(),
 			event.Summary, description, location, event.DTStart, event.DTEnd, event.AllDay,
+			due, event.DueTZ, completedAt, percentComplete, priority,
 			organizerEmail, organizerName, event.Sequence, event.Status,
 			rrule, recurrenceID, etag, event.LocalModified,
 			event.CreatedAt, event.UpdatedAt,
@@ -505,20 +481,24 @@ func (db *DB) ApplySyncChanges(changes *SyncEventChanges) error {
 		// uid is written too: a feed that regenerates UIDs still describes the
 		// same events, and re-pointing the stored row at the new UID is what
 		// keeps it from being deleted and recreated on every sync.
+		due, completedAt, percentComplete, priority := todoParams(event)
+
 		query := `
 			UPDATE calendar_events
-			SET uid = $1, ical_data = $2, summary = $3, description = $4, location = $5,
-			    dtstart = $6, dtend = $7, all_day = $8,
-			    organizer_email = $9, organizer_name = $10, sequence = $11, status = $12,
-			    rrule = $13, recurrence_id = $14,
-			    etag = $15, local_modified = $16, updated_at = $17
-			WHERE id = $18
+			SET uid = $1, ical_data = $2, component = $3, summary = $4, description = $5, location = $6,
+			    dtstart = $7, dtend = $8, all_day = $9,
+			    due = $10, due_tz = $11, completed_at = $12, percent_complete = $13, priority = $14,
+			    organizer_email = $15, organizer_name = $16, sequence = $17, status = $18,
+			    rrule = $19, recurrence_id = $20,
+			    etag = $21, local_modified = $22, updated_at = $23
+			WHERE id = $24
 		`
 
 		_, err := tx.Exec(
 			query,
-			event.UID, event.ICalData, event.Summary, event.Description, event.Location,
+			event.UID, event.ICalData, event.ComponentOrDefault(), event.Summary, event.Description, event.Location,
 			event.DTStart, event.DTEnd, event.AllDay,
+			due, event.DueTZ, completedAt, percentComplete, priority,
 			event.OrganizerEmail, event.OrganizerName, event.Sequence, event.Status,
 			event.RRule, event.RecurrenceID,
 			event.ETag, event.LocalModified, event.UpdatedAt, event.ID,
@@ -548,30 +528,79 @@ func attendeesToPtrs(in []models.CalendarAttendee) []*models.CalendarAttendee {
 	return out
 }
 
+// calendarEventColumns is the one SELECT list every read of this table uses.
+//
+// It exists because there were six copies of it and three matching Scan blocks,
+// and adding the VTODO columns meant editing nine places in lockstep — exactly
+// the kind of change where one gets missed and the mismatch only shows up as a
+// scan error at runtime. Column order here and field order in
+// scanCalendarEvent are a single contract: change one, change the other.
+const calendarEventColumns = `id, calendar_id, uid, COALESCE(remote_id, ''), ical_data,
+	       COALESCE(component, 'VEVENT'),
+	       COALESCE(summary, ''), COALESCE(description, ''), COALESCE(location, ''),
+	       dtstart, dtend, all_day,
+	       due, COALESCE(due_tz, 0), completed_at, percent_complete, priority,
+	       COALESCE(organizer_email, ''), COALESCE(organizer_name, ''), COALESCE(sequence, 0), COALESCE(status, 'CONFIRMED'),
+	       COALESCE(rrule, ''), COALESCE(recurrence_id, ''), COALESCE(etag, ''), local_modified,
+	       created_at, updated_at`
+
+// rowScanner is what *sql.Row and *sql.Rows have in common, so one scanner
+// serves both the single-row and the iterating callers.
+type rowScanner interface {
+	Scan(dest ...interface{}) error
+}
+
+// scanCalendarEvent reads one row selected with calendarEventColumns.
+func scanCalendarEvent(row rowScanner, event *models.CalendarEvent) error {
+	var dtEnd, due, completedAt sql.NullInt64
+	var percentComplete, priority sql.NullInt16
+
+	err := row.Scan(
+		&event.ID, &event.CalendarID, &event.UID, &event.RemoteID, &event.ICalData,
+		&event.Component,
+		&event.Summary, &event.Description, &event.Location,
+		&event.DTStart, &dtEnd, &event.AllDay,
+		&due, &event.DueTZ, &completedAt, &percentComplete, &priority,
+		&event.OrganizerEmail, &event.OrganizerName, &event.Sequence, &event.Status,
+		&event.RRule, &event.RecurrenceID, &event.ETag, &event.LocalModified,
+		&event.CreatedAt, &event.UpdatedAt,
+	)
+	if err != nil {
+		return err
+	}
+
+	if dtEnd.Valid {
+		v := dtEnd.Int64
+		event.DTEnd = &v
+	}
+	if due.Valid {
+		v := due.Int64
+		event.Due = &v
+	}
+	if completedAt.Valid {
+		v := completedAt.Int64
+		event.CompletedAt = &v
+	}
+	if percentComplete.Valid {
+		v := percentComplete.Int16
+		event.PercentComplete = &v
+	}
+	if priority.Valid {
+		v := priority.Int16
+		event.Priority = &v
+	}
+
+	return nil
+}
+
 // scanCalendarEvents scans multiple calendar event rows
 func scanCalendarEvents(rows *sql.Rows) ([]*models.CalendarEvent, error) {
 	var events []*models.CalendarEvent
 	for rows.Next() {
 		event := &models.CalendarEvent{}
-		var dtEnd sql.NullInt64
-
-		err := rows.Scan(
-			&event.ID, &event.CalendarID, &event.UID, &event.RemoteID, &event.ICalData,
-			&event.Summary, &event.Description, &event.Location,
-			&event.DTStart, &dtEnd, &event.AllDay,
-			&event.OrganizerEmail, &event.OrganizerName, &event.Sequence, &event.Status,
-			&event.RRule, &event.RecurrenceID, &event.ETag, &event.LocalModified,
-			&event.CreatedAt, &event.UpdatedAt,
-		)
-		if err != nil {
+		if err := scanCalendarEvent(rows, event); err != nil {
 			return nil, fmt.Errorf("failed to scan event: %w", err)
 		}
-
-		if dtEnd.Valid {
-			val := dtEnd.Int64
-			event.DTEnd = &val
-		}
-
 		events = append(events, event)
 	}
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,10 +29,10 @@ func ParseICS(icsData string) ([]*models.CalendarEvent, error) {
 			break
 		}
 
-		for _, event := range cal.Events() {
-			modelEvent, err := parseICalEvent(&event, 0, tz, time.UTC)
+		for _, comp := range calendarComponents(cal) {
+			modelEvent, err := parseICalEvent(comp, 0, tz, time.UTC)
 			if err != nil {
-				log.Printf("importer: skipping event: %v", err)
+				log.Printf("importer: skipping component: %v", err)
 				continue
 			}
 			modelEvent.ETag = generateETag(modelEvent.ICalData)
@@ -69,12 +70,12 @@ func ImportICS(database *db.DB, calendarID int64, icsData []byte) (int, error) {
 			break
 		}
 
-		// Process each VEVENT in the calendar
-		for _, event := range cal.Events() {
-			modelEvent, err := parseICalEvent(&event, calendarID, tz, time.UTC)
+		// Process each VEVENT and VTODO in the calendar
+		for _, comp := range calendarComponents(cal) {
+			modelEvent, err := parseICalEvent(comp, calendarID, tz, time.UTC)
 			if err != nil {
-				log.Printf("importer: skipping event: %v", err)
-				continue // Skip invalid events
+				log.Printf("importer: skipping component: %v", err)
+				continue // Skip invalid components
 			}
 
 			// Check if event already exists
@@ -192,8 +193,14 @@ func ImportICSSimple(database *db.DB, calendarID int64, icsData []byte) (int, er
 // are resolved through tz; times with no zone of their own fall back to
 // fallback (see zoneResolver).
 func parseICalEvent(event *ical.Event, calendarID int64, tz *zoneResolver, fallback *time.Location) (*models.CalendarEvent, error) {
+	component := models.ComponentEvent
+	if event.Component != nil && event.Component.Name == ical.CompToDo {
+		component = models.ComponentTodo
+	}
+
 	modelEvent := &models.CalendarEvent{
 		CalendarID: calendarID,
+		Component:  component,
 	}
 
 	// Get UID
@@ -271,6 +278,12 @@ func parseICalEvent(event *ical.Event, calendarID int64, tz *zoneResolver, fallb
 		modelEvent.DTEnd = &ms
 	}
 
+	if component == models.ComponentTodo {
+		if err := parseTodoProps(event, modelEvent, tz, fallback); err != nil {
+			return nil, err
+		}
+	}
+
 	// Serialize just this single event wrapped in a VCALENDAR
 	// Don't serialize the entire calendar with all events!
 	singleCal := ical.NewCalendar()
@@ -288,6 +301,85 @@ func parseICalEvent(event *ical.Event, calendarID int64, tz *zoneResolver, fallb
 	}
 
 	return modelEvent, nil
+}
+
+// calendarComponents returns the VEVENTs and VTODOs of a calendar, in document
+// order.
+//
+// go-ical offers Events() but no Todos(), so the VTODO half is walked by hand.
+// Both are returned as *ical.Event: the two components share the property model
+// entirely, and parseICalEvent tells them apart by Component.Name — a second
+// near-identical parser for tasks would drift from this one within a release.
+func calendarComponents(cal *ical.Calendar) []*ical.Event {
+	var out []*ical.Event
+	for _, child := range cal.Children {
+		switch child.Name {
+		case ical.CompEvent, ical.CompToDo:
+			out = append(out, &ical.Event{Component: child})
+		}
+	}
+	return out
+}
+
+// parseTodoProps reads the properties only a VTODO carries.
+func parseTodoProps(event *ical.Event, modelEvent *models.CalendarEvent, tz *zoneResolver, fallback *time.Location) error {
+	// DUE is the task's deadline. Unlike DTEND on an event it is genuinely
+	// optional — a task with no due date is an ordinary thing, not a defect —
+	// so its absence is silent while an unreadable value still fails.
+	if prop := event.Props.Get("DUE"); prop != nil {
+		allDay := isDateValue(prop.Params.Get(ical.ParamValue), prop.Value)
+		due, err := tz.parseProp(prop.Value, prop.Params.Get(ical.ParamTimezoneID), allDay, fallback)
+		if err != nil {
+			return fmt.Errorf("todo %s: DUE %q: %w", modelEvent.UID, prop.Value, err)
+		}
+		ms := timeutil.ToMs(due)
+		modelEvent.Due = &ms
+		if allDay {
+			modelEvent.AllDay = true
+		}
+	}
+
+	if prop := event.Props.Get("COMPLETED"); prop != nil {
+		done, err := tz.parseProp(prop.Value, prop.Params.Get(ical.ParamTimezoneID), false, fallback)
+		if err != nil {
+			// A malformed COMPLETED is not worth losing the task over: the
+			// STATUS property usually says the same thing, and dropping the row
+			// would hide a task the user can see on their phone.
+			log.Printf("importer: todo %s: ignoring unreadable COMPLETED %q: %v", modelEvent.UID, prop.Value, err)
+		} else {
+			ms := timeutil.ToMs(done)
+			modelEvent.CompletedAt = &ms
+		}
+	}
+
+	if prop := event.Props.Get("PERCENT-COMPLETE"); prop != nil {
+		if n, err := strconv.Atoi(strings.TrimSpace(prop.Value)); err == nil && n >= 0 && n <= 100 {
+			v := int16(n)
+			modelEvent.PercentComplete = &v
+		}
+	}
+
+	if prop := event.Props.Get("PRIORITY"); prop != nil {
+		if n, err := strconv.Atoi(strings.TrimSpace(prop.Value)); err == nil && n >= 0 && n <= 9 {
+			v := int16(n)
+			modelEvent.Priority = &v
+		}
+	}
+
+	// A task's default STATUS is NEEDS-ACTION, not the CONFIRMED that events
+	// default to — writing CONFIRMED onto a task would make every client show
+	// it as an odd, statusless item.
+	if modelEvent.Status == "" || strings.EqualFold(modelEvent.Status, "CONFIRMED") {
+		if prop := event.Props.Get(ical.PropStatus); prop != nil && prop.Value != "" {
+			modelEvent.Status = strings.ToUpper(strings.TrimSpace(prop.Value))
+		} else if modelEvent.CompletedAt != nil {
+			modelEvent.Status = "COMPLETED"
+		} else {
+			modelEvent.Status = "NEEDS-ACTION"
+		}
+	}
+
+	return nil
 }
 
 // eventTZIDs lists every zone the event's properties reference, sorted. The
