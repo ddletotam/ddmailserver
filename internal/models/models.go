@@ -31,6 +31,30 @@ func (u *User) IsBanned() bool {
 	return u.IsBannedFlag
 }
 
+// AppPassword is a scoped credential that authenticates a user on the protocol
+// endpoints (IMAP, SMTP, CalDAV, CardDAV) but never on the web or desktop
+// login. See migrations/047 for why it exists and why it is not bcrypt.
+type AppPassword struct {
+	ID     int64  `json:"id"`
+	UserID int64  `json:"user_id"`
+	Label  string `json:"label"`
+
+	// Last four characters of the secret. The secret itself is shown once, at
+	// creation, and is not recoverable afterwards — there is no field for it.
+	Last4 string `json:"last4"`
+
+	CreatedAt  int64 `json:"created_at"`
+	LastUsedAt int64 `json:"last_used_at,omitempty"`
+
+	// nil means active.
+	RevokedAt *int64 `json:"revoked_at,omitempty"`
+}
+
+// IsRevoked reports whether this credential has been withdrawn.
+func (p *AppPassword) IsRevoked() bool {
+	return p.RevokedAt != nil
+}
+
 // Account represents an external email account (Gmail, Outlook, etc.)
 type Account struct {
 	ID           int64  `json:"id"`

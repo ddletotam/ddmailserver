@@ -12,7 +12,6 @@ import (
 	"github.com/emersion/go-vcard"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // textMatchRe pulls the search term out of an addressbook-query
@@ -80,14 +79,11 @@ func (s *Server) authenticate(r *http.Request) (*models.User, error) {
 		return nil, fmt.Errorf("no credentials")
 	}
 
-	user, err := s.database.GetUserByUsername(username)
+	// Accepts the account password or an application password — see the CalDAV
+	// server's authenticate for why a device profile carries the latter.
+	user, err := s.database.AuthenticateProtocol(username, password)
 	if err != nil {
-		return nil, fmt.Errorf("user not found")
-	}
-
-	// Check password
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
-		return nil, fmt.Errorf("invalid password")
+		return nil, fmt.Errorf("invalid credentials")
 	}
 
 	return user, nil
