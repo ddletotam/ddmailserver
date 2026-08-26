@@ -313,6 +313,10 @@ func main() {
 	webSrv := web.New(database, cfg.Security.JWTSecret, cfg.Server.WebHost, cfg.Server.WebPort, cfg.Server.Locale, &cfg.OAuth)
 	webSrv.SetSyncIntervalSec(cfg.Sync.Interval)
 	webSrv.SetNotifyHub(notifyHub)
+	// What device profiles tell clients to connect to. Not the listen ports:
+	// this deployment binds 10993/10465 behind a firewall redirect from
+	// 993/465, so a profile built from the listen config would be unusable.
+	webSrv.SetPublicEndpoints(cfg.PublicWithDefaults())
 	// Queueing a message is not sending it: without this hook the outbox row
 	// waits for the next scheduler cycle, delaying every send by up to one
 	// interval.

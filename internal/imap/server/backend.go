@@ -3,7 +3,6 @@ package server
 import (
 	"errors"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/emersion/go-imap"
@@ -11,7 +10,6 @@ import (
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/notify"
 	"github.com/yourusername/mailserver/internal/search"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // Backend implements IMAP backend with BackendUpdater support for IDLE
@@ -145,24 +143,14 @@ func (b *Backend) notifyFlags(username, mailbox string, seqNum, uid uint32, flag
 func (b *Backend) Login(connInfo *imap.ConnInfo, username, password string) (backend.User, error) {
 	log.Printf("IMAP login attempt for user: %s", username)
 
-	// Strip @domain part if present (e.g. "lucky@letotam.ru" -> "lucky")
-	// New Outlook and some clients require email-format login
-	if idx := strings.IndexByte(username, '@'); idx != -1 {
-		username = username[:idx]
-	}
-
-	// Get user from database
-	user, err := b.database.GetUserByUsername(username)
+	// Accepts the account password or an application password; also strips the
+	// @domain part, which New Outlook and some other clients insist on sending.
+	user, err := b.database.AuthenticateProtocol(username, password)
 	if err != nil {
-		log.Printf("User not found: %s", username)
+		log.Printf("IMAP login failed for user: %s", username)
 		return nil, errors.New("invalid credentials")
 	}
-
-	// Verify password using bcrypt
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
-		log.Printf("Invalid password for user: %s", username)
-		return nil, errors.New("invalid credentials")
-	}
+	username = user.Username
 
 	log.Printf("User %s logged in successfully", username)
 

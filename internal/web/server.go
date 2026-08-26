@@ -38,6 +38,11 @@ type Server struct {
 	// triggerOutbox asks the scheduler to send queued mail immediately instead
 	// of waiting for its next tick. Optional; see SetOutboxTrigger.
 	triggerOutbox func()
+
+	// publicEndpoints is what device profiles tell clients to connect to —
+	// the internet-facing hostname and ports, which are not the ports this
+	// process listens on. See SetPublicEndpoints.
+	publicEndpoints config.PublicEndpoints
 }
 
 // New creates a new web server
@@ -144,6 +149,18 @@ func (s *Server) setupRoutes() {
 	settingsAPI.HandleFunc("/account", s.HandleDeleteUserAccount).Methods("DELETE")
 	settingsAPI.HandleFunc("/oauth/google", s.HandleSaveGoogleOAuthSettings).Methods("POST")
 	settingsAPI.HandleFunc("/oauth/microsoft", s.HandleSaveMicrosoftOAuthSettings).Methods("POST")
+
+	// Application passwords: protocol-only credentials, one per device. The
+	// secret is returned by the create call and never again — see
+	// migrations/047.
+	settingsAPI.HandleFunc("/app-passwords", s.HandleListAppPasswords).Methods("GET")
+	settingsAPI.HandleFunc("/app-passwords", s.HandleCreateAppPassword).Methods("POST")
+	settingsAPI.HandleFunc("/app-passwords/{id}", s.HandleRevokeAppPassword).Methods("DELETE")
+
+	// Device configuration profile. GET rather than POST because iOS installs
+	// a .mobileconfig from a plain link; it mints a credential as a side
+	// effect, which is why it lives behind the authenticated subrouter.
+	settingsAPI.HandleFunc("/mobileconfig", s.HandleExportMobileconfig).Methods("GET")
 
 	// Admin API (admin-only). Registered before general /api subrouter so the
 	// more-specific prefix wins in gorilla/mux's first-match-wins traversal.
@@ -425,6 +442,17 @@ func (s *Server) kickOutbox() {
 // SetSyncIntervalSec sets the sync interval for display in the UI
 func (s *Server) SetSyncIntervalSec(sec int) {
 	s.syncIntervalSec = sec
+}
+
+// SetPublicEndpoints wires the internet-facing hostname and ports used when
+// generating device configuration profiles.
+//
+// These are deliberately separate from the listen ports: this deployment binds
+// 10993/10465 and lets the firewall redirect 993/465 onto them, so a profile
+// built from the listen configuration would hand phones a port that answers
+// only from inside the host.
+func (s *Server) SetPublicEndpoints(p config.PublicEndpoints) {
+	s.publicEndpoints = p
 }
 
 // Stop stops the web server

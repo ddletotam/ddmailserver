@@ -78,6 +78,42 @@ type ServerConfig struct {
 	WebHost     string `yaml:"web_host"`
 	Domain      string `yaml:"domain"` // Mail server hostname (e.g., mail.example.com)
 	Locale      string `yaml:"locale"`
+
+	// Public is what clients are told to connect to. It is NOT the same as the
+	// ports above: this deployment listens on 10993/10465 and lets the firewall
+	// redirect 993→10993 and 465→10465, so a device profile built from
+	// IMAPTLSPort would send phones to a port nothing answers on from outside.
+	Public PublicEndpoints `yaml:"public"`
+}
+
+// PublicEndpoints describes the server as reachable from the internet. Used to
+// generate device configuration profiles (.mobileconfig); every field falls
+// back to the conventional value via PublicWithDefaults, so an existing
+// config.yaml with no `public:` section keeps working.
+type PublicEndpoints struct {
+	Hostname  string `yaml:"hostname"`   // defaults to Server.Domain
+	IMAPPort  int    `yaml:"imap_port"`  // defaults to 993 (implicit TLS)
+	SMTPPort  int    `yaml:"smtp_port"`  // defaults to 465 (implicit TLS)
+	HTTPSPort int    `yaml:"https_port"` // defaults to 443, used for CalDAV/CardDAV
+}
+
+// PublicWithDefaults resolves the public endpoints, filling anything the
+// config left unset with the standard port for that protocol.
+func (c *Config) PublicWithDefaults() PublicEndpoints {
+	p := c.Server.Public
+	if p.Hostname == "" {
+		p.Hostname = c.Server.Domain
+	}
+	if p.IMAPPort == 0 {
+		p.IMAPPort = 993
+	}
+	if p.SMTPPort == 0 {
+		p.SMTPPort = 465
+	}
+	if p.HTTPSPort == 0 {
+		p.HTTPSPort = 443
+	}
+	return p
 }
 
 type DatabaseConfig struct {
