@@ -134,26 +134,55 @@ func (c *Client) DiscoverCalendars(ctx context.Context) ([]*models.Calendar, err
 
 	var result []*models.Calendar
 	for _, cal := range calendars {
-		// Skip if not a calendar (could be a task list)
-		if !supportsCalendarComponent(cal, "VEVENT") {
-			continue
-		}
+		// Task lists used to be dropped here — "skip if not a calendar" — which
+		// is half of why iOS Reminders had nowhere to go: Apple keeps them in
+		// their own VTODO-only collections, we discovered those and threw them
+		// away, and the reminders ended up filed against an event calendar
+		// instead. They are collections like any other now; what differs is
+		// what each one accepts.
+		components := remoteComponentSet(cal)
 
 		calendar := &models.Calendar{
-			SourceID:    c.source.ID,
-			UserID:      c.source.UserID,
-			RemoteID:    cal.Path,
-			Name:        cal.Name,
-			Description: cal.Description,
-			Timezone:    "UTC",
-			CanWrite:    true,
-			Color:       c.source.Color, // Use source color
+			SourceID:            c.source.ID,
+			UserID:              c.source.UserID,
+			RemoteID:            cal.Path,
+			Name:                cal.Name,
+			Description:         cal.Description,
+			Timezone:            "UTC",
+			CanWrite:            true,
+			Color:               c.source.Color, // Use source color
+			SupportedComponents: components,
 		}
 
+		log.Printf("CalDAV discovery: calendar %q (%s) accepts %s", cal.Name, cal.Path, components)
 		result = append(result, calendar)
 	}
 
 	return result, nil
+}
+
+// remoteComponentSet renders what a discovered collection accepts, as the
+// comma-separated form stored on calendars.supported_components.
+//
+// Only VEVENT and VTODO are kept: those are the two this server can represent,
+// and recording a VJOURNAL we cannot store would put us right back to
+// advertising capabilities that do not exist. A collection that declares
+// nothing is read as events only — the conservative answer, and what every
+// calendar predating tasks effectively was.
+func remoteComponentSet(cal caldav.Calendar) string {
+	var out []string
+	for _, comp := range cal.SupportedComponentSet {
+		switch strings.ToUpper(strings.TrimSpace(comp)) {
+		case models.ComponentEvent:
+			out = append(out, models.ComponentEvent)
+		case models.ComponentTodo:
+			out = append(out, models.ComponentTodo)
+		}
+	}
+	if len(out) == 0 {
+		return models.ComponentEvent
+	}
+	return strings.Join(out, ",")
 }
 
 // useDirectCalendarURL creates a calendar entry from a direct calendar URL (skip discovery)
@@ -607,21 +636,6 @@ func (c *Client) createICalFromEvent(event *models.CalendarEvent) *ical.Calendar
 	cal.Children = append(cal.Children, vevent.Component)
 
 	return cal
-}
-
-// supportsCalendarComponent checks if a calendar supports a specific component
-func supportsCalendarComponent(cal caldav.Calendar, component string) bool {
-	// If no supported components are specified, assume VEVENT is supported
-	if len(cal.SupportedComponentSet) == 0 {
-		return true
-	}
-
-	for _, comp := range cal.SupportedComponentSet {
-		if comp == component {
-			return true
-		}
-	}
-	return false
 }
 
 // PutEventRaw uploads raw iCal data to a remote CalDAV path

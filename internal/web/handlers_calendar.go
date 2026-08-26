@@ -404,11 +404,21 @@ func (s *Server) HandleGetEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	events, err := s.database.GetEventsByCalendarID(calID)
+	all, err := s.database.GetEventsByCalendarID(calID)
 	if err != nil {
 		log.Printf("Failed to get events: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
+	}
+
+	// Events only: the web calendar draws a grid, and tasks have neither the
+	// start nor the duration to be placed on one. They are reachable through
+	// the tasks endpoint instead.
+	events := make([]*models.CalendarEvent, 0, len(all))
+	for _, e := range all {
+		if !e.IsTodo() {
+			events = append(events, e)
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
