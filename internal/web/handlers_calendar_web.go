@@ -2,7 +2,6 @@ package web
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"html/template"
 	"io"
@@ -20,6 +19,7 @@ import (
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/oauth"
 	"github.com/yourusername/mailserver/internal/timeutil"
+	"github.com/yourusername/mailserver/internal/tlsverify"
 )
 
 // CalendarsData holds data for the calendars page
@@ -555,10 +555,13 @@ func (s *Server) syncICSURLSource(ctx context.Context, source *models.CalendarSo
 	req.Header.Set("User-Agent", "DDMailServer/1.0 (Calendar Sync)")
 	req.Header.Set("Accept", "text/calendar, application/calendar+json, */*")
 
-	// Skip TLS verification for ICS URLs (some corporate servers use self-signed certs)
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
+	// Verification stays on. This used to be InsecureSkipVerify with the note
+	// "some corporate servers use self-signed certs" — which bought one awkward
+	// server at the price of accepting ANY certificate for EVERY feed, so a
+	// calendar's contents came from whoever answered the connection. The common
+	// real cause is a server that omits its intermediate, and tlsverify
+	// completes that chain instead of abandoning the check.
+	transport := tlsverify.Transport()
 	client := &http.Client{Timeout: 30 * time.Second, Transport: transport}
 	resp, err := client.Do(req)
 	if err != nil {

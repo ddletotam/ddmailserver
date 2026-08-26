@@ -1,7 +1,6 @@
 package client
 
 import (
-	"crypto/tls"
 	"fmt"
 	"log"
 	"strings"
@@ -11,6 +10,7 @@ import (
 	"github.com/emersion/go-imap/client"
 	"github.com/emersion/go-sasl"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/tlsverify"
 )
 
 // xoauth2Client implements XOAUTH2 SASL authentication for Gmail
@@ -81,9 +81,10 @@ func (c *Client) Connect() error {
 	if c.account.IMAPTLS {
 		// Connect with TLS
 		log.Printf("Connecting to IMAP server %s with TLS", addr)
-		conn, err = client.DialTLS(addr, &tls.Config{
-			ServerName: c.account.IMAPHost,
-		})
+		// AIA-completing verification: a server that omits its intermediate
+		// would otherwise be unreachable, and the alternative — skipping
+		// verification — is not one.
+		conn, err = client.DialTLS(addr, tlsverify.Config(c.account.IMAPHost))
 	} else {
 		// Connect without TLS
 		log.Printf("Connecting to IMAP server %s without TLS", addr)

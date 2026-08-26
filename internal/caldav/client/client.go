@@ -22,6 +22,7 @@ import (
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/timeutil"
+	"github.com/yourusername/mailserver/internal/tlsverify"
 )
 
 // Client is a CalDAV client for syncing with external calendars
@@ -66,8 +67,11 @@ func (c *Client) Connect() error {
 	var httpClient *http.Client
 	if c.source.AuthType == "password" {
 		// Create HTTP client with ETag fix transport, then add basic auth
+		// tlsverify.Transport() rather than http.DefaultTransport: a CalDAV
+		// host that omits its intermediate is otherwise unreachable, and the
+		// answer to that is completing the chain, not skipping the check.
 		httpClient = &http.Client{
-			Transport: &etagFixTransport{base: http.DefaultTransport},
+			Transport: &etagFixTransport{base: tlsverify.Transport()},
 			Timeout:   30 * time.Second,
 		}
 		authClient := webdav.HTTPClientWithBasicAuth(httpClient, c.source.CalDAVUsername, c.source.CalDAVPassword)
@@ -78,7 +82,7 @@ func (c *Client) Connect() error {
 		// Use OAuth2 bearer token, also wrapped with ETag fix
 		transport := &etagFixTransport{
 			base: &oauthTransport{
-				base:  http.DefaultTransport,
+				base:  tlsverify.Transport(),
 				token: c.source.OAuthAccessToken,
 			},
 		}
@@ -649,7 +653,17 @@ func (c *Client) queryObjectPathsLenient(ctx context.Context, calendarPath, comp
   <C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="%s"/></C:comp-filter></C:filter>
 </C:calendar-query>`, component)
 
-	reportURL := c.buildFullURL(calendarPath)
+	// An empty calendarPath means "the source URL already IS the collection" —
+	// SyncCalendar blanks it when remote_id is a full URL, because go-webdav
+	// resolves "" against its own base. buildFullURL has no such base: it would
+	// return scheme://host and drop the path, sending the REPORT at the site
+	// root. Observed against a SOGo server as
+	// `Report "https://host"` with /SOGo/dav/<user> missing.
+	reportURL := c.source.CalDAVURL
+	if calendarPath != "" {
+		reportURL = c.buildFullURL(calendarPath)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, "REPORT", reportURL, strings.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to build REPORT: %w", err)
@@ -682,18 +696,28 @@ func (c *Client) queryObjectPathsLenient(ctx context.Context, calendarPath, comp
 
 	// The collection's own href is in there too; keeping it would send the GET
 	// loop after the directory instead of an object.
+	// Derive the collection's own path from the URL actually queried, not from
+	// calendarPath — that is empty whenever the source URL is the collection.
 	collection := strings.TrimSuffix(calendarPath, "/")
+	if collection == "" {
+		if u, parseErr := url.Parse(reportURL); parseErr == nil {
+			collection = strings.TrimSuffix(u.Path, "/")
+		}
+	}
 
 	var out []caldav.CalendarObject
 	for _, r := range doc.Responses {
 		href := strings.TrimSpace(r.Href)
-		if href == "" || strings.TrimSuffix(href, "/") == collection || strings.HasSuffix(href, "/") {
+		// A trailing slash marks a collection; the self-href comparison catches
+		// the servers that omit it.
+		if href == "" || strings.HasSuffix(href, "/") ||
+			(collection != "" && strings.TrimSuffix(href, "/") == collection) {
 			continue
 		}
 		out = append(out, caldav.CalendarObject{Path: href})
 	}
 
-	log.Printf("CalDAV lenient REPORT: %d object paths for %s", len(out), calendarPath)
+	log.Printf("CalDAV lenient REPORT: %d object paths from %s", len(out), reportURL)
 	return out, nil
 }
 

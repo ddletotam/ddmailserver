@@ -12,6 +12,7 @@ import (
 
 	"github.com/yourusername/mailserver/internal/logmask"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/tlsverify"
 )
 
 // oauthBearerAuth implements smtp.Auth for OAUTHBEARER (RFC 7628)
@@ -164,9 +165,7 @@ func usesImplicitTLS(port int) bool {
 
 // sendTLS sends email over TLS, choosing implicit TLS or STARTTLS by port.
 func (c *Client) sendTLS(addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
-	tlsConfig := &tls.Config{
-		ServerName: c.account.SMTPHost,
-	}
+	tlsConfig := tlsverify.Config(c.account.SMTPHost)
 
 	var client *smtp.Client
 	var err error
@@ -315,7 +314,11 @@ func sendDirectAttempt(addr, hostname, from string, to []string, msg []byte, try
 	if tryTLS {
 		if ok, _ := client.Extension("STARTTLS"); ok {
 			host := strings.Split(addr, ":")[0]
-			tlsConfig := &tls.Config{ServerName: host}
+			// Verification here is opportunistic in effect: a failed handshake
+			// makes the caller retry in plaintext. Completing the chain via AIA
+			// therefore only ever upgrades an MX that would have fallen back —
+			// it cannot make delivery less secure than it already was.
+			tlsConfig := tlsverify.Config(host)
 			if err := client.StartTLS(tlsConfig); err != nil {
 				return fmt.Errorf("%w: %v", errStartTLS, err)
 			}
