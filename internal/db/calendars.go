@@ -267,6 +267,27 @@ func (db *DB) UpdateCalendarCTag(calendarID int64, ctag string) error {
 	return nil
 }
 
+// UpdateCalendarSupportedComponents records what a collection accepts, as
+// reported by discovery.
+//
+// Kept separate from the general calendar update because it is the remote's
+// answer, not the user's preference: nothing in the UI should be able to widen
+// it. Claiming a component the collection will not store is precisely the
+// mistake this column exists to prevent.
+func (db *DB) UpdateCalendarSupportedComponents(calendarID int64, components string) error {
+	if strings.TrimSpace(components) == "" {
+		components = models.ComponentEvent
+	}
+	_, err := db.Exec(
+		`UPDATE calendars SET supported_components = $1, updated_at = $2 WHERE id = $3`,
+		components, timeutil.Now(), calendarID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update supported components: %w", err)
+	}
+	return nil
+}
+
 // supportedComponents is what a new calendar row records as acceptable.
 //
 // Defaults to events only rather than to "whatever the caller left empty":

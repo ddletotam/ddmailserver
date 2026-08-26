@@ -107,6 +107,18 @@ func (t *CalendarSyncTask) doSync(ctx context.Context) error {
 			log.Printf("Created new calendar: %s", cal.Name)
 		} else {
 			cal = existingCal
+			// Adopt what the remote now says it accepts. Calendars discovered
+			// before tasks existed all carry the default 'VEVENT', and until
+			// this is refreshed a genuine reminder list would keep refusing
+			// tasks locally for the wrong reason.
+			if remoteCal.SupportedComponents != "" && remoteCal.SupportedComponents != cal.SupportedComponents {
+				log.Printf("Calendar %q components: %q → %q", cal.Name, cal.SupportedComponents, remoteCal.SupportedComponents)
+				if err := t.database.UpdateCalendarSupportedComponents(cal.ID, remoteCal.SupportedComponents); err != nil {
+					log.Printf("Failed to update supported components for %s: %v", cal.Name, err)
+				} else {
+					cal.SupportedComponents = remoteCal.SupportedComponents
+				}
+			}
 		}
 
 		// Sync calendar events

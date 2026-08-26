@@ -170,11 +170,16 @@ func (db *DB) GetEventsForCalendarsInRange(calendarIDs []int64, startMs, endMs i
 		return []*models.CalendarEvent{}, nil
 	}
 
+	// Events only. Tasks live in the same table and would otherwise land in the
+	// week grid — which is exactly what happened while VTODO was unrecognised:
+	// iOS reminders showed up as untitled rows because they have no summary a
+	// VEVENT parser can see, and no start a grid can place.
 	query := `
 		SELECT ` + calendarEventColumns + `
 		FROM calendar_events
 		WHERE calendar_id = ANY($1)
 		  AND soft_deleted_at IS NULL
+		  AND COALESCE(component, 'VEVENT') = 'VEVENT'
 		  AND ((dtstart >= $2 AND dtstart < $3)
 		       OR (dtend > $2 AND dtend <= $3)
 		       OR (dtstart < $2 AND dtend > $3)
@@ -185,6 +190,43 @@ func (db *DB) GetEventsForCalendarsInRange(calendarIDs []int64, startMs, endMs i
 	rows, err := db.Query(query, pq.Array(calendarIDs), startMs, endMs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get events: %w", err)
+	}
+	defer rows.Close()
+
+	return scanCalendarEvents(rows)
+}
+
+// GetTodosForCalendars retrieves the tasks of several calendars.
+//
+// Deliberately not time-windowed the way events are: most tasks have no start
+// and many have no due date at all, so a window would silently hide the bulk of
+// a reminders list. Completed ones are excluded unless asked for — a finished
+// task is history, and a client that wants it says so.
+func (db *DB) GetTodosForCalendars(calendarIDs []int64, includeCompleted bool) ([]*models.CalendarEvent, error) {
+	if len(calendarIDs) == 0 {
+		return []*models.CalendarEvent{}, nil
+	}
+
+	query := `
+		SELECT ` + calendarEventColumns + `
+		FROM calendar_events
+		WHERE calendar_id = ANY($1)
+		  AND soft_deleted_at IS NULL
+		  AND COALESCE(component, 'VEVENT') = 'VTODO'
+	`
+	if !includeCompleted {
+		query += `
+		  AND completed_at IS NULL
+		  AND COALESCE(status, '') <> 'COMPLETED'
+		`
+	}
+	// Undated tasks sort last rather than first: NULL due dates would otherwise
+	// head the list on Postgres, burying whatever is actually urgent.
+	query += ` ORDER BY due NULLS LAST, dtstart NULLS LAST, summary`
+
+	rows, err := db.Query(query, pq.Array(calendarIDs))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get todos: %w", err)
 	}
 	defer rows.Close()
 

@@ -216,6 +216,10 @@ func (s *Server) setupRoutes() {
 	desktopAuthAPI.HandleFunc("/send", s.HandleDesktopSend).Methods("POST")
 	desktopAuthAPI.HandleFunc("/calendars", s.HandleDesktopCalendars).Methods("GET")
 	desktopAuthAPI.HandleFunc("/calendar-events", s.HandleDesktopCalendarEvents).Methods("GET")
+	// Tasks (VTODO) are their own endpoint, not a flavour of calendar-events:
+	// they have no end, often no start, and would have nowhere to sit on a
+	// week grid. See handlers_desktop_tasks.go.
+	desktopAuthAPI.HandleFunc("/tasks", s.HandleDesktopTasks).Methods("GET")
 	desktopAuthAPI.HandleFunc("/events/{id}/rsvp", s.HandleDesktopEventRSVP).Methods("POST")
 	desktopAuthAPI.HandleFunc("/events/{id}", s.HandleDesktopEventPatch).Methods("PATCH")
 	desktopAuthAPI.HandleFunc("/events/{id}", s.HandleDesktopEventDelete).Methods("DELETE")
