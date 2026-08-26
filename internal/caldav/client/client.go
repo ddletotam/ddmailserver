@@ -310,8 +310,35 @@ func (c *Client) SyncCalendar(ctx context.Context, cal *models.Calendar) error {
 		}
 		objects, err = c.client.QueryCalendar(ctx, calendarPath, query)
 		if err != nil {
-			log.Printf("CalDAV QueryCalendar failed for path '%s' (base URL: %s): %v", calendarPath, c.source.CalDAVURL, err)
-			return fmt.Errorf("failed to query calendar: %w", err)
+			// Last resort: ask for the whole component instead of a
+			// property subset.
+			//
+			// The two attempts above request `calendar-data` narrowed to UID,
+			// which is all this phase needs — every object is GET'd in full
+			// straight after. iCloud honours that for VEVENT and answers 404
+			// on the property for its VTODO collections, which go-webdav
+			// surfaces as a failed query. Asking for everything costs a larger
+			// response on one request and is the difference between a reminder
+			// list syncing and not.
+			log.Printf("CalDAV QueryCalendar with partial calendar-data failed, retrying whole-component: %v", err)
+			query = &caldav.CalendarQuery{
+				CompRequest: caldav.CalendarCompRequest{
+					Name:     "VCALENDAR",
+					AllProps: true,
+					AllComps: true,
+				},
+				CompFilter: caldav.CompFilter{
+					Name: "VCALENDAR",
+					Comps: []caldav.CompFilter{
+						{Name: component},
+					},
+				},
+			}
+			objects, err = c.client.QueryCalendar(ctx, calendarPath, query)
+			if err != nil {
+				log.Printf("CalDAV QueryCalendar failed for path '%s' (base URL: %s): %v", calendarPath, c.source.CalDAVURL, err)
+				return fmt.Errorf("failed to query calendar: %w", err)
+			}
 		}
 	}
 
