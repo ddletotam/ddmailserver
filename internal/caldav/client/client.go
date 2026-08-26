@@ -252,22 +252,39 @@ func (c *Client) SyncCalendar(ctx context.Context, cal *models.Calendar) error {
 	startTime := now.AddDate(0, -6, 0)
 	endTime := now.AddDate(1, 0, 0)
 
+	// Ask for what this collection actually holds. Asking every collection for
+	// VEVENT is why Apple's reminder lists came back empty once discovery
+	// finally stopped throwing them away: a VTODO-only collection answers a
+	// VEVENT query with nothing, perfectly correctly.
+	component := models.ComponentEvent
+	if cal.Supports(models.ComponentTodo) && !cal.Supports(models.ComponentEvent) {
+		component = models.ComponentTodo
+	}
+
+	// A time-range on VTODO is a trap. RFC 4791 §9.9 defines it against DTSTART,
+	// DUE, DURATION and COMPLETED, and a task carrying none of those — the
+	// ordinary "buy milk" — matches no window at all. Tasks are fetched whole.
+	var filterStart, filterEnd time.Time
+	if component == models.ComponentEvent {
+		filterStart, filterEnd = startTime, endTime
+	}
+
 	// Try with time-range filter first (required by iCloud and many servers)
 	// Request minimal data in query to get list of paths/ETags
 	query := &caldav.CalendarQuery{
 		CompRequest: caldav.CalendarCompRequest{
 			Name: "VCALENDAR",
 			Comps: []caldav.CalendarCompRequest{
-				{Name: "VEVENT", Props: []string{"UID"}},
+				{Name: component, Props: []string{"UID"}},
 			},
 		},
 		CompFilter: caldav.CompFilter{
 			Name: "VCALENDAR",
 			Comps: []caldav.CompFilter{
 				{
-					Name:  "VEVENT",
-					Start: startTime,
-					End:   endTime,
+					Name:  component,
+					Start: filterStart,
+					End:   filterEnd,
 				},
 			},
 		},
@@ -281,13 +298,13 @@ func (c *Client) SyncCalendar(ctx context.Context, cal *models.Calendar) error {
 			CompRequest: caldav.CalendarCompRequest{
 				Name: "VCALENDAR",
 				Comps: []caldav.CalendarCompRequest{
-					{Name: "VEVENT", Props: []string{"UID"}},
+					{Name: component, Props: []string{"UID"}},
 				},
 			},
 			CompFilter: caldav.CompFilter{
 				Name: "VCALENDAR",
 				Comps: []caldav.CompFilter{
-					{Name: "VEVENT"},
+					{Name: component},
 				},
 			},
 		}
@@ -493,9 +510,11 @@ func (c *Client) parseCalendarObject(obj *caldav.CalendarObject, calendarID int6
 		obj.Data.Props.SetText(ical.PropVersion, "2.0")
 	}
 
-	// Ensure required properties exist in all VEVENT components (required by RFC 5545)
+	// Ensure required properties exist (RFC 5545 demands DTSTAMP and UID on
+	// both VEVENT and VTODO; the repair used to skip tasks, which would have
+	// left them unencodable the moment we tried to push one back).
 	for _, child := range obj.Data.Children {
-		if child.Name == ical.CompEvent {
+		if child.Name == ical.CompEvent || child.Name == ical.CompToDo {
 			// Add DTSTAMP if missing
 			if child.Props.Get(ical.PropDateTimeStamp) == nil {
 				dtstamp := ical.NewProp(ical.PropDateTimeStamp)
@@ -528,71 +547,44 @@ func (c *Client) parseCalendarObject(obj *caldav.CalendarObject, calendarID int6
 		event.ETag = generateETag(event.ICalData)
 	}
 
-	// Extract event properties from the first VEVENT
-	for _, vevent := range obj.Data.Events() {
-		// Get UID
-		if prop := vevent.Props.Get(ical.PropUID); prop != nil {
-			event.UID = prop.Value
-		}
-
-		// Get Summary / Description / Location — these are TEXT-typed in RFC
-		// 5545, which means commas, semicolons, backslashes and newlines
-		// arrive escaped (`\,` `\;` `\\` `\n`). Prop.Value keeps the raw
-		// form; Text() decodes it. Without this the client renders
-		// "массаж\, Маргарита" literally.
-		if prop := vevent.Props.Get(ical.PropSummary); prop != nil {
-			if v, err := prop.Text(); err == nil {
-				event.Summary = v
-			} else {
-				event.Summary = prop.Value
-			}
-		}
-		if prop := vevent.Props.Get(ical.PropDescription); prop != nil {
-			if v, err := prop.Text(); err == nil {
-				event.Description = v
-			} else {
-				event.Description = prop.Value
-			}
-		}
-		if prop := vevent.Props.Get(ical.PropLocation); prop != nil {
-			if v, err := prop.Text(); err == nil {
-				event.Location = v
-			} else {
-				event.Location = prop.Value
-			}
-		}
-
-		// Get RRULE
-		if prop := vevent.Props.Get(ical.PropRecurrenceRule); prop != nil {
-			event.RRule = prop.Value
-		}
-
-		// Parse DTSTART
-		if prop := vevent.Props.Get(ical.PropDateTimeStart); prop != nil {
-			if t, err := prop.DateTime(nil); err == nil {
-				event.DTStart = timeutil.ToMs(t)
-			}
-			if prop.Params.Get(ical.ParamValue) == "DATE" {
-				event.AllDay = true
-			}
-		}
-
-		// Parse DTEND
-		if prop := vevent.Props.Get(ical.PropDateTimeEnd); prop != nil {
-			if t, err := prop.DateTime(nil); err == nil {
-				ms := timeutil.ToMs(t)
-				event.DTEnd = &ms
-			}
-		}
-
-		// Organizer + attendees. Without these the RSVP pills in the desktop
-		// card never resolve `myAttendee` and the bar stays hidden — the user
-		// can't see they were invited to an externally-synced meeting.
-		event.OrganizerEmail, event.OrganizerName = importer.ParseOrganizer(&vevent)
-		event.Attendees = importer.ParseAttendees(&vevent)
-
-		break // Only process first VEVENT
+	// Extract the properties through the shared importer.
+	//
+	// This was a third hand-rolled copy of the same extraction — after the one
+	// in the CalDAV server's PUT handler — and it had drifted in two ways that
+	// mattered: it was blind to VTODO, so a reminder list synced as rows with
+	// no summary and no due date; and it resolved DTSTART with prop.DateTime,
+	// which ignores whatever VTIMEZONE the server sent and silently zeroes a
+	// start whose zone this host does not know. The importer's zone resolver
+	// handles both.
+	parsed, parseErr := importer.ParseICS(event.ICalData)
+	if parseErr != nil || len(parsed) == 0 {
+		return nil, fmt.Errorf("failed to parse calendar object: %w", parseErr)
 	}
+
+	p := parsed[0]
+	event.Component = p.Component
+	event.UID = p.UID
+	event.Summary = p.Summary
+	event.Description = p.Description
+	event.Location = p.Location
+	event.RRule = p.RRule
+	event.RecurrenceID = p.RecurrenceID
+	event.DTStart = p.DTStart
+	event.DTEnd = p.DTEnd
+	event.AllDay = p.AllDay
+	event.Due = p.Due
+	event.CompletedAt = p.CompletedAt
+	event.PercentComplete = p.PercentComplete
+	event.Priority = p.Priority
+	if p.Status != "" {
+		event.Status = p.Status
+	}
+	// Organizer + attendees. Without these the RSVP pills in the desktop card
+	// never resolve `myAttendee` and the bar stays hidden — the user can't see
+	// they were invited to an externally-synced meeting.
+	event.OrganizerEmail = p.OrganizerEmail
+	event.OrganizerName = p.OrganizerName
+	event.Attendees = p.Attendees
 
 	if event.UID == "" {
 		return nil, fmt.Errorf("event has no UID")
