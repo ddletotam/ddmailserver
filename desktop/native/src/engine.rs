@@ -18,8 +18,9 @@ use ddmail_core::native_provider::NativeProvider;
 use ddmail_core::provider::MailProvider;
 use ddmail_core::session::SessionPool;
 use ddmail_core::types::{
-    Contact, Conversation, DesktopCalendar, DesktopCalendarEvent, DesktopContact, MessageBody,
-    MessageEnvelope, MessageRef, OutgoingAttachment, OutgoingMessage, CHANGE_KIND_DELETE,
+    Contact, Conversation, DesktopCalendar, DesktopCalendarEvent, DesktopContact, DesktopTask,
+    MessageBody, MessageEnvelope, MessageRef, OutgoingAttachment, OutgoingMessage,
+    CHANGE_KIND_DELETE,
 };
 
 #[derive(Clone)]
@@ -422,6 +423,13 @@ pub enum EngineCmd {
     /// query is autocomplete/search. `query` is echoed in the result so the UI
     /// can drop stale answers.
     FetchContacts { query: String, limit: u32 },
+    /// Tasks (VTODO) across every account. Not windowed by time the way
+    /// calendar events are: most tasks have no date at all, so a window would
+    /// hide the bulk of a reminders list.
+    FetchTasks { include_completed: bool },
+    /// Tick a task off (or back on). The UI has already moved; this is the
+    /// write that makes it stick.
+    SetTaskCompletion { task_id: i64, completed: bool, account_key: String },
     /// Address-book writes. Bodies are server-shaped JSON
     /// (full_name/emails/phones/organization/title [+ from_identity on create]).
     CreateContact { body: serde_json::Value, account_key: String },
@@ -501,6 +509,8 @@ pub enum EngineResult {
     /// Address-book rows — echoed back from FetchContacts. `query` lets the UI
     /// drop stale answers when typing faster than the engine answers.
     Contacts { query: String, list: Vec<DesktopContact> },
+    /// Task rows — echoed back from FetchTasks.
+    Tasks(Vec<DesktopTask>),
     /// Events for the currently displayed week — echoed back from
     /// FetchCalendarEvents. `from_ms`/`to_ms` echo the requested window and
     /// `complete` says every account answered — orphaned-reminder pruning
@@ -1109,6 +1119,40 @@ pub fn spawn(
                         }
                     }
                     on_result(EngineResult::Contacts { query, list: all });
+                }
+                EngineCmd::FetchTasks { include_completed } => {
+                    let mut all = Vec::new();
+                    for conn in &conns {
+                        match rt.block_on(conn.provider.fetch_tasks(include_completed)) {
+                            Ok(mut list) => {
+                                for t in list.iter_mut() {
+                                    t.account_key = conn.key.clone();
+                                }
+                                all.extend(list);
+                            }
+                            Err(e) => eprintln!("fetch_tasks [{}]: {e}", conn.key),
+                        }
+                    }
+                    // Undated tasks sort last: they are the ones with no
+                    // urgency to convey, and putting them on top would bury
+                    // whatever actually has a deadline.
+                    all.sort_by(|a, b| match (a.due, b.due) {
+                        (Some(x), Some(y)) => x.cmp(&y),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => a.summary.cmp(&b.summary),
+                    });
+                    on_result(EngineResult::Tasks(all));
+                }
+                EngineCmd::SetTaskCompletion { task_id, completed, account_key } => {
+                    let provider = route(&conns, &account_key).provider.clone();
+                    if let Err(e) = rt.block_on(provider.set_task_completion(task_id, completed)) {
+                        eprintln!("set_task_completion {task_id}: {e}");
+                        // Re-read rather than guess: the optimistic tick in the
+                        // UI is now wrong, and the server's answer is the only
+                        // one worth showing.
+                        on_result(EngineResult::Error(format!("Не удалось изменить задачу: {e}")));
+                    }
                 }
                 EngineCmd::CreateContact { body, account_key } => {
                     let provider = route(&conns, &account_key).provider.clone();

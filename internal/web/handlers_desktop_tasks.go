@@ -1,11 +1,16 @@
 package web
 
 import (
+	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/gorilla/mux"
+	caldavutil "github.com/yourusername/mailserver/internal/caldav"
 	"github.com/yourusername/mailserver/internal/models"
+	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // DesktopTask is a VTODO as the desktop needs to hear it.
@@ -138,4 +143,93 @@ func (s *Server) HandleDesktopTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, out)
+}
+
+// TaskCompletionRequest is the body of the completion toggle.
+type TaskCompletionRequest struct {
+	// Completed is a pointer so "not specified" can mean "flip it", which is
+	// what a checkbox wants, while an explicit value stays authoritative for
+	// callers that know the state they intend.
+	Completed *bool `json:"completed"`
+}
+
+// HandleDesktopTaskCompletion marks a task done or not done.
+//
+// Its own endpoint rather than a field on the event PATCH: that handler is
+// shaped around events — recurrence scope, DTSTART/DTEND — and completion has
+// no meaning there. Mixing them would put a `completed` field on every event
+// edit that no event can honour.
+func (s *Server) HandleDesktopTaskCompletion(w http.ResponseWriter, r *http.Request) {
+	user := s.GetUserFromContext(r.Context())
+	if user == nil {
+		respondError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	taskID, err := strconv.ParseInt(mux.Vars(r)["id"], 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "bad task id")
+		return
+	}
+
+	var req TaskCompletionRequest
+	// An empty body is legitimate: it means "toggle".
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	task, err := s.database.GetEventByID(taskID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	if !task.IsTodo() {
+		respondError(w, http.StatusBadRequest, "not a task")
+		return
+	}
+
+	cal, err := s.database.GetCalendarByID(task.CalendarID)
+	if err != nil || cal.UserID != user.ID {
+		respondError(w, http.StatusNotFound, "calendar not found")
+		return
+	}
+	if !cal.CanWrite || cal.SourceType == "ics_url" || cal.SourceType == "ics_import" {
+		respondError(w, http.StatusBadRequest, "calendar is read-only")
+		return
+	}
+
+	completed := !task.IsCompleted()
+	if req.Completed != nil {
+		completed = *req.Completed
+	}
+
+	now := timeutil.Now()
+	task.ICalData = caldavutil.SetTodoCompletion(task.ICalData, completed, now)
+	if completed {
+		task.Status = "COMPLETED"
+		task.CompletedAt = &now
+		full := int16(100)
+		task.PercentComplete = &full
+	} else {
+		task.Status = "NEEDS-ACTION"
+		task.CompletedAt = nil
+		task.PercentComplete = nil
+	}
+	// The reverse-sync worker skips rows it has already pushed; this is what
+	// tells it there is something new to send.
+	task.LocalModified = true
+
+	if err := s.database.UpdateCalendarEvent(task); err != nil {
+		log.Printf("task completion: failed to update task %d: %v", taskID, err)
+		respondError(w, http.StatusInternalServerError, "failed to update task")
+		return
+	}
+
+	s.queueEventReverseSync(cal, task, "update")
+
+	log.Printf("task completion: task %d (%s) → completed=%t", taskID, task.UID, completed)
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"id":        task.ID,
+		"completed": completed,
+		"status":    task.Status,
+	})
 }
