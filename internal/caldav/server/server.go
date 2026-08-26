@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/emersion/go-ical"
 	"github.com/yourusername/mailserver/internal/caldav/importer"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
@@ -272,14 +271,11 @@ func (s *Server) propfindCalendarHome(user *models.User, depth string, prefix st
           <C:calendar/>
         </D:resourcetype>
         <D:displayname>%s</D:displayname>
-        <C:supported-calendar-component-set>
-          <C:comp name="VEVENT"/>
-          <C:comp name="VTODO"/>
-        </C:supported-calendar-component-set>
+%s
       </D:prop>
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
-  </D:response>`, calURL, xmlEscape(cal.Name)))
+  </D:response>`, calURL, xmlEscape(cal.Name), supportedComponentSetXML(cal)))
 		}
 	}
 
@@ -345,15 +341,12 @@ func (s *Server) propfindCalendar(user *models.User, calID int64, depth string, 
           <C:calendar/>
         </D:resourcetype>
         <D:displayname>%s</D:displayname>
-        <C:supported-calendar-component-set>
-          <C:comp name="VEVENT"/>
-          <C:comp name="VTODO"/>
-        </C:supported-calendar-component-set>
+%s
       </D:prop>
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
   </D:response>%s
-</D:multistatus>`, calURL, xmlEscape(cal.Name), eventResponses.String())
+</D:multistatus>`, calURL, xmlEscape(cal.Name), supportedComponentSetXML(cal), eventResponses.String())
 }
 
 // reportRequest represents a parsed REPORT request body
@@ -362,6 +355,12 @@ type reportRequest struct {
 	hrefs      []string
 	timeRange  *timeRange
 	wantData   bool // whether calendar-data was requested in <prop>
+
+	// component is the comp-filter the client asked for: "VEVENT", "VTODO" or
+	// "" for no preference. Apple's Calendar and Reminders point at the same
+	// collection and tell them apart by exactly this filter — without honouring
+	// it, Reminders is handed a pile of meetings and Calendar a pile of tasks.
+	component string
 }
 
 type timeRange struct {
@@ -425,6 +424,32 @@ func parseReportBody(body []byte) *reportRequest {
 				}
 				remaining = remaining[end+len(endTag):]
 			}
+		}
+	}
+
+	// Extract the component filter. The interesting one is nested inside
+	// VCALENDAR — `<C:comp-filter name="VCALENDAR"><C:comp-filter name="VTODO">`
+	// — so the outer VCALENDAR level is skipped and the first inner name wins.
+	for _, prefix := range []string{"<C:comp-filter", "<comp-filter"} {
+		remaining := bodyStr
+		for {
+			idx := strings.Index(remaining, prefix)
+			if idx == -1 {
+				break
+			}
+			tagEnd := strings.Index(remaining[idx:], ">")
+			if tagEnd == -1 {
+				break
+			}
+			name := strings.ToUpper(extractAttr(remaining[idx:idx+tagEnd], "name"))
+			if name == models.ComponentEvent || name == models.ComponentTodo {
+				req.component = name
+				break
+			}
+			remaining = remaining[idx+tagEnd:]
+		}
+		if req.component != "" {
+			break
 		}
 	}
 
@@ -559,6 +584,21 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request, user *mode
 			}
 			events = filtered
 		}
+	}
+
+	// Honour the comp-filter. Apple's Calendar and Reminders both point at the
+	// same collection and distinguish themselves by nothing else, so skipping
+	// this hands each of them the other's contents.
+	if report.component != "" {
+		filtered := make([]*models.CalendarEvent, 0, len(events))
+		for _, event := range events {
+			if event.ComponentOrDefault() == report.component {
+				filtered = append(filtered, event)
+			}
+		}
+		log.Printf("REPORT comp-filter=%s kept %d of %d on calendar %d",
+			report.component, len(filtered), len(events), calID)
+		events = filtered
 	}
 
 	var responses strings.Builder
@@ -741,71 +781,45 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 		return
 	}
 
-	// Parse iCal data
-	decoder := ical.NewDecoder(strings.NewReader(string(body)))
-	icalCal, err := decoder.Decode()
-	if err != nil {
+	// Parse through the shared importer rather than a second hand-rolled loop.
+	//
+	// This handler used to walk icalCal.Events() itself, which meant a copy of
+	// the property extraction that drifted from the importer's — and, more to
+	// the point, was blind to VTODO: a task PUT here produced a row with no
+	// summary and no due date, which is how iOS Reminders ended up stored as
+	// nameless events.
+	parsed, err := importer.ParseICS(string(body))
+	if err != nil || len(parsed) == 0 {
 		http.Error(w, "Invalid iCal data", http.StatusBadRequest)
 		return
 	}
 
-	// Extract event data
-	event := &models.CalendarEvent{
-		CalendarID:    calID,
-		UID:           uid,
-		ICalData:      string(body),
-		LocalModified: true,
+	event := parsed[0]
+	event.CalendarID = calID
+	event.LocalModified = true
+	// The client's exact bytes are kept, not the importer's re-serialisation:
+	// this body is what gets pushed back upstream, and a round trip through
+	// our encoder would drop properties we do not model.
+	event.ICalData = string(body)
+	// The path names the resource; the body's UID is advisory.
+	if uid != "" {
+		event.UID = uid
 	}
 
-	for _, vevent := range icalCal.Events() {
-		if prop := vevent.Props.Get(ical.PropUID); prop != nil && event.UID == "" {
-			event.UID = prop.Value
-		}
-		// TEXT-typed values — Text() unescapes `\,` `\;` `\\` `\n` per RFC 5545.
-		if prop := vevent.Props.Get(ical.PropSummary); prop != nil {
-			if v, err := prop.Text(); err == nil {
-				event.Summary = v
-			} else {
-				event.Summary = prop.Value
-			}
-		}
-		if prop := vevent.Props.Get(ical.PropDescription); prop != nil {
-			if v, err := prop.Text(); err == nil {
-				event.Description = v
-			} else {
-				event.Description = prop.Value
-			}
-		}
-		if prop := vevent.Props.Get(ical.PropLocation); prop != nil {
-			if v, err := prop.Text(); err == nil {
-				event.Location = v
-			} else {
-				event.Location = prop.Value
-			}
-		}
-		if prop := vevent.Props.Get(ical.PropRecurrenceRule); prop != nil {
-			event.RRule = prop.Value
-		}
-		if prop := vevent.Props.Get(ical.PropDateTimeStart); prop != nil {
-			if t, err := prop.DateTime(nil); err == nil {
-				event.DTStart = timeutil.ToMs(t)
-			}
-			if prop.Params.Get(ical.ParamValue) == "DATE" {
-				event.AllDay = true
-			}
-		}
-		if prop := vevent.Props.Get(ical.PropDateTimeEnd); prop != nil {
-			if t, err := prop.DateTime(nil); err == nil {
-				ms := timeutil.ToMs(t)
-				event.DTEnd = &ms
-			}
-		}
-		// Organizer + attendees. Mirror of what client.go does on inbound sync —
-		// without this, an event PUT by Evolution/Thunderbird/iOS to our CalDAV
-		// drops the attendee list, and the desktop RSVP bar stays hidden.
-		event.OrganizerEmail, event.OrganizerName = importer.ParseOrganizer(&vevent)
-		event.Attendees = importer.ParseAttendees(&vevent)
-		break
+	// A collection only accepts what it advertises. Refusing here is the whole
+	// point of migrations/048: iOS was filing Reminders into event calendars
+	// because we claimed to take them, and every one of those then failed
+	// upstream with a 403 we could not explain.
+	if !cal.Supports(event.ComponentOrDefault()) {
+		log.Printf("CalDAV PUT: cal=%d rejects %s (supports %s)",
+			calID, event.ComponentOrDefault(), strings.Join(cal.ComponentList(), ","))
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?>
+<D:error xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <C:supported-calendar-component/>
+</D:error>`)
+		return
 	}
 
 	// Generate ETag
@@ -1030,4 +1044,22 @@ func xmlEscape(s string) string {
 	var buf strings.Builder
 	xml.EscapeText(&buf, []byte(s))
 	return buf.String()
+}
+
+// supportedComponentSetXML renders a calendar's supported-calendar-component-set
+// from what the collection actually holds.
+//
+// This used to be hardcoded to "VEVENT and VTODO" for every calendar, and that
+// single line is the origin of the whole task saga: iOS read the advertisement,
+// filed its Reminders here, and the reverse sync then pushed VTODOs at an
+// iCloud event collection that answered 403 to every one of them. A client is
+// entitled to believe this property — so it has to be true.
+func supportedComponentSetXML(cal *models.Calendar) string {
+	var sb strings.Builder
+	sb.WriteString("        <C:supported-calendar-component-set>\n")
+	for _, comp := range cal.ComponentList() {
+		fmt.Fprintf(&sb, "          <C:comp name=%q/>\n", xmlEscape(comp))
+	}
+	sb.WriteString("        </C:supported-calendar-component-set>")
+	return sb.String()
 }
