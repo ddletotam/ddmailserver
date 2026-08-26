@@ -81,19 +81,10 @@ func (t *ContactSyncTask) doSync(ctx context.Context) error {
 	// Same as the calendar side: drop the placeholder book once discovery
 	// starts naming real ones. Guarded the same way — a source whose discovery
 	// never works keeps its contacts in exactly such a row.
-	discoveryWorked := false
-	for _, rb := range addressBooks {
-		if rb.RemoteID != t.source.CardDAVURL {
-			discoveryWorked = true
-			break
-		}
-	}
-	if discoveryWorked {
-		if pruned, err := t.database.PruneDirectURLAddressBook(t.source.ID, t.source.CardDAVURL); err != nil {
-			log.Printf("Failed to prune placeholder address book for %s: %v", t.source.Name, err)
-		} else if pruned {
-			log.Printf("Removed placeholder address book for %s — discovery now returns real collections", t.source.Name)
-		}
+	if pruned, err := t.database.PruneDirectURLAddressBookIfDiscovered(t.source.ID, t.source.CardDAVURL, addressBooks); err != nil {
+		log.Printf("Failed to prune placeholder address book for %s: %v", t.source.Name, err)
+	} else if pruned {
+		log.Printf("Removed placeholder address book for %s — discovery now returns real collections", t.source.Name)
 	}
 
 	// Sync each address book

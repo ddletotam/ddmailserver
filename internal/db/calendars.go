@@ -346,3 +346,28 @@ func (db *DB) PruneDirectURLCalendar(sourceID int64, sourceURL string) (bool, er
 	}
 	return true, nil
 }
+
+// PruneDirectURLCalendarIfDiscovered removes the placeholder row when the
+// discovered set shows that discovery is working again.
+//
+// The decision lives here rather than at the call sites because there are two
+// of them — the background worker and the web handler each implement calendar
+// sync separately — and "did discovery work?" answered differently in the two
+// places is how one of them silently stops cleaning up. That has already
+// happened once with this very fix.
+//
+// Working means: something came back that is not the source URL itself. A
+// transient failure returns only the placeholder, and then nothing is removed.
+func (db *DB) PruneDirectURLCalendarIfDiscovered(sourceID int64, sourceURL string, discovered []*models.Calendar) (bool, error) {
+	worked := false
+	for _, c := range discovered {
+		if c.RemoteID != sourceURL {
+			worked = true
+			break
+		}
+	}
+	if !worked {
+		return false, nil
+	}
+	return db.PruneDirectURLCalendar(sourceID, sourceURL)
+}
