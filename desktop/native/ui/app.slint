@@ -1052,6 +1052,14 @@ export component MainWindow inherits Window {
     in-out property <bool> edit-all-day: false;
     in property <[string]> edit-calendars;     // writable calendar names
     in-out property <int> edit-calendar-idx: 0;
+    // Почему форма не сохраняется. Rust проверяет то, что нельзя выразить
+    // биндингом (разобралась ли дата, выбран ли календарь, что ответил
+    // сервер), и раньше писал это в stderr: пользователь жал «Сохранить» и
+    // не получал НИЧЕГО — ни события, ни ошибки. Пустая строка — блок скрыт.
+    in-out property <string> edit-error: "";
+    // Форма отправлена и ждёт ответа движка: кнопки гаснут, чтобы повторное
+    // нажатие не создало второе событие.
+    in-out property <bool> edit-busy: false;
     // Read-only block of the event card (meetings): organizer line,
     // attendees with participation-status dots, and a meta line
     // (cancelled/tentative · recurrence · reminder). All empty for
@@ -4403,6 +4411,17 @@ export component MainWindow inherits Window {
                     VerticalLayout {
                         spacing: 3px;
                         Text { text: "Календарь"; font-size: 12px; color: #5b6672; }
+                        // Пустой список календарей — это не «нет строки», это
+                        // «сохранять некуда». Раньше место просто пустовало, и
+                        // тупик был виден только по бездействию кнопки.
+                        if root.edit-calendars.length == 0: Text {
+                            text: root.edit-is-create
+                                ? "Нет календарей, доступных на запись"
+                                : "—";
+                            font-size: 13px;
+                            color: #b45309;
+                            wrap: word-wrap;
+                        }
                         HorizontalLayout {
                             spacing: 6px;
                             alignment: start;
@@ -4481,11 +4500,35 @@ export component MainWindow inherits Window {
                         value <=> root.edit-description;
                     }
                     Rectangle { vertical-stretch: 1; }
+                    if root.edit-error != "": Rectangle {
+                        border-radius: 7px;
+                        background: #fef2f2;
+                        border-width: 1px;
+                        border-color: #fca5a5;
+                        HorizontalLayout {
+                            padding: 8px;
+                            Text {
+                                text: root.edit-error;
+                                font-size: 13px;
+                                color: #b91c1c;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
                     HorizontalLayout {
                         spacing: 8px;
                         Rectangle { horizontal-stretch: 1; }
                         Button { text: "Отмена"; clicked => { root.edit-cancel(); } }
-                        Button { text: "Сохранить"; primary: true; clicked => { root.edit-save(); } }
+                        // Создавать событие некуда, пока нет ни одного
+                        // календаря на запись — кнопка гаснет вместо того,
+                        // чтобы молча ничего не делать по нажатию.
+                        Button {
+                            text: root.edit-busy ? "Сохраняю…" : "Сохранить";
+                            primary: true;
+                            enabled: !root.edit-busy
+                                && (!root.edit-is-create || root.edit-calendars.length > 0);
+                            clicked => { root.edit-save(); }
+                        }
                     }
                 }
             }
