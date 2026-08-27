@@ -239,6 +239,7 @@ func (c *Client) SyncAddressBook(ctx context.Context, book *models.AddressBook) 
 	}
 
 	seenUIDs := make(map[string]bool)
+	dupUIDs := 0
 
 	for _, obj := range objects {
 		if obj.Card == nil {
@@ -254,6 +255,18 @@ func (c *Client) SyncAddressBook(ctx context.Context, book *models.AddressBook) 
 
 		contact.RemoteID = obj.Path
 		contact.ETag = obj.ETag
+
+		// Дедуп ВНУТРИ пачки. UID у карточки берётся с сервера, и он не всегда
+		// уникален: у GAL-коллекций SOGo это адрес (`UID:1cteam@small.kz`), а
+		// одна и та же запись попадает в выдачу дважды. Сверка ниже идёт только
+		// с базой, поэтому обе копии уходили в Creates, второй INSERT ронял
+		// уникальный индекс (address_book_id, uid) и с ним всю транзакцию —
+		// книга оставалась пустой на каждом синке, бесконечно. Первая копия
+		// побеждает: это одна и та же запись, выбирать между копиями нечего.
+		if seenUIDs[contact.UID] {
+			dupUIDs++
+			continue
+		}
 		seenUIDs[contact.UID] = true
 
 		// Check if contact exists
@@ -269,6 +282,11 @@ func (c *Client) SyncAddressBook(ctx context.Context, book *models.AddressBook) 
 			contact.ID = existing.ID
 			changes.Updates = append(changes.Updates, contact)
 		}
+	}
+
+	if dupUIDs > 0 {
+		log.Printf("CardDAV %s: %d objects shared a UID with an earlier one and were skipped (source reuses UIDs)",
+			book.Name, dupUIDs)
 	}
 
 	// Find deleted contacts
@@ -637,10 +655,17 @@ func (c *Client) syncGoogleContacts(ctx context.Context, book *models.AddressBoo
 
 	changes := &db.SyncContactChanges{}
 	seenUIDs := make(map[string]bool)
+	dupUIDs := 0
 
 	for _, person := range result.Connections {
 		contact := person.toContact(c.source.UserID, book.ID)
 		if contact.UID == "" || contact.FullName == "" {
+			continue
+		}
+		// Тот же дедуп внутри пачки, что и в CardDAV-пути: два элемента с одним
+		// UID дали бы два INSERT'а и уронили транзакцию целиком.
+		if seenUIDs[contact.UID] {
+			dupUIDs++
 			continue
 		}
 		seenUIDs[contact.UID] = true
@@ -668,6 +693,11 @@ func (c *Client) syncGoogleContacts(ctx context.Context, book *models.AddressBoo
 		} else {
 			changes.Creates = append(changes.Creates, contact)
 		}
+	}
+
+	if dupUIDs > 0 {
+		log.Printf("Google Contacts %s: %d entries shared a UID with an earlier one and were skipped",
+			book.Name, dupUIDs)
 	}
 
 	// Detect deletes

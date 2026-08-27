@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -466,6 +467,19 @@ func (db *DB) ApplyContactSyncChanges(addressBookID int64, changes *SyncContactC
 			birthday = sql.NullInt64{Int64: *contact.Birthday, Valid: true}
 		}
 
+		// Upsert, not plain INSERT. `Creates` is built from a snapshot of the
+		// book taken before the network round-trip, so a row can appear under
+		// the same (address_book_id, uid) in between — a concurrent sync of the
+		// same book, or a source that hands out the same UID twice. As a plain
+		// INSERT that raised a unique violation and rolled back the WHOLE
+		// transaction: one odd card and the entire address book stayed empty,
+		// every cycle, forever. Last write wins instead — the conflicting row
+		// describes the same card.
+		//
+		// The `local_modified = false` guard keeps the pull off rows the user
+		// edited locally: those belong to the reverse-push (same rule as the
+		// LocalModified skip on the client side). Such a row updates nothing
+		// and returns no id, hence the ErrNoRows branch.
 		query := `
 			INSERT INTO contacts (
 				user_id, address_book_id, uid, remote_id, vcard_data,
@@ -474,6 +488,18 @@ func (db *DB) ApplyContactSyncChanges(addressBookID int64, changes *SyncContactC
 				organization, title, department, address, notes, photo_url, birthday,
 				etag, local_modified, created_at, updated_at
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+			ON CONFLICT (address_book_id, uid) DO UPDATE SET
+				remote_id = EXCLUDED.remote_id, vcard_data = EXCLUDED.vcard_data,
+				full_name = EXCLUDED.full_name, given_name = EXCLUDED.given_name,
+				family_name = EXCLUDED.family_name, nickname = EXCLUDED.nickname,
+				email = EXCLUDED.email, email2 = EXCLUDED.email2, email3 = EXCLUDED.email3,
+				phone = EXCLUDED.phone, phone2 = EXCLUDED.phone2, phone3 = EXCLUDED.phone3,
+				organization = EXCLUDED.organization, title = EXCLUDED.title,
+				department = EXCLUDED.department, address = EXCLUDED.address,
+				notes = EXCLUDED.notes, photo_url = EXCLUDED.photo_url,
+				birthday = EXCLUDED.birthday, etag = EXCLUDED.etag,
+				updated_at = EXCLUDED.updated_at
+			WHERE contacts.local_modified = false
 			RETURNING id
 		`
 
@@ -486,6 +512,10 @@ func (db *DB) ApplyContactSyncChanges(addressBookID int64, changes *SyncContactC
 			contact.ETag, false, contact.CreatedAt, contact.UpdatedAt,
 		).Scan(&contact.ID)
 
+		if errors.Is(err, sql.ErrNoRows) {
+			// Row exists and is locally modified — reverse sync owns it.
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("failed to create contact %s: %w", contact.UID, err)
 		}
