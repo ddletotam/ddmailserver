@@ -427,21 +427,25 @@ func (s *Server) HandleDesktopSetFlags(w http.ResponseWriter, r *http.Request) {
 			s.database.UpdateMessageFlag(msg.ID, "draft", req.Add)
 		}
 
-		if propagate {
-			// Track for the WS push below. Only seen/flagged/answered are
-			// user-visible unread-state changes worth a push; \Deleted and
-			// \Draft ride their own flows.
-			if (req.Flags == "\\Seen" && msg.Seen != req.Add) ||
-				(req.Flags == "\\Flagged" && msg.Flagged != req.Add) ||
-				(req.Flags == "\\Answered" && msg.Answered != req.Add) {
-				anyVisibleChange = true
-				if changedFolder == "" {
-					changedFolder = ref.Folder
-				}
+		// Did this call actually move the flag? Only seen/flagged/answered are
+		// user-visible unread-state changes worth a push; \Deleted and \Draft
+		// ride their own flows.
+		flagsMoved := (req.Flags == "\\Seen" && msg.Seen != req.Add) ||
+			(req.Flags == "\\Flagged" && msg.Flagged != req.Add) ||
+			(req.Flags == "\\Answered" && msg.Answered != req.Add)
+
+		if propagate && flagsMoved {
+			anyVisibleChange = true
+			if changedFolder == "" {
+				changedFolder = ref.Folder
 			}
 		}
 
-		if propagate && msg.AccountID > 0 && msg.RemoteUID > 0 {
+		// A no-op re-assert (the client marks an already-read message read
+		// again) must not enter the queue: it costs a pointless remote STORE,
+		// and a pending row now freezes the flag columns against the upstream
+		// pull, so it would also delay a genuine remote-side change.
+		if propagate && flagsMoved && msg.AccountID > 0 && msg.RemoteUID > 0 {
 			if err := s.database.QueueFlagSync(
 				msg.ID, msg.AccountID, msg.RemoteFolder, msg.RemoteUID,
 				newSeen, newFlagged, newAnswered, false,
