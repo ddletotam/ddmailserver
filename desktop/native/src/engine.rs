@@ -504,8 +504,10 @@ pub enum EngineResult {
     AttachmentSavedTo(String),
     /// Raw RFC-822 source for a FetchSource request.
     Source { uid: u32, raw: String },
-    /// Calendar list (sidebar) — echoed back from FetchCalendars.
-    Calendars(Vec<DesktopCalendar>),
+    /// Calendar list (sidebar) — echoed back from FetchCalendars. `complete`
+    /// says every account answered: тот же принцип, что у CalendarEvents —
+    /// отсутствие календарей упавшего аккаунта не означает, что их удалили.
+    Calendars { list: Vec<DesktopCalendar>, complete: bool },
     /// Address-book rows — echoed back from FetchContacts. `query` lets the UI
     /// drop stale answers when typing faster than the engine answers.
     Contacts { query: String, list: Vec<DesktopContact> },
@@ -731,6 +733,11 @@ pub fn spawn(
         // must not queue behind that backlog, so avatars are parked and
         // served only while the channel is empty.
         let mut avatar_backlog: std::collections::VecDeque<String> = Default::default();
+        // Последний удачно полученный список календарей на аккаунт. Нужен
+        // ровно затем, чтобы разовая ошибка запроса не оставила UI без
+        // календарей (см. FetchCalendars).
+        let mut last_calendars: std::collections::HashMap<String, Vec<DesktopCalendar>> =
+            Default::default();
         loop {
             let mut next: Option<EngineCmd> = None;
             let mut disconnected = false;
@@ -1086,19 +1093,37 @@ pub fn spawn(
                     // its owner — one unified list, no primary account.
                     let t0 = std::time::Instant::now();
                     let mut all = Vec::new();
+                    let mut complete = true;
                     for conn in &conns {
                         match rt.block_on(conn.provider.list_calendars()) {
                             Ok(mut cals) => {
                                 for c in cals.iter_mut() {
                                     c.account_key = conn.key.clone();
                                 }
+                                last_calendars.insert(conn.key.clone(), cals.clone());
                                 all.extend(cals);
                             }
-                            Err(e) => eprintln!("list_calendars [{}]: {e}", conn.key),
+                            Err(e) => {
+                                eprintln!("list_calendars [{}]: {e}", conn.key);
+                                complete = false;
+                                // Ошибка запроса — это не «календари удалили».
+                                // Отдать вместо них пустоту значит сломать
+                                // форму создания события: сохранять станет
+                                // некуда, причём молча. Держим последний
+                                // удачный список этого аккаунта.
+                                if let Some(prev) = last_calendars.get(&conn.key) {
+                                    all.extend(prev.iter().cloned());
+                                }
+                            }
                         }
                     }
-                    println!("[cal] FetchCalendars: {} cals in {}ms", all.len(), t0.elapsed().as_millis());
-                    on_result(EngineResult::Calendars(all));
+                    println!(
+                        "[cal] FetchCalendars: {} cals in {}ms{}",
+                        all.len(),
+                        t0.elapsed().as_millis(),
+                        if complete { "" } else { " (partial)" }
+                    );
+                    on_result(EngineResult::Calendars { list: all, complete });
                 }
                 EngineCmd::FetchContacts { query, limit } => {
                     let mut all = Vec::new();

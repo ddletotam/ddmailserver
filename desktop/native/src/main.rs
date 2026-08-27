@@ -1673,6 +1673,10 @@ struct Shared {
     manual_col_w: Cell<f32>,
     /// Event being edited (0 in create mode).
     editing_event_id: Cell<i64>,
+    /// Форма события отправлена и ждёт ответа движка. Карточка закрывается по
+    /// подтверждению, а не по факту нажатия: закрываясь сразу, она уносила с
+    /// собой и отказ сервера — успех и провал выглядели одинаково (ничего).
+    pending_event_save: Cell<bool>,
     /// Writable calendar ids, parallel to the edit-form's ComboBox model.
     edit_cal_ids: RefCell<Vec<i64>>,
     /// account_key of each writable calendar (parallel to edit_cal_ids), so a
@@ -4493,6 +4497,18 @@ fn open_create_form_at(ui: &MainWindow, sh: &Shared, start_ms: i64) {
     if ids.is_empty() {
         ids = fill_writable_calendars(ui, sh, false);
     }
+    // Список календарей живёт только в памяти и заполняется единственным
+    // ответом FetchCalendars. Открывать форму, из которой нечем сохранить,
+    // бессмысленно — сразу говорим об этом и просим список заново; ответ
+    // дозаполнит уже открытую карточку (см. EngineResult::Calendars).
+    if ids.is_empty() {
+        ui.set_edit_error("Список календарей не загружен — обновляю…".into());
+        if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+            let _ = etx.send(engine::EngineCmd::FetchCalendars);
+        }
+    } else {
+        ui.set_edit_error("".into());
+    }
     *sh.edit_cal_ids.borrow_mut() = ids;
     sh.editing_event_id.set(0);
     ui.set_edit_is_create(true);
@@ -4507,6 +4523,7 @@ fn open_create_form_at(ui: &MainWindow, sh: &Shared, start_ms: i64) {
     ui.set_edit_attendees(ModelRc::new(VecModel::from(Vec::<AttendeeItem>::new())));
     ui.set_edit_meta("".into());
     ui.set_edit_extras(ModelRc::new(VecModel::from(Vec::<EventExtraItem>::new())));
+    ui.set_edit_busy(false);
     ui.set_edit_visible(true);
 }
 
@@ -4603,6 +4620,7 @@ fn open_edit_form(ui: &MainWindow, sh: &Shared, ev: &ddmail_core::types::Desktop
     let idx = ids.iter().position(|&id| id == ev.calendar_id).unwrap_or(0) as i32;
     *sh.edit_cal_ids.borrow_mut() = ids;
     sh.editing_event_id.set(ev.id);
+    ui.set_edit_error("".into());
     ui.set_edit_is_create(false);
     ui.set_edit_title(ev.summary.clone().into());
     ui.set_edit_all_day(ev.all_day);
@@ -4663,17 +4681,23 @@ fn open_edit_form(ui: &MainWindow, sh: &Shared, ev: &ddmail_core::types::Desktop
     }
     ui.set_edit_meta(meta.join(" · ").into());
 
+    ui.set_edit_busy(false);
     ui.set_edit_visible(true);
 }
 
 /// Validate the form and dispatch Create or Patch to the engine.
+///
+/// Каждый отказ обязан попасть в `edit-error`: раньше проверки писали причину
+/// в stderr и выходили, а пользователь видел кнопку, которая «не нажимается».
 fn save_edit_form(ui: &MainWindow, sh: &Shared) {
+    ui.set_edit_error("".into());
     let all_day = ui.get_edit_all_day();
     let Some(start) = parts_to_ms(
         ui.get_edit_s_year(), ui.get_edit_s_month(), ui.get_edit_s_day(),
         ui.get_edit_s_hour(), ui.get_edit_s_min(), all_day,
     ) else {
         eprintln!("edit: bad start time");
+        ui.set_edit_error("Не удалось разобрать дату начала — проверьте поля «Начало».".into());
         return;
     };
     let end = parts_to_ms(
@@ -4683,13 +4707,34 @@ fn save_edit_form(ui: &MainWindow, sh: &Shared) {
     let title = ui.get_edit_title().to_string();
     let location = ui.get_edit_location().to_string();
     let description = ui.get_edit_description().to_string();
-    let Some(etx) = sh.engine_tx.borrow().clone() else { return };
+    let Some(etx) = sh.engine_tx.borrow().clone() else {
+        ui.set_edit_error("Нет соединения с сервером — событие не отправлено.".into());
+        return;
+    };
 
     let editing = sh.editing_event_id.get();
     if editing == 0 {
+        // Отрицательный индекс (ничего не выбрано) как usize превращается в
+        // огромное число, поэтому `get` здесь ловит и «список пуст», и «выбор
+        // не сделан» — но различить их для человека надо.
         let idx = ui.get_edit_calendar_idx() as usize;
         let Some(&cal_id) = sh.edit_cal_ids.borrow().get(idx) else {
-            eprintln!("edit: no writable calendar selected");
+            eprintln!("edit: no writable calendar selected (idx={idx})");
+            let empty = sh.edit_cal_ids.borrow().is_empty();
+            if empty {
+                // Список приезжает единственным ответом FetchCalendars и
+                // нигде не кэшируется: если тот ответ не пришёл (или пришёл
+                // пустым из-за ошибки запроса), сохранять действительно
+                // некуда. Просим список заново прямо отсюда — карточка
+                // дозаполнится, когда ответ придёт.
+                ui.set_edit_error(
+                    "Список календарей не загружен — обновляю. Повторите сохранение через пару секунд."
+                        .into(),
+                );
+                let _ = etx.send(engine::EngineCmd::FetchCalendars);
+            } else {
+                ui.set_edit_error("Выберите календарь для события.".into());
+            }
             return;
         };
         let mut body = serde_json::json!({
@@ -4723,7 +4768,11 @@ fn save_edit_form(ui: &MainWindow, sh: &Shared) {
         let ak = sh.event_accounts.borrow().get(&editing).cloned().unwrap_or_default();
         let _ = etx.send(engine::EngineCmd::PatchEvent { event_id: editing, body, account_key: ak });
     }
-    ui.set_edit_visible(false);
+    // Карточка остаётся до ответа движка: закроет её подтверждение (Done), а
+    // отказ покажет причину прямо здесь. Кнопки на это время гаснут, чтобы
+    // повторное нажатие не отправило второе событие.
+    sh.pending_event_save.set(true);
+    ui.set_edit_busy(true);
 }
 
 /// Seed the calendar view's read-only state before the engine produces
@@ -5943,6 +5992,7 @@ fn main() {
         manual_hour_h: Cell::new(cal_set.manual_hour_height),
         manual_col_w: Cell::new(cal_set.manual_col_width),
         editing_event_id: Cell::new(0),
+        pending_event_save: Cell::new(false),
         edit_cal_ids: RefCell::new(Vec::new()),
         edit_cal_accounts: RefCell::new(Vec::new()),
         address_book: RefCell::new(Vec::new()),
@@ -8492,6 +8542,13 @@ fn main() {
     let ui_weak_ec = ui.as_weak();
     ui.on_edit_cancel(move || {
         if let Some(ui) = ui_weak_ec.upgrade() {
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    sh.pending_event_save.set(false);
+                }
+            });
+            ui.set_edit_busy(false);
+            ui.set_edit_error("".into());
             ui.set_edit_visible(false);
         }
     });
@@ -9082,6 +9139,13 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                 // Calendar mutation → refresh the visible week's events.
                 SHARED.with(|s| {
                     if let Some(sh) = s.borrow().as_ref() {
+                        // Подтверждение сохранения формы — только теперь
+                        // карточку можно закрывать.
+                        if sh.pending_event_save.replace(false) {
+                            ui.set_edit_busy(false);
+                            ui.set_edit_error("".into());
+                            ui.set_edit_visible(false);
+                        }
                         refetch_calendar_events(ui, sh);
                     }
                 });
@@ -9453,8 +9517,12 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                 }
             });
         }
-        engine::EngineResult::Calendars(cals) => {
-            println!("engine: {} calendars", cals.len());
+        engine::EngineResult::Calendars { list: cals, complete } => {
+            println!(
+                "engine: {} calendars{}",
+                cals.len(),
+                if complete { "" } else { " (partial)" }
+            );
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
                     {
@@ -9465,6 +9533,32 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     }
                     *sh.calendars.borrow_mut() = cals;
                     apply_calendar_view(ui, sh);
+
+                    // Открытая форма создания, у которой не было куда сохранять,
+                    // дозаполняется здесь же — иначе пришедший список пришлось
+                    // бы «поймать» закрытием и повторным открытием карточки.
+                    if ui.get_edit_visible()
+                        && ui.get_edit_is_create()
+                        && sh.edit_cal_ids.borrow().is_empty()
+                    {
+                        let mut ids = fill_writable_calendars(ui, sh, true);
+                        if ids.is_empty() {
+                            ids = fill_writable_calendars(ui, sh, false);
+                        }
+                        let filled = !ids.is_empty();
+                        *sh.edit_cal_ids.borrow_mut() = ids;
+                        ui.set_edit_calendar_idx(0);
+                        ui.set_edit_error(
+                            if filled {
+                                ""
+                            } else if complete {
+                                "Нет календарей, доступных на запись."
+                            } else {
+                                "Не удалось получить список календарей — проверьте соединение."
+                            }
+                            .into(),
+                        );
+                    }
                 }
             });
         }
@@ -9655,7 +9749,21 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                 || {},
             );
         }
-        engine::EngineResult::Error(e) => eprintln!("engine error: {e}"),
+        engine::EngineResult::Error(e) => {
+            eprintln!("engine error: {e}");
+            // Отказ по сохранению события принадлежит открытой карточке. Без
+            // этого «Сохранить» на событии, которое сервер отверг (403 на
+            // календарь только для чтения, разорванное соединение), выглядел
+            // ровно так же, как успех: карточка просто закрывалась.
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    if sh.pending_event_save.replace(false) {
+                        ui.set_edit_busy(false);
+                        ui.set_edit_error(format!("Сервер не принял событие: {e}").into());
+                    }
+                }
+            });
+        }
     }
 }
 
