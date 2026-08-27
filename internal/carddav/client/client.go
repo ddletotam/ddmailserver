@@ -209,10 +209,14 @@ func (c *Client) SyncAddressBook(ctx context.Context, book *models.AddressBook) 
 		},
 	}
 
+	// complete — можно ли считать выдачу полной картиной коллекции. От этого
+	// зависит только удаление: карточку, которую мы просто не смогли получить,
+	// нельзя путать с удалённой на сервере.
+	complete := true
 	objects, err := c.client.QueryAddressBook(ctx, addressBookPath, query)
 	if err != nil {
 		log.Printf("CardDAV addressbook-query failed for %s, trying multiget fallback: %v", book.Name, err)
-		objects, err = c.syncViaMultiGet(ctx, addressBookPath)
+		objects, complete, err = c.syncViaMultiGet(ctx, addressBookPath)
 		if err != nil {
 			return fmt.Errorf("failed to query address book: %w", err)
 		}
@@ -290,11 +294,19 @@ func (c *Client) SyncAddressBook(ctx context.Context, book *models.AddressBook) 
 			book.Name, dupUIDs)
 	}
 
-	// Find deleted contacts
-	for uid := range existingByUID {
-		if !seenUIDs[uid] {
-			changes.DeleteUIDs = append(changes.DeleteUIDs, uid)
+	// Find deleted contacts — только если выдача полная. Иначе «не пришло» и
+	// «удалено на сервере» неразличимы, и недокачанный прогон стирает
+	// локальные карточки: на GAL small.kz книга так теряла то 371, то больше
+	// записей за цикл, а следующий прогон заводил их заново.
+	if complete {
+		for uid := range existingByUID {
+			if !seenUIDs[uid] {
+				changes.DeleteUIDs = append(changes.DeleteUIDs, uid)
+			}
 		}
+	} else {
+		log.Printf("CardDAV %s: выдача неполная — удаление пропущено (получено %d карточек)",
+			book.Name, len(seenUIDs))
 	}
 
 	// Apply changes
@@ -354,71 +366,214 @@ func parseMultistatusHrefs(body []byte, collectionPath string) ([]string, error)
 	return paths, nil
 }
 
-// syncViaMultiGet fetches contacts using PROPFIND + addressbook-multiget as fallback
-func (c *Client) syncViaMultiGet(ctx context.Context, addressBookPath string) ([]carddav.AddressObject, error) {
-	// First PROPFIND to get list of contact paths and ETags
-	multiGet := &carddav.AddressBookMultiGet{
-		DataRequest: carddav.AddressDataRequest{
-			AllProp: true,
-		},
-	}
+// multiGetChunkSize — сколько href'ов уходит в один REPORT. Дробим, чтобы у
+// коллекции на несколько тысяч карточек одна неудача не стоила всей выдачи и
+// чтобы отдельный запрос не выедал весь дедлайн задачи.
+const multiGetChunkSize = 200
 
+// syncViaMultiGet fetches contacts using PROPFIND + addressbook-multiget as
+// fallback. Второе возвращаемое значение — полнота выдачи: false означает
+// «часть карточек получить не удалось», и вызывающая сторона по нему НЕ должна
+// удалять локальные записи (см. SyncAddressBook).
+func (c *Client) syncViaMultiGet(ctx context.Context, addressBookPath string) ([]carddav.AddressObject, bool, error) {
 	// Build full URL for PROPFIND
 	propfindURL := c.buildFullURL(addressBookPath)
 	req, err := http.NewRequestWithContext(ctx, "PROPFIND", propfindURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create PROPFIND request: %w", err)
+		return nil, false, fmt.Errorf("failed to create PROPFIND request: %w", err)
 	}
 	req.Header.Set("Depth", "1")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("PROPFIND failed: %w", err)
+		return nil, false, fmt.Errorf("PROPFIND failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 207 {
-		return nil, fmt.Errorf("PROPFIND returned %d", resp.StatusCode)
+		return nil, false, fmt.Errorf("PROPFIND returned %d", resp.StatusCode)
 	}
 
 	paths, err := parseMultistatusHrefs(body, addressBookPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse PROPFIND response: %w", err)
+		return nil, false, fmt.Errorf("failed to parse PROPFIND response: %w", err)
 	}
 
 	if len(paths) == 0 {
 		log.Printf("No contact paths found in PROPFIND response for %s", addressBookPath)
-		return nil, nil
+		// Пустая коллекция и «не смогли разобрать список» выглядят одинаково,
+		// поэтому полнотой это не считаем: удалять по такой выдаче нельзя.
+		return nil, false, nil
 	}
 
 	log.Printf("Found %d contact paths via PROPFIND, fetching via multiget", len(paths))
 
-	// Now use addressbook-multiget to fetch all contacts with data
-	multiGet.Paths = paths
-	objects, err := c.client.MultiGetAddressBook(ctx, addressBookPath, multiGet)
+	objects, complete, err := c.multiGetAddressData(ctx, addressBookPath, paths)
 	if err != nil {
-		// If multiget also fails, fetch contacts one by one via GET
+		// Последний рубеж: по одному GET'у на карточку. Дорого (для GAL это
+		// тысячи запросов и почти гарантированный дедлайн), но иногда это
+		// единственное, что сервер умеет.
 		log.Printf("MultiGet failed, fetching contacts individually: %v", err)
 		return c.fetchContactsIndividually(ctx, paths)
+	}
+
+	return objects, complete, nil
+}
+
+// multiGetAddressData выполняет REPORT addressbook-multiget своими руками.
+//
+// Почему не go-webdav: его декодер ответа разбирает ВСЕ вернувшиеся свойства в
+// свою структуру, и на `getlastmodified` в формате SOGo
+// (`Thu, 27 Aug 2026 13:47:39 +0500`) падает целиком — «cannot parse ... as
+// " "». Одна лишняя дата в ответе обесценивала весь multiget: код уходил в
+// фолбэк «GET на каждую карточку», 3814 запросов к неспешному хосту не
+// укладывались в пятиминутный дедлайн задачи, и книга каждый раз получалась
+// разной. Нам из ответа нужны ровно две вещи — href и address-data, поэтому
+// читаем только их и не спорим с сервером о формате остальных свойств.
+func (c *Client) multiGetAddressData(ctx context.Context, collectionPath string, paths []string) ([]carddav.AddressObject, bool, error) {
+	reportURL := c.buildFullURL(collectionPath)
+
+	var objects []carddav.AddressObject
+	complete := true
+
+	for start := 0; start < len(paths); start += multiGetChunkSize {
+		end := start + multiGetChunkSize
+		if end > len(paths) {
+			end = len(paths)
+		}
+
+		chunk, err := c.multiGetReport(ctx, reportURL, paths[start:end])
+		if err != nil {
+			// Первый же провалившийся кусок — сигнал, что сервер этот REPORT не
+			// тянет: отдаём ошибку, чтобы вызывающий ушёл в поштучный фолбэк.
+			if start == 0 {
+				return nil, false, err
+			}
+			log.Printf("MultiGet chunk %d..%d failed: %v", start, end, err)
+			complete = false
+			if ctx.Err() != nil {
+				break
+			}
+			continue
+		}
+		objects = append(objects, chunk...)
+	}
+
+	return objects, complete, nil
+}
+
+// multiGetReport отправляет один REPORT addressbook-multiget и возвращает
+// разобранные карточки.
+func (c *Client) multiGetReport(ctx context.Context, reportURL string, paths []string) ([]carddav.AddressObject, error) {
+	var body strings.Builder
+	body.WriteString(`<?xml version="1.0" encoding="utf-8"?>` + "\n")
+	body.WriteString(`<C:addressbook-multiget xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">`)
+	body.WriteString(`<D:prop><D:getetag/><C:address-data/></D:prop>`)
+	for _, p := range paths {
+		body.WriteString(`<D:href>`)
+		if err := xml.EscapeText(&body, []byte(p)); err != nil {
+			return nil, fmt.Errorf("escape href %q: %w", p, err)
+		}
+		body.WriteString(`</D:href>`)
+	}
+	body.WriteString(`</C:addressbook-multiget>`)
+
+	req, err := http.NewRequestWithContext(ctx, "REPORT", reportURL, strings.NewReader(body.String()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create REPORT request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/xml; charset=utf-8")
+	req.Header.Set("Depth", "1")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("REPORT failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read REPORT response: %w", err)
+	}
+	if resp.StatusCode != 207 {
+		return nil, fmt.Errorf("REPORT returned %d", resp.StatusCode)
+	}
+
+	return parseAddressDataMultistatus(respBody)
+}
+
+// parseAddressDataMultistatus достаёт из `207 Multi-Status` пары href +
+// address-data и превращает их в карточки. Ответы без address-data (404 на
+// href, пустое свойство) молча пропускаются — их отсутствие уже учтено
+// полнотой выдачи на уровне куска.
+func parseAddressDataMultistatus(body []byte) ([]carddav.AddressObject, error) {
+	var ms struct {
+		Responses []struct {
+			Href      string `xml:"DAV: href"`
+			Propstats []struct {
+				Status string `xml:"DAV: status"`
+				Prop   struct {
+					ETag        string `xml:"DAV: getetag"`
+					AddressData string `xml:"urn:ietf:params:xml:ns:carddav address-data"`
+				} `xml:"DAV: prop"`
+			} `xml:"DAV: propstat"`
+		} `xml:"DAV: response"`
+	}
+	if err := xml.Unmarshal(body, &ms); err != nil {
+		return nil, fmt.Errorf("parse multiget response: %w", err)
+	}
+
+	var objects []carddav.AddressObject
+	for _, r := range ms.Responses {
+		for _, ps := range r.Propstats {
+			data := strings.TrimSpace(ps.Prop.AddressData)
+			if data == "" {
+				continue
+			}
+			card, err := vcard.NewDecoder(strings.NewReader(data)).Decode()
+			if err != nil {
+				log.Printf("Failed to parse vCard from %s: %v", r.Href, err)
+				continue
+			}
+			objects = append(objects, carddav.AddressObject{
+				Path: strings.TrimSpace(r.Href),
+				ETag: ps.Prop.ETag,
+				Card: card,
+			})
+			break
+		}
 	}
 
 	return objects, nil
 }
 
-// fetchContactsIndividually fetches each contact via GET as last resort fallback
-func (c *Client) fetchContactsIndividually(ctx context.Context, paths []string) ([]carddav.AddressObject, error) {
+// fetchContactsIndividually fetches each contact via GET as last resort
+// fallback. Второе значение — полнота: раньше провалившиеся GET'ы просто
+// пропускались, и вызывающий считал недокачанную выдачу полной картиной
+// сервера — а значит удалял всё, до чего не дошёл. На медленном источнике
+// (5-минутный дедлайн, тысячи карточек) книга из-за этого каждый прогон
+// теряла разные куски.
+func (c *Client) fetchContactsIndividually(ctx context.Context, paths []string) ([]carddav.AddressObject, bool, error) {
 	var objects []carddav.AddressObject
+	failed := 0
 
 	for _, path := range paths {
+		if ctx.Err() != nil {
+			log.Printf("Individual fetch aborted after %d/%d contacts: %v", len(objects), len(paths), ctx.Err())
+			return objects, false, nil
+		}
+
 		req, err := http.NewRequestWithContext(ctx, "GET", c.buildFullURL(path), nil)
 		if err != nil {
+			failed++
 			continue
 		}
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			log.Printf("GET %s failed: %v", path, err)
+			failed++
 			continue
 		}
 
@@ -426,6 +581,7 @@ func (c *Client) fetchContactsIndividually(ctx context.Context, paths []string) 
 		resp.Body.Close()
 
 		if resp.StatusCode != 200 {
+			failed++
 			continue
 		}
 
@@ -434,6 +590,7 @@ func (c *Client) fetchContactsIndividually(ctx context.Context, paths []string) 
 		card, err := decoder.Decode()
 		if err != nil {
 			log.Printf("Failed to parse vCard from %s: %v", path, err)
+			failed++
 			continue
 		}
 
@@ -444,8 +601,13 @@ func (c *Client) fetchContactsIndividually(ctx context.Context, paths []string) 
 		})
 	}
 
+	if failed > 0 {
+		log.Printf("Fetched %d contacts individually, %d failed — treating result as incomplete", len(objects), failed)
+		return objects, false, nil
+	}
+
 	log.Printf("Fetched %d contacts individually", len(objects))
-	return objects, nil
+	return objects, true, nil
 }
 
 // parseVCard parses a vCard into a Contact model
