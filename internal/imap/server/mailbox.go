@@ -613,8 +613,17 @@ func (m *Mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, operation i
 			}
 
 			// Queue for reverse sync to external IMAP server (if applicable)
-			// Only queue if message has remote UID (external account, not local delivery)
-			if msg.AccountID > 0 && msg.RemoteUID > 0 {
+			// Only queue if message has remote UID (external account, not local
+			// delivery) AND the STORE actually moved something: clients re-assert
+			// \Seen on an already-read message routinely (Thunderbird does it on
+			// every open). Such a row costs a pointless remote STORE, and — since
+			// a pending row now freezes the flag columns against the upstream
+			// pull — it would also keep a genuine remote-side change (marked
+			// unread in another client of the SOURCE account) waiting for the
+			// next push cycle.
+			flagsMoved := seen != msg.Seen || flagged != msg.Flagged ||
+				answered != msg.Answered || deleted != msg.Deleted
+			if flagsMoved && msg.AccountID > 0 && msg.RemoteUID > 0 {
 				if err := m.database.QueueFlagSync(msg.ID, msg.AccountID, msg.RemoteFolder, msg.RemoteUID, seen, flagged, answered, deleted); err != nil {
 					log.Printf("Failed to queue flag sync for message %d: %v", msg.ID, err)
 				}
