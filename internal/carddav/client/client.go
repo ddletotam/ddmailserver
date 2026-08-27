@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"log"
@@ -310,6 +311,49 @@ func (c *Client) SyncAddressBook(ctx context.Context, book *models.AddressBook) 
 	return nil
 }
 
+// parseMultistatusHrefs извлекает из `207 Multi-Status` пути ресурсов
+// коллекции: по одному href на каждый `<response>`, без самой коллекции.
+//
+// Раньше здесь был поиск подстроки `<href` по всему телу ответа — и он брал
+// hrefs откуда угодно, в том числе изнутри свойств (`owner`, `principal-URL`,
+// `addressbook-home-set` и прочее, чего в allprop-ответе много). На GAL SOGo
+// это давало 7628 «путей» вместо 1231 карточки: часть — мусор, который потом
+// отваливался, а часть — та же карточка, запрошенная в multiget несколько раз,
+// из-за чего сервер и присылал её несколько раз. Отсюда и брались дубликаты,
+// ронявшие вставку. Берём только href, который является ПРЯМЫМ потомком
+// `<response>` (encoding/xml сопоставляет только непосредственных детей, так
+// что вложенные в свойства hrefs сюда не попадают), и дедуплицируем.
+func parseMultistatusHrefs(body []byte, collectionPath string) ([]string, error) {
+	var ms struct {
+		Responses []struct {
+			Href string `xml:"DAV: href"`
+		} `xml:"DAV: response"`
+	}
+	if err := xml.Unmarshal(body, &ms); err != nil {
+		return nil, err
+	}
+
+	collection := strings.TrimSuffix(collectionPath, "/")
+	seen := make(map[string]bool, len(ms.Responses))
+	var paths []string
+	for _, r := range ms.Responses {
+		href := strings.TrimSpace(r.Href)
+		if href == "" || strings.HasSuffix(href, "/") {
+			// Коллекции (в том числе сама запрашиваемая) всегда со слешем.
+			continue
+		}
+		if collection != "" && href == collection {
+			continue
+		}
+		if seen[href] {
+			continue
+		}
+		seen[href] = true
+		paths = append(paths, href)
+	}
+	return paths, nil
+}
+
 // syncViaMultiGet fetches contacts using PROPFIND + addressbook-multiget as fallback
 func (c *Client) syncViaMultiGet(ctx context.Context, addressBookPath string) ([]carddav.AddressObject, error) {
 	// First PROPFIND to get list of contact paths and ETags
@@ -338,36 +382,9 @@ func (c *Client) syncViaMultiGet(ctx context.Context, addressBookPath string) ([
 		return nil, fmt.Errorf("PROPFIND returned %d", resp.StatusCode)
 	}
 
-	// Parse hrefs from PROPFIND response (simple extraction)
-	var paths []string
-	bodyStr := string(body)
-	remaining := bodyStr
-	for {
-		idx := strings.Index(remaining, "<href")
-		if idx == -1 {
-			idx = strings.Index(remaining, "<D:href")
-		}
-		if idx == -1 {
-			break
-		}
-		// Find the closing >
-		start := strings.Index(remaining[idx:], ">")
-		if start == -1 {
-			break
-		}
-		remaining = remaining[idx+start+1:]
-		// Find closing tag
-		end := strings.Index(remaining, "</")
-		if end == -1 {
-			break
-		}
-		href := strings.TrimSpace(remaining[:end])
-		remaining = remaining[end:]
-
-		// Only include .vcf files or paths that look like contacts (not the collection itself)
-		if href != addressBookPath && href != "" && !strings.HasSuffix(href, "/") {
-			paths = append(paths, href)
-		}
+	paths, err := parseMultistatusHrefs(body, addressBookPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse PROPFIND response: %w", err)
 	}
 
 	if len(paths) == 0 {
