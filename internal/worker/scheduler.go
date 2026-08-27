@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -138,10 +140,28 @@ func (s *Scheduler) TriggerSyncForAccount(account *models.Account) {
 		return s.refreshAccountOAuthTokenForce(a, true)
 	})
 
-	if err := s.pool.Submit(task); err != nil {
-		log.Printf("IDLE trigger: failed to submit sync for %s: %v", account.Email, err)
-	} else {
-		log.Printf("IDLE trigger: submitted immediate sync for %s", account.Email)
+	s.submit(task, fmt.Sprintf("IDLE-triggered sync for %s", account.Email))
+}
+
+// submit puts a task in the pool and logs the outcome uniformly.
+// `what` names the work in log lines ("sync task for user@host").
+//
+// A duplicate — the same logical task already waiting for a worker — is
+// deliberately silent: the scheduler re-offers every account and every source
+// on every tick, so this is the normal steady state whenever work outlives one
+// interval, not a failure worth a log line. Returns true only when the task
+// was actually queued.
+func (s *Scheduler) submit(t Task, what string) bool {
+	err := s.pool.Submit(t)
+	switch {
+	case err == nil:
+		log.Printf("Submitted %s", what)
+		return true
+	case errors.Is(err, ErrDuplicateTask):
+		return false
+	default:
+		log.Printf("Failed to submit %s: %v", what, err)
+		return false
 	}
 }
 
@@ -309,9 +329,7 @@ func (s *Scheduler) scheduleIMAPSync() {
 			return s.refreshAccountOAuthTokenForce(a, true)
 		})
 
-		if err := s.pool.Submit(task); err != nil {
-			log.Printf("Failed to submit sync task for %s: %v", account.Email, err)
-		} else {
+		if s.submit(task, fmt.Sprintf("sync task for %s", account.Email)) {
 			synced++
 		}
 	}
@@ -375,11 +393,7 @@ func (s *Scheduler) scheduleSMTPSend() {
 
 		task := sendTask
 
-		if err := s.pool.Submit(task); err != nil {
-			log.Printf("Failed to submit send task for message %d: %v", msg.ID, err)
-		} else {
-			log.Printf("Submitted send task for message %d", msg.ID)
-		}
+		s.submit(task, fmt.Sprintf("send task for message %d", msg.ID))
 	}
 }
 
@@ -418,11 +432,7 @@ func (s *Scheduler) TriggerCalendarSyncForUser(userID int64) {
 			continue
 		}
 
-		if err := s.pool.Submit(task); err != nil {
-			log.Printf("Failed to submit immediate calendar sync for %s: %v", source.Name, err)
-		} else {
-			log.Printf("Submitted immediate calendar sync for %s", source.Name)
-		}
+		s.submit(task, fmt.Sprintf("immediate calendar sync for %s", source.Name))
 	}
 }
 
@@ -457,11 +467,7 @@ func (s *Scheduler) scheduleCalendarSync() {
 			continue
 		}
 
-		if err := s.pool.Submit(task); err != nil {
-			log.Printf("Failed to submit calendar sync task for %s: %v", source.Name, err)
-		} else {
-			log.Printf("Submitted calendar sync task for %s (%s)", source.Name, source.SourceType)
-		}
+		s.submit(task, fmt.Sprintf("calendar sync task for %s (%s)", source.Name, source.SourceType))
 	}
 }
 
@@ -487,11 +493,7 @@ func (s *Scheduler) scheduleContactSync() {
 
 		task := NewContactSyncTask(source, s.database, s.googleOAuth, s.microsoftOAuth)
 
-		if err := s.pool.Submit(task); err != nil {
-			log.Printf("Failed to submit contact sync task for %s: %v", source.Name, err)
-		} else {
-			log.Printf("Submitted contact sync task for %s (%s)", source.Name, source.SourceType)
-		}
+		s.submit(task, fmt.Sprintf("contact sync task for %s (%s)", source.Name, source.SourceType))
 	}
 }
 
@@ -523,11 +525,7 @@ func (s *Scheduler) scheduleContactSyncPush() {
 
 		task := NewContactSyncPushTask(source, s.database)
 
-		if err := s.pool.Submit(task); err != nil {
-			log.Printf("Failed to submit contact sync push task for %s: %v", source.Name, err)
-		} else {
-			log.Printf("Submitted contact sync push task for %s", source.Name)
-		}
+		s.submit(task, fmt.Sprintf("contact sync push task for %s", source.Name))
 	}
 }
 
@@ -559,11 +557,7 @@ func (s *Scheduler) scheduleCalendarEventSync() {
 
 		task := NewCalendarEventSyncTask(source, s.database)
 
-		if err := s.pool.Submit(task); err != nil {
-			log.Printf("Failed to submit calendar event sync task for %s: %v", source.Name, err)
-		} else {
-			log.Printf("Submitted calendar event sync task for %s", source.Name)
-		}
+		s.submit(task, fmt.Sprintf("calendar event sync task for %s", source.Name))
 	}
 }
 
@@ -574,9 +568,7 @@ func (s *Scheduler) scheduleCalendarEventSync() {
 // scheduler tick is cheap and idempotent.
 func (s *Scheduler) scheduleCalendarSyncWarning() {
 	task := NewCalendarSyncWarningTask(s.database, s.notifyHub, s.getHostname())
-	if err := s.pool.Submit(task); err != nil {
-		log.Printf("Failed to submit calendar sync warning task: %v", err)
-	}
+	s.submit(task, "calendar sync warning task")
 }
 
 // scheduleFlagSync schedules flag synchronization tasks for external IMAP accounts
@@ -609,11 +601,7 @@ func (s *Scheduler) scheduleFlagSync() {
 
 		task := NewFlagSyncTask(account, s.database)
 
-		if err := s.pool.Submit(task); err != nil {
-			log.Printf("Failed to submit flag sync task for %s: %v", account.Email, err)
-		} else {
-			log.Printf("Submitted flag sync task for %s", account.Email)
-		}
+		s.submit(task, fmt.Sprintf("flag sync task for %s", account.Email))
 	}
 }
 
