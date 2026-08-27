@@ -103,3 +103,64 @@ func TestParseMultistatusHrefsRejectsGarbage(t *testing.T) {
 		t.Fatal("ожидалась ошибка разбора, получили nil")
 	}
 }
+
+// Ответ SOGo на REPORT addressbook-multiget: рядом с нужными нам getetag и
+// address-data лежит getlastmodified в формате, на котором декодер go-webdav
+// падает целиком («cannot parse ", 27 Aug 2026 ..." as " "»). Из-за этого
+// multiget считался неработающим и код уходил в поштучные GET'ы — тысячи
+// запросов, дедлайн и разная книга каждый прогон. Наш разбор читает только
+// href и address-data и на остальные свойства не смотрит.
+const sogoMultigetBody = `<?xml version="1.0" encoding="UTF-8"?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/SOGo/dav/user@small.kz/Contacts/small.kz/a.abdeyev@small.kz</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:getetag>"etag-1"</D:getetag>
+        <D:getlastmodified>Thu, 27 Aug 2026 13:47:39 +0500</D:getlastmodified>
+        <C:address-data>BEGIN:VCARD
+VERSION:3.0
+UID:a.abdeyev@small.kz
+FN:Алибек Абдеев
+EMAIL:a.abdeyev@small.kz
+END:VCARD
+</C:address-data>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/SOGo/dav/user@small.kz/Contacts/small.kz/gone@small.kz</D:href>
+    <D:propstat>
+      <D:prop><C:address-data/></D:prop>
+      <D:status>HTTP/1.1 404 Not Found</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>`
+
+func TestParseAddressDataMultistatusIgnoresUnparseableProps(t *testing.T) {
+	objects, err := parseAddressDataMultistatus([]byte(sogoMultigetBody))
+	if err != nil {
+		t.Fatalf("parseAddressDataMultistatus: %v", err)
+	}
+	if len(objects) != 1 {
+		t.Fatalf("got %d objects, want 1 (пустой address-data пропускается)", len(objects))
+	}
+
+	obj := objects[0]
+	if obj.Path != "/SOGo/dav/user@small.kz/Contacts/small.kz/a.abdeyev@small.kz" {
+		t.Errorf("path = %q", obj.Path)
+	}
+	if obj.ETag != `"etag-1"` {
+		t.Errorf("etag = %q, want \"etag-1\"", obj.ETag)
+	}
+	if obj.Card == nil {
+		t.Fatal("card не разобрана")
+	}
+	if uid := obj.Card.Value("UID"); uid != "a.abdeyev@small.kz" {
+		t.Errorf("UID = %q", uid)
+	}
+	if fn := obj.Card.Value("FN"); fn != "Алибек Абдеев" {
+		t.Errorf("FN = %q", fn)
+	}
+}
