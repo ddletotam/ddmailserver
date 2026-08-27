@@ -497,11 +497,16 @@ func (db *DB) ReclassifyMessageFromRemoteSpam(userID, accountID int64, messageID
 //   - remote_uid + remote_folder always get refreshed so flag-sync /
 //     delete-sync continue to target the right path.
 //   - Flags (\Seen / \Flagged / \Answered) are overwritten from the
-//     remote side. The flag_sync worker pushes our local changes
-//     OUT to upstream, and any inbound change we see here is either
-//     the user toggling state on another client or the round-trip
-//     of our own push — either way upstream is authoritative for
-//     "current state".
+//     remote side — UNLESS the message still has an unpushed row in
+//     flag_sync_queue. Upstream is authoritative only for state we have
+//     already told it about: while our own change sits in the queue,
+//     upstream's answer is simply the stale "before" picture, and
+//     copying it back destroys the user's action. That was the
+//     «прочитал письмо, флажок пропал и через минуту вернулся» bug —
+//     the pull runs every cycle, the push waits for a worker slot, and
+//     whoever ran last won. Local pending change wins until the push
+//     succeeds (the worker deletes the queue row) or the entry is
+//     dropped; only then does upstream get a say again.
 //   - If `downgradeSpam` is true and the row was marked is_spam=true
 //     by our analyzer (not by an explicit user spam-rule), clear it
 //     and drop the spam metadata. Used by the inbox-pull path: a
@@ -538,21 +543,39 @@ func (db *DB) RefreshExistingFromRemote(
 	// something actually differs. The returned bool is that same signal
 	// (RowsAffected > 0) — the sync task uses it to publish flags_changed
 	// pushes only when a remote-side change actually landed.
+	//
+	// `pending` (an unpushed flag_sync_queue row for this message) freezes the
+	// three flag columns: they keep their local value, and they're excluded
+	// from the no-op guard too — otherwise a locally-read message whose remote
+	// still says unseen would match the guard on every single cycle, rewrite
+	// itself to the same values, bump updated_at and fire a bogus
+	// flags_changed push. remote_uid / remote_folder / spam columns keep
+	// refreshing regardless: the queue only claims ownership of flags.
 	if downgradeSpam {
 		res, err := db.Exec(
-			`UPDATE messages SET
+			`WITH target AS (
+			     SELECT m.id,
+			            EXISTS (SELECT 1 FROM flag_sync_queue q WHERE q.message_id = m.id) AS pending
+			       FROM messages m
+			      WHERE m.user_id = $7 AND m.message_id = $8 AND m.account_id = $9
+			 )
+			 UPDATE messages m SET
 			   remote_uid = $1, remote_folder = $2,
-			   seen = $3, flagged = $4, answered = $5,
+			   seen     = CASE WHEN t.pending THEN m.seen     ELSE $3 END,
+			   flagged  = CASE WHEN t.pending THEN m.flagged  ELSE $4 END,
+			   answered = CASE WHEN t.pending THEN m.answered ELSE $5 END,
 			   is_spam = false, spam_status = 'clean',
 			   spam_reasons = '', spam_rule_id = NULL,
 			   updated_at = $6
-			 WHERE user_id = $7 AND message_id = $8 AND account_id = $9
-			   AND (remote_uid IS DISTINCT FROM $1
-			     OR remote_folder IS DISTINCT FROM $2
-			     OR seen IS DISTINCT FROM $3
-			     OR flagged IS DISTINCT FROM $4
-			     OR answered IS DISTINCT FROM $5
-			     OR is_spam IS DISTINCT FROM false)`,
+			 FROM target t
+			 WHERE m.id = t.id
+			   AND (m.remote_uid IS DISTINCT FROM $1
+			     OR m.remote_folder IS DISTINCT FROM $2
+			     OR m.is_spam IS DISTINCT FROM false
+			     OR (NOT t.pending
+			         AND (m.seen IS DISTINCT FROM $3
+			           OR m.flagged IS DISTINCT FROM $4
+			           OR m.answered IS DISTINCT FROM $5)))`,
 			remoteUID, remoteFolder, seen, flagged, answered, now, userID, messageID, accountID,
 		)
 		if err != nil {
@@ -562,16 +585,26 @@ func (db *DB) RefreshExistingFromRemote(
 		return n > 0, nil
 	}
 	res, err := db.Exec(
-		`UPDATE messages SET
+		`WITH target AS (
+		     SELECT m.id,
+		            EXISTS (SELECT 1 FROM flag_sync_queue q WHERE q.message_id = m.id) AS pending
+		       FROM messages m
+		      WHERE m.user_id = $7 AND m.message_id = $8 AND m.account_id = $9
+		 )
+		 UPDATE messages m SET
 		   remote_uid = $1, remote_folder = $2,
-		   seen = $3, flagged = $4, answered = $5,
+		   seen     = CASE WHEN t.pending THEN m.seen     ELSE $3 END,
+		   flagged  = CASE WHEN t.pending THEN m.flagged  ELSE $4 END,
+		   answered = CASE WHEN t.pending THEN m.answered ELSE $5 END,
 		   updated_at = $6
-		 WHERE user_id = $7 AND message_id = $8 AND account_id = $9
-		   AND (remote_uid IS DISTINCT FROM $1
-		     OR remote_folder IS DISTINCT FROM $2
-		     OR seen IS DISTINCT FROM $3
-		     OR flagged IS DISTINCT FROM $4
-		     OR answered IS DISTINCT FROM $5)`,
+		 FROM target t
+		 WHERE m.id = t.id
+		   AND (m.remote_uid IS DISTINCT FROM $1
+		     OR m.remote_folder IS DISTINCT FROM $2
+		     OR (NOT t.pending
+		         AND (m.seen IS DISTINCT FROM $3
+		           OR m.flagged IS DISTINCT FROM $4
+		           OR m.answered IS DISTINCT FROM $5)))`,
 		remoteUID, remoteFolder, seen, flagged, answered, now, userID, messageID, accountID,
 	)
 	if err != nil {
