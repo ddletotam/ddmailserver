@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -14,6 +15,25 @@ import (
 	"github.com/yourusername/mailserver/internal/oauth"
 	"github.com/yourusername/mailserver/internal/tlsverify"
 )
+
+// idleSessionTTL — предельный возраст одной IDLE-сессии, после которого
+// соединение пересоздаётся, даже если с ним всё «хорошо».
+//
+// Замерено на проде 2026-08-28: сессия ddanilin@appsec.global (Яндекс) висела
+// 10 часов без единой ошибки — TCP живой, keepalive отвечает, библиотека честно
+// перевыпускает IDLE каждые 25 минут (`idle.Client.LogoutTimeout`), — и при
+// этом сервер перестал слать EXISTS: письмо, доставленное в 08:40:25, не
+// подняло ни одного уведомления и приехало только плановым синком в 08:43:32.
+// Соседний яндексовый аккаунт на той же машине уведомления получал. Отличить
+// «тихо, потому что писем нет» от «тихо, потому что канал умер» изнутри
+// сессии нечем, поэтому мы её просто не держим дольше TTL: цена — один
+// реконнект в 15 минут на аккаунт, выигрыш — мгновенная доставка не пропадает
+// до перезапуска сервиса.
+const idleSessionTTL = 15 * time.Minute
+
+// errIdleRefresh — плановое завершение сессии по TTL. Не ошибка: не логируется
+// как сбой и не наращивает backoff переподключения.
+var errIdleRefresh = errors.New("idle session refresh")
 
 // IdleManager maintains persistent IDLE connections to external IMAP servers.
 // When a server reports new mail, it triggers an immediate sync instead of
@@ -120,32 +140,33 @@ func (m *IdleManager) watchAccount(ctx context.Context, account *models.Account)
 	m.accountLog(account.ID, "info", "IDLE watcher started for %s", account.Email)
 	defer m.accountLog(account.ID, "info", "IDLE watcher stopped for %s", account.Email)
 
-	backoff := 10 * time.Second
+	const baseBackoff = 10 * time.Second
 	const maxBackoff = 5 * time.Minute
+	backoff := baseBackoff
 
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 
+		started := time.Now()
 		err := m.runIdleSession(ctx, account)
 		if ctx.Err() != nil {
 			return
 		}
 
-		if err != nil {
-			m.accountLog(account.ID, "error", "%v, reconnecting in %v", err, backoff)
+		wait, next := reconnectDelay(err, time.Since(started), backoff, baseBackoff, maxBackoff)
+		if err != nil && !errors.Is(err, errIdleRefresh) {
+			m.accountLog(account.ID, "error", "%v, reconnecting in %v", err, wait)
 		}
+		backoff = next
 
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
-		}
-
-		backoff = backoff * 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
+		if wait > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
 		}
 
 		// Reload account from DB in case credentials changed (e.g. OAuth refresh)
@@ -160,6 +181,34 @@ func (m *IdleManager) watchAccount(ctx context.Context, account *models.Account)
 		}
 		account = fresh
 	}
+}
+
+// reconnectDelay решает, сколько ждать перед новой IDLE-сессией и каким станет
+// backoff. Возвращает (пауза, следующий backoff).
+//
+// Правила:
+//   - плановое обновление по TTL — не сбой: подключаемся немедленно, backoff
+//     возвращается к базовому;
+//   - сессия, прожившая дольше healthySession, тоже считается здоровой: разрыв
+//     после часа работы не имеет отношения к предыдущему разрыву, и наказывать
+//     за него пятиминутной паузой не за что. Раньше backoff удваивался после
+//     ЛЮБОГО завершения сессии и не сбрасывался никогда, так что долгоживущий
+//     аккаунт со временем восстанавливался только через maxBackoff;
+//   - быстрый повторный сбой — обычное удвоение до потолка.
+func reconnectDelay(err error, sessionLen, current, base, max time.Duration) (time.Duration, time.Duration) {
+	const healthySession = 2 * time.Minute
+
+	if errors.Is(err, errIdleRefresh) {
+		return 0, base
+	}
+	if sessionLen > healthySession {
+		current = base
+	}
+	next := current * 2
+	if next > max {
+		next = max
+	}
+	return current, next
 }
 
 // refreshOAuthToken refreshes the OAuth token for an account if needed.
@@ -242,6 +291,11 @@ func (m *IdleManager) runIdleSession(ctx context.Context, account *models.Accoun
 		m.accountLog(account.ID, "info", "connected to %s, no IDLE support — using NOOP polling", addr)
 	}
 
+	// Возраст сессии считаем от установленного соединения: по его истечении
+	// выходим и подключаемся заново (см. idleSessionTTL).
+	expiry := time.NewTimer(idleSessionTTL)
+	defer expiry.Stop()
+
 	// Main IDLE/poll loop
 	for {
 		if ctx.Err() != nil {
@@ -268,6 +322,14 @@ func (m *IdleManager) runIdleSession(ctx context.Context, account *models.Accoun
 				close(stop)
 				<-idleDone
 				return nil
+
+			case <-expiry.C:
+				// Сессия отжила своё — закрываемся и переподключаемся, не
+				// дожидаясь ошибки, которой может и не быть никогда.
+				close(stop)
+				<-idleDone
+				m.accountLog(account.ID, "info", "плановое обновление IDLE-сессии (%v)", idleSessionTTL)
+				return errIdleRefresh
 
 			case upd := <-updates:
 				switch upd.(type) {
