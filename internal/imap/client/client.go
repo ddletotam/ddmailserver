@@ -72,6 +72,33 @@ func New(account *models.Account) (*Client, error) {
 }
 
 // Connect establishes connection to the IMAP server
+// upgradeStartTLS поднимает уже открытое plaintext-соединение до TLS.
+//
+// Ветка «без неявного TLS» раньше означала буквально открытый текст: следом шёл
+// LOGIN с паролем в клартексте, и ни одной строчки об этом никому не
+// показывалось. Поэтому здесь два правила:
+//   - STARTTLS обязателен, а не опортунистичен: сервер, не предлагающий его на
+//     этом порту, получает отказ, а не наши учётные данные;
+//   - проверка сертификата — общая (`tlsverify.Config`, достраивает цепочку по
+//     AIA), чтобы 143-й порт не оказался слабее 993-го.
+//
+// Повод: mail.skiftrade.kz отдаёт IMAP только на 143 (993 принимает TCP, но
+// рукопожатие висит), а без STARTTLS переезд на 143 означал бы пароль открытым
+// текстом через полстраны.
+func upgradeStartTLS(conn *client.Client, host string) error {
+	ok, err := conn.SupportStartTLS()
+	if err != nil {
+		return fmt.Errorf("failed to check STARTTLS support: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("server %s does not offer STARTTLS on this port — refusing to send credentials in the clear", host)
+	}
+	if err := conn.StartTLS(tlsverify.Config(host)); err != nil {
+		return fmt.Errorf("STARTTLS handshake failed: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) Connect() error {
 	var conn *client.Client
 	var err error
@@ -86,9 +113,15 @@ func (c *Client) Connect() error {
 		// verification — is not one.
 		conn, err = client.DialTLS(addr, tlsverify.Config(c.account.IMAPHost))
 	} else {
-		// Connect without TLS
-		log.Printf("Connecting to IMAP server %s without TLS", addr)
+		// Порт без неявного TLS (обычно 143) — поднимаем STARTTLS.
+		log.Printf("Connecting to IMAP server %s with STARTTLS", addr)
 		conn, err = client.Dial(addr)
+		if err == nil {
+			if tlsErr := upgradeStartTLS(conn, c.account.IMAPHost); tlsErr != nil {
+				conn.Logout()
+				return tlsErr
+			}
+		}
 	}
 
 	if err != nil {
