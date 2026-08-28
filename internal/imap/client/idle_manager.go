@@ -244,7 +244,16 @@ func (m *IdleManager) runIdleSession(ctx context.Context, account *models.Accoun
 	if account.IMAPTLS {
 		conn, err = imapClient.DialTLS(addr, tlsverify.Config(account.IMAPHost))
 	} else {
+		// Тот же обязательный STARTTLS, что и в клиенте синка: IDLE-сессия
+		// логинится теми же учётными данными и не имеет права уронить их в
+		// открытый текст.
 		conn, err = imapClient.Dial(addr)
+		if err == nil {
+			if tlsErr := upgradeStartTLS(conn, account.IMAPHost); tlsErr != nil {
+				conn.Logout()
+				return tlsErr
+			}
+		}
 	}
 	if err != nil {
 		return fmt.Errorf("connect %s: %w", addr, err)
