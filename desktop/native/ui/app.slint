@@ -2082,6 +2082,16 @@ export component MainWindow inherits Window {
                 lv := ScrollView {
                     vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                    init => {
+                        // Панель почты условная: этот скроллер новый и стоит
+                        // в начале, но `changed viewport-y` на начальном
+                        // значении не срабатывает — зеркало осталось бы с
+                        // позицией ПРОШЛОЙ панели. От него зависят и снимок
+                        // позиции при уходе из почты, и проверка
+                        // «пользователь внизу?» в Rust, и решение, доехало
+                        // ли восстановление (nudge_chat_scroll).
+                        root.chat-vp-y = 0;
+                    }
                     // Ширина содержимого = видимой: горизонтальной прокрутки
                     // у переписки нет, пузыри режутся по ширине панели.
                     viewport-width: self.visible-width;

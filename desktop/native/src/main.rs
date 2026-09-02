@@ -1523,6 +1523,11 @@ struct Shared {
     /// Где стоял скролл чата, когда мы уходили из почты в календарь/книгу.
     /// Положительный отступ от верха; -1 = ещё не уходили.
     ///
+    /// Диалог, открытый последним: пишется в calendar.json при каждом
+    /// открытии, чтобы следующий запуск вернулся к нему, а не к первому в
+    /// списке. Ключ — `Conversation::id` (набор адресов), он переживает и
+    /// пересинк, и смену порядка списка.
+    last_conv_id: RefCell<String>,
     /// Панель почты условная (`if root.view-mode == 0` в app.slint), а `if` в
     /// Slint уничтожает поддерево — возврат даёт новый ListView с viewport-y = 0.
     /// Без этого снимка диалог открывался в начале, а не там, где его
@@ -2146,6 +2151,14 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
     let Some(c) = convs.get(idx) else { return };
     let conv_label = c.label.clone();
     let msg_count = c.messages.len();
+    // Запомнить открытый диалог — следующий запуск вернётся к нему, а не к
+    // первому в списке. Пишем сразу, как и остальные настройки: «сохраним на
+    // выходе» не выживает ни выхода через трей, ни kill. Сравнение — чтобы
+    // ходьба стрелками по одному и тому же диалогу не переписывала файл.
+    if *sh.last_conv_id.borrow() != c.id {
+        *sh.last_conv_id.borrow_mut() = c.id.clone();
+        save_calendar_settings(ui, sh);
+    }
     // Which account this conversation belongs to (empty → primary). Drives the
     // cache namespace and every addressed command issued while it's open.
     let akey = if c.account_key.is_empty() {
@@ -3465,6 +3478,25 @@ fn save_calendar_settings(ui: &MainWindow, sh: &Shared) {
         work_end_hour: sh.work_end.get(),
         manual_hour_height: sh.manual_hour_h.get(),
         manual_col_width: sh.manual_col_w.get(),
+        last_conversation: sh.last_conv_id.borrow().clone(),
+    });
+}
+
+/// Через `delay_ms` повторить bump `chat-scroll-seq`, если переписка ещё не
+/// доехала до `target`. Нужно там, где панель почты только что создалась:
+/// мост `changed x` живёт внутри неё, и bump, сделанный до её появления, до
+/// моста не доходит.
+///
+/// Проверка по зеркалу `chat-vp-y` (свежая панель обнуляет его в `init`)
+/// делает повтор безвредным: доехали или пользователь сам увёл вид — вид не
+/// дёргаем.
+fn nudge_chat_scroll(ui_weak: slint::Weak<MainWindow>, target: f32, delay_ms: u64) {
+    slint::Timer::single_shot(std::time::Duration::from_millis(delay_ms), move || {
+        let Some(ui) = ui_weak.upgrade() else { return };
+        if (-ui.get_chat_vp_y() - target).abs() <= 1.0 {
+            return;
+        }
+        ui.set_chat_scroll_seq(ui.get_chat_scroll_seq() + 1);
     });
 }
 
@@ -6056,6 +6088,7 @@ fn main() {
         work_end: Cell::new(cal_set.work_end_hour.clamp(1, 24)),
         manual_hour_h: Cell::new(cal_set.manual_hour_height),
         manual_col_w: Cell::new(cal_set.manual_col_width),
+        last_conv_id: RefCell::new(cal_set.last_conversation.clone()),
         editing_event_id: Cell::new(0),
         pending_event_save: Cell::new(false),
         edit_cal_ids: RefCell::new(Vec::new()),
@@ -6116,10 +6149,22 @@ fn main() {
         }
     }
 
-    // Open the first conversation that has cached bodies.
+    // Открыть диалог, на котором закончили в прошлый раз; если его больше нет
+    // (или у него нет закэшированных тел) — первый, у которого они есть.
     {
         let convs = shared.convs.borrow();
-        for (i, c) in convs.iter().enumerate() {
+        // Ключ диалога — набор адресов (контракт §4), так что запомненный
+        // находится и после пересинка, и при другом порядке списка.
+        let last = shared.last_conv_id.borrow().clone();
+        let preferred = convs.iter().position(|c| !last.is_empty() && c.id == last);
+        // Запомненный — первым кандидатом, дальше все по порядку: у него
+        // может не оказаться тел в кэше, и тогда пустая панель на старте
+        // читалась бы как сломанный клиент.
+        let order = preferred
+            .into_iter()
+            .chain((0..convs.len()).filter(|i| Some(*i) != preferred));
+        for i in order {
+            let c = &convs[i];
             let bodies = shared
                 .cache
                 .as_ref()
@@ -6151,6 +6196,20 @@ fn main() {
             // would let a much later background refresh yank the viewport.
             let scroll = take_scroll_target(&shared, &bodies, true);
             send_render_job(&shared, bodies, scroll);
+            // Довести сайдбар до выбранной строки. С задержкой по той же
+            // причине, что и восстановление скролла переписки: мост живёт
+            // внутри панели почты, а сейчас её ещё не существует — bump до
+            // моста не дойдёт. Раньше это было не нужно: стартовый выбор
+            // всегда попадал в первые строки, они и так видны.
+            if i > 0 {
+                let ui_weak = ui.as_weak();
+                slint::Timer::single_shot(std::time::Duration::from_millis(200), move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_sidebar_row_y(i as f32 * 64.0);
+                        ui.set_sidebar_scroll_seq(ui.get_sidebar_scroll_seq() + 1);
+                    }
+                });
+            }
             break;
         }
     }
@@ -7709,6 +7768,18 @@ fn main() {
                 if saved >= 0.0 {
                     ui.set_chat_scroll_y(saved);
                     ui.set_chat_scroll_pending(true);
+                    // Одного флага мало: при создании панели с уже готовой
+                    // геометрией пропадают ОБА триггера — bump seq был до
+                    // появления моста, а первая раскладка не «изменение»
+                    // свойства, так что ни один `changed` не срабатывает и
+                    // переписка остаётся в начале. Тот же приём, что у сетки
+                    // календаря (`scroll_calendar_to_hour`): доложить
+                    // bump'ом после того, как панель уже существует.
+                    nudge_chat_scroll(ui.as_weak(), saved, 120);
+                    // Вторая попытка — на случай, когда к 120 мс раскладка
+                    // ещё не настоящая (длинная переписка, рендер догоняет).
+                    // Обе проверяют, доехал ли вид, и молчат, если да.
+                    nudge_chat_scroll(ui.as_weak(), saved, 400);
                 }
             } else {
                 // Уходим из почты — снять позицию ДО того, как панель

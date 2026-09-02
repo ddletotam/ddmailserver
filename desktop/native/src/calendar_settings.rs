@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CalendarSettings {
     /// Calendars the user toggled OFF. Stored as a deny-list so newly
@@ -35,6 +35,31 @@ pub struct CalendarSettings {
     pub manual_hour_height: f32,
     #[serde(default)]
     pub manual_col_width: f32,
+    /// Диалог, открытый последним (`Conversation::id` — набор адресов, см.
+    /// контракт §4). Стартовый выбор возвращается к нему, а не к первому в
+    /// списке. Пусто / диалог исчез → первый с закэшированными телами.
+    #[serde(default)]
+    pub last_conversation: String,
+}
+
+/// `Default` — руками, а не `derive`: у derive'а это нули и `false`, тогда
+/// как `#[serde(default = ...)]` у полей даёт 8..19 и звук включённым.
+/// Расходились они не безобидно: `load()` при ОТСУТСТВУЮЩЕМ файле идёт через
+/// `default()`, так что первый запуск получал рабочий день 0..1 и выключенный
+/// звук — и первое же сохранение настроек цементировало это в файле.
+impl Default for CalendarSettings {
+    fn default() -> Self {
+        Self {
+            hidden: Vec::new(),
+            colors: HashMap::new(),
+            notify_sound: default_true(),
+            work_start_hour: default_work_start(),
+            work_end_hour: default_work_end(),
+            manual_hour_height: 0.0,
+            manual_col_width: 0.0,
+            last_conversation: String::new(),
+        }
+    }
 }
 
 fn default_true() -> bool {
