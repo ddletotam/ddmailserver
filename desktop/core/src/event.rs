@@ -6,7 +6,14 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
-    /// Connection lifecycle: state is "connecting" | "connected" | "error".
+    /// Connection lifecycle: state is "connecting" | "connected" | "error"
+    /// | "auth".
+    ///
+    /// `"auth"` — отдельный случай, а не разновидность `"error"`: токен
+    /// просрочен настолько, что обменять его на свежий сервер уже не даёт
+    /// (30-дневный потолок на refresh), и добыть новый нечем — нужен пароль
+    /// пользователя. Ретраи такое не лечат, поэтому UI по этому состоянию
+    /// просит войти заново, а watcher перестаёт переподключаться.
     ConnectionState { state: String, message: Option<String> },
     /// New mail arrived in `folder`. `count` is the folder total (IMAP
     /// EXISTS semantics); `new_count`/`from`/`subject`/`message_id`

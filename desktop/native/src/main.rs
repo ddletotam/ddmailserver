@@ -1488,10 +1488,20 @@ struct Shared {
     /// route to the right server. Empty falls back to the primary account.
     cur_account_key: RefCell<String>,
     /// All account keys (the indicator's denominator) and their last-known
-    /// connection state ("connecting" | "connected" | "error"). Drives the
-    /// aggregate green/yellow/red status light.
+    /// connection state ("connecting" | "connected" | "error" | "auth").
+    /// Drives the aggregate green/yellow/red status light.
     account_keys: RefCell<Vec<String>>,
     account_states: RefCell<HashMap<String, String>>,
+    /// Ключи строк списка учёток под индикатором связи (порядок
+    /// accounts.json) — по индексу строки `relogin` находит, какую учётку
+    /// открывать в форме входа.
+    conn_dot_keys: RefCell<Vec<String>>,
+    /// Учётки, чья сессия мертва и ждёт пароля — в порядке accounts.json.
+    /// Отдельно от `account_states`, потому что состояние липкое: watcher
+    /// после отказа ещё успевает крикнуть "connecting"/"error", и в общей
+    /// карте «нужен вход» тут же затиралось бы на «нет связи». Снимается
+    /// только удачным коннектом, ротацией токена или пересборкой движка.
+    reauth: RefCell<Vec<String>>,
     /// Message refs for the currently rendered rows (row index → message).
     current_msgs: RefCell<Vec<MessageRef>>,
     /// Bodies of the open conversation, kept in memory (parallel to
@@ -3602,6 +3612,50 @@ mod url_handler_tests {
 }
 
 #[cfg(test)]
+mod reauth_tests {
+    use super::note_account_state;
+
+    /// «Нужен вход» держится, пока сессию не подтвердили заново: watcher
+    /// после отказа успевает крикнуть "error"/"connecting", и если считать
+    /// это выздоровлением, плашка мигнёт и исчезнет.
+    #[test]
+    fn auth_is_sticky_until_connected() {
+        let mut r = Vec::new();
+        note_account_state(&mut r, "mail.letotam.ru|lucky", "auth");
+        note_account_state(&mut r, "mail.letotam.ru|lucky", "error");
+        note_account_state(&mut r, "mail.letotam.ru|lucky", "connecting");
+        assert_eq!(r, vec!["mail.letotam.ru|lucky".to_string()]);
+
+        note_account_state(&mut r, "mail.letotam.ru|lucky", "connected");
+        assert!(r.is_empty());
+    }
+
+    /// Каждый 401 по любому запросу шлёт своё событие; в списке учётка одна.
+    #[test]
+    fn repeated_auth_reports_do_not_duplicate() {
+        let mut r = Vec::new();
+        for _ in 0..5 {
+            note_account_state(&mut r, "a|u", "auth");
+        }
+        assert_eq!(r.len(), 1);
+    }
+
+    /// Порядок отказов сохраняется, а чужой коннект не снимает свой приговор:
+    /// индекс для формы входа считается по этому списку.
+    #[test]
+    fn accounts_are_independent_and_ordered() {
+        let mut r = Vec::new();
+        note_account_state(&mut r, "a|u", "auth");
+        note_account_state(&mut r, "b|u", "auth");
+        note_account_state(&mut r, "b|u", "connected");
+        assert_eq!(r, vec!["a|u".to_string()]);
+
+        note_account_state(&mut r, "b|u", "auth");
+        assert_eq!(r, vec!["a|u".to_string(), "b|u".to_string()]);
+    }
+}
+
+#[cfg(test)]
 mod line_bounds_tests {
     use super::line_bounds;
     use crate::render_common::TextRun;
@@ -5103,6 +5157,10 @@ fn rebuild_engine(ui: &MainWindow, shared: &Rc<Shared>) {
         }
         drop(st);
         *shared.account_keys.borrow_mut() = keys;
+        // Пересборка движка — это и повторный вход в том числе: заново
+        // выданный токен ещё ничего не подтвердил, но старый приговор с него
+        // снимать надо, иначе плашка останется висеть после успешного входа.
+        shared.reauth.borrow_mut().clear();
     }
 
     let ui_weak_eng = ui.as_weak();
@@ -5125,21 +5183,26 @@ fn refresh_connections(ui: &MainWindow, shared: &Rc<Shared>) {
     let accounts = engine::AccountConfig::load_all();
     let mut rows: Vec<ConnRow> = Vec::with_capacity(accounts.len());
     let mut keys: Vec<String> = Vec::with_capacity(accounts.len());
+    let reauth = shared.reauth.borrow();
     for a in &accounts {
-        let title = if a.email.is_empty() { a.account_key() } else { a.email.clone() };
-        let mode = if a.native_url.is_some() {
-            "наш сервер"
-        } else if a.oauth_refresh_token.is_some() {
-            "Google OAuth"
+        let key = a.account_key();
+        let title = if a.email.is_empty() { key.clone() } else { a.email.clone() };
+        let needs_login = reauth.iter().any(|k| *k == key);
+        let subtitle = if needs_login {
+            // Кнопка «Изменить» рядом открывает форму входа с подставленным
+            // сервером и логином — строка говорит, что от неё нужно.
+            "сессия истекла — «Изменить» и ввести пароль".to_string()
         } else {
-            "IMAP/SMTP"
+            format!("{} · {}", a.host, account_mode(a))
         };
         rows.push(ConnRow {
             title: title.into(),
-            subtitle: format!("{} · {}", a.host, mode).into(),
+            subtitle: subtitle.into(),
+            needs_login,
         });
-        keys.push(a.account_key());
+        keys.push(key);
     }
+    drop(reauth);
     *shared.settings_conn_keys.borrow_mut() = keys;
     ui.set_connections(ModelRc::new(VecModel::from(rows)));
 }
@@ -5931,6 +5994,8 @@ fn main() {
         cur_account_key: RefCell::new(String::new()),
         account_keys: RefCell::new(Vec::new()),
         account_states: RefCell::new(HashMap::new()),
+        conn_dot_keys: RefCell::new(Vec::new()),
+        reauth: RefCell::new(Vec::new()),
         current_msgs: RefCell::new(Vec::new()),
         current_bodies: RefCell::new(Vec::new()),
         open_gen: Cell::new(0),
@@ -7951,6 +8016,19 @@ fn main() {
         let cfg = engine::AccountConfig::load_all().into_iter().find(|a| a.account_key() == key);
         open_add_connection(ui_weak_editc.clone(), cfg);
     });
+    // Плашка «сессия истекла» и строка под индикатором связи: тот же вход,
+    // что «Изменить», но по индексу списка учёток (он существует с первого
+    // события связи, тогда как список настроек наполняется только при
+    // открытии модалки).
+    let ui_weak_relog = ui.as_weak();
+    let sh_relog = shared.clone();
+    ui.on_relogin(move |idx| {
+        let key = sh_relog.conn_dot_keys.borrow().get(idx.max(0) as usize).cloned();
+        let Some(key) = key else { return };
+        let cfg = engine::AccountConfig::load_all().into_iter().find(|a| a.account_key() == key);
+        open_add_connection(ui_weak_relog.clone(), cfg);
+    });
+
     let ui_weak_delc = ui.as_weak();
     let sh_delc = shared.clone();
     ui.on_delete_connection(move |idx| {
@@ -8789,6 +8867,25 @@ fn main() {
     slint::run_event_loop_until_quit().unwrap();
 }
 
+/// Учесть новое состояние аккаунта в списке «ждут пароля».
+///
+/// `"auth"` добавляет (без дублей, порядок отказов сохраняется), удачный
+/// коннект снимает. `"connecting"`/`"error"` НЕ снимают намеренно: мёртвая
+/// сессия продолжает отдавать 401, и watcher по пути к молчанию успевает ещё
+/// раз сказать «переподключаюсь» — приняв это за выздоровление, плашка
+/// мигнула бы и исчезла, оставив пользователя с тем же пустым календарём.
+fn note_account_state(reauth: &mut Vec<String>, key: &str, state: &str) {
+    match state {
+        "auth" => {
+            if !reauth.iter().any(|k| k == key) {
+                reauth.push(key.to_string());
+            }
+        }
+        "connected" => reauth.retain(|k| k != key),
+        _ => {}
+    }
+}
+
 /// Apply an engine result on the UI thread (reaches Shared via the thread-local).
 /// Recompute the aggregate connection light from per-account states:
 /// 2 = green (all connected), 1 = yellow (some down), 0 = red (none connected).
@@ -8810,28 +8907,68 @@ fn apply_conn_status(ui: &MainWindow, sh: &Shared) {
     ui.set_conn_status(status);
 
     // Тот же список, что в настройках, но с бинарным состоянием на строку:
-    // агрегат «частично» уже несёт сама точка.
+    // агрегат «частично» уже несёт сама точка. Исключение — мёртвая сессия:
+    // «не подключён» тут ничего не объясняет, поэтому строка говорит прямо.
     let accounts = engine::AccountConfig::load_all();
+    let reauth = sh.reauth.borrow();
     let rows: Vec<ConnDotRow> = accounts
         .iter()
         .map(|a| {
             let key = a.account_key();
             let title = if a.email.is_empty() { key.clone() } else { a.email.clone() };
-            let mode = if a.native_url.is_some() {
-                "наш сервер"
-            } else if a.oauth_refresh_token.is_some() {
-                "Google OAuth"
+            let needs_login = reauth.iter().any(|k| *k == key);
+            let subtitle = if needs_login {
+                "сессия истекла — войти заново".to_string()
             } else {
-                "IMAP/SMTP"
+                format!("{} · {}", a.host, account_mode(a))
             };
             ConnDotRow {
                 title: title.into(),
-                subtitle: format!("{} · {}", a.host, mode).into(),
+                subtitle: subtitle.into(),
                 ok: states.get(&key).map(|s| s == "connected").unwrap_or(false),
+                needs_login,
             }
         })
         .collect();
+    // Индексы строк списка = порядок accounts.json; `relogin(i)` разрешает
+    // индекс через этот же список, а не через список настроек: тот
+    // наполняется только при открытии модалки настроек.
+    *sh.conn_dot_keys.borrow_mut() = accounts.iter().map(|a| a.account_key()).collect();
     ui.set_conn_accounts(ModelRc::new(VecModel::from(rows)));
+
+    // Плашка «сессия истекла»: первая по порядку accounts.json учётка,
+    // ждущая пароля, плюс сколько ещё таких же.
+    match accounts.iter().position(|a| reauth.iter().any(|k| *k == a.account_key())) {
+        Some(idx) => {
+            let a = &accounts[idx];
+            let title = if a.email.is_empty() { a.account_key() } else { a.email.clone() };
+            let rest = reauth.len().saturating_sub(1);
+            let note = if rest > 0 {
+                format!(
+                    "{title} и ещё {rest}: почта, календарь и задачи не обновляются"
+                )
+            } else {
+                format!("{title}: почта, календарь и задачи не обновляются")
+            };
+            ui.set_reauth_index(idx as i32);
+            ui.set_reauth_note(note.into());
+        }
+        None => {
+            ui.set_reauth_index(-1);
+            ui.set_reauth_note("".into());
+        }
+    }
+}
+
+/// Как учётка ходит на сервер — подпись для строки в списках подключений.
+fn account_mode(a: &engine::AccountConfig) -> &'static str {
+    if a.native_url.is_some() {
+        "наш сервер"
+    } else if a.oauth_refresh_token.is_some() {
+        "Google OAuth"
+    } else {
+        "IMAP/SMTP"
+    }
 }
 
 /// Keep refetching conversations after a send until what we are waiting for has
@@ -9208,6 +9345,7 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         // молчать неопределённое время после старта.
                         fetch_reminder_window(sh);
                     }
+                    note_account_state(&mut sh.reauth.borrow_mut(), &account_key, &state);
                     sh.account_states
                         .borrow_mut()
                         .insert(account_key, state);
@@ -9340,6 +9478,23 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     // refresh window, would silently fall back to cache-only.
                     engine::AccountConfig::persist_native_token(&account_id, &token);
                     println!("engine event: token refreshed for {account_id} (persisted)");
+                    // Ротация — доказательство, что сессия жива: снимаем
+                    // плашку, не дожидаясь коннекта watcher'а (тот в этот
+                    // момент может стоять на бэкоффе). Событие адресовано
+                    // почтой (`account_id` провайдера — это email), а список
+                    // ждущих пароля ведётся по account_key = хост+логин.
+                    let key = engine::AccountConfig::load_all()
+                        .into_iter()
+                        .find(|a| a.email == account_id)
+                        .map(|a| a.account_key());
+                    if let Some(key) = key {
+                        SHARED.with(|s| {
+                            if let Some(sh) = s.borrow().as_ref() {
+                                sh.reauth.borrow_mut().retain(|k| *k != key);
+                                apply_conn_status(ui, sh);
+                            }
+                        });
+                    }
                 }
             }
         }

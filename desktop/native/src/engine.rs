@@ -488,7 +488,8 @@ pub enum EngineResult {
     },
     /// A push event from the provider's background watcher.
     Event(EngineEvent),
-    /// Per-account connection state ("connecting" | "connected" | "error"),
+    /// Per-account connection state ("connecting" | "connected" | "error" |
+    /// "auth" — токен мёртв, нужен повторный вход, см. `EngineEvent`),
     /// tagged with the account so the UI can drive the aggregate indicator.
     AccountState { account_key: String, state: String },
     /// A message was sent (server response / message-id).

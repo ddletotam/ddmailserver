@@ -17,7 +17,10 @@ struct MessageHit {
 // One connection row in Settings → Подключения.
 struct ConnRow {
     title: string,      // account email / name
-    subtitle: string,   // server + mode
+    subtitle: string,   // server + mode, либо «сессия истекла» (см. needs-login)
+    // Токен мёртв, форма входа ждёт пароля: строка подписывается красным,
+    // иначе «сессия истекла» читается как обычная строка про сервер.
+    needs-login: bool,
 }
 
 // One row of the connection-light dropdown: an account and whether it is
@@ -27,6 +30,10 @@ struct ConnDotRow {
     title: string,
     subtitle: string,
     ok: bool,
+    // «Не подключён» бывает двух очень разных сортов: сервер недоступен
+    // (само пройдёт) и сессия мертва (сама не пройдёт никогда). Второе
+    // строка говорит словами, а клик по ней ведёт прямо в форму входа.
+    needs-login: bool,
 }
 
 // One row of the unified address book (view-mode 2). Aggregated server-side;
@@ -865,6 +872,28 @@ export component MainWindow inherits Window {
     in property <bool> engine-reloading: false;
     // Empty-state CTA → open settings to add the first connection.
     callback add-first-connection();
+
+    // ── Сессия истекла ──
+    //
+    // Индекс учётки, ждущей пароля (в порядке accounts.json — тот же индекс,
+    // что у «Изменить» в настройках); -1 = никто не ждёт, плашки нет.
+    // `reauth-note` собран в Rust целиком: у Slint нет ни склонений, ни
+    // приведения числа к строке.
+    in property <int> reauth-index: -1;
+    in property <string> reauth-note: "";
+    // Плашка центрируется над областью содержимого, а не над всем окном: по
+    // центру окна её левый край накрывал поле поиска в сайдбаре письма.
+    // Сайдбар есть только у вида «Почта», у остальных содержимое от нуля.
+    property <length> reauth-left: (root.view-mode == 0 ? root.sidebar-width : 0px) + 12px;
+    // Открыть форму входа для учётки с этим индексом.
+    callback relogin(int);
+
+    // Открыта центрированная модалка: в коротком окне её панель доходит до
+    // самого верха, где живёт плашка о истёкшей сессии.
+    property <bool> modal-open: root.settings-visible || root.detail-visible
+        || root.edit-visible || root.source-view-visible
+        || root.contact-editor-open || root.confirm-delete-visible
+        || root.snooze-visible;
 
     // ── Tasks (view-mode 3) ──
     in property <[TaskRow]> tasks;
@@ -5314,7 +5343,12 @@ export component MainWindow inherits Window {
                                         VerticalLayout {
                                             alignment: center; horizontal-stretch: 1; spacing: 2px;
                                             Text { text: c.title; font-size: 14px; font-weight: 600; color: #0f1419; overflow: elide; }
-                                            Text { text: c.subtitle; font-size: 12px; color: #6b7480; overflow: elide; }
+                                            Text {
+                                                text: c.subtitle;
+                                                font-size: 12px;
+                                                color: c.needs-login ? #d64545 : #6b7480;
+                                                overflow: elide;
+                                            }
                                         }
                                         ce := TouchArea {
                                             width: 74px;
@@ -5390,9 +5424,78 @@ export component MainWindow inherits Window {
         }
     }
 
+    // ── «Сессия истекла» ──
+    //
+    // Мёртвый токен выглядел как пустой календарь и не обновляющаяся почта:
+    // кэш продолжал показывать старое, а единственным признаком была красная
+    // точка внизу слева — по ней не догадаться ни о причине, ни о том, что
+    // делать. Плашка называет причину и ведёт в форму входа одним кликом.
+    // Закрыть её нельзя намеренно: пока сессии нет, клиент показывает
+    // прошлое, и молчать об этом — то же самое, что врать.
+    if root.reauth-index >= 0 && !root.modal-open: Rectangle {
+        width: min(560px, root.width - root.reauth-left - 12px);
+        height: 56px;
+        x: root.reauth-left + max(0px, (root.width - root.reauth-left - self.width) / 2);
+        y: 10px;
+        background: #fff4f2;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: #ffb4a3;
+        drop-shadow-blur: 16px;
+        drop-shadow-color: #00000026;
+        drop-shadow-offset-y: 2px;
+        // Плашка не прозрачна для кликов по тому, что под ней.
+        TouchArea {}
+        HorizontalLayout {
+            padding-left: 14px;
+            padding-right: 10px;
+            spacing: 10px;
+            Text {
+                text: "⚠";
+                font-size: 18px;
+                color: #d64545;
+                vertical-alignment: center;
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                spacing: 2px;
+                Text {
+                    text: "Сессия истекла — войдите заново";
+                    font-size: 13px;
+                    font-weight: 700;
+                    color: #0f1419;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.reauth-note;
+                    font-size: 11px;
+                    color: #6b7480;
+                    overflow: elide;
+                }
+            }
+            rlg := TouchArea {
+                width: 96px;
+                height: 34px;
+                clicked => { root.relogin(root.reauth-index); }
+                Rectangle {
+                    background: rlg.has-hover ? #4f7df5 : #3a6df0;
+                    border-radius: 8px;
+                    Text {
+                        text: "Войти";
+                        color: white;
+                        font-size: 13px;
+                        font-weight: 600;
+                    }
+                }
+            }
+        }
+    }
+
     // Connection light: green = every account connected, yellow = some down,
-    // red = none. Clicking it opens the per-account list; clicking a row goes
-    // to Settings → Аккаунты, which is where anything can be done about it.
+    // red = none. Clicking it opens the per-account list; a row goes to
+    // Settings → Подключение, or straight to the login form when that
+    // account's session is what's broken.
     Rectangle {
         width: 12px;
         height: 12px;
@@ -5442,15 +5545,21 @@ export component MainWindow inherits Window {
                 vertical-alignment: center;
                 horizontal-alignment: center;
             }
-            for acc in root.conn-accounts: Rectangle {
+            for acc[ai] in root.conn-accounts: Rectangle {
                 height: 42px;
                 border-radius: 8px;
                 background: acc-ta.has-hover ? #f0f4fa : transparent;
                 acc-ta := TouchArea {
                     clicked => {
                         root.conn-menu-open = false;
-                        root.settings-tab = 3;
-                        root.settings-visible = true;
+                        // Ждёт пароля — вести в настройки незачем: там та же
+                        // кнопка «Изменить», только на два клика дальше.
+                        if (acc.needs-login) {
+                            root.relogin(ai);
+                        } else {
+                            root.settings-tab = 3;
+                            root.settings-visible = true;
+                        }
                     }
                 }
                 HorizontalLayout {
@@ -5479,7 +5588,7 @@ export component MainWindow inherits Window {
                         Text {
                             text: acc.subtitle;
                             font-size: 11px;
-                            color: #8b95a1;
+                            color: acc.needs-login ? #d64545 : #8b95a1;
                             overflow: elide;
                         }
                     }

@@ -37,6 +37,36 @@ pub struct NativeProvider {
     refresh_lock: Arc<Mutex<()>>,
 }
 
+/// Почему refresh не удался. Разница не косметическая: сетевую ошибку или
+/// пятисотку переживёт следующая попытка, а 401/403 от самого refresh значит,
+/// что живого токена больше нет и взять новый негде — нужен пароль. Первое
+/// лечится ретраем, второе — только пользователем, и путать их нельзя: клиент
+/// иначе вечно крутит реконнект, показывая «нет связи» вместо «войдите».
+struct RefreshFail {
+    message: String,
+    needs_login: bool,
+}
+
+impl From<RefreshFail> for String {
+    fn from(f: RefreshFail) -> Self {
+        f.message
+    }
+}
+
+impl RefreshFail {
+    fn transient(message: String) -> Self {
+        Self { message, needs_login: false }
+    }
+}
+
+/// Значит ли ответ refresh-эндпоинта, что нужен новый вход. 401 отдаётся на
+/// все виды мёртвого токена (нет заголовка, битая подпись, старше 30 суток,
+/// пользователь заблокирован), 403 — на отозванный доступ; во всех этих
+/// случаях ретраить нечем. Остальное (таймаут, 5xx, обрыв) — временное.
+fn refresh_needs_login(status: StatusCode) -> bool {
+    status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN
+}
+
 /// Single-flight token refresh, callable from tasks that can't hold &self
 /// (the WebSocket watcher outlives any borrow of the provider). Semantics:
 /// under the lock, if the current token no longer equals `seen_token`,
@@ -51,7 +81,7 @@ async fn refresh_token_standalone(
     notifier: Option<&Notifier>,
     account_id: &str,
     seen_token: &str,
-) -> Result<(), String> {
+) -> Result<(), RefreshFail> {
     let _guard = refresh_lock.lock().await;
 
     // Under the lock — has someone already refreshed for us?
@@ -67,20 +97,39 @@ async fn refresh_token_standalone(
         .bearer_auth(seen_token)
         .send()
         .await
-        .map_err(|e| format!("Refresh request: {e}"))?;
+        .map_err(|e| RefreshFail::transient(format!("Refresh request: {e}")))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Refresh failed HTTP {status}: {body}"));
+        let message = format!("Refresh failed HTTP {status}: {body}");
+        if refresh_needs_login(status) {
+            // Сообщаем ровно отсюда: путь общий для watcher'а и для любого
+            // REST-запроса, наткнувшегося на 401, так что состояние доедет до
+            // UI независимо от того, кто первым это обнаружил. Иначе о смерти
+            // сессии знал бы только тот, кто спрашивал, а остальные пути
+            // молча возвращали бы пустые списки (так и пропал календарь).
+            if let Some(notifier) = notifier {
+                notifier(EngineEvent::ConnectionState {
+                    state: "auth".into(),
+                    message: Some(message.clone()),
+                });
+            }
+            return Err(RefreshFail { message, needs_login: true });
+        }
+        return Err(RefreshFail::transient(message));
     }
 
-    let data: serde_json::Value =
-        resp.json().await.map_err(|e| format!("Refresh parse: {e}"))?;
+    let data: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| RefreshFail::transient(format!("Refresh parse: {e}")))?;
     let new_token = data
         .get("token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "Refresh: missing token in response".to_string())?
+        .ok_or_else(|| {
+            RefreshFail::transient("Refresh: missing token in response".to_string())
+        })?
         .to_string();
 
     *token.write().await = new_token.clone();
@@ -148,6 +197,7 @@ impl NativeProvider {
             seen_token,
         )
         .await
+        .map_err(String::from)
     }
 
     /// Send a request with auto-refresh on 401. The closure is called once
@@ -786,7 +836,7 @@ impl MailProvider for NativeProvider {
                         // next iteration reads the rotated token from the lock.
                         let watcher_notifier =
                             self_notifier.lock().ok().and_then(|slot| slot.clone());
-                        if let Err(re) = refresh_token_standalone(
+                        match refresh_token_standalone(
                             &http,
                             &server_url,
                             &token,
@@ -797,7 +847,25 @@ impl MailProvider for NativeProvider {
                         )
                         .await
                         {
-                            log::warn!("NativeProvider: watcher token refresh failed: {re}");
+                            Ok(()) => {}
+                            Err(f) if f.needs_login => {
+                                // Крутить реконнект дальше незачем: каждый круг
+                                // упрётся в тот же 401, а состояние "auth" уже
+                                // уехало в UI (из refresh_token_standalone).
+                                // Watcher поднимется сам, когда пользователь
+                                // войдёт: вход пересобирает движок целиком.
+                                log::warn!(
+                                    "NativeProvider: сессия мертва, нужен повторный вход ({})",
+                                    f.message
+                                );
+                                break;
+                            }
+                            Err(f) => {
+                                log::warn!(
+                                    "NativeProvider: watcher token refresh failed: {}",
+                                    f.message
+                                );
+                            }
                         }
                     }
                 }
