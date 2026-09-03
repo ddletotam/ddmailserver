@@ -28,8 +28,12 @@ pub fn mail_toast(from: &str, subject: &str, on_click: impl Fn() + Send + Sync +
 }
 
 #[cfg(not(windows))]
-pub fn mail_toast(from: &str, subject: &str, _on_click: impl Fn() + Send + Sync + 'static) {
-    crate::notify::notify(from, subject);
+pub fn mail_toast(from: &str, subject: &str, on_click: impl Fn() + Send + Sync + 'static) {
+    // Клик по плашке обязан открывать письмо. Раньше обработчик здесь
+    // отбрасывался (`_on_click`), и уведомление на Linux не реагировало
+    // вообще ни на что — при том что весь путь «открыть письмо из тоста»
+    // уже был написан и работал на Windows.
+    crate::notify::notify_clickable(from, subject, move || on_click());
 }
 
 /// Calendar-reminder toast, restored from the Tauri build: body click =

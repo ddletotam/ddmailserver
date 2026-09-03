@@ -1523,6 +1523,11 @@ struct Shared {
     /// Где стоял скролл чата, когда мы уходили из почты в календарь/книгу.
     /// Положительный отступ от верха; -1 = ещё не уходили.
     ///
+    /// Пока пользователь был не в почте, в ОТКРЫТЫЙ диалог пришло письмо.
+    /// Перерисовать панель было некому — её не существовало, — поэтому
+    /// возврат в почту должен не восстанавливать позицию, а открыть диалог
+    /// заново: иначе новое письмо не появится в переписке вовсе.
+    missed_mail: Cell<bool>,
     /// Диалог, открытый последним: пишется в calendar.json при каждом
     /// открытии, чтобы следующий запуск вернулся к нему, а не к первому в
     /// списке. Ключ — `Conversation::id` (набор адресов), он переживает и
@@ -2140,7 +2145,13 @@ fn rebuild_merged_view(ui: &MainWindow, sh: &Shared, select_id: Option<String>, 
 
 /// Open a conversation by index: show cached bodies immediately, and (if a live
 /// engine is running) fire a background fetch to refresh them.
+/// `#[track_caller]` — чтобы `[perf]`-строка называла, ОТКУДА диалог открыли.
+/// Путей больше десятка (клик в списке, стрелки, поиск, тост, отправка,
+/// склейка, возврат в почту), а по логу они выглядели одинаково: на поиск
+/// виновника «кто это открыл диалог» уходил час на каждый заход.
+#[track_caller]
 fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
+    let caller = std::panic::Location::caller();
     let t0 = Instant::now();
     sh.current.set(idx);
     // New conversation generation: any in-flight FetchMessages answer for
@@ -2151,6 +2162,9 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
     let Some(c) = convs.get(idx) else { return };
     let conv_label = c.label.clone();
     let msg_count = c.messages.len();
+    // Открытие диалога само по себе показывает всё, что в нём есть, — повод
+    // перерисовывать его при возврате в почту снят.
+    sh.missed_mail.set(false);
     // Запомнить открытый диалог — следующий запуск вернётся к нему, а не к
     // первому в списке. Пишем сразу, как и остальные настройки: «сохраним на
     // выходе» не выживает ни выхода через трей, ни kill. Сравнение — чтобы
@@ -2207,7 +2221,8 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
             *sh.current_bodies.borrow_mut() = bodies.clone();
             println!(
                 "[perf] open_conversation idx={idx} label={conv_label:?} \
-                 messages={msg_count} bodies={} cache_load={load_ms}ms enqueue@{:?}",
+                 messages={msg_count} bodies={} cache_load={load_ms}ms \
+                 enqueue@{:?} caller={caller}",
                 bodies.len(),
                 t0.elapsed()
             );
@@ -2218,7 +2233,8 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
         } else {
             println!(
                 "[perf] open_conversation idx={idx} label={conv_label:?} \
-                 messages={msg_count} cache_miss (no cached bodies) cache_load={load_ms}ms"
+                 messages={msg_count} cache_miss (no cached bodies) \
+                 cache_load={load_ms}ms caller={caller}"
             );
         }
     }
@@ -3483,20 +3499,42 @@ fn save_calendar_settings(ui: &MainWindow, sh: &Shared) {
 }
 
 /// Через `delay_ms` повторить bump `chat-scroll-seq`, если переписка ещё не
-/// доехала до `target`. Нужно там, где панель почты только что создалась:
-/// мост `changed x` живёт внутри неё, и bump, сделанный до её появления, до
-/// моста не доходит.
+/// доехала до `target`. Нужно всюду, где панель почты могла создаваться в
+/// момент bump'а: мост `changed x` живёт ВНУТРИ панели, и bump, сделанный до
+/// её появления, до моста не доходит — ни `changed`, ни первая раскладка его
+/// не подберут (см. контракт §4).
 ///
 /// Проверка по зеркалу `chat-vp-y` (свежая панель обнуляет его в `init`)
-/// делает повтор безвредным: доехали или пользователь сам увёл вид — вид не
-/// дёргаем.
+/// делает повтор безвредным: доехали или пользователь сам увёл вид — не
+/// дёргаем. Цель клампится по содержимому здесь же, иначе «в конец» (`1e9`,
+/// как его ставит рендер) никогда не совпало бы с реальной позицией и
+/// каждый повтор считал бы, что не доехали.
 fn nudge_chat_scroll(ui_weak: slint::Weak<MainWindow>, target: f32, delay_ms: u64) {
     slint::Timer::single_shot(std::time::Duration::from_millis(delay_ms), move || {
         let Some(ui) = ui_weak.upgrade() else { return };
-        if (-ui.get_chat_vp_y() - target).abs() <= 1.0 {
+        let content_h = ui.get_chat_content_h();
+        let view_h = ui.get_chat_view_h();
+        let want = if content_h > 0.0 && view_h > 0.0 {
+            target.min((content_h - view_h).max(0.0))
+        } else {
+            target
+        };
+        if (-ui.get_chat_vp_y() - want).abs() <= 1.0 {
             return;
         }
         ui.set_chat_scroll_seq(ui.get_chat_scroll_seq() + 1);
+    });
+}
+
+/// То же для сайдбара: строка выбранного диалога должна быть видна, а её
+/// bump теряется по той же причине. Своего зеркала позиции у списка нет,
+/// поэтому просто повторяем — мост доводит строку до видимости и ничего не
+/// делает, если она уже видна.
+fn nudge_sidebar_scroll(ui_weak: slint::Weak<MainWindow>, row_y: f32, delay_ms: u64) {
+    slint::Timer::single_shot(std::time::Duration::from_millis(delay_ms), move || {
+        let Some(ui) = ui_weak.upgrade() else { return };
+        ui.set_sidebar_row_y(row_y);
+        ui.set_sidebar_scroll_seq(ui.get_sidebar_scroll_seq() + 1);
     });
 }
 
@@ -5923,6 +5961,14 @@ fn main() {
                             if let Some(y) = scroll_y {
                                 ui.set_chat_scroll_y(y);
                                 ui.set_chat_scroll_seq(ui.get_chat_scroll_seq() + 1);
+                                // Панель почты могла создаваться прямо сейчас:
+                                // клик по тосту о новом письме сам переключает
+                                // view-mode в 0 и тут же открывает диалог, так
+                                // что этот bump уходит в ещё не существующий
+                                // мост. Живой панели повторы ничего не стоят —
+                                // позиция уже доехала, и они молчат.
+                                nudge_chat_scroll(ui.as_weak(), y, 120);
+                                nudge_chat_scroll(ui.as_weak(), y, 400);
                             }
                             // Scroll-less render (width change, scale change,
                             // policy toggle) НЕ трогает chat-scroll-pending:
@@ -6088,6 +6134,7 @@ fn main() {
         work_end: Cell::new(cal_set.work_end_hour.clamp(1, 24)),
         manual_hour_h: Cell::new(cal_set.manual_hour_height),
         manual_col_w: Cell::new(cal_set.manual_col_width),
+        missed_mail: Cell::new(false),
         last_conv_id: RefCell::new(cal_set.last_conversation.clone()),
         editing_event_id: Cell::new(0),
         pending_event_save: Cell::new(false),
@@ -6202,13 +6249,7 @@ fn main() {
             // моста не дойдёт. Раньше это было не нужно: стартовый выбор
             // всегда попадал в первые строки, они и так видны.
             if i > 0 {
-                let ui_weak = ui.as_weak();
-                slint::Timer::single_shot(std::time::Duration::from_millis(200), move || {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_sidebar_row_y(i as f32 * 64.0);
-                        ui.set_sidebar_scroll_seq(ui.get_sidebar_scroll_seq() + 1);
-                    }
-                });
+                nudge_sidebar_scroll(ui.as_weak(), i as f32 * 64.0, 200);
             }
             break;
         }
@@ -7764,8 +7805,18 @@ fn main() {
                 // изменение, так что `changed` не сработает. Применит скролл
                 // сам ListView на первом реальном layout (`viewport-height` /
                 // `height`), как это уже сделано для сетки календаря.
+                // Пока нас не было, в открытый диалог пришло письмо —
+                // возвращать позицию, на которой ушли, значит спрятать его
+                // под сгибом (а точнее — не показать вовсе: панели не
+                // существовало, и в переписку письмо не дорисовывалось).
+                // Открываем диалог заново: анкор встанет на первое
+                // непрочитанное, то есть на него.
                 let saved = sh_view.chat_vp_y.replace(-1.0);
-                if saved >= 0.0 {
+                if sh_view.missed_mail.replace(false) {
+                    let idx = sh_view.current.get();
+                    apply_active_header(&ui, &sh_view, idx);
+                    open_conversation(&ui, &sh_view, idx);
+                } else if saved >= 0.0 {
                     ui.set_chat_scroll_y(saved);
                     ui.set_chat_scroll_pending(true);
                     // Одного флага мало: при создании панели с уже готовой
@@ -10056,12 +10107,17 @@ fn handle_new_mail(
     // «Я в этом диалоге?» — compare the sender against the OPEN conversation,
     // not the first list hit: pair-grouping can hold the same counterpart in
     // several rows, and list re-sorts make index equality a lottery.
-    let is_current = visible
-        && in_mail_view
-        && !from_addr.is_empty()
+    let belongs_to_open = !from_addr.is_empty()
         && sh.convs.borrow().get(sh.current.get()).is_some_and(|c| {
             c.counterparts.iter().any(|cp| cp.addr.eq_ignore_ascii_case(&from_addr))
         });
+    let is_current = visible && in_mail_view && belongs_to_open;
+    // Письмо в открытый диалог, но панели почты сейчас нет (календарь,
+    // книга, задачи): дорисовать его некому и незачем — перерисуем при
+    // возврате, тогда же анкор и встанет на него.
+    if belongs_to_open && !in_mail_view {
+        sh.missed_mail.set(true);
+    }
 
     if is_current {
         let at_bottom = {
@@ -10206,6 +10262,9 @@ fn open_message_from_toast(ui: &MainWindow, sh: &Shared, folder: &str, uid: u32,
                 }
             })
     };
+    // Переключение вида из Rust: колбэк `view-changed` при этом НЕ зовётся
+    // (его дёргает только меню), так что ни снимка позиции, ни его
+    // восстановления здесь нет — диалог открывается со своим анкором.
     ui.set_view_mode(0);
     if let Some(idx) = idx {
         ui.set_selected(idx as i32);
@@ -10213,6 +10272,9 @@ fn open_message_from_toast(ui: &MainWindow, sh: &Shared, folder: &str, uid: u32,
         open_conversation(ui, sh, idx);
         ui.set_sidebar_row_y(idx as f32 * 64.0);
         ui.set_sidebar_scroll_seq(ui.get_sidebar_scroll_seq() + 1);
+        // Панель сайдбара создаётся этим же переключением — bump выше уходит
+        // в никуда, строка остаётся за кадром.
+        nudge_sidebar_scroll(ui.as_weak(), idx as f32 * 64.0, 200);
     }
 }
 
