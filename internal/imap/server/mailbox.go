@@ -437,44 +437,55 @@ func collectTextParts(criteria *imap.SearchCriteria) []string {
 func (m *Mailbox) CreateMessage(flags []string, date time.Time, body imap.Literal) error {
 	log.Printf("CreateMessage called for mailbox %s (type=%s) with %d flags", m.name, m.folderType, len(flags))
 
-	// Read the message body
 	data, err := io.ReadAll(body)
 	if err != nil {
 		log.Printf("CreateMessage: failed to read body: %v", err)
 		return fmt.Errorf("failed to read message body: %w", err)
 	}
+	_, _, err = m.storeAppended(flags, date, data)
+	return err
+}
 
-	// Parse the message
+// storeAppended persists a message handed to us by APPEND — a client saving
+// its own copy, most often into Sent — and reports the UID it ended up with
+// and whether it was a duplicate we skipped. Shared by CreateMessage and
+// CreateMessageUID, which differ only in what they hand back to the client.
+//
+// Everything the parser found has to be stored here, not just the headers and
+// the body. An APPEND is often the ONLY copy of a message we will ever see:
+// a client that sends through someone else's SMTP still saves its Sent copy
+// with us, and no submission path runs to save the attachments for it.
+// Dropping the parts left such a letter with none at all — 76 KB on the wire,
+// a 195-byte HTML div in the database — and dropping References cost the
+// thread the links to what it answers.
+func (m *Mailbox) storeAppended(flags []string, date time.Time, data []byte) (uint32, bool, error) {
 	p := parser.New()
 	parsed, err := p.ParseBytes(data)
 	if err != nil {
-		log.Printf("CreateMessage: failed to parse message: %v", err)
+		log.Printf("storeAppended: failed to parse message: %v", err)
 		// Continue with minimal info even if parsing fails
 		parsed = &parser.ParsedMessage{}
 	}
 
-	// Dedup for Sent folder: if message with same Message-ID already exists, skip
+	// Dedup for Sent folder: if message with same Message-ID already exists,
+	// keep the copy we have (it came from our own submission, raw email and
+	// all) and report its UID.
 	if m.folderType == "sent" && parsed.GetMessageID() != "" {
 		exists, err := m.database.MessageExistsInFolder(m.folderID, parsed.GetMessageID())
 		if err == nil && exists {
-			log.Printf("CreateMessage: dedup — message %s already in Sent, skipping", parsed.GetMessageID())
-			return nil // Return OK to client
+			log.Printf("storeAppended: dedup — message %s already in Sent, skipping", parsed.GetMessageID())
+			existingUID, _ := m.database.GetMessageUIDByMessageID(m.folderID, parsed.GetMessageID())
+			return existingUID, true, nil
 		}
 	}
 
-	// Get next UID
 	nextUID, err := m.database.GetNextUIDForFolder(m.folderID)
 	if err != nil {
-		log.Printf("CreateMessage: failed to get next UID: %v", err)
-		return fmt.Errorf("failed to get next UID: %w", err)
+		log.Printf("storeAppended: failed to get next UID: %v", err)
+		return 0, false, fmt.Errorf("failed to get next UID: %w", err)
 	}
 
-	// Extract flags
-	seen := false
-	flagged := false
-	answered := false
-	draft := false
-	deleted := false
+	seen, flagged, answered, draft, deleted := false, false, false, false, false
 	for _, flag := range flags {
 		switch flag {
 		case imap.SeenFlag:
@@ -490,7 +501,8 @@ func (m *Mailbox) CreateMessage(flags []string, date time.Time, body imap.Litera
 		}
 	}
 
-	// Use provided date or parsed date
+	// APPEND carries its own INTERNALDATE; fall back to the Date header, then
+	// to now, so a message never lands with a zero date.
 	msgDate := date
 	if msgDate.IsZero() {
 		msgDate = parsed.GetDate()
@@ -498,39 +510,60 @@ func (m *Mailbox) CreateMessage(flags []string, date time.Time, body imap.Litera
 	if msgDate.IsZero() {
 		msgDate = time.Now()
 	}
-	msgDateMs := timeutil.ToMs(msgDate)
 
-	// Create message
 	msg := &models.Message{
-		AccountID: 0, // Local message
-		UserID:    m.user.userID,
-		FolderID:  m.folderID,
-		MessageID: parsed.GetMessageID(),
-		Subject:   parser.SanitizeUTF8(parsed.Subject),
-		From:      parser.SanitizeUTF8(parser.FormatAddress(parsed.From)),
-		To:        parser.SanitizeUTF8(parser.FormatAddressList(parsed.To)),
-		Cc:        parser.SanitizeUTF8(parser.FormatAddressList(parsed.Cc)),
-		ReplyTo:   parser.SanitizeUTF8(parser.FormatAddress(parsed.ReplyTo)),
-		Date:      msgDateMs,
-		Body:      parser.SanitizeUTF8(parsed.Body),
-		BodyHTML:  parser.SanitizeUTF8(parsed.BodyHTML),
-		Size:      int64(len(data)),
-		UID:       nextUID,
-		Seen:      seen,
-		Flagged:   flagged,
-		Answered:  answered,
-		Draft:     draft,
-		Deleted:   deleted,
-		InReplyTo: parser.SanitizeUTF8(parsed.InReplyTo),
+		AccountID:         0, // Local message
+		UserID:            m.user.userID,
+		FolderID:          m.folderID,
+		MessageID:         parsed.GetMessageID(),
+		Subject:           parser.SanitizeUTF8(parsed.Subject),
+		From:              parser.SanitizeUTF8(parser.FormatAddress(parsed.From)),
+		To:                parser.SanitizeUTF8(parser.FormatAddressList(parsed.To)),
+		Cc:                parser.SanitizeUTF8(parser.FormatAddressList(parsed.Cc)),
+		ReplyTo:           parser.SanitizeUTF8(parser.FormatAddress(parsed.ReplyTo)),
+		Date:              timeutil.ToMs(msgDate),
+		DateTZ:            timeutil.TZOffsetMinutes(msgDate),
+		Body:              parser.SanitizeUTF8(parsed.Body),
+		BodyHTML:          parser.SanitizeUTF8(parsed.BodyHTML),
+		RawEmail:          data, // so «показать исходник» shows the real RFC-822
+		Attachments:       len(parsed.Attachments),
+		Size:              int64(len(data)),
+		UID:               nextUID,
+		Seen:              seen,
+		Flagged:           flagged,
+		Answered:          answered,
+		Draft:             draft,
+		Deleted:           deleted,
+		InReplyTo:         parser.SanitizeUTF8(parsed.InReplyTo),
+		MessageReferences: parser.SanitizeUTF8(strings.Join(parsed.References, " ")),
 	}
 
 	if err := m.database.CreateMessage(msg); err != nil {
-		log.Printf("CreateMessage: failed to save message: %v", err)
-		return fmt.Errorf("failed to save message: %w", err)
+		log.Printf("storeAppended: failed to save message: %v", err)
+		return 0, false, fmt.Errorf("failed to save message: %w", err)
 	}
 
-	log.Printf("CreateMessage: saved message %d with UID %d to mailbox %s", msg.ID, msg.UID, m.name)
-	return nil
+	// Attachments (inline images included — they carry a Content-ID the body
+	// references, and without the rows an appended letter renders with broken
+	// pictures as well as missing files).
+	for _, att := range parsed.Attachments {
+		attachment := &models.Attachment{
+			MessageID:   msg.ID,
+			ContentID:   strings.Trim(att.ContentID, "<>"),
+			Filename:    att.Filename,
+			ContentType: att.ContentType,
+			Size:        int(att.Size),
+			IsInline:    att.IsInline,
+			Data:        att.Data,
+		}
+		if err := m.database.CreateAttachment(attachment); err != nil {
+			log.Printf("storeAppended: failed to save attachment %s: %v", att.Filename, err)
+		}
+	}
+
+	log.Printf("storeAppended: saved message %d with UID %d (%d attachments) to mailbox %s",
+		msg.ID, msg.UID, len(parsed.Attachments), m.name)
+	return nextUID, false, nil
 }
 
 // UpdateMessagesFlags updates message flags
@@ -663,83 +696,11 @@ func (m *Mailbox) CreateMessageUID(flags []string, date time.Time, body imap.Lit
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to read message body: %w", err)
 	}
-
-	p := parser.New()
-	parsed, err := p.ParseBytes(data)
+	uid, _, err := m.storeAppended(flags, date, data)
 	if err != nil {
-		parsed = &parser.ParsedMessage{}
+		return 0, 0, err
 	}
-
-	// Dedup for Sent folder
-	if m.folderType == "sent" && parsed.GetMessageID() != "" {
-		exists, err := m.database.MessageExistsInFolder(m.folderID, parsed.GetMessageID())
-		if err == nil && exists {
-			log.Printf("CreateMessageUID: dedup — message %s already in Sent, skipping", parsed.GetMessageID())
-			// Return existing UID for deduped message
-			existingUID, _ := m.database.GetMessageUIDByMessageID(m.folderID, parsed.GetMessageID())
-			return existingUID, m.getUIDValidity(), nil
-		}
-	}
-
-	nextUID, err := m.database.GetNextUIDForFolder(m.folderID)
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get next UID: %w", err)
-	}
-
-	seen, flagged, answered, draft, deleted := false, false, false, false, false
-	for _, flag := range flags {
-		switch flag {
-		case imap.SeenFlag:
-			seen = true
-		case imap.FlaggedFlag:
-			flagged = true
-		case imap.AnsweredFlag:
-			answered = true
-		case imap.DraftFlag:
-			draft = true
-		case imap.DeletedFlag:
-			deleted = true
-		}
-	}
-
-	msgDate2 := date
-	if msgDate2.IsZero() {
-		msgDate2 = parsed.GetDate()
-	}
-	if msgDate2.IsZero() {
-		msgDate2 = time.Now()
-	}
-	msgDateMs2 := timeutil.ToMs(msgDate2)
-
-	msg := &models.Message{
-		AccountID: 0,
-		UserID:    m.user.userID,
-		FolderID:  m.folderID,
-		MessageID: parsed.GetMessageID(),
-		Subject:   parser.SanitizeUTF8(parsed.Subject),
-		From:      parser.SanitizeUTF8(parser.FormatAddress(parsed.From)),
-		To:        parser.SanitizeUTF8(parser.FormatAddressList(parsed.To)),
-		Cc:        parser.SanitizeUTF8(parser.FormatAddressList(parsed.Cc)),
-		ReplyTo:   parser.SanitizeUTF8(parser.FormatAddress(parsed.ReplyTo)),
-		Date:      msgDateMs2,
-		Body:      parser.SanitizeUTF8(parsed.Body),
-		BodyHTML:  parser.SanitizeUTF8(parsed.BodyHTML),
-		Size:      int64(len(data)),
-		UID:       nextUID,
-		Seen:      seen,
-		Flagged:   flagged,
-		Answered:  answered,
-		Draft:     draft,
-		Deleted:   deleted,
-		InReplyTo: parser.SanitizeUTF8(parsed.InReplyTo),
-	}
-
-	if err := m.database.CreateMessage(msg); err != nil {
-		return 0, 0, fmt.Errorf("failed to save message: %w", err)
-	}
-
-	log.Printf("CreateMessageUID: saved message %d with UID %d to mailbox %s", msg.ID, msg.UID, m.name)
-	return nextUID, m.getUIDValidity(), nil
+	return uid, m.getUIDValidity(), nil
 }
 
 // CopyMessagesUID is like CopyMessages but returns UID mapping for UIDPLUS.
