@@ -170,35 +170,29 @@ func (p *Parser) handleInlinePart(h *gomail.InlineHeader, body io.Reader, msg *P
 		return p.handleEmbeddedMessage(body, msg, depth)
 	}
 
-	// Check for Content-ID - if present, treat as inline attachment (e.g., embedded image)
-	contentID := h.Get("Content-ID")
-	if contentID != "" && !strings.HasPrefix(contentType, "text/") {
-		// This is an inline image or other embedded content
-		contentID = strings.TrimPrefix(contentID, "<")
-		contentID = strings.TrimSuffix(contentID, ">")
-
+	// Anything that isn't text is a FILE, and it has to be kept whether or not
+	// it carries a Content-ID.
+	//
+	// go-message routes a part here by disposition alone: `disp == "inline"`
+	// makes an InlineHeader regardless of content type (mail/reader.go). iPhone
+	// Mail attaches with `Content-Disposition: inline` and no Content-ID, so
+	// such a part matched neither the Content-ID branch nor the text/* switch
+	// below and vanished without a trace — every attachment sent from an
+	// iPhone was lost (a 76 KB letter left a 195-byte HTML div in the database
+	// and attachments = 0), on every path that parses mail, incoming included.
+	//
+	// Content-ID decides only whether the file is EMBEDDED in the body: the
+	// api hides such parts from the attachment list when the HTML references
+	// the cid. It was never a reason to keep or drop the bytes.
+	contentID := strings.Trim(h.Get("Content-ID"), "<>")
+	if !strings.HasPrefix(contentType, "text/") && !strings.HasPrefix(contentType, "multipart/") {
 		data, err := io.ReadAll(body)
 		if err != nil {
 			return fmt.Errorf("failed to read inline content: %w", err)
 		}
 
-		// Get filename from Content-Disposition or Content-Type name param
-		filename := params["name"]
-		if filename == "" {
-			// Generate filename based on content-id
-			ext := ".bin"
-			switch {
-			case strings.HasPrefix(contentType, "image/jpeg"):
-				ext = ".jpg"
-			case strings.HasPrefix(contentType, "image/png"):
-				ext = ".png"
-			case strings.HasPrefix(contentType, "image/gif"):
-				ext = ".gif"
-			case strings.HasPrefix(contentType, "image/webp"):
-				ext = ".webp"
-			}
-			filename = contentID + ext
-		}
+		filename := inlinePartFilename(h, params, contentID, contentType)
+		ext := strings.ToLower(filepath.Ext(filename))
 
 		attachment := ParsedAttachment{
 			Filename:    filename,
@@ -206,8 +200,8 @@ func (p *Parser) handleInlinePart(h *gomail.InlineHeader, body io.Reader, msg *P
 			Size:        int64(len(data)),
 			Data:        data,
 			ContentID:   contentID,
-			IsInline:    true,
-			IsDangerous: false,
+			IsInline:    contentID != "",
+			IsDangerous: p.isDangerousExtension(ext),
 		}
 		msg.Attachments = append(msg.Attachments, attachment)
 		return nil
@@ -260,6 +254,39 @@ func (p *Parser) handleInlinePart(h *gomail.InlineHeader, body io.Reader, msg *P
 	}
 
 	return nil
+}
+
+// inlinePartFilename picks a name for a non-text inline part: the filename
+// from Content-Disposition first (that's where clients put it), then the
+// Content-Type `name` param, then a synthetic one — a nameless file still has
+// to be downloadable, and Content-ID makes a stable stem when there is one.
+func inlinePartFilename(h *gomail.InlineHeader, params map[string]string, contentID, contentType string) string {
+	if _, dispParams, err := mime.ParseMediaType(h.Get("Content-Disposition")); err == nil {
+		if name := dispParams["filename"]; name != "" {
+			return DecodeMIMEHeader(name)
+		}
+	}
+	if name := params["name"]; name != "" {
+		return DecodeMIMEHeader(name)
+	}
+
+	ext := ".bin"
+	switch {
+	case strings.HasPrefix(contentType, "image/jpeg"):
+		ext = ".jpg"
+	case strings.HasPrefix(contentType, "image/png"):
+		ext = ".png"
+	case strings.HasPrefix(contentType, "image/gif"):
+		ext = ".gif"
+	case strings.HasPrefix(contentType, "image/webp"):
+		ext = ".webp"
+	case strings.HasPrefix(contentType, "application/pdf"):
+		ext = ".pdf"
+	}
+	if contentID != "" {
+		return contentID + ext
+	}
+	return "unnamed" + ext
 }
 
 // handleAttachment handles attachment parts
