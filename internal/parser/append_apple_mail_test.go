@@ -69,3 +69,110 @@ JVBERi0xLjQKJcOkw7zDtsOfCjEgMCBvYmoKPDwvVHlwZS9DYXRhbG9nPj4KZW5kb2JqCg==
 		t.Error("html body is empty")
 	}
 }
+
+// Настоящая форма письма с iPhone (снято с потерянного письма от 05.09.2026):
+// multipart/alternative с ОДНИМ ребёнком multipart/mixed, внутри — текст
+// ответа, вложение и цитата. Вложение помечено `Content-Disposition: inline`
+// и БЕЗ Content-ID: go-message из-за диспозиции считает такую часть
+// «текстовой», и разбор её терял целиком.
+func TestParseIPhoneInlineAttachmentWithoutContentID(t *testing.T) {
+	raw := strings.ReplaceAll(`From: Denis <info@example.org>
+To: someone@example.com
+Subject: Re: invoice
+Message-Id: <E5DFF90D@example.org>
+References: <c67fece84@example.com>
+In-Reply-To: <c67fece84@example.com>
+X-Mailer: iPhone Mail (23G83)
+Content-Type: multipart/alternative; boundary=Apple-Mail-55D9
+MIME-Version: 1.0
+
+--Apple-Mail-55D9
+Content-Type: multipart/mixed; boundary=Apple-Mail-AFA6
+Content-Transfer-Encoding: 7bit
+
+--Apple-Mail-AFA6
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<html><body dir=3D"auto">payment attached</body></html>
+--Apple-Mail-AFA6
+Content-Type: application/pdf; x-unix-mode=0644; name="payment.pdf"
+Content-Disposition: inline; filename="payment.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJcOkw7zDtsOfCjEgMCBvYmoKPDwvVHlwZS9DYXRhbG9nPj4KZW5kb2JqCg==
+--Apple-Mail-AFA6
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<html><body>&gt; quoted original</body></html>
+--Apple-Mail-AFA6--
+--Apple-Mail-55D9--
+`, "\n", "\r\n")
+
+	parsed, err := New().ParseBytes([]byte(raw))
+	if err != nil {
+		t.Fatalf("ParseBytes: %v", err)
+	}
+
+	if len(parsed.Attachments) != 1 {
+		t.Fatalf("attachments = %d, want 1 (inline PDF without Content-ID)", len(parsed.Attachments))
+	}
+	att := parsed.Attachments[0]
+	if att.Filename != "payment.pdf" {
+		t.Errorf("filename = %q, want payment.pdf", att.Filename)
+	}
+	if !strings.HasPrefix(string(att.Data), "%PDF-") {
+		t.Errorf("data not decoded: %q", string(att.Data[:min(5, len(att.Data))]))
+	}
+	// Content-ID нет → файл не «встроен в тело», и прятать его из списка
+	// вложений нельзя (иначе он снова невидим, только теперь уже в API).
+	if att.IsInline {
+		t.Error("IsInline = true без Content-ID: файл спрячется из списка вложений")
+	}
+	if att.ContentID != "" {
+		t.Errorf("content-id = %q, want empty", att.ContentID)
+	}
+	if parsed.BodyHTML == "" {
+		t.Error("html body is empty")
+	}
+}
+
+// Встроенная картинка (Content-ID есть) остаётся встроенной: от IsInline
+// зависит, прячет ли её API из списка вложений при ссылке из HTML.
+func TestParseInlineImageKeepsContentID(t *testing.T) {
+	raw := strings.ReplaceAll(`From: a@example.org
+To: b@example.com
+Subject: pic
+Content-Type: multipart/related; boundary=B1
+MIME-Version: 1.0
+
+--B1
+Content-Type: text/html; charset=utf-8
+
+<html><body><img src="cid:logo@x"></body></html>
+--B1
+Content-Type: image/png
+Content-ID: <logo@x>
+Content-Disposition: inline
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgo=
+--B1--
+`, "\n", "\r\n")
+
+	parsed, err := New().ParseBytes([]byte(raw))
+	if err != nil {
+		t.Fatalf("ParseBytes: %v", err)
+	}
+	if len(parsed.Attachments) != 1 {
+		t.Fatalf("attachments = %d, want 1", len(parsed.Attachments))
+	}
+	att := parsed.Attachments[0]
+	if !att.IsInline || att.ContentID != "logo@x" {
+		t.Errorf("inline=%v cid=%q, want true/logo@x", att.IsInline, att.ContentID)
+	}
+	if att.Filename != "logo@x.png" {
+		t.Errorf("filename = %q, want logo@x.png", att.Filename)
+	}
+}
