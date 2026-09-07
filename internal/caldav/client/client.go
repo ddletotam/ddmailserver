@@ -353,9 +353,16 @@ func (c *Client) SyncCalendar(ctx context.Context, cal *models.Calendar) error {
 
 	// For each object, fetch full data using GET
 	log.Printf("CalDAV query returned %d object paths for calendar %s, fetching full data...", len(objects), cal.Name)
+	listed := len(objects)
 	fullObjects := make([]caldav.CalendarObject, 0, len(objects))
+
+	// Anything we failed to read makes this listing incomplete, and an
+	// incomplete listing must not be allowed to delete events — see the
+	// delete phase below.
+	incomplete := 0
 	for _, obj := range objects {
 		if obj.Path == "" {
+			incomplete++
 			continue
 		}
 		fullObj, err := c.client.GetCalendarObject(ctx, obj.Path)
@@ -365,14 +372,17 @@ func (c *Client) SyncCalendar(ctx context.Context, cal *models.Calendar) error {
 				fullObj, err = c.fetchICSDirectly(ctx, obj.Path)
 				if err != nil {
 					log.Printf("Failed to fetch calendar object %s (fallback): %v", obj.Path, err)
+					incomplete++
 					continue
 				}
 			} else {
 				log.Printf("Failed to GET calendar object %s: %v", obj.Path, err)
+				incomplete++
 				continue
 			}
 		}
 		if fullObj == nil {
+			incomplete++
 			continue
 		}
 		fullObjects = append(fullObjects, *fullObj)
@@ -382,7 +392,7 @@ func (c *Client) SyncCalendar(ctx context.Context, cal *models.Calendar) error {
 	log.Printf("CalDAV returned %d objects for calendar %s", len(objects), cal.Name)
 
 	// Get existing events for comparison
-	existingUIDs, err := c.database.GetAllEventUIDsForCalendar(cal.ID)
+	existing, err := c.database.GetCalendarPruneState(cal.ID)
 	if err != nil {
 		return fmt.Errorf("failed to get existing UIDs: %w", err)
 	}
@@ -405,11 +415,13 @@ func (c *Client) SyncCalendar(ctx context.Context, cal *models.Calendar) error {
 		event, err := c.parseCalendarObject(&obj, cal.ID)
 		if err != nil {
 			log.Printf("Failed to parse event %d: %v", i+1, err)
+			incomplete++
 			continue
 		}
 
 		if event.UID == "" {
 			log.Printf("Skipping event with empty UID: %s", event.Summary)
+			incomplete++
 			continue
 		}
 
@@ -471,9 +483,30 @@ func (c *Client) SyncCalendar(ctx context.Context, cal *models.Calendar) error {
 
 	log.Printf("Parsed %d events, queued %d creates, %d updates", parsedCount, len(changes.Creates), len(changes.Updates))
 
-	// Queue deletes for events that no longer exist on the server
-	for uid := range existingUIDs {
-		if !seenUIDs[uid] {
+	// Queue deletes for events that no longer exist on the server.
+	//
+	// "No longer exists" is a claim about the remote, and this listing is only
+	// entitled to make it when it is complete. One interrupted sync used to be
+	// enough to empty a calendar: a restart mid-GET-loop left seenUIDs almost
+	// empty and every local event was deleted, coming back only on the next
+	// successful pass ("0 created, 0 updated, 33 deleted", then "33 created"
+	// ninety seconds later). Anything the clients read in between saw an empty
+	// calendar.
+	switch {
+	case ctx.Err() != nil:
+		log.Printf("Not pruning %s: sync was interrupted (%v)", cal.Name, ctx.Err())
+	case incomplete > 0:
+		log.Printf("Not pruning %s: %d of %d listed objects could not be read, so absence proves nothing",
+			cal.Name, incomplete, listed)
+	default:
+		for uid, st := range existing {
+			if seenUIDs[uid] {
+				continue
+			}
+			if reason := keepReason(st, filterStart, filterEnd); reason != "" {
+				log.Printf("Keeping %s on %s despite absence upstream: %s", uid, cal.Name, reason)
+				continue
+			}
 			changes.DeleteUIDs = append(changes.DeleteUIDs, uid)
 		}
 	}
@@ -488,6 +521,43 @@ func (c *Client) SyncCalendar(ctx context.Context, cal *models.Calendar) error {
 	}
 
 	return nil
+}
+
+// keepReason says why a local event must survive not being mentioned by the
+// remote listing, or "" if its absence really does mean it was deleted
+// upstream.
+//
+// `start`/`end` are the window the listing was filtered by, zero when it was
+// not filtered at all (task collections are fetched whole — RFC 4791 §9.9
+// time-range against a task carrying no DTSTART, DUE, DURATION or COMPLETED
+// matches nothing).
+func keepReason(st db.SyncPruneState, start, end time.Time) string {
+	if st.LocalModified {
+		return "locally modified, waiting to be pushed"
+	}
+	if st.PendingSync {
+		return "reverse-sync queue still holds an operation for it"
+	}
+	if start.IsZero() || end.IsZero() {
+		// Unfiltered listing: absence is the whole truth.
+		return ""
+	}
+	if st.Recurs {
+		// The remote answers a windowed query for a recurring event by
+		// expanding its instances, so a birthday from 2017 shows up while
+		// this year's instance is in range. Absence can mean "series ended",
+		// which is not something a window can tell us.
+		return "recurring, so a windowed listing cannot prove it is gone"
+	}
+	if st.DTStart < timeutil.ToMs(start) || st.DTStart > timeutil.ToMs(end) {
+		// This is what quietly ate the past: the query asked for six months
+		// back, the delete phase asked for everything, and every one-off
+		// event that aged past the boundary was deleted on the next sync.
+		// Not a single non-recurring event older than six months survived
+		// anywhere in the database.
+		return "outside the window this listing asked for"
+	}
+	return ""
 }
 
 // PushChanges pushes local changes to the server

@@ -368,6 +368,67 @@ func (db *DB) GetAllEventUIDsForCalendar(calendarID int64) (map[string]string, e
 	return uids, nil
 }
 
+// SyncPruneState is what the delete phase of a sync needs in order to decide
+// whether a local event's absence from the remote listing really means "gone
+// upstream". The UID alone is not enough, and answering with the UID alone is
+// how a calendar lost events: see prunable in internal/caldav/client.
+type SyncPruneState struct {
+	ETag string
+
+	// DTStart in ms, and whether the event recurs. A remote listing is
+	// usually filtered by a time window; an event outside that window is
+	// absent because it was never asked for. A recurring event may sit far
+	// outside the window and still have instances inside it, so its absence
+	// says nothing either way.
+	DTStart int64
+	Recurs  bool
+
+	// LocalModified events are waiting to be pushed upstream. They are
+	// legitimately absent from the remote — that is the point — and deleting
+	// them destroys a change the user made and never got to send.
+	LocalModified bool
+
+	// PendingSync means the reverse-sync queue still holds an operation for
+	// this event. Same reasoning, from the other side: the event exists here
+	// on purpose and the remote does not know about it yet.
+	PendingSync bool
+}
+
+// GetCalendarPruneState returns, per UID, everything the delete phase needs.
+func (db *DB) GetCalendarPruneState(calendarID int64) (map[string]SyncPruneState, error) {
+	query := `
+		SELECT e.uid, COALESCE(e.etag, ''), COALESCE(e.dtstart, 0),
+		       COALESCE(e.rrule, '') <> '', COALESCE(e.local_modified, FALSE),
+		       EXISTS(
+		           SELECT 1 FROM calendar_event_sync_queue q
+		           WHERE q.event_id = e.id OR (q.calendar_id = e.calendar_id AND q.uid = e.uid)
+		       )
+		FROM calendar_events e
+		WHERE e.calendar_id = $1
+	`
+
+	rows, err := db.Query(query, calendarID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get calendar prune state: %w", err)
+	}
+	defer rows.Close()
+
+	state := make(map[string]SyncPruneState)
+	for rows.Next() {
+		var uid string
+		var st SyncPruneState
+		if err := rows.Scan(&uid, &st.ETag, &st.DTStart, &st.Recurs, &st.LocalModified, &st.PendingSync); err != nil {
+			return nil, fmt.Errorf("failed to scan prune state: %w", err)
+		}
+		state[uid] = st
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read prune state: %w", err)
+	}
+
+	return state, nil
+}
+
 // EventIdentity is the least a sync needs to recognise an event it has seen
 // before: the UID the feed gave it, and the content a feed cannot regenerate.
 // Some feeds mint a fresh UID on every render, so the UID alone cannot answer
@@ -439,9 +500,17 @@ func (db *DB) ApplySyncChanges(changes *SyncEventChanges) error {
 
 	now := timeutil.Now()
 
-	// Apply deletes first
+	// Apply deletes first.
+	//
+	// local_modified is excluded here as well as by the caller: this is the
+	// only statement in the codebase that deletes an event because a remote
+	// listing did not mention it, and a local change that has not been pushed
+	// yet is exactly the thing that must survive such a listing. Belt and
+	// braces on purpose — one caller already got the caller-side check wrong.
 	for _, uid := range changes.DeleteUIDs {
-		_, err := tx.Exec(`DELETE FROM calendar_events WHERE calendar_id = $1 AND uid = $2`,
+		_, err := tx.Exec(
+			`DELETE FROM calendar_events
+			 WHERE calendar_id = $1 AND uid = $2 AND COALESCE(local_modified, FALSE) = FALSE`,
 			changes.CalendarID, uid)
 		if err != nil {
 			return fmt.Errorf("failed to delete event %s: %w", uid, err)
