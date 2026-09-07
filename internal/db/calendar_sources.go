@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/yourusername/mailserver/internal/crypto"
 	"github.com/yourusername/mailserver/internal/models"
@@ -35,6 +36,10 @@ func createCalendarSource(q querier, encryptionKey string, source *models.Calend
 			return err
 		}
 		source.IdentityEmail = email
+	}
+
+	if err := bindSourceToAccount(q, source); err != nil {
+		return err
 	}
 
 	// Encrypt password
@@ -225,6 +230,10 @@ func (db *DB) UpdateCalendarSource(source *models.CalendarSource) error {
 		source.IdentityEmail = email
 	}
 
+	if err := bindSourceToAccount(db, source); err != nil {
+		return err
+	}
+
 	// Encrypt password
 	var encryptedPassword string
 	var err error
@@ -405,5 +414,40 @@ func (db *DB) decryptCalendarSourceSecrets(source *models.CalendarSource) error 
 		source.OAuthRefreshToken = decrypted
 	}
 
+	return nil
+}
+
+// bindSourceToAccount links a source to the mail account it authenticates as,
+// when the user has one with that address and no binding was given.
+//
+// The binding is what routes an incoming invite: the invite arrives on an
+// account, and only a bound source can be matched to it. While account_id sat
+// NULL — which it did for every source added before this — invite routing fell
+// through to a fallback that picked a calendar by recency, and work invites
+// were filed into an unrelated account's calendar and pushed at its server.
+//
+// Best-effort by design: no matching account is a perfectly ordinary state
+// (a calendar whose mail lives elsewhere, or nowhere), and not a reason to
+// refuse to save the source.
+func bindSourceToAccount(q querier, source *models.CalendarSource) error {
+	if source.AccountID != nil || source.CalDAVUsername == "" {
+		return nil
+	}
+
+	var id int64
+	err := q.QueryRow(`
+		SELECT id FROM accounts
+		WHERE user_id = $1 AND LOWER(COALESCE(email, '')) = LOWER($2)
+		ORDER BY id
+		LIMIT 1
+	`, source.UserID, strings.TrimSpace(source.CalDAVUsername)).Scan(&id)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to resolve account for calendar source: %w", err)
+	}
+
+	source.AccountID = &id
 	return nil
 }

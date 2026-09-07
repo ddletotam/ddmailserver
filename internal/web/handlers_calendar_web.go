@@ -493,10 +493,12 @@ func (s *Server) syncCalendarSource(ctx context.Context, source *models.Calendar
 	// Same cleanup the worker does. This handler is a second, independent
 	// implementation of calendar sync; the decision itself lives in the db
 	// helper so the two cannot disagree about when a placeholder is dead.
-	if pruned, err := s.database.PruneDirectURLCalendarIfDiscovered(source.ID, source.CalDAVURL, calendars); err != nil {
+	if pruned, demoted, err := s.database.PruneDirectURLCalendarIfDiscovered(source.ID, source.CalDAVURL, calendars); err != nil {
 		log.Printf("Failed to prune placeholder calendar for %s: %v", source.Name, err)
 	} else if pruned {
 		log.Printf("Removed placeholder calendar for %s — discovery now returns real collections", source.Name)
+	} else if demoted {
+		log.Printf("Placeholder calendar for %s still holds events — marked read-only, move them to a real collection", source.Name)
 	}
 
 	var syncErrors []string

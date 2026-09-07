@@ -373,8 +373,10 @@ func (s *Session) Data(r io.Reader) error {
 			// iTIP processing: REQUEST/CANCEL/REPLY/COUNTER attached as .ics
 			// shouldn't surface in the conversation list. If the dispatch
 			// returns processed=true the message + its attachments go away.
-			// Local MX delivery has no account_id (=0) — FindUserCalendarForInvites
-			// falls back to "any enabled calendar" for the user, which is fine.
+			// Local MX delivery has no account_id (=0), so routing falls to
+			// the recipient address: a source that authenticates as it, or a
+			// local calendar. If neither exists the invite is left as mail
+			// rather than filed into an arbitrary calendar.
 			handler := calendar.NewIncomingHandler(s.database)
 			if processed, perr := handler.ProcessAndDispatch(parsed, recipient.Mailbox.UserID, 0, []string{recipient.Email}); perr != nil {
 				log.Printf("MX: ICS dispatch error for msg %d: %v", msg.ID, perr)

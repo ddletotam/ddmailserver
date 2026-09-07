@@ -358,7 +358,10 @@ func (db *DB) PruneDirectURLCalendar(sourceID int64, sourceURL string) (bool, er
 //
 // Working means: something came back that is not the source URL itself. A
 // transient failure returns only the placeholder, and then nothing is removed.
-func (db *DB) PruneDirectURLCalendarIfDiscovered(sourceID int64, sourceURL string, discovered []*models.Calendar) (bool, error) {
+// A placeholder that cannot be removed because it holds events is demoted to
+// read-only instead — see DemoteDirectURLCalendar. Returns which of the two
+// happened, so the caller can say so.
+func (db *DB) PruneDirectURLCalendarIfDiscovered(sourceID int64, sourceURL string, discovered []*models.Calendar) (pruned bool, demoted bool, err error) {
 	worked := false
 	for _, c := range discovered {
 		if c.RemoteID != sourceURL {
@@ -367,7 +370,51 @@ func (db *DB) PruneDirectURLCalendarIfDiscovered(sourceID int64, sourceURL strin
 		}
 	}
 	if !worked {
+		return false, false, nil
+	}
+
+	pruned, err = db.PruneDirectURLCalendar(sourceID, sourceURL)
+	if err != nil || pruned {
+		return pruned, false, err
+	}
+
+	demoted, err = db.DemoteDirectURLCalendar(sourceID, sourceURL)
+	return false, demoted, err
+}
+
+// DemoteDirectURLCalendar marks the placeholder row read-only once discovery
+// has found the real collections but the row cannot be deleted because events
+// have accumulated in it.
+//
+// Read-only is the honest state: its remote_id is the source URL — a
+// principal's home rather than a collection — so every PUT aimed at it comes
+// back 403. Until it was demoted, three things kept writing into it: the
+// incoming-invite handler (which picked it as "any enabled calendar"), the
+// CalDAV server, and the web UI. Each write then queued a reverse-sync entry
+// that could not succeed, and the user got a daily "calendar sync failed"
+// email quoting a path that had never been valid.
+//
+// The events are deliberately left in place. They cannot be re-parented
+// safely: an event landed here precisely because the destination was chosen
+// wrongly, so it may belong to an entirely different account, and moving it
+// into a real collection would push it to a remote it has nothing to do with.
+// Emptying this calendar is a decision for the user.
+func (db *DB) DemoteDirectURLCalendar(sourceID int64, sourceURL string) (bool, error) {
+	if strings.TrimSpace(sourceURL) == "" {
 		return false, nil
 	}
-	return db.PruneDirectURLCalendar(sourceID, sourceURL)
+
+	res, err := db.Exec(`
+		UPDATE calendars
+		SET can_write = FALSE, updated_at = $3
+		WHERE source_id = $1 AND remote_id = $2 AND can_write = TRUE
+	`, sourceID, sourceURL, timeutil.Now())
+	if err != nil {
+		return false, fmt.Errorf("failed to demote direct-URL calendar: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, nil
+	}
+	return n > 0, nil
 }
