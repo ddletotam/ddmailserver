@@ -504,7 +504,7 @@ func (c *Client) PushChanges(ctx context.Context, cal *models.Calendar) error {
 
 	for _, event := range events {
 		// Build the path for this event
-		eventPath := fmt.Sprintf("%s%s.ics", cal.RemoteID, event.UID)
+		eventPath := caldavutil.ObjectPath(cal.RemoteID, event.UID)
 
 		// Create iCal calendar
 		icalCal := c.createICalFromEvent(event)

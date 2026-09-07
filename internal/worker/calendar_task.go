@@ -89,10 +89,12 @@ func (t *CalendarSyncTask) doSync(ctx context.Context) error {
 	// "Discovery worked" means it produced something other than the source URL
 	// itself. The distinction matters: for a server with no discovery at all —
 	// Yandex — the fallback IS the working calendar, and its row must stay.
-	if pruned, err := t.database.PruneDirectURLCalendarIfDiscovered(t.source.ID, t.source.CalDAVURL, calendars); err != nil {
+	if pruned, demoted, err := t.database.PruneDirectURLCalendarIfDiscovered(t.source.ID, t.source.CalDAVURL, calendars); err != nil {
 		log.Printf("Failed to prune placeholder calendar for %s: %v", t.source.Name, err)
 	} else if pruned {
 		log.Printf("Removed placeholder calendar for %s — discovery now returns real collections", t.source.Name)
+	} else if demoted {
+		log.Printf("Placeholder calendar for %s still holds events — marked read-only, move them to a real collection", t.source.Name)
 	}
 
 	for _, remoteCal := range calendars {

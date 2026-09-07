@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 
+	caldavutil "github.com/yourusername/mailserver/internal/caldav"
 	caldavclient "github.com/yourusername/mailserver/internal/caldav/client"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
@@ -92,6 +93,24 @@ func (t *CalendarEventSyncTask) Execute(ctx context.Context) error {
 				continue
 			}
 
+			// A collection we cannot write into refuses every PUT, so there
+			// is nothing to retry. The case that brought this here: a
+			// placeholder row left behind by failed discovery, whose
+			// remote_id is the source URL — the principal's home, not a
+			// collection. SOGo answered 403 to every attempt and the only
+			// visible result was a daily "sync failed" email naming a path
+			// that could never have worked.
+			if !cal.CanWrite {
+				reason := fmt.Sprintf("calendar %q is not writable — %q is not a collection we can PUT into", cal.Name, cal.RemoteID)
+				log.Printf("Calendar event sync: retiring %s (%s) — %s", entry.UID, entry.Operation, reason)
+				if dbErr := t.database.DeadLetterCalendarEventSync(entry.ID, reason); dbErr != nil {
+					log.Printf("retire unwritable sync entry %d: %v", entry.ID, dbErr)
+				}
+				t.database.MarkEventSynced(entry.EventID, "")
+				failCount++
+				continue
+			}
+
 			// Never push a component the target collection does not accept.
 			//
 			// This is the failure that made tasks worth implementing: iOS
@@ -118,7 +137,7 @@ func (t *CalendarEventSyncTask) Execute(ctx context.Context) error {
 			remotePath := entry.RemoteID
 			if remotePath == "" {
 				// New event — construct path from calendar's remote ID and UID
-				remotePath = fmt.Sprintf("%s%s.ics", cal.RemoteID, entry.UID)
+				remotePath = caldavutil.ObjectPath(cal.RemoteID, entry.UID)
 			}
 			err = client.PutEventRaw(ctx, remotePath, entry.ICalData)
 			if err == nil && entry.RemoteID == "" {

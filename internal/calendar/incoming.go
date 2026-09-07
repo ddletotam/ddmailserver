@@ -1,8 +1,10 @@
 package calendar
 
 import (
+	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -297,7 +299,15 @@ func (h *IncomingHandler) dispatchInvite(info *InviteInfo, userID, accountID int
 		// COUNTER (= proposing a different time) takes the same path: the
 		// updated time lands in the event, and the user is bumped back to
 		// NEEDS-ACTION so they re-confirm.
-		cal, err := h.FindUserCalendarForInvites(userID, accountID)
+		cal, err := h.FindCalendarForInvite(userID, accountID, invitedIdentities(info.Attendees, idSet))
+		if errors.Is(err, ErrNoInviteCalendar) {
+			// Leave the message where it is. Consuming it would delete the
+			// mail (see the MX and IMAP call sites) and the invite would exist
+			// nowhere at all.
+			log.Printf("[ics] no destination calendar for uid=%s (account=%d) — leaving the invite as mail: %v",
+				info.EventUID, accountID, err)
+			return false, nil
+		}
 		if err != nil {
 			return false, err
 		}
@@ -478,48 +488,170 @@ func isICSAttachment(att parser.ParsedAttachment) bool {
 	return strings.HasSuffix(filename, ".ics") || strings.HasSuffix(filename, ".ical")
 }
 
-// FindUserCalendarForInvites picks a destination calendar for an incoming
-// invite. Priority:
-//  1. Any *enabled* calendar from a CalDAV source bound to the recipient's
-//     mail account (the user said: "if many calendars per account, any
-//     active one is fine").
-//  2. Any enabled local calendar of the user.
-//  3. Any enabled calendar at all.
+// ErrNoInviteCalendar means no destination calendar could be chosen for an
+// invite without guessing. The caller must leave the message alone: an invite
+// that stays a mail in the inbox is recoverable, an invite filed into the
+// wrong account is not.
+var ErrNoInviteCalendar = errors.New("no calendar matches the invited identity")
+
+// FindCalendarForInvite picks the destination calendar for an incoming invite.
 //
-// Disabled calendars are excluded — they're the user's signal of "don't
-// touch this one." Returns an error if the user has no calendars.
-func (h *IncomingHandler) FindUserCalendarForInvites(userID int64, accountID int64) (*models.Calendar, error) {
-	allCals, err := h.db.GetEnabledCalendarsByUserID(userID)
+// `invited` holds the user's own addresses that appear in the ICS attendee
+// list — the addresses this invite is actually for. `accountID` is the mail
+// account that delivered it (0 for local MX delivery, which has none).
+//
+// Priority:
+//  1. A calendar whose source is bound to the delivering account.
+//  2. A calendar whose source authenticates as one of the invited addresses
+//     (CalDAV username) — the same person's calendar on the same provider.
+//  3. A local calendar.
+//  4. A calendar whose source declares one of the invited addresses as its
+//     identity, and only if exactly one source does.
+//
+// There is deliberately no "any enabled calendar" fallback any more. That
+// fallback took allCals[0] from a list ordered by created_at DESC, so the
+// destination for every unmatched invite was whatever calendar the user had
+// added most recently. A work invite addressed to one account was filed into
+// an unrelated account's calendar, reverse sync then pushed it at that
+// account's server, and the server refused it with a 403 — for days, one
+// warning email per day. Not choosing is better than choosing wrong.
+//
+// Disabled calendars are excluded — that is the user's "don't touch this one".
+// So are read-only ones: writing into a collection the remote will not accept
+// is the failure above with extra steps.
+func (h *IncomingHandler) FindCalendarForInvite(userID, accountID int64, invited map[string]struct{}) (*models.Calendar, error) {
+	cals, err := h.db.GetEnabledCalendarsByUserID(userID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load calendars: %w", err)
 	}
-	if len(allCals) == 0 {
-		return nil, fmt.Errorf("no enabled calendars for user %d", userID)
-	}
-
 	sources, err := h.db.GetCalendarSourcesByUserID(userID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get calendar sources: %w", err)
 	}
+	return chooseInviteCalendar(cals, sources, accountID, invited)
+}
 
-	// Build source.ID → source for membership checks.
-	sourceByID := make(map[int64]*models.CalendarSource, len(sources))
-	for i := range sources {
-		sourceByID[sources[i].ID] = sources[i]
+// chooseInviteCalendar is the decision itself, separated from the loading so
+// the priority order can be tested without a database. `cals` must already be
+// the user's enabled calendars.
+func chooseInviteCalendar(
+	cals []*models.Calendar,
+	sources []*models.CalendarSource,
+	accountID int64,
+	invited map[string]struct{},
+) (*models.Calendar, error) {
+	// Group writable calendars by source, lowest id first within each source.
+	//
+	// The order matters and must not be "newest": a calendar list reordered by
+	// every new subscription silently moves where invites land. Lowest id is
+	// the oldest collection of that source, which for a CalDAV account is its
+	// primary calendar.
+	bySource := make(map[int64][]*models.Calendar, len(sources))
+	for _, c := range cals {
+		if !c.CanWrite {
+			continue
+		}
+		bySource[c.SourceID] = append(bySource[c.SourceID], c)
+	}
+	if len(bySource) == 0 {
+		return nil, ErrNoInviteCalendar
+	}
+	for id := range bySource {
+		sort.Slice(bySource[id], func(i, j int) bool { return bySource[id][i].ID < bySource[id][j].ID })
 	}
 
-	// Pass 1: calendars whose source is bound to the recipient's account.
-	for _, c := range allCals {
-		if src, ok := sourceByID[c.SourceID]; ok && src.AccountID != nil && *src.AccountID == accountID {
-			return c, nil
+	// Sources in a stable order too, so a tie resolves the same way twice.
+	sort.Slice(sources, func(i, j int) bool { return sources[i].ID < sources[j].ID })
+
+	firstCalendarOf := func(sourceID int64) *models.Calendar {
+		if list := bySource[sourceID]; len(list) > 0 {
+			return list[0]
+		}
+		return nil
+	}
+
+	// Pass 1: the source bound to the account that delivered the invite.
+	if accountID != 0 {
+		for _, src := range sources {
+			if src.AccountID == nil || *src.AccountID != accountID {
+				continue
+			}
+			if cal := firstCalendarOf(src.ID); cal != nil {
+				return cal, nil
+			}
 		}
 	}
-	// Pass 2: local calendars.
-	for _, c := range allCals {
-		if src, ok := sourceByID[c.SourceID]; ok && src.SourceType == "local" {
-			return c, nil
+
+	// Pass 2: the source that logs in as one of the invited addresses.
+	for _, src := range sources {
+		if !isInvited(src.CalDAVUsername, invited) {
+			continue
+		}
+		if cal := firstCalendarOf(src.ID); cal != nil {
+			return cal, nil
 		}
 	}
-	// Pass 3: anything enabled.
-	return allCals[0], nil
+
+	// Pass 3: a local calendar. Nothing is pushed anywhere from here, so a
+	// wrong guess costs a stray local event rather than a write into somebody
+	// else's account.
+	for _, src := range sources {
+		if src.SourceType != "local" {
+			continue
+		}
+		if cal := firstCalendarOf(src.ID); cal != nil {
+			return cal, nil
+		}
+	}
+
+	// Pass 4: the declared identity of the source — but only when it singles
+	// one out. identity_email defaults to the user's default sending identity,
+	// so several sources routinely share it, and "several" is precisely the
+	// case this function must not resolve by picking one.
+	var byIdentity []*models.Calendar
+	for _, src := range sources {
+		if !isInvited(src.IdentityEmail, invited) {
+			continue
+		}
+		if cal := firstCalendarOf(src.ID); cal != nil {
+			byIdentity = append(byIdentity, cal)
+		}
+	}
+	switch len(byIdentity) {
+	case 0:
+		return nil, ErrNoInviteCalendar
+	case 1:
+		return byIdentity[0], nil
+	default:
+		return nil, fmt.Errorf("%w: %d sources claim it", ErrNoInviteCalendar, len(byIdentity))
+	}
+}
+
+// isInvited reports whether an address is one of the addresses this invite was
+// addressed to. Comparison is case-insensitive: mail addresses arrive in
+// whatever case the sender's client felt like using.
+func isInvited(addr string, invited map[string]struct{}) bool {
+	addr = strings.ToLower(strings.TrimSpace(addr))
+	if addr == "" {
+		return false
+	}
+	_, ok := invited[addr]
+	return ok
+}
+
+// invitedIdentities returns the user's own addresses that this invite names as
+// attendees — the intersection of the identities the delivering path knows
+// about and the ICS attendee list.
+func invitedIdentities(attendees []models.CalendarAttendee, idSet map[string]struct{}) map[string]struct{} {
+	out := make(map[string]struct{}, len(idSet))
+	for _, a := range attendees {
+		email := strings.ToLower(strings.TrimSpace(a.Email))
+		if email == "" {
+			continue
+		}
+		if _, ok := idSet[email]; ok {
+			out[email] = struct{}{}
+		}
+	}
+	return out
 }
