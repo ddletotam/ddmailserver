@@ -9,6 +9,8 @@
 
 slint::include_modules!();
 
+#[cfg(all(unix, not(target_os = "macos")))]
+mod keylayout;
 mod calendar_settings;
 mod engine;
 mod merges;
@@ -5342,9 +5344,12 @@ fn shortcut_key(text: &str) -> Option<u8> {
     virtual_key(utf16[0]).or_else(|| cyrillic_key(ch))
 }
 
-/// Last resort where the OS cannot be asked (X11/Wayland report the layout's
-/// own character for some Ctrl combinations): the ЙЦУКЕН positions of the keys
-/// the app binds. Windows never reaches this — `VkKeyScanExW` answers first.
+/// Last resort for the one case where nothing can be asked: a Wayland-only
+/// session, where the keymap belongs to the compositor and the client is not
+/// told which key produced the character. Everywhere else this is dead code —
+/// Windows answers with `VkKeyScanExW`, X11 with the keyboard mapping (see
+/// `keylayout`). It is kept, and deliberately not extended: a table of letters
+/// per language is never finished, and the two real answers above are.
 fn cyrillic_key(ch: char) -> Option<u8> {
     let lower = ch.to_lowercase().next().unwrap_or(ch);
     Some(match lower {
@@ -5381,14 +5386,26 @@ fn virtual_key(ch: u16) -> Option<u8> {
     Some((scan & 0xFF) as u8)
 }
 
-/// Elsewhere: the latin letter, which is what X11 and Wayland report for a
-/// Ctrl combination on every layout worth the name.
+/// Elsewhere: the latin letter if the layout produced one, otherwise ask the
+/// X server which physical key it was (`keylayout`).
+///
+/// The latin case is answered without touching X — a latin-only session never
+/// opens a connection, and the common keystroke costs nothing.
 #[cfg(not(windows))]
 fn virtual_key(ch: u16) -> Option<u8> {
-    char::from_u32(ch as u32)
-        .map(|c| c.to_ascii_uppercase())
-        .filter(|c| c.is_ascii_uppercase())
-        .map(|c| c as u8)
+    let ch = char::from_u32(ch as u32)?;
+    if ch.is_ascii_alphabetic() {
+        return Some(ch.to_ascii_uppercase() as u8);
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        return keylayout::latin_key(ch);
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        let _ = ch;
+        None
+    }
 }
 
 fn main() {

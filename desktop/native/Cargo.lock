@@ -1415,6 +1415,8 @@ dependencies = [
  "windows 0.58.0",
  "winresource",
  "x11",
+ "x11rb",
+ "xkeysym",
 ]
 
 [[package]]
