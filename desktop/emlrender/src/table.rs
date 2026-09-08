@@ -621,7 +621,7 @@ impl Ctx<'_> {
             }
             match t {
                 "br" => {
-                    self.push_raw(&mut inline, "\n", &cs, None);
+                    self.push_break(&mut inline, &cs, None);
                     continue;
                 }
                 "hr" => continue,

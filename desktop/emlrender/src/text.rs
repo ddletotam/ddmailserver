@@ -37,6 +37,10 @@ pub struct Span {
     pub object: Option<usize>,
     /// Index into the render's href table, when this text sits inside an `<a>`.
     pub link: Option<usize>,
+    /// This span is an explicit `<br>`, not whitespace that happened to be in
+    /// the source. The difference decides whether a paragraph containing
+    /// nothing else is a blank line or nothing at all — see `flush_inline`.
+    pub hard_break: bool,
 }
 
 impl Span {
@@ -55,6 +59,7 @@ impl Span {
             letter_spacing: s.letter_spacing,
             object: None,
             link,
+            hard_break: false,
         }
     }
 }

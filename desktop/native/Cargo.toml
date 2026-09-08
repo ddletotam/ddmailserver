@@ -26,6 +26,8 @@ winresource = "0.1"
 # raw-window-handle-06 exposes the OS window handle (HasWindowHandle), which
 # we hand to rfd's set_parent so the file dialog opens in front + modal.
 slint = { version = "1.13", features = ["raw-window-handle-06"] }
+# Inline images of an optimistic-send stub travel as data: URIs (stub_html).
+base64 = "0.22"
 
 # The one and only body-render path on both platforms — there is no browser
 # engine in this build and no flag that brings one back.

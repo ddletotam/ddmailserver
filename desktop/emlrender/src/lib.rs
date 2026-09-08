@@ -258,6 +258,56 @@ mod tests {
         }
     }
 
+    /// Blank lines the author asked for are lines.
+    ///
+    /// `<div><br></div>` is how every composer writes an empty line, ours
+    /// included. The whitespace guard in `flush_inline` used to eat them, so a
+    /// reply with four deliberate line breaks rendered exactly like one with
+    /// none — the two paragraphs sat on adjacent lines either way.
+    #[test]
+    fn blank_paragraphs_take_a_line_each() {
+        let none = render("<div>до</div><div>после</div>", &opts(400));
+        let one = render("<div>до</div><div><br></div><div>после</div>", &opts(400));
+        let four = render(
+            "<div>до</div><div><br></div><div><br></div><div><br></div><div>после</div>",
+            &opts(400),
+        );
+
+        let line = (one.height_px - none.height_px) as f32;
+        assert!(line > 8.0, "one blank div added {line}px, expected a line");
+        // Each further blank div adds exactly one more line, so four breaks
+        // are four breaks.
+        let grew = (four.height_px - none.height_px) as f32;
+        assert!(
+            (grew - 3.0 * line).abs() <= 1.0,
+            "three blank divs added {grew}px, expected {}",
+            3.0 * line
+        );
+
+        // And the text really is that far apart, not merely padded.
+        let y_of = |r: &Rendered, needle: &str| {
+            r.runs.iter().find(|t| t.text.contains(needle)).map(|t| t.y)
+        };
+        let (a, b) = (y_of(&four, "до"), y_of(&four, "после"));
+        let (Some(a), Some(b)) = (a, b) else {
+            panic!("both paragraphs must be rendered");
+        };
+        assert!(b - a > 3.0 * line, "paragraphs only {}px apart", b - a);
+    }
+
+    /// The guard those blank lines slipped past still holds: whitespace that
+    /// is merely how the source was formatted renders as nothing. Mail is full
+    /// of it, and a blank line per indented tag would double every message.
+    #[test]
+    fn source_whitespace_is_still_not_a_line() {
+        let tight = render("<div>до</div><div>после</div>", &opts(400));
+        let pretty = render(
+            "<div>до</div>\n    <div>\n    </div>\n    <div>после</div>",
+            &opts(400),
+        );
+        assert_eq!(tight.height_px, pretty.height_px);
+    }
+
     /// The rule the whole crate exists for: nothing is ever wider than asked.
     #[test]
     fn unbreakable_text_does_not_widen_the_bitmap() {

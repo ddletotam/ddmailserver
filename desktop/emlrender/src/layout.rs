@@ -424,7 +424,7 @@ impl Ctx<'_> {
 
             match t {
                 "br" => {
-                    self.push_raw(&mut inline, "\n", &cs, clink);
+                    self.push_break(&mut inline, &cs, clink);
                     continue;
                 }
                 "img" => {
@@ -521,7 +521,7 @@ impl Ctx<'_> {
                 continue;
             }
             if t == "br" {
-                self.push_raw(out, "\n", &cs, link);
+                self.push_break(out, &cs, link);
                 continue;
             }
             let clink = match t {
@@ -651,6 +651,20 @@ impl Ctx<'_> {
         out.push(Span::from_style(s.to_string(), style, link));
     }
 
+    /// An explicit `<br>`. Same line break as `push_raw("\n")`, but marked as
+    /// content the author asked for, which keeps a paragraph made of nothing
+    /// else from being discarded as whitespace.
+    pub(crate) fn push_break(
+        &mut self,
+        out: &mut Vec<Span>,
+        style: &Style,
+        link: Option<usize>,
+    ) {
+        let mut span = Span::from_style("\n".to_string(), style, link);
+        span.hard_break = true;
+        out.push(span);
+    }
+
     /// End the current line, unless the paragraph is empty or already broken.
     fn break_line(&mut self, out: &mut Vec<Span>, style: &Style, link: Option<usize>) {
         let already = out
@@ -678,6 +692,20 @@ impl Ctx<'_> {
         // no-break space is whitespace, so `trim` alone would drop the icon.
         if taken.iter().all(|s| s.object.is_none() && s.text.trim().is_empty()) {
             self.objects.clear();
+            // …and a paragraph of nothing but an explicit `<br>` is a blank
+            // line. `<div><br></div>` is how every composer — ours included —
+            // writes one, and dropping it made four deliberate line breaks
+            // render as none at all: "до" and "после" ended up on adjacent
+            // lines whether the author left zero blank lines between them or
+            // four. Source whitespace between tags stays discarded, which is
+            // what this guard was for.
+            if taken.iter().any(|s| s.hard_break) {
+                return taken
+                    .iter()
+                    .map(|s| s.line_height)
+                    .fold(0.0_f32, f32::max)
+                    .max(style.line_px());
+            }
             return 0.0;
         }
         let base_size = style.font_size;

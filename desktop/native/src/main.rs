@@ -42,7 +42,9 @@ use std::time::{Duration, Instant};
 use slint::{Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
 use ddmail_core::cache::Cache;
-use ddmail_core::types::{Contact, Conversation, MessageBody, MessageEnvelope, MessageRef};
+use ddmail_core::types::{
+    Attachment, Contact, Conversation, MessageBody, MessageEnvelope, MessageRef,
+};
 
 const NAMES: [&str; 25] = [
     "Анна Соколова", "Команда AppSec", "Дмитрий П.", "Поддержка letotam",
@@ -3039,11 +3041,69 @@ fn norm_send_text(s: &str) -> String {
     s.replace('\r', "").trim().to_string()
 }
 
+/// The composer's HTML with its `cid:` images inlined as `data:` URIs.
+///
+/// A real message resolves `cid:` against the parts the server stored
+/// (`engine::resolve_inline_parts`). A stub has no message on the server yet,
+/// so its images have to travel inside the HTML — otherwise the preview shows
+/// an empty box where the screenshot the user just pasted should be.
+fn stub_html(html: &str, images: &[richtext::InlineImage]) -> String {
+    use base64::Engine as _;
+    let mut out = html.to_string();
+    for img in images {
+        let data = format!(
+            "data:{};base64,{}",
+            img.mime,
+            base64::engine::general_purpose::STANDARD.encode(img.bytes.as_ref())
+        );
+        out = out.replace(&format!("cid:{}", img.cid), &data);
+    }
+    out
+}
+
+/// Attachment chips for the stub, described from the staged files themselves.
+///
+/// Only name and size reach the bubble (`attachment_chips`), and both are on
+/// disk; mime is left empty because nothing reads it here. A file that cannot
+/// be stat'd still gets a chip — its presence is the point, and a zero size
+/// beats a chip that appears only after the server echo.
+fn stub_attachments(paths: &[String]) -> Vec<Attachment> {
+    paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let p = std::path::Path::new(path);
+            Attachment {
+                filename: p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone()),
+                mime_type: String::new(),
+                size: std::fs::metadata(p).map(|m| m.len() as usize).unwrap_or(0),
+                index,
+            }
+        })
+        .collect()
+}
+
 /// Optimistic send: append an outgoing stub bubble to the open pane the
 /// moment «Отправить» is clicked, so the message is visible before the
 /// server confirms. The stub is reconciled in the Messages handler and
 /// rolled back in SendFailed.
-fn append_send_stub(sh: &Shared, text: &str, from: &str, conv_id: &str) {
+///
+/// It carries the same HTML and the same attachment list as the message on
+/// its way out, because the stub is on screen for as long as a round trip
+/// takes and the swap should not be visible. Sending it as bare text made
+/// every reply flash: formatting, inline images and attachment chips all
+/// appeared a second later, when the real message arrived from the server.
+fn append_send_stub(
+    sh: &Shared,
+    text: &str,
+    html: Option<String>,
+    attachments: Vec<Attachment>,
+    from: &str,
+    conv_id: &str,
+) {
     let uid = sh.pending_send_seq.get() + 1;
     sh.pending_send_seq.set(uid);
     let body = MessageBody {
@@ -3058,9 +3118,9 @@ fn append_send_stub(sh: &Shared, text: &str, from: &str, conv_id: &str) {
         cc: Vec::new(),
         date: String::new(),
         date_ts: chrono::Local::now().timestamp(),
-        html: None,
+        html,
         text: Some(text.to_string()),
-        attachments: Vec::new(),
+        attachments,
         is_outgoing: true,
         message_id: String::new(),
         in_reply_to: String::new(),
@@ -7121,6 +7181,8 @@ fn main() {
                 append_send_stub(
                     &sh_send,
                     &text,
+                    Some(stub_html(&rich_html, &rich_images)),
+                    stub_attachments(&attachments),
                     &from_identity.clone().unwrap_or_else(|| sh_send.key.clone()),
                     "",
                 );
@@ -7208,6 +7270,8 @@ fn main() {
                 append_send_stub(
                     &sh_send,
                     &text,
+                    Some(stub_html(&rich_html, &rich_images)),
+                    stub_attachments(&attachments),
                     &from_identity.clone().unwrap_or_else(|| sh_send.key.clone()),
                     &conv_id,
                 );
@@ -7273,6 +7337,9 @@ fn main() {
         drop(convs);
         if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
             println!("sending reply to {to:?}");
+            // Described before the list is handed to the engine — the stub
+            // shows the same chips as the message going out.
+            let stub_atts = stub_attachments(&attachments);
             let _ = etx.send(engine::EngineCmd::Send {
                 to, cc, subject, body: text.clone(),
                 html: rich_html.clone(), inline: inline_atts.clone(),
@@ -7286,6 +7353,8 @@ fn main() {
             append_send_stub(
                 &sh_send,
                 &text,
+                Some(stub_html(&rich_html, &rich_images)),
+                stub_atts,
                 &from_identity.clone().unwrap_or_else(|| sh_send.key.clone()),
                 &conv_id,
             );
