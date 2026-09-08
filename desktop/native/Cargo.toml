@@ -116,3 +116,10 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",
 ] }
+
+# Раскладко-независимые шорткаты на Linux: спрашиваем у X, какая физическая
+# клавиша дала этот символ (см. src/keylayout.rs). Оба крейта и так есть в
+# дереве — их тянет winit, — так что сборке это ничего не стоит.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = "0.13"
+xkeysym = "0.2"
