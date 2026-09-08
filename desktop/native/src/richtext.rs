@@ -1210,6 +1210,30 @@ mod tests {
         assert_eq!(ed.plain_text(), "до\n\nпосле");
     }
 
+    /// As many blank lines as the author asked for, in both serialisations.
+    ///
+    /// The complaint was that four breaks arrived as one. They leave here
+    /// intact — the collapsing was in the renderer (`emlrender`, empty
+    /// paragraphs took no height) — and this pins the half that was already
+    /// right so a later change to block handling cannot quietly break it.
+    #[test]
+    fn every_break_survives_serialisation() {
+        let mut ed = Editor::default();
+        ed.insert_str("до");
+        for _ in 0..4 {
+            ed.split_block();
+        }
+        ed.insert_str("после");
+
+        assert_eq!(ed.plain_text(), "до\n\n\n\nпосле");
+        // Five paragraphs: two with text, three empty between them.
+        assert_eq!(ed.html().matches("<div><br></div>").count(), 3);
+        assert_eq!(
+            ed.html(),
+            "<div>до</div><div><br></div><div><br></div><div><br></div><div>после</div>"
+        );
+    }
+
     #[test]
     fn backspace_removes_image() {
         let mut ed = Editor::new();

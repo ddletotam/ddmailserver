@@ -1392,6 +1392,7 @@ name = "ddmail-native"
 version = "0.1.10"
 dependencies = [
  "arboard",
+ "base64 0.22.1",
  "chrono",
  "cosmic-text",
  "ddmail-core",
