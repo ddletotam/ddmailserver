@@ -1,4 +1,4 @@
-import { ListView, LineEdit, ComboBox, CheckBox, Button, SpinBox, ScrollView, TextEdit } from "std-widgets.slint";
+import { ListView, LineEdit, ComboBox, CheckBox, Button, SpinBox, ScrollView, TextEdit, Palette } from "std-widgets.slint";
 
 // Live-dropdown rows. We keep contacts and messages as separate models
 // so the Slint side can render them in their own sections — see
@@ -745,6 +745,16 @@ component DateTimeField inherits VerticalLayout {
 }
 
 export component MainWindow inherits Window {
+    // Палитра std-widgets прибита к светлой, потому что вся вёрстка здесь
+    // светлая жёстко: белые карточки, #e9eef5 под ними, тёмный текст. Сами
+    // виджеты палитру выбирают по системе, и на тёмной схеме их передний план
+    // становится белым — на белой карточке это значит «ничего не видно».
+    // Наблюдалось так: в диалоге «Адрес отправителя не совпадает» пустая рамка
+    // вместо ComboBox, пустая коробка вместо кнопки «Отмена» и совсем
+    // невидимый CheckBox, при том что соседние наши `Text` рисовались. Свои
+    // элементы ничего не наследуют, поэтому лечится одной строкой на окно.
+    // Воспроизводится на голом Xvfb со slint 1.16.1 — это не тема KDE.
+    init => { Palette.color-scheme = ColorScheme.light; }
     title: "ddmail";
     preferred-width: 1100px;
     preferred-height: 760px;
@@ -5616,6 +5626,16 @@ export component MainWindow inherits Window {
 // is pure presentation. The whole card is a body-click target EXCEPT the X and
 // the action button, which sit above it in z-order and swallow their clicks.
 export component ToastWindow inherits Window {
+    // Палитра std-widgets прибита к светлой, потому что вся вёрстка здесь
+    // светлая жёстко: белые карточки, #e9eef5 под ними, тёмный текст. Сами
+    // виджеты палитру выбирают по системе, и на тёмной схеме их передний план
+    // становится белым — на белой карточке это значит «ничего не видно».
+    // Наблюдалось так: в диалоге «Адрес отправителя не совпадает» пустая рамка
+    // вместо ComboBox, пустая коробка вместо кнопки «Отмена» и совсем
+    // невидимый CheckBox, при том что соседние наши `Text` рисовались. Свои
+    // элементы ничего не наследуют, поэтому лечится одной строкой на окно.
+    // Воспроизводится на голом Xvfb со slint 1.16.1 — это не тема KDE.
+    init => { Palette.color-scheme = ColorScheme.light; }
     no-frame: true;
     always-on-top: true;
     background: transparent;
@@ -5752,6 +5772,16 @@ export component ToastWindow inherits Window {
 // configured. Rust does the actual HTTP round-trip (submit → busy → either
 // error text or the window is hidden and startup continues).
 export component LoginWindow inherits Window {
+    // Палитра std-widgets прибита к светлой, потому что вся вёрстка здесь
+    // светлая жёстко: белые карточки, #e9eef5 под ними, тёмный текст. Сами
+    // виджеты палитру выбирают по системе, и на тёмной схеме их передний план
+    // становится белым — на белой карточке это значит «ничего не видно».
+    // Наблюдалось так: в диалоге «Адрес отправителя не совпадает» пустая рамка
+    // вместо ComboBox, пустая коробка вместо кнопки «Отмена» и совсем
+    // невидимый CheckBox, при том что соседние наши `Text` рисовались. Свои
+    // элементы ничего не наследуют, поэтому лечится одной строкой на окно.
+    // Воспроизводится на голом Xvfb со slint 1.16.1 — это не тема KDE.
+    init => { Palette.color-scheme = ColorScheme.light; }
     title: "ddmail — вход";
     width: 440px;
     height: 700px;
