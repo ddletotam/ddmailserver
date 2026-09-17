@@ -1143,6 +1143,21 @@ fn enter_compose_mode(sh: &Shared, ui: &MainWindow, email: &str) {
 }
 
 /// Mirror the staged attachment basenames into the composer's chip model.
+/// Активность кнопки «Отправить»: есть что отправлять, если непуст редактор
+/// ИЛИ приложен файл.
+///
+/// Гейт смотрел только редактор, а письмо из одного вложения без текста —
+/// валидное. Кнопка на него не реагировала совсем: `send()` в Slint вызывается
+/// под `if (root.rt-can-send)`, так что обработчик отправки даже не начинался и
+/// в логе не оставалось ничего. Пересчитывать обязательно в двух местах — при
+/// правке текста и при смене набора вложений, иначе прикрепление файла не
+/// оживит кнопку до следующего нажатия клавиши.
+fn refresh_can_send(ui: &MainWindow, sh: &Shared) {
+    let has_body = !sh.rich.borrow().is_empty();
+    let has_attachments = !sh.compose_attachments.borrow().is_empty();
+    ui.set_rt_can_send(has_body || has_attachments);
+}
+
 fn refresh_attachment_chips(ui: &MainWindow, sh: &Shared) {
     let chips: Vec<AttachChip> = sh
         .compose_attachments
@@ -1157,6 +1172,9 @@ fn refresh_attachment_chips(ui: &MainWindow, sh: &Shared) {
         })
         .collect();
     ui.set_composer_attachments(slint::ModelRc::new(slint::VecModel::from(chips)));
+    // Набор вложений изменился — вместе с ним и ответ на вопрос «есть что
+    // отправлять?».
+    refresh_can_send(ui, sh);
 }
 
 fn message_hits(envs: &[MessageEnvelope]) -> Vec<MessageHit> {
@@ -2681,9 +2699,11 @@ fn rich_refresh(ui: &MainWindow, sh: &Shared) {
     ui.set_rt_caret_y(out.caret_y);
     ui.set_rt_caret_h(out.caret_h);
     ui.set_rt_has_selection(ed.has_selection());
-    ui.set_rt_can_send(!ed.is_empty());
     ui.set_rt_empty(ed.is_empty());
     ui.set_composer_text(ed.plain_text().into());
+    // Текст мог появиться или исчезнуть — пересчитать активность «Отправить».
+    // Вложения тоже участвуют, поэтому через общий помощник, а не по `ed`.
+    refresh_can_send(ui, sh);
 }
 
 /// Заменить содержимое композера plain-текстом (восстановление черновика
