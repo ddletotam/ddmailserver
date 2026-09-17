@@ -3728,9 +3728,16 @@ mod url_handler_tests {
     /// каталоге, и в системном.
     #[test]
     fn picks_url_handlers_and_dedupes() {
-        let base = std::env::temp_dir().join(format!("ddmail-urlh-{}", std::process::id()));
-        let user = base.join("user");
-        let sys = base.join("sys");
+        // Каталог убирает `TempDir` в своём `Drop`, а не строка в конце теста:
+        // уборка в конце не случается, когда падает assert выше, и каталог
+        // остаётся в `/tmp` ровно в том прогоне, после которого в него полезут
+        // разбираться.
+        let base = tempfile::Builder::new()
+            .prefix("ddmail-urlh-")
+            .tempdir()
+            .expect("tempdir");
+        let user = base.path().join("user");
+        let sys = base.path().join("sys");
         std::fs::create_dir_all(&user).unwrap();
         std::fs::create_dir_all(&sys).unwrap();
 
@@ -3760,8 +3767,6 @@ mod url_handler_tests {
         // Пользовательский каталог первым: у Chrome должен остаться его путь.
         let chrome = apps.iter().find(|(n, _)| n == "Chrome").unwrap();
         assert!(chrome.1.starts_with(&user), "пользовательский каталог приоритетнее");
-
-        std::fs::remove_dir_all(&base).ok();
     }
 }
 
