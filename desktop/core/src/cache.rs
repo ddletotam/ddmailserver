@@ -424,6 +424,15 @@ impl Cache {
     /// Which of `refs` already have a cached body. Used by the engine's
     /// missing-only fetch: bodies are immutable, so a cached (folder, uid)
     /// never needs refetching.
+    ///
+    /// Проверка идёт ровно по первичному ключу (folder, uid, account_key),
+    /// поэтому её не жалко звать на весь список бесед: фоновая догрузка
+    /// (`EngineCmd::PrefetchBodies`) так и выясняет, чего в кэше не хватает,
+    /// не вытаскивая при этом html и текст всего ящика.
+    ///
+    /// Пустая строка (`body_is_blank`) здесь считается присутствующей. Лечит
+    /// такие путь открытия диалога (§4а контракта); фон их не трогает, иначе
+    /// по-настоящему пустое письмо перекачивалось бы на каждом цикле синка.
     pub fn cached_body_refs(&self, account_key: &str, refs: &[MessageRef]) -> Result<Vec<MessageRef>, String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         let mut stmt = conn.prepare(

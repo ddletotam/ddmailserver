@@ -376,6 +376,13 @@ pub enum EngineCmd {
     /// back in `EngineResult::Messages` so the UI can drop answers that
     /// arrive after the user already switched to another conversation.
     FetchMessages { messages: Vec<MessageRef>, generation: u64, account_key: String },
+    /// Фоновая догрузка тел: те же запросы, что у `FetchMessages`, но результат
+    /// только ложится в кэш — в UI не уходит ничего.
+    ///
+    /// Команду шлёт себе сам движок (см. `refill_body_backlog`), из UI её не
+    /// отправляют: экран показывает то, что уже в кэше, а префетч существует
+    /// затем, чтобы к моменту клика там лежало всё.
+    PrefetchBodies { messages: Vec<MessageRef>, account_key: String },
     StartWatching,
     FetchAvatar { email: String },
     SetFlags { messages: Vec<MessageRef>, flags: String, add: bool, account_key: String },
@@ -697,6 +704,106 @@ struct AccountConn {
 /// Pick the account an addressed command targets. Falls back to the first
 /// account when the key is empty/unknown (single-account, or a command issued
 /// without a conversation context). `conns` is guaranteed non-empty.
+/// Сколько тел уходит в одном фоновом запросе.
+///
+/// Компромисс между двумя провайдерами. Нативному всё равно (один POST на
+/// пачку любого размера), а IMAP на каждый вызов поднимает сессию заново —
+/// там чем пачка больше, тем меньше логинов. Против крупной пачки играет
+/// латентность клика: движок однопоточный, и нажатие на беседу ждёт, пока
+/// долетит запрос, который уже в воздухе.
+const PREFETCH_CHUNK: usize = 16;
+
+/// Пересобрать очередь фоновой догрузки тел по свежему списку бесед.
+///
+/// Очередь именно ПЕРЕСОБИРАЕТСЯ, а не дополняется: она считается по кэшу,
+/// поэтому всё уже скачанное (в том числе открытое пользователем руками, пока
+/// очередь ждала) отваливается само, и повторная постановка одного и того же
+/// невозможна. Порядок — от свежих бесед к старым: список приходит
+/// отсортированным по `last_date_ts`, а новое письмо нужнее старого.
+fn refill_body_backlog(
+    cache: &Cache,
+    convs: &[Conversation],
+    backlog: &mut std::collections::VecDeque<(String, Vec<MessageRef>)>,
+) {
+    backlog.clear();
+    // Проверка кэша — одна на аккаунт, а не на беседу: внутри это выборка по
+    // первичному ключу, но лок и prepare стоят денег, и платить их за каждую
+    // из двух сотен бесед незачем.
+    //
+    // Порциями по CACHE_PROBE_CHUNK, потому что лок кэша общий с UI-потоком:
+    // ящик на десять тысяч писем — это десять тысяч выборок под одним
+    // захватом, и клик по беседе (`load_message_bodies` прямо в
+    // `open_conversation`) всё это время ждал бы фоновую работу.
+    const CACHE_PROBE_CHUNK: usize = 500;
+    let mut cached: std::collections::HashMap<String, std::collections::HashSet<(String, u32)>> =
+        Default::default();
+    for c in convs {
+        if cached.contains_key(&c.account_key) {
+            continue;
+        }
+        let refs: Vec<MessageRef> = convs
+            .iter()
+            .filter(|o| o.account_key == c.account_key)
+            .flat_map(|o| o.messages.iter().cloned())
+            .collect();
+        let mut hit: std::collections::HashSet<(String, u32)> = Default::default();
+        for part in refs.chunks(CACHE_PROBE_CHUNK) {
+            hit.extend(
+                cache
+                    .cached_body_refs(&c.account_key, part)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|m| (m.folder, m.uid)),
+            );
+        }
+        cached.insert(c.account_key.clone(), hit);
+    }
+
+    // Пачки копятся на аккаунт, но обход идёт по общему списку — иначе
+    // вся история первого аккаунта встала бы перед сегодняшней почтой
+    // второго. Накопитель — вектор, а не map: недобранные пачки досылаются
+    // хвостом, и из map они уходили бы в очередь в случайном порядке.
+    let mut buf: Vec<(String, Vec<MessageRef>)> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, String, u32)> = Default::default();
+    let mut total = 0usize;
+    for c in convs {
+        let have = cached.get(&c.account_key);
+        for m in &c.messages {
+            if have.is_some_and(|h| h.contains(&(m.folder.clone(), m.uid))) {
+                continue;
+            }
+            // Одно письмо может числиться в двух беседах (склейка) — качать
+            // его дважды не за чем.
+            if !seen.insert((c.account_key.clone(), m.folder.clone(), m.uid)) {
+                continue;
+            }
+            total += 1;
+            let slot = match buf.iter_mut().find(|(k, _)| *k == c.account_key) {
+                Some(slot) => slot,
+                None => {
+                    buf.push((c.account_key.clone(), Vec::new()));
+                    buf.last_mut().expect("just pushed")
+                }
+            };
+            slot.1.push(m.clone());
+            if slot.1.len() >= PREFETCH_CHUNK {
+                backlog.push_back((c.account_key.clone(), std::mem::take(&mut slot.1)));
+            }
+        }
+    }
+    for (key, refs) in buf {
+        if !refs.is_empty() {
+            backlog.push_back((key, refs));
+        }
+    }
+    if total > 0 {
+        println!(
+            "engine: prefetch queue — {total} bodies missing in {} batches",
+            backlog.len()
+        );
+    }
+}
+
 fn route<'a>(conns: &'a [AccountConn], account_key: &str) -> &'a AccountConn {
     conns
         .iter()
@@ -741,6 +848,14 @@ pub fn spawn(
         // must not queue behind that backlog, so avatars are parked and
         // served only while the channel is empty.
         let mut avatar_backlog: std::collections::VecDeque<String> = Default::default();
+        // Тела писем, которых ещё нет в кэше, — пачками по аккаунту. Та же
+        // парковка, что у аватарок: качаем, пока никто ничего не просит, и
+        // уступаем дорогу первой же интерактивной команде. Наполняется после
+        // каждого синка бесед (`refill_body_backlog`), поэтому «новые письма
+        // во всех диалогах» оказываются на диске до того, как пользователь
+        // откроет диалог, а не после.
+        let mut body_backlog: std::collections::VecDeque<(String, Vec<MessageRef>)> =
+            Default::default();
         // Последний удачно полученный список календарей на аккаунт. Нужен
         // ровно затем, чтобы разовая ошибка запроса не оставила UI без
         // календарей (см. FetchCalendars).
@@ -766,8 +881,14 @@ pub fn spawn(
             let cmd = match next {
                 Some(c) => c,
                 None => {
+                    // Аватарки вперёд тел: их ждёт сайдбар, на который
+                    // пользователь смотрит прямо сейчас, и стоят они по
+                    // одному запросу штука. Тела нужны к моменту клика,
+                    // а не к этой секунде.
                     if let Some(email) = avatar_backlog.pop_front() {
                         EngineCmd::FetchAvatar { email }
+                    } else if let Some((account_key, messages)) = body_backlog.pop_front() {
+                        EngineCmd::PrefetchBodies { messages, account_key }
                     } else if disconnected {
                         break;
                     } else {
@@ -905,6 +1026,10 @@ pub fn spawn(
                         merged.extend(convs);
                     }
                     merged.sort_by(|a, b| b.last_date_ts.cmp(&a.last_date_ts));
+                    // Синк принёс список — значит, известно и чего не хватает
+                    // в кэше тел. Ставим недостающее в фон: к клику по беседе
+                    // всё уже должно лежать на диске.
+                    refill_body_backlog(&cache, &merged, &mut body_backlog);
                     on_result(EngineResult::Conversations { list: merged, partial: false });
                 }
                 EngineCmd::FetchMessages { messages, generation, account_key } => {
@@ -974,6 +1099,53 @@ pub fn spawn(
                             on_result(EngineResult::Messages { bodies, generation });
                         }
                         Err(e) => on_result(EngineResult::Error(e)),
+                    }
+                }
+                EngineCmd::PrefetchBodies { messages, account_key } => {
+                    let conn = route(&conns, &account_key);
+                    let provider = conn.provider.clone();
+                    let key = conn.key.clone();
+                    // Пачку собрали в прошлый синк — с тех пор пользователь мог
+                    // открыть эту беседу руками, и тела уже в кэше. Проверка
+                    // стоит шестнадцати выборок по первичному ключу, запрос —
+                    // сетевого раунд-трипа.
+                    let have: std::collections::HashSet<(String, u32)> = cache
+                        .cached_body_refs(&key, &messages)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|m| (m.folder, m.uid))
+                        .collect();
+                    let missing: Vec<MessageRef> = messages
+                        .into_iter()
+                        .filter(|m| !have.contains(&(m.folder.clone(), m.uid)))
+                        .collect();
+                    if missing.is_empty() {
+                        continue;
+                    }
+                    let our = resolve_our_addrs(&cache, &conn.cfg);
+                    match rt.block_on(provider.fetch_conversation_messages(&our, &missing)) {
+                        Ok(mut fetched) => {
+                            // Тот же cid:-ресолвинг, что и на пути открытия:
+                            // тело кэшируется навсегда, и сохранённое сырым
+                            // осталось бы с битыми inline-картинками.
+                            resolve_inline_parts(&rt, provider.as_ref(), &mut fetched);
+                            cache.save_message_bodies(&key, &fetched).ok();
+                            println!(
+                                "engine: prefetched {} bodies [{key}], {} batches left",
+                                fetched.len(),
+                                body_backlog.len()
+                            );
+                        }
+                        Err(e) => {
+                            // Молча в лог: пользователь ничего не просил, и
+                            // тост о фоновой работе он прочитает как поломку.
+                            // Очередь сбрасываем целиком — раз сеть отвалилась,
+                            // следующие пачки лягут в тот же таймаут и будут
+                            // держать движок, пока он нужен кликам. Синк
+                            // соберёт её заново.
+                            eprintln!("prefetch bodies [{key}]: {e}");
+                            body_backlog.clear();
+                        }
                     }
                 }
                 EngineCmd::FetchAvatar { email } => {
@@ -1394,4 +1566,158 @@ pub fn spawn(
         }
     });
     tx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Кэш в temp-каталоге, который убирает за собой — тот же приём, что у
+    /// тестов напоминалок (`reminders::tests::TempCache`): каталогом владеет
+    /// `tempfile::TempDir` и удаляет его в своём `Drop`, поля дропаются в
+    /// порядке объявления (сначала SQLite отпускает файлы, потом уходит
+    /// каталог), а `Deref` позволяет передавать `&cache` как `&Cache`.
+    struct TempCache {
+        cache: Cache,
+        _dir: tempfile::TempDir,
+    }
+
+    impl std::ops::Deref for TempCache {
+        type Target = Cache;
+        fn deref(&self) -> &Cache {
+            &self.cache
+        }
+    }
+
+    fn temp_cache() -> TempCache {
+        let dir = tempfile::Builder::new()
+            .prefix("ddmail_prefetch_test_")
+            .tempdir()
+            .expect("tempdir");
+        let cache = Cache::new(dir.path().to_path_buf()).expect("cache");
+        TempCache { cache, _dir: dir }
+    }
+
+    fn mref(folder: &str, uid: u32) -> MessageRef {
+        MessageRef {
+            folder: folder.into(),
+            uid,
+            message_id: format!("<{uid}@test>"),
+            seen: true,
+        }
+    }
+
+    fn conv(id: &str, account_key: &str, ts: i64, refs: Vec<MessageRef>) -> Conversation {
+        Conversation {
+            id: id.into(),
+            label: id.into(),
+            avatar_hash: String::new(),
+            received_by: "me@test".into(),
+            counterparts: Vec::new(),
+            is_group: false,
+            last_date: String::new(),
+            last_date_ts: ts,
+            last_subject: String::new(),
+            unread_count: 0,
+            total_count: refs.len() as u32,
+            messages: refs,
+            draft: None,
+            account_key: account_key.into(),
+            merged: false,
+        }
+    }
+
+    fn body(folder: &str, uid: u32) -> MessageBody {
+        MessageBody {
+            uid,
+            folder: folder.into(),
+            subject: "s".into(),
+            from: "a@test".into(),
+            from_addr: "a@test".into(),
+            to: Vec::new(),
+            cc: Vec::new(),
+            date: String::new(),
+            date_ts: 0,
+            html: None,
+            text: Some("text".into()),
+            attachments: Vec::new(),
+            is_outgoing: false,
+            message_id: format!("<{uid}@test>"),
+            in_reply_to: String::new(),
+            references: Vec::new(),
+            raw_headers: String::new(),
+        }
+    }
+
+    fn queued(backlog: &std::collections::VecDeque<(String, Vec<MessageRef>)>) -> Vec<(String, u32)> {
+        backlog
+            .iter()
+            .flat_map(|(k, refs)| refs.iter().map(move |m| (k.clone(), m.uid)))
+            .collect()
+    }
+
+    /// Уже закэшированное тело в очередь не попадает, дубль из склеенной
+    /// беседы — тоже, а порядок идёт от свежей беседы к старой.
+    #[test]
+    fn prefetch_queue_skips_cached_and_dedupes() {
+        let cache = temp_cache();
+        cache.save_message_bodies("acc", &[body("INBOX", 2)]).unwrap();
+
+        let convs = vec![
+            conv("new", "acc", 200, vec![mref("INBOX", 1), mref("INBOX", 2)]),
+            conv("old", "acc", 100, vec![mref("INBOX", 1), mref("INBOX", 3)]),
+        ];
+        let mut backlog = Default::default();
+        refill_body_backlog(&cache, &convs, &mut backlog);
+
+        assert_eq!(
+            queued(&backlog),
+            vec![("acc".to_string(), 1), ("acc".to_string(), 3)]
+        );
+    }
+
+    /// Пачки режутся по PREFETCH_CHUNK, и каждая адресована своему аккаунту.
+    #[test]
+    fn prefetch_queue_chunks_per_account() {
+        let cache = temp_cache();
+        let many: Vec<MessageRef> = (1..=PREFETCH_CHUNK as u32 + 3)
+            .map(|u| mref("INBOX", u))
+            .collect();
+        let convs = vec![
+            conv("a", "acc-a", 200, many),
+            conv("b", "acc-b", 100, vec![mref("INBOX", 1)]),
+        ];
+        let mut backlog = Default::default();
+        refill_body_backlog(&cache, &convs, &mut backlog);
+
+        let sizes: Vec<(String, usize)> = backlog
+            .iter()
+            .map(|(k, refs)| (k.clone(), refs.len()))
+            .collect();
+        assert_eq!(
+            sizes,
+            vec![
+                ("acc-a".to_string(), PREFETCH_CHUNK),
+                ("acc-a".to_string(), 3),
+                ("acc-b".to_string(), 1),
+            ]
+        );
+    }
+
+    /// Пересборка не копит: второй вызов по тем же беседам даёт ту же очередь,
+    /// а не удвоенную.
+    #[test]
+    fn prefetch_queue_is_rebuilt_not_appended() {
+        let cache = temp_cache();
+        let convs = vec![conv("a", "acc", 100, vec![mref("INBOX", 1)])];
+        let mut backlog = Default::default();
+        refill_body_backlog(&cache, &convs, &mut backlog);
+        refill_body_backlog(&cache, &convs, &mut backlog);
+        assert_eq!(queued(&backlog), vec![("acc".to_string(), 1)]);
+
+        // Тело доехало — очередь пустеет сама.
+        cache.save_message_bodies("acc", &[body("INBOX", 1)]).unwrap();
+        refill_body_backlog(&cache, &convs, &mut backlog);
+        assert!(backlog.is_empty());
+    }
 }
