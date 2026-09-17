@@ -15,14 +15,14 @@ import (
 // and data. Dates are decoded as strings — no payload key we read is a date,
 // and inventing a time type for a field nobody consults would be dead weight.
 type Value struct {
-	Kind   Kind
-	Str    string
-	Num    float64
-	Flag   bool // <true/> or <false/>
-	Data   []byte
-	Array  []*Value
-	Dict   map[string]*Value
-	keys   []string // insertion order, for stable iteration
+	Kind  Kind
+	Str   string
+	Num   float64
+	Flag  bool // <true/> or <false/>
+	Data  []byte
+	Array []*Value
+	Dict  map[string]*Value
+	keys  []string // insertion order, for stable iteration
 }
 
 // Kind enumerates the plist node types.
