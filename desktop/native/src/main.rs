@@ -280,7 +280,9 @@ fn target_conversation_id(ui: &MainWindow, sh: &Shared, chosen: &str) -> Option<
     let is_mine = |a: &String| identities.iter().any(|i| i.eq_ignore_ascii_case(a));
     let mine: Vec<String> = participants.iter().filter(|a| is_mine(a)).cloned().collect();
     let others: Vec<String> = participants.iter().filter(|a| !is_mine(a)).cloned().collect();
-    Some(ddmail_core::imap::conversation_id(&mine, &others))
+    // `chosen` — айдентика, с которой пишем: она же и владелец диалога, если
+    // нашего адреса в наборе не окажется.
+    Some(ddmail_core::imap::conversation_id(&mine, &others, chosen))
 }
 
 /// Перейти в диалог, которого ждали после отправки с другого адреса, — если он
@@ -6942,7 +6944,15 @@ fn main() {
         // не значит «нечего отправлять»: письмо из одной картинки — валидное.
         let (rich_html, rich_images) = {
             let ed = sh_send.rich.borrow();
-            if ed.is_empty() && text.trim().is_empty() {
+            // Вложения спрашиваем отдельно: `ed.is_empty()` знает только
+            // документ редактора — абзацы и inline-картинки, — а прикреплённые
+            // файлы лежат в `compose_attachments`. Без этой проверки письмо из
+            // одного вложения без единого слова не отправлялось, и кнопка при
+            // этом молчала: обработчик выходил здесь же, до всякой обратной
+            // связи.
+            let has_attachments = !sh_send.compose_attachments.borrow().is_empty();
+            if ed.is_empty() && text.trim().is_empty() && !has_attachments {
+                eprintln!("send: нечего отправлять — ни текста, ни картинок, ни вложений");
                 return;
             }
             (ed.html(), ed.images())
@@ -7079,7 +7089,13 @@ fn main() {
         // Branch 0: forward — explicit recipients from the «Кому» field;
         // the typed text is the covering note, the original's text goes
         // below it after a separator, attachments re-attach engine-side.
-        if let Some(orig) = sh_send.pending_forward.borrow().clone() {
+        // Клон берётся ОТДЕЛЬНЫМ стейтментом, а не в скрутинии `if let`:
+        // временное значение из скрутинии живёт до конца блока, поэтому `Ref`
+        // пережил бы `exit_reply_mode` в конце ветки, а тот пишет в эту же
+        // ячейку. Именно так клиент и умирал сразу после отправки —
+        // «RefCell already borrowed», main.rs:1063. То же и в двух ветках ниже.
+        let forwarded = sh_send.pending_forward.borrow().clone();
+        if let Some(orig) = forwarded {
             let to = to_override.clone();
             if to.is_empty() {
                 eprintln!("forward: адресат не указан — заполните «Кому»");
@@ -7149,7 +7165,8 @@ fn main() {
             return;
         }
         // Branch 1: transient compose target set via the search dropdown.
-        if let Some(target) = sh_send.pending_compose.borrow().clone() {
+        let compose_target = sh_send.pending_compose.borrow().clone();
+        if let Some(target) = compose_target {
             let subject = if !subject_override.is_empty() {
                 subject_override.clone()
             } else {
@@ -7192,7 +7209,8 @@ fn main() {
             return;
         }
         // Branch 2: explicit reply via quote ribbon.
-        if let Some(reply_body) = sh_send.pending_reply.borrow().clone() {
+        let quoted_reply = sh_send.pending_reply.borrow().clone();
+        if let Some(reply_body) = quoted_reply {
             // Reply-all in groups: the current convs entry tells us
             // group-ness; in 1:1 conversations the counterpart is the
             // sender anyway. The recipients are the source's from + to

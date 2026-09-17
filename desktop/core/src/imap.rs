@@ -443,14 +443,26 @@ pub fn conversation_participants(from: &str, to: &[String], cc: &[String]) -> Ve
 ///   одна моя + несколько    →  "me@a|group:bob,carol"
 ///   две моих + чужие        →  "me@a+me@b|bob"
 ///   только мои              →  "me@a+me@b|self"
-///   меня в наборе нет (bcc) →  "|bob"
+///   меня в наборе нет (bcc) →  "me@own|bob"  (см. `own` ниже)
 /// ```
+///
+/// `own` — айдентика, которой диалог принадлежит: она подставляется, когда
+/// нашего адреса в наборе не видно (доставка по bcc, срезанные заголовки,
+/// письмо, восстановленное из спама). Без неё такая переписка получала ключ
+/// `|bob`, а своё же отправленное письмо — `me@own|bob`, потому что в его
+/// `From` наш адрес ЕСТЬ: одна и та же переписка разъезжалась на два диалога,
+/// и отправленное не показывалось рядом с входящими. Замер на живом кэше:
+/// 73 диалога из 397 имели пустую левую часть.
 ///
 /// Обязан совпадать с серверной реализацией в
 /// `internal/web/handlers_desktop.go` — один и тот же ящик может приехать и
 /// оттуда, и по IMAP напрямую.
-pub fn conversation_id(mine: &[String], others: &[String]) -> String {
-    let mine_key = mine.join("+");
+pub fn conversation_id(mine: &[String], others: &[String], own: &str) -> String {
+    let mine_key = if mine.is_empty() && !own.is_empty() {
+        own.to_lowercase()
+    } else {
+        mine.join("+")
+    };
     if others.is_empty() {
         format!("{mine_key}|self")
     } else if others.len() > 1 {
@@ -694,8 +706,10 @@ where
         //   одна моя + несколько    →  "me@a|group:bob,carol" (как было)
         //   две моих + чужие        →  "me@a+me@b|bob"
         //   только мои              →  "me@a+me@b|self"
-        //   меня в наборе нет (bcc) →  "|bob"
-        let id = conversation_id(&mine, &others);
+        //   меня в наборе нет (bcc) →  "me@own|bob" — ключ берёт разрешённую
+        //                              айдентику (`my_id`), иначе отправленное
+        //                              уходит в отдельный диалог
+        let id = conversation_id(&mine, &others, &my_id);
         let label = if is_group {
             let subject = if first.subject.trim().is_empty() {
                 "(без темы)".to_string()
@@ -1444,30 +1458,46 @@ mod conversation_key_tests {
     fn id_matches_the_old_format_for_a_single_identity() {
         // Ради этого схема и подобрана так: закрепления и merges.json,
         // записанные до перехода, продолжают указывать на тот же диалог.
-        assert_eq!(conversation_id(&v(&["me@a.ru"]), &v(&["bob@x.ru"])), "me@a.ru|bob@x.ru");
+        assert_eq!(conversation_id(&v(&["me@a.ru"]), &v(&["bob@x.ru"]), "me@a.ru"), "me@a.ru|bob@x.ru");
         assert_eq!(
-            conversation_id(&v(&["me@a.ru"]), &v(&["bob@x.ru", "carol@x.ru"])),
+            conversation_id(&v(&["me@a.ru"]), &v(&["bob@x.ru", "carol@x.ru"]), "me@a.ru"),
             "me@a.ru|group:bob@x.ru,carol@x.ru"
         );
     }
 
     #[test]
     fn id_separates_conversations_that_differ_only_by_my_second_identity() {
-        let one = conversation_id(&v(&["me@a.ru"]), &v(&["bob@x.ru"]));
-        let two = conversation_id(&v(&["me@a.ru", "me@b.ru"]), &v(&["bob@x.ru"]));
+        let one = conversation_id(&v(&["me@a.ru"]), &v(&["bob@x.ru"]), "me@a.ru");
+        let two = conversation_id(&v(&["me@a.ru", "me@b.ru"]), &v(&["bob@x.ru"]), "me@a.ru");
         assert_ne!(one, two);
         assert_eq!(two, "me@a.ru+me@b.ru|bob@x.ru");
     }
 
     #[test]
     fn id_for_mail_between_my_own_identities() {
-        assert_eq!(conversation_id(&v(&["me@a.ru", "me@b.ru"]), &[]), "me@a.ru+me@b.ru|self");
+        assert_eq!(conversation_id(&v(&["me@a.ru", "me@b.ru"]), &[], "me@a.ru"), "me@a.ru+me@b.ru|self");
     }
 
     #[test]
     fn id_when_i_am_not_among_the_visible_addresses() {
-        // Доставка по bcc: меня в наборе нет, id всё равно остаётся функцией
-        // набора, а не того, какой ящик его принял.
-        assert_eq!(conversation_id(&[], &v(&["bob@x.ru"])), "|bob@x.ru");
+        // Доставка по bcc: меня в наборе нет, и ключ берёт айдентику, которой
+        // диалог принадлежит. Иначе входящие получали "|bob", а свой же ответ
+        // — "me@a.ru|bob", и переписка разъезжалась на два диалога.
+        assert_eq!(conversation_id(&[], &v(&["bob@x.ru"]), "me@a.ru"), "me@a.ru|bob@x.ru");
+    }
+
+    #[test]
+    fn bcc_incoming_and_my_reply_land_in_one_conversation() {
+        // Ровно тот случай с живого кэша: входящее, где нашего адреса в
+        // заголовках не видно, и наш ответ, где он есть во `From`.
+        let incoming = conversation_id(&[], &v(&["bob@x.ru"]), "me@a.ru");
+        let my_reply = conversation_id(&v(&["me@a.ru"]), &v(&["bob@x.ru"]), "me@a.ru");
+        assert_eq!(incoming, my_reply);
+    }
+
+    #[test]
+    fn id_keeps_the_empty_form_when_no_identity_is_known() {
+        // Фолбэка нет — остаётся старая форма, а не адрес-пустышка.
+        assert_eq!(conversation_id(&[], &v(&["bob@x.ru"]), ""), "|bob@x.ru");
     }
 }

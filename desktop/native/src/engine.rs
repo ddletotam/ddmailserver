@@ -23,6 +23,13 @@ use ddmail_core::types::{
     CHANGE_KIND_DELETE,
 };
 
+/// Версия схемы id диалогов (`imap::conversation_id`). Кэш помнит, под какой
+/// версией он собран; при несовпадении следующий синк идёт полной выдачей,
+/// которая заменяет набор целиком и вымывает ключи прошлой схемы. Поднимать
+/// при ЛЮБОЙ правке формата id — иначе переписка покажется дважды, старым
+/// ключом и новым.
+const CONV_ID_EPOCH: &str = "2";
+
 #[derive(Clone)]
 pub struct AccountConfig {
     pub host: String,
@@ -824,11 +831,19 @@ pub fn spawn(
                         let our = resolve_our_addrs(&cache, &conn.cfg);
                         let since_key = format!("conv_since:{}", conn.key);
                         let full_key = format!("conv_full_ts:{}", conn.key);
+                        let epoch_key = format!("conv_id_epoch:{}", conn.key);
                         let last_full: i64 = cache
                             .get_meta(&full_key)
                             .and_then(|v| v.parse().ok())
                             .unwrap_or(0);
-                        let since: i64 = if now_s - last_full > 24 * 3600 {
+                        // Схема id диалогов сменилась — прошлый кэш держит
+                        // ключи старой формы. Дельта их не убирает (она
+                        // сообщает только изменившиеся диалоги), так что без
+                        // разового полного синка переписка висела бы в
+                        // сайдбаре дважды: старым `|bob` и новым `me@own|bob`.
+                        let epoch_stale =
+                            cache.get_meta(&epoch_key).as_deref() != Some(CONV_ID_EPOCH);
+                        let since: i64 = if epoch_stale || now_s - last_full > 24 * 3600 {
                             0
                         } else {
                             cache.get_meta(&since_key).and_then(|v| v.parse().ok()).unwrap_or(0)
@@ -838,8 +853,12 @@ pub fn spawn(
                                 if partial && since > 0 {
                                     cache.upsert_conversations(&conn.key, &convs).ok();
                                 } else {
+                                    // Полная выдача заменяет набор целиком —
+                                    // ключи старой схемы уходят вместе с ней,
+                                    // и эпоху можно зафиксировать.
                                     cache.save_conversations(&conn.key, &convs).ok();
                                     cache.set_meta(&full_key, &now_s.to_string()).ok();
+                                    cache.set_meta(&epoch_key, CONV_ID_EPOCH).ok();
                                 }
                                 if server_now > 0 {
                                     cache.set_meta(&since_key, &server_now.to_string()).ok();
