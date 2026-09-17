@@ -1411,6 +1411,7 @@ dependencies = [
  "slint",
  "slint-build",
  "tauri-winrt-notification",
+ "tempfile",
  "tokio",
  "tray-icon",
  "windows 0.58.0",

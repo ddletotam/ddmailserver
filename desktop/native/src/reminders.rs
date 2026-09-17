@@ -276,16 +276,38 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn temp_cache() -> Cache {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static N: AtomicU32 = AtomicU32::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "ddmail_rem2_test_{}_{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        Cache::new(PathBuf::from(&dir)).expect("cache")
+    /// Кэш в temp-каталоге, который убирает за собой.
+    ///
+    /// Раньше каталог делался руками по pid и никем не удалялся: прогон
+    /// `cargo test` оставлял в `/tmp` по каталогу на каждый тест, и они
+    /// копились месяцами — на 2026-09-17 там лежало 65 штук по 100 КБ.
+    ///
+    /// Каталогом владеет `tempfile::TempDir` — удаляет его в своём `Drop`,
+    /// поэтому своего `Drop` здесь нет вообще. Поля дропаются в порядке
+    /// объявления: сначала `cache` (SQLite отпускает файлы), потом каталог.
+    /// При панике теста уборка тоже случается — `Drop` бежит на раскрутке.
+    ///
+    /// `Deref` оставляет тесты как были: `let cache = temp_cache();` и дальше
+    /// `&cache`, все 52 обращения идут по ссылке.
+    struct TempCache {
+        cache: Cache,
+        _dir: tempfile::TempDir,
+    }
+
+    impl std::ops::Deref for TempCache {
+        type Target = Cache;
+        fn deref(&self) -> &Cache {
+            &self.cache
+        }
+    }
+
+    fn temp_cache() -> TempCache {
+        let dir = tempfile::Builder::new()
+            .prefix("ddmail_rem2_test_")
+            .tempdir()
+            .expect("tempdir");
+        let cache = Cache::new(dir.path().to_path_buf()).expect("cache");
+        TempCache { cache, _dir: dir }
     }
 
     fn event(id: i64, summary: &str, dtstart: i64, leads: &[i32]) -> DesktopCalendarEvent {

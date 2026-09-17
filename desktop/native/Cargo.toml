@@ -15,6 +15,12 @@ path = "src/main.rs"
 lto = "thin"
 strip = "symbols"
 
+[dev-dependencies]
+# Temp-каталоги тестов, которые убираются сами (`Drop`), а не строкой в конце
+# теста: та не выполняется, когда падает assert выше. Крейт и так есть в
+# дереве, так что сборке это ничего не стоит.
+tempfile = "3"
+
 [build-dependencies]
 slint-build = "1.13"
 
