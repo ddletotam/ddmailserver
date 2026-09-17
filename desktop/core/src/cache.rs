@@ -257,8 +257,16 @@ impl Cache {
             let cps_json = serde_json::to_string(&conv.counterparts)
                 .map_err(|e| format!("serialize counterparts: {e}"))?;
 
+            // OR REPLACE, а не голый INSERT: два диалога с одинаковым id в
+            // одной выдаче — ошибка на той стороне, но платить за неё полным
+            // откатом транзакции нельзя. Так уже было: правка ключа заставила
+            // сервер отдать дубль, `INSERT` упал на PRIMARY KEY, ошибка ушла
+            // в `.ok()` у вызывающего, и кэш диалогов перестал обновляться
+            // молча — DELETE выше откатился вместе со всем остальным. Ссылки
+            // на письма идут через OR IGNORE, так что при дубле диалог
+            // соберёт письма обеих групп, а не потеряет их.
             tx.execute(
-                "INSERT INTO conversations (id, account_key, label, avatar_hash, received_by, counterpart_name, counterpart_addr, \
+                "INSERT OR REPLACE INTO conversations (id, account_key, label, avatar_hash, received_by, counterpart_name, counterpart_addr, \
                  counterparts_json, is_group, last_date, last_date_ts, last_subject, unread_count, total_count, updated_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
