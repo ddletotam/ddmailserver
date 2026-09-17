@@ -1232,6 +1232,41 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 		if len(participants) == 0 {
 			continue
 		}
+		// Нашего адреса в видимых участниках может не быть вовсе: доставка по
+		// bcc, срезанные заголовки, письмо, восстановленное из спама. Но
+		// участником переписки мы при этом остаёмся — это просто не написано
+		// в заголовках. Адрес, которым письмо принято, добавляем сами, иначе
+		// набор входящего ({bob}) не совпадает с набором нашего ответа
+		// ({me, bob}), и одна переписка разъезжается на два диалога: в одном
+		// входящие, в другом — своё же отправленное, и рядом с письмом его не
+		// видно. На живом кэше так разъехались 73 диалога из 397.
+		//
+		// Источник адреса — аккаунт письма, затем аккаунт его папки; та же
+		// цепочка, которой ниже разрешается айдентика для ответа (`myID`), и
+		// только адрес, который действительно наш.
+		ourHere := false
+		for _, a := range participants {
+			if isOurs(a) {
+				ourHere = true
+				break
+			}
+		}
+		if !ourHere {
+			own := ""
+			if e, ok := accountEmail[msg.AccountID]; ok && identities[e] {
+				own = e
+			}
+			if own == "" {
+				if accID, ok := folderAccount[msg.FolderID]; ok {
+					if e, ok := accountEmail[accID]; ok && identities[e] {
+						own = e
+					}
+				}
+			}
+			if own != "" {
+				add(own)
+			}
+		}
 		sort.Strings(participants)
 
 		key := strings.Join(participants, ",")

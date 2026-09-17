@@ -851,12 +851,19 @@ pub fn spawn(
                         match rt.block_on(conn.provider.fetch_conversations_delta(&our, limit, since)) {
                             Ok((convs, server_now, partial)) => {
                                 if partial && since > 0 {
-                                    cache.upsert_conversations(&conn.key, &convs).ok();
+                                    // Ошибку записи печатаем, а не глотаем:
+                                    // молчащий `.ok()` уже прятал то, что кэш
+                                    // диалогов перестал обновляться совсем.
+                                    if let Err(e) = cache.upsert_conversations(&conn.key, &convs) {
+                                        eprintln!("conversations upsert [{}]: {e}", conn.key);
+                                    }
                                 } else {
                                     // Полная выдача заменяет набор целиком —
                                     // ключи старой схемы уходят вместе с ней,
                                     // и эпоху можно зафиксировать.
-                                    cache.save_conversations(&conn.key, &convs).ok();
+                                    if let Err(e) = cache.save_conversations(&conn.key, &convs) {
+                                        eprintln!("conversations save [{}]: {e}", conn.key);
+                                    }
                                     cache.set_meta(&full_key, &now_s.to_string()).ok();
                                     cache.set_meta(&epoch_key, CONV_ID_EPOCH).ok();
                                 }
