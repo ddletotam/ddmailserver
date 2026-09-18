@@ -713,6 +713,25 @@ struct AccountConn {
 /// долетит запрос, который уже в воздухе.
 const PREFETCH_CHUNK: usize = 16;
 
+/// Сколько фоновая догрузка может не получать хода, прежде чем её пропустят
+/// вперёд команд.
+///
+/// Очередь тел обслуживается только в пустом командном канале, а пустеет он
+/// неравномерно: сразу после запуска сервер сыплет `calendar_updated` по
+/// каждому календарю, и фон в этот момент почти не получает хода.
+///
+/// Замер 2026-09-18 на 393 беседах, 483 тела в 31 пачке: за первые 3,5 минуты
+/// ушла ОДНА пачка, но за 21 минуту работы очередь разошлась целиком. То есть
+/// без таймера механика работает — просто медленнее всего ровно тогда, когда
+/// клиент только открыли и по беседам как раз собираются кликать.
+///
+/// Таймер не лечит голодание, а ставит границу худшему случаю: пока очередь
+/// непуста, пачка уходит не реже чем раз в это время. Те же 467 тел в стартовом
+/// шторме разойдутся за минуту вместо двадцати. Цена — интерактивная команда
+/// может подождать один round-trip пачки, ровно столько же, сколько стоил бы
+/// фон, поймавший простой. Пустая очередь не стоит ничего.
+const PREFETCH_STARVATION: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Пересобрать очередь фоновой догрузки тел по свежему списку бесед.
 ///
 /// Очередь именно ПЕРЕСОБИРАЕТСЯ, а не дополняется: она считается по кэшу,
@@ -861,10 +880,23 @@ pub fn spawn(
         // календарей (см. FetchCalendars).
         let mut last_calendars: std::collections::HashMap<String, Vec<DesktopCalendar>> =
             Default::default();
+        // Когда фон в последний раз получал ход. См. PREFETCH_STARVATION.
+        let mut last_prefetch = std::time::Instant::now();
         loop {
             let mut next: Option<EngineCmd> = None;
+            // Фон голодает — пропускаем одну пачку вперёд команд. Канал при
+            // этом НЕ трогаем: проверка стоит до `try_recv`, поэтому ни одна
+            // команда не может быть вынута и потеряна ради этой пачки.
+            if !body_backlog.is_empty() && last_prefetch.elapsed() >= PREFETCH_STARVATION {
+                if let Some((account_key, messages)) = body_backlog.pop_front() {
+                    next = Some(EngineCmd::PrefetchBodies { messages, account_key });
+                }
+            }
             let mut disconnected = false;
-            loop {
+            // Пропуск фона вперёд означает, что в этой итерации канал не
+            // разбирается вовсе: команды подождут до следующей, аватарки
+            // доберутся тогда же.
+            while next.is_none() {
                 match rx.try_recv() {
                     Ok(EngineCmd::FetchAvatar { email }) => avatar_backlog.push_back(email),
                     Ok(c) => {
@@ -1120,6 +1152,7 @@ pub fn spawn(
                         .filter(|m| !have.contains(&(m.folder.clone(), m.uid)))
                         .collect();
                     if missing.is_empty() {
+                        last_prefetch = std::time::Instant::now();
                         continue;
                     }
                     let our = resolve_our_addrs(&cache, &conn.cfg);
@@ -1147,6 +1180,13 @@ pub fn spawn(
                             body_backlog.clear();
                         }
                     }
+                    // Ход засчитывается ПО ЗАВЕРШЕНИИ, а не в начале: пачка,
+                    // которая сама шла дольше PREFETCH_STARVATION, иначе делала
+                    // бы следующую немедленно подходящей — и фон пошёл бы
+                    // сплошняком впереди команд, ровно наоборот к задуманному.
+                    // Так между пачками гарантированно проходит окно чужой
+                    // работы.
+                    last_prefetch = std::time::Instant::now();
                 }
                 EngineCmd::FetchAvatar { email } => {
                     // Cache first — a Some(empty) is a valid negative entry
