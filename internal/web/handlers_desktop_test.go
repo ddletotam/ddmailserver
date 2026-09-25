@@ -119,6 +119,25 @@ func TestExtractEmail(t *testing.T) {
 	}
 }
 
+// Replying to upstream mail that arrived without a Message-ID must not leak
+// the server-derived id into the outgoing threading headers.
+func TestBuildRawEmailStripsSyntheticIDs(t *testing.T) {
+	syn := "<noid.0123456789abcdef0123456789abcdef@ddmail.invalid>"
+	raw := string(buildRawEmailWithThreading(
+		"sender@example.com", "recipient@other.com", "", "Re: hello",
+		"plain body", "", syn, "<root@x> "+syn,
+	))
+	if strings.Contains(raw, "ddmail.invalid") {
+		t.Errorf("synthetic id leaked into raw email:\n%s", raw)
+	}
+	if strings.Contains(raw, "In-Reply-To:") {
+		t.Errorf("empty In-Reply-To must be omitted:\n%s", raw)
+	}
+	if !strings.Contains(raw, "References: <root@x>\r\n") {
+		t.Errorf("real reference dropped:\n%s", raw)
+	}
+}
+
 func TestBuildRawEmailWithThreading(t *testing.T) {
 	raw := string(buildRawEmailWithThreading(
 		"sender@example.com",

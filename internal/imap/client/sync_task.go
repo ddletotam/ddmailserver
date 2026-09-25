@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"strings"
 
@@ -405,13 +404,20 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 	if hasFlag(imapMsg.Flags, imap.DeletedFlag) {
 		return false, false, nil
 	}
-	// A message's identity is (user_id, Message-ID) — never invented here. An
-	// upstream message without one is skipped (we can't 5xx the source) + logged.
+	// A message's identity is (user_id, Message-ID). Upstream senders that
+	// omit the header (tutu, ELMA, …) can't be 5xx'd from here, and dropping
+	// the message loses real mail — so the id is derived deterministically
+	// from the content instead (see parser.DeriveMessageID).
+	var rawData []byte
 	messageID := imapMsg.Envelope.MessageId
 	if messageID == "" {
-		log.Printf("IMAP sync: skip message (uid %d, subj %q) — no Message-ID",
-			imapMsg.Uid, imapMsg.Envelope.Subject)
-		return false, false, nil
+		rawData = firstLiteral(imapMsg)
+		messageID = parser.DeriveMessageID(rawData)
+		if messageID == "" {
+			log.Printf("IMAP sync: skip message (uid %d, subj %q) — no Message-ID and no body to derive one",
+				imapMsg.Uid, imapMsg.Envelope.Subject)
+			return false, false, nil
+		}
 	}
 	exists, err := t.database.MessageExistsByMessageID(t.account.UserID, messageID)
 	if err != nil {
@@ -485,19 +491,12 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 	var body, bodyHTML string
 	var attachments []parser.ParsedAttachment
 	var parsed *parser.ParsedMessage
-	var rawData []byte
-	var rfc822Body io.Reader
-	for _, literal := range imapMsg.Body {
-		rfc822Body = literal
-		break
+	if rawData == nil {
+		rawData = firstLiteral(imapMsg)
 	}
-	if rfc822Body != nil {
-		var buf bytes.Buffer
-		teeReader := io.TeeReader(rfc822Body, &buf)
-		p := parser.New()
+	if rawData != nil {
 		var parseErr error
-		parsed, parseErr = p.Parse(teeReader)
-		rawData = buf.Bytes()
+		parsed, parseErr = parser.New().ParseBytes(rawData)
 		if parseErr == nil {
 			body = parsed.Body
 			bodyHTML = parsed.BodyHTML
@@ -758,4 +757,21 @@ func hasFlag(flags []string, flag string) bool {
 		}
 	}
 	return false
+}
+
+// firstLiteral reads the fetched RFC822 body section. A literal is a one-shot
+// reader, so callers keep the returned bytes. Returns nil when the fetch
+// carried no body section.
+func firstLiteral(imapMsg *imap.Message) []byte {
+	for _, literal := range imapMsg.Body {
+		if literal == nil {
+			return nil
+		}
+		var buf bytes.Buffer
+		if _, err := buf.ReadFrom(literal); err != nil {
+			log.Printf("IMAP sync: read body of uid %d: %v", imapMsg.Uid, err)
+		}
+		return buf.Bytes()
+	}
+	return nil
 }

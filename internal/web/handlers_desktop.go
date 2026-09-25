@@ -1924,6 +1924,11 @@ func buildRawEmail(from, to, cc, subject, text, html, inReplyTo, references stri
 	_, _ = rand.Read(idBytes)
 	messageID := fmt.Sprintf("<%d.%s@%s>", time.Now().UnixNano(), hex.EncodeToString(idBytes), domain)
 
+	// Ids the server derived for upstream mail that had none mean nothing to
+	// the recipient — replying to such a message just starts a new thread.
+	inReplyTo = parser.StripSyntheticMessageIDs(inReplyTo)
+	references = parser.StripSyntheticMessageIDs(references)
+
 	var b strings.Builder
 
 	// Headers. Subject + address display-names are RFC 2047-encoded to keep
