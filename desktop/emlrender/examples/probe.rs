@@ -56,7 +56,10 @@ fn main() {
 
     if std::env::var_os("EMLRENDER_DEBUG").is_some() {
         for run in &r.runs {
-            println!("  run {:>7.1},{:<7.1} {:>6.1}x{:<5.1} {:?}", run.x, run.y, run.w, run.h, run.text);
+            println!(
+                "  run {:>7.1},{:<7.1} {:>6.1}x{:<5.1} {:?}",
+                run.x, run.y, run.w, run.h, run.text
+            );
         }
     }
 

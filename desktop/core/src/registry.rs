@@ -14,17 +14,12 @@ pub struct ProviderRegistry {
 
 impl ProviderRegistry {
     pub fn new() -> Self {
-        Self {
-            providers: RwLock::new(HashMap::new()),
-        }
+        Self { providers: RwLock::new(HashMap::new()) }
     }
 
     /// Register (or replace) a provider for the given account.
     pub async fn register(&self, account_id: &str, provider: Arc<dyn MailProvider>) {
-        self.providers
-            .write()
-            .await
-            .insert(account_id.to_string(), provider);
+        self.providers.write().await.insert(account_id.to_string(), provider);
     }
 
     /// Look up the provider for an account.

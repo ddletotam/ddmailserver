@@ -7,8 +7,8 @@
 //!   DDMAIL_IMAP_TLS (1/0), DDMAIL_EMAIL
 //!   optional native mode: DDMAIL_NATIVE_URL, DDMAIL_NATIVE_TOKEN
 
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 
 use ddmail_core::cache::Cache;
 use ddmail_core::event::{EngineEvent, Notifier};
@@ -18,9 +18,9 @@ use ddmail_core::native_provider::NativeProvider;
 use ddmail_core::provider::MailProvider;
 use ddmail_core::session::SessionPool;
 use ddmail_core::types::{
-    Contact, Conversation, DesktopCalendar, DesktopCalendarEvent, DesktopContact, DesktopTask,
-    MessageBody, MessageEnvelope, MessageRef, OutgoingAttachment, OutgoingMessage,
-    CHANGE_KIND_DELETE,
+    CHANGE_KIND_DELETE, Contact, Conversation, DesktopCalendar, DesktopCalendarEvent,
+    DesktopContact, DesktopTask, MessageBody, MessageEnvelope, MessageRef, OutgoingAttachment,
+    OutgoingMessage,
 };
 
 /// Версия схемы id диалогов (`imap::conversation_id`). Кэш помнит, под какой
@@ -51,7 +51,6 @@ pub struct AccountConfig {
     pub oauth_refresh_token: Option<String>,
 }
 
-
 /// Заменить парные маркеры на тег. Непарный хвост остаётся текстом.
 fn apply_marker(text: &str, marker: &str, tag: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -79,16 +78,12 @@ impl AccountConfig {
         let username = std::env::var("DDMAIL_IMAP_USER").ok()?;
         let password = std::env::var("DDMAIL_IMAP_PASS").ok()?;
         let email = std::env::var("DDMAIL_EMAIL").unwrap_or_else(|_| username.clone());
-        let port = std::env::var("DDMAIL_IMAP_PORT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(993);
+        let port =
+            std::env::var("DDMAIL_IMAP_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(993);
         let use_tls = std::env::var("DDMAIL_IMAP_TLS").map(|s| s != "0").unwrap_or(true);
         let smtp_host = std::env::var("DDMAIL_SMTP_HOST").unwrap_or_else(|_| host.clone());
-        let smtp_port = std::env::var("DDMAIL_SMTP_PORT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(465);
+        let smtp_port =
+            std::env::var("DDMAIL_SMTP_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(465);
         Some(AccountConfig {
             host,
             port,
@@ -133,7 +128,10 @@ impl AccountConfig {
             native_token: v.get("native_token").and_then(|x| x.as_str()).map(String::from),
             carddav_url: v.get("carddav_url").and_then(|x| x.as_str()).map(String::from),
             caldav_url: v.get("caldav_url").and_then(|x| x.as_str()).map(String::from),
-            oauth_refresh_token: v.get("oauth_refresh_token").and_then(|x| x.as_str()).map(String::from),
+            oauth_refresh_token: v
+                .get("oauth_refresh_token")
+                .and_then(|x| x.as_str())
+                .map(String::from),
         })
     }
 
@@ -198,8 +196,7 @@ impl AccountConfig {
     /// Overwrite `accounts.json` with the given set. Best-effort.
     pub fn save_all(accounts: &[AccountConfig]) {
         let Some(dir) = Self::config_dir() else { return };
-        let arr =
-            serde_json::Value::Array(accounts.iter().map(|a| a.to_json()).collect());
+        let arr = serde_json::Value::Array(accounts.iter().map(|a| a.to_json()).collect());
         if let Ok(s) = serde_json::to_string_pretty(&arr) {
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::fs::write(dir.join("accounts.json"), s);
@@ -268,9 +265,7 @@ fn resolve_inline_parts(
 ) -> usize {
     use std::sync::OnceLock;
     static CID_RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = CID_RE.get_or_init(|| {
-        regex::Regex::new(r#"(?i)cid:([^"'\s>)]+)"#).unwrap()
-    });
+    let re = CID_RE.get_or_init(|| regex::Regex::new(r#"(?i)cid:([^"'\s>)]+)"#).unwrap());
 
     let mut rewritten = 0usize;
     for b in bodies.iter_mut() {
@@ -278,17 +273,14 @@ fn resolve_inline_parts(
         if !html.contains("cid:") {
             continue;
         }
-        let cids: std::collections::HashSet<String> = re
-            .captures_iter(&html)
-            .map(|c| c[1].to_string())
-            .collect();
+        let cids: std::collections::HashSet<String> =
+            re.captures_iter(&html).map(|c| c[1].to_string()).collect();
         let mut replaced = html.clone();
         let mut any = false;
         for cid in cids {
             match rt.block_on(provider.fetch_inline_part(b.uid, &cid)) {
                 Ok(part) => {
-                    let data_url =
-                        format!("data:{};base64,{}", part.mime_type, part.content_b64);
+                    let data_url = format!("data:{};base64,{}", part.mime_type, part.content_b64);
                     replaced = replaced.replace(&format!("cid:{cid}"), &data_url);
                     any = true;
                 }
@@ -371,27 +363,51 @@ fn resolve_our_addrs(cache: &Cache, cfg: &AccountConfig) -> Vec<String> {
 
 /// Commands the UI sends to the engine thread.
 pub enum EngineCmd {
-    FetchConversations { limit: u32 },
+    FetchConversations {
+        limit: u32,
+    },
     /// `generation` is the UI's conversation-open generation; it is echoed
     /// back in `EngineResult::Messages` so the UI can drop answers that
     /// arrive after the user already switched to another conversation.
-    FetchMessages { messages: Vec<MessageRef>, generation: u64, account_key: String },
+    FetchMessages {
+        messages: Vec<MessageRef>,
+        generation: u64,
+        account_key: String,
+    },
     /// Фоновая догрузка тел: те же запросы, что у `FetchMessages`, но результат
     /// только ложится в кэш — в UI не уходит ничего.
     ///
     /// Команду шлёт себе сам движок (см. `refill_body_backlog`), из UI её не
     /// отправляют: экран показывает то, что уже в кэше, а префетч существует
     /// затем, чтобы к моменту клика там лежало всё.
-    PrefetchBodies { messages: Vec<MessageRef>, account_key: String },
+    PrefetchBodies {
+        messages: Vec<MessageRef>,
+        account_key: String,
+    },
     StartWatching,
-    FetchAvatar { email: String },
-    SetFlags { messages: Vec<MessageRef>, flags: String, add: bool, account_key: String },
-    Delete { messages: Vec<MessageRef>, account_key: String },
+    FetchAvatar {
+        email: String,
+    },
+    SetFlags {
+        messages: Vec<MessageRef>,
+        flags: String,
+        add: bool,
+        account_key: String,
+    },
+    Delete {
+        messages: Vec<MessageRef>,
+        account_key: String,
+    },
     /// Raw RFC-822 source of one message — feeds the «Показать →
     /// Заголовки / Исходник сообщения» views.
     /// `headers_only` fetches just the header block — the viewer that wants
     /// thirty lines should not pull every attachment down first.
-    FetchSource { folder: String, uid: u32, account_key: String, headers_only: bool },
+    FetchSource {
+        folder: String,
+        uid: u32,
+        account_key: String,
+        headers_only: bool,
+    },
     /// «Спам»: blacklist the sender and purge their messages, including the
     /// given conversation rows. The real sender is resolved server-side from
     /// `message_ids`; `scope` = "address" | "domain"; `fallback_addr` is only
@@ -404,12 +420,22 @@ pub enum EngineCmd {
     },
     /// `save_to = None` → в Downloads + автооткрытие (клик по чипу);
     /// `save_to = Some(path)` → в выбранный пользователем файл, без открытия.
-    DownloadAttachment { folder: String, uid: u32, index: usize, filename: String, account_key: String, save_to: Option<String> },
+    DownloadAttachment {
+        folder: String,
+        uid: u32,
+        index: usize,
+        filename: String,
+        account_key: String,
+        save_to: Option<String>,
+    },
     /// Live dropdown lookup for the search-as-compose bar: matching contacts
     /// (name/email) AND matching messages (subject/body) in one round-trip.
     /// The query is echoed back in the result so the UI can drop stale answers
     /// when typing faster than the engine answers.
-    SearchDropdown { query: String, limit: u32 },
+    SearchDropdown {
+        query: String,
+        limit: u32,
+    },
     /// Calendar list — populates the calendar-view sidebar. Cheap when
     /// the native provider is in use; ImapProvider returns an empty
     /// list (no calendar support there).
@@ -436,27 +462,60 @@ pub enum EngineCmd {
     /// The unified address book. Empty `query` = the full book; a non-empty
     /// query is autocomplete/search. `query` is echoed in the result so the UI
     /// can drop stale answers.
-    FetchContacts { query: String, limit: u32 },
+    FetchContacts {
+        query: String,
+        limit: u32,
+    },
     /// Tasks (VTODO) across every account. Not windowed by time the way
     /// calendar events are: most tasks have no date at all, so a window would
     /// hide the bulk of a reminders list.
-    FetchTasks { include_completed: bool },
+    FetchTasks {
+        include_completed: bool,
+    },
     /// Tick a task off (or back on). The UI has already moved; this is the
     /// write that makes it stick.
-    SetTaskCompletion { task_id: i64, completed: bool, account_key: String },
+    SetTaskCompletion {
+        task_id: i64,
+        completed: bool,
+        account_key: String,
+    },
     /// Address-book writes. Bodies are server-shaped JSON
     /// (full_name/emails/phones/organization/title [+ from_identity on create]).
-    CreateContact { body: serde_json::Value, account_key: String },
-    UpdateContact { id: i64, body: serde_json::Value, account_key: String },
-    DeleteContact { id: i64, account_key: String },
+    CreateContact {
+        body: serde_json::Value,
+        account_key: String,
+    },
+    UpdateContact {
+        id: i64,
+        body: serde_json::Value,
+        account_key: String,
+    },
+    DeleteContact {
+        id: i64,
+        account_key: String,
+    },
     /// Set the requesting user's PARTSTAT on an event (ACCEPTED/TENTATIVE/DECLINED).
-    Rsvp { event_id: i64, partstat: String, account_key: String },
+    Rsvp {
+        event_id: i64,
+        partstat: String,
+        account_key: String,
+    },
     /// Create a calendar event from a server-shaped JSON body.
-    CreateEvent { body: serde_json::Value, account_key: String },
+    CreateEvent {
+        body: serde_json::Value,
+        account_key: String,
+    },
     /// Patch an existing event (body carries the changed fields + scope).
-    PatchEvent { event_id: i64, body: serde_json::Value, account_key: String },
+    PatchEvent {
+        event_id: i64,
+        body: serde_json::Value,
+        account_key: String,
+    },
     /// Delete an event.
-    DeleteEvent { event_id: i64, account_key: String },
+    DeleteEvent {
+        event_id: i64,
+        account_key: String,
+    },
     Send {
         to: Vec<String>,
         cc: Vec<String>,
@@ -490,9 +549,15 @@ pub enum EngineCmd {
 pub enum EngineResult {
     /// `partial == true`: only changed conversations (delta sync) — merge
     /// into the existing list instead of replacing it.
-    Conversations { list: Vec<Conversation>, partial: bool },
+    Conversations {
+        list: Vec<Conversation>,
+        partial: bool,
+    },
     /// `generation` echoes FetchMessages' (stale-answer guard).
-    Messages { bodies: Vec<MessageBody>, generation: u64 },
+    Messages {
+        bodies: Vec<MessageBody>,
+        generation: u64,
+    },
     /// Live-dropdown answer. `query` lets the UI drop responses for an old
     /// query string when the user has typed past it.
     SearchDropdown {
@@ -505,27 +570,44 @@ pub enum EngineResult {
     /// Per-account connection state ("connecting" | "connected" | "error" |
     /// "auth" — токен мёртв, нужен повторный вход, см. `EngineEvent`),
     /// tagged with the account so the UI can drive the aggregate indicator.
-    AccountState { account_key: String, state: String },
+    AccountState {
+        account_key: String,
+        state: String,
+    },
     /// A message was sent (server response / message-id).
     Sent(String),
     /// A mutating op (flags/delete) finished; UI should refresh.
     Done(String),
     /// A decoded avatar (RGBA) for an email address.
-    Avatar { email: String, rgba: Vec<u8>, w: u32, h: u32 },
+    Avatar {
+        email: String,
+        rgba: Vec<u8>,
+        w: u32,
+        h: u32,
+    },
     /// An attachment was downloaded and saved at this path; UI opens it.
     AttachmentSaved(String),
     /// Вложение записано в явно выбранный пользователем путь («Сохранить
     /// как…») — подтверждаем инлайн-плашкой, файл НЕ открываем.
     AttachmentSavedTo(String),
     /// Raw RFC-822 source for a FetchSource request.
-    Source { uid: u32, raw: String },
+    Source {
+        uid: u32,
+        raw: String,
+    },
     /// Calendar list (sidebar) — echoed back from FetchCalendars. `complete`
     /// says every account answered: тот же принцип, что у CalendarEvents —
     /// отсутствие календарей упавшего аккаунта не означает, что их удалили.
-    Calendars { list: Vec<DesktopCalendar>, complete: bool },
+    Calendars {
+        list: Vec<DesktopCalendar>,
+        complete: bool,
+    },
     /// Address-book rows — echoed back from FetchContacts. `query` lets the UI
     /// drop stale answers when typing faster than the engine answers.
-    Contacts { query: String, list: Vec<DesktopContact> },
+    Contacts {
+        query: String,
+        list: Vec<DesktopContact>,
+    },
     /// Task rows — echoed back from FetchTasks.
     Tasks(Vec<DesktopTask>),
     /// Events for the currently displayed week — echoed back from
@@ -549,7 +631,11 @@ pub enum EngineResult {
     AttachmentFailed(String),
     /// Spam blacklist-and-purge succeeded: what was blocked + rows removed.
     /// The client confirms with a «✓ …» plashka.
-    SpamPurged { rule_type: String, rule_value: String, deleted: i64 },
+    SpamPurged {
+        rule_type: String,
+        rule_value: String,
+        deleted: i64,
+    },
     /// Spam blacklist-and-purge failed — surfaced to the user (toast).
     SpamFailed(String),
     Error(String),
@@ -567,13 +653,7 @@ fn save_download(filename: &str, bytes: &[u8]) -> Result<String, String> {
     // хвостовые точки/пробелы (Windows их молча отрезает — путь разъезжается).
     let safe: String = filename
         .chars()
-        .map(|c| {
-            if "\\/:*?\"<>|".contains(c) || c.is_control() {
-                '_'
-            } else {
-                c
-            }
-        })
+        .map(|c| if "\\/:*?\"<>|".contains(c) || c.is_control() { '_' } else { c })
         .collect();
     let safe = safe.trim().trim_end_matches(['.', ' ']).to_string();
     let safe = if safe.is_empty() { "attachment".to_string() } else { safe };
@@ -660,11 +740,7 @@ fn resolve_attachments(paths: &[String]) -> Vec<OutgoingAttachment> {
 /// Best-effort MIME type from a file extension. Falls back to the generic
 /// binary type — the receiving MUA can still save the file by name.
 fn guess_mime(path: &std::path::Path) -> String {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
@@ -816,18 +892,12 @@ fn refill_body_backlog(
         }
     }
     if total > 0 {
-        println!(
-            "engine: prefetch queue — {total} bodies missing in {} batches",
-            backlog.len()
-        );
+        println!("engine: prefetch queue — {total} bodies missing in {} batches", backlog.len());
     }
 }
 
 fn route<'a>(conns: &'a [AccountConn], account_key: &str) -> &'a AccountConn {
-    conns
-        .iter()
-        .find(|c| c.key == account_key)
-        .unwrap_or(&conns[0])
+    conns.iter().find(|c| c.key == account_key).unwrap_or(&conns[0])
 }
 
 pub fn spawn(
@@ -847,11 +917,7 @@ pub fn spawn(
         };
         let conns: Vec<AccountConn> = accounts
             .into_iter()
-            .map(|cfg| AccountConn {
-                key: cfg.account_key(),
-                provider: build_provider(&cfg),
-                cfg,
-            })
+            .map(|cfg| AccountConn { key: cfg.account_key(), provider: build_provider(&cfg), cfg })
             .collect();
         if conns.is_empty() {
             while rx.recv().is_ok() {}
@@ -951,10 +1017,8 @@ pub fn spawn(
                         // reports changed threads, never removed ones. Providers
                         // without a journal (plain IMAP) return None → skipped.
                         let seq_key = format!("journal_seq:{}", conn.key);
-                        let cur_seq: i64 = cache
-                            .get_meta(&seq_key)
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(0);
+                        let cur_seq: i64 =
+                            cache.get_meta(&seq_key).and_then(|v| v.parse().ok()).unwrap_or(0);
                         match rt.block_on(conn.provider.fetch_changes(cur_seq)) {
                             Ok(Some(ch)) => {
                                 let deletes: Vec<String> = ch
@@ -985,10 +1049,8 @@ pub fn spawn(
                         let since_key = format!("conv_since:{}", conn.key);
                         let full_key = format!("conv_full_ts:{}", conn.key);
                         let epoch_key = format!("conv_id_epoch:{}", conn.key);
-                        let last_full: i64 = cache
-                            .get_meta(&full_key)
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(0);
+                        let last_full: i64 =
+                            cache.get_meta(&full_key).and_then(|v| v.parse().ok()).unwrap_or(0);
                         // Схема id диалогов сменилась — прошлый кэш держит
                         // ключи старой формы. Дельта их не убирает (она
                         // сообщает только изменившиеся диалоги), так что без
@@ -1001,7 +1063,9 @@ pub fn spawn(
                         } else {
                             cache.get_meta(&since_key).and_then(|v| v.parse().ok()).unwrap_or(0)
                         };
-                        match rt.block_on(conn.provider.fetch_conversations_delta(&our, limit, since)) {
+                        match rt
+                            .block_on(conn.provider.fetch_conversations_delta(&our, limit, since))
+                        {
                             Ok((convs, server_now, partial)) => {
                                 if partial && since > 0 {
                                     // Ошибку записи печатаем, а не глотаем:
@@ -1072,8 +1136,7 @@ pub fn spawn(
                     // Bodies are immutable: a cached (folder, uid) never needs
                     // refetching, so only the refs missing from SQLite go out
                     // on the wire. Fully-cached conversation = no network at all.
-                    let mut cached =
-                        cache.load_message_bodies(&key, &messages).unwrap_or_default();
+                    let mut cached = cache.load_message_bodies(&key, &messages).unwrap_or_default();
                     // Heal pre-substitution cache entries: bodies cached before
                     // cid:-resolution keep broken inline-image refs forever
                     // (they never refetch) — resolve them in place and re-save.
@@ -1196,9 +1259,8 @@ pub fn spawn(
                     let (bytes, mime) = match cache.get_avatar(&email) {
                         Some(hit) => hit,
                         None => {
-                            let (b, m) = rt
-                                .block_on(provider.fetch_avatar(&email))
-                                .unwrap_or_default();
+                            let (b, m) =
+                                rt.block_on(provider.fetch_avatar(&email)).unwrap_or_default();
                             cache.save_avatar(&email, &b, &m).ok();
                             (b, m)
                         }
@@ -1250,11 +1312,18 @@ pub fn spawn(
                     let conn = route(&conns, &account_key);
                     let provider = conn.provider.clone();
                     let key = conn.key.clone();
-                    match rt.block_on(provider.blacklist_and_purge(&scope, &fallback_addr, &message_ids)) {
+                    match rt.block_on(provider.blacklist_and_purge(
+                        &scope,
+                        &fallback_addr,
+                        &message_ids,
+                    )) {
                         Ok(outcome) => {
                             println!(
                                 "engine: spam purge blocked {}={} ({} rule(s)), removed {} messages",
-                                outcome.rule_type, outcome.rule_value, outcome.rule_count, outcome.deleted
+                                outcome.rule_type,
+                                outcome.rule_value,
+                                outcome.rule_count,
+                                outcome.deleted
                             );
                             // Conversations vanish — force the next list
                             // refetch to run full (same as Delete).
@@ -1268,7 +1337,14 @@ pub fn spawn(
                         Err(e) => on_result(EngineResult::SpamFailed(e)),
                     }
                 }
-                EngineCmd::DownloadAttachment { folder, uid, index, filename, account_key, save_to } => {
+                EngineCmd::DownloadAttachment {
+                    folder,
+                    uid,
+                    index,
+                    filename,
+                    account_key,
+                    save_to,
+                } => {
                     let provider = route(&conns, &account_key).provider.clone();
                     match rt.block_on(provider.fetch_attachment(&folder, uid, index)) {
                         Ok((bytes, _mime)) => match save_to {
@@ -1302,16 +1378,14 @@ pub fn spawn(
                                 contacts.extend(c);
                             }
                         }
-                        if let Ok(m) = rt.block_on(conn.provider.search_messages(&conn.cfg.email, &query)) {
+                        if let Ok(m) =
+                            rt.block_on(conn.provider.search_messages(&conn.cfg.email, &query))
+                        {
                             messages.extend(m);
                         }
                     }
                     contacts.truncate(limit as usize);
-                    on_result(EngineResult::SearchDropdown {
-                        query,
-                        contacts,
-                        messages,
-                    });
+                    on_result(EngineResult::SearchDropdown { query, contacts, messages });
                 }
                 EngineCmd::RefreshIdentities => {
                     // Unconditional, unlike the cached check in
@@ -1449,7 +1523,11 @@ pub fn spawn(
                     // мы просто ничего не спросили (фетч до коннекта).
                     let mut complete = calendar_ids.is_empty() && !conns.is_empty();
                     for conn in &conns {
-                        match rt.block_on(conn.provider.fetch_calendar_events(from_ms, to_ms, &calendar_ids)) {
+                        match rt.block_on(conn.provider.fetch_calendar_events(
+                            from_ms,
+                            to_ms,
+                            &calendar_ids,
+                        )) {
                             Ok(mut evs) => {
                                 for e in evs.iter_mut() {
                                     e.account_key = conn.key.clone();
@@ -1505,7 +1583,20 @@ pub fn spawn(
                         Err(e) => on_result(EngineResult::Error(format!("delete_event: {e}"))),
                     }
                 }
-                EngineCmd::Send { to, cc, subject, body, html, inline, in_reply_to, references, from, attachments, forward_attachments, account_key } => {
+                EngineCmd::Send {
+                    to,
+                    cc,
+                    subject,
+                    body,
+                    html,
+                    inline,
+                    in_reply_to,
+                    references,
+                    from,
+                    attachments,
+                    forward_attachments,
+                    account_key,
+                } => {
                     let conn = route(&conns, &account_key);
                     let provider = conn.provider.clone();
                     let key = conn.key.clone();
@@ -1525,7 +1616,11 @@ pub fn spawn(
                             .map(|b| b.attachments)
                             .unwrap_or_default();
                         for meta in metas.iter() {
-                            match rt.block_on(provider.fetch_attachment(&orig.folder, orig.uid, meta.index)) {
+                            match rt.block_on(provider.fetch_attachment(
+                                &orig.folder,
+                                orig.uid,
+                                meta.index,
+                            )) {
                                 Ok((bytes, mime)) => outgoing.push(OutgoingAttachment {
                                     filename: meta.filename.clone(),
                                     mime_type: if mime.is_empty() {
@@ -1556,11 +1651,7 @@ pub fn spawn(
                         inline_paths: Vec::new(),
                         attachments: outgoing,
                     };
-                    let r = rt.block_on(provider.send_message(
-                        &cfg.smtp_host,
-                        cfg.smtp_port,
-                        &msg,
-                    ));
+                    let r = rt.block_on(provider.send_message(&cfg.smtp_host, cfg.smtp_port, &msg));
                     match r {
                         Ok(id) => on_result(EngineResult::Sent(id)),
                         // Distinct from the generic Error: the UI toasts this
@@ -1630,21 +1721,14 @@ mod tests {
     }
 
     fn temp_cache() -> TempCache {
-        let dir = tempfile::Builder::new()
-            .prefix("ddmail_prefetch_test_")
-            .tempdir()
-            .expect("tempdir");
+        let dir =
+            tempfile::Builder::new().prefix("ddmail_prefetch_test_").tempdir().expect("tempdir");
         let cache = Cache::new(dir.path().to_path_buf()).expect("cache");
         TempCache { cache, _dir: dir }
     }
 
     fn mref(folder: &str, uid: u32) -> MessageRef {
-        MessageRef {
-            folder: folder.into(),
-            uid,
-            message_id: format!("<{uid}@test>"),
-            seen: true,
-        }
+        MessageRef { folder: folder.into(), uid, message_id: format!("<{uid}@test>"), seen: true }
     }
 
     fn conv(id: &str, account_key: &str, ts: i64, refs: Vec<MessageRef>) -> Conversation {
@@ -1689,11 +1773,10 @@ mod tests {
         }
     }
 
-    fn queued(backlog: &std::collections::VecDeque<(String, Vec<MessageRef>)>) -> Vec<(String, u32)> {
-        backlog
-            .iter()
-            .flat_map(|(k, refs)| refs.iter().map(move |m| (k.clone(), m.uid)))
-            .collect()
+    fn queued(
+        backlog: &std::collections::VecDeque<(String, Vec<MessageRef>)>,
+    ) -> Vec<(String, u32)> {
+        backlog.iter().flat_map(|(k, refs)| refs.iter().map(move |m| (k.clone(), m.uid))).collect()
     }
 
     /// Уже закэшированное тело в очередь не попадает, дубль из склеенной
@@ -1710,30 +1793,22 @@ mod tests {
         let mut backlog = Default::default();
         refill_body_backlog(&cache, &convs, &mut backlog);
 
-        assert_eq!(
-            queued(&backlog),
-            vec![("acc".to_string(), 1), ("acc".to_string(), 3)]
-        );
+        assert_eq!(queued(&backlog), vec![("acc".to_string(), 1), ("acc".to_string(), 3)]);
     }
 
     /// Пачки режутся по PREFETCH_CHUNK, и каждая адресована своему аккаунту.
     #[test]
     fn prefetch_queue_chunks_per_account() {
         let cache = temp_cache();
-        let many: Vec<MessageRef> = (1..=PREFETCH_CHUNK as u32 + 3)
-            .map(|u| mref("INBOX", u))
-            .collect();
-        let convs = vec![
-            conv("a", "acc-a", 200, many),
-            conv("b", "acc-b", 100, vec![mref("INBOX", 1)]),
-        ];
+        let many: Vec<MessageRef> =
+            (1..=PREFETCH_CHUNK as u32 + 3).map(|u| mref("INBOX", u)).collect();
+        let convs =
+            vec![conv("a", "acc-a", 200, many), conv("b", "acc-b", 100, vec![mref("INBOX", 1)])];
         let mut backlog = Default::default();
         refill_body_backlog(&cache, &convs, &mut backlog);
 
-        let sizes: Vec<(String, usize)> = backlog
-            .iter()
-            .map(|(k, refs)| (k.clone(), refs.len()))
-            .collect();
+        let sizes: Vec<(String, usize)> =
+            backlog.iter().map(|(k, refs)| (k.clone(), refs.len())).collect();
         assert_eq!(
             sizes,
             vec![

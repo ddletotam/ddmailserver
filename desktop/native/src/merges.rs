@@ -71,8 +71,7 @@ impl Merges {
     /// и записать одну общую. `target` идёт первым — его голова остаётся
     /// первичным диалогом объединения.
     pub fn merge(&mut self, target: Vec<MergeKey>, source: Vec<MergeKey>) {
-        self.groups
-            .retain(|g| !g.iter().any(|k| target.contains(k) || source.contains(k)));
+        self.groups.retain(|g| !g.iter().any(|k| target.contains(k) || source.contains(k)));
         let mut group = target;
         for k in source {
             if !group.contains(&k) {
@@ -83,7 +82,6 @@ impl Merges {
             self.groups.push(group);
         }
     }
-
 
     /// Перевести сохранённые id на схему «ключ диалога — набор адресов».
     ///
@@ -145,9 +143,7 @@ fn merges_path() -> Option<PathBuf> {
         let base = std::env::var("XDG_CONFIG_HOME")
             .ok()
             .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config"))
-            })?;
+            .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config")))?;
         return Some(base.join("ru.letotam.ddmail").join("merges.json"));
     }
     #[allow(unreachable_code)]
@@ -184,7 +180,10 @@ mod tests {
 
     #[test]
     fn migrates_a_chat_where_both_addresses_are_mine() {
-        let mut m = Merges { groups: vec![vec![k("me@b.ru|me@a.ru"), k("me@a.ru|bob@x.ru")]], ..Default::default() };
+        let mut m = Merges {
+            groups: vec![vec![k("me@b.ru|me@a.ru"), k("me@a.ru|bob@x.ru")]],
+            ..Default::default()
+        };
         assert!(m.migrate_self_chat_ids(&["me@a.ru".into(), "me@b.ru".into()]));
         assert_eq!(m.groups[0][0].id, "me@a.ru+me@b.ru|self");
         // Обычный диалог не тронут — его id и не менялся.

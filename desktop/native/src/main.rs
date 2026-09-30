@@ -9,10 +9,10 @@
 
 slint::include_modules!();
 
-#[cfg(all(unix, not(target_os = "macos")))]
-mod keylayout;
 mod calendar_settings;
 mod engine;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod keylayout;
 mod merges;
 mod notify;
 mod policy;
@@ -24,19 +24,19 @@ mod render;
 mod render_common;
 mod richtext;
 mod richtext_render;
-#[cfg(any(windows, target_os = "linux"))]
-mod tray;
 mod sanitize;
 mod texture_cache;
 mod toast;
 mod toast_window;
+#[cfg(any(windows, target_os = "linux"))]
+mod tray;
 mod window_state;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use slint::{Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
@@ -47,12 +47,31 @@ use ddmail_core::types::{
 };
 
 const NAMES: [&str; 25] = [
-    "Анна Соколова", "Команда AppSec", "Дмитрий П.", "Поддержка letotam",
-    "Ольга Кузнецова", "DevSecOps канал", "Игорь Лебедев", "Мария В.",
-    "Никита Орлов", "Рассылки", "Светлана Г.", "Павел Морозов",
-    "QA дайджест", "Елена Фомина", "Артём Зайцев", "Релизы 4.x",
-    "Юлия Беляева", "Сергей Котов", "HR отдел", "Григорий Н.",
-    "Вера Полякова", "Алексей Тимофеев", "Финансы", "Дарья Жукова", "Roadmap",
+    "Анна Соколова",
+    "Команда AppSec",
+    "Дмитрий П.",
+    "Поддержка letotam",
+    "Ольга Кузнецова",
+    "DevSecOps канал",
+    "Игорь Лебедев",
+    "Мария В.",
+    "Никита Орлов",
+    "Рассылки",
+    "Светлана Г.",
+    "Павел Морозов",
+    "QA дайджест",
+    "Елена Фомина",
+    "Артём Зайцев",
+    "Релизы 4.x",
+    "Юлия Беляева",
+    "Сергей Котов",
+    "HR отдел",
+    "Григорий Н.",
+    "Вера Полякова",
+    "Алексей Тимофеев",
+    "Финансы",
+    "Дарья Жукова",
+    "Roadmap",
 ];
 const PALETTE: [&str; 6] = ["#2f80ed", "#27ae60", "#eb5757", "#9b51e0", "#f2994a", "#11998e"];
 
@@ -153,21 +172,17 @@ struct Disp {
 /// `IDENT_VIVID` is the hue-aligned saturated counterpart — same index, same
 /// hue, used only for the from-picker dot (see `refresh_composer_identities`).
 const IDENT_PASTEL: [&str; 24] = [
-    "#FFE4E1", "#E8F5E9", "#E3F2FD", "#FFF9C4", "#F3E5F5",
-    "#E0F7FA", "#FBE9E7", "#F1F8E9", "#EDE7F6", "#E8EAF6",
-    "#FCE4EC", "#E0F2F1", "#FFF3E0", "#F9FBE7", "#EFEBE9",
-    "#ECEFF1", "#FFF8E1", "#E1F5FE", "#DCEDC8", "#FFCDD2",
-    "#F8BBD0", "#D1C4E9", "#B2DFDB", "#B3E5FC",
+    "#FFE4E1", "#E8F5E9", "#E3F2FD", "#FFF9C4", "#F3E5F5", "#E0F7FA", "#FBE9E7", "#F1F8E9",
+    "#EDE7F6", "#E8EAF6", "#FCE4EC", "#E0F2F1", "#FFF3E0", "#F9FBE7", "#EFEBE9", "#ECEFF1",
+    "#FFF8E1", "#E1F5FE", "#DCEDC8", "#FFCDD2", "#F8BBD0", "#D1C4E9", "#B2DFDB", "#B3E5FC",
 ];
 /// Saturated counterpart to `IDENT_PASTEL`, index-aligned by hue. Used ONLY
 /// for the from-picker dot: at 12px a pastel dot is invisible, so the sender
 /// selector shows the intense version while the sidebar keeps the wash.
 const IDENT_VIVID: [&str; 24] = [
-    "#E53935", "#43A047", "#1E88E5", "#FDD835", "#8E24AA",
-    "#00ACC1", "#F4511E", "#7CB342", "#5E35B1", "#3949AB",
-    "#D81B60", "#00897B", "#FB8C00", "#C0CA33", "#6D4C41",
-    "#546E7A", "#FFB300", "#039BE5", "#558B2F", "#C62828",
-    "#AD1457", "#6A1B9A", "#00695C", "#0277BD",
+    "#E53935", "#43A047", "#1E88E5", "#FDD835", "#8E24AA", "#00ACC1", "#F4511E", "#7CB342",
+    "#5E35B1", "#3949AB", "#D81B60", "#00897B", "#FB8C00", "#C0CA33", "#6D4C41", "#546E7A",
+    "#FFB300", "#039BE5", "#558B2F", "#C62828", "#AD1457", "#6A1B9A", "#00695C", "#0277BD",
 ];
 /// «Ugly gray» for conversations received by an unknown alias.
 const IDENT_UNKNOWN: &str = "#d5d5d0";
@@ -244,8 +259,6 @@ fn refresh_composer_identities(ui: &MainWindow, sh: &Shared) {
     *sh.composer_identities.borrow_mut() = emails;
 }
 
-
-
 /// id диалога, которому будет принадлежать письмо, отправленное с адреса
 /// `chosen`.
 ///
@@ -255,10 +268,7 @@ fn refresh_composer_identities(ui: &MainWindow, sh: &Shared) {
 /// «Кому» побеждает собеседников открытого диалога.
 fn target_conversation_id(ui: &MainWindow, sh: &Shared, chosen: &str) -> Option<String> {
     let split = |raw: &str| -> Vec<String> {
-        raw.split([',', ';'])
-            .map(|p| p.trim().to_lowercase())
-            .filter(|p| !p.is_empty())
-            .collect()
+        raw.split([',', ';']).map(|p| p.trim().to_lowercase()).filter(|p| !p.is_empty()).collect()
     };
 
     let to = split(ui.get_composer_to().as_str());
@@ -361,10 +371,7 @@ fn aim_composer_identity(ui: &MainWindow, sh: &Shared, email: &str) {
 fn fetch_contacts(sh: &Shared, query: &str) {
     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
         let limit = if query.trim().is_empty() { 500 } else { 50 };
-        let _ = etx.send(engine::EngineCmd::FetchContacts {
-            query: query.to_string(),
-            limit,
-        });
+        let _ = etx.send(engine::EngineCmd::FetchContacts { query: query.to_string(), limit });
     }
 }
 
@@ -406,9 +413,8 @@ fn contact_body_from_ui(ui: &MainWindow) -> serde_json::Value {
 fn fetch_tasks(ui: &MainWindow, sh: &Shared) {
     ui.set_tasks_loading(true);
     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
-        let _ = etx.send(engine::EngineCmd::FetchTasks {
-            include_completed: ui.get_tasks_show_done(),
-        });
+        let _ =
+            etx.send(engine::EngineCmd::FetchTasks { include_completed: ui.get_tasks_show_done() });
     }
 }
 
@@ -575,11 +581,10 @@ fn cache_db_path() -> Option<std::path::PathBuf> {
     }
     #[cfg(target_os = "linux")]
     {
-        let base = std::env::var("XDG_DATA_HOME").ok()
-            .map(std::path::PathBuf::from)
-            .or_else(|| std::env::var("HOME").ok().map(|h|
-                std::path::PathBuf::from(h).join(".local/share")
-            ))?;
+        let base =
+            std::env::var("XDG_DATA_HOME").ok().map(std::path::PathBuf::from).or_else(|| {
+                std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".local/share"))
+            })?;
         return Some(base.join("ru.letotam.ddmail").join("cache.db"));
     }
     #[allow(unreachable_code)]
@@ -650,11 +655,7 @@ fn displays_from(convs: &[Conversation], ident_colors: &HashMap<String, String>)
 /// Effective account key диалога: загрузка из кэша на старте оставляет
 /// account_key пустым — это первичный аккаунт.
 fn eff_account(fallback: &str, c: &Conversation) -> String {
-    if c.account_key.is_empty() {
-        fallback.to_string()
-    } else {
-        c.account_key.clone()
-    }
+    if c.account_key.is_empty() { fallback.to_string() } else { c.account_key.clone() }
 }
 
 fn conv_merge_key(fallback: &str, c: &Conversation) -> merges::MergeKey {
@@ -671,11 +672,7 @@ fn conv_merge_key(fallback: &str, c: &Conversation) -> merges::MergeKey {
 /// Поверх склеек ложатся пользовательские имена (`Merges::names`): они
 /// меняют только `label` в этом виде — сырой список, кэш и письма их не
 /// видят (контракт §4, «Переименование диалога»).
-fn apply_merges(
-    raw: &[Conversation],
-    m: &merges::Merges,
-    fallback: &str,
-) -> Vec<Conversation> {
+fn apply_merges(raw: &[Conversation], m: &merges::Merges, fallback: &str) -> Vec<Conversation> {
     let mut out = merge_groups(raw, m, fallback);
     if !m.names.is_empty() {
         for c in &mut out {
@@ -687,11 +684,7 @@ fn apply_merges(
     out
 }
 
-fn merge_groups(
-    raw: &[Conversation],
-    m: &merges::Merges,
-    fallback: &str,
-) -> Vec<Conversation> {
+fn merge_groups(raw: &[Conversation], m: &merges::Merges, fallback: &str) -> Vec<Conversation> {
     if m.groups.is_empty() {
         return raw.to_vec();
     }
@@ -739,11 +732,8 @@ fn merge_groups(
                     })
                     .copied()
                     .unwrap_or(idxs[0]);
-                let newest = idxs
-                    .iter()
-                    .max_by_key(|&&i| raw[i].last_date_ts)
-                    .copied()
-                    .unwrap_or(idxs[0]);
+                let newest =
+                    idxs.iter().max_by_key(|&&i| raw[i].last_date_ts).copied().unwrap_or(idxs[0]);
                 let mut combined = raw[primary].clone();
                 combined.merged = true;
                 combined.last_date = raw[newest].last_date.clone();
@@ -805,9 +795,13 @@ fn parse_email_like(q: &str) -> Option<String> {
     let at = s.find('@')?;
     let local = &s[..at];
     let domain = &s[at + 1..];
-    if local.is_empty() || domain.is_empty() { return None; }
+    if local.is_empty() || domain.is_empty() {
+        return None;
+    }
     let dot = domain.find('.')?;
-    if dot == 0 || dot == domain.len() - 1 { return None; }
+    if dot == 0 || dot == domain.len() - 1 {
+        return None;
+    }
     Some(s.to_lowercase())
 }
 
@@ -815,7 +809,9 @@ fn parse_email_like(q: &str) -> Option<String> {
 /// message rows — matches svelte's formatDateShort behaviour closely
 /// enough for the right-aligned date hint.
 fn fmt_short_date(ts_ms: i64) -> String {
-    if ts_ms <= 0 { return String::new(); }
+    if ts_ms <= 0 {
+        return String::new();
+    }
     use chrono::{DateTime, Datelike, Local, TimeZone, Timelike};
     let dt: DateTime<Local> = match Local.timestamp_millis_opt(ts_ms).single() {
         Some(d) => d,
@@ -853,17 +849,18 @@ fn fmt_bubble_time(ts_secs: i64) -> String {
     }
     format!(
         "{:02}.{:02}.{:02} {:02}:{:02}",
-        dt.day(), dt.month(), dt.year() % 100, dt.hour(), dt.minute()
+        dt.day(),
+        dt.month(),
+        dt.year() % 100,
+        dt.hour(),
+        dt.minute()
     )
 }
 
 fn contact_items(contacts: &[Contact]) -> Vec<ContactItem> {
     contacts
         .iter()
-        .map(|c| ContactItem {
-            name: c.name.clone().into(),
-            email: c.email.clone().into(),
-        })
+        .map(|c| ContactItem { name: c.name.clone().into(), email: c.email.clone().into() })
         .collect()
 }
 
@@ -893,11 +890,7 @@ fn local_search_contacts(
             continue;
         }
         let email = c.emails.first().cloned().unwrap_or_default();
-        let key = if email.is_empty() {
-            c.full_name.to_lowercase()
-        } else {
-            email.to_lowercase()
-        };
+        let key = if email.is_empty() { c.full_name.to_lowercase() } else { email.to_lowercase() };
         if key.is_empty() || !seen.insert(key) {
             continue;
         }
@@ -1102,12 +1095,7 @@ fn refresh_composer_hints(ui: &MainWindow, sh: &Shared) {
             }
         };
         push(body.from_addr.to_lowercase());
-        let is_group = sh
-            .convs
-            .borrow()
-            .get(sh.current.get())
-            .map(|c| c.is_group)
-            .unwrap_or(false);
+        let is_group = sh.convs.borrow().get(sh.current.get()).map(|c| c.is_group).unwrap_or(false);
         if is_group {
             for a in body.to.iter().chain(body.cc.iter()) {
                 push(extract_addr(a));
@@ -1125,12 +1113,8 @@ fn refresh_composer_hints(ui: &MainWindow, sh: &Shared) {
         ui.set_composer_subject_auto("".into());
         return;
     };
-    let to: Vec<String> = c
-        .counterparts
-        .iter()
-        .map(|cp| cp.addr.clone())
-        .filter(|a| !a.is_empty())
-        .collect();
+    let to: Vec<String> =
+        c.counterparts.iter().map(|cp| cp.addr.clone()).filter(|a| !a.is_empty()).collect();
     let cached = sh.current_bodies.borrow();
     let base_subject = cached
         .iter()
@@ -1143,11 +1127,8 @@ fn refresh_composer_hints(ui: &MainWindow, sh: &Shared) {
 }
 
 fn enter_reply_mode(sh: &Shared, ui: &MainWindow, body: MessageBody) {
-    let display_from = if body.from.is_empty() {
-        body.from_addr.clone()
-    } else {
-        body.from.clone()
-    };
+    let display_from =
+        if body.from.is_empty() { body.from_addr.clone() } else { body.from.clone() };
     let preview = body_preview(&body);
     *sh.pending_reply.borrow_mut() = Some(body);
     ui.set_reply_ribbon_from(display_from.into());
@@ -1186,11 +1167,8 @@ fn exit_reply_mode(sh: &Shared, ui: &MainWindow) {
 /// separator and its attachments are re-attached as-is (engine-side).
 fn enter_forward_mode(sh: &Shared, ui: &MainWindow, body: MessageBody) {
     exit_reply_mode(sh, ui); // a forward replaces any staged reply
-    let display_from = if body.from.is_empty() {
-        body.from_addr.clone()
-    } else {
-        body.from.clone()
-    };
+    let display_from =
+        if body.from.is_empty() { body.from_addr.clone() } else { body.from.clone() };
     let subj_lc = body.subject.to_lowercase();
     let subject = if subj_lc.starts_with("fwd:") || subj_lc.starts_with("fw:") {
         body.subject.clone()
@@ -1229,11 +1207,7 @@ fn enter_compose_mode(sh: &Shared, ui: &MainWindow, email: &str) {
     // open conversation must not resurface when a send stub re-renders it.
     sh.current_bodies.borrow_mut().clear();
     sh.pending_sends.borrow_mut().clear();
-    let initial = email
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_default();
+    let initial = email.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
     ui.set_active_name(email.clone().into());
     ui.set_active_initials(initial.into());
     ui.set_active_color(slint::Brush::SolidColor(hex("#10b981")));
@@ -1297,7 +1271,6 @@ fn message_hits(envs: &[MessageEnvelope]) -> Vec<MessageHit> {
         .collect()
 }
 
-
 /// Bubble wrapper + email-HTML normalization (tames ugly notification emails).
 /// External-resource blocking is applied here per the current `Policy` —
 /// images / stylesheets / `url(...)` references to non-allowlisted hosts
@@ -1325,7 +1298,12 @@ fn build_body_html(b: &MessageBody, policy: &policy::Policy, caption: bool) -> S
     bubble_template_wide(
         b.is_outgoing,
         &fmt_bubble_time(b.date_ts),
-        &format!("{}{inner}{}{}", subject_caption(b, caption), attachment_chips(b), empty_body_note(b)),
+        &format!(
+            "{}{inner}{}{}",
+            subject_caption(b, caption),
+            attachment_chips(b),
+            empty_body_note(b)
+        ),
         wide,
     )
 }
@@ -1378,7 +1356,12 @@ fn build_text_only_html(b: &MessageBody, caption: bool) -> String {
     bubble_template(
         b.is_outgoing,
         &fmt_bubble_time(b.date_ts),
-        &format!("{}{inner}{}{}", subject_caption(b, caption), attachment_chips(b), empty_body_note(b)),
+        &format!(
+            "{}{inner}{}{}",
+            subject_caption(b, caption),
+            attachment_chips(b),
+            empty_body_note(b)
+        ),
     )
 }
 
@@ -1589,11 +1572,19 @@ enum Job {
         /// адресатами (контракт §4, «Склеенный диалог»).
         merged: bool,
     },
-    HitTest { row: usize, x: f32, y: f32 },
+    HitTest {
+        row: usize,
+        x: f32,
+        y: f32,
+    },
     /// Render the source/headers viewer text to a bitmap + word rects, so the
     /// modal reuses the fast bubble selection layer instead of Slint's
     /// (slow-on-large-text) TextInput.
-    RenderSource { text: String, width: u32, scale: f32 },
+    RenderSource {
+        text: String,
+        width: u32,
+        scale: f32,
+    },
 }
 
 /// Everything the render worker knows about a row besides its bitmap —
@@ -1962,8 +1953,8 @@ fn hicon_from_png(size: u32) -> Option<windows::Win32::UI::WindowsAndMessaging::
     use image::imageops::FilterType;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Graphics::Gdi::{
-        CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-        DIB_RGB_COLORS, HDC,
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS,
+        DeleteObject, HDC,
     };
     use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO};
 
@@ -1998,7 +1989,9 @@ fn hicon_from_png(size: u32) -> Option<windows::Win32::UI::WindowsAndMessaging::
         .ok()?
     };
     if bits.is_null() {
-        unsafe { let _ = DeleteObject(hbm_color); }
+        unsafe {
+            let _ = DeleteObject(hbm_color);
+        }
         return None;
     }
     // RGBA → BGRA (what a 32bpp DIB expects).
@@ -2047,12 +2040,7 @@ fn set_window_icon(ui: &MainWindow) -> bool {
     for (size, which) in [(32u32, ICON_BIG), (16u32, ICON_SMALL)] {
         if let Some(hicon) = hicon_from_png(size) {
             unsafe {
-                SendMessageW(
-                    hwnd,
-                    WM_SETICON,
-                    WPARAM(which),
-                    LPARAM(hicon.0 as isize),
-                );
+                SendMessageW(hwnd, WM_SETICON, WPARAM(which), LPARAM(hicon.0 as isize));
             }
         }
     }
@@ -2133,13 +2121,12 @@ fn raise_window(ui: &MainWindow) {
     {
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         use windows::Win32::UI::WindowsAndMessaging::{
-            IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE,
+            IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindow,
         };
         let handle = ui.window().window_handle();
         if let Ok(wh) = handle.window_handle() {
             if let RawWindowHandle::Win32(h) = wh.as_raw() {
-                let hwnd =
-                    windows::Win32::Foundation::HWND(h.hwnd.get() as *mut core::ffi::c_void);
+                let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut core::ffi::c_void);
                 unsafe {
                     if IsIconic(hwnd).as_bool() {
                         let _ = ShowWindow(hwnd, SW_RESTORE);
@@ -2174,8 +2161,7 @@ fn activate_window_x11(window: std::os::raw::c_ulong) {
         if dpy.is_null() {
             return;
         }
-        let net_active =
-            xlib::XInternAtom(dpy, c"_NET_ACTIVE_WINDOW".as_ptr(), xlib::False);
+        let net_active = xlib::XInternAtom(dpy, c"_NET_ACTIVE_WINDOW".as_ptr(), xlib::False);
         let root = xlib::XDefaultRootWindow(dpy);
 
         let mut data = xlib::ClientMessageData::new();
@@ -2274,11 +2260,8 @@ static UI_WEAK: std::sync::OnceLock<slint::Weak<MainWindow>> = std::sync::OnceLo
 /// пересборка склеенного вида (merge/unmerge) воскресила бы уже погашенный
 /// unread-бейдж до прихода серверной дельты.
 fn mark_raw_seen(sh: &Shared, conv_key: &merges::MergeKey, conv_merged: bool) {
-    let keys: Vec<merges::MergeKey> = if conv_merged {
-        sh.merges.borrow().members_of(conv_key)
-    } else {
-        vec![conv_key.clone()]
-    };
+    let keys: Vec<merges::MergeKey> =
+        if conv_merged { sh.merges.borrow().members_of(conv_key) } else { vec![conv_key.clone()] };
     let mut raw = sh.raw_convs.borrow_mut();
     for c in raw.iter_mut() {
         if keys.contains(&conv_merge_key(&sh.key, c)) {
@@ -2353,11 +2336,7 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
     }
     // Which account this conversation belongs to (empty → primary). Drives the
     // cache namespace and every addressed command issued while it's open.
-    let akey = if c.account_key.is_empty() {
-        sh.key.clone()
-    } else {
-        c.account_key.clone()
-    };
+    let akey = if c.account_key.is_empty() { sh.key.clone() } else { c.account_key.clone() };
     sh.cur_account_key.replace(akey.clone());
     // Смена контекста — сбрасываем закреплённый ручной выбор отправителя:
     // новая беседа по умолчанию отвечает со своей received_by identity, и
@@ -2384,8 +2363,7 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
     // scroll (first unread at top; none unread → scroll to the end).
     let unread: Vec<MessageRef> = c.messages.iter().filter(|m| !m.seen).cloned().collect();
     let had_unread = !unread.is_empty();
-    *sh.open_unread.borrow_mut() =
-        unread.iter().map(|m| (m.folder.clone(), m.uid)).collect();
+    *sh.open_unread.borrow_mut() = unread.iter().map(|m| (m.folder.clone(), m.uid)).collect();
     sh.scroll_pending.set(true);
 
     if let Some(cache) = &sh.cache {
@@ -2394,8 +2372,15 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
         let bodies = cache.load_message_bodies(key, &c.messages).unwrap_or_default();
         let load_ms = t_load_start.elapsed().as_millis();
         if !bodies.is_empty() {
-            *sh.current_msgs.borrow_mut() =
-                bodies.iter().map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid, message_id: b.message_id.clone(), seen: true }).collect();
+            *sh.current_msgs.borrow_mut() = bodies
+                .iter()
+                .map(|b| MessageRef {
+                    folder: b.folder.clone(),
+                    uid: b.uid,
+                    message_id: b.message_id.clone(),
+                    seen: true,
+                })
+                .collect();
             *sh.current_bodies.borrow_mut() = bodies.clone();
             println!(
                 "[perf] open_conversation idx={idx} label={conv_label:?} \
@@ -2426,7 +2411,12 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
             if !fetch_refs.iter().any(|m| m.uid == u) {
                 // Toast target identified only by (folder, uid); no RFC
                 // Message-ID here — server falls back to uid for this one.
-                fetch_refs.push(MessageRef { folder: f, uid: u, message_id: String::new(), seen: false });
+                fetch_refs.push(MessageRef {
+                    folder: f,
+                    uid: u,
+                    message_id: String::new(),
+                    seen: false,
+                });
             }
         }
         let _ = etx.send(engine::EngineCmd::FetchMessages {
@@ -2450,17 +2440,13 @@ fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
     // delta refetch a second later, but the sidebar must not keep showing
     // an unread pill for the conversation the user is literally reading.
     if had_unread {
-        let key_flag = sh
-            .convs
-            .borrow_mut()
-            .get_mut(idx)
-            .map(|c| {
-                c.unread_count = 0;
-                for m in c.messages.iter_mut() {
-                    m.seen = true;
-                }
-                (conv_merge_key(&sh.key, c), c.merged)
-            });
+        let key_flag = sh.convs.borrow_mut().get_mut(idx).map(|c| {
+            c.unread_count = 0;
+            for m in c.messages.iter_mut() {
+                m.seen = true;
+            }
+            (conv_merge_key(&sh.key, c), c.merged)
+        });
         if let Some((k, merged)) = key_flag {
             mark_raw_seen(sh, &k, merged);
         }
@@ -2559,8 +2545,8 @@ fn bare_host_to_url(cand: &str, whole_field: bool) -> Option<String> {
     }
     const FILE_EXT: &[&str] = &[
         "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pdf", "txt", "csv", "rtf", "odt", "ods",
-        "zip", "rar", "png", "jpg", "jpeg", "gif", "bmp", "svg", "mp3", "mp4", "avi", "mov",
-        "exe", "msi", "dll", "ics", "eml", "msg", "sig", "json", "xml", "html", "htm",
+        "zip", "rar", "png", "jpg", "jpeg", "gif", "bmp", "svg", "mp3", "mp4", "avi", "mov", "exe",
+        "msi", "dll", "ics", "eml", "msg", "sig", "json", "xml", "html", "htm",
     ];
     if FILE_EXT.contains(&tld.to_ascii_lowercase().as_str()) {
         return None;
@@ -2687,7 +2673,11 @@ fn line_bounds(runs: &[render_common::TextRun], i: usize) -> (usize, usize) {
 /// Merged highlight rects for a run range: consecutive selected words on the
 /// same visual line merge into one rect. Pure — shared by the bubble rows and
 /// the source-viewer modal.
-fn selection_rects_for(runs: &[render_common::TextRun], anchor: usize, head: usize) -> Vec<SelRect> {
+fn selection_rects_for(
+    runs: &[render_common::TextRun],
+    anchor: usize,
+    head: usize,
+) -> Vec<SelRect> {
     let mut rects: Vec<SelRect> = Vec::new();
     if runs.is_empty() {
         return rects;
@@ -2710,7 +2700,11 @@ fn selection_rects_for(runs: &[render_common::TextRun], anchor: usize, head: usi
 
 /// Selected words joined back into text: spaces within a line, a newline when
 /// the next word starts a new visual line. Pure — shared by rows and modal.
-fn selection_text_for(runs: &[render_common::TextRun], anchor: usize, head: usize) -> Option<String> {
+fn selection_text_for(
+    runs: &[render_common::TextRun],
+    anchor: usize,
+    head: usize,
+) -> Option<String> {
     if runs.is_empty() {
         return None;
     }
@@ -2914,7 +2908,14 @@ fn chat_page(ui: &MainWindow, cmd: i32) {
     ui.set_chat_page_seq(ui.get_chat_page_seq() + 1);
 }
 
-fn rich_key(ui: &MainWindow, sh: &Rc<Shared>, text: &str, ctrl: bool, shift: bool, alt: bool) -> bool {
+fn rich_key(
+    ui: &MainWindow,
+    sh: &Rc<Shared>,
+    text: &str,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+) -> bool {
     use richtext::{Motion, StyleBit};
     use slint::platform::Key;
 
@@ -3090,9 +3091,7 @@ fn rich_key(ui: &MainWindow, sh: &Rc<Shared>, text: &str, ctrl: bool, shift: boo
     if !ctrl
         && !alt
         && !text.is_empty()
-        && text
-            .chars()
-            .all(|c| !c.is_control() && !matches!(c, '\u{F700}'..='\u{F8FF}'))
+        && text.chars().all(|c| !c.is_control() && !matches!(c, '\u{F700}'..='\u{F8FF}'))
     {
         sh.rich.borrow_mut().insert_str(text);
         rich_refresh(ui, sh);
@@ -3215,10 +3214,8 @@ fn take_scroll_target(sh: &Shared, bodies: &[MessageBody], consume: bool) -> Opt
 fn send_render_job(sh: &Shared, bodies: Vec<MessageBody>, scroll_to: Option<i32>) {
     let seq = sh.render_seq.fetch_add(1, Ordering::SeqCst) + 1;
     let overrides = sh.body_view_text.borrow();
-    let modes: Vec<u8> = bodies
-        .iter()
-        .map(|b| u8::from(overrides.contains(&(b.folder.clone(), b.uid))))
-        .collect();
+    let modes: Vec<u8> =
+        bodies.iter().map(|b| u8::from(overrides.contains(&(b.folder.clone(), b.uid)))).collect();
     drop(overrides);
     // Склейка — свойство открытого диалога, а не писем: новое письмо
     // compose-режима ни к какой склейке не относится.
@@ -3400,11 +3397,7 @@ fn sidebar_items(displays: &[Disp], avatars: &HashMap<String, Image>) -> Vec<Con
 /// very top of the sidebar so the user sees "a chat" with the new
 /// recipient before any message has been sent. Telegram does the same.
 fn pending_compose_item(target: &str) -> ConvItem {
-    let initials = target
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_default();
+    let initials = target.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
     ConvItem {
         name: target.to_string().into(),
         preview: "Новое сообщение".into(),
@@ -3477,9 +3470,7 @@ fn week_start_days_today() -> i64 {
     let today = Local::now().date_naive();
     let from_mon = today.weekday().num_days_from_monday() as i64;
     let monday = today - Duration::days(from_mon);
-    monday
-        .signed_duration_since(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
-        .num_days()
+    monday.signed_duration_since(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()).num_days()
 }
 
 /// Same, but for the week containing an arbitrary timestamp — used to
@@ -3492,9 +3483,7 @@ fn week_start_days_for_ms(ms: i64) -> i64 {
         .map(|t| t.date_naive())
         .unwrap_or_else(|| Local::now().date_naive());
     let monday = date - Duration::days(date.weekday().num_days_from_monday() as i64);
-    monday
-        .signed_duration_since(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
-        .num_days()
+    monday.signed_duration_since(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()).num_days()
 }
 
 /// Route a reminder-toast action onto the UI loop. Toast callbacks fire on the
@@ -3577,10 +3566,7 @@ fn handle_reminder_action(
             let mins_until = (occ_ms - now_ms) / 60_000;
             let opts: Vec<SnoozeOpt> = snooze_steps(mins_until)
                 .into_iter()
-                .map(|(value, label)| SnoozeOpt {
-                    value: value.into(),
-                    label: label.into(),
-                })
+                .map(|(value, label)| SnoozeOpt { value: value.into(), label: label.into() })
                 .collect();
             // occ_end recovered from the current calendar view (0 if unknown;
             // user_choice_reminder tolerates it).
@@ -3591,8 +3577,7 @@ fn handle_reminder_action(
                 .find(|e| e.id == event_id)
                 .and_then(|e| e.dtend)
                 .unwrap_or(0);
-            sh.snooze_ctx
-                .replace((event_id, occ_ms, occ_end, toast_id, summary.to_string()));
+            sh.snooze_ctx.replace((event_id, occ_ms, occ_end, toast_id, summary.to_string()));
             ui.set_snooze_summary(summary.into());
             ui.set_snooze_options(slint::ModelRc::new(slint::VecModel::from(opts)));
             ui.set_snooze_visible(true);
@@ -3610,8 +3595,7 @@ fn handle_reminder_action(
             raise_window(ui);
             let jump_week = week_start_days_for_ms(occ_ms);
             sh.calendar_week_start_days.set(jump_week);
-            sh.week_follows_today
-                .set(jump_week == week_start_days_today());
+            sh.week_follows_today.set(jump_week == week_start_days_today());
             sh.pending_open_event.set(event_id);
             sh.pending_open_occ.set(occ_ms);
             *sh.pending_open_summary.borrow_mut() = summary.to_string();
@@ -3673,10 +3657,7 @@ fn assign_overlap_lanes(blocks: &mut [EventBlock], day_count: i32) {
     for day in 0..day_count {
         let mut idx: Vec<usize> = (0..blocks.len()).filter(|&i| blocks[i].day == day).collect();
         idx.sort_by(|&a, &b| {
-            blocks[a]
-                .top
-                .partial_cmp(&blocks[b].top)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            blocks[a].top.partial_cmp(&blocks[b].top).unwrap_or(std::cmp::Ordering::Equal)
         });
         let mut cluster: Vec<usize> = Vec::new();
         let mut cluster_end = f32::MIN;
@@ -3696,10 +3677,7 @@ fn assign_overlap_lanes(blocks: &mut [EventBlock], day_count: i32) {
 /// the local timezone genuinely has no midnight that day (DST gap).
 fn local_midnight_ms(date: chrono::NaiveDate) -> Option<i64> {
     use chrono::{Local, TimeZone};
-    Local
-        .from_local_datetime(&date.and_hms_opt(0, 0, 0)?)
-        .single()
-        .map(|d| d.timestamp_millis())
+    Local.from_local_datetime(&date.and_hms_opt(0, 0, 0)?).single().map(|d| d.timestamp_millis())
 }
 
 /// Compute the [from_ms, to_ms) range covering the displayed week
@@ -3708,8 +3686,8 @@ fn local_midnight_ms(date: chrono::NaiveDate) -> Option<i64> {
 fn week_range_ms(week_start_days: i64, day_count: i32) -> (i64, i64) {
     use chrono::Duration;
     let day_ms: i64 = 24 * 60 * 60 * 1000;
-    let monday = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()
-        + Duration::days(week_start_days);
+    let monday =
+        chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap() + Duration::days(week_start_days);
     let from = local_midnight_ms(monday).unwrap_or(week_start_days * day_ms);
     let to = from + day_count as i64 * day_ms;
     (from, to)
@@ -3759,10 +3737,7 @@ fn apply_reminder_visibility(sh: &Shared, cal_id: i64, visible: bool) {
         for id in &hit {
             toast_window::close_for_event(*id);
         }
-        println!(
-            "[cal] календарь {cal_id} выключен — снято напоминаний по {} событиям",
-            hit.len()
-        );
+        println!("[cal] календарь {cal_id} выключен — снято напоминаний по {} событиям", hit.len());
     }
 }
 
@@ -3939,26 +3914,51 @@ mod url_handler_tests {
         // уборка в конце не случается, когда падает assert выше, и каталог
         // остаётся в `/tmp` ровно в том прогоне, после которого в него полезут
         // разбираться.
-        let base = tempfile::Builder::new()
-            .prefix("ddmail-urlh-")
-            .tempdir()
-            .expect("tempdir");
+        let base = tempfile::Builder::new().prefix("ddmail-urlh-").tempdir().expect("tempdir");
         let user = base.path().join("user");
         let sys = base.path().join("sys");
         std::fs::create_dir_all(&user).unwrap();
         std::fs::create_dir_all(&sys).unwrap();
 
-        write(&user, "chrome.desktop", "[Desktop Entry]\nType=Application\nName=Chrome\nExec=chrome %U\nMimeType=text/html;x-scheme-handler/https;\n");
+        write(
+            &user,
+            "chrome.desktop",
+            "[Desktop Entry]\nType=Application\nName=Chrome\nExec=chrome %U\nMimeType=text/html;x-scheme-handler/https;\n",
+        );
         // Тот же браузер в системном каталоге — в меню должен попасть один раз.
-        write(&sys, "chrome.desktop", "[Desktop Entry]\nType=Application\nName=Chrome\nExec=/usr/bin/chrome %U\nMimeType=x-scheme-handler/https;\n");
-        write(&sys, "yandex.desktop", "[Desktop Entry]\nType=Application\nName=Yandex\nName[ru]=Яндекс Браузер\nExec=yb %U\nMimeType=x-scheme-handler/http;\n");
+        write(
+            &sys,
+            "chrome.desktop",
+            "[Desktop Entry]\nType=Application\nName=Chrome\nExec=/usr/bin/chrome %U\nMimeType=x-scheme-handler/https;\n",
+        );
+        write(
+            &sys,
+            "yandex.desktop",
+            "[Desktop Entry]\nType=Application\nName=Yandex\nName[ru]=Яндекс Браузер\nExec=yb %U\nMimeType=x-scheme-handler/http;\n",
+        );
         // Не обработчик ссылок.
-        write(&sys, "gimp.desktop", "[Desktop Entry]\nType=Application\nName=GIMP\nExec=gimp %F\nMimeType=image/png;\n");
+        write(
+            &sys,
+            "gimp.desktop",
+            "[Desktop Entry]\nType=Application\nName=GIMP\nExec=gimp %F\nMimeType=image/png;\n",
+        );
         // Скрытые и терминальные не показываем.
-        write(&sys, "hidden.desktop", "[Desktop Entry]\nType=Application\nName=Hidden\nNoDisplay=true\nMimeType=x-scheme-handler/https;\n");
-        write(&sys, "lynx.desktop", "[Desktop Entry]\nType=Application\nName=Lynx\nTerminal=true\nMimeType=x-scheme-handler/http;\n");
+        write(
+            &sys,
+            "hidden.desktop",
+            "[Desktop Entry]\nType=Application\nName=Hidden\nNoDisplay=true\nMimeType=x-scheme-handler/https;\n",
+        );
+        write(
+            &sys,
+            "lynx.desktop",
+            "[Desktop Entry]\nType=Application\nName=Lynx\nTerminal=true\nMimeType=x-scheme-handler/http;\n",
+        );
         // Name из секции [Desktop Action] не должен подменять основной.
-        write(&sys, "acts.desktop", "[Desktop Entry]\nType=Application\nName=WithActions\nMimeType=x-scheme-handler/https;\n\n[Desktop Action new]\nName=Новое окно\n");
+        write(
+            &sys,
+            "acts.desktop",
+            "[Desktop Entry]\nType=Application\nName=WithActions\nMimeType=x-scheme-handler/https;\n\n[Desktop Action new]\nName=Новое окно\n",
+        );
 
         let dirs = [user.to_string_lossy().to_string(), sys.to_string_lossy().to_string()];
         let apps = url_handler_apps_in(&dirs);
@@ -4133,11 +4133,9 @@ mod bubble_css_tests {
         // пузыря, поэтому поиск по всему документу всегда находил бы его.
         let markup = |doc: &str| doc[doc.find("</style>").expect("есть <style>")..].to_string();
 
-        let html = build_body_html(&html_body("<table><tr><td>рассылка</td></tr></table>"), &p, false);
-        assert!(
-            markup(&html).contains("ddm-wide"),
-            "HTML-письмо должно получить широкий пузырь"
-        );
+        let html =
+            build_body_html(&html_body("<table><tr><td>рассылка</td></tr></table>"), &p, false);
+        assert!(markup(&html).contains("ddm-wide"), "HTML-письмо должно получить широкий пузырь");
 
         let mut plain = html_body("");
         plain.html = None;
@@ -4163,7 +4161,13 @@ mod conv_search_tests {
     use super::{conv_hit_addrs, conv_meta_parts, local_search_convs, recipients_tip};
     use ddmail_core::types::{ContactInfo, Conversation, MessageBody, MessageRef};
 
-    fn conv(id: &str, label: &str, addrs: &[&str], last_subject: &str, refs: &[u32]) -> Conversation {
+    fn conv(
+        id: &str,
+        label: &str,
+        addrs: &[&str],
+        last_subject: &str,
+        refs: &[u32],
+    ) -> Conversation {
         Conversation {
             id: id.into(),
             label: label.into(),
@@ -4181,7 +4185,12 @@ mod conv_search_tests {
             total_count: refs.len() as u32,
             messages: refs
                 .iter()
-                .map(|&uid| MessageRef { folder: "INBOX".into(), uid, message_id: String::new(), seen: true })
+                .map(|&uid| MessageRef {
+                    folder: "INBOX".into(),
+                    uid,
+                    message_id: String::new(),
+                    seen: true,
+                })
                 .collect(),
             draft: None,
             account_key: String::new(),
@@ -4192,7 +4201,13 @@ mod conv_search_tests {
     fn sample() -> Vec<Conversation> {
         vec![
             conv("c0", "Иван Петров", &["ivan@example.ru"], "Счёт за сентябрь", &[1]),
-            conv("c1", "", &["anna@lizing.example.ru", "olga@lizing.example.ru"], "RE: выкуп", &[2, 3]),
+            conv(
+                "c1",
+                "",
+                &["anna@lizing.example.ru", "olga@lizing.example.ru"],
+                "RE: выкуп",
+                &[2, 3],
+            ),
             conv("c2", "Бухгалтерия", &["buh@example.ru"], "Акт сверки", &[4]),
         ]
     }
@@ -4241,7 +4256,9 @@ mod conv_search_tests {
     fn hit_addresses_are_excluded_from_contacts() {
         let hits = local_search_convs(&sample(), &[], "acc", "выкуп");
         let addrs = conv_hit_addrs(&hits);
-        assert!(addrs.contains("anna@lizing.example.ru") && addrs.contains("olga@lizing.example.ru"));
+        assert!(
+            addrs.contains("anna@lizing.example.ru") && addrs.contains("olga@lizing.example.ru")
+        );
     }
 
     #[test]
@@ -4250,7 +4267,10 @@ mod conv_search_tests {
         let parts = conv_meta_parts(&c);
         let clickable: Vec<&str> =
             parts.iter().filter(|p| !p.addr.is_empty()).map(|p| p.addr.as_str()).collect();
-        assert_eq!(clickable, vec!["anna@lizing.example.ru", "olga@lizing.example.ru", "me@example.ru"]);
+        assert_eq!(
+            clickable,
+            vec!["anna@lizing.example.ru", "olga@lizing.example.ru", "me@example.ru"]
+        );
         // Разделители не кликабельны и видны как текст.
         let text: String = parts.iter().map(|p| p.text.as_str()).collect();
         assert_eq!(text, "anna@lizing.example.ru, olga@lizing.example.ru → me@example.ru");
@@ -4414,7 +4434,7 @@ mod event_link_tests {
 
 #[cfg(test)]
 mod click_target_tests {
-    use super::{click_target, LinkOrigin};
+    use super::{LinkOrigin, click_target};
 
     /// Тот самый баг: href кнопки уходил в браузер через `cmd /C start`, и `&`
     /// обрывал командную строку — сервер получал ссылку без токена и отвечал
@@ -4526,7 +4546,7 @@ mod att_url_tests {
 
 #[cfg(test)]
 mod grid_layout_tests {
-    use super::{compute_horizontal, compute_vertical, MIN_COL_W, MIN_HOUR_H};
+    use super::{MIN_COL_W, MIN_HOUR_H, compute_horizontal, compute_vertical};
 
     #[test]
     fn horizontal_seven_then_five_then_scroll() {
@@ -4590,18 +4610,14 @@ mod grid_layout_tests {
 
 fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
     use chrono::{Datelike, Duration, NaiveDate};
-    let (day_count, col_width) =
-        compute_horizontal(sh.grid_canvas_w.get(), sh.manual_col_w.get());
+    let (day_count, col_width) = compute_horizontal(sh.grid_canvas_w.get(), sh.manual_col_w.get());
     ui.set_col_width(col_width);
     // Dash segments per quarter-hour line (24px period), capped so a very
     // wide manual zoom can't spawn an absurd number of rects.
-    let dash_count = ((day_count as f32 * col_width) / 24.0)
-        .floor()
-        .clamp(0.0, 160.0) as i32;
+    let dash_count = ((day_count as f32 * col_width) / 24.0).floor().clamp(0.0, 160.0) as i32;
     ui.set_dash_count(dash_count);
     let week_days = sh.calendar_week_start_days.get();
-    let monday = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()
-        + Duration::days(week_days);
+    let monday = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap() + Duration::days(week_days);
     let headers: Vec<slint::SharedString> = (0..day_count as i64)
         .map(|i| {
             let d = monday + Duration::days(i);
@@ -4617,7 +4633,8 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
     // local time drives the now-line.
     {
         let now = chrono::Local::now();
-        let today_days = (now.date_naive() - NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()).num_days();
+        let today_days =
+            (now.date_naive() - NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()).num_days();
         let col = today_days - week_days;
         let in_view = (0..day_count as i64).contains(&col);
         ui.set_today_col(if in_view { col as i32 } else { -1 });
@@ -4626,8 +4643,18 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
     }
     let title = {
         const MONTHS: [&str; 12] = [
-            "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
-            "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+            "Январь",
+            "Февраль",
+            "Март",
+            "Апрель",
+            "Май",
+            "Июнь",
+            "Июль",
+            "Август",
+            "Сентябрь",
+            "Октябрь",
+            "Ноябрь",
+            "Декабрь",
         ];
         format!("{} {}", MONTHS[(monday.month() - 1) as usize], monday.year())
     };
@@ -4720,15 +4747,11 @@ fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
                 continue;
             }
             let color = color_for(e.calendar_id);
-            let writable = cals
-                .iter()
-                .find(|c| c.id == e.calendar_id)
-                .map(|c| c.can_write)
-                .unwrap_or(false);
+            let writable =
+                cals.iter().find(|c| c.id == e.calendar_id).map(|c| c.can_write).unwrap_or(false);
             let att_count = e.attendees.len() as i32;
             let tentative = att_count >= 2
-                && e
-                    .attendees
+                && e.attendees
                     .iter()
                     .find(|a| {
                         let lc = a.email.to_lowercase();
@@ -4965,13 +4988,7 @@ fn dt_parts(ms: i64) -> (i32, i32, i32, i32, i32) {
         .timestamp_millis_opt(ms)
         .single()
         .unwrap_or_else(|| Local.timestamp_millis_opt(0).unwrap());
-    (
-        d.year(),
-        d.month() as i32,
-        d.day() as i32,
-        d.hour() as i32,
-        d.minute() as i32,
-    )
+    (d.year(), d.month() as i32, d.day() as i32, d.hour() as i32, d.minute() as i32)
 }
 
 /// (year, month, day, hour, minute) из пикера → ms в локальной зоне. Для
@@ -4980,8 +4997,8 @@ fn dt_parts(ms: i64) -> (i32, i32, i32, i32, i32) {
 fn parts_to_ms(y: i32, mo: i32, d: i32, h: i32, mi: i32, all_day: bool) -> Option<i64> {
     use chrono::{Local, NaiveDate, TimeZone};
     let (h, mi) = if all_day { (0, 0) } else { (h, mi) };
-    let naive = NaiveDate::from_ymd_opt(y, mo as u32, d as u32)?
-        .and_hms_opt(h as u32, mi as u32, 0)?;
+    let naive =
+        NaiveDate::from_ymd_opt(y, mo as u32, d as u32)?.and_hms_opt(h as u32, mi as u32, 0)?;
     Local.from_local_datetime(&naive).single().map(|x| x.timestamp_millis())
 }
 
@@ -5122,21 +5139,15 @@ fn partstat_dot(partstat: &str) -> slint::Color {
 
 /// "Имя <email>" when a display name exists, plain email otherwise.
 fn person_label(name: &str, email: &str) -> String {
-    if name.trim().is_empty() {
-        email.to_string()
-    } else {
-        format!("{} <{}>", name.trim(), email)
-    }
+    if name.trim().is_empty() { email.to_string() } else { format!("{} <{}>", name.trim(), email) }
 }
 
 /// RRULE → короткая русская метка. Only FREQ/INTERVAL are surfaced — the
 /// point is "это повторяющееся событие", not a full RFC 5545 rendering.
 fn humanize_rrule(rrule: &str) -> String {
     let up = rrule.to_uppercase();
-    let get = |k: &str| {
-        up.split(&[';', ':'][..])
-            .find_map(|p| p.strip_prefix(k).map(|v| v.to_string()))
-    };
+    let get =
+        |k: &str| up.split(&[';', ':'][..]).find_map(|p| p.strip_prefix(k).map(|v| v.to_string()));
     let interval: u32 = get("INTERVAL=").and_then(|v| v.parse().ok()).unwrap_or(1);
     let (each, unit) = match get("FREQ=").as_deref() {
         Some("DAILY") => ("Ежедневно", "дн."),
@@ -5145,11 +5156,7 @@ fn humanize_rrule(rrule: &str) -> String {
         Some("YEARLY") => ("Ежегодно", "г."),
         _ => return "Повторяется".to_string(),
     };
-    if interval > 1 {
-        format!("Каждые {interval} {unit}")
-    } else {
-        each.to_string()
-    }
+    if interval > 1 { format!("Каждые {interval} {unit}") } else { each.to_string() }
 }
 
 /// Minutes-before-start → "N мин" / "N ч" / "N дн".
@@ -5208,11 +5215,7 @@ fn open_edit_form(ui: &MainWindow, sh: &Shared, ev: &ddmail_core::types::Desktop
             // Признак кликабельности и сам клик считает одна функция, иначе
             // строка подсвечивалась бы ссылкой, а клик по ней ничего не делал.
             let is_link = click_target(&value, LinkOrigin::Text).is_some();
-            EventExtraItem {
-                label: label.into(),
-                value: value.into(),
-                is_link,
-            }
+            EventExtraItem { label: label.into(), value: value.into(), is_link }
         })
         .collect();
     ui.set_edit_extras(ModelRc::new(VecModel::from(extras)));
@@ -5242,16 +5245,24 @@ fn save_edit_form(ui: &MainWindow, sh: &Shared) {
     ui.set_edit_error("".into());
     let all_day = ui.get_edit_all_day();
     let Some(start) = parts_to_ms(
-        ui.get_edit_s_year(), ui.get_edit_s_month(), ui.get_edit_s_day(),
-        ui.get_edit_s_hour(), ui.get_edit_s_min(), all_day,
+        ui.get_edit_s_year(),
+        ui.get_edit_s_month(),
+        ui.get_edit_s_day(),
+        ui.get_edit_s_hour(),
+        ui.get_edit_s_min(),
+        all_day,
     ) else {
         eprintln!("edit: bad start time");
         ui.set_edit_error("Не удалось разобрать дату начала — проверьте поля «Начало».".into());
         return;
     };
     let end = parts_to_ms(
-        ui.get_edit_e_year(), ui.get_edit_e_month(), ui.get_edit_e_day(),
-        ui.get_edit_e_hour(), ui.get_edit_e_min(), all_day,
+        ui.get_edit_e_year(),
+        ui.get_edit_e_month(),
+        ui.get_edit_e_day(),
+        ui.get_edit_e_hour(),
+        ui.get_edit_e_min(),
+        all_day,
     );
     let title = ui.get_edit_title().to_string();
     let location = ui.get_edit_location().to_string();
@@ -5315,7 +5326,8 @@ fn save_edit_form(ui: &MainWindow, sh: &Shared) {
             let _ = c.purge_event_reminders(editing);
         }
         let ak = sh.event_accounts.borrow().get(&editing).cloned().unwrap_or_default();
-        let _ = etx.send(engine::EngineCmd::PatchEvent { event_id: editing, body, account_key: ak });
+        let _ =
+            etx.send(engine::EngineCmd::PatchEvent { event_id: editing, body, account_key: ak });
     }
     // Карточка остаётся до ответа движка: закроет её подтверждение (Done), а
     // отказ покажет причину прямо здесь. Кнопки на это время гаснут, чтобы
@@ -5349,8 +5361,18 @@ fn apply_calendar_defaults(ui: &MainWindow) {
     let title = {
         use chrono::Datelike as _;
         const MONTHS: [&str; 12] = [
-            "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
-            "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+            "Январь",
+            "Февраль",
+            "Март",
+            "Апрель",
+            "Май",
+            "Июнь",
+            "Июль",
+            "Август",
+            "Сентябрь",
+            "Октябрь",
+            "Ноябрь",
+            "Декабрь",
         ];
         format!("{} {}", MONTHS[(monday.month() - 1) as usize], monday.year())
     };
@@ -5500,9 +5522,10 @@ fn open_add_connection(main_weak: slint::Weak<MainWindow>, prefill: Option<engin
         let weak = lw.as_weak();
         let mw = mw_submit.clone();
         std::thread::spawn(move || {
-            let result = tokio::runtime::Runtime::new()
-                .map_err(|e| format!("tokio: {e}"))
-                .and_then(|rt| rt.block_on(ddmail_core::auth::login(&server, &username, &password)));
+            let result =
+                tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}")).and_then(|rt| {
+                    rt.block_on(ddmail_core::auth::login(&server, &username, &password))
+                });
             match result {
                 Ok(login) => {
                     let cfg = engine::AccountConfig {
@@ -5547,9 +5570,8 @@ fn open_add_connection(main_weak: slint::Weak<MainWindow>, prefill: Option<engin
         let weak = lw.as_weak();
         let mw = mw_google.clone();
         std::thread::spawn(move || {
-            let result = tokio::runtime::Runtime::new()
-                .map_err(|e| format!("tokio: {e}"))
-                .and_then(|rt| {
+            let result =
+                tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}")).and_then(|rt| {
                     rt.block_on(async {
                         let creds = ddmail_core::oauth::load_client_creds()
                             .ok_or("google_oauth.json missing")?;
@@ -5690,11 +5712,7 @@ fn refresh_connections(ui: &MainWindow, shared: &Rc<Shared>) {
         } else {
             format!("{} · {}", a.host, account_mode(a))
         };
-        rows.push(ConnRow {
-            title: title.into(),
-            subtitle: subtitle.into(),
-            needs_login,
-        });
+        rows.push(ConnRow { title: title.into(), subtitle: subtitle.into(), needs_login });
         keys.push(key);
     }
     drop(reauth);
@@ -5730,7 +5748,7 @@ fn shortcut_action(text: &str, held: bool) -> i32 {
         b'I' => 6, // курсив
         b'U' => 7, // подчёркнутый
         b'S' => 8, // зачёркнутый (X занят вырезанием, а резать текст в
-                   // композере нужнее, чем зачёркивать)
+        // композере нужнее, чем зачёркивать)
         _ => 0,
     })
 }
@@ -5832,8 +5850,7 @@ fn virtual_key(ch: u16) -> Option<u8> {
 }
 
 fn main() {
-    let _ = log::set_logger(&STDOUT_LOGGER)
-        .map(|()| log::set_max_level(log::LevelFilter::Info));
+    let _ = log::set_logger(&STDOUT_LOGGER).map(|()| log::set_max_level(log::LevelFilter::Info));
     // Name the rustls crypto backend before anything opens a connection:
     // reqwest, lettre and tungstenite each build their own client config off
     // the process default, and rustls panics rather than guess. See
@@ -5881,11 +5898,9 @@ fn main() {
         let restore_done = restore_done.clone();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = w.upgrade() {
-                ui.window()
-                    .set_size(slint::LogicalSize::new(saved.width, saved.height));
+                ui.window().set_size(slint::LogicalSize::new(saved.width, saved.height));
                 if saved.has_position() {
-                    ui.window()
-                        .set_position(slint::PhysicalPosition::new(saved.x, saved.y));
+                    ui.window().set_position(slint::PhysicalPosition::new(saved.x, saved.y));
                 }
                 if saved.maximized {
                     ui.window().set_maximized(true);
@@ -5923,8 +5938,7 @@ fn main() {
     // Last *normal* (un-maximized) geometry — seeded from the restored state so
     // that, while maximized, we keep persisting a sane un-maximize target.
     let last_normal = std::cell::Cell::new(saved);
-    let last_written =
-        std::cell::Cell::new(None::<(i32, i32, u32, u32, f32, bool)>);
+    let last_written = std::cell::Cell::new(None::<(i32, i32, u32, u32, f32, bool)>);
     let restore_done_saver = restore_done.clone();
     // Advance the calendar now-line every minute. The full calendar re-render
     // sets now-hour too (and today-col), so this only nudges the vertical
@@ -6076,8 +6090,15 @@ fn main() {
             // result across to the UI without doing any more memcpy work
             // on the hot path. UI-thread cost shrinks to just wrapping
             // each buffer in an `Image`.
-            let mut body_cache: HashMap<(String, u32, u32, u64, u8, u64),
-                (SharedPixelBuffer<Rgba8Pixel>, f32, Vec<render_common::LinkRect>, Vec<render_common::TextRun>)> = HashMap::new();
+            let mut body_cache: HashMap<
+                (String, u32, u32, u64, u8, u64),
+                (
+                    SharedPixelBuffer<Rgba8Pixel>,
+                    f32,
+                    Vec<render_common::LinkRect>,
+                    Vec<render_common::TextRun>,
+                ),
+            > = HashMap::new();
             // FIFO insertion order for the RAM cache: bitmaps are megabytes
             // each, so cap the entry count and drop the oldest (the disk
             // layer below still has them — eviction only costs a PNG decode).
@@ -6103,7 +6124,17 @@ fn main() {
                     engine_needs_rebuild = false;
                 }
                 match job {
-                    Job::SetConversation { bodies, width, policy, policy_gen, seq, scroll_to, modes, scale, merged } => {
+                    Job::SetConversation {
+                        bodies,
+                        width,
+                        policy,
+                        policy_gen,
+                        seq,
+                        scroll_to,
+                        modes,
+                        scale,
+                        merged,
+                    } => {
                         // Latest-wins: a newer conversation/relayout job is
                         // already queued behind this one — rendering it would
                         // produce frames nobody will ever see.
@@ -6187,18 +6218,29 @@ fn main() {
                                     0
                                 };
                             let key = (body.folder.clone(), body.uid, width, policy_gen, mode, fp);
-                            let mut remember =
-                                |key: &(String, u32, u32, u64, u8, u64),
-                                 entry: &(SharedPixelBuffer<Rgba8Pixel>, f32, Vec<render_common::LinkRect>, Vec<render_common::TextRun>),
-                                 body_cache: &mut HashMap<_, _>,
-                                 ram_order: &mut Vec<(String, u32, u32, u64, u8, u64)>| {
-                                    body_cache.insert(key.clone(), entry.clone());
-                                    ram_order.push(key.clone());
-                                    if ram_order.len() > RAM_CAP {
-                                        let oldest = ram_order.remove(0);
-                                        body_cache.remove(&oldest);
-                                    }
-                                };
+                            let mut remember = |key: &(String, u32, u32, u64, u8, u64),
+                                                entry: &(
+                                SharedPixelBuffer<Rgba8Pixel>,
+                                f32,
+                                Vec<render_common::LinkRect>,
+                                Vec<render_common::TextRun>,
+                            ),
+                                                body_cache: &mut HashMap<_, _>,
+                                                ram_order: &mut Vec<(
+                                String,
+                                u32,
+                                u32,
+                                u64,
+                                u8,
+                                u64,
+                            )>| {
+                                body_cache.insert(key.clone(), entry.clone());
+                                ram_order.push(key.clone());
+                                if ram_order.len() > RAM_CAP {
+                                    let oldest = ram_order.remove(0);
+                                    body_cache.remove(&oldest);
+                                }
+                            };
                             let (buf, h, links, runs) = if let Some(cached) = body_cache.get(&key) {
                                 cache_hits += 1;
                                 cached.clone()
@@ -6238,10 +6280,15 @@ fn main() {
                                     .unwrap_or(false);
                                 // Don't poke a just-panicked engine again this
                                 // job — the text fallback would likely panic too.
-                                if !result.successful() && text_available && !force_text && !panicked {
+                                if !result.successful()
+                                    && text_available
+                                    && !force_text
+                                    && !panicked
+                                {
                                     fallback_used += 1;
                                     let text_html = build_text_only_html(body, merged);
-                                    let (r2, p2) = engine.render_one_guarded(&text_html, width, scale);
+                                    let (r2, p2) =
+                                        engine.render_one_guarded(&text_html, width, scale);
                                     result = r2;
                                     if p2 {
                                         engine_needs_rebuild = true;
@@ -6264,15 +6311,22 @@ fn main() {
                                 let bitmap = result.bitmap;
                                 let t_p = Instant::now();
                                 let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
-                                    &bitmap.rgba, bitmap.width, bitmap.height,
+                                    &bitmap.rgba,
+                                    bitmap.width,
+                                    bitmap.height,
                                 );
                                 pack_ms_total += t_p.elapsed().as_millis();
                                 let entry =
                                     (buf, bitmap.height as f32 / rscale, result.links, result.runs);
                                 println!(
                                     "[perf]   body uid={} h={}px painted={} ready={} links={} runs={} cached={}",
-                                    body.uid, bitmap.height, result.painted_height,
-                                    result.view_ready, entry.2.len(), entry.3.len(), succeeded
+                                    body.uid,
+                                    bitmap.height,
+                                    result.painted_height,
+                                    result.view_ready,
+                                    entry.2.len(),
+                                    entry.3.len(),
+                                    succeeded
                                 );
                                 // Pending-send stubs are transient — never
                                 // persist their textures (the synthetic uid
@@ -6280,9 +6334,18 @@ fn main() {
                                 if succeeded && body.folder != PENDING_FOLDER {
                                     if let Some(t) = tex_disk.as_ref() {
                                         t.store(
-                                            &body.folder, body.uid, width, policy_gen, mode, fp,
-                                            &bitmap.rgba, bitmap.width, bitmap.height,
-                                            entry.1, &entry.2, &entry.3,
+                                            &body.folder,
+                                            body.uid,
+                                            width,
+                                            policy_gen,
+                                            mode,
+                                            fp,
+                                            &bitmap.rgba,
+                                            bitmap.width,
+                                            bitmap.height,
+                                            entry.1,
+                                            &entry.2,
+                                            &entry.3,
                                         );
                                     }
                                     remember(&key, &entry, &mut body_cache, &mut ram_order);
@@ -6293,31 +6356,33 @@ fn main() {
                             // checkbox states reflect the policy this job
                             // rendered under (a toggle re-renders anyway).
                             let sender_lc = body.from_addr.to_lowercase();
-                            let (media_host, script_host) = sanitize::first_external_hosts(
-                                body.html.as_deref().unwrap_or(""),
-                            );
+                            let (media_host, script_host) =
+                                sanitize::first_external_hosts(body.html.as_deref().unwrap_or(""));
                             row_runs.push(runs);
-                            packs.push((buf, RowMeta {
-                                h,
-                                recipients: if merged && body.is_outgoing {
-                                    recipients_tip(body)
-                                } else {
-                                    String::new()
+                            packs.push((
+                                buf,
+                                RowMeta {
+                                    h,
+                                    recipients: if merged && body.is_outgoing {
+                                        recipients_tip(body)
+                                    } else {
+                                        String::new()
+                                    },
+                                    has_html,
+                                    has_text,
+                                    viewing_html: has_html && !force_text,
+                                    m_sender_on: policy.allow_media.contains(&sender_lc),
+                                    s_sender_on: policy.allow_scripts.contains(&sender_lc),
+                                    m_host_on: !media_host.is_empty()
+                                        && (policy.media_hosts.contains(&media_host)
+                                            || policy.allow_domains.contains(&media_host)),
+                                    s_host_on: !script_host.is_empty()
+                                        && policy.script_hosts.contains(&script_host),
+                                    sender: body.from_addr.clone(),
+                                    media_host,
+                                    script_host,
                                 },
-                                has_html,
-                                has_text,
-                                viewing_html: has_html && !force_text,
-                                m_sender_on: policy.allow_media.contains(&sender_lc),
-                                s_sender_on: policy.allow_scripts.contains(&sender_lc),
-                                m_host_on: !media_host.is_empty()
-                                    && (policy.media_hosts.contains(&media_host)
-                                        || policy.allow_domains.contains(&media_host)),
-                                s_host_on: !script_host.is_empty()
-                                    && policy.script_hosts.contains(&script_host),
-                                sender: body.from_addr.clone(),
-                                media_host,
-                                script_host,
-                            }));
+                            ));
                             row_links.push(links);
                             // Push progress to the UI — one event per body.
                             let done = (i + 1) as i32;
@@ -6470,7 +6535,9 @@ fn main() {
                         let runs = result.runs;
                         println!(
                             "[perf] source render {}x{} runs={}",
-                            bmp.width, bmp.height, runs.len()
+                            bmp.width,
+                            bmp.height,
+                            runs.len()
                         );
                         let _ = ui_weak.upgrade_in_event_loop(move |ui| {
                             SHARED.with(|s| {
@@ -6482,9 +6549,10 @@ fn main() {
                             });
                             ui.set_source_img(Image::from_rgba8(buf));
                             ui.set_source_img_h(h);
-                            ui.set_source_selection_rects(ModelRc::new(VecModel::from(
-                                Vec::<SelRect>::new(),
-                            )));
+                            ui.set_source_selection_rects(ModelRc::new(VecModel::from(Vec::<
+                                SelRect,
+                            >::new(
+                            ))));
                         });
                     }
                 }
@@ -6661,9 +6729,7 @@ fn main() {
         // Запомненный — первым кандидатом, дальше все по порядку: у него
         // может не оказаться тел в кэше, и тогда пустая панель на старте
         // читалась бы как сломанный клиент.
-        let order = preferred
-            .into_iter()
-            .chain((0..convs.len()).filter(|i| Some(*i) != preferred));
+        let order = preferred.into_iter().chain((0..convs.len()).filter(|i| Some(*i) != preferred));
         for i in order {
             let c = &convs[i];
             let bodies = shared
@@ -6681,17 +6747,18 @@ fn main() {
             // startup conversation resolve rows through these.
             *shared.current_msgs.borrow_mut() = bodies
                 .iter()
-                .map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid, message_id: b.message_id.clone(), seen: true })
+                .map(|b| MessageRef {
+                    folder: b.folder.clone(),
+                    uid: b.uid,
+                    message_id: b.message_id.clone(),
+                    seen: true,
+                })
                 .collect();
             *shared.current_bodies.borrow_mut() = bodies.clone();
             refresh_composer_hints(&ui, &shared);
             // Startup scroll: same first-unread/end anchoring as a click.
-            *shared.open_unread.borrow_mut() = c
-                .messages
-                .iter()
-                .filter(|m| !m.seen)
-                .map(|m| (m.folder.clone(), m.uid))
-                .collect();
+            *shared.open_unread.borrow_mut() =
+                c.messages.iter().filter(|m| !m.seen).map(|m| (m.folder.clone(), m.uid)).collect();
             shared.scroll_pending.set(true);
             // Consume: no fetch follows at startup — a leftover pending flag
             // would let a much later background refresh yank the viewport.
@@ -6847,9 +6914,7 @@ fn main() {
         }
         let resolved = {
             let convs = sh_rn.convs.borrow();
-            convs
-                .get(sh_rn.current.get())
-                .map(|c| (conv_merge_key(&sh_rn.key, c), c.id.clone()))
+            convs.get(sh_rn.current.get()).map(|c| (conv_merge_key(&sh_rn.key, c), c.id.clone()))
         };
         let Some((key, id)) = resolved else { return };
         {
@@ -7046,10 +7111,7 @@ fn main() {
         move || {
             if let Some(ui) = ui_weak_ww.upgrade() {
                 let sf = ui.window().scale_factor();
-                if sf.is_finite()
-                    && sf > 0.0
-                    && (sf - sh_ww.render_scale.get()).abs() > 0.01
-                {
+                if sf.is_finite() && sf > 0.0 && (sf - sh_ww.render_scale.get()).abs() > 0.01 {
                     sh_ww.render_scale.set(sf);
                     let bodies = sh_ww.current_bodies.borrow().clone();
                     if !bodies.is_empty() {
@@ -7099,23 +7161,18 @@ fn main() {
             .borrow()
             .get(row as usize)
             .and_then(|links| links.iter().find(|l| l.contains(x, y)).map(|l| l.href.clone()));
-        let att = href
-            .as_deref()
-            .and_then(|u| u.strip_prefix("ddmail-attach:"))
-            .and_then(|rest| {
-                let p: Vec<&str> = rest.splitn(4, '|').collect();
-                if p.len() == 4 {
-                    if let (Ok(uid), Ok(index)) = (p[1].parse::<u32>(), p[2].parse::<usize>()) {
-                        // folder/filename percent-кодированы (att_url_encode) —
-                        // в меню и в диалог сохранения идёт человеческое имя.
-                        return Some((att_url_decode(p[0]), uid, index, att_url_decode(p[3])));
-                    }
+        let att = href.as_deref().and_then(|u| u.strip_prefix("ddmail-attach:")).and_then(|rest| {
+            let p: Vec<&str> = rest.splitn(4, '|').collect();
+            if p.len() == 4 {
+                if let (Ok(uid), Ok(index)) = (p[1].parse::<u32>(), p[2].parse::<usize>()) {
+                    // folder/filename percent-кодированы (att_url_encode) —
+                    // в меню и в диалог сохранения идёт человеческое имя.
+                    return Some((att_url_decode(p[0]), uid, index, att_url_decode(p[3])));
                 }
-                None
-            });
-        ui.set_ctx_attach_name(
-            att.as_ref().map(|a| a.3.clone()).unwrap_or_default().into(),
-        );
+            }
+            None
+        });
+        ui.set_ctx_attach_name(att.as_ref().map(|a| a.3.clone()).unwrap_or_default().into());
         // Внешняя ссылка под курсором. `ddmail-attach:` сюда не попадает — это
         // вложение, у него свои пункты выше; всё остальное отдаёт
         // `click_target`, он же достраивает схему голому хосту и отсеивает
@@ -7211,11 +7268,7 @@ fn main() {
     // пережил дельта-refresh и авто-наведение (см. picked_identity).
     let sh_ip = shared.clone();
     ui.on_identity_picked(move |ii| {
-        let email = sh_ip
-            .composer_identities
-            .borrow()
-            .get(ii.max(0) as usize)
-            .cloned();
+        let email = sh_ip.composer_identities.borrow().get(ii.max(0) as usize).cloned();
         if let Some(email) = email {
             println!("identity picked: {email}");
             *sh_ip.picked_identity.borrow_mut() = Some(email);
@@ -7277,11 +7330,8 @@ fn main() {
             return;
         }
         let Some(ui) = ui_weak_sm.upgrade() else { return };
-        let head = sh_sm
-            .row_text_runs
-            .borrow()
-            .get(row as usize)
-            .and_then(|runs| nearest_run(runs, x, y));
+        let head =
+            sh_sm.row_text_runs.borrow().get(row as usize).and_then(|runs| nearest_run(runs, x, y));
         if let Some(i) = head {
             if !sh_sm.sel_moved.get() && i == sh_sm.sel_anchor.get() {
                 return; // not an actual drag yet
@@ -7317,11 +7367,7 @@ fn main() {
         let sh = shared.clone();
         ui.on_from_mismatch_pick(move |index| {
             let Some(ui) = weak.upgrade() else { return };
-            let email = sh
-                .composer_identities
-                .borrow()
-                .get(index.max(0) as usize)
-                .cloned();
+            let email = sh.composer_identities.borrow().get(index.max(0) as usize).cloned();
             if let Some(email) = email {
                 // Закрепляем как ручной выбор — иначе дельта-refetch собьёт
                 // индекс пикера обратно, и уйдёт снова не то.
@@ -7331,11 +7377,8 @@ fn main() {
                 // только если попросили галочкой и адрес действительно другой.
                 let switching = ui.get_from_mismatch_switch()
                     && ui.get_from_mismatch_index() != ui.get_from_mismatch_expected_index();
-                *sh.pending_switch.borrow_mut() = if switching {
-                    target_conversation_id(&ui, &sh, &email)
-                } else {
-                    None
-                };
+                *sh.pending_switch.borrow_mut() =
+                    if switching { target_conversation_id(&ui, &sh, &email) } else { None };
             }
             let text = sh.held_send.borrow().clone().unwrap_or_default();
             ui.invoke_send(text.into());
@@ -7911,9 +7954,12 @@ fn main() {
                 let subjects = sh_typed
                     .cache
                     .as_ref()
-                    .and_then(|c| c.body_subjects().map_err(|e| eprintln!("search subjects: {e}")).ok())
+                    .and_then(|c| {
+                        c.body_subjects().map_err(|e| eprintln!("search subjects: {e}")).ok()
+                    })
                     .unwrap_or_default();
-                let hits = local_search_convs(&sh_typed.convs.borrow(), &subjects, &sh_typed.key, &q_lc);
+                let hits =
+                    local_search_convs(&sh_typed.convs.borrow(), &subjects, &sh_typed.key, &q_lc);
                 let local = local_search_contacts(
                     &sh_typed.address_book.borrow(),
                     &conv_hit_addrs(&hits),
@@ -7963,11 +8009,16 @@ fn main() {
         // Find any conversation with this counterpart; prefer the most recent.
         let convs = sh_sel_c.convs.borrow();
         let target_lc = contact.email.to_lowercase();
-        let best = convs.iter().enumerate().filter(|(_, c)| {
-            c.counterparts.first()
-                .map(|cp| cp.addr.to_lowercase() == target_lc)
-                .unwrap_or(false)
-        }).max_by_key(|(_, c)| c.last_date_ts);
+        let best = convs
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.counterparts
+                    .first()
+                    .map(|cp| cp.addr.to_lowercase() == target_lc)
+                    .unwrap_or(false)
+            })
+            .max_by_key(|(_, c)| c.last_date_ts);
         if let Some((conv_idx, _)) = best {
             drop(convs);
             let _ = sh_sel_c.search_query_inflight.borrow_mut().clear();
@@ -8023,9 +8074,9 @@ fn main() {
         // The conversation that owns this message is the one whose
         // messages list contains the (folder, uid) pair.
         let convs = sh_sel_m.convs.borrow();
-        let conv_idx = convs.iter().position(|c| {
-            c.messages.iter().any(|m| m.folder == env.folder && m.uid == env.uid)
-        });
+        let conv_idx = convs
+            .iter()
+            .position(|c| c.messages.iter().any(|m| m.folder == env.folder && m.uid == env.uid));
         if let Some(conv_idx) = conv_idx {
             drop(convs);
             if let Some(ui) = ui_weak_sel_m.upgrade() {
@@ -8107,7 +8158,8 @@ fn main() {
                 }
                 sh2.src_sel_moved.set(true);
                 sh2.src_sel_head.set(i);
-                let rects = selection_rects_for(&runs, sh2.src_sel_anchor.get(), sh2.src_sel_head.get());
+                let rects =
+                    selection_rects_for(&runs, sh2.src_sel_anchor.get(), sh2.src_sel_head.get());
                 ui.set_source_selection_rects(ModelRc::new(VecModel::from(rects)));
             }
         });
@@ -8256,9 +8308,7 @@ fn main() {
                     return;
                 }
             }
-            sh_act
-                .pending_source_view
-                .set(if action == "show-headers" { 1 } else { 2 });
+            sh_act.pending_source_view.set(if action == "show-headers" { 1 } else { 2 });
             if let Some(etx) = sh_act.engine_tx.borrow().as_ref() {
                 let _ = etx.send(engine::EngineCmd::FetchSource {
                     folder: msg.folder.clone(),
@@ -8469,9 +8519,7 @@ fn main() {
             let accounts = engine::AccountConfig::load_all();
             let labels: Vec<slint::SharedString> = accounts
                 .iter()
-                .map(|a| {
-                    if a.email.is_empty() { a.account_key() } else { a.email.clone() }.into()
-                })
+                .map(|a| if a.email.is_empty() { a.account_key() } else { a.email.clone() }.into())
                 .collect();
             *sh_cadd.ce_account_keys.borrow_mut() =
                 accounts.iter().map(|a| a.account_key()).collect();
@@ -8737,8 +8785,13 @@ fn main() {
                 ui.set_conn_account(account.into());
                 ui.set_conn_mode("Онлайн — IMAP/SMTP".into());
                 ui.set_conn_imap(
-                    format!("{}:{} · {}", c.host, c.port, if c.use_tls { "TLS" } else { "без TLS" })
-                        .into(),
+                    format!(
+                        "{}:{} · {}",
+                        c.host,
+                        c.port,
+                        if c.use_tls { "TLS" } else { "без TLS" }
+                    )
+                    .into(),
                 );
                 ui.set_conn_smtp(format!("{}:{}", c.smtp_host, c.smtp_port).into());
                 ui.set_conn_native(c.native_url.clone().unwrap_or_default().into());
@@ -8833,10 +8886,7 @@ fn main() {
     ui.on_calendar_set_color(move |cal_id, palette_idx| {
         let Some(ui) = ui_weak_cc.upgrade() else { return };
         if let Some(hex_color) = CAL_PALETTE.get(palette_idx as usize) {
-            sh_cc
-                .calendar_colors
-                .borrow_mut()
-                .insert(cal_id as i64, (*hex_color).to_string());
+            sh_cc.calendar_colors.borrow_mut().insert(cal_id as i64, (*hex_color).to_string());
             apply_calendar_view(&ui, &sh_cc);
             save_calendar_settings(&ui, &sh_cc);
         }
@@ -8854,8 +8904,18 @@ fn main() {
         // train («12.12 14:30») read as a hyperlink-ish blur.
         const WD: [&str; 7] = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
         const MON: [&str; 12] = [
-            "января", "февраля", "марта", "апреля", "мая", "июня",
-            "июля", "августа", "сентября", "октября", "ноября", "декабря",
+            "января",
+            "февраля",
+            "марта",
+            "апреля",
+            "мая",
+            "июня",
+            "июля",
+            "августа",
+            "сентября",
+            "октября",
+            "ноября",
+            "декабря",
         ];
         let date_of = |ms: i64| {
             Local
@@ -8908,11 +8968,7 @@ fn main() {
             .map(|a| {
                 let n = if a.name.is_empty() { a.email.clone() } else { a.name.clone() };
                 let (st, col) = status_of(&a.partstat);
-                AttRow {
-                    name: n.into(),
-                    status: st.into(),
-                    color: hex(col),
-                }
+                AttRow { name: n.into(), status: st.into(), color: hex(col) }
             })
             .collect();
         let my_partstat = {
@@ -8929,7 +8985,12 @@ fn main() {
         };
 
         ui.set_detail_title(
-            if ev.summary.is_empty() { "(без названия)".into() } else { ev.summary.clone() }.into(),
+            if ev.summary.is_empty() {
+                "(без названия)".into()
+            } else {
+                ev.summary.clone()
+            }
+            .into(),
         );
         ui.set_detail_when(when.into());
         ui.set_detail_location(ev.location.clone().into());
@@ -8966,11 +9027,8 @@ fn main() {
             .collect();
         // Сравнивать с найденными в тексте ссылками надо по нормализованному
         // виду: в extras лежит голый хост, а extract_urls отдаёт его со схемой.
-        let extra_urls: std::collections::HashSet<String> = extras
-            .iter()
-            .filter(|x| x.is_link)
-            .filter_map(|x| link_target(&x.value))
-            .collect();
+        let extra_urls: std::collections::HashSet<String> =
+            extras.iter().filter(|x| x.is_link).filter_map(|x| link_target(&x.value)).collect();
         ui.set_detail_extras(ModelRc::new(VecModel::from(extras)));
         // Meeting links live as plain text in location/description more
         // often than not — surface every URL as a clickable row, minus the
@@ -9082,8 +9140,7 @@ fn main() {
         let minutes = hour_start as f32 * 60.0 + (y / hour_height) * 60.0;
         let snapped = ((minutes / 15.0).round() as i64) * 15;
         let day_ms: i64 = 24 * 60 * 60 * 1000;
-        let (week_start_ms, _) =
-            week_range_ms(sh_gc.calendar_week_start_days.get(), day_count);
+        let (week_start_ms, _) = week_range_ms(sh_gc.calendar_week_start_days.get(), day_count);
         let start_ms = week_start_ms + day * day_ms + snapped * 60_000;
         open_create_form_at(&ui, &sh_gc, start_ms);
     });
@@ -9129,7 +9186,9 @@ fn main() {
             match sh_gm.cal_occ.borrow().get(&(id, orig_day as i32)).copied() {
                 Some(v) => v,
                 None => {
-                    eprintln!("[cal] move: no occurrence for id={id} day={orig_day} — drop ignored");
+                    eprintln!(
+                        "[cal] move: no occurrence for id={id} day={orig_day} — drop ignored"
+                    );
                     return;
                 }
             };
@@ -9142,12 +9201,9 @@ fn main() {
         let (summary, description, location, all_day) = {
             let events = sh_gm.calendar_events.borrow();
             match events.iter().find(|e| e.id as i32 == id) {
-                Some(e) => (
-                    e.summary.clone(),
-                    e.description.clone(),
-                    e.location.clone(),
-                    e.all_day,
-                ),
+                Some(e) => {
+                    (e.summary.clone(), e.description.clone(), e.location.clone(), e.all_day)
+                }
                 None => return,
             }
         };
@@ -9239,12 +9295,9 @@ fn main() {
         let (summary, description, location, all_day) = {
             let events = sh_gr.calendar_events.borrow();
             match events.iter().find(|e| e.id as i32 == id) {
-                Some(e) => (
-                    e.summary.clone(),
-                    e.description.clone(),
-                    e.location.clone(),
-                    e.all_day,
-                ),
+                Some(e) => {
+                    (e.summary.clone(), e.description.clone(), e.location.clone(), e.all_day)
+                }
                 None => return,
             }
         };
@@ -9410,7 +9463,9 @@ fn main() {
                             reminders::SOON_TIMEOUT_SECS,
                             move || reminder_dispatch("cancel-occ", eid, occ, seq, String::new()),
                             move || reminder_dispatch("open-stay", eid, occ, seq, s_body.clone()),
-                            move || reminder_dispatch("snooze-window", eid, occ, seq, s_act.clone()),
+                            move || {
+                                reminder_dispatch("snooze-window", eid, occ, seq, s_act.clone())
+                            },
                         );
                         toast_window::set_on_timeout(id, move || {
                             reminder_dispatch("timeout", eid, occ, seq, String::new())
@@ -9521,10 +9576,7 @@ fn main() {
             std::time::Duration::from_millis(100),
             move || {
                 tries += 1;
-                let done = icon_weak
-                    .upgrade()
-                    .map(|ui| set_window_icon(&ui))
-                    .unwrap_or(true);
+                let done = icon_weak.upgrade().map(|ui| set_window_icon(&ui)).unwrap_or(true);
                 if done || tries >= 50 {
                     // Defer the stop+drop out of the timer's own dispatch —
                     // never drop a Timer from inside its own callback (same
@@ -9577,10 +9629,8 @@ fn apply_conn_status(ui: &MainWindow, sh: &Shared) {
     let states = sh.account_states.borrow();
     let keys = sh.account_keys.borrow();
     let total = keys.len();
-    let connected = keys
-        .iter()
-        .filter(|k| states.get(*k).map(|s| s == "connected").unwrap_or(false))
-        .count();
+    let connected =
+        keys.iter().filter(|k| states.get(*k).map(|s| s == "connected").unwrap_or(false)).count();
     let status = if total == 0 || connected == total {
         2
     } else if connected > 0 {
@@ -9628,9 +9678,7 @@ fn apply_conn_status(ui: &MainWindow, sh: &Shared) {
             let title = if a.email.is_empty() { a.account_key() } else { a.email.clone() };
             let rest = reauth.len().saturating_sub(1);
             let note = if rest > 0 {
-                format!(
-                    "{title} и ещё {rest}: почта, календарь и задачи не обновляются"
-                )
+                format!("{title} и ещё {rest}: почта, календарь и задачи не обновляются")
             } else {
                 format!("{title}: почта, календарь и задачи не обновляются")
             };
@@ -9683,8 +9731,8 @@ fn schedule_post_send_refetch(attempt: usize) {
 
             // Nothing left to wait for — stop, so a quiet client is not woken
             // every half minute for no reason.
-            let waiting = sh.pending_switch.borrow().is_some()
-                || sh.compose_sent_target.borrow().is_some();
+            let waiting =
+                sh.pending_switch.borrow().is_some() || sh.compose_sent_target.borrow().is_some();
             if attempt > 0 && !waiting {
                 return false;
             }
@@ -9763,7 +9811,9 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                                 continue;
                             }
                             if seen.insert(d.email.clone()) {
-                                let _ = etx.send(engine::EngineCmd::FetchAvatar { email: d.email.clone() });
+                                let _ = etx.send(engine::EngineCmd::FetchAvatar {
+                                    email: d.email.clone(),
+                                });
                             }
                         }
                     }
@@ -9810,10 +9860,8 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                                 mark_raw_seen(sh, &k, mflag);
                             }
                             if had_unread {
-                                let displays = displays_from(
-                                    &sh.convs.borrow(),
-                                    &sh.identity_colors.borrow(),
-                                );
+                                let displays =
+                                    displays_from(&sh.convs.borrow(), &sh.identity_colors.borrow());
                                 *sh.displays.borrow_mut() = displays;
                                 refresh_sidebar(sh, ui);
                             }
@@ -9841,9 +9889,7 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     let redirect = sh.compose_sent_target.borrow().clone();
                     if let Some(addr) = redirect {
                         let idx = sh.convs.borrow().iter().position(|c| {
-                            c.counterparts
-                                .iter()
-                                .any(|cp| cp.addr.eq_ignore_ascii_case(&addr))
+                            c.counterparts.iter().any(|cp| cp.addr.eq_ignore_ascii_case(&addr))
                         });
                         if let Some(idx) = idx {
                             *sh.compose_sent_target.borrow_mut() = None;
@@ -9930,9 +9976,8 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                                                 )
                                     })
                             });
-                            for p in stubs
-                                .iter()
-                                .filter(|p| !cur_id.is_empty() && p.conv_id == cur_id)
+                            for p in
+                                stubs.iter().filter(|p| !cur_id.is_empty() && p.conv_id == cur_id)
                             {
                                 bodies.push(p.body.clone());
                             }
@@ -9942,7 +9987,12 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     *sh.current_msgs.borrow_mut() = bodies
                         .iter()
                         .filter(|b| b.folder != PENDING_FOLDER)
-                        .map(|b| MessageRef { folder: b.folder.clone(), uid: b.uid, message_id: b.message_id.clone(), seen: true })
+                        .map(|b| MessageRef {
+                            folder: b.folder.clone(),
+                            uid: b.uid,
+                            message_id: b.message_id.clone(),
+                            seen: true,
+                        })
                         .collect();
                     *sh.current_bodies.borrow_mut() = bodies.clone();
                     // Freshly fetched bodies can change the Re:-subject hint.
@@ -9994,7 +10044,9 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         return;
                     }
                     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
-                        let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
+                        let _ = etx.send(engine::EngineCmd::FetchConversations {
+                            limit: CONV_FETCH_LIMIT,
+                        });
                         // Reopen current conversation to refresh its bodies.
                         let cur = sh.current.get();
                         if let Some(c) = sh.convs.borrow().get(cur) {
@@ -10030,9 +10082,7 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         fetch_reminder_window(sh);
                     }
                     note_account_state(&mut sh.reauth.borrow_mut(), &account_key, &state);
-                    sh.account_states
-                        .borrow_mut()
-                        .insert(account_key, state);
+                    sh.account_states.borrow_mut().insert(account_key, state);
                     apply_conn_status(ui, sh);
                 }
             });
@@ -10066,7 +10116,9 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                                 }
                             }
                             if let Some(etx) = sh.engine_tx.borrow().as_ref() {
-                                let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
+                                let _ = etx.send(engine::EngineCmd::FetchConversations {
+                                    limit: CONV_FETCH_LIMIT,
+                                });
                             }
                         }
                     });
@@ -10091,7 +10143,9 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                                 }
                             }
                             if let Some(etx) = sh.engine_tx.borrow().as_ref() {
-                                let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
+                                let _ = etx.send(engine::EngineCmd::FetchConversations {
+                                    limit: CONV_FETCH_LIMIT,
+                                });
                             }
                         }
                     });
@@ -10107,7 +10161,9 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     SHARED.with(|s| {
                         if let Some(sh) = s.borrow().as_ref() {
                             if let Some(etx) = sh.engine_tx.borrow().as_ref() {
-                                let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
+                                let _ = etx.send(engine::EngineCmd::FetchConversations {
+                                    limit: CONV_FETCH_LIMIT,
+                                });
                             }
                         }
                     });
@@ -10133,7 +10189,9 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     });
                 }
                 EngineEvent::IdentitiesChanged => {
-                    println!("engine event: identities changed — refreshing accounts, calendars, contacts");
+                    println!(
+                        "engine event: identities changed — refreshing accounts, calendars, contacts"
+                    );
                     // A profile import can add a mailbox, a calendar source and
                     // an address book in one go. Refresh all three: the
                     // identity list (sidebar tints and the from-picker), the
@@ -10228,7 +10286,9 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     };
                     force_full(sh);
                     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
-                        let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
+                        let _ = etx.send(engine::EngineCmd::FetchConversations {
+                            limit: CONV_FETCH_LIMIT,
+                        });
                     }
                     schedule_post_send_refetch(0);
                 }
@@ -10295,7 +10355,9 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
                     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
-                        let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
+                        let _ = etx.send(engine::EngineCmd::FetchConversations {
+                            limit: CONV_FETCH_LIMIT,
+                        });
                     }
                 }
             });
@@ -10411,7 +10473,13 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             ui.set_tasks_loading(false);
             ui.set_tasks(ModelRc::new(VecModel::from(task_rows(&list))));
         }
-        engine::EngineResult::CalendarEvents { events, from_ms, to_ms, complete, for_reminders } => {
+        engine::EngineResult::CalendarEvents {
+            events,
+            from_ms,
+            to_ms,
+            complete,
+            for_reminders,
+        } => {
             println!(
                 "engine: {} calendar events{}",
                 events.len(),
@@ -10535,8 +10603,7 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             // this stays simple.)
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
-                    let stubs: Vec<PendingSend> =
-                        sh.pending_sends.borrow_mut().drain(..).collect();
+                    let stubs: Vec<PendingSend> = sh.pending_sends.borrow_mut().drain(..).collect();
                     if !stubs.is_empty() {
                         let bodies = {
                             let mut cur = sh.current_bodies.borrow_mut();
@@ -10549,11 +10616,7 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         // письма мы не храним, а терять текст нельзя.
                         if ui.get_composer_text().is_empty() {
                             if let Some(p) = stubs.last() {
-                                rich_set_text(
-                                    &ui,
-                                    sh,
-                                    &p.body.text.clone().unwrap_or_default(),
-                                );
+                                rich_set_text(&ui, sh, &p.body.text.clone().unwrap_or_default());
                             }
                         }
                     }
@@ -10615,11 +10678,7 @@ fn display_from(raw: &str) -> String {
 /// displays-index → sidebar model index (the transient compose row shifts
 /// everything by one).
 fn model_index(sh: &Shared, idx: usize) -> usize {
-    if sh.pending_compose.borrow().is_some() {
-        idx + 1
-    } else {
-        idx
-    }
+    if sh.pending_compose.borrow().is_some() { idx + 1 } else { idx }
 }
 
 /// New-mail behaviour per the notification spec:
@@ -10642,17 +10701,17 @@ fn handle_new_mail(
     // Spec #1: a toast only for a real letter to read. Spam and iTIP/ics are
     // already dropped server-side; «своё» (from one of our own identities) is
     // filtered here — our outgoing mail syncing back is not a notification.
-    if !from_addr.is_empty()
-        && sh.identity_colors.borrow().contains_key(&from_addr.to_lowercase())
+    if !from_addr.is_empty() && sh.identity_colors.borrow().contains_key(&from_addr.to_lowercase())
     {
         return;
     }
     let conv_idx = if from_addr.is_empty() {
         None
     } else {
-        sh.convs.borrow().iter().position(|c| {
-            c.counterparts.iter().any(|cp| cp.addr.eq_ignore_ascii_case(&from_addr))
-        })
+        sh.convs
+            .borrow()
+            .iter()
+            .position(|c| c.counterparts.iter().any(|cp| cp.addr.eq_ignore_ascii_case(&from_addr)))
     };
 
     let visible = ui.window().is_visible();
@@ -10724,7 +10783,12 @@ fn handle_new_mail(
                 .map(|c| c.messages.clone())
                 .unwrap_or_default();
             if message_id > 0 && !refs.iter().any(|m| m.uid == message_id as u32) {
-                refs.push(MessageRef { folder, uid: message_id as u32, message_id: row_mid, seen: true });
+                refs.push(MessageRef {
+                    folder,
+                    uid: message_id as u32,
+                    message_id: row_mid,
+                    seen: true,
+                });
             }
             let _ = etx.send(engine::EngineCmd::FetchMessages {
                 messages: refs,
@@ -10766,7 +10830,8 @@ fn handle_new_mail(
         let (title, body) = if new_count > 1 {
             (format!("{new_count} новых"), String::new())
         } else {
-            let b = if subject.is_empty() { "(без темы)".to_string() } else { subject.clone() };
+            let b =
+                if subject.is_empty() { "(без темы)".to_string() } else { subject.clone() };
             (display_from(&from), b)
         };
         let click_folder = folder.clone();
@@ -10802,10 +10867,8 @@ fn open_message_from_toast(ui: &MainWindow, sh: &Shared, folder: &str, uid: u32,
     }
     let idx = {
         let convs = sh.convs.borrow();
-        convs
-            .iter()
-            .position(|c| uid > 0 && c.messages.iter().any(|m| m.uid == uid))
-            .or_else(|| {
+        convs.iter().position(|c| uid > 0 && c.messages.iter().any(|m| m.uid == uid)).or_else(
+            || {
                 if addr.is_empty() {
                     None
                 } else {
@@ -10813,7 +10876,8 @@ fn open_message_from_toast(ui: &MainWindow, sh: &Shared, folder: &str, uid: u32,
                         c.counterparts.iter().any(|cp| cp.addr.eq_ignore_ascii_case(addr))
                     })
                 }
-            })
+            },
+        )
     };
     // Переключение вида из Rust: колбэк `view-changed` при этом НЕ зовётся
     // (его дёргает только меню), так что ни снимка позиции, ни его
@@ -10956,10 +11020,7 @@ fn show_headers(ui: &MainWindow, uid: u32, raw: &str) {
 /// message. Values are returned raw (not RFC 2047-decoded); the table shows
 /// the message as it is on the wire.
 fn parse_headers(raw: &str) -> Vec<(String, String)> {
-    let end = raw
-        .find("\r\n\r\n")
-        .or_else(|| raw.find("\n\n"))
-        .unwrap_or(raw.len());
+    let end = raw.find("\r\n\r\n").or_else(|| raw.find("\n\n")).unwrap_or(raw.len());
     let mut out: Vec<(String, String)> = Vec::new();
     for line in raw[..end].split('\n') {
         let line = line.strip_suffix('\r').unwrap_or(line);
@@ -10994,10 +11055,7 @@ fn parse_headers(raw: &str) -> Vec<(String, String)> {
 fn pick_attachment_files(ui: &MainWindow) -> Vec<std::path::PathBuf> {
     use raw_window_handle::HasWindowHandle;
     let handle = ui.window().window_handle();
-    rfd::FileDialog::new()
-        .set_parent(&handle)
-        .pick_files()
-        .unwrap_or_default()
+    rfd::FileDialog::new().set_parent(&handle).pick_files().unwrap_or_default()
 }
 
 #[cfg(target_os = "linux")]
@@ -11006,15 +11064,10 @@ fn pick_attachment_files(ui: &MainWindow) -> Vec<std::path::PathBuf> {
     // X11 window id lets the picker open transient-for our window (modal,
     // centered, above). Wayland has no portable id here — the picker just
     // opens unparented, which is fine.
-    let xid = ui
-        .window()
-        .window_handle()
-        .window_handle()
-        .ok()
-        .and_then(|wh| match wh.as_raw() {
-            RawWindowHandle::Xlib(h) => Some(h.window),
-            _ => None,
-        });
+    let xid = ui.window().window_handle().window_handle().ok().and_then(|wh| match wh.as_raw() {
+        RawWindowHandle::Xlib(h) => Some(h.window),
+        _ => None,
+    });
 
     // kdialog: native on KDE. `--separate-output --multiple` → one path per
     // line, so filenames with spaces parse cleanly.
@@ -11064,24 +11117,16 @@ fn pick_attachment_files(ui: &MainWindow) -> Vec<std::path::PathBuf> {
 fn pick_save_path(ui: &MainWindow, filename: &str) -> Option<std::path::PathBuf> {
     use raw_window_handle::HasWindowHandle;
     let handle = ui.window().window_handle();
-    rfd::FileDialog::new()
-        .set_parent(&handle)
-        .set_file_name(filename)
-        .save_file()
+    rfd::FileDialog::new().set_parent(&handle).set_file_name(filename).save_file()
 }
 
 #[cfg(target_os = "linux")]
 fn pick_save_path(ui: &MainWindow, filename: &str) -> Option<std::path::PathBuf> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    let xid = ui
-        .window()
-        .window_handle()
-        .window_handle()
-        .ok()
-        .and_then(|wh| match wh.as_raw() {
-            RawWindowHandle::Xlib(h) => Some(h.window),
-            _ => None,
-        });
+    let xid = ui.window().window_handle().window_handle().ok().and_then(|wh| match wh.as_raw() {
+        RawWindowHandle::Xlib(h) => Some(h.window),
+        _ => None,
+    });
     if let Ok(kdialog) = which_bin("kdialog") {
         let mut c = std::process::Command::new(kdialog);
         if let Some(xid) = xid {
@@ -11171,10 +11216,7 @@ fn url_handler_apps_in(dirs: &[String]) -> Vec<(String, std::path::PathBuf)> {
                 _ => continue,
             };
             let field = |key: &str| -> Option<&str> {
-                entry
-                    .lines()
-                    .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
-                    .map(str::trim)
+                entry.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix('=')).map(str::trim)
             };
             if !field("MimeType").is_some_and(|m| {
                 m.contains("x-scheme-handler/https") || m.contains("x-scheme-handler/http")
@@ -11209,12 +11251,7 @@ fn url_handler_apps() -> Vec<(String, std::path::PathBuf)> {
 fn open_with_app(desktop: &std::path::Path, url: &str) {
     // `gio launch` сам разбирает Exec с его %u/%U/%f и полями вроде
     // DBusActivatable — руками это воспроизводить незачем.
-    match std::process::Command::new("gio")
-        .arg("launch")
-        .arg(desktop)
-        .arg(url)
-        .spawn()
-    {
+    match std::process::Command::new("gio").arg("launch").arg(desktop).arg(url).spawn() {
         Ok(_) => {}
         Err(e) => {
             eprintln!("open_with_app: gio launch failed ({e}) — открываю по умолчанию");

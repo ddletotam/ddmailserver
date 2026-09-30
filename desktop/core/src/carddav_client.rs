@@ -160,7 +160,9 @@ pub async fn put_contact(
         .dav_auth(username, password)
         .header(reqwest::header::CONTENT_TYPE, "text/vcard; charset=utf-8");
     req = match pre {
-        crate::caldav_client::Precondition::IfNew => req.header(reqwest::header::IF_NONE_MATCH, "*"),
+        crate::caldav_client::Precondition::IfNew => {
+            req.header(reqwest::header::IF_NONE_MATCH, "*")
+        }
         crate::caldav_client::Precondition::IfMatch(t) => req.header(reqwest::header::IF_MATCH, t),
         crate::caldav_client::Precondition::None => req,
     };
@@ -191,11 +193,8 @@ pub async fn get_contact_raw(
     if !resp.status().is_success() {
         return Err(format!("carddav GET HTTP {}", resp.status()));
     }
-    let etag = resp
-        .headers()
-        .get(reqwest::header::ETAG)
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
+    let etag =
+        resp.headers().get(reqwest::header::ETAG).and_then(|v| v.to_str().ok()).map(String::from);
     let body = resp.text().await.map_err(|e| format!("carddav GET body: {e}"))?;
     Ok((body, etag))
 }
@@ -209,9 +208,7 @@ pub async fn delete_contact(
     if_match: Option<&str>,
 ) -> Result<(), String> {
     let http = http_client()?;
-    let mut req = http
-        .delete(contact_url(collection_url, uid))
-        .dav_auth(username, password);
+    let mut req = http.delete(contact_url(collection_url, uid)).dav_auth(username, password);
     if let Some(t) = if_match {
         req = req.header(reqwest::header::IF_MATCH, t);
     }
@@ -238,8 +235,7 @@ fn extract_address_data(xml: &str) -> Vec<String> {
     while let Some(open_rel) = rest.find("address-data") {
         // Skip if this hit is a CLOSING tag ("</…address-data").
         let before = &rest[..open_rel];
-        let is_close = before.trim_end().ends_with("</")
-            || before.trim_end().ends_with('/'); // "</C:" style
+        let is_close = before.trim_end().ends_with("</") || before.trim_end().ends_with('/'); // "</C:" style
         // Advance to the end of the start tag.
         let after_name = &rest[open_rel + "address-data".len()..];
         let Some(gt) = after_name.find('>') else { break };
@@ -326,9 +322,7 @@ fn unfold_vcard(vcard: &str) -> String {
 }
 
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 fn xml_unescape(s: &str) -> String {

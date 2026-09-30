@@ -149,15 +149,10 @@ pub fn latin_key(ch: char) -> Option<u8> {
     // A miss can mean the character genuinely is not on the keyboard, or that
     // a layout was added since the snapshot. Refetch at most every few
     // seconds, then answer from the fresh table.
-    let stale = map
-        .as_ref()
-        .is_none_or(|m| m.fetched.elapsed() >= REFETCH_AFTER);
+    let stale = map.as_ref().is_none_or(|m| m.fetched.elapsed() >= REFETCH_AFTER);
     if stale {
         *map = fetch(conn);
-        return map
-            .as_ref()
-            .and_then(|m| m.keycode_for(ch))
-            .and_then(physical_letter);
+        return map.as_ref().and_then(|m| m.keycode_for(ch)).and_then(physical_letter);
     }
 
     None
@@ -181,12 +176,7 @@ mod tests {
         put(55, [0x76, 0x56, 0x6cd, 0x6ed]);
         // A: latin a/A, Cyrillic ef.
         put(38, [0x61, 0x41, 0x6c6, 0x6e6]);
-        Keymap {
-            min_keycode: 24,
-            per_keycode: 4,
-            keysyms,
-            fetched: Instant::now(),
-        }
+        Keymap { min_keycode: 24, per_keycode: 4, keysyms, fetched: Instant::now() }
     }
 
     #[test]
@@ -225,12 +215,7 @@ mod tests {
         // Greek ψ sits on the C key in the Greek layout.
         let base = (54 - 24) * 4;
         keysyms[base..base + 4].copy_from_slice(&[0x63, 0x43, 0x7f8, 0x7d8]);
-        let map = Keymap {
-            min_keycode: 24,
-            per_keycode: 4,
-            keysyms,
-            fetched: Instant::now(),
-        };
+        let map = Keymap { min_keycode: 24, per_keycode: 4, keysyms, fetched: Instant::now() };
         assert_eq!(map.keycode_for('ψ').and_then(physical_letter), Some(b'C'));
     }
 

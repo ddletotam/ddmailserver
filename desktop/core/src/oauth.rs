@@ -136,7 +136,11 @@ pub fn parse_query_param(target: &str, key: &str) -> Option<String> {
     for pair in q.split('&') {
         if let Some((k, v)) = pair.split_once('=') {
             if k == key {
-                return Some(urlencoding::decode(v).map(|c| c.into_owned()).unwrap_or_else(|_| v.to_string()));
+                return Some(
+                    urlencoding::decode(v)
+                        .map(|c| c.into_owned())
+                        .unwrap_or_else(|_| v.to_string()),
+                );
             }
         }
     }
@@ -211,17 +215,10 @@ pub fn parse_token_response(
         .and_then(|x| x.as_str())
         .ok_or("token response missing access_token")?
         .to_string();
-    let refresh_token = v
-        .get("refresh_token")
-        .and_then(|x| x.as_str())
-        .unwrap_or(fallback_refresh)
-        .to_string();
+    let refresh_token =
+        v.get("refresh_token").and_then(|x| x.as_str()).unwrap_or(fallback_refresh).to_string();
     let expires_in = v.get("expires_in").and_then(|x| x.as_i64()).unwrap_or(3600);
-    Ok(GoogleTokens {
-        access_token,
-        refresh_token,
-        expires_at: now_unix + expires_in,
-    })
+    Ok(GoogleTokens { access_token, refresh_token, expires_at: now_unix + expires_in })
 }
 
 #[cfg(test)]

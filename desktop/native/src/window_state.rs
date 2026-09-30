@@ -72,18 +72,13 @@ fn state_path() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         let appdata = std::env::var("APPDATA").ok()?;
-        return Some(
-            PathBuf::from(appdata)
-                .join("ru.letotam.ddmail")
-                .join("window.json"),
-        );
+        return Some(PathBuf::from(appdata).join("ru.letotam.ddmail").join("window.json"));
     }
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var("HOME").ok()?;
         return Some(
-            PathBuf::from(home)
-                .join("Library/Application Support/ru.letotam.ddmail/window.json"),
+            PathBuf::from(home).join("Library/Application Support/ru.letotam.ddmail/window.json"),
         );
     }
     #[cfg(target_os = "linux")]
@@ -91,11 +86,7 @@ fn state_path() -> Option<PathBuf> {
         let base = std::env::var("XDG_CONFIG_HOME")
             .ok()
             .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var("HOME")
-                    .ok()
-                    .map(|h| PathBuf::from(h).join(".config"))
-            })?;
+            .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config")))?;
         return Some(base.join("ru.letotam.ddmail").join("window.json"));
     }
     #[allow(unreachable_code)]
@@ -109,13 +100,8 @@ pub fn load() -> WindowState {
     let Ok(bytes) = fs::read(&path) else {
         return WindowState::default();
     };
-    let parsed: WindowState =
-        serde_json::from_slice(&bytes).unwrap_or_default();
-    if parsed.is_sane() {
-        parsed
-    } else {
-        WindowState::default()
-    }
+    let parsed: WindowState = serde_json::from_slice(&bytes).unwrap_or_default();
+    if parsed.is_sane() { parsed } else { WindowState::default() }
 }
 
 pub fn save(state: &WindowState) {

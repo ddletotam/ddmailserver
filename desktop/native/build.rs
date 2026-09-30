@@ -19,11 +19,9 @@ fn main() {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
     };
     let hash = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
-    let dirty = git(&["status", "--porcelain", "-uno"])
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
-    let date = git(&["log", "-1", "--date=format:%Y-%m-%d %H:%M", "--format=%cd"])
-        .unwrap_or_default();
+    let dirty = git(&["status", "--porcelain", "-uno"]).map(|s| !s.is_empty()).unwrap_or(false);
+    let date =
+        git(&["log", "-1", "--date=format:%Y-%m-%d %H:%M", "--format=%cd"]).unwrap_or_default();
     println!(
         "cargo:rustc-env=BUILD_GIT={}{}{}",
         hash,

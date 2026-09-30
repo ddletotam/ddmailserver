@@ -92,17 +92,9 @@ pub fn seed(
         } else {
             vec![10] // pre-alarm_leads server fallback
         };
-        let signature = format!(
-            "{}|{}|{:?}|{}",
-            ev.dtstart,
-            ev.dtend.unwrap_or(0),
-            leads,
-            ev.summary.trim()
-        );
-        let duration = ev
-            .dtend
-            .map(|e| (e - ev.dtstart).max(0))
-            .unwrap_or(0);
+        let signature =
+            format!("{}|{}|{:?}|{}", ev.dtstart, ev.dtend.unwrap_or(0), leads, ev.summary.trim());
+        let duration = ev.dtend.map(|e| (e - ev.dtstart).max(0)).unwrap_or(0);
 
         // Occurrences: rrule masters expand within [now, horizon]; plain
         // events and override rows are their own single occurrence.
@@ -157,7 +149,8 @@ pub fn valid_starts(
             // Мастер: только реальные развороты (exdates учтены). Перенос
             // одного вхождения (EXDATE + override) валидирует старый слот
             // ТОЛЬКО если разворот его всё ещё производит — как в seed().
-            for o in recurrence::expand(ev.dtstart, ev.dtend, &ev.rrule, &ev.exdates, from_ms, to_ms)
+            for o in
+                recurrence::expand(ev.dtstart, ev.dtend, &ev.rrule, &ev.exdates, from_ms, to_ms)
             {
                 entry.insert(o.start_ms);
             }
@@ -201,7 +194,8 @@ pub fn scan(cache: &Cache, now_ms: i64, hidden: &dyn Fn(&ReminderRow) -> bool) -
     // two event_ids (mirrored across calendars, or master + override). The
     // first time such an occurrence comes due we retire every other id's
     // rows so only one cascade — and one toast — survives.
-    let mut logical_seen: std::collections::HashSet<(i64, String)> = std::collections::HashSet::new();
+    let mut logical_seen: std::collections::HashSet<(i64, String)> =
+        std::collections::HashSet::new();
     for row in due {
         if hidden(&row) {
             continue;
@@ -231,11 +225,8 @@ pub fn scan(cache: &Cache, now_ms: i64, hidden: &dyn Fn(&ReminderRow) -> bool) -
             continue;
         }
         let _ = cache.mark_reminder_shown(row.event_id, row.occurrence_start_ms, row.seq);
-        let mode = if row.at_start || row.lead_min == 0 {
-            ToastMode::AtStart
-        } else {
-            ToastMode::Soon
-        };
+        let mode =
+            if row.at_start || row.lead_min == 0 { ToastMode::AtStart } else { ToastMode::Soon };
         out.push(DueToast { row, mode });
     }
     out
@@ -243,11 +234,7 @@ pub fn scan(cache: &Cache, now_ms: i64, hidden: &dyn Fn(&ReminderRow) -> bool) -
 
 /// Toast title per mode.
 pub fn title_for(t: &DueToast) -> String {
-    let s = if t.row.summary.trim().is_empty() {
-        "Событие"
-    } else {
-        t.row.summary.trim()
-    };
+    let s = if t.row.summary.trim().is_empty() { "Событие" } else { t.row.summary.trim() };
     match t.mode {
         ToastMode::Soon => format!("Скоро: {s}"),
         ToastMode::AtStart => format!("Наступило: {s}"),
@@ -302,10 +289,7 @@ mod tests {
     }
 
     fn temp_cache() -> TempCache {
-        let dir = tempfile::Builder::new()
-            .prefix("ddmail_rem2_test_")
-            .tempdir()
-            .expect("tempdir");
+        let dir = tempfile::Builder::new().prefix("ddmail_rem2_test_").tempdir().expect("tempdir");
         let cache = Cache::new(dir.path().to_path_buf()).expect("cache");
         TempCache { cache, _dir: dir }
     }
@@ -438,12 +422,14 @@ mod tests {
         let moved = event(7, "Move12to13", start13, &[10]);
         seed(&cache, &[moved.clone()], &no_hidden, now);
         let valid = valid_starts(&[moved], now, now + 7 * 24 * 3_600_000);
-        let affected = cache
-            .prune_moved_reminders(now, now + 7 * 24 * 3_600_000, &valid)
-            .unwrap();
+        let affected = cache.prune_moved_reminders(now, now + 7 * 24 * 3_600_000, &valid).unwrap();
         assert_eq!(affected, vec![7], "stale occurrence culled");
         // Старое время молчит, новое стреляет.
-        assert_eq!(scan(&cache, start12 - 10 * 60_000, &nothing_hidden).len(), 0, "old slot silent");
+        assert_eq!(
+            scan(&cache, start12 - 10 * 60_000, &nothing_hidden).len(),
+            0,
+            "old slot silent"
+        );
         let due = scan(&cache, start13 - 10 * 60_000, &nothing_hidden);
         assert_eq!(due.len(), 1, "new slot fires");
         assert_eq!(due[0].row.occurrence_start_ms, start13);
@@ -458,9 +444,7 @@ mod tests {
         seed(&cache, &[event(30, "Синк", start, &[10])], &no_hidden, now);
         assert_eq!(scan(&cache, now, &nothing_hidden).len(), 1);
         // «В момент начала»: ручная строка seq=100 на start.
-        cache
-            .user_choice_reminder(30, start, start + 3_600_000, start, true, "Синк")
-            .unwrap();
+        cache.user_choice_reminder(30, start, start + 3_600_000, start, true, "Синк").unwrap();
         assert_eq!(scan(&cache, now + 4 * 60_000, &nothing_hidden).len(), 0, "тихо после снуза");
 
         // Ресинк сервера пересоздал ту же встречу под НОВЫМ id 31 (churn).
@@ -475,9 +459,7 @@ mod tests {
         // Настоящий ресинк ещё и удаляет исчезнувший старый id — решение уже
         // должно жить под новым id к этому моменту.
         let keep: std::collections::HashSet<i64> = [31].into_iter().collect();
-        cache
-            .prune_orphan_reminders(now, now + 30 * 24 * 3_600_000, &keep)
-            .unwrap();
+        cache.prune_orphan_reminders(now, now + 30 * 24 * 3_600_000, &keep).unwrap();
 
         // Выбор пользователя срабатывает ровно один раз, в момент начала
         // (в этот момент occurrence_start ≤ now → презентация «уже идёт»,
@@ -602,10 +584,8 @@ mod tests {
         let start = now + 20 * 60_000;
         // Меньший event_id (скрытый) придёт из due_reminders первым: одинаковый
         // fire_at, порядок добивается сортировкой вставки.
-        let events = vec![
-            event_in(120, 11, "Синк", start, &[10]),
-            event_in(130, 12, "Синк", start, &[10]),
-        ];
+        let events =
+            vec![event_in(120, 11, "Синк", start, &[10]), event_in(130, 12, "Синк", start, &[10])];
         seed(&cache, &events, &no_hidden, now);
 
         let hide_11 = |r: &ReminderRow| r.calendar_id == 11;

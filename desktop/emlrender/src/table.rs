@@ -198,12 +198,8 @@ impl Ctx<'_> {
             cell_border,
             style.border_color,
         );
-        let cols = rows
-            .iter()
-            .flat_map(|r| r.cells.iter())
-            .map(|c| c.col + c.colspan)
-            .max()
-            .unwrap_or(0);
+        let cols =
+            rows.iter().flat_map(|r| r.cells.iter()).map(|c| c.col + c.colspan).max().unwrap_or(0);
         Grid { rows, cols, spacing }
     }
 
@@ -494,16 +490,16 @@ impl Ctx<'_> {
         let s = &cell.style;
         let (border, pad) = (s.border_width, s.pad(base));
         let bg = self.reserve_bg(s);
-        let border_slot = self.reserve(
-            border.vertical() + border.horizontal() > 0.0 && s.border_color.is_visible(),
-        );
+        let border_slot = self
+            .reserve(border.vertical() + border.horizontal() > 0.0 && s.border_color.is_visible());
         let from = self.cmds.len();
 
         let inner_w = (w - border.horizontal() - pad.horizontal()).max(1.0);
         let inner_x = x + border.left + pad.left;
         let inner_y = y + border.top + pad.top;
         let style = cell.style.clone();
-        let mut h = self.block_children(&cell.node, &style, inner_x, inner_y, inner_w, link, depth + 1);
+        let mut h =
+            self.block_children(&cell.node, &style, inner_x, inner_y, inner_w, link, depth + 1);
         if let Some(len) = style.height {
             h = h.max(len.resolve(0.0));
         }
@@ -647,9 +643,8 @@ impl Ctx<'_> {
                 // is `padding: 14px 36px` around six characters — lose the
                 // frame and it lays out at a width its own label cannot fit.
                 let (bmin, bmax) = self.intrinsic(&child, &cs, depth + 1);
-                let frame = cs.padding.horizontal()
-                    + cs.border_width.horizontal()
-                    + cs.margin.horizontal();
+                let frame =
+                    cs.padding.horizontal() + cs.border_width.horizontal() + cs.margin.horizontal();
                 min = min.max(bmin + frame);
                 max = max.max(bmax + frame);
                 continue;
@@ -683,7 +678,13 @@ impl Ctx<'_> {
         (min, max)
     }
 
-    fn flush_measure(&mut self, spans: &mut Vec<Span>, style: &Style, min: &mut f32, max: &mut f32) {
+    fn flush_measure(
+        &mut self,
+        spans: &mut Vec<Span>,
+        style: &Style,
+        min: &mut f32,
+        max: &mut f32,
+    ) {
         if spans.is_empty() {
             return;
         }
@@ -783,10 +784,7 @@ fn is_zero(e: &Edges) -> bool {
 }
 
 fn span_attr(node: &Handle, name: &str) -> usize {
-    attr(node, name)
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .unwrap_or(1)
-        .clamp(1, MAX_SPAN)
+    attr(node, name).and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(1).clamp(1, MAX_SPAN)
 }
 
 fn attr_px(node: &Handle, name: &str, scale: f32, limit: f32) -> Option<f32> {

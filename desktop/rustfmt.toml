@@ -1,0 +1,4 @@
+# Плотный стиль, в котором написан emlrender: короткие литералы и вызовы — в одну строку.
+use_small_heuristics = "Max"
+# Станции — Windows и Linux; без этого rustfmt на Windows пишет CRLF.
+newline_style = "Unix"

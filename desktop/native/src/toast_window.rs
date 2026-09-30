@@ -116,11 +116,7 @@ pub fn show(
         });
         if r.ticker.is_none() {
             let t = slint::Timer::default();
-            t.start(
-                slint::TimerMode::Repeated,
-                std::time::Duration::from_millis(200),
-                tick,
-            );
+            t.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(200), tick);
             r.ticker = Some(t);
         }
     });
@@ -199,10 +195,7 @@ fn tick() {
         // toast, and calling into REG while borrowed would panic.
         let entry = REG.with(|r| {
             let mut r = r.borrow_mut();
-            r.items
-                .iter()
-                .position(|e| e.id == id)
-                .map(|pos| r.items.remove(pos))
+            r.items.iter().position(|e| e.id == id).map(|pos| r.items.remove(pos))
         });
         if let Some(e) = entry {
             e.win.hide().ok();
@@ -253,20 +246,16 @@ pub fn has_for_event(event_id: i64) -> bool {
 /// one — the scanner dedups on has_for_event before showing another.
 pub fn id_for_event(event_id: i64) -> u64 {
     REG.with(|r| {
-        r.borrow()
-            .items
-            .iter()
-            .find(|e| e.event_id == event_id)
-            .map(|e| e.id)
-            .unwrap_or(0)
+        r.borrow().items.iter().find(|e| e.event_id == event_id).map(|e| e.id).unwrap_or(0)
     })
 }
 
 /// Close every toast for an event — «✕» on a «наступило» toast wipes the
 /// occurrence's notifications, so any sibling toast for it must go too.
 pub fn close_for_event(event_id: i64) {
-    let ids: Vec<u64> =
-        REG.with(|r| r.borrow().items.iter().filter(|e| e.event_id == event_id).map(|e| e.id).collect());
+    let ids: Vec<u64> = REG.with(|r| {
+        r.borrow().items.iter().filter(|e| e.event_id == event_id).map(|e| e.id).collect()
+    });
     for id in ids {
         close(id);
     }
@@ -284,9 +273,7 @@ fn reposition() {
             let m = MARGIN * scale;
             y -= hpx + m;
             let x = sw - wpx - m;
-            e.win
-                .window()
-                .set_position(slint::PhysicalPosition::new(x as i32, y as i32));
+            e.win.window().set_position(slint::PhysicalPosition::new(x as i32, y as i32));
             y -= GAP * scale;
         }
     });
@@ -321,15 +308,13 @@ fn stack_anchor() -> (f32, f32) {
 fn stack_anchor() -> (f32, f32) {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
+        GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
     };
     unsafe {
         // (0,0) по определению лежит на основном мониторе.
         let mon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
-        let mut mi = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
+        let mut mi =
+            MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
         if GetMonitorInfoW(mon, &mut mi).as_bool() {
             return (mi.rcWork.right as f32, mi.rcWork.bottom as f32);
         }
@@ -370,11 +355,8 @@ fn set_x11_notification(win: &ToastWindow) {
 
         // Window type NOTIFICATION → above, undecorated-ish, unfocused.
         let wt = xlib::XInternAtom(dpy, c"_NET_WM_WINDOW_TYPE".as_ptr(), xlib::False);
-        let wt_notif = xlib::XInternAtom(
-            dpy,
-            c"_NET_WM_WINDOW_TYPE_NOTIFICATION".as_ptr(),
-            xlib::False,
-        );
+        let wt_notif =
+            xlib::XInternAtom(dpy, c"_NET_WM_WINDOW_TYPE_NOTIFICATION".as_ptr(), xlib::False);
         let wt_arr: [std::os::raw::c_ulong; 1] = [wt_notif];
         xlib::XChangeProperty(
             dpy,
@@ -393,8 +375,7 @@ fn set_x11_notification(win: &ToastWindow) {
         // map) and also send the client message (the EWMH-correct path for an
         // already-mapped window).
         let st = xlib::XInternAtom(dpy, c"_NET_WM_STATE".as_ptr(), xlib::False);
-        let skip_pager =
-            xlib::XInternAtom(dpy, c"_NET_WM_STATE_SKIP_PAGER".as_ptr(), xlib::False);
+        let skip_pager = xlib::XInternAtom(dpy, c"_NET_WM_STATE_SKIP_PAGER".as_ptr(), xlib::False);
         let skip_taskbar =
             xlib::XInternAtom(dpy, c"_NET_WM_STATE_SKIP_TASKBAR".as_ptr(), xlib::False);
         let above = xlib::XInternAtom(dpy, c"_NET_WM_STATE_ABOVE".as_ptr(), xlib::False);

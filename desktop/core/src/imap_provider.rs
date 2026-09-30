@@ -42,7 +42,8 @@ pub struct ImapProvider {
     pub carddav_collection: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// id → vCard UID for the last-fetched CardDAV contacts (edit/delete
     /// resolution), mirroring caldav_event_uids.
-    pub carddav_contact_uids: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<i64, String>>>,
+    pub carddav_contact_uids:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<i64, String>>>,
     /// Google OAuth (standalone Gmail accounts). When set, DAV uses a Bearer
     /// token and IMAP uses XOAUTH2 instead of the password. Only the refresh
     /// token is persisted; the access token is minted lazily and cached.
@@ -59,17 +60,15 @@ impl ImapProvider {
         let Some(configured) = &self.carddav_url else {
             return Ok(None);
         };
-        if let Some(cached) = self.carddav_collection.lock().map_err(|e| format!("lock: {e}"))?.clone() {
+        if let Some(cached) =
+            self.carddav_collection.lock().map_err(|e| format!("lock: {e}"))?.clone()
+        {
             return Ok(Some(cached));
         }
         let (au, ap) = self.dav_auth_pair().await?;
-        let resolved = crate::carddav_client::resolve_addressbook_collection(
-            configured,
-            &au,
-            &ap,
-        )
-        .await
-        .unwrap_or_else(|_| configured.clone());
+        let resolved = crate::carddav_client::resolve_addressbook_collection(configured, &au, &ap)
+            .await
+            .unwrap_or_else(|_| configured.clone());
         *self.carddav_collection.lock().map_err(|e| format!("lock: {e}"))? = Some(resolved.clone());
         Ok(Some(resolved))
     }
@@ -78,9 +77,12 @@ impl ImapProvider {
     /// re-minted from the refresh token). Errors if OAuth isn't configured.
     async fn oauth_access_token(&self) -> Result<String, String> {
         let refresh = self.oauth_refresh_token.as_ref().ok_or("no refresh token")?;
-        let creds = self.oauth_client.as_ref().ok_or("google oauth not configured on this machine")?;
+        let creds =
+            self.oauth_client.as_ref().ok_or("google oauth not configured on this machine")?;
         let now = chrono::Utc::now().timestamp();
-        if let Some((tok, exp)) = self.oauth_access.lock().map_err(|e| format!("lock: {e}"))?.clone() {
+        if let Some((tok, exp)) =
+            self.oauth_access.lock().map_err(|e| format!("lock: {e}"))?.clone()
+        {
             if now < exp - 60 {
                 return Ok(tok);
             }
@@ -105,7 +107,10 @@ impl ImapProvider {
 
     /// Assign each fetched contact a stable numeric id from its UID and record
     /// id→UID so edit/delete (addressed by id) can find the resource.
-    fn tag_contact_ids(&self, mut list: Vec<DesktopContact>) -> Result<Vec<DesktopContact>, String> {
+    fn tag_contact_ids(
+        &self,
+        mut list: Vec<DesktopContact>,
+    ) -> Result<Vec<DesktopContact>, String> {
         let mut map = self.carddav_contact_uids.lock().map_err(|e| format!("lock: {e}"))?;
         for c in list.iter_mut() {
             if c.uid.is_empty() {
@@ -125,17 +130,15 @@ impl ImapProvider {
         let Some(configured) = &self.caldav_url else {
             return Ok(None);
         };
-        if let Some(cached) = self.caldav_collection.lock().map_err(|e| format!("lock: {e}"))?.clone() {
+        if let Some(cached) =
+            self.caldav_collection.lock().map_err(|e| format!("lock: {e}"))?.clone()
+        {
             return Ok(Some(cached));
         }
         let (au, ap) = self.dav_auth_pair().await?;
-        let resolved = crate::caldav_client::resolve_calendar_collection(
-            configured,
-            &au,
-            &ap,
-        )
-        .await
-        .unwrap_or_else(|_| configured.clone());
+        let resolved = crate::caldav_client::resolve_calendar_collection(configured, &au, &ap)
+            .await
+            .unwrap_or_else(|_| configured.clone());
         *self.caldav_collection.lock().map_err(|e| format!("lock: {e}"))? = Some(resolved.clone());
         Ok(Some(resolved))
     }
@@ -165,17 +168,22 @@ macro_rules! with_session {
     ($self:expr, |$s:ident| $body:expr) => {{
         if $self.oauth_refresh_token.is_some() {
             let tok = $self.oauth_access_token().await?;
-            let mut $s = imap::connect_tls_xoauth2(&$self.host, $self.port, &$self.username, &tok).await?;
+            let mut $s =
+                imap::connect_tls_xoauth2(&$self.host, $self.port, &$self.username, &tok).await?;
             let result = $body;
             $s.logout().await.ok();
             result
         } else if $self.use_tls {
-            let mut $s = imap::connect_tls(&$self.host, $self.port, &$self.username, &$self.password).await?;
+            let mut $s =
+                imap::connect_tls(&$self.host, $self.port, &$self.username, &$self.password)
+                    .await?;
             let result = $body;
             $s.logout().await.ok();
             result
         } else {
-            let mut $s = imap::connect_plain(&$self.host, $self.port, &$self.username, &$self.password).await?;
+            let mut $s =
+                imap::connect_plain(&$self.host, $self.port, &$self.username, &$self.password)
+                    .await?;
             let result = $body;
             $s.logout().await.ok();
             result
@@ -186,9 +194,7 @@ macro_rules! with_session {
 #[async_trait]
 impl MailProvider for ImapProvider {
     async fn list_folders(&self) -> Result<Vec<Folder>, String> {
-        with_session!(self, |session| {
-            imap::list_folders_impl(&mut session).await
-        })
+        with_session!(self, |session| { imap::list_folders_impl(&mut session).await })
     }
 
     async fn fetch_conversations(
@@ -216,9 +222,7 @@ impl MailProvider for ImapProvider {
         user_email: &str,
         query: &str,
     ) -> Result<Vec<MessageEnvelope>, String> {
-        with_session!(self, |session| {
-            imap::search_impl(&mut session, user_email, query).await
-        })
+        with_session!(self, |session| { imap::search_impl(&mut session, user_email, query).await })
     }
 
     async fn set_flags(
@@ -247,16 +251,11 @@ impl MailProvider for ImapProvider {
         })
     }
 
-    async fn delete_messages(
-        &self,
-        messages: &[MessageRef],
-    ) -> Result<(), String> {
+    async fn delete_messages(&self, messages: &[MessageRef]) -> Result<(), String> {
         if messages.is_empty() {
             return Ok(());
         }
-        with_session!(self, |session| {
-            imap::delete_messages_impl(&mut session, messages).await
-        })
+        with_session!(self, |session| { imap::delete_messages_impl(&mut session, messages).await })
     }
 
     async fn mark_spam_by_domain(
@@ -271,33 +270,24 @@ impl MailProvider for ImapProvider {
         if messages.is_empty() {
             return Ok(());
         }
-        with_session!(self, |session| {
-            imap::delete_messages_impl(&mut session, messages).await
-        })
+        with_session!(self, |session| { imap::delete_messages_impl(&mut session, messages).await })
     }
 
-    async fn blacklist_and_purge(&self, _scope: &str, _fallback_addr: &str, _message_ids: &[i64]) -> Result<PurgeOutcome, String> {
+    async fn blacklist_and_purge(
+        &self,
+        _scope: &str,
+        _fallback_addr: &str,
+        _message_ids: &[i64],
+    ) -> Result<PurgeOutcome, String> {
         Err("Blacklist requires a DDMail server.".into())
     }
 
-    async fn fetch_message_source(
-        &self,
-        folder: &str,
-        uid: u32,
-    ) -> Result<String, String> {
-        with_session!(self, |session| {
-            imap::fetch_source_impl(&mut session, folder, uid).await
-        })
+    async fn fetch_message_source(&self, folder: &str, uid: u32) -> Result<String, String> {
+        with_session!(self, |session| { imap::fetch_source_impl(&mut session, folder, uid).await })
     }
 
-    async fn fetch_raw_message(
-        &self,
-        folder: &str,
-        uid: u32,
-    ) -> Result<Vec<u8>, String> {
-        with_session!(self, |session| {
-            imap::fetch_raw_message(&mut session, folder, uid).await
-        })
+    async fn fetch_raw_message(&self, folder: &str, uid: u32) -> Result<Vec<u8>, String> {
+        with_session!(self, |session| { imap::fetch_raw_message(&mut session, folder, uid).await })
     }
 
     async fn fetch_message_headers(&self, folder: &str, uid: u32) -> Result<String, String> {
@@ -323,9 +313,7 @@ impl MailProvider for ImapProvider {
     }
 
     async fn fetch_identities(&self) -> Result<Vec<Identity>, String> {
-        with_session!(self, |session| {
-            imap::fetch_identities_impl(&mut session).await
-        })
+        with_session!(self, |session| { imap::fetch_identities_impl(&mut session).await })
     }
 
     async fn fetch_inline_part(
@@ -352,7 +340,13 @@ impl MailProvider for ImapProvider {
         if self.oauth_refresh_token.is_some() {
             let tok = self.oauth_access_token().await?;
             return crate::smtp::send_message_auth(
-                smtp_host, smtp_port, &self.username, &tok, self.use_tls, true, message,
+                smtp_host,
+                smtp_port,
+                &self.username,
+                &tok,
+                self.use_tls,
+                true,
+                message,
             )
             .await;
         }
@@ -367,10 +361,7 @@ impl MailProvider for ImapProvider {
         .await
     }
 
-    async fn start_watching(
-        &self,
-        notifier: Notifier,
-    ) -> Result<(), String> {
+    async fn start_watching(&self, notifier: Notifier) -> Result<(), String> {
         // OAuth accounts: the IDLE watcher authenticates with a password, which
         // Gmail-OAuth doesn't have — skip it (no push; fetch works via XOAUTH2,
         // send via SMTP XOAUTH2). A push path for OAuth is a later refinement.
@@ -442,9 +433,7 @@ impl MailProvider for ImapProvider {
         };
         let url = url.as_str();
         let (au, ap) = self.dav_auth_pair().await?;
-        let mut events =
-            crate::caldav_client::fetch_events(url, &au, &ap, from_ms, to_ms)
-                .await?;
+        let mut events = crate::caldav_client::fetch_events(url, &au, &ap, from_ms, to_ms).await?;
         // Assign a stable numeric id per UID and remember the mapping so
         // patch/delete (addressed by id) can resolve the CalDAV resource.
         let mut map = self.caldav_event_uids.lock().map_err(|e| format!("lock: {e}"))?;
@@ -474,20 +463,20 @@ impl MailProvider for ImapProvider {
         let description = body.get("description").and_then(|v| v.as_str()).unwrap_or("");
         let location = body.get("location").and_then(|v| v.as_str()).unwrap_or("");
         let all_day = body.get("all_day").and_then(|v| v.as_bool()).unwrap_or(false);
-        let dtstart = body
-            .get("dtstart")
-            .and_then(|v| v.as_i64())
-            .ok_or("dtstart required")?;
+        let dtstart = body.get("dtstart").and_then(|v| v.as_i64()).ok_or("dtstart required")?;
         let dtend = body.get("dtend").and_then(|v| v.as_i64()).filter(|&v| v != 0);
         // UID from start + a hash of the summary (no RNG in core); the server
         // treats a repeat PUT of the same UID as an update, which is benign.
-        let uid = format!(
-            "{}-{:x}@ddmail",
-            dtstart,
-            crate::caldav_client::event_id_from_uid(summary)
-        );
+        let uid =
+            format!("{}-{:x}@ddmail", dtstart, crate::caldav_client::event_id_from_uid(summary));
         let ical = crate::caldav_client::build_ical(
-            &uid, summary, description, location, dtstart, dtend, all_day,
+            &uid,
+            summary,
+            description,
+            location,
+            dtstart,
+            dtend,
+            all_day,
         );
         crate::caldav_client::put_event(
             url,
@@ -499,10 +488,7 @@ impl MailProvider for ImapProvider {
         )
         .await?;
         let id = crate::caldav_client::event_id_from_uid(&uid);
-        self.caldav_event_uids
-            .lock()
-            .map_err(|e| format!("lock: {e}"))?
-            .insert(id, uid.clone());
+        self.caldav_event_uids.lock().map_err(|e| format!("lock: {e}"))?.insert(id, uid.clone());
         Ok(serde_json::json!({
             "id": id, "uid": uid, "calendar_id": STANDALONE_CALDAV_CAL_ID
         }))
@@ -523,26 +509,27 @@ impl MailProvider for ImapProvider {
             .ok_or("unknown event id — reopen the calendar and retry")?;
         // Fetch-merge-put so recurrence and other unedited properties survive;
         // the fetched ETag guards the PUT against a concurrent change.
-        let (existing, etag) =
-            crate::caldav_client::get_event_raw(url, &au, &ap, &uid).await?;
+        let (existing, etag) = crate::caldav_client::get_event_raw(url, &au, &ap, &uid).await?;
         let summary = body.get("summary").and_then(|v| v.as_str()).unwrap_or("");
         let description = body.get("description").and_then(|v| v.as_str()).unwrap_or("");
         let location = body.get("location").and_then(|v| v.as_str()).unwrap_or("");
         let all_day = body.get("all_day").and_then(|v| v.as_bool()).unwrap_or(false);
-        let dtstart = body
-            .get("dtstart")
-            .and_then(|v| v.as_i64())
-            .ok_or("dtstart required")?;
+        let dtstart = body.get("dtstart").and_then(|v| v.as_i64()).ok_or("dtstart required")?;
         let dtend = body.get("dtend").and_then(|v| v.as_i64()).filter(|&v| v != 0);
         let merged = crate::caldav_client::merge_ical(
-            &existing, summary, description, location, dtstart, dtend, all_day,
+            &existing,
+            summary,
+            description,
+            location,
+            dtstart,
+            dtend,
+            all_day,
         );
         let pre = match etag.as_deref() {
             Some(tag) => crate::caldav_client::Precondition::IfMatch(tag),
             None => crate::caldav_client::Precondition::None,
         };
-        crate::caldav_client::put_event(url, &au, &ap, &uid, &merged, pre)
-            .await
+        crate::caldav_client::put_event(url, &au, &ap, &uid, &merged, pre).await
     }
 
     async fn delete_event(&self, event_id: i64) -> Result<(), String> {
@@ -563,14 +550,7 @@ impl MailProvider for ImapProvider {
             .await
             .ok()
             .and_then(|(_, tag)| tag);
-        crate::caldav_client::delete_event(
-            url,
-            &au,
-            &ap,
-            &uid,
-            if_match.as_deref(),
-        )
-        .await
+        crate::caldav_client::delete_event(url, &au, &ap, &uid, if_match.as_deref()).await
     }
 
     async fn list_contacts(&self, limit: u32) -> Result<Vec<DesktopContact>, String> {
@@ -578,22 +558,23 @@ impl MailProvider for ImapProvider {
             return Ok(Vec::new());
         };
         let (au, ap) = self.dav_auth_pair().await?;
-        let list = crate::carddav_client::fetch_contacts(
-            &url, &au, &ap, None, limit as usize,
-        )
-        .await?;
+        let list =
+            crate::carddav_client::fetch_contacts(&url, &au, &ap, None, limit as usize).await?;
         Ok(self.tag_contact_ids(list)?)
     }
 
-    async fn search_contacts(&self, query: &str, limit: u32) -> Result<Vec<DesktopContact>, String> {
+    async fn search_contacts(
+        &self,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<DesktopContact>, String> {
         let Some(url) = self.carddav_collection_url().await? else {
             return Ok(Vec::new());
         };
         let (au, ap) = self.dav_auth_pair().await?;
-        let list = crate::carddav_client::fetch_contacts(
-            &url, &au, &ap, Some(query), limit as usize,
-        )
-        .await?;
+        let list =
+            crate::carddav_client::fetch_contacts(&url, &au, &ap, Some(query), limit as usize)
+                .await?;
         Ok(self.tag_contact_ids(list)?)
     }
 
@@ -607,17 +588,19 @@ impl MailProvider for ImapProvider {
             "{:x}@ddmail",
             crate::caldav_client::event_id_from_uid(&format!("{full_name}{}", emails.join(",")))
         );
-        let vcard = crate::carddav_client::build_vcard(&uid, &full_name, &emails, &phones, &org, &title);
+        let vcard =
+            crate::carddav_client::build_vcard(&uid, &full_name, &emails, &phones, &org, &title);
         crate::carddav_client::put_contact(
-            &url, &au, &ap, &uid, &vcard,
+            &url,
+            &au,
+            &ap,
+            &uid,
+            &vcard,
             crate::caldav_client::Precondition::IfNew,
         )
         .await?;
         let id = crate::caldav_client::event_id_from_uid(&uid);
-        self.carddav_contact_uids
-            .lock()
-            .map_err(|e| format!("lock: {e}"))?
-            .insert(id, uid.clone());
+        self.carddav_contact_uids.lock().map_err(|e| format!("lock: {e}"))?.insert(id, uid.clone());
         Ok(serde_json::json!({ "id": id, "uid": uid }))
     }
 
@@ -633,16 +616,15 @@ impl MailProvider for ImapProvider {
             .get(&id)
             .cloned()
             .ok_or("unknown contact id — reopen the address book and retry")?;
-        let (_, etag) =
-            crate::carddav_client::get_contact_raw(&url, &au, &ap, &uid).await?;
+        let (_, etag) = crate::carddav_client::get_contact_raw(&url, &au, &ap, &uid).await?;
         let (full_name, emails, phones, org, title) = contact_fields(&body);
-        let vcard = crate::carddav_client::build_vcard(&uid, &full_name, &emails, &phones, &org, &title);
+        let vcard =
+            crate::carddav_client::build_vcard(&uid, &full_name, &emails, &phones, &org, &title);
         let pre = match etag.as_deref() {
             Some(t) => crate::caldav_client::Precondition::IfMatch(t),
             None => crate::caldav_client::Precondition::None,
         };
-        crate::carddav_client::put_contact(&url, &au, &ap, &uid, &vcard, pre)
-            .await
+        crate::carddav_client::put_contact(&url, &au, &ap, &uid, &vcard, pre).await
     }
 
     async fn delete_contact(&self, id: i64) -> Result<(), String> {
@@ -661,10 +643,7 @@ impl MailProvider for ImapProvider {
             .await
             .ok()
             .and_then(|(_, t)| t);
-        crate::carddav_client::delete_contact(
-            &url, &au, &ap, &uid, if_match.as_deref(),
-        )
-        .await
+        crate::carddav_client::delete_contact(&url, &au, &ap, &uid, if_match.as_deref()).await
     }
 
     fn provider_type(&self) -> &'static str {
