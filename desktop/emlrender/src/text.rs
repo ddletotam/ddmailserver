@@ -178,6 +178,12 @@ pub fn nbsp_advance(engine: &mut TextEngine, span: &Span) -> f32 {
 /// the min comes from walking glyph advances between whitespace clusters. Table
 /// column sizing asks this of every cell, and a second shaping pass per cell is
 /// visible in the corpus timings.
+///
+/// Both come back padded by `MEASURE_SLACK`. The caller never hands the width
+/// back as-is: it adds the frame, clamps, subtracts the frame again — and that
+/// round trip in f32 can land a few ulp *under* the line it measured. cosmic-text
+/// then wraps the last word: a `padding: 14px 36px` button got 50.815994 px for
+/// a 50.815998 px `Sign in` under Noto Sans and broke its label in two.
 pub fn measure_min_max(
     engine: &mut TextEngine,
     spans: &[Span],
@@ -185,6 +191,8 @@ pub fn measure_min_max(
     base_line: f32,
 ) -> (f32, f32) {
     const UNBOUNDED: f32 = 100_000.0;
+    /// Far above any f32 round-off at mail widths, far below a visible pixel.
+    const MEASURE_SLACK: f32 = 0.01;
     let buffer = shape(engine, spans, UNBOUNDED, Align::Left, base_size, base_line);
     let (mut min, mut max) = (0.0f32, 0.0f32);
     for run in buffer.layout_runs() {
@@ -201,7 +209,10 @@ pub fn measure_min_max(
         }
         min = min.max(word);
     }
-    (min.min(max), max)
+    if max <= 0.0 {
+        return (0.0, 0.0);
+    }
+    (min.min(max) + MEASURE_SLACK, max + MEASURE_SLACK)
 }
 
 /// Laid-out size of a shaped buffer, in device px.
