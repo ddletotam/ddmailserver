@@ -667,7 +667,27 @@ fn conv_merge_key(fallback: &str, c: &Conversation) -> merges::MergeKey {
 /// свежего; счётчики суммируются, refs сообщений конкатенируются (тела
 /// потом сортируются по date_ts в load_message_bodies). Группа, от которой
 /// в списке остался один диалог, рендерится как есть.
+///
+/// Поверх склеек ложатся пользовательские имена (`Merges::names`): они
+/// меняют только `label` в этом виде — сырой список, кэш и письма их не
+/// видят (контракт §4, «Переименование диалога»).
 fn apply_merges(
+    raw: &[Conversation],
+    m: &merges::Merges,
+    fallback: &str,
+) -> Vec<Conversation> {
+    let mut out = merge_groups(raw, m, fallback);
+    if !m.names.is_empty() {
+        for c in &mut out {
+            if let Some(name) = m.name_of(&conv_merge_key(fallback, c)) {
+                c.label = name.to_string();
+            }
+        }
+    }
+    out
+}
+
+fn merge_groups(
     raw: &[Conversation],
     m: &merges::Merges,
     fallback: &str,
@@ -847,24 +867,24 @@ fn contact_items(contacts: &[Contact]) -> Vec<ContactItem> {
         .collect()
 }
 
-/// Match `q_lc` (already lowercased) against everything the user thinks of as a
-/// person: address-book contacts first, then the counterparts of every loaded
-/// conversation — by BOTH display name and address, exactly as shown in the
-/// sidebar. Case-insensitive and Unicode-aware (Rust `to_lowercase`, unlike
-/// SQLite's ASCII-only `LOWER`, which never folded Cyrillic). Returned as
-/// `Contact` so the dropdown row + select-flow reuse unchanged; deduped by
-/// address, capped. Runs entirely client-side, so it answers on the first
-/// keystroke without waiting for the network message search.
+/// Match `q_lc` (already lowercased) against the address book. Собеседники
+/// диалогов сюда больше не идут — их находит секция «Диалоги»
+/// (`local_search_convs`), и адрес, уже показанный там, из контактов
+/// выбрасывается (`skip`). Case-insensitive and Unicode-aware (Rust
+/// `to_lowercase`, unlike SQLite's ASCII-only `LOWER`, which never folded
+/// Cyrillic). Returned as `Contact` so the dropdown row + select-flow reuse
+/// unchanged; deduped by address, capped. Runs entirely client-side, so it
+/// answers on the first keystroke without waiting for the network message
+/// search.
 fn local_search_contacts(
     book: &[ddmail_core::types::DesktopContact],
-    convs: &[Conversation],
+    skip: &HashSet<String>,
     q_lc: &str,
 ) -> Vec<Contact> {
     const CAP: usize = 12;
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen: HashSet<String> = skip.clone();
     let mut out: Vec<Contact> = Vec::new();
 
-    // 1) Address book — first priority.
     for c in book {
         let hit = c.full_name.to_lowercase().contains(q_lc)
             || c.organization.to_lowercase().contains(q_lc)
@@ -895,29 +915,106 @@ fn local_search_contacts(
         }
     }
 
-    // 2) Conversation counterparts — name AND address, as seen in the sidebar.
-    // convs are already newest-first, so order is meaningful.
-    for conv in convs {
-        for cp in &conv.counterparts {
-            if cp.addr.is_empty() {
-                continue;
-            }
-            if !(cp.name.to_lowercase().contains(q_lc) || cp.addr.to_lowercase().contains(q_lc)) {
-                continue;
-            }
-            if seen.insert(cp.addr.to_lowercase()) {
-                out.push(Contact {
-                    email: cp.addr.clone(),
-                    name: cp.name.clone(),
-                    source: "conversation".into(),
-                });
-                if out.len() >= CAP {
-                    return out;
-                }
+    out
+}
+
+/// Строка секции «Диалоги» в выпадашке поиска. Диалог ищется по ключу, а
+/// не по индексу: список может перестроиться, пока выпадашка открыта.
+#[derive(Clone)]
+struct ConvHit {
+    account: String,
+    id: String,
+    name: String,
+    /// Что совпало: тема последнего письма (совпало имя), адрес или тема.
+    detail: String,
+    /// Адреса собеседников — чтобы не повторять их в «Контактах».
+    addrs: Vec<String>,
+}
+
+/// Локальный поиск диалогов (контракт §4, «Поиск»): по имени диалога (в том
+/// числе пользовательскому), по адресам участников и по темам писем —
+/// последней из списка и всех закэшированных тел (`subjects`, строки
+/// `Cache::body_subjects`). Порядок — имя, адрес, тема; внутри — как в
+/// сайдбаре, от свежего к старому. Сервер не спрашивается: его поиск писем
+/// идёт своей секцией, как и раньше.
+fn local_search_convs(
+    convs: &[Conversation],
+    subjects: &[(String, String, u32, String)],
+    fallback: &str,
+    q_lc: &str,
+) -> Vec<ConvHit> {
+    const CAP: usize = 8;
+    let hit = |c: &Conversation, detail: String| ConvHit {
+        account: eff_account(fallback, c),
+        id: c.id.clone(),
+        name: conv_name(c),
+        detail,
+        addrs: c.counterparts.iter().map(|cp| cp.addr.to_lowercase()).collect(),
+    };
+    let mut out: Vec<ConvHit> = Vec::new();
+    let mut taken = vec![false; convs.len()];
+
+    // 1) Имя диалога.
+    for (i, c) in convs.iter().enumerate() {
+        if conv_name(c).to_lowercase().contains(q_lc) {
+            taken[i] = true;
+            out.push(hit(c, c.last_subject.clone()));
+        }
+    }
+    // 2) Адрес любого участника.
+    for (i, c) in convs.iter().enumerate() {
+        if taken[i] {
+            continue;
+        }
+        if let Some(cp) = c.counterparts.iter().find(|cp| cp.addr.to_lowercase().contains(q_lc)) {
+            taken[i] = true;
+            out.push(hit(c, cp.addr.clone()));
+        }
+    }
+    // 3) Тема письма: сначала последняя (она есть и без тел), затем кэш тел.
+    let mut by_subject: Vec<(usize, String)> = Vec::new();
+    for (i, c) in convs.iter().enumerate() {
+        if !taken[i] && c.last_subject.to_lowercase().contains(q_lc) {
+            taken[i] = true;
+            by_subject.push((i, c.last_subject.clone()));
+        }
+    }
+    let mut owner: HashMap<(&str, &str, u32), usize> = HashMap::new();
+    let accounts: Vec<String> = convs.iter().map(|c| eff_account(fallback, c)).collect();
+    for (i, c) in convs.iter().enumerate() {
+        if taken[i] {
+            continue;
+        }
+        for m in &c.messages {
+            owner.insert((accounts[i].as_str(), m.folder.as_str(), m.uid), i);
+        }
+    }
+    if !owner.is_empty() {
+        for (acc, folder, uid, subject) in subjects {
+            let Some(&i) = owner.get(&(acc.as_str(), folder.as_str(), *uid)) else { continue };
+            if !taken[i] && subject.to_lowercase().contains(q_lc) {
+                taken[i] = true;
+                by_subject.push((i, subject.clone()));
             }
         }
     }
+    by_subject.sort_by_key(|(i, _)| *i);
+    for (i, subject) in by_subject {
+        out.push(hit(&convs[i], format!("Тема: {subject}")));
+    }
+    out.truncate(CAP);
     out
+}
+
+/// Адреса собеседников найденных диалогов — «Контакты» их не повторяют.
+fn conv_hit_addrs(hits: &[ConvHit]) -> HashSet<String> {
+    hits.iter().flat_map(|h| h.addrs.iter().cloned()).collect()
+}
+
+fn conv_hit_items(hits: &[ConvHit]) -> Vec<ConvHitItem> {
+    hits.iter()
+        .map(|h| ConvHitItem { name: h.name.clone().into(), detail: h.detail.clone().into() })
+        .collect()
 }
 
 /// Pull a short single-line preview out of a message body — first the
@@ -1058,6 +1155,15 @@ fn enter_reply_mode(sh: &Shared, ui: &MainWindow, body: MessageBody) {
     ui.set_reply_ribbon_visible(true);
     ui.invoke_focus_composer();
     refresh_composer_hints(ui, sh);
+    // Явный ответ показывает поля заполненными ТЕКСТОМ, а не подсказками
+    // (контракт §3): видно, кому и с какой темой уйдёт, и правится как
+    // обычный текст. Значения — ровно то, что вывела бы сама ветка отправки
+    // (`refresh_composer_hints` повторяет её правило), так что адресаты не
+    // меняются; непустое поле просто становится override'ом (§1).
+    ui.set_composer_to(ui.get_composer_to_auto());
+    ui.set_composer_subject(ui.get_composer_subject_auto());
+    ui.set_composer_cc("".into());
+    ui.set_composer_expanded(true);
 }
 
 fn exit_reply_mode(sh: &Shared, ui: &MainWindow) {
@@ -1067,6 +1173,9 @@ fn exit_reply_mode(sh: &Shared, ui: &MainWindow) {
     ui.set_reply_ribbon_from("".into());
     ui.set_reply_ribbon_preview("".into());
     ui.set_composer_to("".into());
+    // Тему ставят явно и ответ, и пересылка — снятая лента забирает её с
+    // собой, иначе «Re:»/«Fwd:» чужого письма уехал бы в неявный ответ.
+    ui.set_composer_subject("".into());
     refresh_composer_hints(ui, sh);
 }
 
@@ -1128,7 +1237,8 @@ fn enter_compose_mode(sh: &Shared, ui: &MainWindow, email: &str) {
     ui.set_active_name(email.clone().into());
     ui.set_active_initials(initial.into());
     ui.set_active_color(slint::Brush::SolidColor(hex("#10b981")));
-    ui.set_active_meta("".into());
+    ui.set_active_meta_parts(ModelRc::new(VecModel::from(Vec::<MetaPart>::new())));
+    ui.set_rename_open(false);
     ui.set_active_ident_color(slint::Brush::SolidColor(hex("#ffffff")));
     ui.set_messages(ModelRc::new(VecModel::from(Vec::<RowItem>::new())));
     ui.set_search_open(false);
@@ -1193,7 +1303,7 @@ fn message_hits(envs: &[MessageEnvelope]) -> Vec<MessageHit> {
 /// images / stylesheets / `url(...)` references to non-allowlisted hosts
 /// are replaced with empty `src=""` (kept as `data-blocked-src` for the
 /// future "show domain X" UX).
-fn build_body_html(b: &MessageBody, policy: &policy::Policy) -> String {
+fn build_body_html(b: &MessageBody, policy: &policy::Policy, caption: bool) -> String {
     let has_html = b.html.as_deref().map(|h| !h.trim().is_empty()).unwrap_or(false);
     let inner = match b.html.as_deref() {
         Some(h) if !h.trim().is_empty() => {
@@ -1215,9 +1325,37 @@ fn build_body_html(b: &MessageBody, policy: &policy::Policy) -> String {
     bubble_template_wide(
         b.is_outgoing,
         &fmt_bubble_time(b.date_ts),
-        &format!("{inner}{}{}", attachment_chips(b), empty_body_note(b)),
+        &format!("{}{inner}{}{}", subject_caption(b, caption), attachment_chips(b), empty_body_note(b)),
         wide,
     )
+}
+
+/// Подпись темой над содержимым пузыря — только в склеенном диалоге
+/// (контракт §4, «Склеенный диалог»): там рядом идут письма разных бесед, и
+/// без темы не понять, к какой относится пузырь. Мелко, но читается.
+fn subject_caption(b: &MessageBody, caption: bool) -> String {
+    if !caption {
+        return String::new();
+    }
+    let subject = b.subject.trim();
+    let subject = if subject.is_empty() { "(без темы)" } else { subject };
+    format!("<div class=\"{CSS_NS}-subj\">{}</div>", html_escape(subject))
+}
+
+/// Подсказка своего пузыря в склеенном диалоге: кому ушло письмо. Строка
+/// на поле — «Кому» и, если есть, «Копия»; адреса как в заголовке письма.
+fn recipients_tip(b: &MessageBody) -> String {
+    let join = |v: &[String]| {
+        v.iter().map(|a| a.trim()).filter(|a| !a.is_empty()).collect::<Vec<_>>().join(", ")
+    };
+    let to = join(&b.to);
+    let cc = join(&b.cc);
+    let mut out = format!("Кому: {}", if to.is_empty() { "—" } else { &to });
+    if !cc.is_empty() {
+        out.push_str("\nКопия: ");
+        out.push_str(&cc);
+    }
+    out
 }
 
 /// Заметка «в письме нет ни текста, ни вложений» — единственный контент
@@ -1234,13 +1372,13 @@ fn empty_body_note(b: &MessageBody) -> String {
 /// Text-only bubble — the fallback we render when the HTML body paints nothing
 /// at all. Preserves linebreaks via `white-space: pre-wrap`, and still appends
 /// attachment chips.
-fn build_text_only_html(b: &MessageBody) -> String {
+fn build_text_only_html(b: &MessageBody, caption: bool) -> String {
     let escaped = html_escape(b.text.as_deref().unwrap_or(""));
     let inner = format!("<div style=\"white-space:pre-wrap\">{escaped}</div>");
     bubble_template(
         b.is_outgoing,
         &fmt_bubble_time(b.date_ts),
-        &format!("{inner}{}{}", attachment_chips(b), empty_body_note(b)),
+        &format!("{}{inner}{}{}", subject_caption(b, caption), attachment_chips(b), empty_body_note(b)),
     )
 }
 
@@ -1347,7 +1485,7 @@ fn attachment_chips(b: &MessageBody) -> String {
 /// Bump whenever the bubble/render HTML template or its CSS changes: the
 /// texture cache keys renders by fnv1a(body.html) only, so without this a
 /// template/CSS edit would keep serving stale cached bitmaps (RAM + disk).
-const RENDER_TEMPLATE_EPOCH: u64 = 7;
+const RENDER_TEMPLATE_EPOCH: u64 = 8;
 
 /// ВСЕ классы обвязки пузыря пишутся с этим префиксом. Документ пузыря —
 /// общая песочница для нашей вёрстки и присланного HTML, а письма сплошь
@@ -1415,6 +1553,8 @@ fn bubble_template_wide(is_outgoing: bool, time: &str, inner: &str, wide: bool) 
                 padding: 4px 10px; margin: 2px 4px 2px 0; color: #10b981;
                 text-decoration: none; font-size: 13px; }}
         .{CSS_NS}-nobody {{ color: #8a97a5; font-size: 13px; font-style: italic; }}
+        .{CSS_NS}-subj {{ color: #6b7785; font-size: 12px; font-weight: 600; line-height: 1.3;
+                 margin-bottom: 4px; }}
         .{CSS_NS}-time {{ text-align: right; font-size: 11px; color: #8a97a5;
                  margin-top: 4px; user-select: none; }}
         </style></head>
@@ -1445,6 +1585,9 @@ enum Job {
         /// UI window scale factor — the WebView rasterizes at this scale so
         /// the capture is 1:1 with physical pixels (crisp on HiDPI).
         scale: f32,
+        /// Склеенный диалог: пузыри подписаны темой, у своих — подсказка с
+        /// адресатами (контракт §4, «Склеенный диалог»).
+        merged: bool,
     },
     HitTest { row: usize, x: f32, y: f32 },
     /// Render the source/headers viewer text to a bitmap + word rects, so the
@@ -1467,6 +1610,9 @@ struct RowMeta {
     s_sender_on: bool,
     m_host_on: bool,
     s_host_on: bool,
+    /// Подсказка с адресатами своего письма в склеенном диалоге; пусто —
+    /// подсказки нет.
+    recipients: String,
 }
 
 /// UI-thread state shared by the select/resize/engine-result paths. All mail
@@ -1642,6 +1788,8 @@ struct Shared {
     /// `search-select-message(idx)` back to their domain objects.
     search_contacts: RefCell<Vec<Contact>>,
     search_messages: RefCell<Vec<MessageEnvelope>>,
+    /// Секция «Диалоги» — локальные совпадения (`local_search_convs`).
+    search_convs: RefCell<Vec<ConvHit>>,
     /// "Transient compose" target — set when the user picks a fresh
     /// recipient via the search dropdown ("Написать xxx@yyy" or a
     /// contact with no existing conversation). While Some, the chat
@@ -2177,6 +2325,12 @@ fn rebuild_merged_view(ui: &MainWindow, sh: &Shared, select_id: Option<String>, 
 fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
     let caller = std::panic::Location::caller();
     let t0 = Instant::now();
+    // Незаконченное переименование относится к прежнему диалогу — снять,
+    // иначе Enter переименовал бы уже этот. Перечит того же диалога (дельта,
+    // новое письмо) поле не трогает: пользователь может быть посреди ввода.
+    if sh.current.get() != idx {
+        ui.set_rename_open(false);
+    }
     sh.current.set(idx);
     // New conversation generation: any in-flight FetchMessages answer for
     // the previously open conversation will be dropped on arrival.
@@ -2753,6 +2907,13 @@ fn rich_paste(ui: &MainWindow, sh: &Shared) {
 /// Раскладка: шорткаты сверяются и с латиницей, и с кириллицей тех же клавиш —
 /// Slint матчит их по символу, а под ЙЦУКЕН приходит «с»/«м»/«и»…
 /// (см. `global Kb` в app.slint — здесь та же болезнь, своё лечение).
+/// Клавиатурная прокрутка открытой переписки: 1 = страница вверх, 2 = вниз,
+/// 3 = в начало, 4 = в конец. Применяет мост `chat-page-seq` в app.slint.
+fn chat_page(ui: &MainWindow, cmd: i32) {
+    ui.set_chat_page_cmd(cmd);
+    ui.set_chat_page_seq(ui.get_chat_page_seq() + 1);
+}
+
 fn rich_key(ui: &MainWindow, sh: &Rc<Shared>, text: &str, ctrl: bool, shift: bool, alt: bool) -> bool {
     use richtext::{Motion, StyleBit};
     use slint::platform::Key;
@@ -2845,6 +3006,18 @@ fn rich_key(ui: &MainWindow, sh: &Rc<Shared>, text: &str, ctrl: bool, shift: boo
         return false;
     }
 
+    // Прокрутка переписки из композера (контракт §4). PgUp/PgDn — всегда:
+    // поле ввода капнуто десятью строками, листать его страницами незачем.
+    // Home/End — только в пустом поле: в набранном тексте это ход каретки.
+    if is(Key::PageUp) || is(Key::PageDown) {
+        chat_page(ui, if is(Key::PageUp) { 1 } else { 2 });
+        return true;
+    }
+    if (is(Key::Home) || is(Key::End)) && !shift && sh.rich.borrow().is_empty() {
+        chat_page(ui, if is(Key::Home) { 3 } else { 4 });
+        return true;
+    }
+
     if is(Key::Return) {
         if shift {
             sh.rich.borrow_mut().split_block();
@@ -2929,22 +3102,40 @@ fn rich_key(ui: &MainWindow, sh: &Rc<Shared>, text: &str, ctrl: bool, shift: boo
 }
 
 /// Tauri-era header meta line: counterpart address (1:1) or participants
-/// (group), plus " → receiving identity".
-fn conv_meta(c: &Conversation) -> String {
-    let mut m = if c.is_group {
-        c.counterparts
-            .iter()
-            .map(|cp| if cp.name.is_empty() { cp.addr.clone() } else { cp.name.clone() })
-            .collect::<Vec<_>>()
-            .join(", ")
-    } else {
-        c.counterparts.first().map(|cp| cp.addr.clone()).unwrap_or_default()
-    };
-    if !c.received_by.is_empty() {
-        m.push_str(" → ");
-        m.push_str(&c.received_by);
+/// (group), plus " → receiving identity". Кусками: у каждого адреса свой
+/// `addr`, клик по нему копирует адрес (контракт §4, «Шапка диалога»).
+fn conv_meta_parts(c: &Conversation) -> Vec<MetaPart> {
+    let part = |text: &str, addr: &str| MetaPart { text: text.into(), addr: addr.into() };
+    let mut out = Vec::new();
+    if c.is_group {
+        for (i, cp) in c.counterparts.iter().enumerate() {
+            if i > 0 {
+                out.push(part(", ", ""));
+            }
+            let text = if cp.name.is_empty() { &cp.addr } else { &cp.name };
+            out.push(part(text, &cp.addr));
+        }
+    } else if let Some(cp) = c.counterparts.first() {
+        out.push(part(&cp.addr, &cp.addr));
     }
-    m
+    if !c.received_by.is_empty() {
+        out.push(part(" → ", ""));
+        out.push(part(&c.received_by, &c.received_by));
+    }
+    out
+}
+
+/// Ненавязчивое подтверждение мутации — плашка «✓ …» над композером ~2 с
+/// (контракт §5: никогда не тостом).
+fn flash_confirm(ui: &MainWindow, text: &str) {
+    ui.set_send_confirm_text(text.into());
+    ui.set_send_confirm_visible(true);
+    let uiw = ui.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_millis(2000), move || {
+        if let Some(u) = uiw.upgrade() {
+            u.set_send_confirm_visible(false);
+        }
+    });
 }
 
 /// Set every header property for conversation `idx` in one place: name,
@@ -2966,8 +3157,8 @@ fn apply_active_header(ui: &MainWindow, sh: &Shared, idx: usize) {
             slint::Brush::SolidColor(hex(&d.ident_color))
         });
     }
-    let meta = sh.convs.borrow().get(idx).map(conv_meta).unwrap_or_default();
-    ui.set_active_meta(meta.into());
+    let meta = sh.convs.borrow().get(idx).map(conv_meta_parts).unwrap_or_default();
+    ui.set_active_meta_parts(ModelRc::new(VecModel::from(meta)));
 }
 
 /// Mirror the policy's global «Медиа…» switches into root properties so
@@ -3029,6 +3220,10 @@ fn send_render_job(sh: &Shared, bodies: Vec<MessageBody>, scroll_to: Option<i32>
         .map(|b| u8::from(overrides.contains(&(b.folder.clone(), b.uid))))
         .collect();
     drop(overrides);
+    // Склейка — свойство открытого диалога, а не писем: новое письмо
+    // compose-режима ни к какой склейке не относится.
+    let merged = sh.pending_compose.borrow().is_none()
+        && sh.convs.borrow().get(sh.current.get()).is_some_and(|c| c.merged);
     let _ = sh.tx.send(Job::SetConversation {
         bodies,
         width: sh.width.get(),
@@ -3038,6 +3233,7 @@ fn send_render_job(sh: &Shared, bodies: Vec<MessageBody>, scroll_to: Option<i32>
         scroll_to,
         modes,
         scale: sh.render_scale.get(),
+        merged,
     });
 }
 
@@ -3124,6 +3320,7 @@ fn append_send_stub(
     html: Option<String>,
     attachments: Vec<Attachment>,
     from: &str,
+    hdr: StubHeaders,
     conv_id: &str,
 ) {
     let uid = sh.pending_send_seq.get() + 1;
@@ -3133,11 +3330,11 @@ fn append_send_stub(
         // A stub the user just typed: it has never been on the wire.
         raw_headers: String::new(),
         folder: PENDING_FOLDER.into(),
-        subject: String::new(),
+        subject: hdr.subject,
         from: from.to_string(),
         from_addr: from.to_string(),
-        to: Vec::new(),
-        cc: Vec::new(),
+        to: hdr.to,
+        cc: hdr.cc,
         date: String::new(),
         date_ts: chrono::Local::now().timestamp(),
         html,
@@ -3160,6 +3357,16 @@ fn append_send_stub(
     };
     // Scroll to the end — the user's own message always lands at the bottom.
     send_render_job(sh, bodies, Some(-1));
+}
+
+/// Тема и адресаты заглушки — те же, что уходят на сервер. В склеенном
+/// диалоге пузырь подписан темой, а у своего есть подсказка с адресатами
+/// (контракт §4, «Склеенный диалог»): без них заглушка «прыгала» бы, когда
+/// её сменит настоящее письмо.
+struct StubHeaders {
+    subject: String,
+    to: Vec<String>,
+    cc: Vec<String>,
 }
 
 /// Rebuild the sidebar ConvItem list from displays + the avatar map.
@@ -3901,9 +4108,10 @@ mod bubble_css_tests {
         let doc = build_body_html(
             &html_body(r#"<table class="row"><tr><td class="row">текст</td></tr></table>"#),
             &policy::Policy::default(),
+            true,
         );
         let css = &doc[..doc.find("</style>").expect("есть <style>")];
-        for bare in [".row", ".bubble", ".time", ".att", ".atts"] {
+        for bare in [".row", ".bubble", ".time", ".att", ".atts", ".subj"] {
             assert!(
                 !css.contains(&format!("{bare} ")) && !css.contains(&format!("{bare}{{")),
                 "селектор {bare} без префикса ddm- поймает разметку письма"
@@ -3925,7 +4133,7 @@ mod bubble_css_tests {
         // пузыря, поэтому поиск по всему документу всегда находил бы его.
         let markup = |doc: &str| doc[doc.find("</style>").expect("есть <style>")..].to_string();
 
-        let html = build_body_html(&html_body("<table><tr><td>рассылка</td></tr></table>"), &p);
+        let html = build_body_html(&html_body("<table><tr><td>рассылка</td></tr></table>"), &p, false);
         assert!(
             markup(&html).contains("ddm-wide"),
             "HTML-письмо должно получить широкий пузырь"
@@ -3934,19 +4142,147 @@ mod bubble_css_tests {
         let mut plain = html_body("");
         plain.html = None;
         plain.text = Some("просто текст".into());
-        let doc = build_body_html(&plain, &p);
+        let doc = build_body_html(&plain, &p, false);
         assert!(!markup(&doc).contains("ddm-wide"), "текстовое письмо остаётся узким");
 
         // Своё письмо с HTML: широким быть не должно, иначе оно уедет влево
         // во всю ширину вместо выравнивания вправо.
         let mut own = html_body("<table><tr><td>мой ответ</td></tr></table>");
         own.is_outgoing = true;
-        let doc_own = build_body_html(&own, &p);
+        let doc_own = build_body_html(&own, &p, false);
         assert!(
             !markup(&doc_own).contains("ddm-wide"),
             "своё письмо остаётся узким, иначе ломается выравнивание вправо"
         );
         assert!(markup(&doc_own).contains("ddm-bubble-out"), "и остаётся исходящим");
+    }
+}
+
+#[cfg(test)]
+mod conv_search_tests {
+    use super::{conv_hit_addrs, conv_meta_parts, local_search_convs, recipients_tip};
+    use ddmail_core::types::{ContactInfo, Conversation, MessageBody, MessageRef};
+
+    fn conv(id: &str, label: &str, addrs: &[&str], last_subject: &str, refs: &[u32]) -> Conversation {
+        Conversation {
+            id: id.into(),
+            label: label.into(),
+            avatar_hash: String::new(),
+            received_by: "me@example.ru".into(),
+            counterparts: addrs
+                .iter()
+                .map(|a| ContactInfo { name: String::new(), addr: (*a).into() })
+                .collect(),
+            is_group: addrs.len() > 1,
+            last_date: String::new(),
+            last_date_ts: 0,
+            last_subject: last_subject.into(),
+            unread_count: 0,
+            total_count: refs.len() as u32,
+            messages: refs
+                .iter()
+                .map(|&uid| MessageRef { folder: "INBOX".into(), uid, message_id: String::new(), seen: true })
+                .collect(),
+            draft: None,
+            account_key: String::new(),
+            merged: false,
+        }
+    }
+
+    fn sample() -> Vec<Conversation> {
+        vec![
+            conv("c0", "Иван Петров", &["ivan@example.ru"], "Счёт за сентябрь", &[1]),
+            conv("c1", "", &["anna@lizing.example.ru", "olga@lizing.example.ru"], "RE: выкуп", &[2, 3]),
+            conv("c2", "Бухгалтерия", &["buh@example.ru"], "Акт сверки", &[4]),
+        ]
+    }
+
+    fn ids(q: &str, subjects: &[(String, String, u32, String)]) -> Vec<String> {
+        local_search_convs(&sample(), subjects, "acc", q).into_iter().map(|h| h.id).collect()
+    }
+
+    #[test]
+    fn finds_by_name_case_insensitive_cyrillic() {
+        assert_eq!(ids("петров", &[]), vec!["c0"]);
+    }
+
+    #[test]
+    fn finds_by_any_participant_address() {
+        // Второй участник группы — не первый, по которому названа строка.
+        let hits = local_search_convs(&sample(), &[], "acc", "olga@");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "c1");
+        assert_eq!(hits[0].detail, "olga@lizing.example.ru");
+    }
+
+    #[test]
+    fn finds_by_cached_subject_not_only_the_last_one() {
+        let subjects = vec![("acc".into(), "INBOX".into(), 2u32, "Договор №5 — график".into())];
+        let hits = local_search_convs(&sample(), &subjects, "acc", "график");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "c1");
+        assert_eq!(hits[0].detail, "Тема: Договор №5 — график");
+        // Тема чужого аккаунта с тем же (folder, uid) — не этот диалог.
+        let foreign = vec![("other".into(), "INBOX".into(), 2u32, "график".into())];
+        assert!(ids("график", &foreign).is_empty());
+    }
+
+    #[test]
+    fn name_beats_address_beats_subject_and_no_duplicates() {
+        // «example» есть в адресах всех трёх и в имени ни одного; «бух» —
+        // и в имени c2, и в его адресе: диалог один раз, как совпадение имени.
+        assert_eq!(ids("бух", &[]), vec!["c2"]);
+        let subjects = vec![("acc".into(), "INBOX".into(), 1u32, "сверка".into())];
+        // «свер»: c2 — последняя тема, c0 — тема из кэша; порядок как в сайдбаре.
+        assert_eq!(ids("свер", &subjects), vec!["c0", "c2"]);
+    }
+
+    #[test]
+    fn hit_addresses_are_excluded_from_contacts() {
+        let hits = local_search_convs(&sample(), &[], "acc", "выкуп");
+        let addrs = conv_hit_addrs(&hits);
+        assert!(addrs.contains("anna@lizing.example.ru") && addrs.contains("olga@lizing.example.ru"));
+    }
+
+    #[test]
+    fn header_meta_parts_are_clickable_addresses() {
+        let c = conv("c1", "", &["anna@lizing.example.ru", "olga@lizing.example.ru"], "", &[]);
+        let parts = conv_meta_parts(&c);
+        let clickable: Vec<&str> =
+            parts.iter().filter(|p| !p.addr.is_empty()).map(|p| p.addr.as_str()).collect();
+        assert_eq!(clickable, vec!["anna@lizing.example.ru", "olga@lizing.example.ru", "me@example.ru"]);
+        // Разделители не кликабельны и видны как текст.
+        let text: String = parts.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(text, "anna@lizing.example.ru, olga@lizing.example.ru → me@example.ru");
+    }
+
+    #[test]
+    fn recipients_tip_lists_to_and_cc() {
+        let mut b = MessageBody {
+            uid: 1,
+            folder: "Sent".into(),
+            subject: String::new(),
+            from: String::new(),
+            from_addr: "me@example.ru".into(),
+            to: vec!["anna@lizing.example.ru".into(), " olga@lizing.example.ru ".into()],
+            cc: vec![],
+            date: String::new(),
+            date_ts: 0,
+            html: None,
+            text: None,
+            attachments: vec![],
+            is_outgoing: true,
+            message_id: String::new(),
+            in_reply_to: String::new(),
+            references: vec![],
+            raw_headers: String::new(),
+        };
+        assert_eq!(recipients_tip(&b), "Кому: anna@lizing.example.ru, olga@lizing.example.ru");
+        b.cc = vec!["Бух <buh@example.ru>".into()];
+        assert_eq!(
+            recipients_tip(&b),
+            "Кому: anna@lizing.example.ru, olga@lizing.example.ru\nКопия: Бух <buh@example.ru>"
+        );
     }
 }
 
@@ -4006,11 +4342,11 @@ mod blank_body_tests {
     #[test]
     fn empty_note_only_when_nothing_to_draw() {
         let p = policy::Policy::default();
-        let atts = build_body_html(&body(None, None, 1), &p);
+        let atts = build_body_html(&body(None, None, 1), &p, false);
         assert!(atts.contains("class=\"ddm-att\""), "чип вложения обязателен");
         assert!(!atts.contains("class=\"ddm-nobody\""));
 
-        let empty = build_body_html(&body(None, None, 0), &p);
+        let empty = build_body_html(&body(None, None, 0), &p, false);
         assert!(empty.contains("class=\"ddm-nobody\""), "пустое тело должно быть подписано");
     }
 }
@@ -5767,7 +6103,7 @@ fn main() {
                     engine_needs_rebuild = false;
                 }
                 match job {
-                    Job::SetConversation { bodies, width, policy, policy_gen, seq, scroll_to, modes, scale } => {
+                    Job::SetConversation { bodies, width, policy, policy_gen, seq, scroll_to, modes, scale, merged } => {
                         // Latest-wins: a newer conversation/relayout job is
                         // already queued behind this one — rendering it would
                         // produce frames nobody will ever see.
@@ -5842,7 +6178,14 @@ fn main() {
                                 ^ att_fp
                                 ^ texture_cache::fnv1a(body.text.as_deref().unwrap_or(""))
                                     .rotate_left(21)
-                                ^ ((scale.to_bits() as u64) << 32);
+                                ^ ((scale.to_bits() as u64) << 32)
+                                // Подпись темой — тоже содержимое пузыря: тот
+                                // же текст в склейке и вне её — разные битмапы.
+                                ^ if merged {
+                                    texture_cache::fnv1a(&format!("subj|{}", body.subject)).rotate_left(43)
+                                } else {
+                                    0
+                                };
                             let key = (body.folder.clone(), body.uid, width, policy_gen, mode, fp);
                             let mut remember =
                                 |key: &(String, u32, u32, u64, u8, u64),
@@ -5878,9 +6221,9 @@ fn main() {
                                 // bubble — keeps "missing bubble" failures from
                                 // being silent.
                                 let html = if force_text {
-                                    build_text_only_html(body)
+                                    build_text_only_html(body, merged)
                                 } else {
-                                    build_body_html(body, &policy)
+                                    build_body_html(body, &policy, merged)
                                 };
                                 let t_r = Instant::now();
                                 let (mut result, panicked) =
@@ -5897,7 +6240,7 @@ fn main() {
                                 // job — the text fallback would likely panic too.
                                 if !result.successful() && text_available && !force_text && !panicked {
                                     fallback_used += 1;
-                                    let text_html = build_text_only_html(body);
+                                    let text_html = build_text_only_html(body, merged);
                                     let (r2, p2) = engine.render_one_guarded(&text_html, width, scale);
                                     result = r2;
                                     if p2 {
@@ -5956,6 +6299,11 @@ fn main() {
                             row_runs.push(runs);
                             packs.push((buf, RowMeta {
                                 h,
+                                recipients: if merged && body.is_outgoing {
+                                    recipients_tip(body)
+                                } else {
+                                    String::new()
+                                },
                                 has_html,
                                 has_text,
                                 viewing_html: has_html && !force_text,
@@ -6039,6 +6387,7 @@ fn main() {
                                     s_sender_on: m.s_sender_on,
                                     m_host_on: m.m_host_on,
                                     s_host_on: m.s_host_on,
+                                    recipients: m.recipients.into(),
                                 })
                                 .collect();
                             // Post-open scroll target: y offset of the first
@@ -6219,6 +6568,7 @@ fn main() {
         search_query_inflight: RefCell::new(String::new()),
         search_contacts: RefCell::new(Vec::new()),
         search_messages: RefCell::new(Vec::new()),
+        search_convs: RefCell::new(Vec::new()),
         pending_compose: RefCell::new(None),
         pending_reply: RefCell::new(None),
         pending_sends: RefCell::new(Vec::new()),
@@ -6483,6 +6833,37 @@ fn main() {
             sh_um.convs.borrow().get(sh_um.current.get()).map(|c| c.id.clone())
         };
         rebuild_merged_view(&ui, &sh_um, keep_id, was_open);
+    });
+
+    // Переименование открытого диалога (двойной клик по имени в шапке).
+    // Пишется в merges.json рядом со склейками и меняет только имя в
+    // клиенте: письма, кэш и сервер его не видят. Пустое — снять имя.
+    let ui_weak_rn = ui.as_weak();
+    let sh_rn = shared.clone();
+    ui.on_rename_conversation(move |name| {
+        let Some(ui) = ui_weak_rn.upgrade() else { return };
+        if sh_rn.pending_compose.borrow().is_some() {
+            return; // нового письма ещё нет в списке — переименовывать нечего
+        }
+        let resolved = {
+            let convs = sh_rn.convs.borrow();
+            convs
+                .get(sh_rn.current.get())
+                .map(|c| (conv_merge_key(&sh_rn.key, c), c.id.clone()))
+        };
+        let Some((key, id)) = resolved else { return };
+        {
+            let mut m = sh_rn.merges.borrow_mut();
+            if m.name_of(&key).unwrap_or("") == name.trim() {
+                return; // ничего не поменялось — ни записи, ни плашки
+            }
+            m.rename(key.clone(), &name);
+            merges::save(&m);
+        }
+        println!("rename: {} -> {:?}", key.id, name.trim());
+        // Тела не меняются — панель не перечитываем, только сайдбар и шапку.
+        rebuild_merged_view(&ui, &sh_rn, Some(id), false);
+        flash_confirm(&ui, "✓ Переименовано");
     });
 
     // ↑/↓ over the conversation list: select + open the neighbour and keep
@@ -6761,6 +7142,17 @@ fn main() {
     ui.on_copy_link(move || {
         if let Some(url) = sh_cl.ctx_link.borrow().clone() {
             clipboard_set(&url);
+        }
+    });
+    // Клик по адресу в шапке диалога: адрес — в буфер, подтверждение плашкой.
+    let ui_weak_ca = ui.as_weak();
+    ui.on_copy_address(move |addr| {
+        if addr.is_empty() {
+            return;
+        }
+        clipboard_set(&addr);
+        if let Some(ui) = ui_weak_ca.upgrade() {
+            flash_confirm(&ui, &format!("✓ Скопировано: {addr}"));
         }
     });
     let sh_lw = shared.clone();
@@ -7199,12 +7591,10 @@ fn main() {
             };
             if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
                 println!("sending new message to {target}");
+                let to = if to_override.is_empty() { vec![target] } else { to_override.clone() };
+                let hdr = StubHeaders { subject: subject.clone(), to: to.clone(), cc: cc.clone() };
                 let _ = etx.send(engine::EngineCmd::Send {
-                    to: if to_override.is_empty() {
-                        vec![target]
-                    } else {
-                        to_override.clone()
-                    },
+                    to,
                     cc: cc.clone(),
                     subject,
                     body: text.clone(),
@@ -7226,6 +7616,7 @@ fn main() {
                     Some(stub_html(&rich_html, &rich_images)),
                     stub_attachments(&attachments),
                     &from_identity.clone().unwrap_or_else(|| sh_send.key.clone()),
+                    hdr,
                     "",
                 );
             } else {
@@ -7294,6 +7685,7 @@ fn main() {
             let references = (!refs.is_empty()).then(|| refs.join(" "));
             if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
                 println!("sending explicit reply to {to:?}");
+                let hdr = StubHeaders { subject: subject.clone(), to: to.clone(), cc: cc.clone() };
                 let _ = etx.send(engine::EngineCmd::Send {
                     to, cc: cc.clone(), subject, body: text.clone(),
                     html: rich_html.clone(), inline: inline_atts.clone(),
@@ -7316,6 +7708,7 @@ fn main() {
                     Some(stub_html(&rich_html, &rich_images)),
                     stub_attachments(&attachments),
                     &from_identity.clone().unwrap_or_else(|| sh_send.key.clone()),
+                    hdr,
                     &conv_id,
                 );
             } else {
@@ -7383,6 +7776,7 @@ fn main() {
             // Described before the list is handed to the engine — the stub
             // shows the same chips as the message going out.
             let stub_atts = stub_attachments(&attachments);
+            let hdr = StubHeaders { subject: subject.clone(), to: to.clone(), cc: cc.clone() };
             let _ = etx.send(engine::EngineCmd::Send {
                 to, cc, subject, body: text.clone(),
                 html: rich_html.clone(), inline: inline_atts.clone(),
@@ -7399,6 +7793,7 @@ fn main() {
                 Some(stub_html(&rich_html, &rich_images)),
                 stub_atts,
                 &from_identity.clone().unwrap_or_else(|| sh_send.key.clone()),
+                hdr,
                 &conv_id,
             );
         } else {
@@ -7511,12 +7906,22 @@ fn main() {
             // engine result below only augments this with cache + messages.
             if !trimmed.is_empty() {
                 let q_lc = trimmed.to_lowercase();
+                // Диалоги — целиком локально и только здесь: ответ движка
+                // (ниже) их не касается, он приносит контакты кэша и письма.
+                let subjects = sh_typed
+                    .cache
+                    .as_ref()
+                    .and_then(|c| c.body_subjects().map_err(|e| eprintln!("search subjects: {e}")).ok())
+                    .unwrap_or_default();
+                let hits = local_search_convs(&sh_typed.convs.borrow(), &subjects, &sh_typed.key, &q_lc);
                 let local = local_search_contacts(
                     &sh_typed.address_book.borrow(),
-                    &sh_typed.convs.borrow(),
+                    &conv_hit_addrs(&hits),
                     &q_lc,
                 );
                 let c_items = contact_items(&local);
+                ui.set_search_convs(ModelRc::new(VecModel::from(conv_hit_items(&hits))));
+                *sh_typed.search_convs.borrow_mut() = hits;
                 *sh_typed.search_contacts.borrow_mut() = local;
                 ui.set_search_contacts(ModelRc::new(VecModel::from(c_items)));
             }
@@ -7532,7 +7937,9 @@ fn main() {
         *sh_clr.search_query_inflight.borrow_mut() = String::new();
         sh_clr.search_contacts.borrow_mut().clear();
         sh_clr.search_messages.borrow_mut().clear();
+        sh_clr.search_convs.borrow_mut().clear();
         if let Some(ui) = ui_weak_sc.upgrade() {
+            ui.set_search_convs(ModelRc::new(VecModel::from(Vec::<ConvHitItem>::new())));
             ui.set_search_contacts(ModelRc::new(VecModel::from(Vec::<ContactItem>::new())));
             ui.set_search_messages(ModelRc::new(VecModel::from(Vec::<MessageHit>::new())));
             ui.set_search_compose_email("".into());
@@ -7579,6 +7986,32 @@ fn main() {
                 enter_compose_mode(&sh_sel_c, &ui, &contact.email);
             }
         }
+    });
+
+    // Строка секции «Диалоги»: открыть диалог. Ищем по ключу — список мог
+    // перестроиться дельтой, пока выпадашка была открыта.
+    let ui_weak_sel_d = ui.as_weak();
+    let sh_sel_d = shared.clone();
+    ui.on_search_select_conv(move |idx| {
+        let Some(hit) = sh_sel_d.search_convs.borrow().get(idx as usize).cloned() else { return };
+        let conv_idx = sh_sel_d
+            .convs
+            .borrow()
+            .iter()
+            .position(|c| c.id == hit.id && eff_account(&sh_sel_d.key, c) == hit.account);
+        let Some(ui) = ui_weak_sel_d.upgrade() else { return };
+        ui.set_search_open(false);
+        let Some(conv_idx) = conv_idx else {
+            println!("search-select-conv: {} is gone from the list", hit.id);
+            return;
+        };
+        sh_sel_d.search_query_inflight.borrow_mut().clear();
+        ui.set_search_query("".into());
+        ui.set_selected(conv_idx as i32);
+        apply_active_header(&ui, &sh_sel_d, conv_idx);
+        open_conversation(&ui, &sh_sel_d, conv_idx);
+        ui.set_sidebar_row_y(conv_idx as f32 * 64.0);
+        ui.set_sidebar_scroll_seq(ui.get_sidebar_scroll_seq() + 1);
     });
 
     let ui_weak_sel_m = ui.as_weak();
@@ -9815,13 +10248,11 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     // hits (accounts whose book isn't mirrored locally),
                     // deduped by address. Messages stay their own section.
                     let q_lc = query.to_lowercase();
-                    let mut merged = local_search_contacts(
-                        &sh.address_book.borrow(),
-                        &sh.convs.borrow(),
-                        &q_lc,
-                    );
-                    let mut seen: std::collections::HashSet<String> =
-                        merged.iter().map(|c| c.email.to_lowercase()).collect();
+                    let skip = conv_hit_addrs(&sh.search_convs.borrow());
+                    let mut merged = local_search_contacts(&sh.address_book.borrow(), &skip, &q_lc);
+                    // Собеседники найденных диалогов не повторяются и тут.
+                    let mut seen: HashSet<String> =
+                        merged.iter().map(|c| c.email.to_lowercase()).chain(skip).collect();
                     for c in contacts {
                         let key = c.email.to_lowercase();
                         if !key.is_empty() && seen.insert(key) {
@@ -9900,14 +10331,7 @@ fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             // Явное «Сохранить как…»: файл не открываем, подтверждаем той же
             // ненавязчивой плашкой, что и отправку (~2 с, без тостов).
             println!("attachment saved to: {path}");
-            ui.set_send_confirm_text("✓ Сохранено".into());
-            ui.set_send_confirm_visible(true);
-            let uiw = ui.as_weak();
-            slint::Timer::single_shot(std::time::Duration::from_millis(2000), move || {
-                if let Some(u) = uiw.upgrade() {
-                    u.set_send_confirm_visible(false);
-                }
-            });
+            flash_confirm(ui, "✓ Сохранено");
         }
         engine::EngineResult::Source { uid, raw } => {
             SHARED.with(|s| {
