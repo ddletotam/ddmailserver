@@ -367,19 +367,7 @@ impl Resolver {
                 s.family = name;
                 s.generic = generic;
             }
-            "font" => {
-                // Shorthand: only the size/family tail is worth salvaging.
-                if let Some(px) = lower.split_whitespace().find_map(|w| self.len_px(w, em, Some(em)))
-                {
-                    s.font_size = px.clamp(1.0 * self.scale, 200.0 * self.scale);
-                }
-                if lower.contains("bold") {
-                    s.font_weight = 700;
-                }
-                if lower.contains("italic") {
-                    s.italic = true;
-                }
-            }
+            "font" => self.apply_font_shorthand(s, &lower, em),
             "text-decoration" | "text-decoration-line" => {
                 s.underline = lower.contains("underline");
                 s.strike = lower.contains("line-through");
@@ -552,6 +540,75 @@ impl Resolver {
     }
 
     /// Absolute length → device px. `pct_base` enables `%` (font-size only).
+    /// `font: [style] [variant] [weight] size[/line-height] family`.
+    ///
+    /// Порядок значим, и разбирать его приходится честно. Прежний разбор брал
+    /// первое слово, похожее на длину, — а голое число `len_px` считает
+    /// пикселями, так что в `font: 400 40px/44px YS Text` (рассылки Яндекса)
+    /// размером становилась насыщенность: 400 px, срезанные до 200, при
+    /// межстрочном 44 px — строки гигантского текста наезжали друг на друга.
+    /// А `40px/44px` из-за слэша не разбирался вовсе.
+    fn apply_font_shorthand(&self, s: &mut Style, lower: &str, em: f32) {
+        let mut words = lower.split_whitespace().peekable();
+        // До размера: начертание, капитель, насыщенность, ширина — в любом
+        // порядке. Размер — первое слово, которое ни одним из них не является.
+        let mut italic = false;
+        let mut weight = 400;
+        let size_word = loop {
+            let Some(w) = words.next() else { return };
+            match w {
+                "italic" | "oblique" => italic = true,
+                "bold" | "bolder" => weight = 700,
+                "normal" | "lighter" | "small-caps" => {}
+                _ if w.ends_with("condensed") || w.ends_with("expanded") => {}
+                _ if w.len() == 3 && w.ends_with("00") && w.parse::<u16>().is_ok() => {
+                    weight = w.parse().unwrap_or(400)
+                }
+                _ => break w,
+            }
+        };
+        let (size_str, mut lh_str) = match size_word.split_once('/') {
+            Some((a, b)) => (a, (!b.is_empty()).then_some(b)),
+            None => (size_word, None),
+        };
+        // `40px / 44px` и `40px /44px` — слэш отдельным словом.
+        if lh_str.is_none() && words.peek().is_some_and(|w| w.starts_with('/')) {
+            let w = words.next().unwrap_or("/");
+            lh_str = match &w[1..] {
+                "" => words.next(),
+                rest => Some(rest),
+            };
+        }
+        let size = match size_str {
+            "xx-small" => Some(9.0 * self.scale),
+            "x-small" => Some(10.0 * self.scale),
+            "small" | "smaller" => Some(13.0 * self.scale),
+            "medium" => Some(16.0 * self.scale),
+            "large" | "larger" => Some(18.0 * self.scale),
+            "x-large" => Some(24.0 * self.scale),
+            "xx-large" => Some(32.0 * self.scale),
+            // Без размера это не шортхенд, а мусор — не трогаем ничего.
+            other if other.parse::<f32>().is_ok() && other != "0" => None,
+            other => self.len_px(other, em, Some(em)),
+        };
+        let Some(size) = size else { return };
+        s.font_size = size.clamp(1.0 * self.scale, 200.0 * self.scale);
+        s.font_weight = snap_weight(weight);
+        s.italic = italic;
+        // Шортхенд сбрасывает межстрочный в normal, если его не указали.
+        s.line_height = lh_str.and_then(|lh| match lh.parse::<f32>() {
+            Ok(mult) => Some(s.font_size * mult),
+            Err(_) if lh == "normal" => None,
+            Err(_) => self.len_px(lh, em, Some(s.font_size)),
+        });
+        let family: Vec<&str> = words.collect();
+        if !family.is_empty() {
+            let (name, generic) = parse_family(&family.join(" "));
+            s.family = name;
+            s.generic = generic;
+        }
+    }
+
     fn len_px(&self, v: &str, em: f32, pct_base: Option<f32>) -> Option<f32> {
         let v = v.trim();
         if v.is_empty() || v == "0" {
