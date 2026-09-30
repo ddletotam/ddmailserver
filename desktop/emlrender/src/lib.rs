@@ -528,6 +528,25 @@ mod tests {
         assert!(rx > lx + 30 && ry > ly + 30, "tile did not move: {lx},{ly} → {rx},{ry}");
     }
 
+    /// `font: 400 20px/24px …` — 400 это насыщенность, а не размер. Прежний
+    /// разбор брал её за 400 px (обрезанные до 200) при межстрочном 24 px, и
+    /// рассылка Яндекса рисовалась наезжающими друг на друга гигантскими
+    /// буквами.
+    #[test]
+    fn font_shorthand_weight_is_not_the_size() {
+        let html = r#"<div style="font: 400 20px/24px YS Text, Arial, sans-serif">один<br>два</div>"#;
+        let r = render(html, &opts(400));
+        let word = |w: &str| r.runs.iter().find(|t| t.text == w).cloned().expect("word");
+        let (a, b) = (word("один"), word("два"));
+        assert!(a.h < 30.0, "run height {} — size taken from the weight", a.h);
+        let step = b.y - a.y;
+        assert!((step - 24.0).abs() < 1.5, "line step {step}, want the 24px line-height");
+        // Слэш отдельным словом и именованный размер — тоже шортхенд.
+        let r = render(r#"<div style="font: bold 20px / 30px Arial">x<br>y</div>"#, &opts(400));
+        let word = |w: &str| r.runs.iter().find(|t| t.text == w).cloned().expect("word");
+        assert!((word("y").y - word("x").y - 30.0).abs() < 1.5);
+    }
+
     /// An inline-level box is measured as a box, frame and all.
     ///
     /// Walking into it as text loses its padding, so it lays out narrower than
