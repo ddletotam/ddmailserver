@@ -448,6 +448,21 @@ impl Cache {
         Ok(out)
     }
 
+    /// Темы всех закэшированных писем: `(account_key, folder, uid, subject)`.
+    /// Для локального поиска по темам (выпадашка поиска, секция «Диалоги»).
+    /// Фильтр — на вызывающем, а не в SQL: `LOWER`/`LIKE` в SQLite
+    /// регистр складывают только для ASCII, кириллица мимо.
+    pub fn body_subjects(&self) -> Result<Vec<(String, String, u32, String)>, String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        let mut stmt = conn
+            .prepare("SELECT account_key, folder, uid, subject FROM message_bodies WHERE subject <> ''")
+            .map_err(|e| format!("prepare: {e}"))?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .map_err(|e| format!("query: {e}"))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
     /// Distinct account keys present in the conversations table.
     pub fn account_keys(&self) -> Result<Vec<String>, String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;

@@ -8,6 +8,19 @@ struct ContactItem {
     email: string,
 }
 
+// Кусок строки-меты в шапке диалога. Непустой addr — кусок кликабелен и
+// копирует addr; пустой — разделитель («, », « → »).
+struct MetaPart {
+    text: string,
+    addr: string,
+}
+
+// Строка секции «Диалоги» в выпадашке поиска (локальный поиск).
+struct ConvHitItem {
+    name: string,
+    detail: string,
+}
+
 struct MessageHit {
     from: string,
     subject: string,
@@ -131,6 +144,9 @@ struct RowItem {
     s-sender-on: bool,
     m-host-on: bool,
     s-host-on: bool,
+    // Склеенный диалог, своё письмо: кому ушло («Кому: …» / «Копия: …»),
+    // показывается подсказкой при наведении. Пусто — подсказки нет.
+    recipients: string,
 }
 
 // Calendar list row in the calendar-mode sidebar.
@@ -778,14 +794,23 @@ export component MainWindow inherits Window {
     // "Написать xxx@yyy" row at the top of the dropdown.
     in property <[ContactItem]> search-contacts;
     in property <[MessageHit]> search-messages;
+    // Секция «Диалоги» — локальные совпадения по имени диалога, адресам
+    // участников и темам писем; идёт первой после строки «Написать…».
+    in property <[ConvHitItem]> search-convs;
     in property <bool> search-loading: false;
     in property <string> search-compose-email: "";
     in-out property <bool> search-open: false;
     in-out property <string> search-query: "";
     // Keyboard nav: -1 = focus is in the input (no row hovered); >= 0 = an
     // explicit row index in the dropdown. Row order: optional compose-row
-    // first (when search-compose-email != ""), then contacts, then messages.
+    // first (when search-compose-email != ""), then dialogs, then contacts,
+    // then messages.
     in-out property <int> search-selected-row: -1;
+    // Начала сегментов в сквозной нумерации строк выпадашки.
+    property <int> sr-conv0: root.search-compose-email != "" ? 1 : 0;
+    property <int> sr-contact0: root.sr-conv0 + root.search-convs.length;
+    property <int> sr-msg0: root.sr-contact0 + root.search-contacts.length;
+    property <int> sr-total: root.sr-msg0 + root.search-messages.length;
 
     // Telegram-style quote ribbon above the composer input. Visible when
     // the user has explicitly hit "Ответить" on a bubble; cancelled via
@@ -1159,6 +1184,13 @@ export component MainWindow inherits Window {
     // viewport-height change re-runs the assign once and drops the flag;
     // Rust also clears it on any scroll-less render as a belt.
     in-out property <bool> chat-scroll-pending: false;
+    // Клавиатурная прокрутка переписки (PgUp/PgDn/Home/End, контракт §4):
+    // cmd 1 = страница вверх, 2 = вниз, 3 = в начало, 4 = в конец. Тот же
+    // приём моста, что у chat-scroll-seq: скроллер живёт в условной панели,
+    // напрямую до него отсюда не дотянуться. Rust (композер) пишет эти же два
+    // свойства — `chat_page`.
+    in-out property <int> chat-page-cmd: 0;
+    in-out property <int> chat-page-seq: 0;
     // Confirmation modal (delete conversation / spam-purge — the Rust side
     // dispatches by its own mode flag).
     // «Отвечаешь не с того адреса» — подтверждение перед отправкой, когда
@@ -1201,7 +1233,13 @@ export component MainWindow inherits Window {
     callback spam-confirmed(string);           // scope: "address" | "domain"
     // Header: identity tint + Tauri-era meta line + spam action.
     in property <brush> active-ident-color: white;
-    in property <string> active-meta: "";
+    in property <[MetaPart]> active-meta-parts: [];
+    // Инлайн-переименование диалога в шапке (двойной клик по имени).
+    in-out property <bool> rename-open: false;
+    in-out property <string> rename-text: "";
+    callback rename-conversation(string);
+    // Клик по адресу в шапке — скопировать его в буфер обмена.
+    callback copy-address(string);
     callback spam-conversation();
     // Read-only source viewer («Показать → Заголовки / Исходник …»).
     in-out property <bool> source-view-visible: false;
@@ -1315,6 +1353,7 @@ export component MainWindow inherits Window {
     callback search-cleared();
     callback search-compose-new(string);
     callback search-select-contact(int);
+    callback search-select-conv(int);
     callback search-select-message(int);
 
     // Pull keyboard focus to the bottom-of-chat composer input. Used after
@@ -1367,6 +1406,15 @@ export component MainWindow inherits Window {
             }
             if (root.view-mode == 0 && ev.text == Key.DownArrow) {
                 root.nav-conversation(1);
+                return accept;
+            }
+            // PgUp/PgDn/Home/End — прокрутка открытой переписки.
+            if (root.view-mode == 0 && (ev.text == Key.PageUp || ev.text == Key.PageDown
+                    || ev.text == Key.Home || ev.text == Key.End)) {
+                root.chat-page-cmd = ev.text == Key.PageUp ? 1
+                    : ev.text == Key.PageDown ? 2
+                    : ev.text == Key.Home ? 3 : 4;
+                root.chat-page-seq += 1;
                 return accept;
             }
             reject
@@ -1447,19 +1495,9 @@ export component MainWindow inherits Window {
                                 // Index math is inlined because Slint does not
                                 // support local `:=` bindings inside callbacks.
                                 if (ev.text == Key.DownArrow) {
-                                    if (root.search-open
-                                        && ((root.search-compose-email != "" ? 1 : 0)
-                                            + root.search-contacts.length
-                                            + root.search-messages.length) > 0) {
-                                        root.search-selected-row =
-                                            root.search-selected-row + 1
-                                                >= (root.search-compose-email != "" ? 1 : 0)
-                                                   + root.search-contacts.length
-                                                   + root.search-messages.length
-                                            ? (root.search-compose-email != "" ? 1 : 0)
-                                              + root.search-contacts.length
-                                              + root.search-messages.length - 1
-                                            : root.search-selected-row + 1;
+                                    if (root.search-open && root.sr-total > 0) {
+                                        root.search-selected-row = min(root.search-selected-row + 1,
+                                            root.sr-total - 1);
                                     }
                                     return accept;
                                 }
@@ -1489,24 +1527,22 @@ export component MainWindow inherits Window {
                                         root.search-compose-new(root.search-compose-email);
                                         return accept;
                                     }
-                                    // contacts segment: [cv .. cv+contacts.length)
-                                    if (root.search-selected-row >= (root.search-compose-email != "" ? 1 : 0)
-                                        && root.search-selected-row < (root.search-compose-email != "" ? 1 : 0)
-                                                                     + root.search-contacts.length) {
-                                        root.search-select-contact(
-                                            root.search-selected-row - (root.search-compose-email != "" ? 1 : 0));
+                                    // dialogs segment: [sr-conv0 .. sr-contact0)
+                                    if (root.search-selected-row >= root.sr-conv0
+                                        && root.search-selected-row < root.sr-contact0) {
+                                        root.search-select-conv(root.search-selected-row - root.sr-conv0);
                                         return accept;
                                     }
-                                    // messages segment: [cv+contacts.length .. end)
-                                    if (root.search-selected-row >= (root.search-compose-email != "" ? 1 : 0)
-                                                                   + root.search-contacts.length
-                                        && root.search-selected-row < (root.search-compose-email != "" ? 1 : 0)
-                                                                     + root.search-contacts.length
-                                                                     + root.search-messages.length) {
-                                        root.search-select-message(
-                                            root.search-selected-row
-                                            - (root.search-compose-email != "" ? 1 : 0)
-                                            - root.search-contacts.length);
+                                    // contacts segment: [sr-contact0 .. sr-msg0)
+                                    if (root.search-selected-row >= root.sr-contact0
+                                        && root.search-selected-row < root.sr-msg0) {
+                                        root.search-select-contact(root.search-selected-row - root.sr-contact0);
+                                        return accept;
+                                    }
+                                    // messages segment: [sr-msg0 .. sr-total)
+                                    if (root.search-selected-row >= root.sr-msg0
+                                        && root.search-selected-row < root.sr-total) {
+                                        root.search-select-message(root.search-selected-row - root.sr-msg0);
                                         return accept;
                                     }
                                     return reject;
@@ -1753,8 +1789,7 @@ export component MainWindow inherits Window {
                     }
 
                     // Loading / empty / sections
-                    if root.search-loading && root.search-contacts.length == 0 && root.search-messages.length == 0
-                        && root.search-compose-email == "": Text {
+                    if root.search-loading && root.sr-total == 0: Text {
                         height: 32px;
                         text: "Ищу…";
                         color: #8b95a1;
@@ -1762,16 +1797,56 @@ export component MainWindow inherits Window {
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
-                    if !root.search-loading
-                        && root.search-contacts.length == 0
-                        && root.search-messages.length == 0
-                        && root.search-compose-email == "": Text {
+                    if !root.search-loading && root.sr-total == 0: Text {
                         height: 32px;
                         text: "Ничего не найдено";
                         color: #8b95a1;
                         font-size: 13px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
+                    }
+
+                    // Dialogs section — локальные совпадения, клик открывает диалог.
+                    if root.search-convs.length > 0: Rectangle {
+                        height: 22px;
+                        Text {
+                            x: 12px;
+                            text: "ДИАЛОГИ";
+                            color: #8b95a1;
+                            font-size: 11px;
+                            font-weight: 700;
+                            letter-spacing: 0.5px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    for d[di] in root.search-convs: Rectangle {
+                        height: 44px;
+                        background: (root.search-selected-row == root.sr-conv0 + di
+                                     || d-ta.has-hover) ? #e6efff : transparent;
+                        border-radius: 8px;
+                        d-ta := TouchArea {
+                            clicked => { root.search-select-conv(di); }
+                        }
+                        VerticalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            padding-top: 4px;
+                            padding-bottom: 4px;
+                            alignment: center;
+                            Text {
+                                text: d.name;
+                                color: #0f1419;
+                                font-size: 14px;
+                                font-weight: 500;
+                                overflow: elide;
+                            }
+                            if d.detail != "": Text {
+                                text: d.detail;
+                                color: #8b95a1;
+                                font-size: 12px;
+                                overflow: elide;
+                            }
+                        }
                     }
 
                     // Contacts section
@@ -1789,7 +1864,7 @@ export component MainWindow inherits Window {
                     }
                     for c[ci] in root.search-contacts: Rectangle {
                         height: 44px;
-                        background: (root.search-selected-row == (root.search-compose-email != "" ? 1 : 0) + ci
+                        background: (root.search-selected-row == root.sr-contact0 + ci
                                      || c-ta.has-hover) ? #e6efff : transparent;
                         border-radius: 8px;
                         c-ta := TouchArea {
@@ -1832,8 +1907,7 @@ export component MainWindow inherits Window {
                     }
                     for m[mi] in root.search-messages: Rectangle {
                         height: 50px;
-                        background: (root.search-selected-row == (root.search-compose-email != "" ? 1 : 0)
-                                                                 + root.search-contacts.length + mi
+                        background: (root.search-selected-row == root.sr-msg0 + mi
                                      || m-ta.has-hover) ? #e6efff : transparent;
                         border-radius: 8px;
                         m-ta := TouchArea {
@@ -1935,14 +2009,59 @@ export component MainWindow inherits Window {
                             font-weight: 700;
                             font-size: 16px;
                             overflow: elide;
+                            TouchArea {
+                                double-clicked => {
+                                    root.rename-text = root.active-name;
+                                    root.rename-open = true;
+                                }
+                            }
                         }
                         // Tauri-era meta: counterpart address (or group
-                        // participants) + " → receiving identity".
-                        Text {
-                            text: root.active-meta;
-                            color: #69737e;
-                            font-size: 13px;
-                            overflow: elide;
+                        // participants) + " → receiving identity". Кусками:
+                        // каждый адрес кликабелен и копирует себя в буфер
+                        // (контракт §4, «Шапка диалога»). В группе показано
+                        // имя — адрес всплывает подсказкой.
+                        //
+                        // Ширину строка НЕ диктует: у рассылки сотни адресов,
+                        // и минимальная ширина раскладки (сумма всех кусков)
+                        // растягивала панель переписки — пузыри рендерились на
+                        // 4280 px. Поэтому min/preferred обнулены, раскладка
+                        // стоит внутри со своей шириной, лишнее срезает clip.
+                        Rectangle {
+                            height: 17px;
+                            min-width: 0px;
+                            preferred-width: 0px;
+                            horizontal-stretch: 1;
+                            clip: true;
+                            HorizontalLayout {
+                                x: 0;
+                                width: self.preferred-width;
+                                alignment: start;
+                                for part in root.active-meta-parts: Rectangle {
+                                    width: meta-t.preferred-width;
+                                    meta-t := Text {
+                                        text: part.text;
+                                        color: part.addr != "" && meta-ta.has-hover ? #10b981 : #69737e;
+                                        font-size: 13px;
+                                    }
+                                    meta-ta := TouchArea {
+                                        enabled: part.addr != "";
+                                        mouse-cursor: part.addr != "" ? MouseCursor.pointer : MouseCursor.default;
+                                        clicked => { root.copy-address(part.addr); }
+                                        changed has-hover => {
+                                            if (self.has-hover && part.addr != "") {
+                                                root.tip-text = part.addr + " — клик скопирует";
+                                                root.tip-x = self.absolute-position.x + self.mouse-x + 12px;
+                                                root.tip-y = self.absolute-position.y + self.mouse-y + 18px;
+                                                root.tip-armed = true;
+                                            } else {
+                                                root.tip-armed = false;
+                                                root.tip-visible = false;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     // «Спам»: blacklist the counterpart + purge all their
@@ -1971,6 +2090,54 @@ export component MainWindow inherits Window {
                         }
                         spam-ta := TouchArea {
                             clicked => { root.spam-conversation(); }
+                        }
+                    }
+                }
+                // Переименование диалога: двойной клик по имени. Поле ЛЕЖИТ
+                // ПОВЕРХ обеих строк шапки с явными координатами, а не
+                // подменяет их внутри HorizontalLayout: условный элемент в
+                // раскладке, у которого ширину задаёт раскладка, а раскладка
+                // спрашивает размеры у него, давал цикл свойств — Slint падал
+                // с «Recursion detected» на первом же двойном клике.
+                // Enter — сохранить (пустое имя возвращает автоматическое),
+                // Escape или уход фокуса — отмена. Меняется только имя
+                // диалога в клиенте (контракт §4, «Шапка диалога»).
+                if root.rename-open: FocusScope {
+                    x: 62px;
+                    y: 12px;
+                    width: parent.width - 62px - 60px;
+                    height: 36px;
+                    key-pressed(ev) => {
+                        if (ev.text == Key.Escape) {
+                            root.rename-open = false;
+                            kb.focus();
+                            return accept;
+                        }
+                        reject
+                    }
+                    KLineEdit {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        text <=> root.rename-text;
+                        font-size: 15px;
+                        placeholder-text: "Пусто — имя по собеседнику";
+                        init => {
+                            self.focus();
+                            self.select-all();
+                        }
+                        accepted => {
+                            // Текст — из root, а не из self: снятие
+                            // rename-open уничтожает это поле.
+                            root.rename-conversation(root.rename-text);
+                            root.rename-open = false;
+                            kb.focus();
+                        }
+                        changed has-focus => {
+                            if (!self.has-focus) {
+                                root.rename-open = false;
+                            }
                         }
                     }
                 }
@@ -2072,6 +2239,30 @@ export component MainWindow inherits Window {
                         root.chat-scroll-pending = true;
                         lv.viewport-y = -max(0px, min(root.chat-scroll-y,
                             lv.viewport-height - lv.height));
+                    }
+                }
+                // Мост клавиатурной прокрутки (chat-page-seq). Шаг страницы —
+                // 90% видимой высоты: строка на стыке остаётся на экране, и
+                // глазу есть за что зацепиться. Ручная прокрутка снимает
+                // висящий анкор (chat-scroll-pending): иначе ближайшая
+                // перекладка содержимого утащила бы вид обратно.
+                Rectangle {
+                    visible: false;
+                    width: 0;
+                    height: 0;
+                    x: root.chat-page-seq * 1px;
+                    changed x => {
+                        root.chat-scroll-pending = false;
+                        if (root.chat-page-cmd == 1) {
+                            lv.viewport-y = min(0px, lv.viewport-y + lv.visible-height * 0.9);
+                        } else if (root.chat-page-cmd == 2) {
+                            lv.viewport-y = max(-max(0px, lv.viewport-height - lv.visible-height),
+                                lv.viewport-y - lv.visible-height * 0.9);
+                        } else if (root.chat-page-cmd == 3) {
+                            lv.viewport-y = 0;
+                        } else if (root.chat-page-cmd == 4) {
+                            lv.viewport-y = -max(0px, lv.viewport-height - lv.visible-height);
+                        }
                     }
                 }
                 // ScrollView, а НЕ ListView. У ListView viewport-height —
@@ -2299,13 +2490,40 @@ export component MainWindow inherits Window {
                                 mouse-cursor: self.has-hover
                                     && root.hover-link(idx, self.mouse-x * self.fx, self.mouse-y)
                                     ? MouseCursor.pointer : MouseCursor.default;
+                                // Адресаты своего письма в склеенном диалоге —
+                                // та же отложенная подсказка, что у событий.
+                                changed has-hover => {
+                                    if (self.has-hover && msg.recipients != "") {
+                                        root.tip-text = msg.recipients;
+                                        root.tip-x = self.absolute-position.x + self.mouse-x + 12px;
+                                        root.tip-y = self.absolute-position.y + self.mouse-y + 18px;
+                                        root.tip-armed = true;
+                                    } else if (msg.recipients != "") {
+                                        root.tip-armed = false;
+                                        root.tip-visible = false;
+                                    }
+                                }
                                 clicked => { root.hit-test(idx, self.mouse-x * self.fx, self.mouse-y); }
                                 moved => {
                                     if (self.pressed) {
                                         root.sel-move(idx, self.mouse-x * self.fx, self.mouse-y);
+                                        // Тянут выделение — подсказка мешает.
+                                        if (msg.recipients != "") {
+                                            root.tip-armed = false;
+                                            root.tip-visible = false;
+                                        }
                                     }
                                 }
                                 pointer-event(e) => {
+                                    // Пузырь бывает во весь экран: подсказка с
+                                    // адресатами идёт за курсором, а не стоит
+                                    // там, где он вошёл. (`moved` для этого не
+                                    // годится — он только при нажатой кнопке.)
+                                    if (e.kind == PointerEventKind.move && !self.pressed
+                                        && msg.recipients != "") {
+                                        root.tip-x = self.absolute-position.x + self.mouse-x + 12px;
+                                        root.tip-y = self.absolute-position.y + self.mouse-y + 18px;
+                                    }
                                     if (e.button == PointerEventButton.right
                                         && e.kind == PointerEventKind.down) {
                                         // Сначала хит-тест точки: если под курсором

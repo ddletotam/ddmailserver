@@ -21,13 +21,39 @@ pub struct MergeKey {
     pub id: String,
 }
 
+/// Пользовательское имя диалога (двойной клик по имени в шапке). Живёт
+/// только здесь: письма, кэш и сервер о нём не знают.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConvName {
+    pub key: MergeKey,
+    pub name: String,
+}
+
 #[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Merges {
     pub groups: Vec<Vec<MergeKey>>,
+    /// Переименования. Ключ — сырой диалог; у склейки это её первичный
+    /// (голова группы), тот же, чьё имя склейка и так показывает.
+    pub names: Vec<ConvName>,
 }
 
 impl Merges {
+    /// Пользовательское имя диалога, если его переименовали.
+    pub fn name_of(&self, key: &MergeKey) -> Option<&str> {
+        self.names.iter().find(|n| &n.key == key).map(|n| n.name.as_str())
+    }
+
+    /// Задать имя; пустое (после trim) снимает переименование — диалог
+    /// снова называется по собеседнику.
+    pub fn rename(&mut self, key: MergeKey, name: &str) {
+        let name = name.trim();
+        self.names.retain(|n| n.key != key);
+        if !name.is_empty() {
+            self.names.push(ConvName { key, name: name.to_string() });
+        }
+    }
+
     /// Индекс группы, содержащей этот ключ.
     pub fn group_of(&self, key: &MergeKey) -> Option<usize> {
         self.groups.iter().position(|g| g.contains(key))
@@ -71,24 +97,23 @@ impl Merges {
         let mine: Vec<String> = identities.iter().map(|i| i.to_lowercase()).collect();
         let is_mine = |a: &str| mine.iter().any(|m| m == a);
         let mut changed = false;
-        for group in &mut self.groups {
-            for key in group.iter_mut() {
-                let Some((left, right)) = key.id.split_once('|') else { continue };
-                let (left, right) = (left.to_lowercase(), right.to_lowercase());
-                if right.contains(':') || right.contains(',') {
-                    continue; // групповая форма — состав менялся не так
-                }
-                if !is_mine(&left) || !is_mine(&right) {
-                    continue;
-                }
-                let mut parts = vec![left, right];
-                parts.sort();
-                parts.dedup();
-                let next = format!("{}|self", parts.join("+"));
-                if next != key.id {
-                    key.id = next;
-                    changed = true;
-                }
+        let named = self.names.iter_mut().map(|n| &mut n.key);
+        for key in self.groups.iter_mut().flatten().chain(named) {
+            let Some((left, right)) = key.id.split_once('|') else { continue };
+            let (left, right) = (left.to_lowercase(), right.to_lowercase());
+            if right.contains(':') || right.contains(',') {
+                continue; // групповая форма — состав менялся не так
+            }
+            if !is_mine(&left) || !is_mine(&right) {
+                continue;
+            }
+            let mut parts = vec![left, right];
+            parts.sort();
+            parts.dedup();
+            let next = format!("{}|self", parts.join("+"));
+            if next != key.id {
+                key.id = next;
+                changed = true;
             }
         }
         changed
@@ -159,7 +184,7 @@ mod tests {
 
     #[test]
     fn migrates_a_chat_where_both_addresses_are_mine() {
-        let mut m = Merges { groups: vec![vec![k("me@b.ru|me@a.ru"), k("me@a.ru|bob@x.ru")]] };
+        let mut m = Merges { groups: vec![vec![k("me@b.ru|me@a.ru"), k("me@a.ru|bob@x.ru")]], ..Default::default() };
         assert!(m.migrate_self_chat_ids(&["me@a.ru".into(), "me@b.ru".into()]));
         assert_eq!(m.groups[0][0].id, "me@a.ru+me@b.ru|self");
         // Обычный диалог не тронут — его id и не менялся.
@@ -168,7 +193,7 @@ mod tests {
 
     #[test]
     fn self_to_the_same_address_collapses_to_one() {
-        let mut m = Merges { groups: vec![vec![k("me@a.ru|me@a.ru")]] };
+        let mut m = Merges { groups: vec![vec![k("me@a.ru|me@a.ru")]], ..Default::default() };
         assert!(m.migrate_self_chat_ids(&["me@a.ru".into()]));
         assert_eq!(m.groups[0][0].id, "me@a.ru|self");
     }
@@ -177,6 +202,7 @@ mod tests {
     fn leaves_groups_and_foreign_counterparts_alone() {
         let before = Merges {
             groups: vec![vec![k("me@a.ru|group:bob@x.ru,carol@x.ru"), k("me@a.ru|bob@x.ru")]],
+            ..Default::default()
         };
         let mut m = before.clone();
         assert!(!m.migrate_self_chat_ids(&["me@a.ru".into(), "me@b.ru".into()]));
@@ -184,8 +210,38 @@ mod tests {
     }
 
     #[test]
+    fn rename_sets_replaces_and_clears() {
+        let mut m = Merges::default();
+        m.rename(k("me@a.ru|bob@x.ru"), "  Боб, лизинг ");
+        assert_eq!(m.name_of(&k("me@a.ru|bob@x.ru")), Some("Боб, лизинг"));
+        m.rename(k("me@a.ru|bob@x.ru"), "Боб");
+        assert_eq!(m.names.len(), 1);
+        assert_eq!(m.name_of(&k("me@a.ru|bob@x.ru")), Some("Боб"));
+        // Пустое имя — вернуть автоматическое, а не завести «пустое».
+        m.rename(k("me@a.ru|bob@x.ru"), "   ");
+        assert_eq!(m.name_of(&k("me@a.ru|bob@x.ru")), None);
+        assert!(m.names.is_empty());
+    }
+
+    #[test]
+    fn rename_follows_self_chat_migration() {
+        let mut m = Merges::default();
+        m.rename(k("me@b.ru|me@a.ru"), "Себе");
+        assert!(m.migrate_self_chat_ids(&["me@a.ru".into(), "me@b.ru".into()]));
+        assert_eq!(m.name_of(&k("me@a.ru+me@b.ru|self")), Some("Себе"));
+    }
+
+    #[test]
+    fn old_file_without_names_still_loads() {
+        let m: Merges =
+            serde_json::from_str(r#"{"groups":[[{"account":"acc","id":"a|b"}]]}"#).unwrap();
+        assert_eq!(m.groups.len(), 1);
+        assert!(m.names.is_empty());
+    }
+
+    #[test]
     fn is_idempotent() {
-        let mut m = Merges { groups: vec![vec![k("me@b.ru|me@a.ru")]] };
+        let mut m = Merges { groups: vec![vec![k("me@b.ru|me@a.ru")]], ..Default::default() };
         let ids = ["me@a.ru".to_string(), "me@b.ru".to_string()];
         assert!(m.migrate_self_chat_ids(&ids));
         assert!(!m.migrate_self_chat_ids(&ids));
