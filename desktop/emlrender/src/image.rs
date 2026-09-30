@@ -36,8 +36,8 @@ fn looks_like_svg(bytes: &[u8]) -> bool {
     let head = &bytes[..bytes.len().min(512)];
     let text = String::from_utf8_lossy(head);
     let text = text.trim_start().to_ascii_lowercase();
-    text.starts_with("<svg") || (text.starts_with("<?xml") || text.starts_with("<!doctype svg"))
-        && text.contains("<svg")
+    text.starts_with("<svg")
+        || (text.starts_with("<?xml") || text.starts_with("<!doctype svg")) && text.contains("<svg")
 }
 
 /// Vector art → pixels at the resolution it will actually be drawn.

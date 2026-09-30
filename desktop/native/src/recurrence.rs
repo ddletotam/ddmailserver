@@ -58,21 +58,15 @@ pub fn expand(
     win_start_ms: i64,
     win_end_ms: i64,
 ) -> Vec<Occurrence> {
-    let dur_ms = dtend_ms
-        .map(|e| (e - dtstart_ms).max(0))
-        .unwrap_or(30 * 60 * 1000);
+    let dur_ms = dtend_ms.map(|e| (e - dtstart_ms).max(0)).unwrap_or(30 * 60 * 1000);
 
     let overlaps = |start: i64| -> bool {
         let end = start + dur_ms;
         end > win_start_ms && start < win_end_ms
     };
     let excluded = |start: i64| -> bool { exdates.iter().any(|&x| x == start) };
-    let emit = |start: i64| -> Occurrence {
-        Occurrence {
-            start_ms: start,
-            end_ms: start + dur_ms,
-        }
-    };
+    let emit =
+        |start: i64| -> Occurrence { Occurrence { start_ms: start, end_ms: start + dur_ms } };
 
     let Some(rule) = parse_rule(rrule) else {
         // Non-recurring (or unparseable): just the master.
@@ -113,10 +107,9 @@ pub fn expand(
             let mut any_emitted_this_block = false;
             for wd in &byday {
                 let day = week_start + Duration::days(wd.num_days_from_monday() as i64);
-                let start = Utc
-                    .from_utc_datetime(&day.and_hms_opt(0, 0, 0).unwrap())
-                    .timestamp_millis()
-                    + tod_ms;
+                let start =
+                    Utc.from_utc_datetime(&day.and_hms_opt(0, 0, 0).unwrap()).timestamp_millis()
+                        + tod_ms;
                 if start < dtstart_ms {
                     continue; // before the series actually begins
                 }
@@ -246,13 +239,7 @@ fn parse_rule(rrule: &str) -> Option<Rule> {
         }
     }
 
-    Some(Rule {
-        freq: freq?,
-        interval,
-        count,
-        until_ms,
-        byday,
-    })
+    Some(Rule { freq: freq?, interval, count, until_ms, byday })
 }
 
 /// Parse an RFC-5545 UNTIL value to ms. Accepts `YYYYMMDD`,
@@ -270,11 +257,9 @@ fn parse_until(v: &str) -> Option<i64> {
     let month: u32 = date[4..6].parse().ok()?;
     let day: u32 = date[6..8].parse().ok()?;
     let (h, m, s) = match time {
-        Some(t) if t.len() >= 6 => (
-            t[0..2].parse().ok()?,
-            t[2..4].parse().ok()?,
-            t[4..6].parse().ok()?,
-        ),
+        Some(t) if t.len() >= 6 => {
+            (t[0..2].parse().ok()?, t[2..4].parse().ok()?, t[4..6].parse().ok()?)
+        }
         // Date-only UNTIL is inclusive of the whole day.
         _ => (23, 59, 59),
     };
@@ -301,9 +286,7 @@ mod tests {
 
     // 2026-06-08 09:00:00 UTC (a Monday) as ms.
     fn mon_0900() -> i64 {
-        Utc.with_ymd_and_hms(2026, 6, 8, 9, 0, 0)
-            .unwrap()
-            .timestamp_millis()
+        Utc.with_ymd_and_hms(2026, 6, 8, 9, 0, 0).unwrap().timestamp_millis()
     }
     fn day(n: i64) -> i64 {
         n * 86_400_000
@@ -352,9 +335,7 @@ mod tests {
         let until = s + day(16); // between the 3rd and 4th
         let rule = format!(
             "FREQ=WEEKLY;UNTIL={}",
-            Utc.timestamp_millis_opt(until)
-                .unwrap()
-                .format("%Y%m%dT%H%M%SZ")
+            Utc.timestamp_millis_opt(until).unwrap().format("%Y%m%dT%H%M%SZ")
         );
         let occ = expand(s, None, &rule, &[], s - day(1), s + day(60));
         assert_eq!(occ.len(), 3);
@@ -365,14 +346,7 @@ mod tests {
     fn weekly_byday_multi() {
         let s = mon_0900(); // Monday
         // Mon/Wed/Fri for the master week; window = that week.
-        let occ = expand(
-            s,
-            None,
-            "FREQ=WEEKLY;BYDAY=MO,WE,FR",
-            &[],
-            s,
-            s + day(7),
-        );
+        let occ = expand(s, None, "FREQ=WEEKLY;BYDAY=MO,WE,FR", &[], s, s + day(7));
         let starts: Vec<i64> = occ.iter().map(|o| o.start_ms).collect();
         assert_eq!(starts, vec![s, s + day(2), s + day(4)]);
     }
@@ -398,10 +372,8 @@ mod tests {
         let jan31 = Utc.with_ymd_and_hms(2026, 1, 31, 9, 0, 0).unwrap().timestamp_millis();
         let win_end = Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).unwrap().timestamp_millis();
         let occ = expand(jan31, None, "FREQ=MONTHLY", &[], jan31, win_end);
-        let months: Vec<u32> = occ
-            .iter()
-            .map(|o| Utc.timestamp_millis_opt(o.start_ms).unwrap().month())
-            .collect();
+        let months: Vec<u32> =
+            occ.iter().map(|o| Utc.timestamp_millis_opt(o.start_ms).unwrap().month()).collect();
         assert_eq!(months, vec![1, 3], "Feb 31 skipped, Jan and Mar kept");
     }
 
@@ -411,10 +383,8 @@ mod tests {
         let win_end = Utc.with_ymd_and_hms(2029, 1, 1, 0, 0, 0).unwrap().timestamp_millis();
         // Leap-day yearly: only leap years have Feb 29 → 2024, 2028.
         let occ = expand(s, None, "FREQ=YEARLY", &[], s, win_end);
-        let years: Vec<i32> = occ
-            .iter()
-            .map(|o| Utc.timestamp_millis_opt(o.start_ms).unwrap().year())
-            .collect();
+        let years: Vec<i32> =
+            occ.iter().map(|o| Utc.timestamp_millis_opt(o.start_ms).unwrap().year()).collect();
         assert_eq!(years, vec![2024, 2028]);
     }
 }

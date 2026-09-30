@@ -121,12 +121,8 @@ impl Renderer {
         self.scale = scale;
         self.layout(doc, width, scale);
 
-        let total_h = self
-            .laid
-            .last()
-            .map(|b| b.top() + b.height())
-            .unwrap_or(LINE_PX)
-            .max(LINE_PX);
+        let total_h =
+            self.laid.last().map(|b| b.top() + b.height()).unwrap_or(LINE_PX).max(LINE_PX);
         let px_w = (width * scale).round().max(1.0) as u32;
         let px_h = (total_h * scale).ceil().max(1.0) as u32;
 
@@ -150,8 +146,8 @@ impl Renderer {
                                 let start = if bi == s.block { s.off } else { 0 };
                                 let end = if bi == e.block { e.off } else { usize::MAX };
                                 for run in buf.layout_runs() {
-                                    for (x, w) in run
-                                        .highlight(Cursor::new(0, start), Cursor::new(0, end))
+                                    for (x, w) in
+                                        run.highlight(Cursor::new(0, start), Cursor::new(0, end))
                                     {
                                         fill_rect(
                                             pixels,
@@ -312,11 +308,7 @@ impl Renderer {
             Laid::Para { buf, top, .. } => {
                 let cursor = Cursor::new(0, pos.off);
                 match buf.cursor_position(&cursor) {
-                    Some((x, line_top)) => (
-                        x / self.scale,
-                        top + line_top / self.scale,
-                        LINE_PX,
-                    ),
+                    Some((x, line_top)) => (x / self.scale, top + line_top / self.scale, LINE_PX),
                     None => (0.0, *top, LINE_PX),
                 }
             }

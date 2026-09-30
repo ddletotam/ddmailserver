@@ -120,16 +120,12 @@ async fn refresh_token_standalone(
         return Err(RefreshFail::transient(message));
     }
 
-    let data: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| RefreshFail::transient(format!("Refresh parse: {e}")))?;
+    let data: serde_json::Value =
+        resp.json().await.map_err(|e| RefreshFail::transient(format!("Refresh parse: {e}")))?;
     let new_token = data
         .get("token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            RefreshFail::transient("Refresh: missing token in response".to_string())
-        })?
+        .ok_or_else(|| RefreshFail::transient("Refresh: missing token in response".to_string()))?
         .to_string();
 
     *token.write().await = new_token.clone();
@@ -208,10 +204,7 @@ impl NativeProvider {
         F: Fn(&Client, &str) -> RequestBuilder,
     {
         let token = self.token.read().await.clone();
-        let resp = build(&self.http, &token)
-            .send()
-            .await
-            .map_err(|e| format!("HTTP: {e}"))?;
+        let resp = build(&self.http, &token).send().await.map_err(|e| format!("HTTP: {e}"))?;
 
         if resp.status() != StatusCode::UNAUTHORIZED {
             return Ok(resp);
@@ -221,17 +214,12 @@ impl NativeProvider {
         // a concurrent request already rotated under us.
         self.refresh_token(&token).await?;
         let new_token = self.token.read().await.clone();
-        build(&self.http, &new_token)
-            .send()
-            .await
-            .map_err(|e| format!("HTTP: {e}"))
+        build(&self.http, &new_token).send().await.map_err(|e| format!("HTTP: {e}"))
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, String> {
         let url = self.api_url(path);
-        let resp = self
-            .send_authed(|http, token| http.get(&url).bearer_auth(token))
-            .await?;
+        let resp = self.send_authed(|http, token| http.get(&url).bearer_auth(token)).await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -239,9 +227,7 @@ impl NativeProvider {
             return Err(format!("HTTP {status}: {body}"));
         }
 
-        resp.json::<T>()
-            .await
-            .map_err(|e| format!("JSON decode {path}: {e}"))
+        resp.json::<T>().await.map_err(|e| format!("JSON decode {path}: {e}"))
     }
 
     async fn post<B: serde::Serialize, T: serde::de::DeserializeOwned>(
@@ -261,9 +247,7 @@ impl NativeProvider {
             return Err(format!("HTTP {status}: {body}"));
         }
 
-        resp.json::<T>()
-            .await
-            .map_err(|e| format!("JSON decode {path}: {e}"))
+        resp.json::<T>().await.map_err(|e| format!("JSON decode {path}: {e}"))
     }
 }
 
@@ -297,16 +281,13 @@ impl MailProvider for NativeProvider {
             conversations: Vec<Conversation>,
         }
         let since = since_ms.max(0);
-        let resp: DeltaResp = self
-            .get(&format!("/conversations?limit={limit}&since={since}"))
-            .await?;
+        let resp: DeltaResp =
+            self.get(&format!("/conversations?limit={limit}&since={since}")).await?;
         Ok((resp.conversations, resp.server_now_ms, since > 0))
     }
 
     async fn fetch_changes(&self, since: i64) -> Result<Option<ChangesResponse>, String> {
-        let resp: ChangesResponse = self
-            .get(&format!("/changes?since={}", since.max(0)))
-            .await?;
+        let resp: ChangesResponse = self.get(&format!("/changes?since={}", since.max(0))).await?;
         Ok(Some(resp))
     }
 
@@ -362,10 +343,7 @@ impl MailProvider for NativeProvider {
         Ok(())
     }
 
-    async fn delete_messages(
-        &self,
-        messages: &[MessageRef],
-    ) -> Result<(), String> {
+    async fn delete_messages(&self, messages: &[MessageRef]) -> Result<(), String> {
         if messages.is_empty() {
             return Ok(());
         }
@@ -387,7 +365,12 @@ impl MailProvider for NativeProvider {
         Ok(())
     }
 
-    async fn blacklist_and_purge(&self, scope: &str, fallback_addr: &str, message_ids: &[i64]) -> Result<PurgeOutcome, String> {
+    async fn blacklist_and_purge(
+        &self,
+        scope: &str,
+        fallback_addr: &str,
+        message_ids: &[i64],
+    ) -> Result<PurgeOutcome, String> {
         if message_ids.is_empty() && fallback_addr.is_empty() {
             return Err("no sender to block".into());
         }
@@ -403,44 +386,27 @@ impl MailProvider for NativeProvider {
         Ok(resp)
     }
 
-    async fn fetch_message_source(
-        &self,
-        _folder: &str,
-        uid: u32,
-    ) -> Result<String, String> {
+    async fn fetch_message_source(&self, _folder: &str, uid: u32) -> Result<String, String> {
         // uid here is actually the server message ID for native provider
         let url = self.api_url(&format!("/messages/{uid}/source"));
-        let resp = self
-            .send_authed(|http, token| http.get(&url).bearer_auth(token))
-            .await?;
+        let resp = self.send_authed(|http, token| http.get(&url).bearer_auth(token)).await?;
 
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));
         }
 
-        resp.text()
-            .await
-            .map_err(|e| format!("Read body: {e}"))
+        resp.text().await.map_err(|e| format!("Read body: {e}"))
     }
 
-    async fn fetch_raw_message(
-        &self,
-        _folder: &str,
-        uid: u32,
-    ) -> Result<Vec<u8>, String> {
+    async fn fetch_raw_message(&self, _folder: &str, uid: u32) -> Result<Vec<u8>, String> {
         let url = self.api_url(&format!("/messages/{uid}/source"));
-        let resp = self
-            .send_authed(|http, token| http.get(&url).bearer_auth(token))
-            .await?;
+        let resp = self.send_authed(|http, token| http.get(&url).bearer_auth(token)).await?;
 
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));
         }
 
-        resp.bytes()
-            .await
-            .map(|b| b.to_vec())
-            .map_err(|e| format!("Read body: {e}"))
+        resp.bytes().await.map(|b| b.to_vec()).map_err(|e| format!("Read body: {e}"))
     }
 
     async fn fetch_attachment(
@@ -452,9 +418,7 @@ impl MailProvider for NativeProvider {
         // `uid` here is messages.id in native mode (see comment on
         // fetch_message_source).
         let url = self.api_url(&format!("/messages/{uid}/attachments/{index}"));
-        let resp = self
-            .send_authed(|http, token| http.get(&url).bearer_auth(token))
-            .await?;
+        let resp = self.send_authed(|http, token| http.get(&url).bearer_auth(token)).await?;
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));
         }
@@ -478,9 +442,7 @@ impl MailProvider for NativeProvider {
         // safe across nginx and gorilla/mux without depending on path encoding.
         let encoded = urlencoding::encode(email.trim());
         let url = self.api_url(&format!("/avatars?email={encoded}"));
-        let resp = self
-            .send_authed(|http, token| http.get(&url).bearer_auth(token))
-            .await?;
+        let resp = self.send_authed(|http, token| http.get(&url).bearer_auth(token)).await?;
         let status = resp.status();
         if status.as_u16() == 204 {
             return Ok((Vec::new(), String::new()));
@@ -506,7 +468,11 @@ impl MailProvider for NativeProvider {
         self.get(&format!("/contacts?limit={limit}")).await
     }
 
-    async fn search_contacts(&self, query: &str, limit: u32) -> Result<Vec<DesktopContact>, String> {
+    async fn search_contacts(
+        &self,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<DesktopContact>, String> {
         let q = urlencoding::encode(query);
         self.get(&format!("/contacts/search?q={q}&limit={limit}")).await
     }
@@ -517,9 +483,8 @@ impl MailProvider for NativeProvider {
 
     async fn update_contact(&self, id: i64, body: serde_json::Value) -> Result<(), String> {
         let url = self.api_url(&format!("/contacts/{id}"));
-        let resp = self
-            .send_authed(|http, token| http.patch(&url).bearer_auth(token).json(&body))
-            .await?;
+        let resp =
+            self.send_authed(|http, token| http.patch(&url).bearer_auth(token).json(&body)).await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
@@ -530,9 +495,7 @@ impl MailProvider for NativeProvider {
 
     async fn delete_contact(&self, id: i64) -> Result<(), String> {
         let url = self.api_url(&format!("/contacts/{id}"));
-        let resp = self
-            .send_authed(|http, token| http.delete(&url).bearer_auth(token))
-            .await?;
+        let resp = self.send_authed(|http, token| http.delete(&url).bearer_auth(token)).await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
@@ -549,53 +512,34 @@ impl MailProvider for NativeProvider {
     ) -> Result<Vec<DesktopCalendarEvent>, String> {
         let mut path = format!("/calendar-events?from={from_ms}&to={to_ms}");
         if !calendar_ids.is_empty() {
-            let ids = calendar_ids
-                .iter()
-                .map(i64::to_string)
-                .collect::<Vec<_>>()
-                .join(",");
+            let ids = calendar_ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
             path.push_str(&format!("&ids={ids}"));
         }
         self.get(&path).await
     }
 
     async fn fetch_tasks(&self, include_completed: bool) -> Result<Vec<DesktopTask>, String> {
-        let path = if include_completed {
-            "/tasks?include_completed=1"
-        } else {
-            "/tasks"
-        };
+        let path = if include_completed { "/tasks?include_completed=1" } else { "/tasks" };
         self.get(path).await
     }
 
     async fn set_task_completion(&self, task_id: i64, completed: bool) -> Result<bool, String> {
         let body = serde_json::json!({ "completed": completed });
-        let resp: serde_json::Value = self
-            .post(&format!("/tasks/{task_id}/completion"), &body)
-            .await?;
-        Ok(resp
-            .get("completed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(completed))
+        let resp: serde_json::Value =
+            self.post(&format!("/tasks/{task_id}/completion"), &body).await?;
+        Ok(resp.get("completed").and_then(|v| v.as_bool()).unwrap_or(completed))
     }
 
     async fn rsvp_event(&self, event_id: i64, partstat: &str) -> Result<String, String> {
         let body = serde_json::json!({ "partstat": partstat });
         let resp: serde_json::Value = self.post(&format!("/events/{event_id}/rsvp"), &body).await?;
-        Ok(resp
-            .get("partstat")
-            .and_then(|v| v.as_str())
-            .unwrap_or(partstat)
-            .to_string())
+        Ok(resp.get("partstat").and_then(|v| v.as_str()).unwrap_or(partstat).to_string())
     }
 
     async fn patch_event(&self, event_id: i64, body: serde_json::Value) -> Result<(), String> {
         let url = self.api_url(&format!("/events/{event_id}"));
-        let resp = self
-            .send_authed(|http, token| {
-                http.patch(&url).bearer_auth(token).json(&body)
-            })
-            .await?;
+        let resp =
+            self.send_authed(|http, token| http.patch(&url).bearer_auth(token).json(&body)).await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
@@ -610,9 +554,7 @@ impl MailProvider for NativeProvider {
 
     async fn delete_event(&self, event_id: i64) -> Result<(), String> {
         let url = self.api_url(&format!("/events/{event_id}"));
-        let resp = self
-            .send_authed(|http, token| http.delete(&url).bearer_auth(token))
-            .await?;
+        let resp = self.send_authed(|http, token| http.delete(&url).bearer_auth(token)).await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
@@ -628,9 +570,7 @@ impl MailProvider for NativeProvider {
     ) -> Result<InlinePart, String> {
         let cid_enc = urlencoding::encode(content_id);
         let url = self.api_url(&format!("/messages/{message_id}/parts/{cid_enc}"));
-        let resp = self
-            .send_authed(|http, token| http.get(&url).bearer_auth(token))
-            .await?;
+        let resp = self.send_authed(|http, token| http.get(&url).bearer_auth(token)).await?;
 
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));
@@ -643,10 +583,7 @@ impl MailProvider for NativeProvider {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| format!("Read body: {e}"))?;
+        let bytes = resp.bytes().await.map_err(|e| format!("Read body: {e}"))?;
 
         use base64::Engine as _;
         let content_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -660,11 +597,7 @@ impl MailProvider for NativeProvider {
         message: &OutgoingMessage,
     ) -> Result<String, String> {
         let resp: serde_json::Value = self.post("/send", message).await?;
-        Ok(resp
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("queued")
-            .to_string())
+        Ok(resp.get("status").and_then(|v| v.as_str()).unwrap_or("queued").to_string())
     }
 
     async fn start_watching(&self, notifier: Notifier) -> Result<(), String> {
@@ -675,10 +608,7 @@ impl MailProvider for NativeProvider {
         if let Ok(mut slot) = self.notifier.lock() {
             *slot = Some(notifier.clone());
         }
-        let ws_base = self
-            .server_url
-            .replace("https://", "wss://")
-            .replace("http://", "ws://");
+        let ws_base = self.server_url.replace("https://", "wss://").replace("http://", "ws://");
         let user_email = self.user_email.clone();
         let token = self.token.clone();
         // Pieces for in-loop token refresh: the watcher is the only network
@@ -692,10 +622,7 @@ impl MailProvider for NativeProvider {
 
         tokio::spawn(async move {
             log::info!("NativeProvider: connecting WebSocket for {user_email}");
-            notifier(EngineEvent::ConnectionState {
-                state: "connecting".into(),
-                message: None,
-            });
+            notifier(EngineEvent::ConnectionState { state: "connecting".into(), message: None });
 
             // Short first retry, doubling to a 30s ceiling; reset on success.
             let mut backoff_secs: u64 = 2;
@@ -742,15 +669,19 @@ impl MailProvider for NativeProvider {
                                     if let Ok(event) =
                                         serde_json::from_str::<serde_json::Value>(&text)
                                     {
-                                        let event_type =
-                                            event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                                        let event_type = event
+                                            .get("type")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
                                         let folder = event
                                             .get("folder")
                                             .and_then(|v| v.as_str())
                                             .unwrap_or("INBOX");
-                                        let count =
-                                            event.get("count").and_then(|v| v.as_u64()).unwrap_or(1)
-                                                as u32;
+                                        let count = event
+                                            .get("count")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(1)
+                                            as u32;
 
                                         if event_type == "new_message" {
                                             notifier(EngineEvent::NewMail {

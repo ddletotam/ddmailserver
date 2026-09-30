@@ -19,12 +19,48 @@ use crate::style::{Align, BgImage, BgPos, BgSize, Display, Edges, Len, Resolver,
 use crate::text::{self, Span, TextEngine};
 
 pub enum Cmd {
-    Rect { x: f32, y: f32, w: f32, h: f32, radius: f32, color: Rgba },
-    Border { x: f32, y: f32, w: f32, h: f32, radius: f32, widths: Edges, color: Rgba },
-    Text { x: f32, y: f32, buffer: Buffer, spans: Vec<Span> },
-    Image { x: f32, y: f32, w: f32, h: f32, radius: f32, bitmap: Option<Rc<Bitmap>>, link: Option<usize> },
+    Rect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        color: Rgba,
+    },
+    Border {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        widths: Edges,
+        color: Rgba,
+    },
+    Text {
+        x: f32,
+        y: f32,
+        buffer: Buffer,
+        spans: Vec<Span>,
+    },
+    Image {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        bitmap: Option<Rc<Bitmap>>,
+        link: Option<usize>,
+    },
     /// `background-image: <gradient>` over a box.
-    Gradient { x: f32, y: f32, w: f32, h: f32, radius: f32, kind: Ramp, stops: Rc<Vec<(Rgba, f32)>> },
+    Gradient {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        kind: Ramp,
+        stops: Rc<Vec<(Rgba, f32)>>,
+    },
     /// `background-image: url(...)` over a box, sized, placed and repeated per CSS.
     Backdrop {
         x: f32,
@@ -221,7 +257,8 @@ impl Ctx<'_> {
             border.vertical() + border.horizontal() > 0.0 && style.border_color.is_visible(),
         );
 
-        let content_h = self.block_children(node, style, content_x, content_y, content_w, link, depth);
+        let content_h =
+            self.block_children(node, style, content_x, content_y, content_w, link, depth);
         let content_h = match style.height {
             // A declared height is a floor, never a clip: mail routinely
             // under-declares and we would cut text off.
@@ -388,9 +425,7 @@ impl Ctx<'_> {
         // Numbering is the list's business, not the item's. `<ol start>` is
         // how a mail continues a list broken across a quote.
         let ordered = tag(node) == "ol";
-        let mut ordinal: i64 = attr(node, "start")
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(1);
+        let mut ordinal: i64 = attr(node, "start").and_then(|v| v.trim().parse().ok()).unwrap_or(1);
 
         for child in children(node) {
             if self.over_budget(cursor) {
@@ -479,11 +514,8 @@ impl Ctx<'_> {
             } else {
                 cursor += self.flush_inline(&mut inline, style, x, cursor, avail_w);
                 if cs.display == Display::ListItem {
-                    self.marker = Some(if ordered {
-                        format!("{ordinal}. ")
-                    } else {
-                        "• ".to_string()
-                    });
+                    self.marker =
+                        Some(if ordered { format!("{ordinal}. ") } else { "• ".to_string() });
                     ordinal += 1;
                 }
                 cursor += self.block(&child, &cs, x, cursor, avail_w, clink, depth + 1);
@@ -541,8 +573,8 @@ impl Ctx<'_> {
                         // An icon belongs on the line it was written on. Only
                         // when it cannot share one — or when the author asked
                         // for a block — does the paragraph break.
-                        let on_line = is_inline(cs.display)
-                            && self.inline_image(&child, &cs, out, bw, clink);
+                        let on_line =
+                            is_inline(cs.display) && self.inline_image(&child, &cs, out, bw, clink);
                         if !on_line {
                             *cursor += self.flush_inline(out, block_style, bx, *cursor, bw);
                             *cursor += self.image(&child, &cs, bx, *cursor, bw, clink);
@@ -654,12 +686,7 @@ impl Ctx<'_> {
     /// An explicit `<br>`. Same line break as `push_raw("\n")`, but marked as
     /// content the author asked for, which keeps a paragraph made of nothing
     /// else from being discarded as whitespace.
-    pub(crate) fn push_break(
-        &mut self,
-        out: &mut Vec<Span>,
-        style: &Style,
-        link: Option<usize>,
-    ) {
+    pub(crate) fn push_break(&mut self, out: &mut Vec<Span>, style: &Style, link: Option<usize>) {
         let mut span = Span::from_style("\n".to_string(), style, link);
         span.hard_break = true;
         out.push(span);
@@ -667,9 +694,7 @@ impl Ctx<'_> {
 
     /// End the current line, unless the paragraph is empty or already broken.
     fn break_line(&mut self, out: &mut Vec<Span>, style: &Style, link: Option<usize>) {
-        let already = out
-            .last()
-            .is_none_or(|s| s.text.is_empty() || s.text.ends_with('\n'));
+        let already = out.last().is_none_or(|s| s.text.is_empty() || s.text.ends_with('\n'));
         if !already {
             self.push_raw(out, "\n", style, link);
         }
@@ -710,8 +735,7 @@ impl Ctx<'_> {
         }
         let base_size = style.font_size;
         let base_line = style.line_px();
-        let buffer =
-            text::shape(self.eng, &taken, avail_w, style.align, base_size, base_line);
+        let buffer = text::shape(self.eng, &taken, avail_w, style.align, base_size, base_line);
         let (_, h) = text::measure(&buffer);
         self.place_objects(&buffer, &taken, x, y);
         self.cmds.push(Cmd::Text { x, y, buffer, spans: taken });
@@ -777,11 +801,7 @@ impl Ctx<'_> {
             // Left-aligned in its reservation, after the author's left margin;
             // the rounding slack lands on the right, where a gap between
             // inline things belongs.
-            moves.push((
-                object.cmds.clone(),
-                x + x0 + object.lead,
-                y + centre - object.h / 2.0,
-            ));
+            moves.push((object.cmds.clone(), x + x0 + object.lead, y + centre - object.h / 2.0));
         }
         for (cmds, px, py) in moves {
             self.translate(cmds, px, py);
@@ -796,9 +816,7 @@ impl Ctx<'_> {
     /// invented dimensions — it becomes its `alt` text, or nothing.
     fn image_box(&mut self, node: &Handle, style: &Style, avail_w: f32) -> Placement {
         let bitmap = self.decode_image(&attr(node, "src").unwrap_or_default());
-        let natural = bitmap
-            .as_ref()
-            .map(|b| (b.w as f32 * self.scale, b.h as f32 * self.scale));
+        let natural = bitmap.as_ref().map(|b| (b.w as f32 * self.scale, b.h as f32 * self.scale));
 
         let declared_w = style.width.map(|l| l.resolve(avail_w));
         let declared_h = style.height.map(|l| l.resolve(0.0));
@@ -826,10 +844,7 @@ impl Ctx<'_> {
 
         // Wider than the room it has: scale down, keeping the aspect. This is
         // the width invariant reaching all the way into image sizing.
-        let limit = style
-            .max_width
-            .map_or(avail_w, |l| l.resolve(avail_w))
-            .clamp(1.0, avail_w);
+        let limit = style.max_width.map_or(avail_w, |l| l.resolve(avail_w)).clamp(1.0, avail_w);
         let (w, h) = if w > limit { (limit, h * limit / w.max(0.01)) } else { (w, h) };
         Placement::Image(ImageBox {
             bitmap,
@@ -992,12 +1007,7 @@ impl Ctx<'_> {
         if th > h - pad {
             return;
         }
-        self.cmds.push(Cmd::Text {
-            x: x + pad,
-            y: y + (h - th) / 2.0,
-            buffer,
-            spans: vec![span],
-        });
+        self.cmds.push(Cmd::Text { x: x + pad, y: y + (h - th) / 2.0, buffer, spans: vec![span] });
     }
 
     /// Lay out an inline-level box (`display: inline-block` / `inline-table`)

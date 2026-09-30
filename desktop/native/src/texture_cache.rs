@@ -14,7 +14,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use crate::render_common::{parse_link_rects, parse_text_runs, LinkRect, TextRun};
+use crate::render_common::{LinkRect, TextRun, parse_link_rects, parse_text_runs};
 
 /// Bump when the sidecar format gains fields (part of the filename key):
 /// v2 = + text runs. v3 = bubble corner timestamp added to the rendered HTML.
@@ -66,34 +66,37 @@ impl TextureDiskCache {
         Some(cache)
     }
 
-    fn base(&self, folder: &str, uid: u32, width: u32, policy_gen: u64, mode: u8, fp: u64) -> PathBuf {
+    fn base(
+        &self,
+        folder: &str,
+        uid: u32,
+        width: u32,
+        policy_gen: u64,
+        mode: u8,
+        fp: u64,
+    ) -> PathBuf {
         let key = format!("{folder}|{uid}|{width}|{policy_gen}|{mode}|{fp}|v{FORMAT_VERSION}");
         self.dir.join(format!("{:016x}", fnv1a(&key)))
     }
 
-    pub fn load(&self, folder: &str, uid: u32, width: u32, policy_gen: u64, mode: u8, fp: u64) -> Option<DiskEntry> {
+    pub fn load(
+        &self,
+        folder: &str,
+        uid: u32,
+        width: u32,
+        policy_gen: u64,
+        mode: u8,
+        fp: u64,
+    ) -> Option<DiskEntry> {
         let base = self.base(folder, uid, width, policy_gen, mode, fp);
         let meta_raw = fs::read_to_string(base.with_extension("json")).ok()?;
         let meta: serde_json::Value = serde_json::from_str(&meta_raw).ok()?;
         let h = meta.get("h")?.as_f64()? as f32;
-        let links = meta
-            .get("links")
-            .map(|l| parse_link_rects(&l.to_string()))
-            .unwrap_or_default();
-        let runs = meta
-            .get("runs")
-            .map(|r| parse_text_runs(&r.to_string()))
-            .unwrap_or_default();
+        let links = meta.get("links").map(|l| parse_link_rects(&l.to_string())).unwrap_or_default();
+        let runs = meta.get("runs").map(|r| parse_text_runs(&r.to_string())).unwrap_or_default();
         let img = image::open(base.with_extension("png")).ok()?.into_rgba8();
         let (width_px, height_px) = img.dimensions();
-        Some(DiskEntry {
-            rgba: img.into_raw(),
-            width: width_px,
-            height: height_px,
-            h,
-            links,
-            runs,
-        })
+        Some(DiskEntry { rgba: img.into_raw(), width: width_px, height: height_px, h, links, runs })
     }
 
     /// Best-effort store; failures only cost a future re-render.
@@ -122,7 +125,10 @@ impl TextureDiskCache {
         if rgba.len() != expected {
             eprintln!(
                 "texture store: bad buffer {}x{} — {} bytes, expected {} — skipping",
-                width_px, height_px, rgba.len(), expected
+                width_px,
+                height_px,
+                rgba.len(),
+                expected
             );
             return;
         }

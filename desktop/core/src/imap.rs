@@ -1,9 +1,9 @@
-use std::collections::HashMap;
 use crate::event::Notifier;
-use tokio_util::compat::TokioAsyncReadCompatExt;
 use futures::TryStreamExt;
+use std::collections::HashMap;
+use tokio_util::compat::TokioAsyncReadCompatExt;
 
-use md5::{Md5, Digest};
+use md5::{Digest, Md5};
 
 use crate::cache::Cache;
 use crate::session::{Credentials, SessionPool};
@@ -42,9 +42,7 @@ struct RawEnvelope {
 }
 
 fn parse_date_to_ts(date_str: &str) -> i64 {
-    chrono::DateTime::parse_from_rfc2822(date_str)
-        .map(|d| d.timestamp())
-        .unwrap_or(0)
+    chrono::DateTime::parse_from_rfc2822(date_str).map(|d| d.timestamp()).unwrap_or(0)
 }
 
 /// Decode RFC 2047 encoded-words (=?utf-8?q?...?= / =?utf-8?b?...?=) in IMAP envelope fields.
@@ -60,11 +58,15 @@ fn decode_mime(raw: &[u8]) -> String {
 }
 
 fn addr_str(a: &async_imap::imap_proto::types::Address<'_>) -> String {
-    let mbox = a.mailbox.as_ref()
+    let mbox = a
+        .mailbox
+        .as_ref()
         .and_then(|m| String::from_utf8(m.to_vec()).ok())
         .unwrap_or_default()
         .replace(['<', '>'], "");
-    let host = a.host.as_ref()
+    let host = a
+        .host
+        .as_ref()
         .and_then(|h| String::from_utf8(h.to_vec()).ok())
         .unwrap_or_default()
         .replace(['<', '>'], "");
@@ -74,9 +76,7 @@ fn addr_str(a: &async_imap::imap_proto::types::Address<'_>) -> String {
 }
 
 fn name_str(a: &async_imap::imap_proto::types::Address<'_>) -> String {
-    a.name.as_ref()
-        .map(|n| decode_mime(n))
-        .unwrap_or_default()
+    a.name.as_ref().map(|n| decode_mime(n)).unwrap_or_default()
 }
 
 /// Strip email parts from display name.
@@ -109,33 +109,45 @@ fn extract_envelope(msg: &async_imap::types::Fetch, folder: &str) -> Option<RawE
     let uid = msg.uid?;
     let env = msg.envelope()?;
 
-    let subject = env.subject.as_ref()
-        .map(|s| decode_mime(s))
-        .unwrap_or_default();
+    let subject = env.subject.as_ref().map(|s| decode_mime(s)).unwrap_or_default();
 
     // Parse raw FROM header for proper-case name (ENVELOPE may lowercase)
-    let raw_headers = msg.header()
-        .map(|h| String::from_utf8_lossy(h).to_string())
-        .unwrap_or_default();
-    let (from_name, from_addr) = parse_from_header(&raw_headers)
-        .unwrap_or_else(|| {
-            // Fallback to envelope
-            let name = env.from.as_ref()
-                .and_then(|a| a.first()).map(|a| name_str(a)).unwrap_or_default();
-            let addr = env.from.as_ref()
-                .and_then(|a| a.first()).map(|a| addr_str(a)).unwrap_or_default();
-            (name, addr)
-        });
+    let raw_headers =
+        msg.header().map(|h| String::from_utf8_lossy(h).to_string()).unwrap_or_default();
+    let (from_name, from_addr) = parse_from_header(&raw_headers).unwrap_or_else(|| {
+        // Fallback to envelope
+        let name =
+            env.from.as_ref().and_then(|a| a.first()).map(|a| name_str(a)).unwrap_or_default();
+        let addr =
+            env.from.as_ref().and_then(|a| a.first()).map(|a| addr_str(a)).unwrap_or_default();
+        (name, addr)
+    });
 
-    let to_names: Vec<String> = env.to.as_ref()
-        .map(|addrs| addrs.iter().map(|a| { let n = name_str(a); if n.is_empty() { addr_str(a) } else { n } }).collect())
+    let to_names: Vec<String> = env
+        .to
+        .as_ref()
+        .map(|addrs| {
+            addrs
+                .iter()
+                .map(|a| {
+                    let n = name_str(a);
+                    if n.is_empty() { addr_str(a) } else { n }
+                })
+                .collect()
+        })
         .unwrap_or_default();
-    let to_addrs: Vec<String> = env.to.as_ref()
-        .map(|addrs| addrs.iter().map(|a| addr_str(a)).collect()).unwrap_or_default();
-    let cc_addrs: Vec<String> = env.cc.as_ref()
-        .map(|addrs| addrs.iter().map(|a| addr_str(a)).collect()).unwrap_or_default();
-    let date = env.date.as_ref()
-        .and_then(|d| String::from_utf8(d.to_vec()).ok()).unwrap_or_default();
+    let to_addrs: Vec<String> = env
+        .to
+        .as_ref()
+        .map(|addrs| addrs.iter().map(|a| addr_str(a)).collect())
+        .unwrap_or_default();
+    let cc_addrs: Vec<String> = env
+        .cc
+        .as_ref()
+        .map(|addrs| addrs.iter().map(|a| addr_str(a)).collect())
+        .unwrap_or_default();
+    let date =
+        env.date.as_ref().and_then(|d| String::from_utf8(d.to_vec()).ok()).unwrap_or_default();
     let date_ts = parse_date_to_ts(&date);
     let flags: Vec<_> = msg.flags().collect();
     let seen = flags.iter().any(|f| matches!(f, async_imap::types::Flag::Seen));
@@ -143,19 +155,39 @@ fn extract_envelope(msg: &async_imap::types::Fetch, folder: &str) -> Option<RawE
     let is_draft = flags.iter().any(|f| matches!(f, async_imap::types::Flag::Draft));
     let has_attachments = raw_headers.to_lowercase().contains("multipart/mixed");
 
-    let message_id = env.message_id.as_ref()
+    let message_id = env
+        .message_id
+        .as_ref()
         .map(|b| String::from_utf8_lossy(b).to_string())
         .map(|s| normalize_msg_id(&s))
         .unwrap_or_default();
-    let in_reply_to = env.in_reply_to.as_ref()
+    let in_reply_to = env
+        .in_reply_to
+        .as_ref()
         .map(|b| String::from_utf8_lossy(b).to_string())
         .map(|s| normalize_msg_id(&s))
         .unwrap_or_default();
     let references = parse_references(&raw_headers);
 
-    Some(RawEnvelope { uid, folder: folder.to_string(), subject, from_name, from_addr,
-        to_names, to_addrs, cc_addrs, date, date_ts, seen, flagged, has_attachments, is_draft,
-        message_id, in_reply_to, references })
+    Some(RawEnvelope {
+        uid,
+        folder: folder.to_string(),
+        subject,
+        from_name,
+        from_addr,
+        to_names,
+        to_addrs,
+        cc_addrs,
+        date,
+        date_ts,
+        seen,
+        flagged,
+        has_attachments,
+        is_draft,
+        message_id,
+        in_reply_to,
+        references,
+    })
 }
 
 /// Normalize a single Message-Id: strip surrounding `<>` and whitespace.
@@ -170,16 +202,25 @@ fn extract_msg_ids(value: &str) -> Vec<String> {
     let mut depth = 0i32;
     for ch in value.chars() {
         match ch {
-            '<' => { depth += 1; current.clear(); }
+            '<' => {
+                depth += 1;
+                current.clear();
+            }
             '>' => {
                 if depth > 0 {
                     depth -= 1;
                     let id = current.trim().to_string();
-                    if !id.is_empty() { out.push(id); }
+                    if !id.is_empty() {
+                        out.push(id);
+                    }
                     current.clear();
                 }
             }
-            _ => { if depth > 0 { current.push(ch); } }
+            _ => {
+                if depth > 0 {
+                    current.push(ch);
+                }
+            }
         }
     }
     out
@@ -212,10 +253,15 @@ fn clean_subject(subject: &str) -> String {
     let mut s = subject.trim();
     loop {
         let lower = s.to_lowercase();
-        if lower.starts_with("re:") { s = s[3..].trim_start(); }
-        else if lower.starts_with("fwd:") { s = s[4..].trim_start(); }
-        else if lower.starts_with("fw:") { s = s[3..].trim_start(); }
-        else { break; }
+        if lower.starts_with("re:") {
+            s = s[3..].trim_start();
+        } else if lower.starts_with("fwd:") {
+            s = s[4..].trim_start();
+        } else if lower.starts_with("fw:") {
+            s = s[3..].trim_start();
+        } else {
+            break;
+        }
     }
     s.to_string()
 }
@@ -242,7 +288,9 @@ fn parse_from_header(raw_headers: &str) -> Option<(String, String)> {
         (String::new(), from_value.trim().to_lowercase())
     };
 
-    if addr.is_empty() { return None; }
+    if addr.is_empty() {
+        return None;
+    }
     Some((name, addr))
 }
 
@@ -274,20 +322,25 @@ async fn fetch_folder_envelopes<T>(
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + std::fmt::Debug,
 {
-    let mailbox = session.select(folder).await
-        .map_err(|e| format!("SELECT {folder}: {e}"))?;
+    let mailbox = session.select(folder).await.map_err(|e| format!("SELECT {folder}: {e}"))?;
     let total = mailbox.exists;
-    if total == 0 { return Ok(vec![]); }
+    if total == 0 {
+        return Ok(vec![]);
+    }
 
     let start = total.saturating_sub(limit).max(1);
     let range = format!("{start}:{total}");
     let messages = session
-        .fetch(&range, "(UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (CONTENT-TYPE FROM REFERENCES)])")
-        .await.map_err(|e| format!("FETCH {folder}: {e}"))?;
+        .fetch(
+            &range,
+            "(UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (CONTENT-TYPE FROM REFERENCES)])",
+        )
+        .await
+        .map_err(|e| format!("FETCH {folder}: {e}"))?;
 
     let mut envelopes = Vec::new();
-    let collected: Vec<_> = messages.try_collect::<Vec<_>>()
-        .await.map_err(|e| format!("Collect: {e}"))?;
+    let collected: Vec<_> =
+        messages.try_collect::<Vec<_>>().await.map_err(|e| format!("Collect: {e}"))?;
     for msg in &collected {
         if let Some(env) = extract_envelope(msg, folder) {
             envelopes.push(env);
@@ -297,14 +350,24 @@ where
 }
 
 // Macro-like helper: connect, login, get session (TLS)
-pub(crate) async fn connect_tls(host: &str, port: u16, username: &str, password: &str)
-    -> Result<async_imap::Session<futures_rustls::client::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>>, String>
-{
+pub(crate) async fn connect_tls(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+) -> Result<
+    async_imap::Session<
+        futures_rustls::client::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>,
+    >,
+    String,
+> {
     let tls = crate::tls::connector();
-    let tcp = tokio::net::TcpStream::connect((host, port))
-        .await.map_err(|e| format!("TCP: {e}"))?;
-    let tls_stream = tls.connect(crate::tls::server_name(host)?, tcp.compat())
-        .await.map_err(|e| format!("TLS: {e}"))?;
+    let tcp =
+        tokio::net::TcpStream::connect((host, port)).await.map_err(|e| format!("TCP: {e}"))?;
+    let tls_stream = tls
+        .connect(crate::tls::server_name(host)?, tcp.compat())
+        .await
+        .map_err(|e| format!("TLS: {e}"))?;
     let client = async_imap::Client::new(tls_stream);
     client.login(username, password).await.map_err(|e| crate::session::friendly_login_error(e.0))
 }
@@ -324,24 +387,37 @@ impl async_imap::Authenticator for &XOAuth2 {
 }
 
 /// TLS IMAP connect using XOAUTH2 (OAuth access token) instead of a password.
-pub(crate) async fn connect_tls_xoauth2(host: &str, port: u16, email: &str, access_token: &str)
-    -> Result<async_imap::Session<futures_rustls::client::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>>, String>
-{
+pub(crate) async fn connect_tls_xoauth2(
+    host: &str,
+    port: u16,
+    email: &str,
+    access_token: &str,
+) -> Result<
+    async_imap::Session<
+        futures_rustls::client::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>,
+    >,
+    String,
+> {
     let tls = crate::tls::connector();
-    let tcp = tokio::net::TcpStream::connect((host, port))
-        .await.map_err(|e| format!("TCP: {e}"))?;
-    let tls_stream = tls.connect(crate::tls::server_name(host)?, tcp.compat())
-        .await.map_err(|e| format!("TLS: {e}"))?;
+    let tcp =
+        tokio::net::TcpStream::connect((host, port)).await.map_err(|e| format!("TCP: {e}"))?;
+    let tls_stream = tls
+        .connect(crate::tls::server_name(host)?, tcp.compat())
+        .await
+        .map_err(|e| format!("TLS: {e}"))?;
     let client = async_imap::Client::new(tls_stream);
     let auth = XOAuth2 { user: email.to_string(), token: access_token.to_string() };
     client.authenticate("XOAUTH2", &auth).await.map_err(|e| format!("XOAUTH2: {}", e.0))
 }
 
-pub(crate) async fn connect_plain(host: &str, port: u16, username: &str, password: &str)
-    -> Result<async_imap::Session<tokio_util::compat::Compat<tokio::net::TcpStream>>, String>
-{
-    let tcp = tokio::net::TcpStream::connect((host, port))
-        .await.map_err(|e| format!("TCP: {e}"))?;
+pub(crate) async fn connect_plain(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+) -> Result<async_imap::Session<tokio_util::compat::Compat<tokio::net::TcpStream>>, String> {
+    let tcp =
+        tokio::net::TcpStream::connect((host, port)).await.map_err(|e| format!("TCP: {e}"))?;
     let client = async_imap::Client::new(tcp.compat());
     client.login(username, password).await.map_err(|e| crate::session::friendly_login_error(e.0))
 }
@@ -349,7 +425,11 @@ pub(crate) async fn connect_plain(host: &str, port: u16, username: &str, passwor
 // ── Commands ──
 
 pub async fn connect(
-    host: String, port: u16, username: String, password: String, use_tls: bool,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    use_tls: bool,
 ) -> Result<Vec<Folder>, String> {
     if use_tls {
         let mut session = connect_tls(&host, port, &username, &password).await?;
@@ -364,14 +444,15 @@ pub async fn connect(
     }
 }
 
-pub(crate) async fn list_folders_impl<T>(session: &mut async_imap::Session<T>) -> Result<Vec<Folder>, String>
+pub(crate) async fn list_folders_impl<T>(
+    session: &mut async_imap::Session<T>,
+) -> Result<Vec<Folder>, String>
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + std::fmt::Debug,
 {
-    let mailboxes = session.list(Some(""), Some("*"))
-        .await.map_err(|e| format!("LIST: {e}"))?;
-    let collected: Vec<_> = mailboxes.try_collect::<Vec<_>>()
-        .await.map_err(|e| format!("Collect: {e}"))?;
+    let mailboxes = session.list(Some(""), Some("*")).await.map_err(|e| format!("LIST: {e}"))?;
+    let collected: Vec<_> =
+        mailboxes.try_collect::<Vec<_>>().await.map_err(|e| format!("Collect: {e}"))?;
 
     let mut folders = Vec::new();
     for mailbox in &collected {
@@ -382,27 +463,41 @@ where
             Err(_) => (0, 0),
         };
         // Extract Special-Use attribute
-        let special_use = mailbox.attributes().iter()
+        let special_use = mailbox
+            .attributes()
+            .iter()
             .find_map(|attr| {
                 let s = format!("{:?}", attr);
                 // async-imap represents attributes as NameAttribute variants
-                if s.contains("Sent") { Some("\\Sent".to_string()) }
-                else if s.contains("Trash") { Some("\\Trash".to_string()) }
-                else if s.contains("Drafts") { Some("\\Drafts".to_string()) }
-                else if s.contains("Junk") { Some("\\Junk".to_string()) }
-                else if s.contains("Archive") { Some("\\Archive".to_string()) }
-                else { None }
+                if s.contains("Sent") {
+                    Some("\\Sent".to_string())
+                } else if s.contains("Trash") {
+                    Some("\\Trash".to_string())
+                } else if s.contains("Drafts") {
+                    Some("\\Drafts".to_string())
+                } else if s.contains("Junk") {
+                    Some("\\Junk".to_string())
+                } else if s.contains("Archive") {
+                    Some("\\Archive".to_string())
+                } else {
+                    None
+                }
             })
             .unwrap_or_default();
         // INBOX is identified by name, not attribute
-        let special_use = if name.eq_ignore_ascii_case("INBOX") { "\\Inbox".to_string() } else { special_use };
+        let special_use =
+            if name.eq_ignore_ascii_case("INBOX") { "\\Inbox".to_string() } else { special_use };
         folders.push(Folder { name, delimiter, unread, total, special_use });
     }
     Ok(folders)
 }
 
 pub async fn list_folders(
-    host: String, port: u16, username: String, password: String, use_tls: bool,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    use_tls: bool,
 ) -> Result<Vec<Folder>, String> {
     connect(host, port, username, password, use_tls).await
 }
@@ -458,11 +553,8 @@ pub fn conversation_participants(from: &str, to: &[String], cc: &[String]) -> Ve
 /// `internal/web/handlers_desktop.go` — один и тот же ящик может приехать и
 /// оттуда, и по IMAP напрямую.
 pub fn conversation_id(mine: &[String], others: &[String], own: &str) -> String {
-    let mine_key = if mine.is_empty() && !own.is_empty() {
-        own.to_lowercase()
-    } else {
-        mine.join("+")
-    };
+    let mine_key =
+        if mine.is_empty() && !own.is_empty() { own.to_lowercase() } else { mine.join("+") };
     if others.is_empty() {
         format!("{mine_key}|self")
     } else if others.len() > 1 {
@@ -474,14 +566,20 @@ pub fn conversation_id(mine: &[String], others: &[String], own: &str) -> String 
 
 pub async fn fetch_conversations(
     cache: &Cache,
-    host: String, port: u16, username: String, password: String, use_tls: bool,
-    user_email: String, limit: u32,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    use_tls: bool,
+    user_email: String,
+    limit: u32,
 ) -> Result<Vec<Conversation>, String> {
     let user_addr = user_email.to_lowercase();
     let key = account_key(&host, &username);
 
     // Our identity addresses come from the cached identity list; fall back to user_addr only.
-    let mut our_addrs: Vec<String> = cache.load_identities(&key)
+    let mut our_addrs: Vec<String> = cache
+        .load_identities(&key)
         .map(|ids| ids.into_iter().map(|i| i.email.to_lowercase()).collect::<Vec<_>>())
         .unwrap_or_default();
     if !our_addrs.iter().any(|a| a == &user_addr) {
@@ -518,10 +616,9 @@ where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + std::fmt::Debug,
 {
     // Get folder list and detect Special-Use folders by attributes
-    let mailboxes = session.list(Some(""), Some("*"))
-        .await.map_err(|e| format!("LIST: {e}"))?;
-    let collected: Vec<_> = mailboxes.try_collect::<Vec<_>>()
-        .await.map_err(|e| format!("Collect: {e}"))?;
+    let mailboxes = session.list(Some(""), Some("*")).await.map_err(|e| format!("LIST: {e}"))?;
+    let collected: Vec<_> =
+        mailboxes.try_collect::<Vec<_>>().await.map_err(|e| format!("Collect: {e}"))?;
 
     let mut inbox_name = "INBOX".to_string();
     let mut sent_name: Option<String> = None;
@@ -543,11 +640,16 @@ where
 
     // Fallback: find Sent by name if no attribute
     if sent_name.is_none() {
-        let folder_list: Vec<Folder> = collected.iter().map(|m| Folder {
-            name: m.name().to_string(),
-            delimiter: m.delimiter().unwrap_or("/").to_string(),
-            unread: 0, total: 0, special_use: String::new(),
-        }).collect();
+        let folder_list: Vec<Folder> = collected
+            .iter()
+            .map(|m| Folder {
+                name: m.name().to_string(),
+                delimiter: m.delimiter().unwrap_or("/").to_string(),
+                unread: 0,
+                total: 0,
+                special_use: String::new(),
+            })
+            .collect();
         sent_name = find_sent_folder(&folder_list);
     }
 
@@ -611,7 +713,9 @@ where
             let mut seen: HashMap<String, usize> = HashMap::new();
             let mut keep = vec![true; msgs.len()];
             for (i, m) in msgs.iter().enumerate() {
-                if m.message_id.is_empty() { continue; }
+                if m.message_id.is_empty() {
+                    continue;
+                }
                 if let Some(&j) = seen.get(&m.message_id) {
                     if prefer_folder(&m.folder) < prefer_folder(&msgs[j].folder) {
                         keep[j] = false;
@@ -628,13 +732,19 @@ where
         }
 
         // Separate drafts from regular messages.
-        let draft = msgs.iter().rev().find(|m| m.is_draft)
-            .map(|m| MessageRef { folder: m.folder.clone(), uid: m.uid, message_id: m.message_id.clone(), seen: true });
+        let draft = msgs.iter().rev().find(|m| m.is_draft).map(|m| MessageRef {
+            folder: m.folder.clone(),
+            uid: m.uid,
+            message_id: m.message_id.clone(),
+            seen: true,
+        });
         let regular_msgs: Vec<&RawEnvelope> = msgs.iter().filter(|m| !m.is_draft).collect();
 
         // Drafts alone don't make a conversation — see HandleDesktopConversations
         // in the Go server for the matching server-side rule.
-        if regular_msgs.is_empty() { continue; }
+        if regular_msgs.is_empty() {
+            continue;
+        }
 
         let first = regular_msgs.first().copied().unwrap();
         let last = regular_msgs.last().copied().unwrap();
@@ -652,7 +762,10 @@ where
             let my = if is_ours(&first_from) {
                 first_from
             } else {
-                first.to_addrs.iter().chain(first.cc_addrs.iter())
+                first
+                    .to_addrs
+                    .iter()
+                    .chain(first.cc_addrs.iter())
                     .map(|a| a.to_lowercase())
                     .find(|a| is_ours(a))
                     .or_else(|| mine.first().cloned())
@@ -682,17 +795,22 @@ where
                 .find(|m| m.from_addr.eq_ignore_ascii_case(addr) && !m.from_name.is_empty())
                 .map(|m| clean_display_name(&m.from_name))
                 .filter(|n| !n.is_empty() && !n.contains('@'))
-                .or_else(|| msgs.iter().flat_map(|m|
-                    m.to_addrs.iter().zip(m.to_names.iter())
-                        .filter(|(a, _)| a.eq_ignore_ascii_case(addr))
-                        .map(|(_, n)| clean_display_name(n))
-                ).find(|n| !n.is_empty() && !n.contains('@')))
+                .or_else(|| {
+                    msgs.iter()
+                        .flat_map(|m| {
+                            m.to_addrs
+                                .iter()
+                                .zip(m.to_names.iter())
+                                .filter(|(a, _)| a.eq_ignore_ascii_case(addr))
+                                .map(|(_, n)| clean_display_name(n))
+                        })
+                        .find(|n| !n.is_empty() && !n.contains('@'))
+                })
                 .unwrap_or_default()
         };
 
-        let counterparts: Vec<ContactInfo> = cp_addrs.iter()
-            .map(|a| ContactInfo { name: name_for(a), addr: a.clone() })
-            .collect();
+        let counterparts: Vec<ContactInfo> =
+            cp_addrs.iter().map(|a| ContactInfo { name: name_for(a), addr: a.clone() }).collect();
 
         let is_group = others.len() > 1;
 
@@ -737,7 +855,15 @@ where
             last_subject: last.subject.clone(),
             unread_count: regular_msgs.iter().filter(|m| !m.seen).count() as u32,
             total_count: regular_msgs.len() as u32,
-            messages: regular_msgs.iter().map(|m| MessageRef { folder: m.folder.clone(), uid: m.uid, message_id: m.message_id.clone(), seen: m.seen }).collect(),
+            messages: regular_msgs
+                .iter()
+                .map(|m| MessageRef {
+                    folder: m.folder.clone(),
+                    uid: m.uid,
+                    message_id: m.message_id.clone(),
+                    seen: m.seen,
+                })
+                .collect(),
             draft,
             account_key: String::new(), // stamped by the engine on merge
             merged: false,
@@ -750,13 +876,19 @@ where
 
 pub async fn fetch_conversation_messages(
     cache: &Cache,
-    host: String, port: u16, username: String, password: String, use_tls: bool,
-    user_email: String, messages: Vec<MessageRef>,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    use_tls: bool,
+    user_email: String,
+    messages: Vec<MessageRef>,
 ) -> Result<Vec<MessageBody>, String> {
     let user_addr = user_email.to_lowercase();
     let key = account_key(&host, &username);
 
-    let mut our_addrs: Vec<String> = cache.load_identities(&key)
+    let mut our_addrs: Vec<String> = cache
+        .load_identities(&key)
         .map(|ids| ids.into_iter().map(|i| i.email.to_lowercase()).collect::<Vec<_>>())
         .unwrap_or_default();
     if !our_addrs.iter().any(|a| a == &user_addr) {
@@ -801,46 +933,76 @@ where
     for (folder, uids) in by_folder {
         session.select(&folder).await.map_err(|e| format!("SELECT {folder}: {e}"))?;
         let uid_set = uids.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",");
-        let fetched = session.uid_fetch(&uid_set, "(BODY.PEEK[] FLAGS)")
-            .await.map_err(|e| format!("FETCH {folder}: {e}"))?;
+        let fetched = session
+            .uid_fetch(&uid_set, "(BODY.PEEK[] FLAGS)")
+            .await
+            .map_err(|e| format!("FETCH {folder}: {e}"))?;
 
-        let collected: Vec<_> = fetched.try_collect::<Vec<_>>()
-            .await.map_err(|e| format!("Collect: {e}"))?;
+        let collected: Vec<_> =
+            fetched.try_collect::<Vec<_>>().await.map_err(|e| format!("Collect: {e}"))?;
 
         for msg in &collected {
             let uid = msg.uid.unwrap_or(0);
-            let body_raw = match msg.body() { Some(b) => b, None => continue };
-            let parsed = match mailparse::parse_mail(body_raw) { Ok(p) => p, Err(_) => continue };
+            let body_raw = match msg.body() {
+                Some(b) => b,
+                None => continue,
+            };
+            let parsed = match mailparse::parse_mail(body_raw) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
 
-            let subject = parsed.headers.iter()
+            let subject = parsed
+                .headers
+                .iter()
                 .find(|h| h.get_key().eq_ignore_ascii_case("subject"))
-                .map(|h| h.get_value()).unwrap_or_default();
-            let from = parsed.headers.iter()
+                .map(|h| h.get_value())
+                .unwrap_or_default();
+            let from = parsed
+                .headers
+                .iter()
                 .find(|h| h.get_key().eq_ignore_ascii_case("from"))
-                .map(|h| h.get_value()).unwrap_or_default();
+                .map(|h| h.get_value())
+                .unwrap_or_default();
             let from_addr = extract_addr_from_header(&from);
-            let to: Vec<String> = parsed.headers.iter()
+            let to: Vec<String> = parsed
+                .headers
+                .iter()
                 .find(|h| h.get_key().eq_ignore_ascii_case("to"))
                 .map(|h| h.get_value().split(',').map(|s| s.trim().to_string()).collect())
                 .unwrap_or_default();
-            let cc: Vec<String> = parsed.headers.iter()
+            let cc: Vec<String> = parsed
+                .headers
+                .iter()
                 .find(|h| h.get_key().eq_ignore_ascii_case("cc"))
                 .map(|h| h.get_value().split(',').map(|s| s.trim().to_string()).collect())
                 .unwrap_or_default();
-            let date = parsed.headers.iter()
+            let date = parsed
+                .headers
+                .iter()
                 .find(|h| h.get_key().eq_ignore_ascii_case("date"))
-                .map(|h| h.get_value()).unwrap_or_default();
+                .map(|h| h.get_value())
+                .unwrap_or_default();
             let date_ts = parse_date_to_ts(&date);
 
-            let message_id = parsed.headers.iter()
+            let message_id = parsed
+                .headers
+                .iter()
                 .find(|h| h.get_key().eq_ignore_ascii_case("message-id"))
-                .map(|h| normalize_msg_id(&h.get_value())).unwrap_or_default();
-            let in_reply_to = parsed.headers.iter()
+                .map(|h| normalize_msg_id(&h.get_value()))
+                .unwrap_or_default();
+            let in_reply_to = parsed
+                .headers
+                .iter()
                 .find(|h| h.get_key().eq_ignore_ascii_case("in-reply-to"))
-                .map(|h| normalize_msg_id(&h.get_value())).unwrap_or_default();
-            let references = parsed.headers.iter()
+                .map(|h| normalize_msg_id(&h.get_value()))
+                .unwrap_or_default();
+            let references = parsed
+                .headers
+                .iter()
                 .find(|h| h.get_key().eq_ignore_ascii_case("references"))
-                .map(|h| extract_msg_ids(&h.get_value())).unwrap_or_default();
+                .map(|h| extract_msg_ids(&h.get_value()))
+                .unwrap_or_default();
 
             let mut html = None;
             let mut text = None;
@@ -855,10 +1017,23 @@ where
             let raw_headers = header_block(body_raw);
 
             bodies.push(MessageBody {
-                uid, folder: folder.clone(), subject, from, from_addr: from_addr.clone(),
-                to, cc, date, date_ts, html, text, attachments,
+                uid,
+                folder: folder.clone(),
+                subject,
+                from,
+                from_addr: from_addr.clone(),
+                to,
+                cc,
+                date,
+                date_ts,
+                html,
+                text,
+                attachments,
                 is_outgoing,
-                message_id, in_reply_to, references, raw_headers,
+                message_id,
+                in_reply_to,
+                references,
+                raw_headers,
             });
         }
     }
@@ -871,36 +1046,59 @@ where
 fn header_block(raw: &[u8]) -> String {
     let end = raw
         .windows(4)
-        .position(|w| w == b"
+        .position(|w| {
+            w == b"
 
-")
-        .or_else(|| raw.windows(2).position(|w| w == b"
+"
+        })
+        .or_else(|| {
+            raw.windows(2).position(|w| {
+                w == b"
 
-"))
+"
+            })
+        })
         .unwrap_or(raw.len());
     String::from_utf8_lossy(&raw[..end]).into_owned()
 }
 
-fn walk_parts(part: &mailparse::ParsedMail, html: &mut Option<String>, text: &mut Option<String>, attachments: &mut Vec<Attachment>, idx: &mut usize) {
+fn walk_parts(
+    part: &mailparse::ParsedMail,
+    html: &mut Option<String>,
+    text: &mut Option<String>,
+    attachments: &mut Vec<Attachment>,
+    idx: &mut usize,
+) {
     let ct = part.ctype.mimetype.to_lowercase();
     if part.subparts.is_empty() {
         let disp = part.get_content_disposition();
         if matches!(disp.disposition, mailparse::DispositionType::Attachment) {
-            let filename = disp.params.get("filename").cloned().unwrap_or_else(|| format!("attachment_{idx}"));
+            let filename =
+                disp.params.get("filename").cloned().unwrap_or_else(|| format!("attachment_{idx}"));
             let size = part.get_body_raw().map(|b| b.len()).unwrap_or(0);
             attachments.push(Attachment { filename, mime_type: ct, size, index: *idx });
             *idx += 1;
             return;
         }
-        if ct == "text/html" && html.is_none() { *html = part.get_body().ok(); }
-        else if ct == "text/plain" && text.is_none() { *text = part.get_body().ok(); }
+        if ct == "text/html" && html.is_none() {
+            *html = part.get_body().ok();
+        } else if ct == "text/plain" && text.is_none() {
+            *text = part.get_body().ok();
+        }
     }
-    for sub in &part.subparts { walk_parts(sub, html, text, attachments, idx); }
+    for sub in &part.subparts {
+        walk_parts(sub, html, text, attachments, idx);
+    }
 }
 
 pub async fn search_messages(
-    host: String, port: u16, username: String, password: String, use_tls: bool,
-    user_email: String, query: String,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    use_tls: bool,
+    user_email: String,
+    query: String,
 ) -> Result<Vec<MessageEnvelope>, String> {
     let user_addr = user_email.to_lowercase();
     if use_tls {
@@ -925,33 +1123,44 @@ where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + std::fmt::Debug,
 {
     // Find INBOX and the Sent folder via LIST attributes; search both.
-    let mailboxes = session.list(Some(""), Some("*"))
-        .await.map_err(|e| format!("LIST: {e}"))?;
-    let collected: Vec<_> = mailboxes.try_collect::<Vec<_>>()
-        .await.map_err(|e| format!("Collect: {e}"))?;
+    let mailboxes = session.list(Some(""), Some("*")).await.map_err(|e| format!("LIST: {e}"))?;
+    let collected: Vec<_> =
+        mailboxes.try_collect::<Vec<_>>().await.map_err(|e| format!("Collect: {e}"))?;
     let mut sent_name: Option<String> = None;
     for m in &collected {
         let attrs: Vec<String> = m.attributes().iter().map(|a| format!("{:?}", a)).collect();
-        if attrs.join(" ").contains("Sent") { sent_name = Some(m.name().to_string()); break; }
+        if attrs.join(" ").contains("Sent") {
+            sent_name = Some(m.name().to_string());
+            break;
+        }
     }
-    let folder_list: Vec<Folder> = collected.iter().map(|m| Folder {
-        name: m.name().to_string(),
-        delimiter: m.delimiter().unwrap_or("/").to_string(),
-        unread: 0, total: 0, special_use: String::new(),
-    }).collect();
-    if sent_name.is_none() { sent_name = find_sent_folder(&folder_list); }
+    let folder_list: Vec<Folder> = collected
+        .iter()
+        .map(|m| Folder {
+            name: m.name().to_string(),
+            delimiter: m.delimiter().unwrap_or("/").to_string(),
+            unread: 0,
+            total: 0,
+            special_use: String::new(),
+        })
+        .collect();
+    if sent_name.is_none() {
+        sent_name = find_sent_folder(&folder_list);
+    }
 
     let mut envelopes: Vec<MessageEnvelope> = Vec::new();
-    let folders_to_search: Vec<String> = std::iter::once("INBOX".to_string())
-        .chain(sent_name.into_iter())
-        .collect();
+    let folders_to_search: Vec<String> =
+        std::iter::once("INBOX".to_string()).chain(sent_name.into_iter()).collect();
 
-    let escaped: String = query.chars()
+    let escaped: String = query
+        .chars()
         .map(|c| if c == '\\' || c == '"' { format!("\\{}", c) } else { c.to_string() })
         .collect();
 
     for folder in &folders_to_search {
-        if session.select(folder).await.is_err() { continue; }
+        if session.select(folder).await.is_err() {
+            continue;
+        }
         // Server's Meilisearch index covers only subject+body. We pass both criteria;
         // the server's `extractTextQuery` joins them into a single full-text query.
         // CHARSET UTF-8 lets non-ASCII text match; fall back to a bare query for
@@ -978,20 +1187,29 @@ where
             Ok(m) => m,
             Err(_) => continue,
         };
-        let collected: Vec<_> = messages.try_collect::<Vec<_>>()
-            .await.unwrap_or_default();
+        let collected: Vec<_> = messages.try_collect::<Vec<_>>().await.unwrap_or_default();
 
         for msg in &collected {
             if let Some(raw) = extract_envelope(msg, folder) {
                 let is_outgoing = raw.from_addr == user_addr;
                 envelopes.push(MessageEnvelope {
-                    uid: raw.uid, folder: raw.folder, subject: raw.subject,
-                    from: raw.from_name, from_addr: raw.from_addr,
-                    to: raw.to_names, to_addrs: raw.to_addrs, cc_addrs: raw.cc_addrs,
-                    date: raw.date, date_ts: raw.date_ts,
-                    seen: raw.seen, flagged: raw.flagged,
-                    has_attachments: raw.has_attachments, is_outgoing,
-                    message_id: raw.message_id, in_reply_to: raw.in_reply_to, references: raw.references,
+                    uid: raw.uid,
+                    folder: raw.folder,
+                    subject: raw.subject,
+                    from: raw.from_name,
+                    from_addr: raw.from_addr,
+                    to: raw.to_names,
+                    to_addrs: raw.to_addrs,
+                    cc_addrs: raw.cc_addrs,
+                    date: raw.date,
+                    date_ts: raw.date_ts,
+                    seen: raw.seen,
+                    flagged: raw.flagged,
+                    has_attachments: raw.has_attachments,
+                    is_outgoing,
+                    message_id: raw.message_id,
+                    in_reply_to: raw.in_reply_to,
+                    references: raw.references,
                 });
             }
         }
@@ -1004,23 +1222,35 @@ where
 
 pub(crate) async fn store_flags_impl<T>(
     session: &mut async_imap::Session<T>,
-    folder: &str, uid: u32, flags: &str, add: bool,
+    folder: &str,
+    uid: u32,
+    flags: &str,
+    add: bool,
 ) -> Result<(), String>
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + std::fmt::Debug,
 {
     session.select(folder).await.map_err(|e| format!("SELECT: {e}"))?;
     let op = if add { "+FLAGS" } else { "-FLAGS" };
-    let store_result = session.uid_store(uid.to_string(), &format!("{op} ({flags})"))
-        .await.map_err(|e| format!("STORE: {e}"))?;
-    let _: Vec<_> = store_result.try_collect::<Vec<_>>()
-        .await.map_err(|e| format!("STORE collect: {e}"))?;
+    let store_result = session
+        .uid_store(uid.to_string(), &format!("{op} ({flags})"))
+        .await
+        .map_err(|e| format!("STORE: {e}"))?;
+    let _: Vec<_> =
+        store_result.try_collect::<Vec<_>>().await.map_err(|e| format!("STORE collect: {e}"))?;
     Ok(())
 }
 
 pub async fn set_flags(
-    host: String, port: u16, username: String, password: String, use_tls: bool,
-    folder: String, uid: u32, flags: String, add: bool,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    use_tls: bool,
+    folder: String,
+    uid: u32,
+    flags: String,
+    add: bool,
 ) -> Result<(), String> {
     if use_tls {
         let mut session = connect_tls(&host, port, &username, &password).await?;
@@ -1037,10 +1267,18 @@ pub async fn set_flags(
 /// Apply flag changes to many messages in a single IMAP session — avoids the
 /// thunder-on-handshake of one TLS connection per message.
 pub async fn set_flags_batch(
-    host: String, port: u16, username: String, password: String, use_tls: bool,
-    messages: Vec<MessageRef>, flags: String, add: bool,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    use_tls: bool,
+    messages: Vec<MessageRef>,
+    flags: String,
+    add: bool,
 ) -> Result<(), String> {
-    if messages.is_empty() { return Ok(()); }
+    if messages.is_empty() {
+        return Ok(());
+    }
     if use_tls {
         let mut session = connect_tls(&host, port, &username, &password).await?;
         let r = store_flags_batch_impl(&mut session, &messages, &flags, add).await;
@@ -1056,14 +1294,18 @@ pub async fn set_flags_batch(
 
 pub(crate) async fn store_flags_batch_impl<T>(
     session: &mut async_imap::Session<T>,
-    messages: &[MessageRef], flags: &str, add: bool,
+    messages: &[MessageRef],
+    flags: &str,
+    add: bool,
 ) -> Result<(), String>
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + std::fmt::Debug,
 {
     let mut by_folder: HashMap<String, Vec<u32>> = HashMap::new();
     for mr in messages {
-        if mr.uid == 0 { continue; }
+        if mr.uid == 0 {
+            continue;
+        }
         by_folder.entry(mr.folder.clone()).or_default().push(mr.uid);
     }
     let op = if add { "+FLAGS" } else { "-FLAGS" };
@@ -1074,7 +1316,9 @@ where
         }
         let uid_set = uids.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",");
         match session.uid_store(uid_set, format!("{op} ({flags})")).await {
-            Ok(stream) => { let _: Vec<_> = stream.try_collect::<Vec<_>>().await.unwrap_or_default(); }
+            Ok(stream) => {
+                let _: Vec<_> = stream.try_collect::<Vec<_>>().await.unwrap_or_default();
+            }
             Err(e) => log::warn!("set_flags_batch: STORE in {folder}: {e}"),
         }
     }
@@ -1093,7 +1337,9 @@ where
 {
     let mut by_folder: HashMap<String, Vec<u32>> = HashMap::new();
     for mr in messages {
-        if mr.uid == 0 { continue; }
+        if mr.uid == 0 {
+            continue;
+        }
         by_folder.entry(mr.folder.clone()).or_default().push(mr.uid);
     }
     for (folder, uids) in by_folder {
@@ -1103,11 +1349,18 @@ where
         }
         let uid_set = uids.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",");
         match session.uid_store(uid_set, "+FLAGS (\\Deleted)").await {
-            Ok(stream) => { let _: Vec<_> = stream.try_collect::<Vec<_>>().await.unwrap_or_default(); }
-            Err(e) => { log::warn!("delete_messages: STORE in {folder}: {e}"); continue; }
+            Ok(stream) => {
+                let _: Vec<_> = stream.try_collect::<Vec<_>>().await.unwrap_or_default();
+            }
+            Err(e) => {
+                log::warn!("delete_messages: STORE in {folder}: {e}");
+                continue;
+            }
         }
         match session.expunge().await {
-            Ok(stream) => { let _: Vec<_> = stream.try_collect::<Vec<_>>().await.unwrap_or_default(); }
+            Ok(stream) => {
+                let _: Vec<_> = stream.try_collect::<Vec<_>>().await.unwrap_or_default();
+            }
             Err(e) => log::warn!("delete_messages: EXPUNGE in {folder}: {e}"),
         }
     }
@@ -1116,8 +1369,13 @@ where
 
 /// Fetch raw RFC-822 source of a single message.
 pub async fn fetch_message_source(
-    host: String, port: u16, username: String, password: String, use_tls: bool,
-    folder: String, uid: u32,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    use_tls: bool,
+    folder: String,
+    uid: u32,
 ) -> Result<String, String> {
     if use_tls {
         let mut session = connect_tls(&host, port, &username, &password).await?;
@@ -1141,8 +1399,10 @@ where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + std::fmt::Debug,
 {
     session.select(folder).await.map_err(|e| format!("SELECT {folder}: {e}"))?;
-    let fetched = session.uid_fetch(uid.to_string(), "BODY.PEEK[]")
-        .await.map_err(|e| format!("FETCH: {e}"))?;
+    let fetched = session
+        .uid_fetch(uid.to_string(), "BODY.PEEK[]")
+        .await
+        .map_err(|e| format!("FETCH: {e}"))?;
     let msgs: Vec<_> = fetched.try_collect().await.map_err(|e| format!("Collect: {e}"))?;
     let msg = msgs.first().ok_or("Message not found")?;
     let body = msg.body().ok_or("Empty body")?;
@@ -1175,14 +1435,18 @@ fn open_in_default_app(path: &std::path::Path) {
 }
 
 pub(crate) async fn fetch_raw_message<T>(
-    session: &mut async_imap::Session<T>, folder: &str, uid: u32,
+    session: &mut async_imap::Session<T>,
+    folder: &str,
+    uid: u32,
 ) -> Result<Vec<u8>, String>
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + std::fmt::Debug,
 {
     session.select(folder).await.map_err(|e| format!("SELECT {folder}: {e}"))?;
-    let fetched = session.uid_fetch(uid.to_string(), "BODY.PEEK[]")
-        .await.map_err(|e| format!("FETCH: {e}"))?;
+    let fetched = session
+        .uid_fetch(uid.to_string(), "BODY.PEEK[]")
+        .await
+        .map_err(|e| format!("FETCH: {e}"))?;
     let msgs: Vec<_> = fetched.try_collect().await.map_err(|e| format!("Collect: {e}"))?;
     let msg = msgs.first().ok_or("Message not found")?;
     let body = msg.body().ok_or("Empty body")?;
@@ -1191,14 +1455,18 @@ where
 
 /// The header block alone — kilobytes, where the full message is megabytes.
 pub(crate) async fn fetch_message_headers<T>(
-    session: &mut async_imap::Session<T>, folder: &str, uid: u32,
+    session: &mut async_imap::Session<T>,
+    folder: &str,
+    uid: u32,
 ) -> Result<Vec<u8>, String>
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + std::fmt::Debug,
 {
     session.select(folder).await.map_err(|e| format!("SELECT {folder}: {e}"))?;
-    let fetched = session.uid_fetch(uid.to_string(), "BODY.PEEK[HEADER]")
-        .await.map_err(|e| format!("FETCH: {e}"))?;
+    let fetched = session
+        .uid_fetch(uid.to_string(), "BODY.PEEK[HEADER]")
+        .await
+        .map_err(|e| format!("FETCH: {e}"))?;
     let msgs: Vec<_> = fetched.try_collect().await.map_err(|e| format!("Collect: {e}"))?;
     let msg = msgs.first().ok_or("Message not found")?;
     // `header()` is the BODY[HEADER] section; `body()` is empty for this fetch.
@@ -1224,14 +1492,23 @@ pub(crate) fn find_attachment(
         return None;
     }
     for sub in &part.subparts {
-        if let Some(b) = find_attachment(sub, target, idx) { return Some(b); }
+        if let Some(b) = find_attachment(sub, target, idx) {
+            return Some(b);
+        }
     }
     None
 }
 
 fn sanitize_filename(name: &str) -> String {
-    let cleaned: String = name.chars()
-        .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0') { '_' } else { c })
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0') {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let trimmed = cleaned.trim().trim_matches('.');
     if trimmed.is_empty() { "attachment".into() } else { trimmed.to_string() }
@@ -1239,14 +1516,18 @@ fn sanitize_filename(name: &str) -> String {
 
 fn unique_path(dir: &std::path::Path, filename: &str) -> std::path::PathBuf {
     let candidate = dir.join(filename);
-    if !candidate.exists() { return candidate; }
+    if !candidate.exists() {
+        return candidate;
+    }
     let (stem, ext) = match filename.rsplit_once('.') {
         Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
         _ => (filename.to_string(), String::new()),
     };
     for n in 1..1000 {
         let try_path = dir.join(format!("{stem} ({n}){ext}"));
-        if !try_path.exists() { return try_path; }
+        if !try_path.exists() {
+            return try_path;
+        }
     }
     candidate
 }
@@ -1255,7 +1536,10 @@ fn unique_path(dir: &std::path::Path, filename: &str) -> std::path::PathBuf {
 
 pub async fn search_contacts(
     cache: &Cache,
-    host: String, username: String, query: String, limit: u32,
+    host: String,
+    username: String,
+    query: String,
+    limit: u32,
 ) -> Result<Vec<Contact>, String> {
     let key = account_key(&host, &username);
     cache.search_contacts(&key, &query, limit)
@@ -1266,7 +1550,8 @@ pub async fn search_contacts(
 /// Load conversations from local SQLite cache (instant).
 pub async fn load_cached_conversations(
     cache: &Cache,
-    host: String, username: String,
+    host: String,
+    username: String,
 ) -> Result<Vec<Conversation>, String> {
     let key = account_key(&host, &username);
     cache.load_conversations(&key)
@@ -1275,7 +1560,9 @@ pub async fn load_cached_conversations(
 /// Load message bodies from local cache (instant).
 pub async fn load_cached_messages(
     cache: &Cache,
-    host: String, username: String, messages: Vec<MessageRef>,
+    host: String,
+    username: String,
+    messages: Vec<MessageRef>,
 ) -> Result<Vec<MessageBody>, String> {
     let key = account_key(&host, &username);
     cache.load_message_bodies(&key, &messages)
@@ -1287,7 +1574,11 @@ pub async fn load_cached_messages(
 /// Returns empty vec if not our server.
 pub async fn fetch_identities(
     cache: &Cache,
-    host: String, port: u16, username: String, password: String, use_tls: bool,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    use_tls: bool,
 ) -> Result<Vec<Identity>, String> {
     let key = account_key(&host, &username);
 
@@ -1329,9 +1620,13 @@ fn extract_top_level_array(s: &str) -> Option<String> {
     let mut esc = false;
     for (i, &b) in bytes.iter().enumerate().skip(start) {
         if in_str {
-            if esc { esc = false; }
-            else if b == b'\\' { esc = true; }
-            else if b == b'"' { in_str = false; }
+            if esc {
+                esc = false;
+            } else if b == b'\\' {
+                esc = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
             continue;
         }
         match b {
@@ -1364,8 +1659,10 @@ where
     }
 
     // 2. Send GETMETADATA command
-    let _tag = session.run_command("GETMETADATA \"\" /shared/vendor/ddmail/identities")
-        .await.map_err(|e| format!("GETMETADATA send: {e}"))?;
+    let _tag = session
+        .run_command("GETMETADATA \"\" /shared/vendor/ddmail/identities")
+        .await
+        .map_err(|e| format!("GETMETADATA send: {e}"))?;
 
     // 3. Accumulate every raw response chunk (literal-form values can span multiple
     // reads), then extract the JSON array using bracket-matching that respects
@@ -1375,7 +1672,9 @@ where
         match session.read_response().await {
             Some(Ok(resp)) => {
                 buf.extend_from_slice(resp.borrow_owner());
-                if resp.request_id().is_some() { break; }
+                if resp.request_id().is_some() {
+                    break;
+                }
             }
             Some(Err(e)) => return Err(format!("GETMETADATA read: {e}")),
             None => break,
@@ -1391,18 +1690,20 @@ where
         }
     };
 
-    log::info!("GETMETADATA JSON ({} bytes): {}...", json_data.len(),
-        &json_data[..json_data.len().min(100)]);
+    log::info!(
+        "GETMETADATA JSON ({} bytes): {}...",
+        json_data.len(),
+        &json_data[..json_data.len().min(100)]
+    );
 
     // 4. Parse JSON
-    let mut identities: Vec<Identity> = serde_json::from_str(&json_data)
-        .map_err(|e| format!("Parse identities JSON: {e}"))?;
+    let mut identities: Vec<Identity> =
+        serde_json::from_str(&json_data).map_err(|e| format!("Parse identities JSON: {e}"))?;
 
     // 5. Assign pastel colors to identities without colors
     let pastel_colors = [
-        "#FFE4E1", "#E8F5E9", "#E3F2FD", "#FFF9C4", "#F3E5F5",
-        "#E0F7FA", "#FBE9E7", "#F1F8E9", "#EDE7F6", "#E8EAF6",
-        "#FCE4EC", "#E0F2F1", "#FFF3E0", "#F9FBE7", "#EFEBE9",
+        "#FFE4E1", "#E8F5E9", "#E3F2FD", "#FFF9C4", "#F3E5F5", "#E0F7FA", "#FBE9E7", "#F1F8E9",
+        "#EDE7F6", "#E8EAF6", "#FCE4EC", "#E0F2F1", "#FFF3E0", "#F9FBE7", "#EFEBE9",
     ];
     for (i, identity) in identities.iter_mut().enumerate() {
         if identity.color.is_empty() {
@@ -1416,7 +1717,11 @@ where
 pub async fn start_watching(
     notifier: Notifier,
     pool: &SessionPool,
-    host: String, port: u16, username: String, password: String, use_tls: bool,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    use_tls: bool,
     user_email: String,
 ) -> Result<(), String> {
     let creds = Credentials { host, port, username, password, use_tls, user_email };
@@ -1458,7 +1763,10 @@ mod conversation_key_tests {
     fn id_matches_the_old_format_for_a_single_identity() {
         // Ради этого схема и подобрана так: закрепления и merges.json,
         // записанные до перехода, продолжают указывать на тот же диалог.
-        assert_eq!(conversation_id(&v(&["me@a.ru"]), &v(&["bob@x.ru"]), "me@a.ru"), "me@a.ru|bob@x.ru");
+        assert_eq!(
+            conversation_id(&v(&["me@a.ru"]), &v(&["bob@x.ru"]), "me@a.ru"),
+            "me@a.ru|bob@x.ru"
+        );
         assert_eq!(
             conversation_id(&v(&["me@a.ru"]), &v(&["bob@x.ru", "carol@x.ru"]), "me@a.ru"),
             "me@a.ru|group:bob@x.ru,carol@x.ru"
@@ -1475,7 +1783,10 @@ mod conversation_key_tests {
 
     #[test]
     fn id_for_mail_between_my_own_identities() {
-        assert_eq!(conversation_id(&v(&["me@a.ru", "me@b.ru"]), &[], "me@a.ru"), "me@a.ru+me@b.ru|self");
+        assert_eq!(
+            conversation_id(&v(&["me@a.ru", "me@b.ru"]), &[], "me@a.ru"),
+            "me@a.ru+me@b.ru|self"
+        );
     }
 
     #[test]

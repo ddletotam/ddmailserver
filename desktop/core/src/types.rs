@@ -271,7 +271,7 @@ pub struct OutgoingAttachment {
 /// transport — matches Go's default `[]byte` JSON encoding so the native
 /// /send endpoint can decode `attachments[].content` straight into `[]byte`.
 mod base64_bytes {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
@@ -368,8 +368,8 @@ pub struct DesktopCalendarEvent {
     pub description: String,
     #[serde(default)]
     pub location: String,
-    pub dtstart: i64,        // ms since epoch
-    pub dtend: Option<i64>,  // ms since epoch, may be null
+    pub dtstart: i64,       // ms since epoch
+    pub dtend: Option<i64>, // ms since epoch, may be null
     pub all_day: bool,
     #[serde(default)]
     pub organizer_email: String,

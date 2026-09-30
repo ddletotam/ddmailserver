@@ -97,8 +97,7 @@ pub async fn resolve_calendar_collection(
 ) -> Result<String, String> {
     // Is the URL itself a calendar collection?
     let root = propfind(url, username, password, 0, PROP_RESOURCETYPE_HOME).await?;
-    if root.to_lowercase().contains("<c:calendar") || root.to_lowercase().contains(":calendar/>")
-    {
+    if root.to_lowercase().contains("<c:calendar") || root.to_lowercase().contains(":calendar/>") {
         return Ok(url.to_string());
     }
     // Walk principal → calendar-home-set → first calendar.
@@ -112,8 +111,7 @@ pub async fn resolve_calendar_collection(
     let listing = propfind(&home, username, password, 1, PROP_RESOURCETYPE_HOME).await?;
     // Pick the first response whose resourcetype is a calendar.
     for resp in split_responses(&listing) {
-        if resp.to_lowercase().contains("calendar")
-            && resp.to_lowercase().contains("resourcetype")
+        if resp.to_lowercase().contains("calendar") && resp.to_lowercase().contains("resourcetype")
         {
             if let Some(href) = first_href(&resp, "href") {
                 return Ok(abs_url(&home, &href));
@@ -123,8 +121,10 @@ pub async fn resolve_calendar_collection(
     Ok(url.to_string())
 }
 
-const PROP_RESOURCETYPE_HOME: &str = r#"<D:prop><D:resourcetype/><D:current-user-principal/><D:displayname/></D:prop>"#;
-const PROP_CAL_HOME: &str = r#"<D:prop><C:calendar-home-set xmlns:C="urn:ietf:params:xml:ns:caldav"/></D:prop>"#;
+const PROP_RESOURCETYPE_HOME: &str =
+    r#"<D:prop><D:resourcetype/><D:current-user-principal/><D:displayname/></D:prop>"#;
+const PROP_CAL_HOME: &str =
+    r#"<D:prop><C:calendar-home-set xmlns:C="urn:ietf:params:xml:ns:caldav"/></D:prop>"#;
 
 /// One PROPFIND round-trip returning the raw multistatus XML.
 pub(crate) async fn propfind(
@@ -236,11 +236,7 @@ pub async fn put_event(
         Precondition::IfMatch(tag) => req.header(reqwest::header::IF_MATCH, tag),
         Precondition::None => req,
     };
-    let resp = req
-        .body(ical.to_string())
-        .send()
-        .await
-        .map_err(|e| format!("caldav PUT: {e}"))?;
+    let resp = req.body(ical.to_string()).send().await.map_err(|e| format!("caldav PUT: {e}"))?;
     if resp.status().as_u16() == 412 {
         return Err("event changed on the server — reopen the calendar and retry".into());
     }
@@ -259,9 +255,7 @@ pub async fn delete_event(
     if_match: Option<&str>,
 ) -> Result<(), String> {
     let http = client()?;
-    let mut req = http
-        .delete(event_url(collection_url, uid))
-        .dav_auth(username, password);
+    let mut req = http.delete(event_url(collection_url, uid)).dav_auth(username, password);
     if let Some(tag) = if_match {
         req = req.header(reqwest::header::IF_MATCH, tag);
     }
@@ -321,7 +315,9 @@ pub fn build_ical(
     all_day: bool,
 ) -> String {
     let dtstamp = fmt_utc_stamp(dtstart_ms);
-    let mut ev = String::from("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//ddmail//caldav//EN\r\nBEGIN:VEVENT\r\n");
+    let mut ev = String::from(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//ddmail//caldav//EN\r\nBEGIN:VEVENT\r\n",
+    );
     ev.push_str(&format!("UID:{}\r\n", uid));
     ev.push_str(&format!("DTSTAMP:{}\r\n", dtstamp));
     ev.push_str(&fmt_dt_line("DTSTART", dtstart_ms, all_day));
@@ -360,7 +356,8 @@ pub fn merge_ical(
         ("DTSTART".into(), fmt_dt_line("DTSTART", dtstart_ms, all_day).trim_end().to_string()),
     ];
     match dtend_ms {
-        Some(end) => updates.push(("DTEND".into(), fmt_dt_line("DTEND", end, all_day).trim_end().to_string())),
+        Some(end) => updates
+            .push(("DTEND".into(), fmt_dt_line("DTEND", end, all_day).trim_end().to_string())),
         None => updates.push(("DTEND".into(), String::new())), // drop DTEND
     }
 
@@ -401,10 +398,7 @@ fn fmt_dt_line(prop: &str, ms: i64, all_day: bool) -> String {
 }
 
 fn escape_text(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('\n', "\\n")
-        .replace(',', "\\,")
-        .replace(';', "\\;")
+    s.replace('\\', "\\\\").replace('\n', "\\n").replace(',', "\\,").replace(';', "\\;")
 }
 
 /// `20260715T120000Z` — the UTC stamp CalDAV time-range filters want.
@@ -618,7 +612,15 @@ mod tests {
 
     #[test]
     fn builds_ical_with_escaped_fields() {
-        let ics = build_ical("u1", "Plan, v2", "", "Room; A", 1_700_000_000_000, Some(1_700_003_600_000), false);
+        let ics = build_ical(
+            "u1",
+            "Plan, v2",
+            "",
+            "Room; A",
+            1_700_000_000_000,
+            Some(1_700_003_600_000),
+            false,
+        );
         assert!(ics.contains("UID:u1"));
         assert!(ics.contains("SUMMARY:Plan\\, v2"));
         assert!(ics.contains("LOCATION:Room\\; A"));
@@ -646,15 +648,15 @@ mod tests {
         let xml = r#"<D:multistatus xmlns:D="DAV:"><D:response><D:href>/p/</D:href>
           <D:propstat><D:prop><D:current-user-principal><D:href>/principals/lucky/</D:href></D:current-user-principal></D:prop></D:propstat>
         </D:response></D:multistatus>"#;
-        assert_eq!(first_href(xml, "current-user-principal").as_deref(), Some("/principals/lucky/"));
+        assert_eq!(
+            first_href(xml, "current-user-principal").as_deref(),
+            Some("/principals/lucky/")
+        );
         assert_eq!(
             abs_url("https://mail.letotam.ru/caldav/", "/principals/lucky/"),
             "https://mail.letotam.ru/principals/lucky/"
         );
-        assert_eq!(
-            abs_url("https://x.ru/a/", "https://other.ru/b/"),
-            "https://other.ru/b/"
-        );
+        assert_eq!(abs_url("https://x.ru/a/", "https://other.ru/b/"), "https://other.ru/b/");
     }
 
     #[test]

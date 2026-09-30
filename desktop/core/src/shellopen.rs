@@ -88,11 +88,11 @@ fn launch(target: &std::ffi::OsStr, wait: bool) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::PCWSTR;
 
     fn wide(s: &str) -> Vec<u16> {
         std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
@@ -123,10 +123,6 @@ mod windows_impl {
         // упакованный в хэндл код SE_ERR_*/Win32 (2 — обработчика нет,
         // 31 — нет ассоциации, 5 — доступ запрещён).
         let code = inst.0 as isize;
-        if code > 32 {
-            Ok(())
-        } else {
-            Err(format!("ShellExecuteW: код {code}"))
-        }
+        if code > 32 { Ok(()) } else { Err(format!("ShellExecuteW: код {code}")) }
     }
 }

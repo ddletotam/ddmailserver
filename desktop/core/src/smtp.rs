@@ -1,9 +1,9 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use lettre::message::{Attachment, Mailbox, MultiPart, SinglePart, header::ContentType};
 use lettre::{
-    transport::smtp::authentication::{Credentials, Mechanism},
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+    transport::smtp::authentication::{Credentials, Mechanism},
 };
-use lettre::message::{header::ContentType, Attachment, Mailbox, MultiPart, SinglePart};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::types::{OutgoingAttachment, OutgoingMessage};
 
@@ -22,7 +22,11 @@ fn make_message_id(from_email: &str) -> String {
 
 /// Core send logic, reusable by the `send_message` wrapper and ImapProvider.
 pub(crate) async fn send_message_impl(
-    host: &str, port: u16, username: &str, password: &str, use_tls: bool,
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    use_tls: bool,
     message: &OutgoingMessage,
 ) -> Result<String, String> {
     send_message_auth(host, port, username, password, use_tls, false, message).await
@@ -32,27 +36,30 @@ pub(crate) async fn send_message_impl(
 /// XOAUTH2 (Gmail/Google): `password` is the OAuth access token, `username`
 /// the email.
 pub(crate) async fn send_message_auth(
-    host: &str, port: u16, username: &str, password: &str, use_tls: bool,
-    xoauth2: bool, message: &OutgoingMessage,
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    use_tls: bool,
+    xoauth2: bool,
+    message: &OutgoingMessage,
 ) -> Result<String, String> {
-    let from_mailbox: Mailbox = message.from.parse()
-        .map_err(|e| format!("Invalid from address: {e}"))?;
+    let from_mailbox: Mailbox =
+        message.from.parse().map_err(|e| format!("Invalid from address: {e}"))?;
 
     let msg_id = make_message_id(from_mailbox.email.as_ref());
-    let mut email_builder = Message::builder()
-        .from(from_mailbox)
-        .message_id(Some(msg_id))
-        .subject(&message.subject);
+    let mut email_builder =
+        Message::builder().from(from_mailbox).message_id(Some(msg_id)).subject(&message.subject);
 
     for to_addr in &message.to {
-        let mailbox: Mailbox = to_addr.parse()
-            .map_err(|e| format!("Invalid to address '{to_addr}': {e}"))?;
+        let mailbox: Mailbox =
+            to_addr.parse().map_err(|e| format!("Invalid to address '{to_addr}': {e}"))?;
         email_builder = email_builder.to(mailbox);
     }
 
     for cc_addr in &message.cc {
-        let mailbox: Mailbox = cc_addr.parse()
-            .map_err(|e| format!("Invalid cc address '{cc_addr}': {e}"))?;
+        let mailbox: Mailbox =
+            cc_addr.parse().map_err(|e| format!("Invalid cc address '{cc_addr}': {e}"))?;
         email_builder = email_builder.cc(mailbox);
     }
 
@@ -66,9 +73,7 @@ pub(crate) async fn send_message_auth(
 
     let mp = build_body(&message.text, &message.html, &message.attachments)?;
 
-    let email = email_builder
-        .multipart(mp)
-        .map_err(|e| format!("Build email: {e}"))?;
+    let email = email_builder.multipart(mp).map_err(|e| format!("Build email: {e}"))?;
 
     let creds = Credentials::new(username.to_string(), password.to_string());
 
@@ -92,16 +97,18 @@ pub(crate) async fn send_message_auth(
         b.build()
     };
 
-    let response = mailer.send(email)
-        .await
-        .map_err(|e| format!("Send failed: {e}"))?;
+    let response = mailer.send(email).await.map_err(|e| format!("Send failed: {e}"))?;
 
     Ok(format!("Sent: {:?}", response.code()))
 }
 
 /// Convenience wrapper over `send_message_impl`.
 pub async fn send_message(
-    host: String, port: u16, username: String, password: String, use_tls: bool,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    use_tls: bool,
     message: OutgoingMessage,
 ) -> Result<String, String> {
     send_message_impl(&host, port, &username, &password, use_tls, &message).await
@@ -120,20 +127,11 @@ fn build_body(
     attachments: &[OutgoingAttachment],
 ) -> Result<MultiPart, String> {
     let body_alt = MultiPart::alternative()
-        .singlepart(
-            SinglePart::builder()
-                .header(ContentType::TEXT_PLAIN)
-                .body(text.to_string()),
-        )
-        .singlepart(
-            SinglePart::builder()
-                .header(ContentType::TEXT_HTML)
-                .body(html.to_string()),
-        );
+        .singlepart(SinglePart::builder().header(ContentType::TEXT_PLAIN).body(text.to_string()))
+        .singlepart(SinglePart::builder().header(ContentType::TEXT_HTML).body(html.to_string()));
 
-    let (inlines, files): (Vec<_>, Vec<_>) = attachments
-        .iter()
-        .partition(|a| a.content_id.is_some());
+    let (inlines, files): (Vec<_>, Vec<_>) =
+        attachments.iter().partition(|a| a.content_id.is_some());
 
     // Wrap body_alt with multipart/related when there are inline images, so the
     // HTML's cid: references are resolved against the same envelope.
@@ -159,14 +157,14 @@ fn build_body(
 }
 
 fn build_inline_part(att: &OutgoingAttachment) -> Result<SinglePart, String> {
-    let ct: ContentType = att.mime_type.parse()
-        .map_err(|_| format!("invalid mime for inline {}", att.filename))?;
+    let ct: ContentType =
+        att.mime_type.parse().map_err(|_| format!("invalid mime for inline {}", att.filename))?;
     let cid = att.content_id.as_deref().unwrap_or_default();
     Ok(Attachment::new_inline(cid.to_string()).body(att.content.clone(), ct))
 }
 
 fn build_file_part(att: &OutgoingAttachment) -> Result<SinglePart, String> {
-    let ct: ContentType = att.mime_type.parse()
-        .map_err(|_| format!("invalid mime for {}", att.filename))?;
+    let ct: ContentType =
+        att.mime_type.parse().map_err(|_| format!("invalid mime for {}", att.filename))?;
     Ok(Attachment::new(att.filename.clone()).body(att.content.clone(), ct))
 }

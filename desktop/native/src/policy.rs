@@ -126,11 +126,7 @@ fn policy_path() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         let appdata = std::env::var("APPDATA").ok()?;
-        return Some(
-            PathBuf::from(appdata)
-                .join("ru.letotam.ddmail")
-                .join("permissions.json"),
-        );
+        return Some(PathBuf::from(appdata).join("ru.letotam.ddmail").join("permissions.json"));
     }
     #[cfg(target_os = "macos")]
     {
@@ -145,11 +141,7 @@ fn policy_path() -> Option<PathBuf> {
         let base = std::env::var("XDG_CONFIG_HOME")
             .ok()
             .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var("HOME")
-                    .ok()
-                    .map(|h| PathBuf::from(h).join(".config"))
-            })?;
+            .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config")))?;
         return Some(base.join("ru.letotam.ddmail").join("permissions.json"));
     }
     #[allow(unreachable_code)]

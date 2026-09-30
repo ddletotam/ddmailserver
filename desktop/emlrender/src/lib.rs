@@ -301,10 +301,8 @@ mod tests {
     #[test]
     fn source_whitespace_is_still_not_a_line() {
         let tight = render("<div>до</div><div>после</div>", &opts(400));
-        let pretty = render(
-            "<div>до</div>\n    <div>\n    </div>\n    <div>после</div>",
-            &opts(400),
-        );
+        let pretty =
+            render("<div>до</div>\n    <div>\n    </div>\n    <div>после</div>", &opts(400));
         assert_eq!(tight.height_px, pretty.height_px);
     }
 
@@ -408,8 +406,7 @@ mod tests {
     fn letter_spacing_is_in_pixels_not_ems() {
         let word = "iiiiiiiiii"; // ten glyphs, ten gaps added
         let plain = render(&format!("<p>{word}</p>"), &opts(400));
-        let spaced =
-            render(&format!(r#"<p style="letter-spacing:2px">{word}</p>"#), &opts(400));
+        let spaced = render(&format!(r#"<p style="letter-spacing:2px">{word}</p>"#), &opts(400));
         let width = |r: &Rendered| r.runs.first().map_or(0.0, |t| t.w);
         let grew = width(&spaced) - width(&plain);
         assert!(grew > 10.0, "spacing had no effect: {grew}");
@@ -429,8 +426,7 @@ mod tests {
         let r = render_with(html, &opts(400), &OneImage(png(4, 4, RED)));
 
         let run = |w: &str| r.runs.iter().find(|t| t.text == w).cloned().expect("word");
-        let (before, alpha, beta, after) =
-            (run("before"), run("alpha"), run("beta"), run("after"));
+        let (before, alpha, beta, after) = (run("before"), run("alpha"), run("beta"), run("after"));
         assert_eq!(before.y, alpha.y, "text before the icon left the line");
         assert_eq!(alpha.y, beta.y, "the icon broke the line");
         assert_eq!(beta.y, after.y, "text after the icon left the line");
@@ -534,7 +530,8 @@ mod tests {
     /// буквами.
     #[test]
     fn font_shorthand_weight_is_not_the_size() {
-        let html = r#"<div style="font: 400 20px/24px YS Text, Arial, sans-serif">один<br>два</div>"#;
+        let html =
+            r#"<div style="font: 400 20px/24px YS Text, Arial, sans-serif">один<br>два</div>"#;
         let r = render(html, &opts(400));
         let word = |w: &str| r.runs.iter().find(|t| t.text == w).cloned().expect("word");
         let (a, b) = (word("один"), word("два"));

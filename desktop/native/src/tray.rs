@@ -35,10 +35,7 @@ impl Tray {
 /// Build the tray. `on_open` fires on left-click or the "Открыть" item;
 /// `on_quit` on the "Выход" item. Both run on the UI thread (from the timer).
 #[cfg(windows)]
-pub fn setup(
-    on_open: impl Fn() + 'static,
-    on_quit: impl Fn() + 'static,
-) -> Option<Tray> {
+pub fn setup(on_open: impl Fn() + 'static, on_quit: impl Fn() + 'static) -> Option<Tray> {
     use tray_icon::menu::{Menu, MenuEvent, MenuItem};
     use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
 
@@ -54,40 +51,29 @@ pub fn setup(
     // Version + git stamp in the tooltip — hover the tray icon to tell
     // exactly which build is running (contract §7).
     let tray = TrayIconBuilder::new()
-        .with_tooltip(format!(
-            "ddmail {} ({})",
-            env!("CARGO_PKG_VERSION"),
-            env!("BUILD_GIT"),
-        ))
+        .with_tooltip(format!("ddmail {} ({})", env!("CARGO_PKG_VERSION"), env!("BUILD_GIT"),))
         .with_menu(Box::new(menu))
         .with_icon(icon)
         .build()
         .ok()?;
 
     let timer = slint::Timer::default();
-    timer.start(
-        slint::TimerMode::Repeated,
-        std::time::Duration::from_millis(300),
-        move || {
-            while let Ok(ev) = MenuEvent::receiver().try_recv() {
-                if ev.id == open_id {
-                    on_open();
-                } else if ev.id == quit_id {
-                    on_quit();
-                }
+    timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(300), move || {
+        while let Ok(ev) = MenuEvent::receiver().try_recv() {
+            if ev.id == open_id {
+                on_open();
+            } else if ev.id == quit_id {
+                on_quit();
             }
-            while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
-                if let TrayIconEvent::Click { .. } = ev {
-                    on_open();
-                }
+        }
+        while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
+            if let TrayIconEvent::Click { .. } = ev {
+                on_open();
             }
-        },
-    );
+        }
+    });
 
-    Some(Tray {
-        icon: tray,
-        _timer: timer,
-    })
+    Some(Tray { icon: tray, _timer: timer })
 }
 
 /// 32×32 RGBA of the app icon (emerald speech bubble), decoded from the bundled
@@ -96,10 +82,7 @@ pub fn setup(
 fn base_icon_rgba() -> Vec<u8> {
     use image::imageops::FilterType;
     match image::load_from_memory(crate::ICON_PNG) {
-        Ok(img) => img
-            .resize_exact(32, 32, FilterType::Lanczos3)
-            .to_rgba8()
-            .into_raw(),
+        Ok(img) => img.resize_exact(32, 32, FilterType::Lanczos3).to_rgba8().into_raw(),
         Err(_) => {
             let mut v = Vec::with_capacity(32 * 32 * 4);
             for _ in 0..32 * 32 {
@@ -174,11 +157,7 @@ impl ksni::Tray for DdmailTray {
     }
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-        vec![ksni::Icon {
-            width: 32,
-            height: 32,
-            data: icon_argb(self.unread),
-        }]
+        vec![ksni::Icon { width: 32, height: 32, data: icon_argb(self.unread) }]
     }
 
     // Left-click on the tray icon.

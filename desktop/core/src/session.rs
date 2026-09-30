@@ -1,9 +1,9 @@
+use crate::event::{EngineEvent, Notifier};
+use log::{info, warn};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::Mutex;
-use serde::{Deserialize, Serialize};
-use crate::event::{EngineEvent, Notifier};
 use tokio_util::compat::TokioAsyncReadCompatExt;
-use log::{info, warn};
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Credentials {
@@ -38,9 +38,9 @@ pub struct SessionPool {
 pub fn friendly_login_error(e: async_imap::error::Error) -> String {
     use async_imap::error::Error;
     match e {
-        Error::No(s) | Error::Bad(s) => extract_info(&s)
-            .map(|info| humanize_login_info(&info))
-            .unwrap_or_else(|| s),
+        Error::No(s) | Error::Bad(s) => {
+            extract_info(&s).map(|info| humanize_login_info(&info)).unwrap_or_else(|| s)
+        }
         Error::Io(io) => format!("Connection error: {io}"),
         Error::ConnectionLost => "Connection lost".to_string(),
         other => other.to_string(),
@@ -87,10 +87,14 @@ impl SessionPool {
         let key = format!("{}@{}:{}", creds.username, creds.host, creds.port);
         {
             let mut handles = self.idle_handles.lock().await;
-            if let Some(handle) = handles.remove(&key) { handle.abort(); }
+            if let Some(handle) = handles.remove(&key) {
+                handle.abort();
+            }
         }
         let key_clone = key.clone();
-        let handle = tokio::spawn(async move { idle_loop(notifier, creds).await; });
+        let handle = tokio::spawn(async move {
+            idle_loop(notifier, creds).await;
+        });
         self.idle_handles.lock().await.insert(key_clone, handle);
     }
 }
@@ -106,7 +110,9 @@ async fn idle_loop(notifier: Notifier, creds: Credentials) {
         };
 
         match result {
-            Ok(()) => { info!("IDLE cycle completed, restarting"); }
+            Ok(()) => {
+                info!("IDLE cycle completed, restarting");
+            }
             Err(e) => {
                 warn!("IDLE error: {e}, reconnecting in 30s");
                 notifier(EngineEvent::ConnectionState { state: "error".into(), message: Some(e) });
@@ -119,28 +125,33 @@ async fn idle_loop(notifier: Notifier, creds: Credentials) {
 async fn run_idle_tls(notifier: &Notifier, creds: &Credentials) -> Result<(), String> {
     let tls = crate::tls::connector();
     let tcp = tokio::net::TcpStream::connect((creds.host.as_str(), creds.port))
-        .await.map_err(|e| format!("TCP: {e}"))?;
-    let tls_stream = tls.connect(crate::tls::server_name(&creds.host)?, tcp.compat())
-        .await.map_err(|e| format!("TLS: {e}"))?;
+        .await
+        .map_err(|e| format!("TCP: {e}"))?;
+    let tls_stream = tls
+        .connect(crate::tls::server_name(&creds.host)?, tcp.compat())
+        .await
+        .map_err(|e| format!("TLS: {e}"))?;
     let client = async_imap::Client::new(tls_stream);
-    let session = client.login(&creds.username, &creds.password)
-        .await.map_err(|e| friendly_login_error(e.0))?;
+    let session = client
+        .login(&creds.username, &creds.password)
+        .await
+        .map_err(|e| friendly_login_error(e.0))?;
     do_idle(notifier, session).await
 }
 
 async fn run_idle_plain(notifier: &Notifier, creds: &Credentials) -> Result<(), String> {
     let tcp = tokio::net::TcpStream::connect((creds.host.as_str(), creds.port))
-        .await.map_err(|e| format!("TCP: {e}"))?;
+        .await
+        .map_err(|e| format!("TCP: {e}"))?;
     let client = async_imap::Client::new(tcp.compat());
-    let session = client.login(&creds.username, &creds.password)
-        .await.map_err(|e| friendly_login_error(e.0))?;
+    let session = client
+        .login(&creds.username, &creds.password)
+        .await
+        .map_err(|e| friendly_login_error(e.0))?;
     do_idle(notifier, session).await
 }
 
-async fn do_idle<T>(
-    notifier: &Notifier,
-    mut session: async_imap::Session<T>,
-) -> Result<(), String>
+async fn do_idle<T>(notifier: &Notifier, mut session: async_imap::Session<T>) -> Result<(), String>
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + std::fmt::Debug,
 {
@@ -171,8 +182,12 @@ where
                 message_id: 0,
             });
         }
-        IdleResponse::Timeout => { info!("IDLE: timeout"); }
-        IdleResponse::ManualInterrupt => { info!("IDLE: interrupted"); }
+        IdleResponse::Timeout => {
+            info!("IDLE: timeout");
+        }
+        IdleResponse::ManualInterrupt => {
+            info!("IDLE: interrupted");
+        }
     }
 
     idle.done().await.map_err(|e| format!("IDLE done: {e}"))?;

@@ -42,11 +42,15 @@ fn strips() -> &'static Strips {
         re_object: Regex::new(r"(?is)<object\b[^>]*>.*?</object\s*>").unwrap(),
         re_embed_self: Regex::new(r"(?is)<embed\b[^>]*/?>").unwrap(),
         re_base: Regex::new(r"(?is)<base\b[^>]*/?>").unwrap(),
-        re_meta_refresh: Regex::new(r#"(?is)<meta\b[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*/?>"#).unwrap(),
+        re_meta_refresh: Regex::new(
+            r#"(?is)<meta\b[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*/?>"#,
+        )
+        .unwrap(),
         // Outlook conditional comments wrap whole alternative trees and
         // contain MS-only markup Ultralight chokes on. Drop the whole
         // block.
-        re_mso_conditional: Regex::new(r"(?is)<!--\s*\[if\s+[^\]]*\]>.*?<!\s*\[endif\]\s*-->").unwrap(),
+        re_mso_conditional: Regex::new(r"(?is)<!--\s*\[if\s+[^\]]*\]>.*?<!\s*\[endif\]\s*-->")
+            .unwrap(),
         // Inline event handlers — non-functional anyway since we don't
         // run JS, but parsing them slows the layout and occasionally
         // confuses the attribute scanner.
@@ -124,11 +128,7 @@ pub fn first_external_hosts(html: &str) -> (String, String) {
     let img_host = res
         .re_img
         .captures_iter(html)
-        .filter_map(|c| {
-            c.get(4)
-                .or_else(|| c.get(5))
-                .and_then(|m| extract_host(m.as_str()))
-        })
+        .filter_map(|c| c.get(4).or_else(|| c.get(5)).and_then(|m| extract_host(m.as_str())))
         .next()
         .unwrap_or_default();
     let script_host = script_src_re()
@@ -183,7 +183,11 @@ fn block_res() -> &'static BlockRes {
 
 fn extract_host(url: &str) -> Option<String> {
     let trimmed = url.trim();
-    if trimmed.is_empty() || trimmed.starts_with("data:") || trimmed.starts_with("cid:") || trimmed.starts_with('#') {
+    if trimmed.is_empty()
+        || trimmed.starts_with("data:")
+        || trimmed.starts_with("cid:")
+        || trimmed.starts_with('#')
+    {
         return None;
     }
     let lower = trimmed.to_lowercase();
@@ -197,15 +201,9 @@ fn extract_host(url: &str) -> Option<String> {
         return None;
     };
     let rest = &trimmed[scheme_end..];
-    let end = rest
-        .find(|c: char| c == '/' || c == '?' || c == '#')
-        .unwrap_or(rest.len());
+    let end = rest.find(|c: char| c == '/' || c == '?' || c == '#').unwrap_or(rest.len());
     let host = &rest[..end];
-    if host.is_empty() {
-        None
-    } else {
-        Some(host.to_lowercase())
-    }
+    if host.is_empty() { None } else { Some(host.to_lowercase()) }
 }
 
 /// Strip / blank out external resource URLs unless the sender is
@@ -217,18 +215,12 @@ fn extract_host(url: &str) -> Option<String> {
 /// the UI can offer per-domain "allow" toggles.
 pub fn block_external(input: &str, policy: &Policy, sender: &str) -> BlockOutcome {
     if input.is_empty() {
-        return BlockOutcome {
-            html: String::new(),
-            blocked_domains: Vec::new(),
-        };
+        return BlockOutcome { html: String::new(), blocked_domains: Vec::new() };
     }
     if policy.media_allowed(sender) {
         // Sender-trusted: nothing to block. Domain-allow list still
         // applies to scripts elsewhere but doesn't change <img>/url().
-        return BlockOutcome {
-            html: input.to_string(),
-            blocked_domains: Vec::new(),
-        };
+        return BlockOutcome { html: input.to_string(), blocked_domains: Vec::new() };
     }
 
     let res = block_res();
@@ -300,8 +292,5 @@ pub fn block_external(input: &str, policy: &Policy, sender: &str) -> BlockOutcom
         })
         .into_owned();
 
-    BlockOutcome {
-        html: out,
-        blocked_domains: blocked.into_iter().collect(),
-    }
+    BlockOutcome { html: out, blocked_domains: blocked.into_iter().collect() }
 }

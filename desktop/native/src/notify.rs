@@ -4,11 +4,7 @@
 
 /// Show a desktop notification. Best-effort.
 pub fn notify(title: &str, body: &str) {
-    if let Err(e) = notify_rust::Notification::new()
-        .summary(title)
-        .body(body)
-        .show()
-    {
+    if let Err(e) = notify_rust::Notification::new().summary(title).body(body).show() {
         eprintln!("notify: {e}");
     }
 }

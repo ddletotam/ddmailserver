@@ -214,7 +214,11 @@ impl Editor {
     }
     /// Выделение в нормальном порядке (начало ≤ конец).
     pub fn selection(&self) -> (Pos, Pos) {
-        if self.anchor <= self.caret { (self.anchor, self.caret) } else { (self.caret, self.anchor) }
+        if self.anchor <= self.caret {
+            (self.anchor, self.caret)
+        } else {
+            (self.caret, self.anchor)
+        }
     }
 
     /// Пустой документ — ни текста, ни картинок. По нему решается, есть ли что
@@ -561,9 +565,10 @@ impl Editor {
             Motion::WordLeft => self.word_boundary(at, false),
             Motion::WordRight => self.word_boundary(at, true),
             Motion::LineStart => Pos { block: at.block, off: 0 },
-            Motion::LineEnd => {
-                Pos { block: at.block, off: self.doc.blocks.get(at.block).map(|b| b.len()).unwrap_or(0) }
-            }
+            Motion::LineEnd => Pos {
+                block: at.block,
+                off: self.doc.blocks.get(at.block).map(|b| b.len()).unwrap_or(0),
+            },
             Motion::DocStart => Pos { block: 0, off: 0 },
             Motion::DocEnd => {
                 let last = self.doc.blocks.len().saturating_sub(1);
@@ -865,8 +870,7 @@ impl Editor {
             return;
         }
         let next = self.doc.blocks.remove(block + 1);
-        if let (Some(Block::Para(runs)), Block::Para(tail)) =
-            (self.doc.blocks.get_mut(block), next)
+        if let (Some(Block::Para(runs)), Block::Para(tail)) = (self.doc.blocks.get_mut(block), next)
         {
             runs.extend(tail);
         }
@@ -1036,11 +1040,7 @@ fn run_inner_html(r: &Run) -> String {
         out.push_str(&escape_html(&rest[..s]));
         let url = &rest[s..e];
         let href = if url.starts_with("www.") { format!("http://{url}") } else { url.to_string() };
-        out.push_str(&format!(
-            "<a href=\"{}\">{}</a>",
-            escape_html(&href),
-            escape_html(url)
-        ));
+        out.push_str(&format!("<a href=\"{}\">{}</a>", escape_html(&href), escape_html(url)));
         rest = &rest[e..];
     }
     out.push_str(&escape_html(rest));

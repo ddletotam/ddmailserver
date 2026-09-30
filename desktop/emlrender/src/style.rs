@@ -102,11 +102,18 @@ impl Edges {
 pub enum BgImage {
     /// Angle in CSS degrees (0 = up, clockwise) and stops already resolved to
     /// explicit 0..1 positions.
-    Linear { angle: f32, stops: Vec<(Rgba, f32)> },
+    Linear {
+        angle: f32,
+        stops: Vec<(Rgba, f32)>,
+    },
     /// Centre as a fraction of the box, and the same resolved stops. Ellipses
     /// are drawn as circles — tiny-skia has no elliptical gradient, and a
     /// circle through the same corner is far closer than a flat fill.
-    Radial { cx: f32, cy: f32, stops: Vec<(Rgba, f32)> },
+    Radial {
+        cx: f32,
+        cy: f32,
+        stops: Vec<(Rgba, f32)>,
+    },
     Url(String),
 }
 
@@ -623,7 +630,8 @@ impl Resolver {
             Some(n * 16.0 * self.scale)
         } else if let Some(n) = v.strip_suffix("em").and_then(num) {
             Some(n * em)
-        } else if let Some(n) = v.strip_suffix("ex").or_else(|| v.strip_suffix("ch")).and_then(num) {
+        } else if let Some(n) = v.strip_suffix("ex").or_else(|| v.strip_suffix("ch")).and_then(num)
+        {
             // Gmail writes its quote rule as `padding-left: 1ex`. Without these
             // the padding silently became 0 and quoted text sat on the rule.
             // Half an em is close enough for both on the fonts mail uses.
@@ -642,8 +650,7 @@ impl Resolver {
 
     /// A box shorthand split into its absolute and its percentage halves.
     fn edges_split(&self, v: &str, em: f32) -> (Edges, Edges) {
-        let parts: Vec<(f32, f32)> =
-            v.split_whitespace().map(|p| self.len_or_pct(p, em)).collect();
+        let parts: Vec<(f32, f32)> = v.split_whitespace().map(|p| self.len_or_pct(p, em)).collect();
         (shorthand(&parts, |p| p.0), shorthand(&parts, |p| p.1))
     }
 
@@ -901,7 +908,8 @@ fn parse_hex(hex: &str) -> Option<Rgba> {
 }
 
 fn parse_rgb_fn(inner: &str, alpha: bool) -> Option<Rgba> {
-    let parts: Vec<&str> = inner.split(&[',', '/', ' '][..]).filter(|p| !p.trim().is_empty()).collect();
+    let parts: Vec<&str> =
+        inner.split(&[',', '/', ' '][..]).filter(|p| !p.trim().is_empty()).collect();
     if parts.len() < 3 {
         return None;
     }
@@ -914,7 +922,12 @@ fn parse_rgb_fn(inner: &str, alpha: bool) -> Option<Rgba> {
         }
     };
     let a = if alpha && parts.len() >= 4 {
-        parts[3].trim().parse::<f32>().ok().map(|v| (v * 255.0).clamp(0.0, 255.0) as u8).unwrap_or(255)
+        parts[3]
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| (v * 255.0).clamp(0.0, 255.0) as u8)
+            .unwrap_or(255)
     } else {
         255
     };
@@ -1117,9 +1130,10 @@ impl Stylesheet {
             .iter()
             .filter(|r| {
                 r.sel.tag.as_deref().is_none_or(|s| s == t)
-                    && r.sel.class.as_deref().is_none_or(|c| {
-                        classes.split_whitespace().any(|have| have == c)
-                    })
+                    && r.sel
+                        .class
+                        .as_deref()
+                        .is_none_or(|c| classes.split_whitespace().any(|have| have == c))
                     && r.sel.id.as_deref().is_none_or(|i| i == id)
             })
             .map(|r| &r.decls)
@@ -1131,10 +1145,12 @@ impl Stylesheet {
 /// combinator, attribute test or pseudo — a wrong match is worse than none.
 fn parse_simple_selector(sel: &str) -> Option<(SimpleSel, u32)> {
     let sel = sel.trim();
-    if sel.is_empty()
-        || sel.contains([' ', '>', '+', '~', '[', ':', '(', '*'])
-    {
-        return if sel == "*" { Some((SimpleSel { tag: None, class: None, id: None }, 0)) } else { None };
+    if sel.is_empty() || sel.contains([' ', '>', '+', '~', '[', ':', '(', '*']) {
+        return if sel == "*" {
+            Some((SimpleSel { tag: None, class: None, id: None }, 0))
+        } else {
+            None
+        };
     }
     let lower = sel.to_ascii_lowercase();
     let mut out = SimpleSel { tag: None, class: None, id: None };

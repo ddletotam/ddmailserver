@@ -56,7 +56,12 @@ impl Engine {
     /// text engine, so the "did it panic" flag the callers use to fall back to
     /// the plain-text body is always false: a failure here is a short bitmap,
     /// not a lost worker.
-    pub fn render_one_guarded(&mut self, html: &str, width: u32, scale: f32) -> (RenderResult, bool) {
+    pub fn render_one_guarded(
+        &mut self,
+        html: &str,
+        width: u32,
+        scale: f32,
+    ) -> (RenderResult, bool) {
         (self.render_one(html, width, scale), false)
     }
 

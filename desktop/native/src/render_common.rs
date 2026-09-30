@@ -93,4 +93,3 @@ pub fn parse_text_runs(json: &str) -> Vec<TextRun> {
         })
         .collect()
 }
-

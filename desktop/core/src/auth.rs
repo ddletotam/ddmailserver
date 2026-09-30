@@ -80,8 +80,5 @@ async fn fetch_default_email(
         return None;
     }
     let ids: Vec<Identity> = resp.json().await.ok()?;
-    ids.iter()
-        .find(|i| i.is_default)
-        .or_else(|| ids.first())
-        .map(|i| i.email.clone())
+    ids.iter().find(|i| i.is_default).or_else(|| ids.first()).map(|i| i.email.clone())
 }

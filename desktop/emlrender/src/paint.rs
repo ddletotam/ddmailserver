@@ -7,8 +7,8 @@
 use cosmic_text::Color as CtColor;
 use image::{ImageBuffer, Rgba as Rgba8};
 use tiny_skia::{
-    Color, FilterQuality, FillRule, GradientStop, LinearGradient, Paint, Pattern,
-    PathBuilder, Pixmap, PremultipliedColorU8, Point, RadialGradient, Rect, SpreadMode, Transform,
+    Color, FillRule, FilterQuality, GradientStop, LinearGradient, Paint, PathBuilder, Pattern,
+    Pixmap, Point, PremultipliedColorU8, RadialGradient, Rect, SpreadMode, Transform,
 };
 
 use crate::image::Bitmap;
@@ -135,13 +135,21 @@ fn stroke_border(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, r: f32, e: Edg
     if !c.is_visible() {
         return;
     }
-    let uniform = e.top > 0.0 && (e.top - e.right).abs() < 0.01 && (e.top - e.bottom).abs() < 0.01
+    let uniform = e.top > 0.0
+        && (e.top - e.right).abs() < 0.01
+        && (e.top - e.bottom).abs() < 0.01
         && (e.top - e.left).abs() < 0.01;
     if uniform && r > 0.5 {
         // Rounded and uniform: ring = outer path minus inset path.
         if let (Some(outer), Some(inner)) = (
             round_rect_path(x, y, w, h, r),
-            round_rect_path(x + e.top, y + e.top, w - 2.0 * e.top, h - 2.0 * e.top, (r - e.top).max(0.0)),
+            round_rect_path(
+                x + e.top,
+                y + e.top,
+                w - 2.0 * e.top,
+                h - 2.0 * e.top,
+                (r - e.top).max(0.0),
+            ),
         ) {
             let mut pb = PathBuilder::new();
             pb.push_path(&outer);
@@ -201,9 +209,7 @@ fn fill_gradient(
     }
     let ramp: Vec<GradientStop> = stops
         .iter()
-        .map(|(c, p)| {
-            GradientStop::new(p.clamp(0.0, 1.0), Color::from_rgba8(c.r, c.g, c.b, c.a))
-        })
+        .map(|(c, p)| GradientStop::new(p.clamp(0.0, 1.0), Color::from_rgba8(c.r, c.g, c.b, c.a)))
         .collect();
     let shader = match kind {
         Ramp::Linear(angle) => {
@@ -299,10 +305,7 @@ fn fill_backdrop(
             let (dx, dy) = (col as i64 - px0, row as i64 - py0);
             let (sx, sy) = if repeat {
                 // Modulo that stays positive to the left of the origin.
-                (
-                    dx.rem_euclid(tw as i64) as u32,
-                    dy.rem_euclid(th as i64) as u32,
-                )
+                (dx.rem_euclid(tw as i64) as u32, dy.rem_euclid(th as i64) as u32)
             } else if dx < 0 || dy < 0 {
                 continue;
             } else {
@@ -356,8 +359,7 @@ fn draw_bitmap(pm: &mut Pixmap, bmp: &Bitmap, x: f32, y: f32, w: f32, h: f32, ra
         // The pattern shader wants premultiplied; `Bitmap` is straight alpha.
         let a = p[3] as u32;
         let mul = |c: u8| ((c as u32 * a + 127) / 255) as u8;
-        *px = PremultipliedColorU8::from_rgba(mul(p[0]), mul(p[1]), mul(p[2]), p[3])
-            .unwrap_or(*px);
+        *px = PremultipliedColorU8::from_rgba(mul(p[0]), mul(p[1]), mul(p[2]), p[3]).unwrap_or(*px);
     }
     let Some(path) = round_rect_path(x, y, w, h, radius) else { return };
     let paint = Paint {
@@ -409,17 +411,21 @@ fn paint_text(
         let line_top = oy + run.line_top;
         let line_h = run.line_height;
 
-        group_by(run.glyphs, |g| spans.get(g.metadata).and_then(|s| s.link), |link, x0, x1| {
-            if let Some(href) = link.and_then(|i| hrefs.get(i)) {
-                links.push(LinkRect {
-                    x: (ox + x0) / scale,
-                    y: line_top / scale,
-                    w: (x1 - x0) / scale,
-                    h: line_h / scale,
-                    href: href.clone(),
-                });
-            }
-        });
+        group_by(
+            run.glyphs,
+            |g| spans.get(g.metadata).and_then(|s| s.link),
+            |link, x0, x1| {
+                if let Some(href) = link.and_then(|i| hrefs.get(i)) {
+                    links.push(LinkRect {
+                        x: (ox + x0) / scale,
+                        y: line_top / scale,
+                        w: (x1 - x0) / scale,
+                        h: line_h / scale,
+                        href: href.clone(),
+                    });
+                }
+            },
+        );
 
         group_by(
             run.glyphs,
@@ -428,10 +434,26 @@ fn paint_text(
                 let Some((underline, strike, color, size)) = deco else { return };
                 let thickness = (size * 0.06).max(1.0);
                 if underline {
-                    fill_round_rect(pm, ox + x0, baseline + size * 0.12, x1 - x0, thickness, 0.0, color);
+                    fill_round_rect(
+                        pm,
+                        ox + x0,
+                        baseline + size * 0.12,
+                        x1 - x0,
+                        thickness,
+                        0.0,
+                        color,
+                    );
                 }
                 if strike {
-                    fill_round_rect(pm, ox + x0, baseline - size * 0.28, x1 - x0, thickness, 0.0, color);
+                    fill_round_rect(
+                        pm,
+                        ox + x0,
+                        baseline - size * 0.28,
+                        x1 - x0,
+                        thickness,
+                        0.0,
+                        color,
+                    );
                 }
             },
         );
@@ -441,7 +463,8 @@ fn paint_text(
         let mut word_start: Option<(f32, f32, usize)> = None;
         let flush = |word: Option<(f32, f32, usize)>, runs_out: &mut Vec<TextRun>, cont: bool| {
             if let Some((x0, x1, start)) = word {
-                let text: String = run.text[start..].chars().take_while(|c| !c.is_whitespace()).collect();
+                let text: String =
+                    run.text[start..].chars().take_while(|c| !c.is_whitespace()).collect();
                 if !text.is_empty() {
                     runs_out.push(TextRun {
                         x: (ox + x0) / scale,
@@ -525,13 +548,10 @@ fn blend_pixel(pm: &mut Pixmap, x: i32, y: i32, r: u8, g: u8, b: u8, a: u8) {
     let inv = 255 - sa;
     let pm_ch = |c: u8| (c as u32 * sa + 127) / 255;
     let out = |s: u32, d: u8| -> u8 { (s + (d as u32 * inv + 127) / 255).min(255) as u8 };
-    let (nr, ng, nb) = (
-        out(pm_ch(r), dst.red()),
-        out(pm_ch(g), dst.green()),
-        out(pm_ch(b), dst.blue()),
-    );
+    let (nr, ng, nb) =
+        (out(pm_ch(r), dst.red()), out(pm_ch(g), dst.green()), out(pm_ch(b), dst.blue()));
     let na = out(sa, dst.alpha());
     // Premultiplied invariant: channels can't exceed alpha.
-    px[idx] = PremultipliedColorU8::from_rgba(nr.min(na), ng.min(na), nb.min(na), na)
-        .unwrap_or(dst);
+    px[idx] =
+        PremultipliedColorU8::from_rgba(nr.min(na), ng.min(na), nb.min(na), na).unwrap_or(dst);
 }

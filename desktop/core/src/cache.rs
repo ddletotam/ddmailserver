@@ -14,7 +14,9 @@ fn parse_addr_pair(value: &str) -> (String, String) {
             return (name, addr);
         }
     }
-    if v.contains('@') { return (String::new(), v.to_string()); }
+    if v.contains('@') {
+        return (String::new(), v.to_string());
+    }
     (String::new(), String::new())
 }
 
@@ -26,7 +28,9 @@ fn collect_address_entries(body: &MessageBody) -> Vec<(String, String)> {
     out.push((fname, final_addr));
     for h in body.to.iter().chain(body.cc.iter()) {
         let (n, a) = parse_addr_pair(h);
-        if !a.is_empty() { out.push((n, a)); }
+        if !a.is_empty() {
+            out.push((n, a));
+        }
     }
     out
 }
@@ -41,7 +45,8 @@ impl Cache {
         let db_path = app_dir.join("cache.db");
         let conn = Connection::open(&db_path).map_err(|e| format!("SQLite open: {e}"))?;
 
-        conn.execute_batch("
+        conn.execute_batch(
+            "
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
 
@@ -176,22 +181,68 @@ impl Cache {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL DEFAULT ''
             );
-        ").map_err(|e| format!("SQLite init: {e}"))?;
+        ",
+        )
+        .map_err(|e| format!("SQLite init: {e}"))?;
 
         // Migrations for existing databases
-        conn.execute("ALTER TABLE conversation_messages ADD COLUMN seen INTEGER NOT NULL DEFAULT 1", []).ok();
-        conn.execute("ALTER TABLE conversation_messages ADD COLUMN message_id TEXT NOT NULL DEFAULT ''", []).ok();
-        conn.execute("ALTER TABLE conversations ADD COLUMN avatar_hash TEXT NOT NULL DEFAULT ''", []).ok();
-        conn.execute("ALTER TABLE conversations ADD COLUMN received_by TEXT NOT NULL DEFAULT ''", []).ok();
-        conn.execute("ALTER TABLE conversations ADD COLUMN last_subject TEXT NOT NULL DEFAULT ''", []).ok();
-        conn.execute("ALTER TABLE conversations ADD COLUMN counterparts_json TEXT NOT NULL DEFAULT '[]'", []).ok();
-        conn.execute("ALTER TABLE reminders2 ADD COLUMN calendar_id INTEGER NOT NULL DEFAULT 0", []).ok();
-        conn.execute("ALTER TABLE message_bodies ADD COLUMN message_id TEXT NOT NULL DEFAULT ''", []).ok();
-        conn.execute("ALTER TABLE message_bodies ADD COLUMN in_reply_to TEXT NOT NULL DEFAULT ''", []).ok();
-        conn.execute("ALTER TABLE message_bodies ADD COLUMN references_json TEXT NOT NULL DEFAULT '[]'", []).ok();
+        conn.execute(
+            "ALTER TABLE conversation_messages ADD COLUMN seen INTEGER NOT NULL DEFAULT 1",
+            [],
+        )
+        .ok();
+        conn.execute(
+            "ALTER TABLE conversation_messages ADD COLUMN message_id TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .ok();
+        conn.execute(
+            "ALTER TABLE conversations ADD COLUMN avatar_hash TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .ok();
+        conn.execute(
+            "ALTER TABLE conversations ADD COLUMN received_by TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .ok();
+        conn.execute(
+            "ALTER TABLE conversations ADD COLUMN last_subject TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .ok();
+        conn.execute(
+            "ALTER TABLE conversations ADD COLUMN counterparts_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )
+        .ok();
+        conn.execute(
+            "ALTER TABLE reminders2 ADD COLUMN calendar_id INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .ok();
+        conn.execute(
+            "ALTER TABLE message_bodies ADD COLUMN message_id TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .ok();
+        conn.execute(
+            "ALTER TABLE message_bodies ADD COLUMN in_reply_to TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .ok();
+        conn.execute(
+            "ALTER TABLE message_bodies ADD COLUMN references_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )
+        .ok();
         // Empty for rows cached before this column; the viewer falls back to
         // the network for those and they fill in on the next sync.
-        conn.execute("ALTER TABLE message_bodies ADD COLUMN raw_headers TEXT NOT NULL DEFAULT ''", []).ok();
+        conn.execute(
+            "ALTER TABLE message_bodies ADD COLUMN raw_headers TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .ok();
         conn.execute("ALTER TABLE avatar_cache ADD COLUMN mime TEXT NOT NULL DEFAULT ''", []).ok();
         // Existing rows pre-MIME stored Gravatar PNG bytes — purge so the
         // next lookup uses the new chain (and labels the result with a MIME).
@@ -219,11 +270,9 @@ impl Cache {
         // один раз: после этого каждая строка знает свой календарь.
         const REMINDERS_DATA_VERSION: &str = "4";
         let rv: String = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'reminders_data_version'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT value FROM meta WHERE key = 'reminders_data_version'", [], |r| {
+                r.get(0)
+            })
             .unwrap_or_default();
         if rv != REMINDERS_DATA_VERSION {
             conn.execute("DELETE FROM reminders2", []).ok();
@@ -238,16 +287,23 @@ impl Cache {
     }
 
     /// Save conversations to cache (replaces all for this account).
-    pub fn save_conversations(&self, account_key: &str, conversations: &[Conversation]) -> Result<(), String> {
+    pub fn save_conversations(
+        &self,
+        account_key: &str,
+        conversations: &[Conversation],
+    ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         let now = chrono::Utc::now().timestamp();
 
         let tx = conn.unchecked_transaction().map_err(|e| format!("tx: {e}"))?;
 
         // Delete old conversations for this account
-        tx.execute("DELETE FROM conversation_messages WHERE conversation_id IN \
-            (SELECT id FROM conversations WHERE account_key = ?1)", params![account_key])
-            .map_err(|e| format!("del msgs: {e}"))?;
+        tx.execute(
+            "DELETE FROM conversation_messages WHERE conversation_id IN \
+            (SELECT id FROM conversations WHERE account_key = ?1)",
+            params![account_key],
+        )
+        .map_err(|e| format!("del msgs: {e}"))?;
         tx.execute("DELETE FROM conversations WHERE account_key = ?1", params![account_key])
             .map_err(|e| format!("del convs: {e}"))?;
 
@@ -292,8 +348,9 @@ impl Cache {
                      ON CONFLICT(account_key, email, source) DO UPDATE SET \
                        name = CASE WHEN excluded.name != '' THEN excluded.name ELSE name END, \
                        last_seen_ts = excluded.last_seen_ts",
-                    params![account_key, lc, cp_name, conv.last_date_ts]
-                ).map_err(|e| format!("auto-contact: {e}"))?;
+                    params![account_key, lc, cp_name, conv.last_date_ts],
+                )
+                .map_err(|e| format!("auto-contact: {e}"))?;
             }
         }
 
@@ -304,7 +361,11 @@ impl Cache {
     /// Upsert a partial set of conversations (delta sync): each conversation
     /// is replaced/inserted by id, its message refs rewritten; everything
     /// else stays untouched. Use save_conversations for a full replace.
-    pub fn upsert_conversations(&self, account_key: &str, conversations: &[Conversation]) -> Result<(), String> {
+    pub fn upsert_conversations(
+        &self,
+        account_key: &str,
+        conversations: &[Conversation],
+    ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         let now = chrono::Utc::now().timestamp();
         let tx = conn.unchecked_transaction().map_err(|e| format!("tx: {e}"))?;
@@ -330,7 +391,8 @@ impl Cache {
             tx.execute(
                 "DELETE FROM conversation_messages WHERE conversation_id = ?1",
                 params![conv.id],
-            ).map_err(|e| format!("del msg refs: {e}"))?;
+            )
+            .map_err(|e| format!("del msg refs: {e}"))?;
             for mr in &conv.messages {
                 tx.execute(
                     "INSERT OR IGNORE INTO conversation_messages (conversation_id, folder, uid, seen, message_id) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -346,22 +408,29 @@ impl Cache {
     /// its message refs, and the cached bodies of those refs. Used by the
     /// desktop "delete conversation" action so a restart can't resurrect
     /// the deleted thread from cache.
-    pub fn delete_conversation(&self, account_key: &str, conversation_id: &str) -> Result<(), String> {
+    pub fn delete_conversation(
+        &self,
+        account_key: &str,
+        conversation_id: &str,
+    ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         let tx = conn.unchecked_transaction().map_err(|e| format!("tx: {e}"))?;
         tx.execute(
             "DELETE FROM message_bodies WHERE account_key = ?1 AND (folder, uid) IN \
              (SELECT folder, uid FROM conversation_messages WHERE conversation_id = ?2)",
             params![account_key, conversation_id],
-        ).map_err(|e| format!("del bodies: {e}"))?;
+        )
+        .map_err(|e| format!("del bodies: {e}"))?;
         tx.execute(
             "DELETE FROM conversation_messages WHERE conversation_id = ?1",
             params![conversation_id],
-        ).map_err(|e| format!("del refs: {e}"))?;
+        )
+        .map_err(|e| format!("del refs: {e}"))?;
         tx.execute(
             "DELETE FROM conversations WHERE account_key = ?1 AND id = ?2",
             params![account_key, conversation_id],
-        ).map_err(|e| format!("del conv: {e}"))?;
+        )
+        .map_err(|e| format!("del conv: {e}"))?;
         tx.commit().map_err(|e| format!("commit: {e}"))
     }
 
@@ -370,7 +439,11 @@ impl Cache {
     /// with no messages. Returns how many message refs were removed. Message
     /// refs written before the message_id column existed (empty message_id)
     /// won't match — a full resync repopulates them.
-    pub fn apply_deletions(&self, account_key: &str, message_ids: &[String]) -> Result<usize, String> {
+    pub fn apply_deletions(
+        &self,
+        account_key: &str,
+        message_ids: &[String],
+    ) -> Result<usize, String> {
         if message_ids.is_empty() {
             return Ok(0);
         }
@@ -381,22 +454,26 @@ impl Cache {
             if mid.is_empty() {
                 continue;
             }
-            removed += tx.execute(
-                "DELETE FROM conversation_messages WHERE message_id = ?1 \
+            removed += tx
+                .execute(
+                    "DELETE FROM conversation_messages WHERE message_id = ?1 \
                  AND conversation_id IN (SELECT id FROM conversations WHERE account_key = ?2)",
-                params![mid, account_key],
-            ).map_err(|e| format!("del conv msg: {e}"))?;
+                    params![mid, account_key],
+                )
+                .map_err(|e| format!("del conv msg: {e}"))?;
             tx.execute(
                 "DELETE FROM message_bodies WHERE message_id = ?1 AND account_key = ?2",
                 params![mid, account_key],
-            ).ok();
+            )
+            .ok();
         }
         // Conversations whose every message is now gone disappear too.
         tx.execute(
             "DELETE FROM conversations WHERE account_key = ?1 \
              AND id NOT IN (SELECT DISTINCT conversation_id FROM conversation_messages)",
             params![account_key],
-        ).map_err(|e| format!("del empty conv: {e}"))?;
+        )
+        .map_err(|e| format!("del empty conv: {e}"))?;
         tx.commit().map_err(|e| format!("commit: {e}"))?;
         Ok(removed)
     }
@@ -404,11 +481,10 @@ impl Cache {
     /// Read a sync-bookkeeping value (see the `meta` table).
     pub fn get_meta(&self, key: &str) -> Option<String> {
         let conn = self.conn.lock().ok()?;
-        conn.query_row(
-            "SELECT value FROM meta WHERE key = ?1",
-            params![key],
-            |r| r.get::<_, String>(0),
-        ).ok()
+        conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+            r.get::<_, String>(0)
+        })
+        .ok()
     }
 
     /// Write a sync-bookkeeping value.
@@ -417,7 +493,8 @@ impl Cache {
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
             params![key, value],
-        ).map_err(|e| format!("set meta: {e}"))?;
+        )
+        .map_err(|e| format!("set meta: {e}"))?;
         Ok(())
     }
 
@@ -433,14 +510,21 @@ impl Cache {
     /// Пустая строка (`body_is_blank`) здесь считается присутствующей. Лечит
     /// такие путь открытия диалога (§4а контракта); фон их не трогает, иначе
     /// по-настоящему пустое письмо перекачивалось бы на каждом цикле синка.
-    pub fn cached_body_refs(&self, account_key: &str, refs: &[MessageRef]) -> Result<Vec<MessageRef>, String> {
+    pub fn cached_body_refs(
+        &self,
+        account_key: &str,
+        refs: &[MessageRef],
+    ) -> Result<Vec<MessageRef>, String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
-        let mut stmt = conn.prepare(
-            "SELECT 1 FROM message_bodies WHERE folder = ?1 AND uid = ?2 AND account_key = ?3"
-        ).map_err(|e| format!("prepare: {e}"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT 1 FROM message_bodies WHERE folder = ?1 AND uid = ?2 AND account_key = ?3",
+            )
+            .map_err(|e| format!("prepare: {e}"))?;
         let mut out = Vec::new();
         for mr in refs {
-            let hit: Result<i32, _> = stmt.query_row(params![mr.folder, mr.uid, account_key], |r| r.get(0));
+            let hit: Result<i32, _> =
+                stmt.query_row(params![mr.folder, mr.uid, account_key], |r| r.get(0));
             if hit.is_ok() {
                 out.push(mr.clone());
             }
@@ -455,7 +539,9 @@ impl Cache {
     pub fn body_subjects(&self) -> Result<Vec<(String, String, u32, String)>, String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         let mut stmt = conn
-            .prepare("SELECT account_key, folder, uid, subject FROM message_bodies WHERE subject <> ''")
+            .prepare(
+                "SELECT account_key, folder, uid, subject FROM message_bodies WHERE subject <> ''",
+            )
             .map_err(|e| format!("prepare: {e}"))?;
         let rows = stmt
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
@@ -469,9 +555,8 @@ impl Cache {
         let mut stmt = conn
             .prepare("SELECT DISTINCT account_key FROM conversations")
             .map_err(|e| format!("prepare: {e}"))?;
-        let rows = stmt
-            .query_map([], |r| r.get::<_, String>(0))
-            .map_err(|e| format!("query: {e}"))?;
+        let rows =
+            stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| format!("query: {e}"))?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
@@ -485,28 +570,43 @@ impl Cache {
              FROM conversations WHERE account_key = ?1 ORDER BY last_date_ts DESC"
         ).map_err(|e| format!("prepare: {e}"))?;
 
-        let rows = stmt.query_map(params![account_key], |row| {
-            Ok((
-                row.get::<_, String>(0)?,   // id
-                row.get::<_, String>(1)?,   // label
-                row.get::<_, String>(2)?,   // avatar_hash
-                row.get::<_, String>(3)?,   // received_by
-                row.get::<_, String>(4)?,   // cp_name (legacy)
-                row.get::<_, String>(5)?,   // cp_addr (legacy)
-                row.get::<_, String>(6)?,   // counterparts_json
-                row.get::<_, bool>(7)?,     // is_group
-                row.get::<_, String>(8)?,   // last_date
-                row.get::<_, i64>(9)?,      // last_date_ts
-                row.get::<_, String>(10)?,  // last_subject
-                row.get::<_, u32>(11)?,     // unread_count
-                row.get::<_, u32>(12)?,     // total_count
-            ))
-        }).map_err(|e| format!("query: {e}"))?;
+        let rows = stmt
+            .query_map(params![account_key], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,  // id
+                    row.get::<_, String>(1)?,  // label
+                    row.get::<_, String>(2)?,  // avatar_hash
+                    row.get::<_, String>(3)?,  // received_by
+                    row.get::<_, String>(4)?,  // cp_name (legacy)
+                    row.get::<_, String>(5)?,  // cp_addr (legacy)
+                    row.get::<_, String>(6)?,  // counterparts_json
+                    row.get::<_, bool>(7)?,    // is_group
+                    row.get::<_, String>(8)?,  // last_date
+                    row.get::<_, i64>(9)?,     // last_date_ts
+                    row.get::<_, String>(10)?, // last_subject
+                    row.get::<_, u32>(11)?,    // unread_count
+                    row.get::<_, u32>(12)?,    // total_count
+                ))
+            })
+            .map_err(|e| format!("query: {e}"))?;
 
         let mut conversations = Vec::new();
         for row in rows {
-            let (id, label, avatar_hash, received_by, cp_name, cp_addr, cps_json, is_group, last_date, last_date_ts,
-                 last_subject, unread_count, total_count) = row.map_err(|e| format!("row: {e}"))?;
+            let (
+                id,
+                label,
+                avatar_hash,
+                received_by,
+                cp_name,
+                cp_addr,
+                cps_json,
+                is_group,
+                last_date,
+                last_date_ts,
+                last_subject,
+                unread_count,
+                total_count,
+            ) = row.map_err(|e| format!("row: {e}"))?;
 
             // Prefer the JSON column. Rows written before that migration will
             // store an empty array there — fall back to the legacy single-pair
@@ -520,16 +620,18 @@ impl Cache {
             let mut msg_stmt = conn.prepare(
                 "SELECT folder, uid, COALESCE(seen, 1), COALESCE(message_id, '') FROM conversation_messages WHERE conversation_id = ?1"
             ).map_err(|e| format!("prepare msgs: {e}"))?;
-            let messages: Vec<MessageRef> = msg_stmt.query_map(params![id], |r| {
-                Ok(MessageRef {
-                    folder: r.get(0)?,
-                    uid: r.get(1)?,
-                    seen: r.get::<_, i32>(2)? != 0,
-                    message_id: r.get(3)?,
+            let messages: Vec<MessageRef> = msg_stmt
+                .query_map(params![id], |r| {
+                    Ok(MessageRef {
+                        folder: r.get(0)?,
+                        uid: r.get(1)?,
+                        seen: r.get::<_, i32>(2)? != 0,
+                        message_id: r.get(3)?,
+                    })
                 })
-            }).map_err(|e| format!("query msgs: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
+                .map_err(|e| format!("query msgs: {e}"))?
+                .filter_map(|r| r.ok())
+                .collect();
 
             conversations.push(Conversation {
                 id,
@@ -544,7 +646,7 @@ impl Cache {
                 unread_count,
                 total_count,
                 messages,
-                draft: None, // Drafts not cached
+                draft: None,                // Drafts not cached
                 account_key: String::new(), // stamped by the engine on merge
                 merged: false,
             });
@@ -554,7 +656,11 @@ impl Cache {
     }
 
     /// Save message bodies to cache.
-    pub fn save_message_bodies(&self, account_key: &str, bodies: &[MessageBody]) -> Result<(), String> {
+    pub fn save_message_bodies(
+        &self,
+        account_key: &str,
+        bodies: &[MessageBody],
+    ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         let now = chrono::Utc::now().timestamp();
 
@@ -562,7 +668,9 @@ impl Cache {
         for body in bodies {
             let entries = collect_address_entries(body);
             for (name, addr) in entries {
-                if addr.is_empty() { continue; }
+                if addr.is_empty() {
+                    continue;
+                }
                 let lc = addr.to_lowercase();
                 conn.execute(
                     "INSERT INTO contacts (account_key, email, name, source, last_seen_ts) \
@@ -570,8 +678,9 @@ impl Cache {
                      ON CONFLICT(account_key, email, source) DO UPDATE SET \
                        name = CASE WHEN excluded.name != '' THEN excluded.name ELSE name END, \
                        last_seen_ts = excluded.last_seen_ts",
-                    params![account_key, lc, name, body.date_ts]
-                ).map_err(|e| format!("auto-contact: {e}"))?;
+                    params![account_key, lc, name, body.date_ts],
+                )
+                .map_err(|e| format!("auto-contact: {e}"))?;
             }
         }
 
@@ -586,31 +695,49 @@ impl Cache {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, \
                          ?16, ?17, ?18, ?19)",
                 params![
-                    body.folder, body.uid, account_key,
-                    body.subject, body.from, body.from_addr,
-                    body.to.join(", "), body.cc.join(", "),
-                    body.date, body.date_ts,
-                    body.html, body.text, att_json,
+                    body.folder,
+                    body.uid,
+                    account_key,
+                    body.subject,
+                    body.from,
+                    body.from_addr,
+                    body.to.join(", "),
+                    body.cc.join(", "),
+                    body.date,
+                    body.date_ts,
+                    body.html,
+                    body.text,
+                    att_json,
                     body.is_outgoing as i32,
-                    body.message_id, body.in_reply_to, refs_json,
-                    body.raw_headers, now
+                    body.message_id,
+                    body.in_reply_to,
+                    refs_json,
+                    body.raw_headers,
+                    now
                 ],
-            ).map_err(|e| format!("ins body: {e}"))?;
+            )
+            .map_err(|e| format!("ins body: {e}"))?;
         }
         Ok(())
     }
 
     /// Load cached message bodies.
-    pub fn load_message_bodies(&self, account_key: &str, refs: &[MessageRef]) -> Result<Vec<MessageBody>, String> {
+    pub fn load_message_bodies(
+        &self,
+        account_key: &str,
+        refs: &[MessageRef],
+    ) -> Result<Vec<MessageBody>, String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
 
         let mut bodies = Vec::new();
-        let mut stmt = conn.prepare(
-            "SELECT folder, uid, subject, from_header, from_addr, to_header, cc_header, \
+        let mut stmt = conn
+            .prepare(
+                "SELECT folder, uid, subject, from_header, from_addr, to_header, cc_header, \
              date_header, date_ts, html, text_body, attachments_json, is_outgoing, \
              message_id, in_reply_to, references_json, raw_headers \
-             FROM message_bodies WHERE folder = ?1 AND uid = ?2 AND account_key = ?3"
-        ).map_err(|e| format!("prepare: {e}"))?;
+             FROM message_bodies WHERE folder = ?1 AND uid = ?2 AND account_key = ?3",
+            )
+            .map_err(|e| format!("prepare: {e}"))?;
 
         for mr in refs {
             let result = stmt.query_row(params![mr.folder, mr.uid, account_key], |row| {
@@ -625,8 +752,16 @@ impl Cache {
                     subject: row.get(2)?,
                     from: row.get(3)?,
                     from_addr: row.get(4)?,
-                    to: to_str.split(", ").filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
-                    cc: cc_str.split(", ").filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
+                    to: to_str
+                        .split(", ")
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .collect(),
+                    cc: cc_str
+                        .split(", ")
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .collect(),
                     date: row.get(7)?,
                     date_ts: row.get(8)?,
                     html: row.get(9)?,
@@ -656,7 +791,11 @@ impl Cache {
     }
 
     /// Save identities to cache.
-    pub fn save_identities(&self, account_key: &str, identities: &[Identity]) -> Result<(), String> {
+    pub fn save_identities(
+        &self,
+        account_key: &str,
+        identities: &[Identity],
+    ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         // Clear old identities for this account
         conn.execute("DELETE FROM identities WHERE account_key = ?1", params![account_key])
@@ -665,8 +804,16 @@ impl Cache {
             conn.execute(
                 "INSERT INTO identities (email, account_key, name, signature, is_default, color) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![id.email, account_key, id.name, id.signature, id.is_default as i32, id.color],
-            ).map_err(|e| format!("ins identity: {e}"))?;
+                params![
+                    id.email,
+                    account_key,
+                    id.name,
+                    id.signature,
+                    id.is_default as i32,
+                    id.color
+                ],
+            )
+            .map_err(|e| format!("ins identity: {e}"))?;
         }
         Ok(())
     }
@@ -678,19 +825,21 @@ impl Cache {
             "SELECT email, name, signature, is_default, color FROM identities WHERE account_key = ?1 ORDER BY is_default DESC"
         ).map_err(|e| format!("prepare: {e}"))?;
 
-        let rows = stmt.query_map(params![account_key], |row| {
-            Ok(Identity {
-                email: row.get(0)?,
-                name: row.get(1)?,
-                signature: row.get(2)?,
-                is_default: row.get::<_, i32>(3)? != 0,
-                color: row.get(4)?,
-                // Capabilities aren't cached — they come from the live
-                // /identities fetch; default false until that lands.
-                can_create_events: false,
-                can_create_contacts: false,
+        let rows = stmt
+            .query_map(params![account_key], |row| {
+                Ok(Identity {
+                    email: row.get(0)?,
+                    name: row.get(1)?,
+                    signature: row.get(2)?,
+                    is_default: row.get::<_, i32>(3)? != 0,
+                    color: row.get(4)?,
+                    // Capabilities aren't cached — they come from the live
+                    // /identities fetch; default false until that lands.
+                    can_create_events: false,
+                    can_create_contacts: false,
+                })
             })
-        }).map_err(|e| format!("query: {e}"))?;
+            .map_err(|e| format!("query: {e}"))?;
 
         let mut identities = Vec::new();
         for row in rows {
@@ -708,7 +857,9 @@ impl Cache {
         let now = chrono::Utc::now().timestamp();
         let tx = conn.unchecked_transaction().map_err(|e| format!("tx: {e}"))?;
         for c in contacts {
-            if c.email.is_empty() { continue; }
+            if c.email.is_empty() {
+                continue;
+            }
             let lc = c.email.to_lowercase();
             tx.execute(
                 "INSERT INTO contacts (account_key, email, name, source, last_seen_ts) \
@@ -716,41 +867,55 @@ impl Cache {
                  ON CONFLICT(account_key, email, source) DO UPDATE SET \
                    name = CASE WHEN excluded.name != '' THEN excluded.name ELSE name END, \
                    last_seen_ts = excluded.last_seen_ts",
-                params![account_key, lc, c.name, c.source, now]
-            ).map_err(|e| format!("upsert contact: {e}"))?;
+                params![account_key, lc, c.name, c.source, now],
+            )
+            .map_err(|e| format!("upsert contact: {e}"))?;
         }
         tx.commit().map_err(|e| format!("commit: {e}"))
     }
 
     /// Search contacts by query (matches against email or name, case-insensitive).
     /// Deduped by email; carddav source wins over auto, then most recent.
-    pub fn search_contacts(&self, account_key: &str, query: &str, limit: u32) -> Result<Vec<Contact>, String> {
+    pub fn search_contacts(
+        &self,
+        account_key: &str,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<Contact>, String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         let pattern = format!("%{}%", query.to_lowercase());
-        let mut stmt = conn.prepare(
-            "SELECT email, name, source, last_seen_ts FROM contacts \
+        let mut stmt = conn
+            .prepare(
+                "SELECT email, name, source, last_seen_ts FROM contacts \
              WHERE account_key = ?1 \
              AND (LOWER(email) LIKE ?2 OR LOWER(name) LIKE ?2) \
              ORDER BY \
                CASE WHEN source='carddav' THEN 0 ELSE 1 END, \
                last_seen_ts DESC, \
-               name"
-        ).map_err(|e| format!("prepare: {e}"))?;
-        let rows = stmt.query_map(params![account_key, pattern], |row| {
-            Ok(Contact {
-                email: row.get::<_, String>(0)?,
-                name: row.get::<_, String>(1)?,
-                source: row.get::<_, String>(2)?,
+               name",
+            )
+            .map_err(|e| format!("prepare: {e}"))?;
+        let rows = stmt
+            .query_map(params![account_key, pattern], |row| {
+                Ok(Contact {
+                    email: row.get::<_, String>(0)?,
+                    name: row.get::<_, String>(1)?,
+                    source: row.get::<_, String>(2)?,
+                })
             })
-        }).map_err(|e| format!("query: {e}"))?;
+            .map_err(|e| format!("query: {e}"))?;
 
         let mut seen_emails: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut out: Vec<Contact> = Vec::new();
         for row in rows {
             if let Ok(c) = row {
-                if !seen_emails.insert(c.email.clone()) { continue; }
+                if !seen_emails.insert(c.email.clone()) {
+                    continue;
+                }
                 out.push(c);
-                if out.len() as u32 >= limit { break; }
+                if out.len() as u32 >= limit {
+                    break;
+                }
             }
         }
         Ok(out)
@@ -765,11 +930,15 @@ impl Cache {
         let day_ago = now - 86400;
         // Empty payload = negative cache; expire after 1 day so transient
         // failures (DNS hiccup, server restart) get re-tried sooner.
-        let row = conn.query_row(
-            "SELECT png_data, mime, cached_at FROM avatar_cache WHERE email = ?1",
-            params![email],
-            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)),
-        ).ok()?;
+        let row = conn
+            .query_row(
+                "SELECT png_data, mime, cached_at FROM avatar_cache WHERE email = ?1",
+                params![email],
+                |row| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+                },
+            )
+            .ok()?;
         let (data, mime, cached_at) = row;
         let ttl_floor = if data.is_empty() { day_ago } else { week_ago };
         if cached_at <= ttl_floor {
@@ -893,7 +1062,15 @@ impl Cache {
                          (event_id, occurrence_start_ms, occurrence_end_ms, seq, fire_at_ms, \
                           lead_min, at_start, status, summary, signature, calendar_id) \
                          VALUES (?1, ?2, ?3, 100, ?4, 0, 0, 'cancelled', ?5, ?6, ?7)",
-                        params![event_id, occ_start_ms, end, occ_start_ms, summary, signature, calendar_id],
+                        params![
+                            event_id,
+                            occ_start_ms,
+                            end,
+                            occ_start_ms,
+                            summary,
+                            signature,
+                            calendar_id
+                        ],
                     )
                     .map_err(|e| format!("carry dismissal: {e}"))?;
                 }
@@ -970,7 +1147,12 @@ impl Cache {
     }
 
     /// The toast for this row is on screen — stop the scanner returning it.
-    pub fn mark_reminder_shown(&self, event_id: i64, occ_start_ms: i64, seq: i64) -> Result<(), String> {
+    pub fn mark_reminder_shown(
+        &self,
+        event_id: i64,
+        occ_start_ms: i64,
+        seq: i64,
+    ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         conn.execute(
             "UPDATE reminders2 SET status = 'shown' \
@@ -985,7 +1167,12 @@ impl Cache {
     /// the next link of the cascade, if any — per spec a secondary
     /// event-defined alarm fires only when the previous toast expired
     /// untouched.
-    pub fn reminder_timeout(&self, event_id: i64, occ_start_ms: i64, seq: i64) -> Result<(), String> {
+    pub fn reminder_timeout(
+        &self,
+        event_id: i64,
+        occ_start_ms: i64,
+        seq: i64,
+    ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         conn.execute(
             "UPDATE reminders2 SET status = 'done' \
@@ -1008,7 +1195,11 @@ impl Cache {
     /// kill every remaining notification of the occurrence, irreversibly.
     /// Rows stay (status = cancelled) so the signature keeps routine
     /// reseeds from resurrecting them.
-    pub fn cancel_occurrence_reminders(&self, event_id: i64, occ_start_ms: i64) -> Result<(), String> {
+    pub fn cancel_occurrence_reminders(
+        &self,
+        event_id: i64,
+        occ_start_ms: i64,
+    ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         conn.execute(
             "UPDATE reminders2 SET status = 'cancelled' \
@@ -1065,7 +1256,11 @@ impl Cache {
 
     /// The occurrence ended while nobody was looking — retire every row
     /// silently (startup corner case: "прошло — тихо удаляем").
-    pub fn expire_occurrence_reminders(&self, event_id: i64, occ_start_ms: i64) -> Result<(), String> {
+    pub fn expire_occurrence_reminders(
+        &self,
+        event_id: i64,
+        occ_start_ms: i64,
+    ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         conn.execute(
             "UPDATE reminders2 SET status = 'expired' \
@@ -1081,11 +1276,8 @@ impl Cache {
     /// deleted → everything regenerates from the event's current settings.
     pub fn purge_event_reminders(&self, event_id: i64) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
-        conn.execute(
-            "DELETE FROM reminders2 WHERE event_id = ?1",
-            params![event_id],
-        )
-        .map_err(|e| format!("purge event: {e}"))?;
+        conn.execute("DELETE FROM reminders2 WHERE event_id = ?1", params![event_id])
+            .map_err(|e| format!("purge event: {e}"))?;
         Ok(())
     }
 
@@ -1128,38 +1320,42 @@ impl Cache {
     /// side, which decides shown / expired / already-running per occurrence.
     pub fn due_reminders(&self, now_ms: i64) -> Result<Vec<ReminderRow>, String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
-        let mut stmt = conn.prepare(
-            "SELECT event_id, occurrence_start_ms, occurrence_end_ms, seq, \
+        let mut stmt = conn
+            .prepare(
+                "SELECT event_id, occurrence_start_ms, occurrence_end_ms, seq, \
                     fire_at_ms, lead_min, at_start, summary, calendar_id \
              FROM reminders2 \
              WHERE status = 'armed' AND fire_at_ms <= ?1 \
-             ORDER BY fire_at_ms ASC"
-        ).map_err(|e| format!("prep: {e}"))?;
-        let rows = stmt.query_map(params![now_ms], |r| {
-            Ok(ReminderRow {
-                event_id: r.get(0)?,
-                occurrence_start_ms: r.get(1)?,
-                occurrence_end_ms: r.get(2)?,
-                seq: r.get(3)?,
-                fire_at_ms: r.get(4)?,
-                lead_min: r.get(5)?,
-                at_start: r.get::<_, i32>(6)? != 0,
-                summary: r.get(7)?,
-                calendar_id: r.get(8)?,
+             ORDER BY fire_at_ms ASC",
+            )
+            .map_err(|e| format!("prep: {e}"))?;
+        let rows = stmt
+            .query_map(params![now_ms], |r| {
+                Ok(ReminderRow {
+                    event_id: r.get(0)?,
+                    occurrence_start_ms: r.get(1)?,
+                    occurrence_end_ms: r.get(2)?,
+                    seq: r.get(3)?,
+                    fire_at_ms: r.get(4)?,
+                    lead_min: r.get(5)?,
+                    at_start: r.get::<_, i32>(6)? != 0,
+                    summary: r.get(7)?,
+                    calendar_id: r.get(8)?,
+                })
             })
-        }).map_err(|e| format!("query: {e}"))?;
+            .map_err(|e| format!("query: {e}"))?;
         let mut out = Vec::new();
-        for r in rows { out.push(r.map_err(|e| format!("row: {e}"))?); }
+        for r in rows {
+            out.push(r.map_err(|e| format!("row: {e}"))?);
+        }
         Ok(out)
     }
 
     /// Bound the table: drop rows whose occurrence is well past.
     pub fn prune_old_reminders(&self, cutoff_ms: i64) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
-        conn.execute(
-            "DELETE FROM reminders2 WHERE occurrence_start_ms < ?1",
-            params![cutoff_ms],
-        ).map_err(|e| format!("prune: {e}"))?;
+        conn.execute("DELETE FROM reminders2 WHERE occurrence_start_ms < ?1", params![cutoff_ms])
+            .map_err(|e| format!("prune: {e}"))?;
         Ok(())
     }
 
@@ -1219,9 +1415,7 @@ impl Cache {
             )
             .map_err(|e| format!("prepare: {e}"))?;
         let rows = stmt
-            .query_map(params![from_ms, to_ms], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-            })
+            .query_map(params![from_ms, to_ms], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
             .map_err(|e| format!("query: {e}"))?;
         let mut stale: Vec<(i64, i64)> = Vec::new();
         for r in rows {

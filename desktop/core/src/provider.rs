@@ -59,13 +59,8 @@ pub trait MailProvider: Send + Sync {
     ) -> Result<Vec<MessageEnvelope>, String>;
 
     /// Set/clear flags on a single message.
-    async fn set_flags(
-        &self,
-        folder: &str,
-        uid: u32,
-        flags: &str,
-        add: bool,
-    ) -> Result<(), String>;
+    async fn set_flags(&self, folder: &str, uid: u32, flags: &str, add: bool)
+    -> Result<(), String>;
 
     /// Set/clear flags on multiple messages in one session.
     async fn set_flags_batch(
@@ -77,10 +72,7 @@ pub trait MailProvider: Send + Sync {
 
     /// Delete a batch of messages. Native: soft-deletes server-side. IMAP:
     /// STORE \Deleted then EXPUNGE.
-    async fn delete_messages(
-        &self,
-        messages: &[MessageRef],
-    ) -> Result<(), String>;
+    async fn delete_messages(&self, messages: &[MessageRef]) -> Result<(), String>;
 
     /// Mark a conversation as spam by domain. Native: posts the domain rule
     /// + flags the messages on the server. IMAP fallback: STORE \Deleted +
@@ -102,14 +94,15 @@ pub trait MailProvider: Send + Sync {
     /// outgoing-from-us threads (where from_addr is OUR address,
     /// not the counterpart's) actually disappear instead of just
     /// the rule being created and the row left to re-sync back.
-    async fn blacklist_and_purge(&self, scope: &str, fallback_addr: &str, message_ids: &[i64]) -> Result<PurgeOutcome, String>;
+    async fn blacklist_and_purge(
+        &self,
+        scope: &str,
+        fallback_addr: &str,
+        message_ids: &[i64],
+    ) -> Result<PurgeOutcome, String>;
 
     /// Fetch raw RFC-822 source of a message.
-    async fn fetch_message_source(
-        &self,
-        folder: &str,
-        uid: u32,
-    ) -> Result<String, String>;
+    async fn fetch_message_source(&self, folder: &str, uid: u32) -> Result<String, String>;
 
     /// Just the header block.
     ///
@@ -119,11 +112,20 @@ pub trait MailProvider: Send + Sync {
     /// honest fallback of cutting them out of the full source.
     async fn fetch_message_headers(&self, folder: &str, uid: u32) -> Result<String, String> {
         let raw = self.fetch_message_source(folder, uid).await?;
-        let end = raw.find("
+        let end = raw
+            .find(
+                "
 
-").or_else(|| raw.find("
+",
+            )
+            .or_else(|| {
+                raw.find(
+                    "
 
-")).unwrap_or(raw.len());
+",
+                )
+            })
+            .unwrap_or(raw.len());
         Ok(raw[..end].to_string())
     }
 
@@ -137,11 +139,7 @@ pub trait MailProvider: Send + Sync {
     ) -> Result<InlinePart, String>;
 
     /// Fetch raw message bytes (for attachment extraction).
-    async fn fetch_raw_message(
-        &self,
-        folder: &str,
-        uid: u32,
-    ) -> Result<Vec<u8>, String>;
+    async fn fetch_raw_message(&self, folder: &str, uid: u32) -> Result<Vec<u8>, String>;
 
     /// Fetch one non-inline attachment by index. Returns the raw bytes and
     /// a best-effort MIME type — the caller is responsible for choosing
@@ -165,10 +163,7 @@ pub trait MailProvider: Send + Sync {
     ) -> Result<String, String>;
 
     /// Start background push/IDLE listener. Pushes events to the notifier.
-    async fn start_watching(
-        &self,
-        notifier: Notifier,
-    ) -> Result<(), String>;
+    async fn start_watching(&self, notifier: Notifier) -> Result<(), String>;
 
     /// Fetch an avatar for the given email. Returns `(bytes, mime)`; bytes
     /// are empty when no source has anything (the caller renders an initial-
@@ -241,7 +236,11 @@ pub trait MailProvider: Send + Sync {
 
     /// Autocomplete/search across the unified address book. Default empty so
     /// non-native providers degrade gracefully.
-    async fn search_contacts(&self, _query: &str, _limit: u32) -> Result<Vec<DesktopContact>, String> {
+    async fn search_contacts(
+        &self,
+        _query: &str,
+        _limit: u32,
+    ) -> Result<Vec<DesktopContact>, String> {
         Ok(Vec::new())
     }
 

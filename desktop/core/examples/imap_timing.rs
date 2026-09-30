@@ -31,7 +31,8 @@ async fn main() {
     println!("connect + TLS      {:>6} ms", t.elapsed().as_millis());
 
     let t = Instant::now();
-    let mut session = async_imap::Client::new(tls).login(&user, &pass).await.map_err(|e| e.0).expect("login");
+    let mut session =
+        async_imap::Client::new(tls).login(&user, &pass).await.map_err(|e| e.0).expect("login");
     println!("LOGIN              {:>6} ms", t.elapsed().as_millis());
 
     let t = Instant::now();
@@ -40,12 +41,7 @@ async fn main() {
 
     // Newest message: the one the source view would most likely be opened on.
     let t = Instant::now();
-    let uids: Vec<u32> = session
-        .uid_search("ALL")
-        .await
-        .expect("search")
-        .into_iter()
-        .collect();
+    let uids: Vec<u32> = session.uid_search("ALL").await.expect("search").into_iter().collect();
     let uid = *uids.last().expect("a message");
     println!("UID SEARCH ALL     {:>6} ms  (newest uid {uid})", t.elapsed().as_millis());
 

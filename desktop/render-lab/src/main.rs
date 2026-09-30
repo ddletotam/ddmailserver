@@ -351,10 +351,8 @@ fn wire_pointer(ui: &LabWindow) {
 /// rendered at. Undoing that scale here keeps the hit-test honest throughout —
 /// and it is a no-op the rest of the time.
 fn as_rendered(ui: &LabWindow, row: i32, x: f32, y: f32) -> (f32, f32) {
-    let rendered = usize::try_from(row)
-        .ok()
-        .and_then(|r| ui.get_bubbles().row_data(r))
-        .map_or(0.0, |b| b.w);
+    let rendered =
+        usize::try_from(row).ok().and_then(|r| ui.get_bubbles().row_data(r)).map_or(0.0, |b| b.w);
     let display = ui.get_content_w();
     if rendered <= 0.5 || display <= 0.5 {
         return (x, y);
