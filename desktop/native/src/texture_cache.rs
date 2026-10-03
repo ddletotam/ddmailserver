@@ -40,6 +40,14 @@ pub fn fnv1a(s: &str) -> u64 {
     h
 }
 
+/// Size and mtime of the running exe: changes with every build that is
+/// installed, stays put across restarts of the same one.
+fn build_stamp() -> Option<String> {
+    let md = std::env::current_exe().ok()?.metadata().ok()?;
+    let mtime = md.modified().ok()?.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+    Some(format!("{}|{}", md.len(), mtime.as_nanos()))
+}
+
 pub struct TextureDiskCache {
     dir: PathBuf,
 }
@@ -62,8 +70,27 @@ impl TextureDiskCache {
         let dir = data_dir.join("textures");
         fs::create_dir_all(&dir).ok()?;
         let cache = Self { dir };
+        cache.drop_if_other_build();
         cache.evict_to_cap();
         Some(cache)
+    }
+
+    /// A texture is the renderer's output, and the key knows nothing about
+    /// the renderer: a fixed emlrender bug kept serving the old blank bubble
+    /// from disk. Any other build of the exe wipes the cache instead, so a
+    /// renderer change never needs a hand-bumped FORMAT_VERSION to show up.
+    fn drop_if_other_build(&self) {
+        let Some(build) = build_stamp() else { return };
+        let stamp = self.dir.join("build");
+        if fs::read_to_string(&stamp).is_ok_and(|s| s == build) {
+            return;
+        }
+        if let Ok(entries) = fs::read_dir(&self.dir) {
+            for e in entries.flatten() {
+                let _ = fs::remove_file(e.path());
+            }
+        }
+        let _ = fs::write(stamp, build);
     }
 
     fn base(
