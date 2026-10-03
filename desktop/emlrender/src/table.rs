@@ -240,7 +240,9 @@ impl Ctx<'_> {
                 );
                 continue;
             }
-            if cs.display != Display::TableRow {
+            // `<tr>` restyled away from `table-row` still is one: CSS wraps the
+            // box in an anonymous row, and dropping it would drop its content.
+            if cs.display != Display::TableRow && t != "tr" {
                 // Stray content directly under a table: html5ever foster-parents
                 // it out during parsing, so anything left here is furniture.
                 continue;
@@ -254,8 +256,19 @@ impl Ctx<'_> {
                     continue;
                 }
                 let mut cst = self.res.resolve(&kid, &cs);
-                if cst.display == Display::None || cst.hidden || cst.display != Display::TableCell {
+                if cst.display == Display::None || cst.hidden {
                     continue;
+                }
+                // The "make it display as block" boilerplate puts the whole mail
+                // inside `<td class="container" style="display:block">`. A browser
+                // wraps such a box in an anonymous cell, so it is laid out as one.
+                // (Adjacent ones would share that cell and stack; we give each its
+                // own column instead — the lone container is what mail does.)
+                if cst.display != Display::TableCell {
+                    if !matches!(kt, "td" | "th") {
+                        continue;
+                    }
+                    cst.display = Display::TableCell;
                 }
                 while col < occupied.len() && occupied[col] > 0 {
                     col += 1;
