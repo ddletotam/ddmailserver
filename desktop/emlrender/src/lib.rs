@@ -306,6 +306,22 @@ mod tests {
         assert_eq!(tight.height_px, pretty.height_px);
     }
 
+    /// A cell or row restyled to `display:block` is still laid out. The
+    /// common "responsive" template does this to the one `<td>` holding the
+    /// whole mail; skipping non-`table-cell` children rendered such a letter
+    /// as an empty bubble.
+    #[test]
+    fn block_styled_cells_and_rows_keep_their_content() {
+        for html in [
+            "<style>.c{display:block}</style>\
+             <table><tr><td>&nbsp;</td><td class=c>письмо</td><td>&nbsp;</td></tr></table>",
+            "<table><tr style='display:block'><td>письмо</td></tr></table>",
+        ] {
+            let r = render(html, &opts(400));
+            assert!(r.runs.iter().any(|t| t.text.contains("письмо")), "lost content of {html}");
+        }
+    }
+
     /// The rule the whole crate exists for: nothing is ever wider than asked.
     #[test]
     fn unbreakable_text_does_not_widen_the_bitmap() {
