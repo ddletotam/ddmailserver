@@ -23,6 +23,7 @@ mod reminders;
 // which is the whole point: nothing here depends on a browser engine.
 mod render;
 mod render_common;
+mod render_worker;
 mod richtext;
 mod richtext_render;
 mod sanitize;
@@ -37,10 +38,12 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use slint::{Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
+
+use render_worker::Job;
 
 use ddmail_core::cache::Cache;
 use ddmail_core::types::{
@@ -1545,67 +1548,6 @@ fn bubble_template_wide(is_outgoing: bool, time: &str, inner: &str, wide: bool) 
     )
 }
 
-enum Job {
-    SetConversation {
-        bodies: Vec<MessageBody>,
-        width: u32,
-        policy: policy::Policy,
-        /// Bumped whenever the policy mutates so the body_cache knows
-        /// to miss for entries rendered under a stale policy.
-        policy_gen: u64,
-        /// Monotonic job sequence (latest wins). The render worker skips
-        /// any job older than the newest one enqueued, and aborts
-        /// mid-render when a newer one arrives — so a drag-resize or a
-        /// fast conversation switch never renders bubbles nobody will see.
-        seq: u64,
-        /// After the rows land: None = keep scroll position (resize,
-        /// policy toggle), Some(-1) = scroll to the end, Some(r) =
-        /// scroll so row r (first unread) is at the top.
-        scroll_to: Option<i32>,
-        /// Per-body render mode, parallel to `bodies`: 0 = auto
-        /// (HTML when present), 1 = force the text-only bubble.
-        modes: Vec<u8>,
-        /// UI window scale factor — emlrender rasterizes at this scale so
-        /// the bitmap is 1:1 with physical pixels (crisp on HiDPI).
-        scale: f32,
-        /// Склеенный диалог: пузыри подписаны темой, у своих — подсказка с
-        /// адресатами (контракт §4, «Склеенный диалог»).
-        merged: bool,
-    },
-    HitTest {
-        row: usize,
-        x: f32,
-        y: f32,
-    },
-    /// Render the source/headers viewer text to a bitmap + word rects, so the
-    /// modal reuses the fast bubble selection layer instead of Slint's
-    /// (slow-on-large-text) TextInput.
-    RenderSource {
-        text: String,
-        width: u32,
-        scale: f32,
-    },
-}
-
-/// Everything the render worker knows about a row besides its bitmap —
-/// shipped to the UI thread to fill RowItem (context-menu data included).
-struct RowMeta {
-    h: f32,
-    has_html: bool,
-    has_text: bool,
-    viewing_html: bool,
-    sender: String,
-    media_host: String,
-    script_host: String,
-    m_sender_on: bool,
-    s_sender_on: bool,
-    m_host_on: bool,
-    s_host_on: bool,
-    /// Подсказка с адресатами своего письма в склеенном диалоге; пусто —
-    /// подсказки нет.
-    recipients: String,
-}
-
 /// UI-thread state shared by the select/resize/engine-result paths. All mail
 /// state is interior-mutable so the live engine refresh can replace it.
 struct Shared {
@@ -1728,9 +1670,9 @@ struct Shared {
     /// через этот список (Slint-модель — источник только для отрисовки).
     composer_identities: RefCell<Vec<String>>,
     /// UI-thread copy of the per-row link rects (CSS px, bubble-relative) —
-    /// drives the pointer cursor over links. The render worker keeps its
-    /// own copy for click hit-testing; this one answers synchronous
-    /// hover-binding queries without a worker round-trip.
+    /// the only copy: the hover cursor, the link click (`on_hit_test`) and
+    /// the context-menu probe all hit-test against it synchronously, without
+    /// a round-trip to the render worker.
     row_links: RefCell<Vec<Vec<render_common::LinkRect>>>,
     /// What the shared confirmation modal confirms: 1 = удалить диалог,
     /// 2 = спам (blacklist + purge отправителя).
@@ -6055,16 +5997,8 @@ fn main() {
         ui.set_active_color(slint::Brush::SolidColor(hex(&d0.color)));
     }
 
-    // ----- Bubble render worker (emlrender) -----
+    // ----- Bubble render worker (emlrender, see render_worker.rs) -----
     //
-    // Holds `body_cache` across jobs: packed bubble bitmaps keyed by
-    // (folder, uid, width, policy_gen, mode, fingerprint). Re-opening a
-    // conversation reuses them instead of laying the mail out again, which
-    // is what dominates the latency budget. Pack-to-buffer (memcpy of RGBA
-    // into a `SharedPixelBuffer`) runs on THIS thread, so the UI thread only
-    // wraps finished buffers in `Image`s.
-    let (tx, rx) = mpsc::channel::<Job>();
-    let rx = Arc::new(Mutex::new(rx));
     // Shared with Job::SetConversation senders (send_render_job): holds the
     // seq of the newest enqueued job so the worker can skip/abort stale ones.
     let render_seq = Arc::new(AtomicU64::new(0));
@@ -6073,468 +6007,7 @@ fn main() {
     let tex_disk = cache_db_path()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .and_then(texture_cache::TextureDiskCache::open);
-    let ui_weak = ui.as_weak();
-    {
-        let rx = Arc::clone(&rx);
-        let latest_seq = Arc::clone(&render_seq);
-        let ui_weak = ui_weak.clone();
-        std::thread::spawn(move || {
-            // Cache holds the (already-packed) RGBA pixel buffer + height
-            // per (folder, uid, width). `SharedPixelBuffer<Rgba8Pixel>` is
-            // Send + Sync (unlike Slint's `Image`, which is UI-thread-only),
-            // so we can build it here on the render thread and ship the
-            // result across to the UI without doing any more memcpy work
-            // on the hot path. UI-thread cost shrinks to just wrapping
-            // each buffer in an `Image`.
-            let mut body_cache: HashMap<
-                (String, u32, u32, u64, u8, u64),
-                (
-                    SharedPixelBuffer<Rgba8Pixel>,
-                    f32,
-                    Vec<render_common::LinkRect>,
-                    Vec<render_common::TextRun>,
-                ),
-            > = HashMap::new();
-            // FIFO insertion order for the RAM cache: bitmaps are megabytes
-            // each, so cap the entry count and drop the oldest (the disk
-            // layer below still has them — eviction only costs a PNG decode).
-            const RAM_CAP: usize = 400;
-            let mut ram_order: Vec<(String, u32, u32, u64, u8, u64)> = Vec::new();
-            // Per-row clickable link rects (CSS px), parallel to the rendered
-            // rows. Renderer-agnostic; the click is a pure point-in-rect test.
-            let mut row_links: Vec<Vec<render_common::LinkRect>> = Vec::new();
-            // Per-row text layer (word rects) — mouse selection support.
-            let mut row_runs: Vec<Vec<render_common::TextRun>> = Vec::new();
-            loop {
-                let job = {
-                    let lock = rx.lock().unwrap();
-                    lock.recv()
-                };
-                let Ok(job) = job else { break };
-                match job {
-                    Job::SetConversation {
-                        bodies,
-                        width,
-                        policy,
-                        policy_gen,
-                        seq,
-                        scroll_to,
-                        modes,
-                        scale,
-                        merged,
-                    } => {
-                        // Latest-wins: a newer conversation/relayout job is
-                        // already queued behind this one — rendering it would
-                        // produce frames nobody will ever see.
-                        if seq < latest_seq.load(Ordering::SeqCst) {
-                            println!("[perf] render job seq={seq} superseded — skipped");
-                            continue;
-                        }
-                        let t_wall = Instant::now();
-                        let n = bodies.len();
-                        row_links.clear();
-                        row_runs.clear();
-
-                        // Tell the UI to show the progress bar.
-                        let n_total = n as i32;
-                        let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                            ui.set_render_total(n_total);
-                            ui.set_render_progress(0);
-                        });
-
-                        let mut packs: Vec<(SharedPixelBuffer<Rgba8Pixel>, RowMeta)> =
-                            Vec::with_capacity(n);
-                        let mut cache_hits = 0usize;
-                        let mut disk_hits = 0usize;
-                        let mut fallback_used = 0usize;
-                        let mut render_ms_total = 0u128;
-                        let mut pack_ms_total = 0u128;
-                        let mut aborted = false;
-                        for (i, body) in bodies.iter().enumerate() {
-                            // Cheap mid-render cancellation: a newer job
-                            // arrived (conversation switch, next resize step)
-                            // — stop spending layout time on this one.
-                            if seq < latest_seq.load(Ordering::SeqCst) {
-                                aborted = true;
-                                break;
-                            }
-                            // Mode 1 = «Текстовая версия» override for this body.
-                            let mode = modes.get(i).copied().unwrap_or(0);
-                            let has_html =
-                                body.html.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
-                            let has_text =
-                                body.text.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
-                            let force_text = mode == 1 && has_html;
-                            // Content fingerprint: bodies are mostly immutable,
-                            // but cid:→data: healing rewrites the HTML — the
-                            // texture must miss when the content changed. The
-                            // rasterization scale is folded in too: the same
-                            // width at a different DPI is a different bitmap.
-                            // Attachments тоже входят: чипы — часть пузыря
-                            // (build_body_html), а серверный список вложений
-                            // может поменяться при неизменном HTML (фикс
-                            // inline-фильтра) — иначе старая текстура без
-                            // чипа наслуживается с диска вечно.
-                            let mut att_fp: u64 = 0;
-                            for a in &body.attachments {
-                                att_fp = att_fp.rotate_left(7)
-                                    ^ texture_cache::fnv1a(&format!(
-                                        "{}|{}|{}",
-                                        a.index, a.filename, a.size
-                                    ));
-                            }
-                            // Текст — обязательная часть отпечатка, а не
-                            // «на всякий случай»: пустую строку кэша движок
-                            // теперь перезапрашивает (engine::body_is_blank), и
-                            // у текстового письма без вложений после перезапроса
-                            // HTML так и остаётся пустым. Без текста в fp
-                            // отпечаток совпал бы с прежним, и с диска
-                            // наслужилась бы та самая пустая текстура — база
-                            // вылечилась, а пузырь остался пустым.
-                            let fp = texture_cache::fnv1a(body.html.as_deref().unwrap_or(""))
-                                .wrapping_add(RENDER_TEMPLATE_EPOCH.wrapping_mul(0x9E37_79B9_7F4A_7C15))
-                                ^ att_fp
-                                ^ texture_cache::fnv1a(body.text.as_deref().unwrap_or(""))
-                                    .rotate_left(21)
-                                ^ ((scale.to_bits() as u64) << 32)
-                                // Подпись темой — тоже содержимое пузыря: тот
-                                // же текст в склейке и вне её — разные битмапы.
-                                ^ if merged {
-                                    texture_cache::fnv1a(&format!("subj|{}", body.subject)).rotate_left(43)
-                                } else {
-                                    0
-                                };
-                            let key = (body.folder.clone(), body.uid, width, policy_gen, mode, fp);
-                            let remember = |key: &(String, u32, u32, u64, u8, u64),
-                                            entry: &(
-                                SharedPixelBuffer<Rgba8Pixel>,
-                                f32,
-                                Vec<render_common::LinkRect>,
-                                Vec<render_common::TextRun>,
-                            ),
-                                            body_cache: &mut HashMap<_, _>,
-                                            ram_order: &mut Vec<(
-                                String,
-                                u32,
-                                u32,
-                                u64,
-                                u8,
-                                u64,
-                            )>| {
-                                body_cache.insert(key.clone(), entry.clone());
-                                ram_order.push(key.clone());
-                                if ram_order.len() > RAM_CAP {
-                                    let oldest = ram_order.remove(0);
-                                    body_cache.remove(&oldest);
-                                }
-                            };
-                            let (buf, h, links, runs) = if let Some(cached) = body_cache.get(&key) {
-                                cache_hits += 1;
-                                cached.clone()
-                            } else if let Some(de) = tex_disk.as_ref().and_then(|t| {
-                                t.load(&body.folder, body.uid, width, policy_gen, mode, fp)
-                            }) {
-                                // Disk layer: rendered in a previous session —
-                                // a PNG decode instead of a layout pass.
-                                disk_hits += 1;
-                                let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
-                                    &de.rgba, de.width, de.height,
-                                );
-                                let entry = (buf, de.h, de.links, de.runs);
-                                remember(&key, &entry, &mut body_cache, &mut ram_order);
-                                entry
-                            } else {
-                                // First render: try the full HTML (unless the
-                                // text view is forced). If the layout broke on
-                                // this mail (`successful()` explains the
-                                // signal) we retry with the text-only bubble —
-                                // keeps "missing bubble" failures from being
-                                // silent.
-                                let html = if force_text {
-                                    build_text_only_html(body, merged)
-                                } else {
-                                    build_body_html(body, &policy, merged)
-                                };
-                                let t_r = Instant::now();
-                                // Текстовой версии картинки не положены вовсе.
-                                let gate = policy.media_gate(&body.from_addr);
-                                let gate: &render::RemoteGate =
-                                    if force_text { &render::no_remote } else { &gate };
-                                let mut result = render::render(&html, width, scale, gate);
-                                let text_available = body
-                                    .text
-                                    .as_deref()
-                                    .map(|s| !s.trim().is_empty())
-                                    .unwrap_or(false);
-                                if !result.successful() && text_available && !force_text {
-                                    fallback_used += 1;
-                                    let text_html = build_text_only_html(body, merged);
-                                    result = render::render(
-                                        &text_html,
-                                        width,
-                                        scale,
-                                        &render::no_remote,
-                                    );
-                                }
-                                render_ms_total += t_r.elapsed().as_millis();
-                                // A failed layout (see `successful()`) must NOT
-                                // be cached — otherwise the degenerate 1px
-                                // bitmap sticks on disk and every later open
-                                // serves that instead of retrying. We still return it for this pass
-                                // (an empty bubble beats a missing one), just
-                                // don't persist it.
-                                let succeeded = result.successful();
-                                // Logical (CSS px) display height: the bitmap
-                                // is captured at `scale` physical px per CSS
-                                // px, and the Image box must stay in CSS px so
-                                // link/text rects keep mapping 1:1.
-                                let rscale = result.scale.max(0.25);
-                                let bitmap = result.bitmap;
-                                let t_p = Instant::now();
-                                let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
-                                    &bitmap.rgba,
-                                    bitmap.width,
-                                    bitmap.height,
-                                );
-                                pack_ms_total += t_p.elapsed().as_millis();
-                                let entry =
-                                    (buf, bitmap.height as f32 / rscale, result.links, result.runs);
-                                println!(
-                                    "[perf]   body uid={} h={}px links={} runs={} cached={}",
-                                    body.uid,
-                                    bitmap.height,
-                                    entry.2.len(),
-                                    entry.3.len(),
-                                    succeeded
-                                );
-                                // Pending-send stubs are transient — never
-                                // persist their textures (the synthetic uid
-                                // restarts every session and would collide).
-                                if succeeded && body.folder != PENDING_FOLDER {
-                                    if let Some(t) = tex_disk.as_ref() {
-                                        t.store(
-                                            &body.folder,
-                                            body.uid,
-                                            width,
-                                            policy_gen,
-                                            mode,
-                                            fp,
-                                            &bitmap.rgba,
-                                            bitmap.width,
-                                            bitmap.height,
-                                            entry.1,
-                                            &entry.2,
-                                            &entry.3,
-                                        );
-                                    }
-                                    remember(&key, &entry, &mut body_cache, &mut ram_order);
-                                }
-                                entry
-                            };
-                            // Context-menu data: per-sender / per-host
-                            // checkbox states reflect the policy this job
-                            // rendered under (a toggle re-renders anyway).
-                            let sender_lc = body.from_addr.to_lowercase();
-                            let (media_host, script_host) =
-                                sanitize::first_external_hosts(body.html.as_deref().unwrap_or(""));
-                            row_runs.push(runs);
-                            packs.push((
-                                buf,
-                                RowMeta {
-                                    h,
-                                    recipients: if merged && body.is_outgoing {
-                                        recipients_tip(body)
-                                    } else {
-                                        String::new()
-                                    },
-                                    has_html,
-                                    has_text,
-                                    viewing_html: has_html && !force_text,
-                                    m_sender_on: policy.allow_media.contains(&sender_lc),
-                                    s_sender_on: policy.allow_scripts.contains(&sender_lc),
-                                    m_host_on: !media_host.is_empty()
-                                        && (policy.media_hosts.contains(&media_host)
-                                            || policy.allow_domains.contains(&media_host)),
-                                    s_host_on: !script_host.is_empty()
-                                        && policy.script_hosts.contains(&script_host),
-                                    sender: body.from_addr.clone(),
-                                    media_host,
-                                    script_host,
-                                },
-                            ));
-                            row_links.push(links);
-                            // Push progress to the UI — one event per body.
-                            let done = (i + 1) as i32;
-                            let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                                ui.set_render_progress(done);
-                            });
-                        }
-                        if aborted {
-                            println!(
-                                "[perf] render job seq={seq} aborted mid-render \
-                                 ({}/{n} done) — newer job queued",
-                                packs.len()
-                            );
-                            // Hide the progress bar; the superseding job
-                            // re-seeds it with its own totals.
-                            let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                                ui.set_render_total(0);
-                                ui.set_render_progress(0);
-                            });
-                            continue;
-                        }
-                        println!(
-                            "[perf] render N={n} width={width}px cache_hits={cache_hits} \
-                             disk_hits={disk_hits} fallback={fallback_used} \
-                             layout={render_ms_total}ms pack={pack_ms_total}ms total_job={}ms",
-                            t_wall.elapsed().as_millis()
-                        );
-                        // UI-thread link/text rects for the pointer cursor
-                        // and mouse selection (the worker keeps its own
-                        // copies for click hit-testing).
-                        let links_for_ui = row_links.clone();
-                        let runs_for_ui = row_runs.clone();
-                        let rects_width = width as f32;
-                        let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                            // The width these rows' link/text rects were
-                            // extracted at — Slint maps mouse coords into (and
-                            // highlight rects out of) this space, so hits stay
-                            // exact even while the column width drifts from
-                            // the render width (resize-debounce window).
-                            ui.set_body_rects_width(rects_width);
-                            // Wrap each SharedPixelBuffer in an Image —
-                            // this is cheap (refcount bump, no memcpy)
-                            // and is the only step that has to run on
-                            // the UI thread.
-                            SHARED.with(|s| {
-                                if let Some(sh) = s.borrow().as_ref() {
-                                    *sh.row_links.borrow_mut() = links_for_ui;
-                                    *sh.row_text_runs.borrow_mut() = runs_for_ui;
-                                    // Rows are being replaced — any active
-                                    // selection now points at stale indices.
-                                    sh.sel_row.set(-1);
-                                    ui.set_selection_row(-1);
-                                }
-                            });
-                            let rows: Vec<RowItem> = packs
-                                .into_iter()
-                                .map(|(buf, m)| RowItem {
-                                    img: Image::from_rgba8(buf),
-                                    h: m.h,
-                                    has_html: m.has_html,
-                                    has_text: m.has_text,
-                                    viewing_html: m.viewing_html,
-                                    sender: m.sender.into(),
-                                    media_host: m.media_host.into(),
-                                    script_host: m.script_host.into(),
-                                    m_sender_on: m.m_sender_on,
-                                    s_sender_on: m.s_sender_on,
-                                    m_host_on: m.m_host_on,
-                                    s_host_on: m.s_host_on,
-                                    recipients: m.recipients.into(),
-                                })
-                                .collect();
-                            // Post-open scroll target: y offset of the first
-                            // unread row, or "very far down" for scroll-to-end
-                            // (the Slint bridge clamps to the content range).
-                            let scroll_y: Option<f32> = scroll_to.map(|sr| {
-                                if sr < 0 {
-                                    1.0e9
-                                } else {
-                                    rows.iter().take(sr as usize).map(|r| r.h).sum()
-                                }
-                            });
-                            // Точная высота содержимого для полосы прокрутки.
-                            // У ListView viewport-height — оценка по средней
-                            // высоте элемента, а пузыри различаются на два
-                            // порядка: ползунок ездил не туда и менял размер на
-                            // ходу. Сумму мы и так уже считаем строкой выше.
-                            let content_h: f32 = rows.iter().map(|r| r.h).sum();
-                            ui.set_chat_content_h(content_h);
-                            ui.set_messages(ModelRc::new(VecModel::from(rows)));
-                            // Hide the progress bar.
-                            ui.set_render_total(0);
-                            ui.set_render_progress(0);
-                            if let Some(y) = scroll_y {
-                                ui.set_chat_scroll_y(y);
-                                ui.set_chat_scroll_seq(ui.get_chat_scroll_seq() + 1);
-                                // Панель почты могла создаваться прямо сейчас:
-                                // клик по тосту о новом письме сам переключает
-                                // view-mode в 0 и тут же открывает диалог, так
-                                // что этот bump уходит в ещё не существующий
-                                // мост. Живой панели повторы ничего не стоят —
-                                // позиция уже доехала, и они молчат.
-                                nudge_chat_scroll(ui.as_weak(), y, 120);
-                                nudge_chat_scroll(ui.as_weak(), y, 400);
-                            }
-                            // Scroll-less render (width change, scale change,
-                            // policy toggle) НЕ трогает chat-scroll-pending:
-                            // раньше он его сбрасывал, но на старте scale-render
-                            // прилетает между анкор-bump'ом и первым layout —
-                            // и убивал ещё-не-применённый скролл (первый диалог
-                            // открывался в начале, а не на свежем письме). После
-                            // применения layout сам гасит флаг в viewport-height
-                            // handler, так что повторного re-anchor нет.
-                        });
-                    }
-                    Job::HitTest { row, x, y } => {
-                        // Renderer-agnostic hit-test: pure point-in-rect against
-                        // the link rects extracted at render time (works for
-                        // both cached and freshly-rendered rows). Resolved URLs
-                        // (incl. internal ddmail-attach:* schemes) go to
-                        // handle_link on the UI thread.
-                        let hit = row_links
-                            .get(row)
-                            .and_then(|links| links.iter().find(|l| l.contains(x, y)))
-                            .map(|l| l.href.clone());
-                        match hit {
-                            Some(url) => {
-                                let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                                    handle_link(&ui, url, LinkOrigin::Html)
-                                });
-                            }
-                            None => println!("click row {row} @({x:.0},{y:.0}) — no link"),
-                        }
-                    }
-                    Job::RenderSource { text, width, scale } => {
-                        // Render the viewer text the same way as a bubble: a
-                        // bitmap + word rects. The modal then selects via the
-                        // fast Rust text-run layer, not Slint's TextInput.
-                        let html = build_source_html(&text);
-                        let result = render::render(&html, width, scale, &render::no_remote);
-                        let rscale = result.scale.max(0.25);
-                        let bmp = result.bitmap;
-                        let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
-                            &bmp.rgba, bmp.width, bmp.height,
-                        );
-                        let h = bmp.height as f32 / rscale;
-                        let runs = result.runs;
-                        println!(
-                            "[perf] source render {}x{} runs={}",
-                            bmp.width,
-                            bmp.height,
-                            runs.len()
-                        );
-                        let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                            SHARED.with(|s| {
-                                if let Some(sh) = s.borrow().as_ref() {
-                                    *sh.src_runs.borrow_mut() = runs;
-                                    sh.src_sel_moved.set(false);
-                                    sh.src_sel_dragging.set(false);
-                                }
-                            });
-                            ui.set_source_img(Image::from_rgba8(buf));
-                            ui.set_source_img_h(h);
-                            ui.set_source_selection_rects(ModelRc::new(VecModel::from(Vec::<
-                                SelRect,
-                            >::new(
-                            ))));
-                        });
-                    }
-                }
-            }
-        });
-    }
+    let tx = render_worker::spawn(ui.as_weak(), Arc::clone(&render_seq), tex_disk);
 
     // ----- Shared state -----
     let (cache, key, init_convs) = match account {
@@ -7102,14 +6575,32 @@ fn main() {
         },
     );
 
-    let tx_hit = shared.tx.clone();
+    // Link click — resolved right here against the UI-thread copy of the
+    // link rects (the same ones the hover cursor reads), not through the
+    // render worker: a click must not wait behind a conversation's layout.
+    let ui_weak_hit = ui.as_weak();
     let sh_hit = shared.clone();
     ui.on_hit_test(move |row, x, y| {
         // A click that ends a drag-selection is not a link click.
         if sh_hit.sel_suppress_click.replace(false) {
             return;
         }
-        let _ = tx_hit.send(Job::HitTest { row: row as usize, x, y });
+        let hit = sh_hit
+            .row_links
+            .borrow()
+            .get(row as usize)
+            .and_then(|links| links.iter().find(|l| l.contains(x, y)))
+            .map(|l| l.href.clone());
+        match hit {
+            // Resolved URLs (incl. internal ddmail-attach:* schemes) go to
+            // handle_link from the event loop, as before — not from inside
+            // the pointer callback.
+            Some(url) => {
+                let _ = ui_weak_hit
+                    .upgrade_in_event_loop(move |ui| handle_link(&ui, url, LinkOrigin::Html));
+            }
+            None => println!("click row {row} @({x:.0},{y:.0}) — no link"),
+        }
     });
 
     // Pointer-cursor hover query — pure point-in-rect against the UI-thread

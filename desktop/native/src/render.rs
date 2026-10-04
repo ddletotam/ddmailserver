@@ -51,8 +51,12 @@ pub fn no_remote(_host: &str) -> bool {
     false
 }
 
-/// Lay out and rasterize one document. Stateless and synchronous: no view to
-/// own, no message pump, nothing to wait for but the remote images.
+/// Remote images of one document, ready for [`render_with`].
+pub type Images = emlrender::net::HttpResources;
+
+/// Download this document's remote images — the ones `allow_host` accepts —
+/// blocking until they are in or the loader's batch deadline passes (seconds
+/// on a slow CDN). Never call this on a path something interactive waits on.
 ///
 /// `allow_host` decides, per host, whether this message's remote images
 /// may be fetched — `Policy::media_gate` for a mail body, [`no_remote`]
@@ -61,10 +65,31 @@ pub fn no_remote(_host: &str) -> bool {
 /// menu, but a spelling its regexes miss (unquoted `src`, entities, CSS)
 /// still reaches the loader, which parses the same DOM layout does and
 /// asks `allow_host` about every URL and every redirect hop.
+pub fn fetch_images(html: &str, allow_host: &RemoteGate) -> Images {
+    Images::prefetch(html, allow_host)
+}
+
+/// The images [`fetch_images`] would return that are already in memory,
+/// without touching the network, and whether that is all of them. `false`
+/// means a render now paints placeholders for some — the caller fetches and
+/// renders again.
+pub fn cached_images(html: &str, allow_host: &RemoteGate) -> (Images, bool) {
+    Images::cached(html, allow_host)
+}
+
+/// Lay out and rasterize one document, fetching its remote images first
+/// (blocking, see [`fetch_images`]). For documents of our own that have none
+/// (`no_remote`), this is plain layout.
 pub fn render(html: &str, width: u32, scale: f32, allow_host: &RemoteGate) -> RenderResult {
+    render_with(html, width, scale, &fetch_images(html, allow_host))
+}
+
+/// Lay out and rasterize one document with the images at hand. Stateless and
+/// synchronous, safe to call from several threads at once: each render
+/// borrows its own text engine from emlrender's pool.
+pub fn render_with(html: &str, width: u32, scale: f32, images: &Images) -> RenderResult {
     let opts = emlrender::RenderOptions { width, scale, block_remote: false };
-    let images = emlrender::net::HttpResources::prefetch(html, allow_host);
-    let r = emlrender::render_with(html, &opts, &images);
+    let r = emlrender::render_with(html, &opts, images);
     RenderResult {
         bitmap: Bitmap { rgba: r.rgba, width: r.width_px, height: r.height_px },
         links: r.links.into_iter().map(into_link).collect(),
