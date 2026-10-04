@@ -410,7 +410,7 @@ pub(crate) fn handle_link(_ui: &MainWindow, url: String, origin: LinkOrigin) {
                                 uid,
                                 index,
                                 filename,
-                                account_key: sh.cur_account_key.borrow().clone(),
+                                account_key: sh.accounts.cur_account_key.borrow().clone(),
                                 save_to: None,
                             });
                         } else {
@@ -596,7 +596,7 @@ pub(crate) fn wire_bubble_links(ui: &MainWindow, shared: &Rc<Shared>) {
     let sh_hit = shared.clone();
     ui.on_hit_test(move |row, x, y| {
         // A click that ends a drag-selection is not a link click.
-        if sh_hit.sel_suppress_click.replace(false) {
+        if sh_hit.selection.sel_suppress_click.replace(false) {
             return;
         }
         let hit = sh_hit
@@ -716,7 +716,7 @@ pub(crate) fn wire_bubble_links(ui: &MainWindow, shared: &Rc<Shared>) {
                 uid,
                 index,
                 filename,
-                account_key: sh_oa.cur_account_key.borrow().clone(),
+                account_key: sh_oa.accounts.cur_account_key.borrow().clone(),
                 save_to: None,
             });
         }
@@ -739,7 +739,7 @@ pub(crate) fn wire_bubble_links(ui: &MainWindow, shared: &Rc<Shared>) {
                 uid,
                 index,
                 filename,
-                account_key: sh_sa.cur_account_key.borrow().clone(),
+                account_key: sh_sa.accounts.cur_account_key.borrow().clone(),
                 save_to: Some(path.to_string_lossy().into_owned()),
             });
         }

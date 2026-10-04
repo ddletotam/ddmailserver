@@ -101,8 +101,8 @@ pub(crate) fn wire_address_book(ui: &MainWindow, shared: &Rc<Shared>) {
     let sh_cadd = shared.clone();
     ui.on_contact_add(move || {
         let Some(ui) = ui_weak_cadd.upgrade() else { return };
-        sh_cadd.editing_contact_id.set(0);
-        sh_cadd.editing_contact_account.borrow_mut().clear();
+        sh_cadd.contacts.editing_contact_id.set(0);
+        sh_cadd.contacts.editing_contact_account.borrow_mut().clear();
         // Populate the account picker (labels + parallel keys).
         {
             let accounts = engine::AccountConfig::load_all();
@@ -110,7 +110,7 @@ pub(crate) fn wire_address_book(ui: &MainWindow, shared: &Rc<Shared>) {
                 .iter()
                 .map(|a| if a.email.is_empty() { a.account_key() } else { a.email.clone() }.into())
                 .collect();
-            *sh_cadd.ce_account_keys.borrow_mut() =
+            *sh_cadd.contacts.ce_account_keys.borrow_mut() =
                 accounts.iter().map(|a| a.account_key()).collect();
             ui.set_ce_accounts(ModelRc::new(VecModel::from(labels)));
             ui.set_ce_account_idx(0);
@@ -128,10 +128,10 @@ pub(crate) fn wire_address_book(ui: &MainWindow, shared: &Rc<Shared>) {
     let sh_ced = shared.clone();
     ui.on_contact_edit(move |idx| {
         let Some(ui) = ui_weak_ced.upgrade() else { return };
-        let book = sh_ced.address_book.borrow();
+        let book = sh_ced.contacts.address_book.borrow();
         let Some(c) = book.get(idx.max(0) as usize) else { return };
-        sh_ced.editing_contact_id.set(c.id);
-        *sh_ced.editing_contact_account.borrow_mut() = c.account_key.clone();
+        sh_ced.contacts.editing_contact_id.set(c.id);
+        *sh_ced.contacts.editing_contact_account.borrow_mut() = c.account_key.clone();
         ui.set_ce_is_edit(true);
         ui.set_ce_name(c.full_name.clone().into());
         ui.set_ce_email(c.emails.first().cloned().unwrap_or_default().into());
@@ -154,13 +154,13 @@ pub(crate) fn wire_address_book(ui: &MainWindow, shared: &Rc<Shared>) {
         let Some(ui) = ui_weak_csave.upgrade() else { return };
         let body = contact_body_from_ui(&ui);
         let Some(etx) = sh_csave.engine_tx.borrow().clone() else { return };
-        let id = sh_csave.editing_contact_id.get();
+        let id = sh_csave.contacts.editing_contact_id.get();
         let ak = if id == 0 {
             // Create → the account chosen in the picker.
             let idx = ui.get_ce_account_idx().max(0) as usize;
-            sh_csave.ce_account_keys.borrow().get(idx).cloned().unwrap_or_default()
+            sh_csave.contacts.ce_account_keys.borrow().get(idx).cloned().unwrap_or_default()
         } else {
-            sh_csave.editing_contact_account.borrow().clone()
+            sh_csave.contacts.editing_contact_account.borrow().clone()
         };
         if id == 0 {
             let _ = etx.send(engine::EngineCmd::CreateContact { body, account_key: ak });
@@ -175,9 +175,9 @@ pub(crate) fn wire_address_book(ui: &MainWindow, shared: &Rc<Shared>) {
     let sh_cdel = shared.clone();
     ui.on_contact_delete(move || {
         let Some(ui) = ui_weak_cdel.upgrade() else { return };
-        let id = sh_cdel.editing_contact_id.get();
+        let id = sh_cdel.contacts.editing_contact_id.get();
         if id != 0 {
-            let ak = sh_cdel.editing_contact_account.borrow().clone();
+            let ak = sh_cdel.contacts.editing_contact_account.borrow().clone();
             if let Some(etx) = sh_cdel.engine_tx.borrow().as_ref() {
                 let _ = etx.send(engine::EngineCmd::DeleteContact { id, account_key: ak });
             }

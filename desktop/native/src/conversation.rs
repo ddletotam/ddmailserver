@@ -43,11 +43,11 @@ pub(crate) fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
     // Which account this conversation belongs to (empty → primary). Drives the
     // cache namespace and every addressed command issued while it's open.
     let akey = if c.account_key.is_empty() { sh.key.clone() } else { c.account_key.clone() };
-    sh.cur_account_key.replace(akey.clone());
+    sh.accounts.cur_account_key.replace(akey.clone());
     // Смена контекста — сбрасываем закреплённый ручной выбор отправителя:
     // новая беседа по умолчанию отвечает со своей received_by identity, и
     // aim ниже её проставляет. Пользователь снова может переопределить.
-    sh.picked_identity.borrow_mut().take();
+    sh.compose.picked_identity.borrow_mut().take();
     // Replies default to the identity that received this conversation; the
     // from-picker shows it and the user can still override before sending.
     aim_composer_identity(ui, sh, &c.received_by);
@@ -63,7 +63,7 @@ pub(crate) fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
     sh.current_msgs.borrow_mut().clear();
     sh.current_bodies.borrow_mut().clear();
     // Optimistic-send stubs live and die with the pane they were drawn in.
-    sh.pending_sends.borrow_mut().clear();
+    sh.compose.pending_sends.borrow_mut().clear();
 
     // Unread snapshot BEFORE we mark anything read — it anchors the
     // scroll (first unread at top; none unread → scroll to the end).
@@ -286,7 +286,7 @@ pub(crate) fn send_render_job(sh: &Shared, bodies: Vec<MessageBody>, scroll_to: 
     drop(overrides);
     // Склейка — свойство открытого диалога, а не писем: новое письмо
     // compose-режима ни к какой склейке не относится.
-    let merged = sh.pending_compose.borrow().is_none()
+    let merged = sh.compose.pending_compose.borrow().is_none()
         && sh.convs.borrow().get(sh.current.get()).is_some_and(|c| c.merged);
     let _ = sh.tx.send(Job::SetConversation {
         bodies,
@@ -404,7 +404,7 @@ pub(crate) fn wire_view_switch(ui: &MainWindow, shared: &Rc<Shared>) {
             if mode == 1 {
                 // Land the viewport on the working day, not on 00:00 —
                 // consumed by apply_calendar_view once the layout is real.
-                sh_view.pending_cal_scroll.set(Some(sh_view.work_start.get() as f32));
+                sh_view.cal.pending_cal_scroll.set(Some(sh_view.cal.work_start.get() as f32));
                 apply_calendar_view(&ui, &sh_view);
                 if let Some(etx) = sh_view.engine_tx.borrow().as_ref() {
                     let _ = etx.send(engine::EngineCmd::FetchCalendars);
@@ -559,7 +559,7 @@ pub(crate) fn wire_message_actions(ui: &MainWindow, shared: &Rc<Shared>) {
                 let _ = etx.send(engine::EngineCmd::FetchSource {
                     folder: msg.folder.clone(),
                     uid: msg.uid,
-                    account_key: sh_act.cur_account_key.borrow().clone(),
+                    account_key: sh_act.accounts.cur_account_key.borrow().clone(),
                     headers_only: action == "show-headers",
                 });
             }
@@ -604,7 +604,7 @@ pub(crate) fn wire_message_actions(ui: &MainWindow, shared: &Rc<Shared>) {
             "delete" => {
                 let _ = etx.send(engine::EngineCmd::Delete {
                     messages: vec![msg],
-                    account_key: sh_act.cur_account_key.borrow().clone(),
+                    account_key: sh_act.accounts.cur_account_key.borrow().clone(),
                 });
             }
             "read" => {
@@ -612,7 +612,7 @@ pub(crate) fn wire_message_actions(ui: &MainWindow, shared: &Rc<Shared>) {
                     messages: vec![msg],
                     flags: "\\Seen".into(),
                     add: true,
-                    account_key: sh_act.cur_account_key.borrow().clone(),
+                    account_key: sh_act.accounts.cur_account_key.borrow().clone(),
                 });
             }
             "unread" => {
@@ -620,7 +620,7 @@ pub(crate) fn wire_message_actions(ui: &MainWindow, shared: &Rc<Shared>) {
                     messages: vec![msg],
                     flags: "\\Seen".into(),
                     add: false,
-                    account_key: sh_act.cur_account_key.borrow().clone(),
+                    account_key: sh_act.accounts.cur_account_key.borrow().clone(),
                 });
             }
             other => println!("msg-action {other} (not wired yet)"),

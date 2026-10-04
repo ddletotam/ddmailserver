@@ -15,8 +15,8 @@ pub(crate) fn refresh_composer_identities(ui: &MainWindow, sh: &Shared) {
     // по индексу (иначе дельта-refetch, прилетающая каждые пару секунд, сбивала
     // выбор обратно на дефолтную identity: ровно этот баг «выбрал dd, ушло
     // info»). Без явного выбора — прежнее поведение (сохранить по email).
-    let prev_email = sh.picked_identity.borrow().clone().or_else(|| {
-        let list = sh.composer_identities.borrow();
+    let prev_email = sh.compose.picked_identity.borrow().clone().or_else(|| {
+        let list = sh.compose.composer_identities.borrow();
         let idx = ui.get_composer_identity_index();
         list.get(idx.max(0) as usize).cloned()
     });
@@ -55,7 +55,7 @@ pub(crate) fn refresh_composer_identities(ui: &MainWindow, sh: &Shared) {
     // back to the account email engine-side.
     ui.set_composer_identities(ModelRc::new(VecModel::from(items)));
     ui.set_composer_identity_index(if selected >= 0 { selected } else { default_idx });
-    *sh.composer_identities.borrow_mut() = emails;
+    *sh.compose.composer_identities.borrow_mut() = emails;
 }
 
 /// id диалога, которому будет принадлежать письмо, отправленное с адреса
@@ -85,7 +85,7 @@ pub(crate) fn target_conversation_id(ui: &MainWindow, sh: &Shared, chosen: &str)
     }
 
     let participants = ddmail_core::imap::conversation_participants(chosen, &recipients, &[]);
-    let identities = sh.composer_identities.borrow();
+    let identities = sh.compose.composer_identities.borrow();
     let is_mine = |a: &String| identities.iter().any(|i| i.eq_ignore_ascii_case(a));
     let mine: Vec<String> = participants.iter().filter(|a| is_mine(a)).cloned().collect();
     let others: Vec<String> = participants.iter().filter(|a| !is_mine(a)).cloned().collect();
@@ -101,12 +101,12 @@ pub(crate) fn target_conversation_id(ui: &MainWindow, sh: &Shared, chosen: &str)
 /// `true` — переход состоялся; тогда восстанавливать выделение по прежнему
 /// диалогу уже нельзя, иначе оно тут же вернёт нас обратно.
 pub(crate) fn try_pending_switch(ui: &MainWindow, sh: &Shared) -> bool {
-    let Some(target) = sh.pending_switch.borrow().clone() else { return false };
+    let Some(target) = sh.compose.pending_switch.borrow().clone() else { return false };
     let idx = {
         let convs = sh.convs.borrow();
         convs.iter().position(|c| c.id == target).or_else(|| {
             let key = merges::MergeKey {
-                account: sh.cur_account_key.borrow().clone(),
+                account: sh.accounts.cur_account_key.borrow().clone(),
                 id: target.clone(),
             };
             let primary = sh.merges.borrow().members_of(&key).first().cloned()?;
@@ -114,7 +114,7 @@ pub(crate) fn try_pending_switch(ui: &MainWindow, sh: &Shared) -> bool {
         })
     };
     let Some(idx) = idx else { return false };
-    *sh.pending_switch.borrow_mut() = None;
+    *sh.compose.pending_switch.borrow_mut() = None;
     sh.current.set(idx);
     ui.set_selected(idx as i32);
     apply_active_header(ui, sh, idx);
@@ -134,19 +134,20 @@ pub(crate) fn try_pending_switch(ui: &MainWindow, sh: &Shared) -> bool {
 pub(crate) fn from_mismatch(ui: &MainWindow, sh: &Shared) -> Option<(String, String)> {
     // Та же логика, что и в on_send: закреплённый выбор важнее индекса пикера.
     let current = sh
+        .compose
         .picked_identity
         .borrow()
         .clone()
         .or_else(|| {
             let idx = ui.get_composer_identity_index();
-            sh.composer_identities.borrow().get(idx.max(0) as usize).cloned()
+            sh.compose.composer_identities.borrow().get(idx.max(0) as usize).cloned()
         })?
         .to_lowercase();
     let expected = sh.convs.borrow().get(sh.current.get())?.received_by.to_lowercase();
     if expected.is_empty() || expected == current {
         return None;
     }
-    if !sh.composer_identities.borrow().iter().any(|e| *e == expected) {
+    if !sh.compose.composer_identities.borrow().iter().any(|e| *e == expected) {
         return None;
     }
     Some((expected, current))
@@ -159,7 +160,7 @@ pub(crate) fn aim_composer_identity(ui: &MainWindow, sh: &Shared, email: &str) {
         return;
     }
     let lc = email.to_lowercase();
-    if let Some(i) = sh.composer_identities.borrow().iter().position(|e| *e == lc) {
+    if let Some(i) = sh.compose.composer_identities.borrow().iter().position(|e| *e == lc) {
         ui.set_composer_identity_index(i as i32);
     }
 }
@@ -183,20 +184,20 @@ pub(crate) fn refresh_composer_hints(ui: &MainWindow, sh: &Shared) {
     };
     // Forward: «Кому» is a REQUIRED real field (the send refuses without
     // it) — a hint would wrongly suggest it can stay empty.
-    if sh.pending_forward.borrow().is_some() {
+    if sh.compose.pending_forward.borrow().is_some() {
         ui.set_composer_to_auto("".into());
         ui.set_composer_subject_auto("".into());
         return;
     }
     // Transient compose to a fresh address.
-    if let Some(email) = sh.pending_compose.borrow().clone() {
+    if let Some(email) = sh.compose.pending_compose.borrow().clone() {
         ui.set_composer_to_auto(email.into());
         ui.set_composer_subject_auto("".into());
         return;
     }
     // Explicit reply via the quote ribbon: sender + (in groups) the
     // source's To/Cc, minus our own identity — same as the send branch.
-    if let Some(body) = sh.pending_reply.borrow().as_ref() {
+    if let Some(body) = sh.compose.pending_reply.borrow().as_ref() {
         let our = sh.key.to_lowercase();
         let extract_addr = |raw: &str| -> String {
             let lt = raw.find('<');
@@ -249,7 +250,7 @@ pub(crate) fn enter_reply_mode(sh: &Shared, ui: &MainWindow, body: MessageBody) 
     let display_from =
         if body.from.is_empty() { body.from_addr.clone() } else { body.from.clone() };
     let preview = body_preview(&body);
-    *sh.pending_reply.borrow_mut() = Some(body);
+    *sh.compose.pending_reply.borrow_mut() = Some(body);
     ui.set_reply_ribbon_from(display_from.into());
     ui.set_reply_ribbon_preview(preview.into());
     ui.set_reply_ribbon_visible(true);
@@ -267,8 +268,8 @@ pub(crate) fn enter_reply_mode(sh: &Shared, ui: &MainWindow, body: MessageBody) 
 }
 
 pub(crate) fn exit_reply_mode(sh: &Shared, ui: &MainWindow) {
-    *sh.pending_reply.borrow_mut() = None;
-    *sh.pending_forward.borrow_mut() = None;
+    *sh.compose.pending_reply.borrow_mut() = None;
+    *sh.compose.pending_forward.borrow_mut() = None;
     ui.set_reply_ribbon_visible(false);
     ui.set_reply_ribbon_from("".into());
     ui.set_reply_ribbon_preview("".into());
@@ -295,7 +296,7 @@ pub(crate) fn enter_forward_mode(sh: &Shared, ui: &MainWindow, body: MessageBody
         format!("Fwd: {}", body.subject)
     };
     let preview = body_preview(&body);
-    *sh.pending_forward.borrow_mut() = Some(body);
+    *sh.compose.pending_forward.borrow_mut() = Some(body);
     ui.set_reply_ribbon_from(format!("Переслать: {display_from}").into());
     ui.set_reply_ribbon_preview(preview.into());
     ui.set_reply_ribbon_visible(true);
@@ -313,11 +314,11 @@ pub(crate) fn enter_forward_mode(sh: &Shared, ui: &MainWindow, body: MessageBody
 /// target email on `Shared.pending_compose` for `on_send` to pick up.
 pub(crate) fn enter_compose_mode(sh: &Shared, ui: &MainWindow, email: &str) {
     let email = email.trim().to_lowercase();
-    *sh.pending_compose.borrow_mut() = Some(email.clone());
+    *sh.compose.pending_compose.borrow_mut() = Some(email.clone());
     // Свежий контекст — снимаем закреплённый ручной выбор отправителя от
     // предыдущей беседы/письма; для нового письма действует дефолтная
     // identity, пока пользователь не выберет другую в дропдауне.
-    sh.picked_identity.borrow_mut().take();
+    sh.compose.picked_identity.borrow_mut().take();
     // Any staged explicit-reply target is invalidated by jumping into
     // a fresh compose: the new conversation has no bubble to quote.
     exit_reply_mode(sh, ui);
@@ -325,7 +326,7 @@ pub(crate) fn enter_compose_mode(sh: &Shared, ui: &MainWindow, email: &str) {
     // The pane is empty in compose mode; stale bodies of the previously
     // open conversation must not resurface when a send stub re-renders it.
     sh.current_bodies.borrow_mut().clear();
-    sh.pending_sends.borrow_mut().clear();
+    sh.compose.pending_sends.borrow_mut().clear();
     let initial = email.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
     ui.set_active_name(email.clone().into());
     ui.set_active_initials(initial.into());
@@ -356,13 +357,14 @@ pub(crate) fn enter_compose_mode(sh: &Shared, ui: &MainWindow, email: &str) {
 /// правке текста и при смене набора вложений, иначе прикрепление файла не
 /// оживит кнопку до следующего нажатия клавиши.
 pub(crate) fn refresh_can_send(ui: &MainWindow, sh: &Shared) {
-    let has_body = !sh.rich.borrow().is_empty();
-    let has_attachments = !sh.compose_attachments.borrow().is_empty();
+    let has_body = !sh.compose.rich.borrow().is_empty();
+    let has_attachments = !sh.compose.compose_attachments.borrow().is_empty();
     ui.set_rt_can_send(has_body || has_attachments);
 }
 
 pub(crate) fn refresh_attachment_chips(ui: &MainWindow, sh: &Shared) {
     let chips: Vec<AttachChip> = sh
+        .compose
         .compose_attachments
         .borrow()
         .iter()
@@ -384,15 +386,15 @@ pub(crate) fn refresh_attachment_chips(ui: &MainWindow, sh: &Shared) {
 /// производные свойства (plain-зеркало, состояние кнопок форматирования).
 /// Вызывается после КАЖДОЙ правки — другого пути обновить картинку нет.
 pub(crate) fn rich_refresh(ui: &MainWindow, sh: &Shared) {
-    let width = sh.rich_width.get();
+    let width = sh.compose.rich_width.get();
     if width <= 1.0 {
         // Ширина ещё не приехала из Slint (первый кадр) — рисовать не по чему.
         return;
     }
     let scale = ui.window().scale_factor();
-    let ed = sh.rich.borrow();
+    let ed = sh.compose.rich.borrow();
     let sel = ed.has_selection().then(|| ed.selection());
-    let mut slot = sh.rich_renderer.borrow_mut();
+    let mut slot = sh.compose.rich_renderer.borrow_mut();
     let renderer = slot.get_or_insert_with(richtext_render::Renderer::new);
     let out = renderer.render(ed.doc(), ed.caret(), sel, width, scale);
     renderer.forget_unused(ed.doc());
@@ -413,12 +415,12 @@ pub(crate) fn rich_refresh(ui: &MainWindow, sh: &Shared) {
 /// Заменить содержимое композера plain-текстом (восстановление черновика
 /// после неудачной отправки) и перерисовать.
 pub(crate) fn rich_set_text(ui: &MainWindow, sh: &Shared, text: &str) {
-    *sh.rich.borrow_mut() = richtext::Editor::from_text(text);
+    *sh.compose.rich.borrow_mut() = richtext::Editor::from_text(text);
     rich_refresh(ui, sh);
 }
 
 pub(crate) fn rich_clear(ui: &MainWindow, sh: &Shared) {
-    sh.rich.borrow_mut().clear();
+    sh.compose.rich.borrow_mut().clear();
     rich_refresh(ui, sh);
 }
 
@@ -426,15 +428,15 @@ pub(crate) fn rich_clear(ui: &MainWindow, sh: &Shared) {
 /// самый частый сценарий), затем текст.
 pub(crate) fn rich_paste(ui: &MainWindow, sh: &Shared) {
     if let Some((png, w, h)) = clipboard_image() {
-        let seq = sh.rich_cid_seq.get() + 1;
-        sh.rich_cid_seq.set(seq);
+        let seq = sh.compose.rich_cid_seq.get() + 1;
+        sh.compose.rich_cid_seq.set(seq);
         // cid должен быть уникален в пределах письма; время старта разводит
         // ещё и разные письма одной сессии.
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        sh.rich.borrow_mut().insert_image(richtext::InlineImage {
+        sh.compose.rich.borrow_mut().insert_image(richtext::InlineImage {
             cid: format!("img{seq}.{stamp}@ddmail"),
             mime: "image/png".into(),
             bytes: Arc::new(png),
@@ -446,7 +448,7 @@ pub(crate) fn rich_paste(ui: &MainWindow, sh: &Shared) {
     }
     if let Some(text) = clipboard_text() {
         if !text.is_empty() {
-            sh.rich.borrow_mut().insert_str(&text);
+            sh.compose.rich.borrow_mut().insert_str(&text);
             rich_refresh(ui, sh);
         }
     }
@@ -484,17 +486,17 @@ pub(crate) fn rich_key(
         let key = shortcut_key(text);
         let hit = |latin: char| key == Some(latin.to_ascii_uppercase() as u8);
         if hit('c') {
-            let sel = sh.rich.borrow().selection_text();
+            let sel = sh.compose.rich.borrow().selection_text();
             if !sel.is_empty() {
                 clipboard_set(&sel);
             }
             return true;
         }
         if hit('x') {
-            let sel = sh.rich.borrow().selection_text();
+            let sel = sh.compose.rich.borrow().selection_text();
             if !sel.is_empty() {
                 clipboard_set(&sel);
-                sh.rich.borrow_mut().delete_selection();
+                sh.compose.rich.borrow_mut().delete_selection();
                 rich_refresh(ui, sh);
             }
             return true;
@@ -504,7 +506,7 @@ pub(crate) fn rich_key(
             return true;
         }
         if hit('a') {
-            sh.rich.borrow_mut().select_all();
+            sh.compose.rich.borrow_mut().select_all();
             rich_refresh(ui, sh);
             return true;
         }
@@ -516,7 +518,7 @@ pub(crate) fn rich_key(
             } else {
                 StyleBit::Underline
             };
-            sh.rich.borrow_mut().toggle_style(bit);
+            sh.compose.rich.borrow_mut().toggle_style(bit);
             rich_refresh(ui, sh);
             return true;
         }
@@ -526,7 +528,7 @@ pub(crate) fn rich_key(
             if let Some(url) = clipboard_text() {
                 let url = url.trim().to_string();
                 if url.starts_with("http://") || url.starts_with("https://") {
-                    sh.rich.borrow_mut().insert_link(&url);
+                    sh.compose.rich.borrow_mut().insert_link(&url);
                     rich_refresh(ui, sh);
                 }
             }
@@ -534,15 +536,15 @@ pub(crate) fn rich_key(
         }
         if hit('z') {
             if shift {
-                sh.rich.borrow_mut().redo();
+                sh.compose.rich.borrow_mut().redo();
             } else {
-                sh.rich.borrow_mut().undo();
+                sh.compose.rich.borrow_mut().undo();
             }
             rich_refresh(ui, sh);
             return true;
         }
         if hit('y') {
-            sh.rich.borrow_mut().redo();
+            sh.compose.rich.borrow_mut().redo();
             rich_refresh(ui, sh);
             return true;
         }
@@ -570,21 +572,21 @@ pub(crate) fn rich_key(
         chat_page(ui, if is(Key::PageUp) { 1 } else { 2 });
         return true;
     }
-    if (is(Key::Home) || is(Key::End)) && !shift && sh.rich.borrow().is_empty() {
+    if (is(Key::Home) || is(Key::End)) && !shift && sh.compose.rich.borrow().is_empty() {
         chat_page(ui, if is(Key::Home) { 3 } else { 4 });
         return true;
     }
 
     if is(Key::Return) {
         if shift {
-            sh.rich.borrow_mut().split_block();
+            sh.compose.rich.borrow_mut().split_block();
             rich_refresh(ui, sh);
         } else {
             // Enter отправляет (контракт композера, §3). Текст снимаем ДО
             // вызова — on_send читает документ и не должен встретить
             // одолженный RefCell.
             let (empty, plain) = {
-                let ed = sh.rich.borrow();
+                let ed = sh.compose.rich.borrow();
                 (ed.is_empty(), ed.plain_text())
             };
             if !empty {
@@ -594,12 +596,12 @@ pub(crate) fn rich_key(
         return true;
     }
     if is(Key::Backspace) {
-        sh.rich.borrow_mut().backspace();
+        sh.compose.rich.borrow_mut().backspace();
         rich_refresh(ui, sh);
         return true;
     }
     if is(Key::Delete) {
-        sh.rich.borrow_mut().delete_forward();
+        sh.compose.rich.borrow_mut().delete_forward();
         rich_refresh(ui, sh);
         return true;
     }
@@ -611,7 +613,7 @@ pub(crate) fn rich_key(
             (false, true) => Motion::WordLeft,
             (false, false) => Motion::Left,
         };
-        sh.rich.borrow_mut().move_caret(m, shift);
+        sh.compose.rich.borrow_mut().move_caret(m, shift);
         rich_refresh(ui, sh);
         return true;
     }
@@ -620,12 +622,12 @@ pub(crate) fn rich_key(
         // строкам, а переносы живут там.
         let up = is(Key::UpArrow);
         let pos = {
-            let ed = sh.rich.borrow();
-            let slot = sh.rich_renderer.borrow();
+            let ed = sh.compose.rich.borrow();
+            let slot = sh.compose.rich_renderer.borrow();
             slot.as_ref().map(|r| r.move_vertical(ed.caret(), up))
         };
         if let Some(pos) = pos {
-            sh.rich.borrow_mut().set_caret(pos, shift);
+            sh.compose.rich.borrow_mut().set_caret(pos, shift);
             rich_refresh(ui, sh);
         }
         return true;
@@ -637,7 +639,7 @@ pub(crate) fn rich_key(
             (false, true) => Motion::DocEnd,
             (false, false) => Motion::LineEnd,
         };
-        sh.rich.borrow_mut().move_caret(m, shift);
+        sh.compose.rich.borrow_mut().move_caret(m, shift);
         rich_refresh(ui, sh);
         return true;
     }
@@ -649,7 +651,7 @@ pub(crate) fn rich_key(
         && !text.is_empty()
         && text.chars().all(|c| !c.is_control() && !matches!(c, '\u{F700}'..='\u{F8FF}'))
     {
-        sh.rich.borrow_mut().insert_str(text);
+        sh.compose.rich.borrow_mut().insert_str(text);
         rich_refresh(ui, sh);
         return true;
     }
@@ -742,8 +744,8 @@ pub(crate) fn append_send_stub(
     hdr: StubHeaders,
     conv_id: &str,
 ) {
-    let uid = sh.pending_send_seq.get() + 1;
-    sh.pending_send_seq.set(uid);
+    let uid = sh.compose.pending_send_seq.get() + 1;
+    sh.compose.pending_send_seq.set(uid);
     let body = MessageBody {
         uid,
         // A stub the user just typed: it has never been on the wire.
@@ -764,7 +766,7 @@ pub(crate) fn append_send_stub(
         in_reply_to: String::new(),
         references: Vec::new(),
     };
-    sh.pending_sends.borrow_mut().push(PendingSend {
+    sh.compose.pending_sends.borrow_mut().push(PendingSend {
         conv_id: conv_id.to_string(),
         body: body.clone(),
         created: Instant::now(),
@@ -816,14 +818,14 @@ pub(crate) fn schedule_post_send_refetch(attempt: usize) {
 
             // Nothing left to wait for — stop, so a quiet client is not woken
             // every half minute for no reason.
-            let waiting =
-                sh.pending_switch.borrow().is_some() || sh.compose_sent_target.borrow().is_some();
+            let waiting = sh.compose.pending_switch.borrow().is_some()
+                || sh.compose.compose_sent_target.borrow().is_some();
             if attempt > 0 && !waiting {
                 return false;
             }
 
             if let Some(cache) = &sh.cache {
-                for k in sh.account_keys.borrow().iter() {
+                for k in sh.accounts.account_keys.borrow().iter() {
                     cache.set_meta(&format!("conv_full_ts:{k}"), "0").ok();
                 }
             }
@@ -856,14 +858,14 @@ pub(crate) fn wire_composer_input(ui: &MainWindow, shared: &Rc<Shared>) {
         if paths.is_empty() {
             return;
         }
-        sh_att.compose_attachments.borrow_mut().extend(paths);
+        sh_att.compose.compose_attachments.borrow_mut().extend(paths);
         refresh_attachment_chips(&u, &sh_att);
     });
     let ui_weak_rm = ui.as_weak();
     let sh_rm = shared.clone();
     ui.on_remove_attachment(move |idx| {
         {
-            let mut atts = sh_rm.compose_attachments.borrow_mut();
+            let mut atts = sh_rm.compose.compose_attachments.borrow_mut();
             let i = idx as usize;
             if i < atts.len() {
                 atts.remove(i);
@@ -877,17 +879,17 @@ pub(crate) fn wire_composer_input(ui: &MainWindow, shared: &Rc<Shared>) {
     // ── Rich-text композер ──
     //
     // Slint отдаёт сюда ширину колонки, клавиши и мышь; обратно уезжают
-    // битмап и геометрия каретки (rich_refresh). Модель — sh.rich.
+    // битмап и геометрия каретки (rich_refresh). Модель — sh.compose.rich.
     let ui_weak_rtw = ui.as_weak();
     let sh_rtw = shared.clone();
     ui.on_rt_resize(move |w| {
         let Some(u) = ui_weak_rtw.upgrade() else { return };
         // Ширина скачет на каждом кадре ресайза — перевёрстываем только на
         // реальном изменении (сравнение в логических px с допуском ½ px).
-        if (sh_rtw.rich_width.get() - w).abs() < 0.5 {
+        if (sh_rtw.compose.rich_width.get() - w).abs() < 0.5 {
             return;
         }
-        sh_rtw.rich_width.set(w);
+        sh_rtw.compose.rich_width.set(w);
         rich_refresh(&u, &sh_rtw);
     });
     let ui_weak_rtk = ui.as_weak();
@@ -901,7 +903,7 @@ pub(crate) fn wire_composer_input(ui: &MainWindow, shared: &Rc<Shared>) {
     ui.on_rt_pointer(move |x, y, kind| {
         let Some(u) = ui_weak_rtp.upgrade() else { return };
         let pos = {
-            let slot = sh_rtp.rich_renderer.borrow();
+            let slot = sh_rtp.compose.rich_renderer.borrow();
             let Some(r) = slot.as_ref() else { return };
             r.pos_at(x, y)
         };
@@ -909,17 +911,17 @@ pub(crate) fn wire_composer_input(ui: &MainWindow, shared: &Rc<Shared>) {
             // Нажатие ставит каретку и начинает протяжку; Shift+клик тянет
             // выделение от прежнего якоря (как в любом текстовом поле).
             0 => {
-                sh_rtp.rich_dragging.set(true);
-                sh_rtp.rich.borrow_mut().set_caret(pos, false);
+                sh_rtp.compose.rich_dragging.set(true);
+                sh_rtp.compose.rich.borrow_mut().set_caret(pos, false);
             }
             1 => {
-                if !sh_rtp.rich_dragging.get() {
+                if !sh_rtp.compose.rich_dragging.get() {
                     return;
                 }
-                sh_rtp.rich.borrow_mut().set_caret(pos, true);
+                sh_rtp.compose.rich.borrow_mut().set_caret(pos, true);
             }
-            2 => sh_rtp.rich_dragging.set(false),
-            _ => sh_rtp.rich.borrow_mut().select_word_at(pos),
+            2 => sh_rtp.compose.rich_dragging.set(false),
+            _ => sh_rtp.compose.rich.borrow_mut().select_word_at(pos),
         }
         rich_refresh(&u, &sh_rtp);
     });
@@ -938,20 +940,20 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
         let sh = shared.clone();
         ui.on_from_mismatch_pick(move |index| {
             let Some(ui) = weak.upgrade() else { return };
-            let email = sh.composer_identities.borrow().get(index.max(0) as usize).cloned();
+            let email = sh.compose.composer_identities.borrow().get(index.max(0) as usize).cloned();
             if let Some(email) = email {
                 // Закрепляем как ручной выбор — иначе дельта-refetch собьёт
                 // индекс пикера обратно, и уйдёт снова не то.
-                *sh.picked_identity.borrow_mut() = Some(email.clone());
+                *sh.compose.picked_identity.borrow_mut() = Some(email.clone());
                 aim_composer_identity(&ui, &sh, &email);
                 // Письмо уедет в диалог своего набора адресов. Переходим туда
                 // только если попросили галочкой и адрес действительно другой.
                 let switching = ui.get_from_mismatch_switch()
                     && ui.get_from_mismatch_index() != ui.get_from_mismatch_expected_index();
-                *sh.pending_switch.borrow_mut() =
+                *sh.compose.pending_switch.borrow_mut() =
                     if switching { target_conversation_id(&ui, &sh, &email) } else { None };
             }
-            let text = sh.held_send.borrow().clone().unwrap_or_default();
+            let text = sh.compose.held_send.borrow().clone().unwrap_or_default();
             ui.invoke_send(text.into());
         });
     }
@@ -961,8 +963,8 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
             // Возвращать текст не нужно: композер чистится только на
             // успешной ветке отправки (clear_overrides), документ на месте.
             // Снимаем и задержанную отправку, и ожидание перехода.
-            sh.held_send.borrow_mut().take();
-            sh.pending_switch.borrow_mut().take();
+            sh.compose.held_send.borrow_mut().take();
+            sh.compose.pending_switch.borrow_mut().take();
         });
     }
 
@@ -974,14 +976,14 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
         // в text/plain-часть и в заглушку optimistic send. Пустой текст ещё
         // не значит «нечего отправлять»: письмо из одной картинки — валидное.
         let (rich_html, rich_images) = {
-            let ed = sh_send.rich.borrow();
+            let ed = sh_send.compose.rich.borrow();
             // Вложения спрашиваем отдельно: `ed.is_empty()` знает только
             // документ редактора — абзацы и inline-картинки, — а прикреплённые
             // файлы лежат в `compose_attachments`. Без этой проверки письмо из
             // одного вложения без единого слова не отправлялось, и кнопка при
             // этом молчала: обработчик выходил здесь же, до всякой обратной
             // связи.
-            let has_attachments = !sh_send.compose_attachments.borrow().is_empty();
+            let has_attachments = !sh_send.compose.compose_attachments.borrow().is_empty();
             if ed.is_empty() && text.trim().is_empty() && !has_attachments {
                 eprintln!("send: нечего отправлять — ни текста, ни картинок, ни вложений");
                 return;
@@ -998,14 +1000,14 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
             })
             .collect();
         // Отправка, возвращённая диалогом «не тот адрес», проверку уже прошла.
-        let resumed = sh_send.held_send.borrow_mut().take().is_some();
+        let resumed = sh_send.compose.held_send.borrow_mut().take().is_some();
         if !resumed {
             if let Some(ui) = ui_weak_send.upgrade() {
                 if let Some((expected, current)) = from_mismatch(&ui, &sh_send) {
-                    *sh_send.held_send.borrow_mut() = Some(text.clone());
+                    *sh_send.compose.held_send.borrow_mut() = Some(text.clone());
                     // Список для дропдауна + предвыбор на адресе диалога:
                     // правильный вариант уже выбран, подтвердить — один клик.
-                    let addresses = sh_send.composer_identities.borrow().clone();
+                    let addresses = sh_send.compose.composer_identities.borrow().clone();
                     let picked = addresses.iter().position(|e| *e == expected).unwrap_or(0);
                     ui.set_from_mismatch_options(ModelRc::new(VecModel::from(
                         addresses.iter().map(|e| slint::SharedString::from(e.as_str())).collect::<Vec<_>>(),
@@ -1026,8 +1028,8 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
         // since removed, the send has nowhere to go — say so plainly instead
         // of misrouting to another account.
         {
-            let ak = sh_send.cur_account_key.borrow().clone();
-            let alive = ak.is_empty() || sh_send.account_keys.borrow().iter().any(|k| *k == ak);
+            let ak = sh_send.accounts.cur_account_key.borrow().clone();
+            let alive = ak.is_empty() || sh_send.accounts.account_keys.borrow().iter().any(|k| *k == ak);
             if !alive {
                 toast_window::show(
                     2,
@@ -1079,14 +1081,14 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
         // только для отрисовки). None до синка identities → движок подставит
         // адрес аккаунта.
         let from_identity: Option<String> = sh_send
-            .picked_identity
+            .compose.picked_identity
             .borrow()
             .clone()
             .or_else(|| {
                 ui_now.as_ref().and_then(|u| {
                     let idx = u.get_composer_identity_index();
                     sh_send
-                        .composer_identities
+                        .compose.composer_identities
                         .borrow()
                         .get(idx.max(0) as usize)
                         .cloned()
@@ -1095,7 +1097,7 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
         // Staged attachment paths for this send, snapshotted up front so the
         // per-branch Send commands all carry the same list.
         let attachments: Vec<String> = sh_send
-            .compose_attachments
+            .compose.compose_attachments
             .borrow()
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
@@ -1104,7 +1106,7 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
         // so the next message starts blank again. Keeps the chevron panel
         // from silently inheriting last message's headers.
         let clear_overrides = || {
-            sh_send.compose_attachments.borrow_mut().clear();
+            sh_send.compose.compose_attachments.borrow_mut().clear();
             if let Some(u) = ui_weak_send.upgrade() {
                 u.set_composer_subject("".into());
                 u.set_composer_cc("".into());
@@ -1125,7 +1127,7 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
         // пережил бы `exit_reply_mode` в конце ветки, а тот пишет в эту же
         // ячейку. Именно так клиент и умирал сразу после отправки —
         // «RefCell already borrowed», main.rs:1063. То же и в двух ветках ниже.
-        let forwarded = sh_send.pending_forward.borrow().clone();
+        let forwarded = sh_send.compose.pending_forward.borrow().clone();
         if let Some(orig) = forwarded {
             let to = to_override.clone();
             if to.is_empty() {
@@ -1183,7 +1185,7 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
                         message_id: orig.message_id.clone(),
                         seen: true,
                     }),
-                    account_key: sh_send.cur_account_key.borrow().clone(),
+                    account_key: sh_send.accounts.cur_account_key.borrow().clone(),
                 });
                 clear_overrides();
                 if let Some(u) = ui_now.as_ref() {
@@ -1196,7 +1198,7 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
             return;
         }
         // Branch 1: transient compose target set via the search dropdown.
-        let compose_target = sh_send.pending_compose.borrow().clone();
+        let compose_target = sh_send.compose.pending_compose.borrow().clone();
         if let Some(target) = compose_target {
             let subject = if !subject_override.is_empty() {
                 subject_override.clone()
@@ -1219,7 +1221,7 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
                     from: from_identity.clone(),
                     attachments: attachments.clone(),
                     forward_attachments: None,
-                    account_key: sh_send.cur_account_key.borrow().clone(),
+                    account_key: sh_send.accounts.cur_account_key.borrow().clone(),
                 });
                 clear_overrides();
                 // Optimistic bubble in the (empty) compose pane; no
@@ -1239,7 +1241,7 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
             return;
         }
         // Branch 2: explicit reply via quote ribbon.
-        let quoted_reply = sh_send.pending_reply.borrow().clone();
+        let quoted_reply = sh_send.compose.pending_reply.borrow().clone();
         if let Some(reply_body) = quoted_reply {
             // Reply-all in groups: the current convs entry tells us
             // group-ness; in 1:1 conversations the counterpart is the
@@ -1307,7 +1309,7 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
                     from: from_identity.clone(),
                     attachments: attachments.clone(),
                     forward_attachments: None,
-                    account_key: sh_send.cur_account_key.borrow().clone(),
+                    account_key: sh_send.accounts.cur_account_key.borrow().clone(),
                 });
                 clear_overrides();
                 let conv_id = sh_send
@@ -1398,7 +1400,7 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
                 from: from_identity.clone(),
                 attachments,
                 forward_attachments: None,
-                account_key: sh_send.cur_account_key.borrow().clone(),
+                account_key: sh_send.accounts.cur_account_key.borrow().clone(),
             });
             clear_overrides();
             append_send_stub(
@@ -1422,10 +1424,10 @@ pub(crate) fn wire_identity_pick(ui: &MainWindow, shared: &Rc<Shared>) {
     // пережил дельта-refresh и авто-наведение (см. picked_identity).
     let sh_ip = shared.clone();
     ui.on_identity_picked(move |ii| {
-        let email = sh_ip.composer_identities.borrow().get(ii.max(0) as usize).cloned();
+        let email = sh_ip.compose.composer_identities.borrow().get(ii.max(0) as usize).cloned();
         if let Some(email) = email {
             println!("identity picked: {email}");
-            *sh_ip.picked_identity.borrow_mut() = Some(email);
+            *sh_ip.compose.picked_identity.borrow_mut() = Some(email);
         }
     });
 }

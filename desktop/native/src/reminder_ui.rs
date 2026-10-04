@@ -95,13 +95,14 @@ pub(crate) fn handle_reminder_action(
             // occ_end recovered from the current calendar view (0 if unknown;
             // user_choice_reminder tolerates it).
             let occ_end = sh
+                .cal
                 .calendar_events
                 .borrow()
                 .iter()
                 .find(|e| e.id == event_id)
                 .and_then(|e| e.dtend)
                 .unwrap_or(0);
-            sh.snooze_ctx.replace((event_id, occ_ms, occ_end, toast_id, summary.to_string()));
+            sh.cal.snooze_ctx.replace((event_id, occ_ms, occ_end, toast_id, summary.to_string()));
             ui.set_snooze_summary(summary.into());
             ui.set_snooze_options(slint::ModelRc::new(slint::VecModel::from(opts)));
             ui.set_snooze_visible(true);
@@ -118,11 +119,11 @@ pub(crate) fn handle_reminder_action(
             }
             raise_window(ui);
             let jump_week = week_start_days_for_ms(occ_ms);
-            sh.calendar_week_start_days.set(jump_week);
-            sh.week_follows_today.set(jump_week == week_start_days_today());
-            sh.pending_open_event.set(event_id);
-            sh.pending_open_occ.set(occ_ms);
-            *sh.pending_open_summary.borrow_mut() = summary.to_string();
+            sh.cal.calendar_week_start_days.set(jump_week);
+            sh.cal.week_follows_today.set(jump_week == week_start_days_today());
+            sh.cal.pending_open_event.set(event_id);
+            sh.cal.pending_open_occ.set(occ_ms);
+            *sh.cal.pending_open_summary.borrow_mut() = summary.to_string();
             // Land the viewport on the event itself (an hour of context
             // above), not on the working day — the toast points at it.
             {
@@ -131,8 +132,8 @@ pub(crate) fn handle_reminder_action(
                     .timestamp_millis_opt(occ_ms)
                     .single()
                     .map(|t| t.hour() as f32 + t.minute() as f32 / 60.0)
-                    .unwrap_or(sh.work_start.get() as f32);
-                sh.pending_cal_scroll.set(Some((hour - 1.0).max(0.0)));
+                    .unwrap_or(sh.cal.work_start.get() as f32);
+                sh.cal.pending_cal_scroll.set(Some((hour - 1.0).max(0.0)));
             }
             ui.set_view_mode(1);
             apply_calendar_view(ui, sh);
@@ -158,10 +159,10 @@ pub(crate) fn handle_reminder_action(
 /// но нем.
 pub(crate) fn apply_reminder_visibility(sh: &Shared, cal_id: i64, visible: bool) {
     let Some(cache) = sh.cache.as_ref() else { return };
-    let events = sh.calendar_events.borrow();
+    let events = sh.cal.calendar_events.borrow();
     if visible {
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let vis = sh.calendar_visible.borrow();
+        let vis = sh.cal.calendar_visible.borrow();
         let hidden = |c: i64| !*vis.get(&c).unwrap_or(&true);
         reminders::seed(cache, &events, &hidden, now_ms);
         println!("[cal] календарь {cal_id} включён — напоминания пересеяны");
@@ -259,8 +260,8 @@ pub(crate) fn start_reminder_timers(ui: &MainWindow) -> (slint::Timer, slint::Ti
                 // взвестись до выключения и не попасть под purge (событие вне
                 // загруженного окна, переезд между календарями). Строка
                 // остаётся взведённой — включат календарь, зазвонит сама.
-                let vis = sh.calendar_visible.borrow();
-                let events = sh.calendar_events.borrow();
+                let vis = sh.cal.calendar_visible.borrow();
+                let events = sh.cal.calendar_events.borrow();
                 let hidden = |row: &ddmail_core::cache::ReminderRow| -> bool {
                     let cal = if row.calendar_id != 0 {
                         row.calendar_id
@@ -357,9 +358,10 @@ pub(crate) fn start_reminder_timers(ui: &MainWindow) -> (slint::Timer, slint::Ti
                 let Some(sh) = borrow.as_ref() else { return };
                 fetch_reminder_window(sh);
                 let today = week_start_days_today();
-                if sh.week_follows_today.get() && sh.calendar_week_start_days.get() != today {
+                if sh.cal.week_follows_today.get() && sh.cal.calendar_week_start_days.get() != today
+                {
                     println!("[cal] перекат недели: сетка идёт за сегодня → {today}");
-                    sh.calendar_week_start_days.set(today);
+                    sh.cal.calendar_week_start_days.set(today);
                     apply_calendar_view(&ui, sh);
                     refetch_calendar_events(&ui, sh);
                 }
@@ -375,7 +377,7 @@ pub(crate) fn wire_snooze(ui: &MainWindow, shared: &Rc<Shared>) {
     // toast buttons use ("snz:5" … "snz:atstart").
     let sh_snz = shared.clone();
     ui.on_snooze_choice(move |choice| {
-        let (eid, occ, occ_end, toast_id, summary) = sh_snz.snooze_ctx.borrow().clone();
+        let (eid, occ, occ_end, toast_id, summary) = sh_snz.cal.snooze_ctx.borrow().clone();
         if eid != 0 {
             let now_ms = chrono::Utc::now().timestamp_millis();
             let at_start = choice == "atstart";
@@ -393,16 +395,16 @@ pub(crate) fn wire_snooze(ui: &MainWindow, shared: &Rc<Shared>) {
             toast_window::stop_timer(toast_id); // disarm the timeout hook
             toast_window::close(toast_id);
         }
-        sh_snz.snooze_ctx.replace((0, 0, 0, 0, String::new()));
+        sh_snz.cal.snooze_ctx.replace((0, 0, 0, 0, String::new()));
     });
     // Snooze dialog dismissed WITHOUT a choice: the toast behaves as if the
     // button was never pressed — resume its paused countdown.
     let sh_snc = shared.clone();
     ui.on_snooze_cancel(move || {
-        let (_, _, _, toast_id, _) = sh_snc.snooze_ctx.borrow().clone();
+        let (_, _, _, toast_id, _) = sh_snc.cal.snooze_ctx.borrow().clone();
         if toast_id != 0 {
             toast_window::resume_timer(toast_id);
         }
-        sh_snc.snooze_ctx.replace((0, 0, 0, 0, String::new()));
+        sh_snc.cal.snooze_ctx.replace((0, 0, 0, 0, String::new()));
     });
 }

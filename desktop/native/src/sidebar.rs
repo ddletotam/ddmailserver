@@ -439,7 +439,7 @@ pub(crate) fn flash_sidebar_row(ui: &MainWindow, model_idx: usize) {
 pub(crate) fn refresh_sidebar(sh: &Shared, ui: &MainWindow) {
     let displays = sh.displays.borrow();
     let avatars = sh.avatars.borrow();
-    let pending = sh.pending_compose.borrow().clone();
+    let pending = sh.compose.pending_compose.borrow().clone();
 
     let mut items = Vec::with_capacity(displays.len() + 1);
     if let Some(target) = pending.as_ref() {
@@ -467,7 +467,7 @@ pub(crate) fn nudge_sidebar_scroll(ui_weak: slint::Weak<MainWindow>, row_y: f32,
 /// displays-index → sidebar model index (the transient compose row shifts
 /// everything by one).
 pub(crate) fn model_index(sh: &Shared, idx: usize) -> usize {
-    if sh.pending_compose.borrow().is_some() { idx + 1 } else { idx }
+    if sh.compose.pending_compose.borrow().is_some() { idx + 1 } else { idx }
 }
 
 /// Conversation list callbacks: select, merge / unmerge, rename, keyboard
@@ -480,7 +480,7 @@ pub(crate) fn wire_sidebar(ui: &MainWindow, shared: &Rc<Shared>) {
         let model_idx = idx as usize;
         // While in transient-compose mode the first row is the synthetic
         // "new chat" — clicking it is a no-op (we're already there).
-        let pending = sh_sel.pending_compose.borrow().is_some();
+        let pending = sh_sel.compose.pending_compose.borrow().is_some();
         if pending && model_idx == 0 {
             return;
         }
@@ -490,7 +490,7 @@ pub(crate) fn wire_sidebar(ui: &MainWindow, shared: &Rc<Shared>) {
         // Picking any real conversation leaves transient-compose mode AND
         // drops any staged explicit-reply target — both are tied to the
         // previous context.
-        let was_pending = sh_sel.pending_compose.borrow_mut().take().is_some();
+        let was_pending = sh_sel.compose.pending_compose.borrow_mut().take().is_some();
         exit_reply_mode(&sh_sel, &ui);
         apply_active_header(&ui, &sh_sel, real_idx);
         if was_pending {
@@ -511,7 +511,7 @@ pub(crate) fn wire_sidebar(ui: &MainWindow, shared: &Rc<Shared>) {
     let sh_cm = shared.clone();
     ui.on_conv_merge(move |model_idx| {
         let Some(ui) = ui_weak_cm.upgrade() else { return };
-        if sh_cm.pending_compose.borrow().is_some() {
+        if sh_cm.compose.pending_compose.borrow().is_some() {
             return; // transient compose: индексы сдвинуты, открытого диалога нет
         }
         let src_idx = model_idx as usize;
@@ -565,7 +565,7 @@ pub(crate) fn wire_sidebar(ui: &MainWindow, shared: &Rc<Shared>) {
     let sh_um = shared.clone();
     ui.on_conv_unmerge(move |model_idx| {
         let Some(ui) = ui_weak_um.upgrade() else { return };
-        if sh_um.pending_compose.borrow().is_some() {
+        if sh_um.compose.pending_compose.borrow().is_some() {
             return;
         }
         let idx = model_idx as usize;
@@ -601,7 +601,7 @@ pub(crate) fn wire_sidebar(ui: &MainWindow, shared: &Rc<Shared>) {
     let sh_rn = shared.clone();
     ui.on_rename_conversation(move |name| {
         let Some(ui) = ui_weak_rn.upgrade() else { return };
-        if sh_rn.pending_compose.borrow().is_some() {
+        if sh_rn.compose.pending_compose.borrow().is_some() {
             return; // нового письма ещё нет в списке — переименовывать нечего
         }
         let resolved = {
@@ -629,7 +629,7 @@ pub(crate) fn wire_sidebar(ui: &MainWindow, shared: &Rc<Shared>) {
     let sh_nav = shared.clone();
     ui.on_nav_conversation(move |delta| {
         let Some(ui) = ui_weak_nav.upgrade() else { return };
-        if sh_nav.pending_compose.borrow().is_some() {
+        if sh_nav.compose.pending_compose.borrow().is_some() {
             return;
         }
         let len = sh_nav.convs.borrow().len() as i32;
@@ -657,7 +657,7 @@ pub(crate) fn wire_sidebar(ui: &MainWindow, shared: &Rc<Shared>) {
     let sh_delc = shared.clone();
     ui.on_delete_conversation(move || {
         let Some(ui) = ui_weak_delc.upgrade() else { return };
-        if sh_delc.pending_compose.borrow().is_some() {
+        if sh_delc.compose.pending_compose.borrow().is_some() {
             return; // transient compose has no conversation to delete
         }
         let convs = sh_delc.convs.borrow();
@@ -684,7 +684,7 @@ pub(crate) fn wire_sidebar(ui: &MainWindow, shared: &Rc<Shared>) {
     let sh_spam = shared.clone();
     ui.on_spam_conversation(move || {
         let Some(ui) = ui_weak_spam.upgrade() else { return };
-        if sh_spam.pending_compose.borrow().is_some() {
+        if sh_spam.compose.pending_compose.borrow().is_some() {
             return;
         }
         let convs = sh_spam.convs.borrow();
@@ -721,7 +721,7 @@ pub(crate) fn wire_sidebar(ui: &MainWindow, shared: &Rc<Shared>) {
             println!("delete conversation {conv_id} ({} messages)", refs.len());
             let _ = etx.send(engine::EngineCmd::Delete {
                 messages: refs,
-                account_key: sh_delk.cur_account_key.borrow().clone(),
+                account_key: sh_delk.accounts.cur_account_key.borrow().clone(),
             });
         }
         optimistic_remove_conversation(&ui, &sh_delk, cur, &conv_id);
@@ -754,7 +754,7 @@ pub(crate) fn wire_sidebar(ui: &MainWindow, shared: &Rc<Shared>) {
                 scope: scope.to_string(),
                 fallback_addr,
                 message_ids: ids,
-                account_key: sh_spamc.cur_account_key.borrow().clone(),
+                account_key: sh_spamc.accounts.cur_account_key.borrow().clone(),
             });
         }
         optimistic_remove_conversation(&ui, &sh_spamc, cur, &conv_id);

@@ -20,46 +20,8 @@ pub(crate) struct Shared {
     /// Вложение под правым кликом (folder, uid, index, filename) — цель
     /// пунктов «Открыть/Сохранить вложение» контекстного меню пузыря.
     pub(crate) ctx_attach: RefCell<Option<(String, u32, usize, String)>>,
-    /// Явно выбранный в дропдауне отправитель (lowercase email). Закрепляет
-    /// пользовательский выбор: побеждает авто-наведение на identity беседы и
-    /// переустановку индекса при дельта-refetch; on_send читает его
-    /// приоритетно. None = явного выбора нет, действует авто-логика.
-    /// Сбрасывается при смене контекста (открытие беседы / новое письмо).
-    pub(crate) picked_identity: RefCell<Option<String>>,
-    /// Диалог, в который надо перейти, когда он появится в списке: отправка с
-    /// другого адреса образует свой набор адресов, то есть свою беседу, и она
-    /// возникает не мгновенно — сначала письмо должно долететь до «Отправленных»
-    /// и вернуться синком. Ставится галочкой в диалоге «не тот адрес».
-    pub(crate) pending_switch: RefCell<Option<String>>,
-
-    /// Отправка, задержанная диалогом «отвечаешь не с того адреса»: текст
-    /// письма ждёт решения. Set → показан диалог; on_send при повторном входе
-    /// забирает текст отсюда и проверку уже не делает.
-    ///
-    /// Задержка нужна потому, что композер очищает поле сразу при отправке:
-    /// без этого отменённое письмо просто пропало бы.
-    pub(crate) held_send: RefCell<Option<String>>,
     pub(crate) displays: RefCell<Vec<Disp>>,
     pub(crate) avatars: RefCell<HashMap<String, Image>>,
-    /// account_key of the currently open conversation. Addressed engine
-    /// commands (body/flags/delete/source/attachment/send) carry it so they
-    /// route to the right server. Empty falls back to the primary account.
-    pub(crate) cur_account_key: RefCell<String>,
-    /// All account keys (the indicator's denominator) and their last-known
-    /// connection state ("connecting" | "connected" | "error" | "auth").
-    /// Drives the aggregate green/yellow/red status light.
-    pub(crate) account_keys: RefCell<Vec<String>>,
-    pub(crate) account_states: RefCell<HashMap<String, String>>,
-    /// Ключи строк списка учёток под индикатором связи (порядок
-    /// accounts.json) — по индексу строки `relogin` находит, какую учётку
-    /// открывать в форме входа.
-    pub(crate) conn_dot_keys: RefCell<Vec<String>>,
-    /// Учётки, чья сессия мертва и ждёт пароля — в порядке accounts.json.
-    /// Отдельно от `account_states`, потому что состояние липкое: watcher
-    /// после отказа ещё успевает крикнуть "connecting"/"error", и в общей
-    /// карте «нужен вход» тут же затиралось бы на «нет связи». Снимается
-    /// только удачным коннектом, ротацией токена или пересборкой движка.
-    pub(crate) reauth: RefCell<Vec<String>>,
     /// Message refs for the currently rendered rows (row index → message).
     pub(crate) current_msgs: RefCell<Vec<MessageRef>>,
     /// Bodies of the open conversation, kept in memory (parallel to
@@ -100,9 +62,6 @@ pub(crate) struct Shared {
     /// bubble even when an HTML part exists («Показать → Текстовую
     /// версию»). Session-scoped on purpose.
     pub(crate) body_view_text: RefCell<HashSet<(String, u32)>>,
-    /// Forward target — set by «Переслать»; on Send the original's text
-    /// goes below the typed text and its attachments are re-attached.
-    pub(crate) pending_forward: RefCell<Option<MessageBody>>,
     /// Which source view a pending FetchSource should open:
     /// 1 = заголовки, 2 = полный исходник.
     pub(crate) pending_source_view: Cell<u8>,
@@ -110,20 +69,9 @@ pub(crate) struct Shared {
     /// shows only a capped slice — see SOURCE_VIEW_MAX). «Копировать всё» reads
     /// this so the clipboard always gets the complete source.
     pub(crate) source_view_full: RefCell<String>,
-    /// Word rects of the rendered source bitmap + its selection state. Mirrors
-    /// the bubble selection layer (row_text_runs/sel_*) but for the modal.
-    pub(crate) src_runs: RefCell<Vec<render_common::TextRun>>,
-    pub(crate) src_sel_anchor: Cell<usize>,
-    pub(crate) src_sel_head: Cell<usize>,
-    pub(crate) src_sel_moved: Cell<bool>,
-    pub(crate) src_sel_dragging: Cell<bool>,
     /// email(lowercase) → пастельный цвет айдентики (подкраска строк
     /// сайдбара по received_by). Обновляется при каждом списке диалогов.
     pub(crate) identity_colors: RefCell<HashMap<String, String>>,
-    /// From-picker дропдауна композера: e-mail'ы в том же порядке, что и
-    /// Slint-модель composer-identities. on_send резолвит выбранный индекс
-    /// через этот список (Slint-модель — источник только для отрисовки).
-    pub(crate) composer_identities: RefCell<Vec<String>>,
     /// UI-thread copy of the per-row link rects (CSS px, bubble-relative) —
     /// the only copy: the hover cursor, the link click (`on_hit_test`) and
     /// the context-menu probe all hit-test against it synchronously, without
@@ -135,22 +83,6 @@ pub(crate) struct Shared {
     /// Per-row text layers (word rects, bubble-relative CSS px) — mouse
     /// selection. Parallel to the rendered rows, like row_links.
     pub(crate) row_text_runs: RefCell<Vec<Vec<render_common::TextRun>>>,
-    /// Mouse selection: row index (-1 none) and the anchor/head word
-    /// indices within that row's text layer (inclusive, unordered).
-    pub(crate) sel_row: Cell<i32>,
-    pub(crate) sel_anchor: Cell<usize>,
-    pub(crate) sel_head: Cell<usize>,
-    pub(crate) sel_dragging: Cell<bool>,
-    pub(crate) sel_moved: Cell<bool>,
-    /// Set when a drag-selection just ended — the click that Slint fires
-    /// on release must NOT open a link.
-    pub(crate) sel_suppress_click: Cell<bool>,
-    /// Серия кликов для выделения слова (второй) и строки (третий). Slint даёт
-    /// только `clicked`, ни двойного, ни тройного события у него нет, поэтому
-    /// серию считаем сами по нажатиям: время, строка и точка предыдущего.
-    pub(crate) sel_click_streak: Cell<u32>,
-    pub(crate) sel_click_at: Cell<Option<Instant>>,
-    pub(crate) sel_click_pos: Cell<(i32, f32, f32)>,
     /// Ссылка под курсором на момент показа контекстного меню и приложения,
     /// умеющие её открыть (имя + .desktop). Список читается один раз при старте.
     pub(crate) ctx_link: RefCell<Option<String>>,
@@ -167,17 +99,65 @@ pub(crate) struct Shared {
     pub(crate) render_scale: Cell<f32>,
     pub(crate) tx: mpsc::Sender<Job>,
     pub(crate) engine_tx: RefCell<Option<mpsc::Sender<engine::EngineCmd>>>,
-    /// Last search query we asked the engine for. Engine echoes the
-    /// query back in `SearchDropdown`; we drop results that don't match
-    /// — handles the race where typing outruns the engine.
-    pub(crate) search_query_inflight: RefCell<String>,
-    /// Latest rows in the dropdown (parallel to the Slint model order),
-    /// so callbacks can resolve `search-select-contact(idx)` and
-    /// `search-select-message(idx)` back to their domain objects.
-    pub(crate) search_contacts: RefCell<Vec<Contact>>,
-    pub(crate) search_messages: RefCell<Vec<MessageEnvelope>>,
-    /// Секция «Диалоги» — локальные совпадения (`local_search_convs`).
-    pub(crate) search_convs: RefCell<Vec<ConvHit>>,
+    /// Content-permission policy (per-sender media/scripts, per-domain
+    /// allowlist) — port of the svelte permissionStore. Persisted to
+    /// disk on every toggle.
+    pub(crate) policy: RefCell<policy::Policy>,
+    /// Monotonic generation counter, bumped each time the policy
+    /// mutates. Render worker uses it as part of the bitmap cache key
+    /// so toggling a permission invalidates exactly the relevant
+    /// cached rows.
+    pub(crate) policy_gen: Cell<u64>,
+    // Per-feature state, one struct each (defined below).
+    pub(crate) compose: ComposeState,
+    pub(crate) selection: SelectionState,
+    pub(crate) search: SearchState,
+    pub(crate) cal: CalendarState,
+    pub(crate) contacts: AddressBookState,
+    pub(crate) accounts: AccountsState,
+}
+
+thread_local! {
+    /// Set once on the UI thread so engine-result closures (posted via
+    /// invoke_from_event_loop, which must be Send + 'static and can't capture
+    /// the Rc) can reach the shared state.
+    pub(crate) static SHARED: RefCell<Option<Rc<Shared>>> = const { RefCell::new(None) };
+}
+
+/// UI weak handle reachable from non-UI threads (toast click callbacks hop
+/// to the event loop through it).
+pub(crate) static UI_WEAK: std::sync::OnceLock<slint::Weak<MainWindow>> =
+    std::sync::OnceLock::new();
+
+/// Composer state: sender choice, staged reply/forward/new-mail target,
+/// optimistic sends, attachments, the rich-text document.
+pub(crate) struct ComposeState {
+    /// Явно выбранный в дропдауне отправитель (lowercase email). Закрепляет
+    /// пользовательский выбор: побеждает авто-наведение на identity беседы и
+    /// переустановку индекса при дельта-refetch; on_send читает его
+    /// приоритетно. None = явного выбора нет, действует авто-логика.
+    /// Сбрасывается при смене контекста (открытие беседы / новое письмо).
+    pub(crate) picked_identity: RefCell<Option<String>>,
+    /// Диалог, в который надо перейти, когда он появится в списке: отправка с
+    /// другого адреса образует свой набор адресов, то есть свою беседу, и она
+    /// возникает не мгновенно — сначала письмо должно долететь до «Отправленных»
+    /// и вернуться синком. Ставится галочкой в диалоге «не тот адрес».
+    pub(crate) pending_switch: RefCell<Option<String>>,
+
+    /// Отправка, задержанная диалогом «отвечаешь не с того адреса»: текст
+    /// письма ждёт решения. Set → показан диалог; on_send при повторном входе
+    /// забирает текст отсюда и проверку уже не делает.
+    ///
+    /// Задержка нужна потому, что композер очищает поле сразу при отправке:
+    /// без этого отменённое письмо просто пропало бы.
+    pub(crate) held_send: RefCell<Option<String>>,
+    /// Forward target — set by «Переслать»; on Send the original's text
+    /// goes below the typed text and its attachments are re-attached.
+    pub(crate) pending_forward: RefCell<Option<MessageBody>>,
+    /// From-picker дропдауна композера: e-mail'ы в том же порядке, что и
+    /// Slint-модель composer-identities. on_send резолвит выбранный индекс
+    /// через этот список (Slint-модель — источник только для отрисовки).
+    pub(crate) composer_identities: RefCell<Vec<String>>,
     /// "Transient compose" target — set when the user picks a fresh
     /// recipient via the search dropdown ("Написать xxx@yyy" or a
     /// contact with no existing conversation). While Some, the chat
@@ -206,15 +186,68 @@ pub(crate) struct Shared {
     /// as the delta brings the (possibly brand-new) conversation row, the
     /// UI redirects to it instead of leaving the user on the stub pane.
     pub(crate) compose_sent_target: RefCell<Option<String>>,
-    /// Content-permission policy (per-sender media/scripts, per-domain
-    /// allowlist) — port of the svelte permissionStore. Persisted to
-    /// disk on every toggle.
-    pub(crate) policy: RefCell<policy::Policy>,
-    /// Monotonic generation counter, bumped each time the policy
-    /// mutates. Render worker uses it as part of the bitmap cache key
-    /// so toggling a permission invalidates exactly the relevant
-    /// cached rows.
-    pub(crate) policy_gen: Cell<u64>,
+    /// Files staged for the next outgoing message, picked via the composer's
+    /// attach button. Parallel to the `composer-attachments` Slint model
+    /// (which holds just the basenames). Cleared once a message is staged.
+    pub(crate) compose_attachments: RefCell<Vec<std::path::PathBuf>>,
+    /// Rich-text документ композера — источник истины для тела письма
+    /// (Slint-свойство `composer-text` лишь его plain-зеркало).
+    pub(crate) rich: RefCell<richtext::Editor>,
+    /// Вёрстка/растеризация композера. Ленивая: сборка `FontSystem` читает
+    /// системные шрифты (сотни мс), а композер нужен не в первую секунду.
+    pub(crate) rich_renderer: RefCell<Option<richtext_render::Renderer>>,
+    /// Ширина колонки текста, логические px — приходит из Slint (`rt-resize`).
+    pub(crate) rich_width: Cell<f32>,
+    /// Идёт протяжка выделения мышью.
+    pub(crate) rich_dragging: Cell<bool>,
+    /// Источник уникальных Content-ID для вставленных картинок.
+    pub(crate) rich_cid_seq: Cell<u64>,
+}
+
+/// Mouse selection over bubble bitmaps and over the source viewer.
+pub(crate) struct SelectionState {
+    /// Word rects of the rendered source bitmap + its selection state. Mirrors
+    /// the bubble selection layer (row_text_runs/sel_*) but for the modal.
+    pub(crate) src_runs: RefCell<Vec<render_common::TextRun>>,
+    pub(crate) src_sel_anchor: Cell<usize>,
+    pub(crate) src_sel_head: Cell<usize>,
+    pub(crate) src_sel_moved: Cell<bool>,
+    pub(crate) src_sel_dragging: Cell<bool>,
+    /// Mouse selection: row index (-1 none) and the anchor/head word
+    /// indices within that row's text layer (inclusive, unordered).
+    pub(crate) sel_row: Cell<i32>,
+    pub(crate) sel_anchor: Cell<usize>,
+    pub(crate) sel_head: Cell<usize>,
+    pub(crate) sel_dragging: Cell<bool>,
+    pub(crate) sel_moved: Cell<bool>,
+    /// Set when a drag-selection just ended — the click that Slint fires
+    /// on release must NOT open a link.
+    pub(crate) sel_suppress_click: Cell<bool>,
+    /// Серия кликов для выделения слова (второй) и строки (третий). Slint даёт
+    /// только `clicked`, ни двойного, ни тройного события у него нет, поэтому
+    /// серию считаем сами по нажатиям: время, строка и точка предыдущего.
+    pub(crate) sel_click_streak: Cell<u32>,
+    pub(crate) sel_click_at: Cell<Option<Instant>>,
+    pub(crate) sel_click_pos: Cell<(i32, f32, f32)>,
+}
+
+/// The search dropdown's latest query and its three result lists.
+pub(crate) struct SearchState {
+    /// Last search query we asked the engine for. Engine echoes the
+    /// query back in `SearchDropdown`; we drop results that don't match
+    /// — handles the race where typing outruns the engine.
+    pub(crate) search_query_inflight: RefCell<String>,
+    /// Latest rows in the dropdown (parallel to the Slint model order),
+    /// so callbacks can resolve `search-select-contact(idx)` and
+    /// `search-select-message(idx)` back to their domain objects.
+    pub(crate) search_contacts: RefCell<Vec<Contact>>,
+    pub(crate) search_messages: RefCell<Vec<MessageEnvelope>>,
+    /// Секция «Диалоги» — локальные совпадения (`local_search_convs`).
+    pub(crate) search_convs: RefCell<Vec<ConvHit>>,
+}
+
+/// Calendar view, event card/form and reminder state.
+pub(crate) struct CalendarState {
     /// Calendars list as the engine last reported it; we hold them so
     /// the visibility map can resolve names/colors when the user
     /// toggles checkboxes.
@@ -262,40 +295,9 @@ pub(crate) struct Shared {
     /// account_key of each writable calendar (parallel to edit_cal_ids), so a
     /// newly-created event routes to the calendar's owning account.
     pub(crate) edit_cal_accounts: RefCell<Vec<String>>,
-    /// Last-fetched address book (parallel to the `address-book` Slint model),
-    /// so the contact editor can read a row's full data by index.
-    pub(crate) address_book: RefCell<Vec<ddmail_core::types::DesktopContact>>,
-    /// Contact being edited (0 in create mode).
-    pub(crate) editing_contact_id: Cell<i64>,
-    /// account_key of the contact under edit, for multi-account write routing
-    /// (empty ⇒ the engine falls back to the first account).
-    pub(crate) editing_contact_account: RefCell<String>,
-    /// account_keys parallel to the contact editor's account ComboBox (create).
-    pub(crate) ce_account_keys: RefCell<Vec<String>>,
     /// event id → owning account_key, from the last events fetch, so calendar
     /// writes (rsvp/patch/delete) route to the right connection.
     pub(crate) event_accounts: RefCell<HashMap<i64, String>>,
-    /// Keeps the add/edit-connection modal alive while it's open.
-    pub(crate) add_conn_window: RefCell<Option<LoginWindow>>,
-    /// account_keys parallel to the settings connections list (for edit/delete
-    /// by row index).
-    pub(crate) settings_conn_keys: RefCell<Vec<String>>,
-    /// Files staged for the next outgoing message, picked via the composer's
-    /// attach button. Parallel to the `composer-attachments` Slint model
-    /// (which holds just the basenames). Cleared once a message is staged.
-    pub(crate) compose_attachments: RefCell<Vec<std::path::PathBuf>>,
-    /// Rich-text документ композера — источник истины для тела письма
-    /// (Slint-свойство `composer-text` лишь его plain-зеркало).
-    pub(crate) rich: RefCell<richtext::Editor>,
-    /// Вёрстка/растеризация композера. Ленивая: сборка `FontSystem` читает
-    /// системные шрифты (сотни мс), а композер нужен не в первую секунду.
-    pub(crate) rich_renderer: RefCell<Option<richtext_render::Renderer>>,
-    /// Ширина колонки текста, логические px — приходит из Slint (`rt-resize`).
-    pub(crate) rich_width: Cell<f32>,
-    /// Идёт протяжка выделения мышью.
-    pub(crate) rich_dragging: Cell<bool>,
-    /// Источник уникальных Content-ID для вставленных картинок.
-    pub(crate) rich_cid_seq: Cell<u64>,
     /// Event a reminder toast asked to open (0 = none); consumed once the
     /// calendar events for its week arrive from the engine. The occurrence
     /// start + summary ride along for the stale-id fallback: the server
@@ -325,14 +327,45 @@ pub(crate) struct Shared {
     pub(crate) cal_occ: RefCell<HashMap<(i32, i32), (i64, i64, bool)>>,
 }
 
-thread_local! {
-    /// Set once on the UI thread so engine-result closures (posted via
-    /// invoke_from_event_loop, which must be Send + 'static and can't capture
-    /// the Rc) can reach the shared state.
-    pub(crate) static SHARED: RefCell<Option<Rc<Shared>>> = const { RefCell::new(None) };
+/// Address book list and the contact editor.
+pub(crate) struct AddressBookState {
+    /// Last-fetched address book (parallel to the `address-book` Slint model),
+    /// so the contact editor can read a row's full data by index.
+    pub(crate) address_book: RefCell<Vec<ddmail_core::types::DesktopContact>>,
+    /// Contact being edited (0 in create mode).
+    pub(crate) editing_contact_id: Cell<i64>,
+    /// account_key of the contact under edit, for multi-account write routing
+    /// (empty ⇒ the engine falls back to the first account).
+    pub(crate) editing_contact_account: RefCell<String>,
+    /// account_keys parallel to the contact editor's account ComboBox (create).
+    pub(crate) ce_account_keys: RefCell<Vec<String>>,
 }
 
-/// UI weak handle reachable from non-UI threads (toast click callbacks hop
-/// to the event loop through it).
-pub(crate) static UI_WEAK: std::sync::OnceLock<slint::Weak<MainWindow>> =
-    std::sync::OnceLock::new();
+/// Connections: which one the open conversation belongs to, their states
+/// and re-login prompts, and the add/edit connection window.
+pub(crate) struct AccountsState {
+    /// account_key of the currently open conversation. Addressed engine
+    /// commands (body/flags/delete/source/attachment/send) carry it so they
+    /// route to the right server. Empty falls back to the primary account.
+    pub(crate) cur_account_key: RefCell<String>,
+    /// All account keys (the indicator's denominator) and their last-known
+    /// connection state ("connecting" | "connected" | "error" | "auth").
+    /// Drives the aggregate green/yellow/red status light.
+    pub(crate) account_keys: RefCell<Vec<String>>,
+    pub(crate) account_states: RefCell<HashMap<String, String>>,
+    /// Ключи строк списка учёток под индикатором связи (порядок
+    /// accounts.json) — по индексу строки `relogin` находит, какую учётку
+    /// открывать в форме входа.
+    pub(crate) conn_dot_keys: RefCell<Vec<String>>,
+    /// Учётки, чья сессия мертва и ждёт пароля — в порядке accounts.json.
+    /// Отдельно от `account_states`, потому что состояние липкое: watcher
+    /// после отказа ещё успевает крикнуть "connecting"/"error", и в общей
+    /// карте «нужен вход» тут же затиралось бы на «нет связи». Снимается
+    /// только удачным коннектом, ротацией токена или пересборкой движка.
+    pub(crate) reauth: RefCell<Vec<String>>,
+    /// Keeps the add/edit-connection modal alive while it's open.
+    pub(crate) add_conn_window: RefCell<Option<LoginWindow>>,
+    /// account_keys parallel to the settings connections list (for edit/delete
+    /// by row index).
+    pub(crate) settings_conn_keys: RefCell<Vec<String>>,
+}

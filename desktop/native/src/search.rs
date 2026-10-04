@@ -412,7 +412,7 @@ pub(crate) fn wire_search(ui: &MainWindow, shared: &Rc<Shared>) {
     ui.on_search_typed(move |query| {
         let q = query.to_string();
         let trimmed = q.trim().to_string();
-        *sh_typed.search_query_inflight.borrow_mut() = trimmed.clone();
+        *sh_typed.search.search_query_inflight.borrow_mut() = trimmed.clone();
         // Compose-row visibility is local to the UI thread — no engine
         // round-trip needed.
         if let Some(ui) = ui_weak_st.upgrade() {
@@ -435,14 +435,14 @@ pub(crate) fn wire_search(ui: &MainWindow, shared: &Rc<Shared>) {
                 let hits =
                     local_search_convs(&sh_typed.convs.borrow(), &subjects, &sh_typed.key, &q_lc);
                 let local = local_search_contacts(
-                    &sh_typed.address_book.borrow(),
+                    &sh_typed.contacts.address_book.borrow(),
                     &conv_hit_addrs(&hits),
                     &q_lc,
                 );
                 let c_items = contact_items(&local);
                 ui.set_search_convs(ModelRc::new(VecModel::from(conv_hit_items(&hits))));
-                *sh_typed.search_convs.borrow_mut() = hits;
-                *sh_typed.search_contacts.borrow_mut() = local;
+                *sh_typed.search.search_convs.borrow_mut() = hits;
+                *sh_typed.search.search_contacts.borrow_mut() = local;
                 ui.set_search_contacts(ModelRc::new(VecModel::from(c_items)));
             }
         }
@@ -454,10 +454,10 @@ pub(crate) fn wire_search(ui: &MainWindow, shared: &Rc<Shared>) {
     let ui_weak_sc = ui.as_weak();
     let sh_clr = shared.clone();
     ui.on_search_cleared(move || {
-        *sh_clr.search_query_inflight.borrow_mut() = String::new();
-        sh_clr.search_contacts.borrow_mut().clear();
-        sh_clr.search_messages.borrow_mut().clear();
-        sh_clr.search_convs.borrow_mut().clear();
+        *sh_clr.search.search_query_inflight.borrow_mut() = String::new();
+        sh_clr.search.search_contacts.borrow_mut().clear();
+        sh_clr.search.search_messages.borrow_mut().clear();
+        sh_clr.search.search_convs.borrow_mut().clear();
         if let Some(ui) = ui_weak_sc.upgrade() {
             ui.set_search_convs(ModelRc::new(VecModel::from(Vec::<ConvHitItem>::new())));
             ui.set_search_contacts(ModelRc::new(VecModel::from(Vec::<ContactItem>::new())));
@@ -478,7 +478,7 @@ pub(crate) fn wire_search(ui: &MainWindow, shared: &Rc<Shared>) {
     let sh_sel_c = shared.clone();
     ui.on_search_select_contact(move |idx| {
         let i = idx as usize;
-        let contact = sh_sel_c.search_contacts.borrow().get(i).cloned();
+        let contact = sh_sel_c.search.search_contacts.borrow().get(i).cloned();
         let Some(contact) = contact else { return };
         // Find any conversation with this counterpart; prefer the most recent.
         let convs = sh_sel_c.convs.borrow();
@@ -495,7 +495,7 @@ pub(crate) fn wire_search(ui: &MainWindow, shared: &Rc<Shared>) {
             .max_by_key(|(_, c)| c.last_date_ts);
         if let Some((conv_idx, _)) = best {
             drop(convs);
-            let _ = sh_sel_c.search_query_inflight.borrow_mut().clear();
+            let _ = sh_sel_c.search.search_query_inflight.borrow_mut().clear();
             if let Some(ui) = ui_weak_sel_c.upgrade() {
                 ui.set_search_open(false);
                 ui.set_search_query("".into());
@@ -518,7 +518,9 @@ pub(crate) fn wire_search(ui: &MainWindow, shared: &Rc<Shared>) {
     let ui_weak_sel_d = ui.as_weak();
     let sh_sel_d = shared.clone();
     ui.on_search_select_conv(move |idx| {
-        let Some(hit) = sh_sel_d.search_convs.borrow().get(idx as usize).cloned() else { return };
+        let Some(hit) = sh_sel_d.search.search_convs.borrow().get(idx as usize).cloned() else {
+            return;
+        };
         let conv_idx = sh_sel_d
             .convs
             .borrow()
@@ -530,7 +532,7 @@ pub(crate) fn wire_search(ui: &MainWindow, shared: &Rc<Shared>) {
             println!("search-select-conv: {} is gone from the list", hit.id);
             return;
         };
-        sh_sel_d.search_query_inflight.borrow_mut().clear();
+        sh_sel_d.search.search_query_inflight.borrow_mut().clear();
         ui.set_search_query("".into());
         ui.set_selected(conv_idx as i32);
         apply_active_header(&ui, &sh_sel_d, conv_idx);
@@ -543,7 +545,7 @@ pub(crate) fn wire_search(ui: &MainWindow, shared: &Rc<Shared>) {
     let sh_sel_m = shared.clone();
     ui.on_search_select_message(move |idx| {
         let i = idx as usize;
-        let env = sh_sel_m.search_messages.borrow().get(i).cloned();
+        let env = sh_sel_m.search.search_messages.borrow().get(i).cloned();
         let Some(env) = env else { return };
         // The conversation that owns this message is the one whose
         // messages list contains the (folder, uid) pair.

@@ -586,7 +586,7 @@ fn install_rows(ctx: &Ctx, rows: Vec<(Packed, RowMeta)>, width: u32, scroll_to: 
                 *sh.row_text_runs.borrow_mut() = runs;
                 // Rows are being replaced — any active selection now points
                 // at stale indices.
-                sh.sel_row.set(-1);
+                sh.selection.sel_row.set(-1);
                 ui.set_selection_row(-1);
             }
         });
@@ -710,8 +710,8 @@ fn apply_row_update(ui: &MainWindow, row: usize, p: Packed) {
             }
             // Word rects of this row moved — a selection in it would
             // highlight the wrong words.
-            if sh.sel_row.get() == row as i32 {
-                sh.sel_row.set(-1);
+            if sh.selection.sel_row.get() == row as i32 {
+                sh.selection.sel_row.set(-1);
                 ui.set_selection_row(-1);
                 ui.set_selection_rects(ModelRc::new(VecModel::from(Vec::<SelRect>::new())));
             }
@@ -764,9 +764,9 @@ fn render_source(ctx: &Ctx, text: &str, width: u32, scale: f32) {
     let _ = ctx.ui.upgrade_in_event_loop(move |ui| {
         SHARED.with(|s| {
             if let Some(sh) = s.borrow().as_ref() {
-                *sh.src_runs.borrow_mut() = p.runs;
-                sh.src_sel_moved.set(false);
-                sh.src_sel_dragging.set(false);
+                *sh.selection.src_runs.borrow_mut() = p.runs;
+                sh.selection.src_sel_moved.set(false);
+                sh.selection.src_sel_dragging.set(false);
             }
         });
         ui.set_source_img(Image::from_rgba8(p.buf));

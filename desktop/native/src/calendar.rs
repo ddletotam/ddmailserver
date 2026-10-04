@@ -143,6 +143,7 @@ pub(crate) fn week_range_ms(week_start_days: i64, day_count: i32) -> (i64, i64) 
 /// day- and hour-range toggles) — never deferred to exit.
 pub(crate) fn save_calendar_settings(ui: &MainWindow, sh: &Shared) {
     let hidden: Vec<i64> = sh
+        .cal
         .calendar_visible
         .borrow()
         .iter()
@@ -151,12 +152,12 @@ pub(crate) fn save_calendar_settings(ui: &MainWindow, sh: &Shared) {
         .collect();
     calendar_settings::save(&calendar_settings::CalendarSettings {
         hidden,
-        colors: sh.calendar_colors.borrow().clone(),
+        colors: sh.cal.calendar_colors.borrow().clone(),
         notify_sound: ui.get_notify_sound_on(),
-        work_start_hour: sh.work_start.get(),
-        work_end_hour: sh.work_end.get(),
-        manual_hour_height: sh.manual_hour_h.get(),
-        manual_col_width: sh.manual_col_w.get(),
+        work_start_hour: sh.cal.work_start.get(),
+        work_end_hour: sh.cal.work_end.get(),
+        manual_hour_height: sh.cal.manual_hour_h.get(),
+        manual_col_width: sh.cal.manual_col_w.get(),
         last_conversation: sh.last_conv_id.borrow().clone(),
     });
 }
@@ -322,13 +323,14 @@ mod grid_layout_tests {
 
 pub(crate) fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
     use chrono::{Datelike, Duration, NaiveDate};
-    let (day_count, col_width) = compute_horizontal(sh.grid_canvas_w.get(), sh.manual_col_w.get());
+    let (day_count, col_width) =
+        compute_horizontal(sh.cal.grid_canvas_w.get(), sh.cal.manual_col_w.get());
     ui.set_col_width(col_width);
     // Dash segments per quarter-hour line (24px period), capped so a very
     // wide manual zoom can't spawn an absurd number of rects.
     let dash_count = ((day_count as f32 * col_width) / 24.0).floor().clamp(0.0, 160.0) as i32;
     ui.set_dash_count(dash_count);
-    let week_days = sh.calendar_week_start_days.get();
+    let week_days = sh.cal.calendar_week_start_days.get();
     let monday = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap() + Duration::days(week_days);
     let headers: Vec<slint::SharedString> = (0..day_count as i64)
         .map(|i| {
@@ -375,9 +377,9 @@ pub(crate) fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
     // Sidebar — calendar list. Sorted by name for stability. User-picked
     // colour overrides win over server colour / palette default.
     let cal_items: Vec<CalendarItem> = {
-        let cals = sh.calendars.borrow();
-        let visibility = sh.calendar_visible.borrow();
-        let overrides = sh.calendar_colors.borrow();
+        let cals = sh.cal.calendars.borrow();
+        let visibility = sh.cal.calendar_visible.borrow();
+        let overrides = sh.cal.calendar_colors.borrow();
         let mut v: Vec<&ddmail_core::types::DesktopCalendar> = cals.iter().collect();
         v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         v.into_iter()
@@ -423,10 +425,10 @@ pub(crate) fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
     }
 
     let (segs, all_day_blocks, all_day_rows, has_out_of_work, occ_map) = {
-        let events = sh.calendar_events.borrow();
-        let visibility = sh.calendar_visible.borrow();
-        let cals = sh.calendars.borrow();
-        let overrides = sh.calendar_colors.borrow();
+        let events = sh.cal.calendar_events.borrow();
+        let visibility = sh.cal.calendar_visible.borrow();
+        let cals = sh.cal.calendars.borrow();
+        let overrides = sh.cal.calendar_colors.borrow();
         let color_for = |cal_id: i64| -> slint::Color {
             let raw = overrides.get(&cal_id).cloned().unwrap_or_else(|| {
                 cals.iter()
@@ -450,8 +452,8 @@ pub(crate) fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
         let mut all_day_fill = vec![0i32; day_count.max(0) as usize];
         let idents = sh.identity_colors.borrow();
         let me_key = sh.key.to_lowercase();
-        let ws_ms = sh.work_start.get() as i64 * 3_600_000;
-        let we_ms = sh.work_end.get() as i64 * 3_600_000;
+        let ws_ms = sh.cal.work_start.get() as i64 * 3_600_000;
+        let we_ms = sh.cal.work_end.get() as i64 * 3_600_000;
         let mut has_out_of_work = false;
 
         for e in events.iter() {
@@ -555,21 +557,21 @@ pub(crate) fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
         let rows = *all_day_fill.iter().max().unwrap_or(&0);
         (segs, all_day_blocks, rows, has_out_of_work, occ_map)
     };
-    *sh.cal_occ.borrow_mut() = occ_map;
+    *sh.cal.cal_occ.borrow_mut() = occ_map;
 
     // Vertical band now that we know whether anything sits outside work hours.
     let (vis_start, vis_end, hour_height) = compute_vertical(
-        sh.grid_canvas_h.get(),
-        sh.work_start.get(),
-        sh.work_end.get(),
+        sh.cal.grid_canvas_h.get(),
+        sh.cal.work_start.get(),
+        sh.cal.work_end.get(),
         has_out_of_work,
-        sh.manual_hour_h.get(),
+        sh.cal.manual_hour_h.get(),
     );
     ui.set_hour_height(hour_height);
     ui.set_hour_start(vis_start);
     ui.set_hour_end(vis_end);
-    ui.set_work_start(sh.work_start.get());
-    ui.set_work_end(sh.work_end.get());
+    ui.set_work_start(sh.cal.work_start.get());
+    ui.set_work_end(sh.cal.work_end.get());
 
     let visible_top_ms = vis_start as i64 * 3_600_000;
     let visible_bottom_ms = vis_end as i64 * 3_600_000;
@@ -623,9 +625,9 @@ pub(crate) fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
     // grid is the no-scroll work band or the full 0–24 scroll (out-of-work
     // events force the latter), and a pixel target computed before that
     // settles points at the wrong hour.
-    if let Some(hour) = sh.pending_cal_scroll.get() {
-        if !sh.calendar_events.borrow().is_empty() {
-            sh.pending_cal_scroll.set(None);
+    if let Some(hour) = sh.cal.pending_cal_scroll.get() {
+        if !sh.cal.calendar_events.borrow().is_empty() {
+            sh.cal.pending_cal_scroll.set(None);
         }
         scroll_calendar_to_hour(ui, hour);
     }
@@ -637,7 +639,7 @@ pub(crate) fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
 pub(crate) fn refetch_calendar_events(ui: &MainWindow, sh: &Shared) {
     // Always fetch the full 7-day week so toggling to a 5-day view (or
     // horizontal scroll) never needs a refetch.
-    let (from_ms, to_ms) = week_range_ms(sh.calendar_week_start_days.get(), 7);
+    let (from_ms, to_ms) = week_range_ms(sh.cal.calendar_week_start_days.get(), 7);
     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
         ui.set_calendar_loading(true);
         let _ = etx.send(engine::EngineCmd::FetchCalendarEvents {
@@ -745,7 +747,7 @@ pub(crate) fn wire_grid_editing(ui: &MainWindow, shared: &Rc<Shared>) {
         let minutes = hour_start as f32 * 60.0 + (y / hour_height) * 60.0;
         let snapped = ((minutes / 15.0).round() as i64) * 15;
         let day_ms: i64 = 24 * 60 * 60 * 1000;
-        let (week_start_ms, _) = week_range_ms(sh_gc.calendar_week_start_days.get(), day_count);
+        let (week_start_ms, _) = week_range_ms(sh_gc.cal.calendar_week_start_days.get(), day_count);
         let start_ms = week_start_ms + day * day_ms + snapped * 60_000;
         open_create_form_at(&ui, &sh_gc, start_ms);
     });
@@ -767,7 +769,7 @@ pub(crate) fn wire_grid_editing(ui: &MainWindow, shared: &Rc<Shared>) {
         let hour_height = ui.get_hour_height();
         let hour_start = ui.get_hour_start();
         let day_ms: i64 = 24 * 60 * 60 * 1000;
-        let (week_start_ms, _) = week_range_ms(sh_gm.calendar_week_start_days.get(), day_count);
+        let (week_start_ms, _) = week_range_ms(sh_gm.cal.calendar_week_start_days.get(), day_count);
 
         // Block x = GUTTER + (day + lane_xf)*col_w + 2px, lane_xf ∈ [0,1) for
         // overlap lanes — floor recovers the day column. round() broke every
@@ -788,7 +790,7 @@ pub(crate) fn wire_grid_editing(ui: &MainWindow, shared: &Rc<Shared>) {
         // Exact instance grabbed (gives recurrence_id + duration + whether the
         // event recurs). Keyed (event_id, original day column).
         let (occ_start, occ_end, recurring) =
-            match sh_gm.cal_occ.borrow().get(&(id, orig_day as i32)).copied() {
+            match sh_gm.cal.cal_occ.borrow().get(&(id, orig_day as i32)).copied() {
                 Some(v) => v,
                 None => {
                     eprintln!(
@@ -804,7 +806,7 @@ pub(crate) fn wire_grid_editing(ui: &MainWindow, shared: &Rc<Shared>) {
 
         // Preserve the event's display fields.
         let (summary, description, location, all_day) = {
-            let events = sh_gm.calendar_events.borrow();
+            let events = sh_gm.cal.calendar_events.borrow();
             match events.iter().find(|e| e.id as i32 == id) {
                 Some(e) => {
                     (e.summary.clone(), e.description.clone(), e.location.clone(), e.all_day)
@@ -832,7 +834,7 @@ pub(crate) fn wire_grid_editing(ui: &MainWindow, shared: &Rc<Shared>) {
             body["scope"] = "all".into();
             // Optimistic shift so the block lands immediately; refetch reconciles.
             {
-                let mut events = sh_gm.calendar_events.borrow_mut();
+                let mut events = sh_gm.cal.calendar_events.borrow_mut();
                 if let Some(e) = events.iter_mut().find(|e| e.id as i32 == id) {
                     if e.dtend.is_some() {
                         e.dtend = Some(new_end);
@@ -846,7 +848,7 @@ pub(crate) fn wire_grid_editing(ui: &MainWindow, shared: &Rc<Shared>) {
         if let Some(c) = sh_gm.cache.as_ref() {
             let _ = c.purge_event_reminders(id as i64);
         }
-        let ak = sh_gm.event_accounts.borrow().get(&(id as i64)).cloned().unwrap_or_default();
+        let ak = sh_gm.cal.event_accounts.borrow().get(&(id as i64)).cloned().unwrap_or_default();
         if let Some(etx) = sh_gm.engine_tx.borrow().as_ref() {
             let _ = etx.send(engine::EngineCmd::PatchEvent {
                 event_id: id as i64,
@@ -872,7 +874,7 @@ pub(crate) fn wire_grid_editing(ui: &MainWindow, shared: &Rc<Shared>) {
         let hour_height = ui.get_hour_height();
         let hour_start = ui.get_hour_start();
         let day_ms: i64 = 24 * 60 * 60 * 1000;
-        let (week_start_ms, _) = week_range_ms(sh_gr.calendar_week_start_days.get(), day_count);
+        let (week_start_ms, _) = week_range_ms(sh_gr.cal.calendar_week_start_days.get(), day_count);
         // floor, not round: orig_x carries the overlap-lane fraction (xf) —
         // see px_to_day in the move handler above.
         let day = (((orig_x - GUTTER - 2.0) / col_w).floor() as i64).clamp(0, day_count as i64 - 1);
@@ -887,7 +889,7 @@ pub(crate) fn wire_grid_editing(ui: &MainWindow, shared: &Rc<Shared>) {
         }
 
         let (occ_start, occ_end, recurring) =
-            match sh_gr.cal_occ.borrow().get(&(id, day as i32)).copied() {
+            match sh_gr.cal.cal_occ.borrow().get(&(id, day as i32)).copied() {
                 Some(v) => v,
                 None => {
                     eprintln!("[cal] resize: no occurrence for id={id} day={day} — ignored");
@@ -898,7 +900,7 @@ pub(crate) fn wire_grid_editing(ui: &MainWindow, shared: &Rc<Shared>) {
             return; // no change
         }
         let (summary, description, location, all_day) = {
-            let events = sh_gr.calendar_events.borrow();
+            let events = sh_gr.cal.calendar_events.borrow();
             match events.iter().find(|e| e.id as i32 == id) {
                 Some(e) => {
                     (e.summary.clone(), e.description.clone(), e.location.clone(), e.all_day)
@@ -920,7 +922,7 @@ pub(crate) fn wire_grid_editing(ui: &MainWindow, shared: &Rc<Shared>) {
         } else {
             body["scope"] = "all".into();
             {
-                let mut events = sh_gr.calendar_events.borrow_mut();
+                let mut events = sh_gr.cal.calendar_events.borrow_mut();
                 if let Some(e) = events.iter_mut().find(|e| e.id as i32 == id) {
                     e.dtstart = new_start;
                     e.dtend = Some(new_end);
@@ -931,7 +933,7 @@ pub(crate) fn wire_grid_editing(ui: &MainWindow, shared: &Rc<Shared>) {
         if let Some(c) = sh_gr.cache.as_ref() {
             let _ = c.purge_event_reminders(id as i64);
         }
-        let ak = sh_gr.event_accounts.borrow().get(&(id as i64)).cloned().unwrap_or_default();
+        let ak = sh_gr.cal.event_accounts.borrow().get(&(id as i64)).cloned().unwrap_or_default();
         if let Some(etx) = sh_gr.engine_tx.borrow().as_ref() {
             let _ = etx.send(engine::EngineCmd::PatchEvent {
                 event_id: id as i64,
@@ -950,7 +952,7 @@ pub(crate) fn wire_calendar_color(ui: &MainWindow, shared: &Rc<Shared>) {
     ui.on_calendar_set_color(move |cal_id, palette_idx| {
         let Some(ui) = ui_weak_cc.upgrade() else { return };
         if let Some(hex_color) = CAL_PALETTE.get(palette_idx as usize) {
-            sh_cc.calendar_colors.borrow_mut().insert(cal_id as i64, (*hex_color).to_string());
+            sh_cc.cal.calendar_colors.borrow_mut().insert(cal_id as i64, (*hex_color).to_string());
             apply_calendar_view(&ui, &sh_cc);
             save_calendar_settings(&ui, &sh_cc);
         }
@@ -971,10 +973,10 @@ pub(crate) fn wire_calendar_nav(ui: &MainWindow, shared: &Rc<Shared>) {
             let new_start = if delta_days == 0 {
                 week_start_days_today()
             } else {
-                sh.calendar_week_start_days.get() + delta_days
+                sh.cal.calendar_week_start_days.get() + delta_days
             };
-            sh.calendar_week_start_days.set(new_start);
-            sh.week_follows_today.set(new_start == week_start_days_today());
+            sh.cal.calendar_week_start_days.set(new_start);
+            sh.cal.week_follows_today.set(new_start == week_start_days_today());
             apply_calendar_view(&ui, &sh);
             refetch_calendar_events(&ui, &sh);
         }
@@ -993,10 +995,10 @@ pub(crate) fn wire_calendar_nav(ui: &MainWindow, shared: &Rc<Shared>) {
         if w <= 0.0 || h <= 0.0 {
             return;
         }
-        let changed = (sh_gr.grid_canvas_w.get() - w).abs() > 0.5
-            || (sh_gr.grid_canvas_h.get() - h).abs() > 0.5;
-        sh_gr.grid_canvas_w.set(w);
-        sh_gr.grid_canvas_h.set(h);
+        let changed = (sh_gr.cal.grid_canvas_w.get() - w).abs() > 0.5
+            || (sh_gr.cal.grid_canvas_h.get() - h).abs() > 0.5;
+        sh_gr.cal.grid_canvas_w.set(w);
+        sh_gr.cal.grid_canvas_h.set(h);
         if changed {
             apply_calendar_view(&ui, &sh_gr);
         }
@@ -1008,10 +1010,10 @@ pub(crate) fn wire_calendar_nav(ui: &MainWindow, shared: &Rc<Shared>) {
     ui.on_calendar_zoom_hours(move |delta| {
         let Some(ui) = ui_weak_zh.upgrade() else { return };
         // A manual zoom overrides any queued programmatic scroll.
-        sh_zh.pending_cal_scroll.set(None);
-        let canvas_h = sh_zh.grid_canvas_h.get().max(MIN_HOUR_H);
-        let cur = if sh_zh.manual_hour_h.get() > 0.0 {
-            sh_zh.manual_hour_h.get()
+        sh_zh.cal.pending_cal_scroll.set(None);
+        let canvas_h = sh_zh.cal.grid_canvas_h.get().max(MIN_HOUR_H);
+        let cur = if sh_zh.cal.manual_hour_h.get() > 0.0 {
+            sh_zh.cal.manual_hour_h.get()
         } else {
             ui.get_hour_height()
         };
@@ -1021,13 +1023,13 @@ pub(crate) fn wire_calendar_nav(ui: &MainWindow, shared: &Rc<Shared>) {
         // hatch a single ctrl-wheel pinned the layout to the full 0–24
         // scroll forever — every launch then opened on the night hours.
         if delta < 0.0 && cur <= MIN_HOUR_H + 0.5 {
-            sh_zh.manual_hour_h.set(0.0);
+            sh_zh.cal.manual_hour_h.set(0.0);
             apply_calendar_view(&ui, &sh_zh);
             save_calendar_settings(&ui, &sh_zh);
             return;
         }
         let next = (cur * factor).clamp(MIN_HOUR_H, canvas_h);
-        sh_zh.manual_hour_h.set(next);
+        sh_zh.cal.manual_hour_h.set(next);
         apply_calendar_view(&ui, &sh_zh);
         save_calendar_settings(&ui, &sh_zh);
     });
@@ -1035,9 +1037,9 @@ pub(crate) fn wire_calendar_nav(ui: &MainWindow, shared: &Rc<Shared>) {
     let sh_zd = shared.clone();
     ui.on_calendar_zoom_days(move |delta| {
         let Some(ui) = ui_weak_zd.upgrade() else { return };
-        let avail = (sh_zd.grid_canvas_w.get() - GUTTER_W).max(MIN_COL_W);
-        let cur = if sh_zd.manual_col_w.get() > 0.0 {
-            sh_zd.manual_col_w.get()
+        let avail = (sh_zd.cal.grid_canvas_w.get() - GUTTER_W).max(MIN_COL_W);
+        let cur = if sh_zd.cal.manual_col_w.get() > 0.0 {
+            sh_zd.cal.manual_col_w.get()
         } else {
             ui.get_col_width()
         };
@@ -1045,13 +1047,13 @@ pub(crate) fn wire_calendar_nav(ui: &MainWindow, shared: &Rc<Shared>) {
         // Same escape hatch as the hour zoom: bottoming out returns to
         // autofit column widths.
         if delta < 0.0 && cur <= MIN_COL_W + 0.5 {
-            sh_zd.manual_col_w.set(0.0);
+            sh_zd.cal.manual_col_w.set(0.0);
             apply_calendar_view(&ui, &sh_zd);
             save_calendar_settings(&ui, &sh_zd);
             return;
         }
         let next = (cur * factor).clamp(MIN_COL_W, avail);
-        sh_zd.manual_col_w.set(next);
+        sh_zd.cal.manual_col_w.set(next);
         apply_calendar_view(&ui, &sh_zd);
         save_calendar_settings(&ui, &sh_zd);
     });
@@ -1062,8 +1064,8 @@ pub(crate) fn wire_calendar_nav(ui: &MainWindow, shared: &Rc<Shared>) {
         let Some(ui) = ui_weak_ws.upgrade() else { return };
         let s = start.clamp(0, 23);
         let e = end.clamp(s + 1, 24);
-        sh_ws.work_start.set(s);
-        sh_ws.work_end.set(e);
+        sh_ws.cal.work_start.set(s);
+        sh_ws.cal.work_end.set(e);
         ui.set_work_start(s);
         ui.set_work_end(e);
         apply_calendar_view(&ui, &sh_ws);
@@ -1074,8 +1076,8 @@ pub(crate) fn wire_calendar_nav(ui: &MainWindow, shared: &Rc<Shared>) {
     ui.on_calendar_toggle_visibility(move |cal_id| {
         if let Some(ui) = ui_weak_vis.upgrade() {
             let id = cal_id as i64;
-            let cur = *sh_vis.calendar_visible.borrow().get(&id).unwrap_or(&true);
-            sh_vis.calendar_visible.borrow_mut().insert(id, !cur);
+            let cur = *sh_vis.cal.calendar_visible.borrow().get(&id).unwrap_or(&true);
+            sh_vis.cal.calendar_visible.borrow_mut().insert(id, !cur);
             apply_reminder_visibility(&sh_vis, id, !cur);
             apply_calendar_view(&ui, &sh_vis);
             save_calendar_settings(&ui, &sh_vis);

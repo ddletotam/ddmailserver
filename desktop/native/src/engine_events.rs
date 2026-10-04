@@ -75,7 +75,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     let switched = try_pending_switch(ui, sh);
                     // Re-locate the selection by id (skip in transient-compose
                     // mode, where the sidebar has a synthetic first row).
-                    if sh.pending_compose.borrow().is_none() {
+                    if sh.compose.pending_compose.borrow().is_none() {
                         if let Some(id) = current_id.filter(|_| !switched) {
                             if let Some(idx) = sh.convs.borrow().iter().position(|c| c.id == id) {
                                 if idx != sh.current.get() {
@@ -121,7 +121,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                                         messages: to_mark,
                                         flags: "\\Seen".into(),
                                         add: true,
-                                        account_key: sh.cur_account_key.borrow().clone(),
+                                        account_key: sh.accounts.cur_account_key.borrow().clone(),
                                     });
                                 }
                             }
@@ -136,26 +136,27 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     // A transient-compose send landed: jump to its conversation
                     // as soon as the delta brings the row — per the agreed spec,
                     // instead of leaving the user on the stub pane.
-                    let redirect = sh.compose_sent_target.borrow().clone();
+                    let redirect = sh.compose.compose_sent_target.borrow().clone();
                     if let Some(addr) = redirect {
                         let idx = sh.convs.borrow().iter().position(|c| {
                             c.counterparts.iter().any(|cp| cp.addr.eq_ignore_ascii_case(&addr))
                         });
                         if let Some(idx) = idx {
-                            *sh.compose_sent_target.borrow_mut() = None;
+                            *sh.compose.compose_sent_target.borrow_mut() = None;
                             ui.set_selected(idx as i32);
                             apply_active_header(ui, sh, idx);
                             open_conversation(ui, sh, idx);
                             ui.set_sidebar_row_y(idx as f32 * 64.0);
                             ui.set_sidebar_scroll_seq(ui.get_sidebar_scroll_seq() + 1);
                         }
-                    } else if !sh.pending_sends.borrow().is_empty() {
+                    } else if !sh.compose.pending_sends.borrow().is_empty() {
                         // Stubs wait in the open dialog: refetch its bodies so
                         // the real sent message (now in the refreshed refs)
                         // replaces the stub.
                         let cur = sh.current.get();
                         let refetch = sh.convs.borrow().get(cur).and_then(|c| {
                             let has_here = sh
+                                .compose
                                 .pending_sends
                                 .borrow()
                                 .iter()
@@ -167,7 +168,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                                 let _ = etx.send(engine::EngineCmd::FetchMessages {
                                     messages,
                                     generation: sh.open_gen.get(),
-                                    account_key: sh.cur_account_key.borrow().clone(),
+                                    account_key: sh.accounts.cur_account_key.borrow().clone(),
                                 });
                             }
                         }
@@ -213,7 +214,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                             .get(sh.current.get())
                             .map(|c| c.id.clone())
                             .unwrap_or_default();
-                        let mut stubs = sh.pending_sends.borrow_mut();
+                        let mut stubs = sh.compose.pending_sends.borrow_mut();
                         if !stubs.is_empty() {
                             stubs.retain(|p| {
                                 p.created.elapsed().as_secs() < 120
@@ -262,7 +263,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     if let Some(sh) = s.borrow().as_ref() {
                         // Подтверждение сохранения формы — только теперь
                         // карточку можно закрывать.
-                        if sh.pending_event_save.replace(false) {
+                        if sh.cal.pending_event_save.replace(false) {
                             ui.set_edit_busy(false);
                             ui.set_edit_error("".into());
                             ui.set_edit_visible(false);
@@ -303,7 +304,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                             let _ = etx.send(engine::EngineCmd::FetchMessages {
                                 messages: c.messages.clone(),
                                 generation: sh.open_gen.get(),
-                                account_key: sh.cur_account_key.borrow().clone(),
+                                account_key: sh.accounts.cur_account_key.borrow().clone(),
                             });
                         }
                     }
@@ -331,8 +332,8 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         // молчать неопределённое время после старта.
                         fetch_reminder_window(sh);
                     }
-                    note_account_state(&mut sh.reauth.borrow_mut(), &account_key, &state);
-                    sh.account_states.borrow_mut().insert(account_key, state);
+                    note_account_state(&mut sh.accounts.reauth.borrow_mut(), &account_key, &state);
+                    sh.accounts.account_states.borrow_mut().insert(account_key, state);
                     apply_conn_status(ui, sh);
                 }
             });
@@ -361,7 +362,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                             // (full), which replaces the cache and prunes the
                             // gone conversations.
                             if let Some(cache) = &sh.cache {
-                                for k in sh.account_keys.borrow().iter() {
+                                for k in sh.accounts.account_keys.borrow().iter() {
                                     cache.set_meta(&format!("conv_full_ts:{k}"), "0").ok();
                                 }
                             }
@@ -388,7 +389,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     SHARED.with(|s| {
                         if let Some(sh) = s.borrow().as_ref() {
                             if let Some(cache) = &sh.cache {
-                                for k in sh.account_keys.borrow().iter() {
+                                for k in sh.accounts.account_keys.borrow().iter() {
                                     cache.set_meta(&format!("conv_full_ts:{k}"), "0").ok();
                                 }
                             }
@@ -427,12 +428,13 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     SHARED.with(|s| {
                         if let Some(sh) = s.borrow().as_ref() {
                             let stale = sh
+                                .cal
                                 .last_cal_refetch
                                 .get()
                                 .map(|t| t.elapsed().as_secs() >= 120)
                                 .unwrap_or(true);
                             if stale {
-                                sh.last_cal_refetch.set(Some(std::time::Instant::now()));
+                                sh.cal.last_cal_refetch.set(Some(std::time::Instant::now()));
                                 refetch_calendar_events(ui, sh);
                             }
                         }
@@ -459,7 +461,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                             // Bypass the CalendarUpdated debounce: this is a
                             // one-off, and waiting out its 2-minute window
                             // would leave the imported calendar blank.
-                            sh.last_cal_refetch.set(Some(std::time::Instant::now()));
+                            sh.cal.last_cal_refetch.set(Some(std::time::Instant::now()));
                             refetch_calendar_events(ui, sh);
                         }
                     });
@@ -482,7 +484,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     if let Some(key) = key {
                         SHARED.with(|s| {
                             if let Some(sh) = s.borrow().as_ref() {
-                                sh.reauth.borrow_mut().retain(|k| *k != key);
+                                sh.accounts.reauth.borrow_mut().retain(|k| *k != key);
                                 apply_conn_status(ui, sh);
                             }
                         });
@@ -509,9 +511,9 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     // landed; remember the recipient so the Conversations
                     // delta can redirect to the (possibly brand-new)
                     // conversation as soon as its row exists.
-                    let target = sh.pending_compose.borrow_mut().take();
+                    let target = sh.compose.pending_compose.borrow_mut().take();
                     if let Some(t) = target {
-                        *sh.compose_sent_target.borrow_mut() = Some(t);
+                        *sh.compose.compose_sent_target.borrow_mut() = Some(t);
                         refresh_sidebar(sh, ui);
                     }
                     // Письмо принято сервером, но в «Отправленных» оно
@@ -529,7 +531,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     // периодическим синком.
                     let force_full = |sh: &Shared| {
                         if let Some(cache) = &sh.cache {
-                            let key = sh.cur_account_key.borrow().clone();
+                            let key = sh.accounts.cur_account_key.borrow().clone();
                             let key = if key.is_empty() { sh.key.clone() } else { key };
                             cache.set_meta(&format!("conv_full_ts:{key}"), "0").ok();
                         }
@@ -550,7 +552,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             // no longer see.
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
-                    if *sh.search_query_inflight.borrow() != query {
+                    if *sh.search.search_query_inflight.borrow() != query {
                         return;
                     }
                     // Contacts first: address book + sidebar counterparts
@@ -558,8 +560,9 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     // hits (accounts whose book isn't mirrored locally),
                     // deduped by address. Messages stay their own section.
                     let q_lc = query.to_lowercase();
-                    let skip = conv_hit_addrs(&sh.search_convs.borrow());
-                    let mut merged = local_search_contacts(&sh.address_book.borrow(), &skip, &q_lc);
+                    let skip = conv_hit_addrs(&sh.search.search_convs.borrow());
+                    let mut merged =
+                        local_search_contacts(&sh.contacts.address_book.borrow(), &skip, &q_lc);
                     // Собеседники найденных диалогов не повторяются и тут.
                     let mut seen: HashSet<String> =
                         merged.iter().map(|c| c.email.to_lowercase()).chain(skip).collect();
@@ -572,8 +575,8 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     merged.truncate(12);
                     let c_items = contact_items(&merged);
                     let m_items = message_hits(&messages);
-                    *sh.search_contacts.borrow_mut() = merged;
-                    *sh.search_messages.borrow_mut() = messages;
+                    *sh.search.search_contacts.borrow_mut() = merged;
+                    *sh.search.search_messages.borrow_mut() = messages;
                     ui.set_search_contacts(ModelRc::new(VecModel::from(c_items)));
                     ui.set_search_messages(ModelRc::new(VecModel::from(m_items)));
                     ui.set_search_loading(false);
@@ -668,12 +671,12 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
                     {
-                        let mut vis = sh.calendar_visible.borrow_mut();
+                        let mut vis = sh.cal.calendar_visible.borrow_mut();
                         for c in &cals {
                             vis.entry(c.id).or_insert(true);
                         }
                     }
-                    *sh.calendars.borrow_mut() = cals;
+                    *sh.cal.calendars.borrow_mut() = cals;
                     apply_calendar_view(ui, sh);
 
                     // Открытая форма создания, у которой не было куда сохранять,
@@ -681,14 +684,14 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     // бы «поймать» закрытием и повторным открытием карточки.
                     if ui.get_edit_visible()
                         && ui.get_edit_is_create()
-                        && sh.edit_cal_ids.borrow().is_empty()
+                        && sh.cal.edit_cal_ids.borrow().is_empty()
                     {
                         let mut ids = fill_writable_calendars(ui, sh, true);
                         if ids.is_empty() {
                             ids = fill_writable_calendars(ui, sh, false);
                         }
                         let filled = !ids.is_empty();
-                        *sh.edit_cal_ids.borrow_mut() = ids;
+                        *sh.cal.edit_cal_ids.borrow_mut() = ids;
                         ui.set_edit_calendar_idx(0);
                         ui.set_edit_error(
                             if filled {
@@ -714,7 +717,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             ui.set_address_book(ModelRc::new(VecModel::from(rows)));
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
-                    *sh.address_book.borrow_mut() = list;
+                    *sh.contacts.address_book.borrow_mut() = list;
                 }
             });
         }
@@ -740,7 +743,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     let now_ms = chrono::Utc::now().timestamp_millis();
                     if let Some(c) = sh.cache.as_ref() {
                         // Hidden calendars don't get reminders (spec #9).
-                        let vis = sh.calendar_visible.borrow();
+                        let vis = sh.cal.calendar_visible.borrow();
                         let hidden = |cal_id: i64| !*vis.get(&cal_id).unwrap_or(&true);
                         reminders::seed(c, &events, &hidden, now_ms);
                         // Deleted-upstream events must stop toasting: cull
@@ -785,7 +788,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     }
                     // Remember each event's owning account for write routing.
                     {
-                        let mut m = sh.event_accounts.borrow_mut();
+                        let mut m = sh.cal.event_accounts.borrow_mut();
                         m.clear();
                         for e in &events {
                             if !e.account_key.is_empty() {
@@ -793,17 +796,17 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                             }
                         }
                     }
-                    *sh.calendar_events.borrow_mut() = events;
+                    *sh.cal.calendar_events.borrow_mut() = events;
                     apply_calendar_view(ui, sh);
                     // A reminder toast asked to open this event — its week
                     // is loaded now, so pop the detail card.
-                    let pend = sh.pending_open_event.get();
+                    let pend = sh.cal.pending_open_event.get();
                     if pend != 0 {
-                        sh.pending_open_event.set(0);
-                        let occ = sh.pending_open_occ.get();
-                        let summary = sh.pending_open_summary.borrow().clone();
+                        sh.cal.pending_open_event.set(0);
+                        let occ = sh.cal.pending_open_occ.get();
+                        let summary = sh.cal.pending_open_summary.borrow().clone();
                         let open_id = {
-                            let events = sh.calendar_events.borrow();
+                            let events = sh.cal.calendar_events.borrow();
                             if events.iter().any(|e| e.id == pend) {
                                 Some(pend)
                             } else {
@@ -853,7 +856,8 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             // this stays simple.)
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
-                    let stubs: Vec<PendingSend> = sh.pending_sends.borrow_mut().drain(..).collect();
+                    let stubs: Vec<PendingSend> =
+                        sh.compose.pending_sends.borrow_mut().drain(..).collect();
                     if !stubs.is_empty() {
                         let bodies = {
                             let mut cur = sh.current_bodies.borrow_mut();
@@ -900,7 +904,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             // ровно так же, как успех: карточка просто закрывалась.
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
-                    if sh.pending_event_save.replace(false) {
+                    if sh.cal.pending_event_save.replace(false) {
                         ui.set_edit_busy(false);
                         ui.set_edit_error(format!("Сервер не принял событие: {e}").into());
                     }
@@ -1017,7 +1021,7 @@ pub(crate) fn handle_new_mail(
                     }],
                     flags: "\\Seen".into(),
                     add: true,
-                    account_key: sh.cur_account_key.borrow().clone(),
+                    account_key: sh.accounts.cur_account_key.borrow().clone(),
                 });
             }
             let mut refs = sh
@@ -1037,7 +1041,7 @@ pub(crate) fn handle_new_mail(
             let _ = etx.send(engine::EngineCmd::FetchMessages {
                 messages: refs,
                 generation: sh.open_gen.get(),
-                account_key: sh.cur_account_key.borrow().clone(),
+                account_key: sh.accounts.cur_account_key.borrow().clone(),
             });
             let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
         }

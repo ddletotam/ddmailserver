@@ -116,7 +116,7 @@ pub(crate) fn finish_add_connection(main_weak: slint::Weak<MainWindow>) {
     let _ = slint::invoke_from_event_loop(move || {
         SHARED.with(|s| {
             if let Some(sh) = s.borrow().as_ref() {
-                if let Some(lw) = sh.add_conn_window.borrow_mut().take() {
+                if let Some(lw) = sh.accounts.add_conn_window.borrow_mut().take() {
                     let _ = lw.hide();
                 }
                 if let Some(m) = main_weak.upgrade() {
@@ -319,7 +319,7 @@ pub(crate) fn open_add_connection(
     let _ = lw.show();
     SHARED.with(|s| {
         if let Some(sh) = s.borrow().as_ref() {
-            *sh.add_conn_window.borrow_mut() = Some(lw);
+            *sh.accounts.add_conn_window.borrow_mut() = Some(lw);
         }
     });
 }
@@ -365,17 +365,17 @@ pub(crate) fn rebuild_engine(ui: &MainWindow, shared: &Rc<Shared>) {
 
     {
         let keys: Vec<String> = accounts.iter().map(|a| a.account_key()).collect();
-        let mut st = shared.account_states.borrow_mut();
+        let mut st = shared.accounts.account_states.borrow_mut();
         st.clear();
         for k in &keys {
             st.insert(k.clone(), "connecting".into());
         }
         drop(st);
-        *shared.account_keys.borrow_mut() = keys;
+        *shared.accounts.account_keys.borrow_mut() = keys;
         // Пересборка движка — это и повторный вход в том числе: заново
         // выданный токен ещё ничего не подтвердил, но старый приговор с него
         // снимать надо, иначе плашка останется висеть после успешного входа.
-        shared.reauth.borrow_mut().clear();
+        shared.accounts.reauth.borrow_mut().clear();
     }
 
     let ui_weak_eng = ui.as_weak();
@@ -398,7 +398,7 @@ pub(crate) fn refresh_connections(ui: &MainWindow, shared: &Rc<Shared>) {
     let accounts = engine::AccountConfig::load_all();
     let mut rows: Vec<ConnRow> = Vec::with_capacity(accounts.len());
     let mut keys: Vec<String> = Vec::with_capacity(accounts.len());
-    let reauth = shared.reauth.borrow();
+    let reauth = shared.accounts.reauth.borrow();
     for a in &accounts {
         let key = a.account_key();
         let title = if a.email.is_empty() { key.clone() } else { a.email.clone() };
@@ -414,7 +414,7 @@ pub(crate) fn refresh_connections(ui: &MainWindow, shared: &Rc<Shared>) {
         keys.push(key);
     }
     drop(reauth);
-    *shared.settings_conn_keys.borrow_mut() = keys;
+    *shared.accounts.settings_conn_keys.borrow_mut() = keys;
     ui.set_connections(ModelRc::new(VecModel::from(rows)));
 }
 
@@ -441,8 +441,8 @@ pub(crate) fn note_account_state(reauth: &mut Vec<String>, key: &str, state: &st
 /// Recompute the aggregate connection light from per-account states:
 /// 2 = green (all connected), 1 = yellow (some down), 0 = red (none connected).
 pub(crate) fn apply_conn_status(ui: &MainWindow, sh: &Shared) {
-    let states = sh.account_states.borrow();
-    let keys = sh.account_keys.borrow();
+    let states = sh.accounts.account_states.borrow();
+    let keys = sh.accounts.account_keys.borrow();
     let total = keys.len();
     let connected =
         keys.iter().filter(|k| states.get(*k).map(|s| s == "connected").unwrap_or(false)).count();
@@ -459,7 +459,7 @@ pub(crate) fn apply_conn_status(ui: &MainWindow, sh: &Shared) {
     // агрегат «частично» уже несёт сама точка. Исключение — мёртвая сессия:
     // «не подключён» тут ничего не объясняет, поэтому строка говорит прямо.
     let accounts = engine::AccountConfig::load_all();
-    let reauth = sh.reauth.borrow();
+    let reauth = sh.accounts.reauth.borrow();
     let rows: Vec<ConnDotRow> = accounts
         .iter()
         .map(|a| {
@@ -482,7 +482,7 @@ pub(crate) fn apply_conn_status(ui: &MainWindow, sh: &Shared) {
     // Индексы строк списка = порядок accounts.json; `relogin(i)` разрешает
     // индекс через этот же список, а не через список настроек: тот
     // наполняется только при открытии модалки настроек.
-    *sh.conn_dot_keys.borrow_mut() = accounts.iter().map(|a| a.account_key()).collect();
+    *sh.accounts.conn_dot_keys.borrow_mut() = accounts.iter().map(|a| a.account_key()).collect();
     ui.set_conn_accounts(ModelRc::new(VecModel::from(rows)));
 
     // Плашка «сессия истекла»: первая по порядку accounts.json учётка,
@@ -539,7 +539,7 @@ pub(crate) fn wire_settings(ui: &MainWindow, shared: &Rc<Shared>) {
     let ui_weak_editc = ui.as_weak();
     let sh_editc = shared.clone();
     ui.on_edit_connection(move |idx| {
-        let key = sh_editc.settings_conn_keys.borrow().get(idx.max(0) as usize).cloned();
+        let key = sh_editc.accounts.settings_conn_keys.borrow().get(idx.max(0) as usize).cloned();
         let Some(key) = key else { return };
         let cfg = engine::AccountConfig::load_all().into_iter().find(|a| a.account_key() == key);
         open_add_connection(ui_weak_editc.clone(), cfg);
@@ -551,7 +551,7 @@ pub(crate) fn wire_settings(ui: &MainWindow, shared: &Rc<Shared>) {
     let ui_weak_relog = ui.as_weak();
     let sh_relog = shared.clone();
     ui.on_relogin(move |idx| {
-        let key = sh_relog.conn_dot_keys.borrow().get(idx.max(0) as usize).cloned();
+        let key = sh_relog.accounts.conn_dot_keys.borrow().get(idx.max(0) as usize).cloned();
         let Some(key) = key else { return };
         let cfg = engine::AccountConfig::load_all().into_iter().find(|a| a.account_key() == key);
         open_add_connection(ui_weak_relog.clone(), cfg);
@@ -561,7 +561,7 @@ pub(crate) fn wire_settings(ui: &MainWindow, shared: &Rc<Shared>) {
     let sh_delc = shared.clone();
     ui.on_delete_connection(move |idx| {
         let Some(ui) = ui_weak_delc.upgrade() else { return };
-        let key = sh_delc.settings_conn_keys.borrow().get(idx.max(0) as usize).cloned();
+        let key = sh_delc.accounts.settings_conn_keys.borrow().get(idx.max(0) as usize).cloned();
         let Some(key) = key else { return };
         engine::AccountConfig::remove_account(&key);
         rebuild_engine(&ui, &sh_delc);

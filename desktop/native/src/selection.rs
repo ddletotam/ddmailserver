@@ -107,28 +107,29 @@ pub(crate) fn selection_text_for(
 
 /// Rebuild the bubble-row highlight rects for the current selection.
 pub(crate) fn refresh_selection_rects(ui: &MainWindow, sh: &Shared) {
-    let row = sh.sel_row.get();
-    if row < 0 || !sh.sel_moved.get() {
+    let row = sh.selection.sel_row.get();
+    if row < 0 || !sh.selection.sel_moved.get() {
         ui.set_selection_row(-1);
         ui.set_selection_rects(ModelRc::new(VecModel::from(Vec::<SelRect>::new())));
         return;
     }
     let runs_all = sh.row_text_runs.borrow();
     let Some(runs) = runs_all.get(row as usize) else { return };
-    let rects = selection_rects_for(runs, sh.sel_anchor.get(), sh.sel_head.get());
+    let rects =
+        selection_rects_for(runs, sh.selection.sel_anchor.get(), sh.selection.sel_head.get());
     ui.set_selection_rects(ModelRc::new(VecModel::from(rects)));
     ui.set_selection_row(row);
 }
 
 /// Selected bubble-row text (legacy entry point for the row selection).
 pub(crate) fn selection_text(sh: &Shared) -> Option<String> {
-    let row = sh.sel_row.get();
-    if row < 0 || !sh.sel_moved.get() {
+    let row = sh.selection.sel_row.get();
+    if row < 0 || !sh.selection.sel_moved.get() {
         return None;
     }
     let runs_all = sh.row_text_runs.borrow();
     let runs = runs_all.get(row as usize)?;
-    selection_text_for(runs, sh.sel_anchor.get(), sh.sel_head.get())
+    selection_text_for(runs, sh.selection.sel_anchor.get(), sh.selection.sel_head.get())
 }
 
 thread_local! {
@@ -260,38 +261,40 @@ pub(crate) fn wire_bubble_selection(ui: &MainWindow, shared: &Rc<Shared>) {
         // у Slint нет ни двойного, ни тройного события. Порог 4px гасит дрожь
         // руки, но не даёт склеить клики по разным словам.
         let now = Instant::now();
-        let (prow, px, py) = sh_ss.sel_click_pos.get();
+        let (prow, px, py) = sh_ss.selection.sel_click_pos.get();
         let same_spot = prow == row && (px - x).abs() < 4.0 && (py - y).abs() < 4.0;
         let quick = sh_ss
+            .selection
             .sel_click_at
             .get()
             .is_some_and(|t| now.duration_since(t) < Duration::from_millis(450));
-        let streak = if same_spot && quick { sh_ss.sel_click_streak.get() + 1 } else { 1 };
-        sh_ss.sel_click_streak.set(streak);
-        sh_ss.sel_click_at.set(Some(now));
-        sh_ss.sel_click_pos.set((row, x, y));
+        let streak =
+            if same_spot && quick { sh_ss.selection.sel_click_streak.get() + 1 } else { 1 };
+        sh_ss.selection.sel_click_streak.set(streak);
+        sh_ss.selection.sel_click_at.set(Some(now));
+        sh_ss.selection.sel_click_pos.set((row, x, y));
 
-        sh_ss.sel_dragging.set(false);
-        sh_ss.sel_moved.set(false);
-        sh_ss.sel_row.set(-1);
+        sh_ss.selection.sel_dragging.set(false);
+        sh_ss.selection.sel_moved.set(false);
+        sh_ss.selection.sel_row.set(-1);
         if let Some(runs) = sh_ss.row_text_runs.borrow().get(row as usize) {
             if let Some(i) = nearest_run(runs, x, y) {
-                sh_ss.sel_row.set(row);
+                sh_ss.selection.sel_row.set(row);
                 let (anchor, head) = match streak {
                     1 => (i, i),
                     // Прогон и есть слово, так что двойной клик — это ровно он.
                     2 => (i, i),
                     _ => line_bounds(runs, i),
                 };
-                sh_ss.sel_anchor.set(anchor);
-                sh_ss.sel_head.set(head);
-                sh_ss.sel_dragging.set(true);
+                sh_ss.selection.sel_anchor.set(anchor);
+                sh_ss.selection.sel_head.set(head);
+                sh_ss.selection.sel_dragging.set(true);
                 if streak >= 2 {
                     // Выделение уже состоялось: пусть держится после отпускания
                     // (иначе `sel_end` сочтёт это кликом) и не открывает ссылку,
                     // если кликнули по ней.
-                    sh_ss.sel_moved.set(true);
-                    sh_ss.sel_suppress_click.set(true);
+                    sh_ss.selection.sel_moved.set(true);
+                    sh_ss.selection.sel_suppress_click.set(true);
                 }
             }
         }
@@ -302,27 +305,27 @@ pub(crate) fn wire_bubble_selection(ui: &MainWindow, shared: &Rc<Shared>) {
     let ui_weak_sm = ui.as_weak();
     let sh_sm = shared.clone();
     ui.on_sel_move(move |row, x, y| {
-        if !sh_sm.sel_dragging.get() || sh_sm.sel_row.get() != row {
+        if !sh_sm.selection.sel_dragging.get() || sh_sm.selection.sel_row.get() != row {
             return;
         }
         let Some(ui) = ui_weak_sm.upgrade() else { return };
         let head =
             sh_sm.row_text_runs.borrow().get(row as usize).and_then(|runs| nearest_run(runs, x, y));
         if let Some(i) = head {
-            if !sh_sm.sel_moved.get() && i == sh_sm.sel_anchor.get() {
+            if !sh_sm.selection.sel_moved.get() && i == sh_sm.selection.sel_anchor.get() {
                 return; // not an actual drag yet
             }
-            sh_sm.sel_moved.set(true);
-            sh_sm.sel_head.set(i);
+            sh_sm.selection.sel_moved.set(true);
+            sh_sm.selection.sel_head.set(i);
             refresh_selection_rects(&ui, &sh_sm);
         }
     });
     let sh_se = shared.clone();
     ui.on_sel_end(move || {
-        sh_se.sel_dragging.set(false);
-        if sh_se.sel_moved.get() {
+        sh_se.selection.sel_dragging.set(false);
+        if sh_se.selection.sel_moved.get() {
             // The release also fires `clicked` — it must not open a link.
-            sh_se.sel_suppress_click.set(true);
+            sh_se.selection.sel_suppress_click.set(true);
         }
     });
     let sh_cs = shared.clone();

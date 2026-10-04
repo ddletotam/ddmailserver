@@ -60,8 +60,8 @@ pub(crate) fn fill_writable_calendars(
     sh: &Shared,
     only_visible: bool,
 ) -> Vec<i64> {
-    let cals = sh.calendars.borrow();
-    let visibility = sh.calendar_visible.borrow();
+    let cals = sh.cal.calendars.borrow();
+    let visibility = sh.cal.calendar_visible.borrow();
     let mut ids = Vec::new();
     let mut accounts = Vec::new();
     let mut names: Vec<slint::SharedString> = Vec::new();
@@ -74,7 +74,7 @@ pub(crate) fn fill_writable_calendars(
         names.push(c.name.clone().into());
     }
     ui.set_edit_calendars(slint::ModelRc::new(slint::VecModel::from(names)));
-    *sh.edit_cal_accounts.borrow_mut() = accounts;
+    *sh.cal.edit_cal_accounts.borrow_mut() = accounts;
     ids
 }
 
@@ -105,8 +105,8 @@ pub(crate) fn open_create_form_at(ui: &MainWindow, sh: &Shared, start_ms: i64) {
     } else {
         ui.set_edit_error("".into());
     }
-    *sh.edit_cal_ids.borrow_mut() = ids;
-    sh.editing_event_id.set(0);
+    *sh.cal.edit_cal_ids.borrow_mut() = ids;
+    sh.cal.editing_event_id.set(0);
     ui.set_edit_is_create(true);
     ui.set_edit_title("".into());
     ui.set_edit_all_day(false);
@@ -208,8 +208,8 @@ pub(crate) fn open_edit_form(
 ) {
     let ids = fill_writable_calendars(ui, sh, false);
     let idx = ids.iter().position(|&id| id == ev.calendar_id).unwrap_or(0) as i32;
-    *sh.edit_cal_ids.borrow_mut() = ids;
-    sh.editing_event_id.set(ev.id);
+    *sh.cal.edit_cal_ids.borrow_mut() = ids;
+    sh.cal.editing_event_id.set(ev.id);
     ui.set_edit_error("".into());
     ui.set_edit_is_create(false);
     ui.set_edit_title(ev.summary.clone().into());
@@ -306,15 +306,15 @@ pub(crate) fn save_edit_form(ui: &MainWindow, sh: &Shared) {
         return;
     };
 
-    let editing = sh.editing_event_id.get();
+    let editing = sh.cal.editing_event_id.get();
     if editing == 0 {
         // Отрицательный индекс (ничего не выбрано) как usize превращается в
         // огромное число, поэтому `get` здесь ловит и «список пуст», и «выбор
         // не сделан» — но различить их для человека надо.
         let idx = ui.get_edit_calendar_idx() as usize;
-        let Some(&cal_id) = sh.edit_cal_ids.borrow().get(idx) else {
+        let Some(&cal_id) = sh.cal.edit_cal_ids.borrow().get(idx) else {
             eprintln!("edit: no writable calendar selected (idx={idx})");
-            let empty = sh.edit_cal_ids.borrow().is_empty();
+            let empty = sh.cal.edit_cal_ids.borrow().is_empty();
             if empty {
                 // Список приезжает единственным ответом FetchCalendars и
                 // нигде не кэшируется: если тот ответ не пришёл (или пришёл
@@ -342,7 +342,7 @@ pub(crate) fn save_edit_form(ui: &MainWindow, sh: &Shared) {
         if let Some(e) = end {
             body["dtend"] = e.into();
         }
-        let cal_account = sh.edit_cal_accounts.borrow().get(idx).cloned().unwrap_or_default();
+        let cal_account = sh.cal.edit_cal_accounts.borrow().get(idx).cloned().unwrap_or_default();
         let _ = etx.send(engine::EngineCmd::CreateEvent { body, account_key: cal_account });
     } else {
         let mut body = serde_json::json!({
@@ -359,14 +359,14 @@ pub(crate) fn save_edit_form(ui: &MainWindow, sh: &Shared) {
         if let Some(c) = sh.cache.as_ref() {
             let _ = c.purge_event_reminders(editing);
         }
-        let ak = sh.event_accounts.borrow().get(&editing).cloned().unwrap_or_default();
+        let ak = sh.cal.event_accounts.borrow().get(&editing).cloned().unwrap_or_default();
         let _ =
             etx.send(engine::EngineCmd::PatchEvent { event_id: editing, body, account_key: ak });
     }
     // Карточка остаётся до ответа движка: закроет её подтверждение (Done), а
     // отказ покажет причину прямо здесь. Кнопки на это время гаснут, чтобы
     // повторное нажатие не отправило второе событие.
-    sh.pending_event_save.set(true);
+    sh.cal.pending_event_save.set(true);
     ui.set_edit_busy(true);
 }
 
@@ -377,7 +377,7 @@ pub(crate) fn wire_edit_form(ui: &MainWindow, shared: &Rc<Shared>) {
     ui.on_detail_edit(move || {
         let Some(ui) = ui_weak_ee.upgrade() else { return };
         let id = ui.get_detail_event_id();
-        let events = sh_ee.calendar_events.borrow();
+        let events = sh_ee.cal.calendar_events.borrow();
         if let Some(ev) = events.iter().find(|e| e.id as i32 == id) {
             ui.set_detail_visible(false);
             open_edit_form(&ui, &sh_ee, ev);
@@ -395,7 +395,7 @@ pub(crate) fn wire_edit_form(ui: &MainWindow, shared: &Rc<Shared>) {
         if let Some(ui) = ui_weak_ec.upgrade() {
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
-                    sh.pending_event_save.set(false);
+                    sh.cal.pending_event_save.set(false);
                 }
             });
             ui.set_edit_busy(false);
@@ -422,7 +422,7 @@ pub(crate) fn wire_event_card(ui: &MainWindow, shared: &Rc<Shared>) {
     ui.on_event_clicked(move |id| {
         use chrono::{Datelike, Local, TimeZone, Timelike};
         let Some(ui) = ui_weak_ev.upgrade() else { return };
-        let events = sh_ev.calendar_events.borrow();
+        let events = sh_ev.cal.calendar_events.borrow();
         let Some(ev) = events.iter().find(|e| e.id as i32 == id) else { return };
 
         // Humanized date: «чт, 12 декабря · 14:30 – 15:30» — a bare digit
@@ -587,7 +587,8 @@ pub(crate) fn wire_event_card(ui: &MainWindow, shared: &Rc<Shared>) {
     ui.on_rsvp(move |id, partstat| {
         if let Some(etx) = sh_rsvp.engine_tx.borrow().as_ref() {
             println!("rsvp event {id} -> {partstat}");
-            let ak = sh_rsvp.event_accounts.borrow().get(&(id as i64)).cloned().unwrap_or_default();
+            let ak =
+                sh_rsvp.cal.event_accounts.borrow().get(&(id as i64)).cloned().unwrap_or_default();
             let _ = etx.send(engine::EngineCmd::Rsvp {
                 event_id: id as i64,
                 partstat: partstat.to_string(),
@@ -607,7 +608,7 @@ pub(crate) fn wire_event_card(ui: &MainWindow, shared: &Rc<Shared>) {
             let _ = c.purge_event_reminders(id);
         }
         toast_window::close_for_event(id);
-        let ak = sh_del.event_accounts.borrow().get(&id).cloned().unwrap_or_default();
+        let ak = sh_del.cal.event_accounts.borrow().get(&id).cloned().unwrap_or_default();
         if let Some(etx) = sh_del.engine_tx.borrow().as_ref() {
             println!("delete event {id}");
             let _ = etx.send(engine::EngineCmd::DeleteEvent { event_id: id, account_key: ak });
