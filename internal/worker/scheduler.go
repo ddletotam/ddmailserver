@@ -157,7 +157,8 @@ func (s *Scheduler) submit(t Task, what string) bool {
 	case err == nil:
 		log.Printf("Submitted %s", what)
 		return true
-	case errors.Is(err, ErrDuplicateTask):
+	case errors.Is(err, ErrDuplicateTask), errors.Is(err, ErrPoolStopped):
+		// Stopped: shutting down, a cycle still in progress — not news.
 		return false
 	default:
 		log.Printf("Failed to submit %s: %v", what, err)

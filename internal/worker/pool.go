@@ -5,8 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"runtime"
+	"sort"
 	"sync"
+	"time"
 )
 
 // ErrDuplicateTask is returned by Submit when the very same logical task (same
@@ -17,6 +18,11 @@ import (
 // anything queued afterwards — including the reverse flag push — never got a
 // slot. Not an error condition: the work is already scheduled.
 var ErrDuplicateTask = errors.New("task already queued")
+
+// ErrPoolStopped is returned by Submit once Stop has begun. The IDLE manager
+// and the outbox trigger submit from their own goroutines and can race with
+// shutdown; they get an error instead of a send on a closed channel.
+var ErrPoolStopped = errors.New("worker pool is stopped")
 
 // fastLanePriority is the Priority() at which a task takes the priority queue
 // instead of the bulk one. Tasks declared their priority since day one and the
@@ -38,12 +44,25 @@ type Pool struct {
 	cancel          context.CancelFunc
 	stats           *Stats
 	mu              sync.RWMutex
-	// Logical tasks currently waiting for a worker, keyed by Task.String().
-	// A key is released the moment a worker picks the task up, NOT when it
-	// finishes: a trigger that arrives while the task runs (IDLE saw new mail
-	// mid-sync) still gets its own follow-up run, so at most one extra run per
-	// key is ever in flight.
+
+	// stopped is set by Stop under mu; Submit checks it and does its
+	// (non-blocking) channel send under the same lock, so nothing enters a
+	// queue once shutdown has begun. The queues are never closed — workers
+	// leave on ctx — which is what makes a late Submit harmless.
+	stopped bool
+
+	// Logical tasks (keyed by Task.String()) waiting for a worker: in a queue
+	// or parked in `deferred`. A key leaves `queued` when a worker actually
+	// starts it, NOT when it finishes: a trigger that arrives mid-run (IDLE saw
+	// new mail during the sync) still earns one follow-up run.
 	queued map[string]bool
+	// Logical tasks currently executing. Two runs of the same key never
+	// overlap: two concurrent syncs of one account pull the same mailbox
+	// twice over two connections and race each other on the dedup check.
+	running map[string]bool
+	// A follow-up taken from the queue while its key was still running. The
+	// worker that finishes the running copy executes it next.
+	deferred map[string]Task
 }
 
 // Stats holds pool statistics
@@ -58,32 +77,34 @@ type Stats struct {
 	SMTPWorkers   int
 }
 
-// NewPool creates a new worker pool
-func NewPool(cpuLimit, imapPercent, queueSize int) *Pool {
-	// Calculate total workers based on CPU limit
-	totalCPUs := runtime.NumCPU()
-	maxWorkers := (totalCPUs * cpuLimit) / 100
-	if maxWorkers < 1 {
-		maxWorkers = 1
-	}
-
-	// Split workers between IMAP and SMTP
-	imapWorkers := (maxWorkers * imapPercent) / 100
-	smtpWorkers := maxWorkers - imapWorkers
-
-	// Ensure at least 1 worker of each type if we have enough workers
-	if imapWorkers == 0 && maxWorkers > 1 {
+// NewPool creates a worker pool with fixed worker counts.
+//
+// Counts are explicit because the work is network-bound: deriving them from
+// runtime.NumCPU used to leave a 2-CPU host with no IMAP worker at all, so
+// mail sync never ran. Values below 1 are raised to 1 — a kind with no worker
+// would accept tasks and never run them.
+func NewPool(imapWorkers, smtpWorkers, queueSize int) *Pool {
+	if imapWorkers < 1 {
 		imapWorkers = 1
-		smtpWorkers = maxWorkers - 1
 	}
-	if smtpWorkers == 0 && maxWorkers > 1 {
+	if smtpWorkers < 1 {
 		smtpWorkers = 1
-		imapWorkers = maxWorkers - 1
+	}
+	if queueSize < 1 {
+		queueSize = 1
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	pool := newPool(imapWorkers, smtpWorkers, queueSize)
 
-	pool := &Pool{
+	log.Printf("Worker pool initialized: %d IMAP, %d SMTP workers, queue size %d",
+		imapWorkers, smtpWorkers, queueSize)
+
+	return pool
+}
+
+func newPool(imapWorkers, smtpWorkers, queueSize int) *Pool {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Pool{
 		imapQueue:       make(chan Task, queueSize),
 		imapFastQueue:   make(chan Task, queueSize),
 		smtpQueue:       make(chan Task, queueSize),
@@ -93,16 +114,13 @@ func NewPool(cpuLimit, imapPercent, queueSize int) *Pool {
 		ctx:             ctx,
 		cancel:          cancel,
 		queued:          make(map[string]bool),
+		running:         make(map[string]bool),
+		deferred:        make(map[string]Task),
 		stats: &Stats{
 			IMAPWorkers: imapWorkers,
 			SMTPWorkers: smtpWorkers,
 		},
 	}
-
-	log.Printf("Worker pool initialized: %d CPUs, %d%% limit = %d total workers (%d IMAP, %d SMTP)",
-		totalCPUs, cpuLimit, maxWorkers, imapWorkers, smtpWorkers)
-
-	return pool
 }
 
 // Start starts the worker pool
@@ -143,18 +161,18 @@ func (p *Pool) smtpWorker(id int) {
 // tens of seconds.
 func (p *Pool) workerLoop(kind string, id int, fast, bulk chan Task) {
 	for {
+		// select picks among ready cases at random, so a queued task could win
+		// over Done; check explicitly so no new work starts after Stop.
+		if p.ctx.Err() != nil {
+			log.Printf("%s worker %d shutting down", kind, id)
+			return
+		}
+
 		// Fast lane first, non-blocking: whenever both lanes have work, the
 		// priority task goes now.
 		select {
-		case <-p.ctx.Done():
-			log.Printf("%s worker %d shutting down", kind, id)
-			return
-		case t, ok := <-fast:
-			if !ok {
-				log.Printf("%s worker %d: queue closed", kind, id)
-				return
-			}
-			p.runTask(kind, id, t)
+		case t := <-fast:
+			p.dispatch(kind, id, t)
 			continue
 		default:
 		}
@@ -163,28 +181,57 @@ func (p *Pool) workerLoop(kind string, id int, fast, bulk chan Task) {
 		case <-p.ctx.Done():
 			log.Printf("%s worker %d shutting down", kind, id)
 			return
-		case t, ok := <-fast:
-			if !ok {
-				log.Printf("%s worker %d: queue closed", kind, id)
-				return
-			}
-			p.runTask(kind, id, t)
-		case t, ok := <-bulk:
-			if !ok {
-				log.Printf("%s worker %d: queue closed", kind, id)
-				return
-			}
-			p.runTask(kind, id, t)
+		case t := <-fast:
+			p.dispatch(kind, id, t)
+		case t := <-bulk:
+			p.dispatch(kind, id, t)
 		}
 	}
 }
 
-// runTask executes one task with panic recovery and records the outcome. The
-// dedup key is released up front — the task is no longer "waiting", so a fresh
-// trigger for the same work can queue a follow-up run.
-func (p *Pool) runTask(kind string, id int, t Task) {
-	p.release(t.String())
+// dispatch runs t unless another run of the same logical task is in progress;
+// then t is parked and the worker finishing that run executes it next. Either
+// way this worker is free again at once — one long sync never pins a second
+// worker waiting on it.
+func (p *Pool) dispatch(kind string, id int, t Task) {
+	key := t.String()
 
+	p.mu.Lock()
+	if p.ctx.Err() != nil {
+		p.mu.Unlock()
+		return
+	}
+	if p.running[key] {
+		// At most one parked follow-up per key: Submit refuses while the key
+		// is in `queued`, and it stays there until the follow-up starts.
+		p.deferred[key] = t
+		p.mu.Unlock()
+		log.Printf("%s worker %d: %s is already running, follow-up deferred", kind, id, key)
+		return
+	}
+	delete(p.queued, key)
+	p.running[key] = true
+	p.mu.Unlock()
+
+	for t != nil {
+		p.runTask(kind, id, t)
+
+		p.mu.Lock()
+		next, ok := p.deferred[key]
+		if ok && p.ctx.Err() == nil {
+			delete(p.deferred, key)
+			delete(p.queued, key)
+			t = next
+		} else {
+			delete(p.running, key)
+			t = nil
+		}
+		p.mu.Unlock()
+	}
+}
+
+// runTask executes one task with panic recovery and records the outcome.
+func (p *Pool) runTask(kind string, id int, t Task) {
 	log.Printf("%s worker %d executing: %s", kind, id, t.String())
 
 	var err error
@@ -217,16 +264,9 @@ func (p *Pool) runTask(kind string, id int, t Task) {
 	p.mu.Unlock()
 }
 
-// release drops a dedup key so the same logical task can be queued again.
-func (p *Pool) release(key string) {
-	p.mu.Lock()
-	delete(p.queued, key)
-	p.mu.Unlock()
-}
-
 // Submit submits a task to the pool. Returns ErrDuplicateTask when the same
 // logical task is already waiting for a worker — callers should treat that as
-// "already scheduled", not as a failure.
+// "already scheduled", not as a failure — and ErrPoolStopped once Stop began.
 func (p *Pool) Submit(task Task) error {
 	var fast, bulk chan Task
 	var queueType string
@@ -246,48 +286,82 @@ func (p *Pool) Submit(task Task) error {
 	}
 
 	key := task.String()
+
+	// Admission and the (non-blocking) send happen under one lock: that is
+	// what orders every Submit against Stop flipping `stopped`.
 	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.stopped {
+		return ErrPoolStopped
+	}
 	if p.queued[key] {
-		p.mu.Unlock()
 		return ErrDuplicateTask
 	}
-	p.queued[key] = true
-	p.mu.Unlock()
 
 	select {
 	case queue <- task:
-		p.mu.Lock()
+		p.queued[key] = true
 		if task.Type() == TaskTypeIMAP {
 			p.stats.IMAPQueued++
 		} else {
 			p.stats.SMTPQueued++
 		}
-		p.mu.Unlock()
 		return nil
-	case <-p.ctx.Done():
-		p.release(key)
-		return fmt.Errorf("pool is shutting down")
 	default:
-		p.release(key)
 		return fmt.Errorf("%s task queue is full", queueType)
 	}
 }
 
-// Stop gracefully stops the worker pool
-func (p *Pool) Stop() {
+// Stop shuts the pool down: refuses new tasks, cancels the context handed to
+// running tasks and waits up to `timeout` for the workers to return. Tasks
+// still waiting in the queues are dropped — the scheduler derives them again
+// from the database after the next start.
+//
+// A worker that does not return in time is stuck in a call that ignores ctx
+// (a network read with no deadline); it is abandoned and process exit takes it
+// down, and the returned error names what was still running. Calling Stop more
+// than once is safe; later calls return nil immediately.
+func (p *Pool) Stop(timeout time.Duration) error {
+	p.mu.Lock()
+	already := p.stopped
+	p.stopped = true
+	p.mu.Unlock()
+	if already {
+		return nil
+	}
+
 	log.Printf("Stopping worker pool...")
 	p.cancel()
 
-	// Close the task queues to signal no more tasks
-	close(p.imapFastQueue)
-	close(p.imapQueue)
-	close(p.smtpFastQueue)
-	close(p.smtpQueue)
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
 
-	// Wait for all workers to finish
-	p.wg.Wait()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 
-	log.Printf("Worker pool stopped")
+	select {
+	case <-done:
+		log.Printf("Worker pool stopped")
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("worker pool: still running after %v: %v", timeout, p.runningKeys())
+	}
+}
+
+// runningKeys lists the logical tasks currently executing, sorted.
+func (p *Pool) runningKeys() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	keys := make([]string, 0, len(p.running))
+	for k := range p.running {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // Stats returns current pool statistics

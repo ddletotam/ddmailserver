@@ -66,14 +66,17 @@ sync:
 
 # Worker pool settings
 workers:
-  # CPU usage limit in percent (1-100)
-  cpu_limit: 50
+  # Tasks wait on the network, not the CPU, so the pool is sized explicitly.
+  # IMAP workers: mailbox pulls, flag push, CalDAV/CardDAV syncs.
+  imap_workers: 4
 
-  # Percentage of workers dedicated to IMAP tasks (rest goes to SMTP)
-  imap_worker_percent: 50
+  # SMTP workers: outbox delivery.
+  smtp_workers: 2
 
   # Task queue size (buffered channel size)
   queue_size: 1000
+
+  # cpu_limit / imap_worker_percent are obsolete: still accepted, ignored.
 
 # Logging
 logging:

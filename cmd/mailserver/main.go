@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/ddletotam/ddmailserver/internal/authlimit"
 	"github.com/ddletotam/ddmailserver/internal/caldav/importer"
@@ -79,7 +80,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer database.Close()
+	// Closed explicitly at the end of shutdown — see shutdown().
 	log.Printf("Database connection established")
 
 	// Set encryption key for password encryption/decryption
@@ -138,13 +139,12 @@ func main() {
 
 	// Initialize worker pool
 	log.Printf("Initializing worker pool...")
-	pool := worker.NewPool(
-		cfg.Workers.CPULimit,
-		cfg.Workers.IMAPWorkerPercent,
-		cfg.Workers.QueueSize,
-	)
+	for _, key := range cfg.Workers.DeprecatedKeys() {
+		log.Printf("WARNING: config key %s is obsolete and ignored — size the pool with workers.imap_workers / workers.smtp_workers", key)
+	}
+	workersCfg := cfg.Workers.WithDefaults()
+	pool := worker.NewPool(workersCfg.IMAPWorkers, workersCfg.SMTPWorkers, workersCfg.QueueSize)
 	pool.Start()
-	defer pool.Stop()
 
 	// Resolve OAuth clients (config takes precedence over DB)
 	var googleOAuth *oauth.GoogleOAuth
@@ -217,7 +217,6 @@ func main() {
 	idleManager.SetSyncCallback(scheduler.TriggerSyncForAccount)
 	idleManager.SetOAuthClients(googleOAuth, microsoftOAuth)
 	go idleManager.Start()
-	defer idleManager.Stop()
 
 	// Free anything the previous run left mid-send. status='sending' is set just
 	// before a send starts and cleared only when it finishes, so a restart in
@@ -231,7 +230,9 @@ func main() {
 
 	// Start scheduler last — all dependencies must be ready before first sync cycle.
 	go scheduler.Start()
-	defer scheduler.Stop()
+
+	// Network listeners, closed on shutdown before the pool is drained.
+	var listeners []namedStop
 
 	// Initialize IMAP server (plain) WITHOUT the IDLE extension, but WITH the
 	// notify hub: flag changes made through this listener must still publish
@@ -248,7 +249,7 @@ func main() {
 			log.Fatalf("IMAP server error: %v", err)
 		}
 	}()
-	defer imapSrv.Stop()
+	listeners = append(listeners, namedStop{"IMAP server", imapSrv.Stop})
 
 	// Initialize IMAP TLS server WITH IDLE support (only TLS gets push notifications)
 	if hasTLS && cfg.Server.IMAPTLSPort > 0 {
@@ -267,7 +268,7 @@ func main() {
 					log.Printf("IMAP TLS server error: %v", err)
 				}
 			}()
-			defer imapTLSSrv.Stop()
+			listeners = append(listeners, namedStop{"IMAP TLS server", imapTLSSrv.Stop})
 		}
 	}
 
@@ -283,7 +284,7 @@ func main() {
 			log.Fatalf("SMTP server error: %v", err)
 		}
 	}()
-	defer smtpSrv.Stop()
+	listeners = append(listeners, namedStop{"SMTP server", smtpSrv.Stop})
 
 	// Initialize SMTP TLS server if configured
 	if hasTLS && cfg.Server.SMTPTLSPort > 0 {
@@ -299,7 +300,7 @@ func main() {
 					log.Printf("SMTP TLS server error: %v", err)
 				}
 			}()
-			defer smtpTLSSrv.Stop()
+			listeners = append(listeners, namedStop{"SMTP TLS server", smtpTLSSrv.Stop})
 		}
 	}
 
@@ -318,7 +319,7 @@ func main() {
 				log.Printf("MX server error: %v (may need root for port 25)", err)
 			}
 		}()
-		defer mxSrv.Stop()
+		listeners = append(listeners, namedStop{"MX server", mxSrv.Stop})
 	}
 
 	// (Removed) The inbound LDAP server face is not part of the aggregation
@@ -350,19 +351,93 @@ func main() {
 			log.Fatalf("Web server error: %v", err)
 		}
 	}()
-	defer webSrv.Stop()
+	listeners = append(listeners, namedStop{"web server", webSrv.Stop})
 	log.Printf("Web interface available at http://%s:%d", cfg.Server.WebHost, cfg.Server.WebPort)
 
 	log.Println("✓ MailServer started successfully")
 	log.Println("Press Ctrl+C to stop")
 
 	// Wait for interrupt signal
-	sigChan := make(chan os.Signal, 1)
+	sigChan := make(chan os.Signal, 2)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	<-sigChan
+	sig := <-sigChan
+	log.Printf("Received %v, shutting down gracefully...", sig)
 
-	log.Println("\nShutting down gracefully...")
+	shutdown(sigChan, scheduler, idleManager, listeners, pool, database)
+}
 
-	// Cleanup will happen via defer statements
-	log.Println("Shutdown complete")
+// Shutdown budget. systemd's TimeoutStopSec (90 s by default) ends in SIGKILL;
+// staying well inside it keeps the stop a clean exit and restarts fast. The
+// pool gets most of it: an in-flight SMTP send should finish rather than be cut
+// mid-transaction (a cut send is retried on the next start — a duplicate).
+const (
+	shutdownBudget  = 10 * time.Second
+	poolStopTimeout = 7 * time.Second
+)
+
+// namedStop is one component to stop, with a name for the shutdown log.
+type namedStop struct {
+	name string
+	stop func() error
+}
+
+// shutdown stops everything in dependency order and never takes longer than
+// shutdownBudget.
+//
+// What used to hold the stop until systemd killed the process: pool.Stop
+// waited for workers without a limit, and a worker in a mailbox sync could
+// not return — on cancellation the sync abandoned its UID FETCH, and the
+// deferred LOGOUT then waited forever for a reply queued behind the undrained
+// FETCH stream (fixed in imap/client; any other ctx-blind network read can
+// still hang, hence the bounded wait). The pool also closed its queues while
+// the IDLE manager and TriggerOutbox could still submit — a panic, not a
+// hang, but no more graceful.
+func shutdown(sigChan <-chan os.Signal, scheduler *worker.Scheduler, idleManager *imapclient.IdleManager,
+	listeners []namedStop, pool *worker.Pool, database *db.DB) {
+	started := time.Now()
+
+	// Last resort: whatever else hangs (a listener Close, a DB call that never
+	// returns), the process still exits inside the budget instead of waiting
+	// for SIGKILL. A second signal exits at once.
+	watchdog := time.AfterFunc(shutdownBudget, func() {
+		log.Printf("Shutdown did not finish within %v — exiting forcibly", shutdownBudget)
+		os.Exit(1)
+	})
+	defer watchdog.Stop()
+	go func() {
+		if sig, ok := <-sigChan; ok {
+			log.Printf("Received %v again — exiting immediately", sig)
+			os.Exit(1)
+		}
+	}()
+
+	// 1. No new work: stop the periodic scheduler and the IDLE watchers that
+	//    trigger syncs.
+	scheduler.Stop()
+	idleManager.Stop()
+
+	// 2. No new clients, in reverse order of start-up.
+	for i := len(listeners) - 1; i >= 0; i-- {
+		if err := listeners[i].stop(); err != nil && !errors.Is(err, net.ErrClosed) {
+			log.Printf("Stopping %s: %v", listeners[i].name, err)
+		}
+	}
+
+	// 3. Let running tasks finish within the pool's share of the budget.
+	//    Submits racing with this get ErrPoolStopped.
+	poolErr := pool.Stop(poolStopTimeout)
+	if poolErr != nil {
+		log.Printf("%v — abandoning them", poolErr)
+	}
+
+	// 4. sql.DB.Close waits for queries in progress; with abandoned workers
+	//    still holding connections that could be forever, so skip it then —
+	//    process exit closes the sockets anyway.
+	if poolErr == nil {
+		if err := database.Close(); err != nil {
+			log.Printf("Closing database: %v", err)
+		}
+	}
+
+	log.Printf("Shutdown complete in %v", time.Since(started).Round(time.Millisecond))
 }

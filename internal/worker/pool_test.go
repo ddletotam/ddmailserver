@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,21 +33,10 @@ func (f *fakeTask) Execute(context.Context) error {
 }
 
 // newTestPool builds a pool with exactly one IMAP worker so ordering is
-// observable, bypassing NewPool's CPU-derived sizing.
+// observable. Workers are started by the test itself (p.wg.Add + go
+// p.imapWorker), so it controls exactly when tasks begin to drain.
 func newTestPool(queueSize int) *Pool {
-	ctx, cancel := context.WithCancel(context.Background())
-	return &Pool{
-		imapQueue:       make(chan Task, queueSize),
-		imapFastQueue:   make(chan Task, queueSize),
-		smtpQueue:       make(chan Task, queueSize),
-		smtpFastQueue:   make(chan Task, queueSize),
-		imapWorkerCount: 1,
-		smtpWorkerCount: 0,
-		ctx:             ctx,
-		cancel:          cancel,
-		queued:          make(map[string]bool),
-		stats:           &Stats{IMAPWorkers: 1},
-	}
+	return newPool(1, 0, queueSize)
 }
 
 // TestSubmitRejectsDuplicateWhileQueued is the admission-control guarantee that
@@ -160,6 +151,225 @@ func TestSubmitFullQueueReleasesKey(t *testing.T) {
 	p.mu.RUnlock()
 	if stillHeld {
 		t.Fatal("dedup key for a rejected task was not released")
+	}
+}
+
+// overlapTask records how many runs of it are executing at once.
+type overlapTask struct {
+	name    string
+	active  *int32
+	maxSeen *int32
+	runs    *int32
+	hold    time.Duration
+}
+
+func (o *overlapTask) Type() task.Type { return task.TypeIMAP }
+func (o *overlapTask) Priority() int   { return 1 }
+func (o *overlapTask) String() string  { return o.name }
+func (o *overlapTask) Execute(context.Context) error {
+	n := atomic.AddInt32(o.active, 1)
+	for {
+		m := atomic.LoadInt32(o.maxSeen)
+		if n <= m || atomic.CompareAndSwapInt32(o.maxSeen, m, n) {
+			break
+		}
+	}
+	time.Sleep(o.hold)
+	atomic.AddInt32(o.active, -1)
+	atomic.AddInt32(o.runs, 1)
+	return nil
+}
+
+// TestSameKeyNeverRunsConcurrently: with several idle workers, a follow-up
+// sync of an account must not start while the previous sync of that account is
+// still running — it waits and runs right after. Before, the dedup key was
+// released at pick-up and a second worker happily ran the follow-up in
+// parallel: two connections pulling the same mailbox, racing on dedup.
+func TestSameKeyNeverRunsConcurrently(t *testing.T) {
+	p := newPool(4, 1, 16)
+	p.Start()
+	defer func() {
+		if err := p.Stop(5 * time.Second); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	var active, maxSeen, runs int32
+	mk := func() *overlapTask {
+		return &overlapTask{name: "IMAP sync for a@b (account 1)", active: &active, maxSeen: &maxSeen, runs: &runs, hold: 50 * time.Millisecond}
+	}
+
+	accepted := int32(0)
+	deadline := time.Now().Add(600 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if err := p.Submit(mk()); err == nil {
+			accepted++
+		} else if !errors.Is(err, ErrDuplicateTask) {
+			t.Fatalf("submit: %v", err)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	waitUntil(t, func() bool { return atomic.LoadInt32(&runs) == accepted })
+	if got := atomic.LoadInt32(&maxSeen); got != 1 {
+		t.Fatalf("same logical task ran %d-way concurrently, want 1", got)
+	}
+	if accepted < 2 {
+		t.Fatalf("only %d runs accepted, test did not exercise follow-ups", accepted)
+	}
+}
+
+// TestDifferentKeysRunInParallel guards against over-serialising: the
+// per-key limit must not turn the pool into a single worker.
+func TestDifferentKeysRunInParallel(t *testing.T) {
+	p := newPool(2, 1, 8)
+	p.Start()
+	defer p.Stop(5 * time.Second)
+
+	ran := make(chan string, 2)
+	release := make(chan struct{})
+	a := &fakeTask{name: "IMAP sync for a@b (account 1)", priority: 1, release: release, ran: ran}
+	b := &fakeTask{name: "IMAP sync for c@d (account 2)", priority: 1, release: release, ran: ran}
+	if err := p.Submit(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Submit(b); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		select {
+		case n := <-ran:
+			seen[n] = true
+		case <-time.After(3 * time.Second):
+			t.Fatalf("only %v started; different accounts must sync in parallel", seen)
+		}
+	}
+	close(release)
+}
+
+// TestStopWithConcurrentSubmits is the shutdown crash: Stop used to close the
+// queues while the IDLE manager and TriggerOutbox were still submitting from
+// their own goroutines — panic: send on closed channel. Run with -race.
+func TestStopWithConcurrentSubmits(t *testing.T) {
+	p := newPool(2, 2, 64)
+	p.Start()
+
+	var wg sync.WaitGroup
+	stopSubmitting := make(chan struct{})
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; ; i++ {
+				select {
+				case <-stopSubmitting:
+					return
+				default:
+				}
+				ft := &fakeTask{name: fmt.Sprintf("t-%d-%d", g, i), priority: 1 + i%2, ran: make(chan string, 1)}
+				err := p.Submit(ft)
+				if errors.Is(err, ErrPoolStopped) {
+					return
+				}
+			}
+		}(g)
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	if err := p.Stop(5 * time.Second); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	// Submitters keep going after Stop for a moment: every one must get
+	// ErrPoolStopped, none may panic.
+	time.Sleep(10 * time.Millisecond)
+	close(stopSubmitting)
+	wg.Wait()
+
+	if err := p.Submit(&fakeTask{name: "late", priority: 1, ran: make(chan string, 1)}); !errors.Is(err, ErrPoolStopped) {
+		t.Fatalf("submit after stop: got %v, want ErrPoolStopped", err)
+	}
+	if err := p.Stop(time.Second); err != nil {
+		t.Fatalf("second stop: %v", err)
+	}
+}
+
+// stuckTask ignores its context, like a network read without a deadline.
+type stuckTask struct{ release chan struct{} }
+
+func (s *stuckTask) Type() task.Type               { return task.TypeSMTP }
+func (s *stuckTask) Priority() int                 { return 1 }
+func (s *stuckTask) String() string                { return "stuck" }
+func (s *stuckTask) Execute(context.Context) error { <-s.release; return nil }
+
+// TestStopTimesOut: a task that ignores ctx must not hold shutdown past the
+// budget — this is what got the process SIGKILLed by systemd.
+func TestStopTimesOut(t *testing.T) {
+	p := newPool(1, 1, 4)
+	p.Start()
+	st := &stuckTask{release: make(chan struct{})}
+	defer close(st.release)
+	if err := p.Submit(st); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, func() bool { return len(p.runningKeys()) == 1 })
+
+	start := time.Now()
+	err := p.Stop(200 * time.Millisecond)
+	if err == nil {
+		t.Fatal("Stop returned nil while a task was stuck")
+	}
+	if el := time.Since(start); el > 2*time.Second {
+		t.Fatalf("Stop took %v, budget was 200ms", el)
+	}
+}
+
+// TestStopCancelsContext: a task that honours ctx ends promptly on Stop.
+func TestStopCancelsContext(t *testing.T) {
+	p := newPool(1, 1, 4)
+	p.Start()
+	started := make(chan struct{})
+	ct := &ctxTask{started: started}
+	if err := p.Submit(ct); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := p.Stop(2 * time.Second); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+}
+
+type ctxTask struct{ started chan struct{} }
+
+func (c *ctxTask) Type() task.Type { return task.TypeIMAP }
+func (c *ctxTask) Priority() int   { return 1 }
+func (c *ctxTask) String() string  { return "ctx" }
+func (c *ctxTask) Execute(ctx context.Context) error {
+	close(c.started)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestNewPoolExplicitCounts(t *testing.T) {
+	p := NewPool(4, 2, 10)
+	if p.imapWorkerCount != 4 || p.smtpWorkerCount != 2 {
+		t.Fatalf("workers = %d IMAP / %d SMTP, want 4 / 2", p.imapWorkerCount, p.smtpWorkerCount)
+	}
+	// Zero must never mean "no IMAP worker" — that was the 2-CPU outage.
+	p = NewPool(0, 0, 0)
+	if p.imapWorkerCount < 1 || p.smtpWorkerCount < 1 || cap(p.imapQueue) < 1 {
+		t.Fatalf("degenerate pool: %d IMAP / %d SMTP / queue %d", p.imapWorkerCount, p.smtpWorkerCount, cap(p.imapQueue))
+	}
+}
+
+func waitUntil(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not reached within 5s")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

@@ -164,10 +164,61 @@ type SyncConfig struct {
 	MaxConnections int `yaml:"max_connections"`
 }
 
+// WorkersConfig sizes the background worker pool.
+//
+// Worker tasks (IMAP pulls, SMTP sends, DAV syncs) spend their time waiting on
+// the network, not on the CPU, so the pool is sized by explicit counts. The old
+// scheme derived them from runtime.NumCPU × cpu_limit% split by
+// imap_worker_percent; on a 2-CPU host with the shipped defaults that came to
+// one worker in total and zero for IMAP — mail sync never ran at all.
 type WorkersConfig struct {
+	IMAPWorkers int `yaml:"imap_workers"` // 0 → DefaultIMAPWorkers
+	SMTPWorkers int `yaml:"smtp_workers"` // 0 → DefaultSMTPWorkers
+	QueueSize   int `yaml:"queue_size"`   // 0 → DefaultQueueSize
+
+	// Deprecated: accepted so existing config files keep loading, ignored.
+	// See DeprecatedKeys.
 	CPULimit          int `yaml:"cpu_limit"`
 	IMAPWorkerPercent int `yaml:"imap_worker_percent"`
-	QueueSize         int `yaml:"queue_size"`
+}
+
+// Worker pool defaults, used when the corresponding key is absent or 0.
+const (
+	DefaultIMAPWorkers = 4
+	DefaultSMTPWorkers = 2
+	DefaultQueueSize   = 1000
+
+	// maxWorkersPerKind bounds each kind: every IMAP worker can hold a remote
+	// connection, and a typo like 400 should fail loudly, not open 400 of them.
+	maxWorkersPerKind = 64
+)
+
+// WithDefaults returns the worker settings with unset (zero) values replaced
+// by the defaults.
+func (w WorkersConfig) WithDefaults() WorkersConfig {
+	if w.IMAPWorkers == 0 {
+		w.IMAPWorkers = DefaultIMAPWorkers
+	}
+	if w.SMTPWorkers == 0 {
+		w.SMTPWorkers = DefaultSMTPWorkers
+	}
+	if w.QueueSize == 0 {
+		w.QueueSize = DefaultQueueSize
+	}
+	return w
+}
+
+// DeprecatedKeys lists the obsolete worker keys present in the config, so the
+// caller can warn that they no longer have any effect.
+func (w WorkersConfig) DeprecatedKeys() []string {
+	var keys []string
+	if w.CPULimit != 0 {
+		keys = append(keys, "workers.cpu_limit")
+	}
+	if w.IMAPWorkerPercent != 0 {
+		keys = append(keys, "workers.imap_worker_percent")
+	}
+	return keys
 }
 
 type LoggingConfig struct {
@@ -216,14 +267,16 @@ func (c *Config) Validate() error {
 	if len(c.Security.EncryptionKey) < 32 {
 		return fmt.Errorf("encryption key must be at least 32 characters")
 	}
-	if c.Workers.CPULimit < 1 || c.Workers.CPULimit > 100 {
-		return fmt.Errorf("CPU limit must be between 1 and 100")
+	// cpu_limit / imap_worker_percent are deliberately not validated: they
+	// are ignored, and an old value must not stop the server from starting.
+	if c.Workers.IMAPWorkers < 0 || c.Workers.IMAPWorkers > maxWorkersPerKind {
+		return fmt.Errorf("workers.imap_workers must be between 0 (default %d) and %d", DefaultIMAPWorkers, maxWorkersPerKind)
 	}
-	if c.Workers.IMAPWorkerPercent < 0 || c.Workers.IMAPWorkerPercent > 100 {
-		return fmt.Errorf("IMAP worker percent must be between 0 and 100")
+	if c.Workers.SMTPWorkers < 0 || c.Workers.SMTPWorkers > maxWorkersPerKind {
+		return fmt.Errorf("workers.smtp_workers must be between 0 (default %d) and %d", DefaultSMTPWorkers, maxWorkersPerKind)
 	}
-	if c.Workers.QueueSize < 1 {
-		return fmt.Errorf("queue size must be at least 1")
+	if c.Workers.QueueSize < 0 {
+		return fmt.Errorf("workers.queue_size must not be negative")
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Server.Public.SecureCookies)) {
 	case "", SecureCookiesAuto, SecureCookiesTrue, SecureCookiesFalse:
