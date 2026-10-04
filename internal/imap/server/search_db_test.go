@@ -92,7 +92,7 @@ func TestSearch_DB(t *testing.T) {
 		{uid: 3, subject: "Re: Hello", from: "bob@example.org", body: "100% sure, a_b",
 			date: day("2024-03-05 08:00"), size: 300},
 		{uid: 4, subject: "other", from: "bob@example.org", body: "100 percent, axb",
-			date: day("2024-04-01 12:00"), size: 70000},
+			date: day("2024-04-01 12:00"), size: 0}, // synced before sizes were stored
 	}
 	for _, m := range msgs {
 		var src interface{}
@@ -171,7 +171,8 @@ func TestSearch_DB(t *testing.T) {
 		{"UID SEARCH NOT SUBJECT hello", "2 4"},
 		{"UID SEARCH SINCE 2-Mar-2024 BEFORE 1-Apr-2024", "2 3"},
 		{"UID SEARCH SENTON 5-Mar-2024", "3"},
-		{"UID SEARCH LARGER 4000", "2 4"},
+		{"UID SEARCH LARGER 4000", "2"},
+		{"UID SEARCH SMALLER 1000", "3 4"},
 		{"UID SEARCH UID 3:*", "3 4"},
 		{"SEARCH FLAGGED", "2"},
 		{"SEARCH 2:* SUBJECT hello", "3"},
@@ -209,5 +210,37 @@ func TestSearch_DB(t *testing.T) {
 	}
 	if got := searchLine(lines); got != "2" {
 		t.Errorf("literal BODY search = %q, want 2", got)
+	}
+
+	// LARGER/SMALLER computed the missing size and stored it, as FETCH does.
+	var size int64
+	if err := raw.QueryRow(`SELECT size FROM messages WHERE folder_id = $1 AND uid = 4`, inbox.ID).Scan(&size); err != nil || size == 0 {
+		t.Errorf("size of message 4 after SEARCH LARGER: %d (%v)", size, err)
+	}
+
+	// Under LC_CTYPE=C the database cannot fold Cyrillic case: non-ASCII
+	// strings are then matched in Go, row by row.
+	mb := &Mailbox{
+		name:       "INBOX",
+		folderType: "inbox",
+		user:       &User{username: tag, userID: user.ID, database: database},
+		database:   database,
+		folderID:   inbox.ID,
+	}
+	noFold := false
+	for _, c := range []struct{ query, want string }{
+		{`CHARSET UTF-8 SUBJECT "СЧЁТ"`, "[2]"},
+		{`CHARSET UTF-8 FROM "иван"`, "[2]"},
+		{`CHARSET UTF-8 TEXT "пятницы"`, "[2]"},
+		{`CHARSET UTF-8 NOT BODY "оплатите"`, "[1 3 4]"},
+		{`CHARSET UTF-8 HEADER Message-ID "3.` + tag + `"`, "[3]"},
+	} {
+		got, err := runSearch(&dbSearchSource{m: mb, folds: &noFold}, true, parseSearch(t, c.query))
+		if err != nil {
+			t.Fatalf("%s: %v", c.query, err)
+		}
+		if fmt.Sprint(got) != c.want {
+			t.Errorf("without DB folding, UID SEARCH %s = %v, want %s", c.query, got, c.want)
+		}
 	}
 }
