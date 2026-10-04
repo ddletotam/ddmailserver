@@ -110,14 +110,24 @@ graph TD
     oauthh["OAuth-хендлеры"]
     webui["Хендлеры веб-UI"]
 
+    msgsvc["service/messages<br/>флаги, удаление, purge + flag_sync_queue (одна транзакция)"]
+    spamsvc["service/spam<br/>объяснение вердикта"]
+    imapsrv["IMAP-сервер (STORE)"]
     dbl["слой БД<br/>(messages, folders, accounts, calendar, contacts)"]
     parser["MIME-парсер + санитайзер"]
     cal["календарь / обработчик входящих iTIP"]
-    spam["спам-анализатор"]
+    spam["спам-анализатор (parser.Analyzer) —<br/>единственный движок"]
     idx["поисковый индексатор (Meili)"]
     hub["NotifyHub"]
 
     router --> desk & caldav & carddav & oauthh & webui
+    desk --> msgsvc
+    webui --> msgsvc
+    imapsrv --> msgsvc
+    webui --> spamsvc
+    msgsvc --> dbl
+    spamsvc --> spam
+    spamsvc --> dbl
     desk --> dbl
     desk --> idx
     desk --> hub
@@ -127,6 +137,12 @@ graph TD
     dbl --> pg[("Postgres")]
     cal --> dbl
 ```
+
+Изменения писем (флаги, удаление, purge) идут только через `service/messages`:
+он решает, когда изменение уходит на исходный сервер внешней учётки, и делает
+это в одной транзакции с самим изменением. SQL живёт только в `internal/db`.
+Окно «почему это спам» — `service/spam`: сохранённый при доставке вердикт +
+повторный прогон того же `parser.Analyzer`, второго движка нет.
 
 ### L3b — Мейлсервер: воркер + синк
 

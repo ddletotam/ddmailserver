@@ -1,0 +1,134 @@
+{{define "spam-analysis"}}
+{{$e := .E}}
+{{$labels := .CheckLabels}}
+<div class="card">
+    <div class="card-header">
+        <h4 class="card-title">{{$e.Message.Subject}}</h4>
+    </div>
+    <div class="card-body">
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <dl>
+                    <dt>{{t "spam.analyze.from"}}</dt><dd><code>{{$e.Message.From}}</code></dd>
+                    <dt>{{t "spam.analyze.date"}}</dt><dd>{{fmtTime $e.Message.Date "02.01.2006 15:04"}}</dd>
+                </dl>
+            </div>
+            <div class="col-md-6">
+                <div class="card {{if $e.IsSpam}}bg-red-lt{{else if eq $e.Status "suspicious"}}bg-orange-lt{{else}}bg-green-lt{{end}}">
+                    <div class="card-body text-center">
+                        <div class="fw-bold">{{if $e.IsSpam}}{{t "spam.analyze.verdict_spam"}}{{else}}{{t "spam.analyze.verdict_inbox"}}{{end}}</div>
+                        <div class="display-6 fw-bold">{{printf "%.1f" $e.Score}}</div>
+                        <div class="text-muted">{{t "spam.analyze.score"}} · {{$e.Status}}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        {{if $e.DecidedByRule}}
+        <div class="alert alert-danger mb-4">
+            <i class="ti ti-shield-x me-2"></i>{{t "spam.analyze.decided_by_rule"}}
+            <code>{{$e.Rule.RuleType}}: {{$e.Rule.RuleValue}}</code>
+        </div>
+        {{else if $e.Rule}}
+        <div class="alert alert-info mb-4">
+            <i class="ti ti-shield-check me-2"></i>{{t "spam.analyze.partial_allow"}}
+            <code>{{$e.Rule.RuleType}}: {{$e.Rule.RuleValue}}</code>
+        </div>
+        {{end}}
+        {{if $e.Whitelisted}}
+        <div class="alert alert-success mb-4"><i class="ti ti-user-check me-2"></i>{{t "spam.analyze.whitelisted"}}</div>
+        {{end}}
+
+        <h5>{{t "spam.analyze.rules_fired"}}</h5>
+        {{if $e.Findings}}
+        <table class="table table-vcenter mb-2">
+            <thead><tr>
+                <th>{{t "spam.analyze.rule"}}</th>
+                <th class="text-end" style="width:180px">{{t "spam.analyze.category"}}</th>
+                <th class="text-end" style="width:80px">{{t "spam.analyze.score"}}</th>
+            </tr></thead>
+            <tbody>
+            {{range $e.Findings}}
+                <tr>
+                    <td>{{.Reason}}</td>
+                    <td class="text-end"><span class="badge {{if not .Scored}}bg-secondary{{else if ge .Score 2.0}}bg-red{{else if ge .Score 1.0}}bg-orange{{else}}bg-yellow{{end}}">{{with index $labels .Check}}{{.}}{{else}}—{{end}}</span></td>
+                    <td class="text-end {{if and .Scored (ge .Score 1.0)}}text-danger fw-bold{{else}}text-warning{{end}}">{{if .Scored}}{{printf "%+.1f" .Score}}{{else}}—{{end}}</td>
+                </tr>
+            {{end}}
+            </tbody>
+        </table>
+        <p class="text-muted small mb-4">{{t "spam.analyze.network_note"}}</p>
+        {{else}}
+        <div class="alert alert-success mb-4"><i class="ti ti-check me-2"></i>{{t "spam.analyze.no_rules"}}</div>
+        {{end}}
+
+        {{if $e.Recheck.Differs}}
+        <div class="alert alert-warning mb-4">
+            <i class="ti ti-alert-triangle me-2"></i>{{t "spam.analyze.recheck_differs"}}
+            <strong>{{printf "%.1f" $e.Recheck.Score}} · {{$e.Recheck.Status}}</strong>
+            {{if $e.Recheck.Findings}}
+            <ul class="mb-0 mt-2 small">
+                {{range $e.Recheck.Findings}}<li>{{.Reason}} ({{printf "%+.1f" .Score}})</li>{{end}}
+            </ul>
+            {{end}}
+        </div>
+        {{end}}
+
+        {{if and $e.SenderStats (gt $e.SenderStats.TotalMessages 0)}}
+        <h5>{{t "spam.analyze.sender_stats"}}</h5>
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <table class="table table-sm">
+                    <tr><td>{{t "spam.analyze.msgs_from_sender"}}</td><td class="text-end"><strong>{{$e.SenderStats.TotalMessages}}</strong></td></tr>
+                    <tr><td>{{t "spam.analyze.marked_spam"}}</td><td class="text-end"><strong>{{$e.SenderStats.SpamMessages}}</strong></td></tr>
+                    {{if $e.SenderStats.FirstMessageAt}}
+                    <tr><td>{{t "spam.analyze.first_message"}}</td><td class="text-end">{{fmtTime $e.SenderStats.FirstMessageAt "02.01.2006"}}</td></tr>
+                    {{end}}
+                </table>
+            </div>
+            <div class="col-md-6">
+                <table class="table table-sm">
+                    <tr><td>{{t "spam.analyze.msgs_from_domain"}} @{{$e.Domain}}</td><td class="text-end"><strong>{{$e.DomainTotal}}</strong></td></tr>
+                    <tr><td>{{t "spam.analyze.domain_spam"}}</td><td class="text-end"><strong>{{$e.DomainSpam}}</strong></td></tr>
+                </table>
+            </div>
+        </div>
+        {{end}}
+
+        {{if $e.Links.URLs}}
+        <details class="mb-4">
+            <summary class="mb-2">{{t "spam.analyze.links_found"}} ({{len $e.Links.URLs}})</summary>
+            <div class="small">
+            {{range $i, $link := $e.Links.URLs}}{{if lt $i 10}}
+                {{$short := in $link $e.Links.Shorteners}}{{$bad := in $link $e.Links.Suspicious}}
+                <div class="text-truncate{{if $short}} text-warning{{end}}{{if $bad}} text-danger{{end}}">
+                    <code>{{$link}}</code>
+                    {{if $short}}<span class="badge bg-warning">{{t "spam.analyze.shortener"}}</span>{{end}}
+                    {{if $bad}}<span class="badge bg-danger">{{t "spam.analyze.suspicious"}}</span>{{end}}
+                </div>
+            {{end}}{{end}}
+            {{if gt (len $e.Links.URLs) 10}}<div class="text-muted">… +{{add (len $e.Links.URLs) -10}}</div>{{end}}
+            </div>
+        </details>
+        {{end}}
+
+        <h5>{{t "spam.analyze.actions"}}</h5>
+        <div class="btn-list">
+            <button class="btn btn-warning" hx-post="/spam/mark-by-message-id" hx-vals="{{.HxVals "message_id" .MessageID "create_rule" "0"}}" hx-swap="none" hx-on::after-request="location.reload()">
+                <i class="ti ti-shield-x me-1"></i>{{t "spam.analyze.mark_spam"}}</button>
+            {{if and $e.FromEmail (not $e.HasBlacklist)}}
+            <button class="btn btn-outline-danger" hx-post="/spam/rules" hx-vals="{{.HxVals "rule_type" "address" "rule_value" $e.FromEmail "action" "spam"}}" hx-swap="none" hx-on::after-request="location.reload()">
+                <i class="ti ti-user-x me-1"></i>{{t "spam.analyze.block_sender"}}</button>
+            {{end}}
+            {{if $e.Domain}}
+            <button class="btn btn-outline-danger" hx-post="/spam/rules" hx-vals="{{.HxVals "rule_type" "domain" "rule_value" $e.Domain "action" "spam"}}" hx-swap="none" hx-on::after-request="location.reload()">
+                <i class="ti ti-world-x me-1"></i>{{t "spam.analyze.block_domain"}} @{{$e.Domain}}</button>
+            {{end}}
+            {{if and $e.FromEmail (not $e.HasWhitelist)}}
+            <button class="btn btn-outline-success" hx-post="/spam/rules" hx-vals="{{.HxVals "rule_type" "address" "rule_value" $e.FromEmail "action" "allow"}}" hx-swap="none" hx-on::after-request="location.reload()">
+                <i class="ti ti-user-check me-1"></i>{{t "spam.analyze.whitelist_sender"}}</button>
+            {{end}}
+        </div>
+    </div>
+</div>
+{{end}}
