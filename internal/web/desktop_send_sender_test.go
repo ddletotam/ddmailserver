@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
 )
 
 type fakeSenderStore struct {

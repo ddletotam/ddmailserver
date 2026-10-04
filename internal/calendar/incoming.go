@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/caldav/importer"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/parser"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 	"github.com/emersion/go-ical"
-	"github.com/yourusername/mailserver/internal/caldav/importer"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/parser"
-	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // IncomingHandler handles incoming calendar invites

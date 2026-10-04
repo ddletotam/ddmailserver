@@ -6,11 +6,11 @@ import (
 	"log"
 	"strings"
 
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/notify"
-	"github.com/yourusername/mailserver/internal/task"
-	"github.com/yourusername/mailserver/internal/timeutil"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/notify"
+	"github.com/ddletotam/ddmailserver/internal/task"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
 // calendarSyncWarningMinRetries is the failure threshold below which we keep

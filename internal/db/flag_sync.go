@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/timeutil"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
 // QueueFlagSync adds or updates a flag sync entry for a message.

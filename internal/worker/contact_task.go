@@ -6,11 +6,11 @@ import (
 	"log"
 	"time"
 
-	carddavclient "github.com/yourusername/mailserver/internal/carddav/client"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/oauth"
-	"github.com/yourusername/mailserver/internal/timeutil"
+	carddavclient "github.com/ddletotam/ddmailserver/internal/carddav/client"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/oauth"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
 // ContactSyncTask represents a contact synchronization task

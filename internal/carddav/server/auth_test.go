@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/yourusername/mailserver/internal/authlimit"
+	"github.com/ddletotam/ddmailserver/internal/authlimit"
 )
 
 // A user blocked for too many failures is rejected before the password is

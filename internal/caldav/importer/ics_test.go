@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourusername/mailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/models"
 )
 
 // Shared fixture lines; `ics` lives in timezone_test.go.

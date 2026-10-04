@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yourusername/mailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/models"
 )
 
 // iosReminder is the shape iOS Reminders actually PUT at us — the payload that

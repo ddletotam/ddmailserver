@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/emersion/go-ical"
 	"github.com/gorilla/mux"
-	"github.com/yourusername/mailserver/internal/models"
 )
 
 // HandleDesktopEventRSVP updates the requesting user's PARTSTAT on an event.

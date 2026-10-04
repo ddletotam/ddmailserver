@@ -5,8 +5,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/yourusername/mailserver/internal/clientip"
-	"github.com/yourusername/mailserver/internal/config"
+	"github.com/ddletotam/ddmailserver/internal/clientip"
+	"github.com/ddletotam/ddmailserver/internal/config"
 )
 
 func TestSecureCookieRule(t *testing.T) {

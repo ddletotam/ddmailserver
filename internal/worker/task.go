@@ -1,7 +1,7 @@
 package worker
 
 // Re-export task types for convenience
-import "github.com/yourusername/mailserver/internal/task"
+import "github.com/ddletotam/ddmailserver/internal/task"
 
 type Task = task.Task
 type TaskType = task.Type

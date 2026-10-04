@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/timeutil"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
 // Indexer handles synchronization between database and Meilisearch

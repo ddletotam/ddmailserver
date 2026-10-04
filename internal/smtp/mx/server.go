@@ -3,9 +3,9 @@ package mx
 import (
 	"log"
 
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/notify"
 	"github.com/emersion/go-smtp"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/notify"
 )
 
 // Server wraps the MX SMTP server for incoming mail

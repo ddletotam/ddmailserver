@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yourusername/mailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/models"
 )
 
 // TestSettingsScriptEmitsQuotedStrings renders the settings page and checks the

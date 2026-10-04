@@ -10,9 +10,9 @@ import (
 	"net/smtp"
 	"strings"
 
-	"github.com/yourusername/mailserver/internal/logmask"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/tlsverify"
+	"github.com/ddletotam/ddmailserver/internal/logmask"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/tlsverify"
 )
 
 // oauthBearerAuth implements smtp.Auth for OAUTHBEARER (RFC 7628)

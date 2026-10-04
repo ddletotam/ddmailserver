@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourusername/mailserver/internal/timeutil"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
 // User represents a user of the mailserver

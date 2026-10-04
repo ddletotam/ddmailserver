@@ -3,8 +3,8 @@ package db
 import (
 	"fmt"
 
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/timeutil"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
 // CreateOutboxAttachment stores a file attachment for an outbox message

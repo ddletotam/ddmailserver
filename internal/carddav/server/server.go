@@ -10,11 +10,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ddletotam/ddmailserver/internal/authlimit"
+	"github.com/ddletotam/ddmailserver/internal/clientip"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/emersion/go-vcard"
-	"github.com/yourusername/mailserver/internal/authlimit"
-	"github.com/yourusername/mailserver/internal/clientip"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
 )
 
 // textMatchRe pulls the search term out of an addressbook-query

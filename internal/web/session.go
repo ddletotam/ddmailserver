@@ -4,9 +4,9 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/yourusername/mailserver/internal/config"
+	"github.com/ddletotam/ddmailserver/internal/config"
 
-	"github.com/yourusername/mailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/models"
 )
 
 const userContextKey contextKey = "user"

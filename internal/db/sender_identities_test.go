@@ -3,7 +3,7 @@ package db
 import (
 	"testing"
 
-	"github.com/yourusername/mailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/models"
 )
 
 type fakeSenderStore struct {

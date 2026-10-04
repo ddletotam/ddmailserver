@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"log"
 
-	carddavclient "github.com/yourusername/mailserver/internal/carddav/client"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/task"
+	carddavclient "github.com/ddletotam/ddmailserver/internal/carddav/client"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/task"
 )
 
 // ContactSyncPushTask pushes local contact changes back to the remote CardDAV server

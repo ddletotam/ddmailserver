@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/yourusername/mailserver/internal/db"
-	imapclient "github.com/yourusername/mailserver/internal/imap/client"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/task"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	imapclient "github.com/ddletotam/ddmailserver/internal/imap/client"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/task"
 )
 
 // FlagSyncTask synchronizes local flag changes back to the remote IMAP server

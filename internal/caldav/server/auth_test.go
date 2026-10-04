@@ -5,8 +5,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/yourusername/mailserver/internal/authlimit"
-	"github.com/yourusername/mailserver/internal/clientip"
+	"github.com/ddletotam/ddmailserver/internal/authlimit"
+	"github.com/ddletotam/ddmailserver/internal/clientip"
 )
 
 // A throttled request is rejected before the password is checked (no

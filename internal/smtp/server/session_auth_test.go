@@ -3,7 +3,7 @@ package server
 import (
 	"testing"
 
-	"github.com/yourusername/mailserver/internal/authlimit"
+	"github.com/ddletotam/ddmailserver/internal/authlimit"
 )
 
 // A blocked user's AUTH fails before the password is checked (no database

@@ -5,12 +5,12 @@ import (
 	"log"
 	"strings"
 
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/tlsverify"
 	"github.com/emersion/go-imap"
 	uidplus "github.com/emersion/go-imap-uidplus"
 	"github.com/emersion/go-imap/client"
 	"github.com/emersion/go-sasl"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/tlsverify"
 )
 
 // xoauth2Client implements XOAUTH2 SASL authentication for Gmail

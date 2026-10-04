@@ -7,10 +7,10 @@ import (
 	"strconv"
 	"strings"
 
+	caldavutil "github.com/ddletotam/ddmailserver/internal/caldav"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 	"github.com/gorilla/mux"
-	caldavutil "github.com/yourusername/mailserver/internal/caldav"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // DesktopTask is a VTODO as the desktop needs to hear it.

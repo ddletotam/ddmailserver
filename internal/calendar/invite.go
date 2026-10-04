@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourusername/mailserver/internal/caldav/generator"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
-	smtpclient "github.com/yourusername/mailserver/internal/smtp/client"
-	"github.com/yourusername/mailserver/internal/timeutil"
+	"github.com/ddletotam/ddmailserver/internal/caldav/generator"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	smtpclient "github.com/ddletotam/ddmailserver/internal/smtp/client"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
 // InviteService handles calendar invite operations

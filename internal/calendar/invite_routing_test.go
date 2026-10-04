@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/yourusername/mailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/models"
 )
 
 func acct(id int64) *int64 { return &id }

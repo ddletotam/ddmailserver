@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourusername/mailserver/internal/authlimit"
-	"github.com/yourusername/mailserver/internal/clientip"
+	"github.com/ddletotam/ddmailserver/internal/authlimit"
+	"github.com/ddletotam/ddmailserver/internal/clientip"
 )
 
 func blockedLimiter(t *testing.T, ip string) *authlimit.Limiter {

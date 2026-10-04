@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/yourusername/mailserver/internal/avatar"
+	"github.com/ddletotam/ddmailserver/internal/avatar"
 )
 
 // HandleDesktopAvatar resolves an avatar for the given email by walking the

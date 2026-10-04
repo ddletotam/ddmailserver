@@ -4,10 +4,10 @@ import (
 	"log"
 	"strings"
 
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/notify"
+	"github.com/ddletotam/ddmailserver/internal/parser"
 	"github.com/emersion/go-smtp"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/notify"
-	"github.com/yourusername/mailserver/internal/parser"
 )
 
 // CalendarSyncTrigger is called to trigger immediate calendar sync for a user

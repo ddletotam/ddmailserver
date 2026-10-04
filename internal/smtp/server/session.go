@@ -8,14 +8,14 @@ import (
 	"log"
 	"strings"
 
+	"github.com/ddletotam/ddmailserver/internal/authlimit"
+	"github.com/ddletotam/ddmailserver/internal/clientip"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/logmask"
+	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/emersion/go-message/mail"
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
-	"github.com/yourusername/mailserver/internal/authlimit"
-	"github.com/yourusername/mailserver/internal/clientip"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/logmask"
-	"github.com/yourusername/mailserver/internal/models"
 )
 
 // Session represents an SMTP session

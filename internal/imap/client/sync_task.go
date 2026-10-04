@@ -9,13 +9,13 @@ import (
 	"log"
 	"strings"
 
+	"github.com/ddletotam/ddmailserver/internal/calendar"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/parser"
+	"github.com/ddletotam/ddmailserver/internal/task"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 	"github.com/emersion/go-imap"
-	"github.com/yourusername/mailserver/internal/calendar"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/parser"
-	"github.com/yourusername/mailserver/internal/task"
-	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // NewMailNotice is what a completed sync reports to the notification hub:

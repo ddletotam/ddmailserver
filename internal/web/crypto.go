@@ -1,7 +1,7 @@
 package web
 
 import (
-	"github.com/yourusername/mailserver/internal/crypto"
+	"github.com/ddletotam/ddmailserver/internal/crypto"
 )
 
 // EncryptPassword encrypts a password using AES-GCM

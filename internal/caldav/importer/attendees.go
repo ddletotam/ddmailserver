@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/emersion/go-ical"
-	"github.com/yourusername/mailserver/internal/models"
 )
 
 // ParseAttendees extracts attendees from an iCal event

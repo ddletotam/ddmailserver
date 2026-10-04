@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourusername/mailserver/internal/task"
+	"github.com/ddletotam/ddmailserver/internal/task"
 )
 
 // fakeTask is a Task whose execution is externally gated, so a test can hold a

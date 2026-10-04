@@ -1,7 +1,7 @@
 package models
 
 import (
-	"github.com/yourusername/mailserver/internal/timeutil"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
 // ContactSource represents a source of contacts (local, CardDAV, Google, Microsoft)

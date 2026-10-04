@@ -3,9 +3,9 @@ package server
 import (
 	"log"
 
+	"github.com/ddletotam/ddmailserver/internal/authlimit"
+	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/emersion/go-smtp"
-	"github.com/yourusername/mailserver/internal/authlimit"
-	"github.com/yourusername/mailserver/internal/db"
 )
 
 // Backend implements SMTP backend

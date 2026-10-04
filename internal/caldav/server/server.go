@@ -13,12 +13,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourusername/mailserver/internal/authlimit"
-	"github.com/yourusername/mailserver/internal/caldav/importer"
-	"github.com/yourusername/mailserver/internal/clientip"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/timeutil"
+	"github.com/ddletotam/ddmailserver/internal/authlimit"
+	"github.com/ddletotam/ddmailserver/internal/caldav/importer"
+	"github.com/ddletotam/ddmailserver/internal/clientip"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
 // Server is a CalDAV server

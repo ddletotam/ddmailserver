@@ -6,9 +6,9 @@ import (
 	"log"
 	"strings"
 
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/emersion/go-ical"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
 )
 
 // BackfillAttendees walks every calendar_events row whose calendar_attendees

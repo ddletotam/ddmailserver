@@ -7,12 +7,12 @@ import (
 	"net/mail"
 	"strings"
 
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/dkimsign"
-	"github.com/yourusername/mailserver/internal/logmask"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/parser"
-	"github.com/yourusername/mailserver/internal/task"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/dkimsign"
+	"github.com/ddletotam/ddmailserver/internal/logmask"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/parser"
+	"github.com/ddletotam/ddmailserver/internal/task"
 )
 
 // DirectSendTask sends email directly via MX lookup (for local domain senders)

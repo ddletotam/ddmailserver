@@ -4,8 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/yourusername/mailserver/internal/crypto"
-	"github.com/yourusername/mailserver/internal/timeutil"
+	"github.com/ddletotam/ddmailserver/internal/crypto"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
 // System settings keys

@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
+	imapclient "github.com/ddletotam/ddmailserver/internal/imap/client"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 	"github.com/gorilla/mux"
-	imapclient "github.com/yourusername/mailserver/internal/imap/client"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 //go:embed templates/*

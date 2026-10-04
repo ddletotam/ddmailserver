@@ -7,16 +7,16 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/authlimit"
+	caldavserver "github.com/ddletotam/ddmailserver/internal/caldav/server"
+	carddavserver "github.com/ddletotam/ddmailserver/internal/carddav/server"
+	"github.com/ddletotam/ddmailserver/internal/clientip"
+	"github.com/ddletotam/ddmailserver/internal/config"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/notify"
+	"github.com/ddletotam/ddmailserver/internal/oauth"
+	"github.com/ddletotam/ddmailserver/internal/search"
 	"github.com/gorilla/mux"
-	"github.com/yourusername/mailserver/internal/authlimit"
-	caldavserver "github.com/yourusername/mailserver/internal/caldav/server"
-	carddavserver "github.com/yourusername/mailserver/internal/carddav/server"
-	"github.com/yourusername/mailserver/internal/clientip"
-	"github.com/yourusername/mailserver/internal/config"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/notify"
-	"github.com/yourusername/mailserver/internal/oauth"
-	"github.com/yourusername/mailserver/internal/search"
 )
 
 // Server represents the web server

@@ -3,7 +3,7 @@ package db
 import (
 	"testing"
 
-	"github.com/yourusername/mailserver/internal/timeutil"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
 // TestDeadLetterCalendarEventSync_PreservesTheBody is the guard on the whole

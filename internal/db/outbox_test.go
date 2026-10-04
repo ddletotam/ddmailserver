@@ -3,7 +3,7 @@ package db
 import (
 	"testing"
 
-	"github.com/yourusername/mailserver/internal/timeutil"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
 // insertTestOutboxMessage creates a throwaway queued message and removes it on

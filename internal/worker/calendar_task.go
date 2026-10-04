@@ -6,12 +6,12 @@ import (
 	"log"
 	"time"
 
-	caldavclient "github.com/yourusername/mailserver/internal/caldav/client"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/notify"
-	"github.com/yourusername/mailserver/internal/oauth"
-	"github.com/yourusername/mailserver/internal/timeutil"
+	caldavclient "github.com/ddletotam/ddmailserver/internal/caldav/client"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/notify"
+	"github.com/ddletotam/ddmailserver/internal/oauth"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
 // CalendarSyncTask represents a calendar synchronization task

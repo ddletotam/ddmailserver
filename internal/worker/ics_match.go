@@ -4,8 +4,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
 )
 
 // eventMatch pairs a parsed feed event with the stored row it belongs to.

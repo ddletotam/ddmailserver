@@ -10,10 +10,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/mobileconfig"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/notify"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/mobileconfig"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/notify"
 )
 
 // maxProfileSize caps an uploaded profile. Real ones are a few kilobytes; this

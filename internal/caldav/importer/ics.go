@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
+	caldavutil "github.com/ddletotam/ddmailserver/internal/caldav"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 	"github.com/emersion/go-ical"
-	caldavutil "github.com/yourusername/mailserver/internal/caldav"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // ParseICS parses ICS data and returns events without importing

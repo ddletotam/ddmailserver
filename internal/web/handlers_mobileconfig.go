@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ddletotam/ddmailserver/internal/mobileconfig"
 	"github.com/gorilla/mux"
-	"github.com/yourusername/mailserver/internal/mobileconfig"
 )
 
 // appPasswordProfileLabel is the label given to the credential minted for a

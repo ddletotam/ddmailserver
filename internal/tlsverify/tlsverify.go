@@ -43,7 +43,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yourusername/mailserver/internal/netguard"
+	"github.com/ddletotam/ddmailserver/internal/netguard"
 )
 
 const (

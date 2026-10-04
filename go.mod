@@ -1,4 +1,4 @@
-module github.com/yourusername/mailserver
+module github.com/ddletotam/ddmailserver
 
 go 1.24.0
 

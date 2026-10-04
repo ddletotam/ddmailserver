@@ -4,8 +4,8 @@ import (
 	"net"
 	"testing"
 
+	"github.com/ddletotam/ddmailserver/internal/authlimit"
 	"github.com/emersion/go-imap"
-	"github.com/yourusername/mailserver/internal/authlimit"
 )
 
 // A throttled login must fail before the password is checked: the backend

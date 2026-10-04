@@ -7,16 +7,16 @@ import (
 	"log"
 	"time"
 
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/dkimsign"
-	imapclient "github.com/yourusername/mailserver/internal/imap/client"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/notify"
-	"github.com/yourusername/mailserver/internal/oauth"
-	"github.com/yourusername/mailserver/internal/parser"
-	smtpclient "github.com/yourusername/mailserver/internal/smtp/client"
-	taskpkg "github.com/yourusername/mailserver/internal/task"
-	"github.com/yourusername/mailserver/internal/timeutil"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/dkimsign"
+	imapclient "github.com/ddletotam/ddmailserver/internal/imap/client"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/notify"
+	"github.com/ddletotam/ddmailserver/internal/oauth"
+	"github.com/ddletotam/ddmailserver/internal/parser"
+	smtpclient "github.com/ddletotam/ddmailserver/internal/smtp/client"
+	taskpkg "github.com/ddletotam/ddmailserver/internal/task"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
 // SchedulerDeps bundles all dependencies the Scheduler needs.

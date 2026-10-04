@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ddletotam/ddmailserver/internal/logmask"
+	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/gorilla/mux"
-	"github.com/yourusername/mailserver/internal/logmask"
-	"github.com/yourusername/mailserver/internal/models"
 )
 
 // Response helpers

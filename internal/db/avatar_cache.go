@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/yourusername/mailserver/internal/timeutil"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
 // AvatarCacheEntry is a single row in the avatar_cache table.

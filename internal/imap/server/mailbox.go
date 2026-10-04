@@ -10,13 +10,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/notify"
+	"github.com/ddletotam/ddmailserver/internal/parser"
+	"github.com/ddletotam/ddmailserver/internal/search"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 	"github.com/emersion/go-imap"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/notify"
-	"github.com/yourusername/mailserver/internal/parser"
-	"github.com/yourusername/mailserver/internal/search"
-	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // Mailbox represents an IMAP mailbox

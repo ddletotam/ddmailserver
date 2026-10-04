@@ -3,8 +3,8 @@ package worker
 import (
 	"testing"
 
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
 )
 
 func row(id int64, uid, summary string, dtstart int64) db.EventIdentity {

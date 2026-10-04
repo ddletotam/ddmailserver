@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/emersion/go-message/mail"
-	"github.com/yourusername/mailserver/internal/models"
 )
 
 // SenderStore is the part of the database sender ownership is decided from.

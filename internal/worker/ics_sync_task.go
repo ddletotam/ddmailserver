@@ -9,13 +9,13 @@ import (
 	"strings"
 	"time"
 
-	caldavutil "github.com/yourusername/mailserver/internal/caldav"
-	"github.com/yourusername/mailserver/internal/caldav/importer"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/notify"
-	"github.com/yourusername/mailserver/internal/timeutil"
-	"github.com/yourusername/mailserver/internal/tlsverify"
+	caldavutil "github.com/ddletotam/ddmailserver/internal/caldav"
+	"github.com/ddletotam/ddmailserver/internal/caldav/importer"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/notify"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
+	"github.com/ddletotam/ddmailserver/internal/tlsverify"
 )
 
 // ICSSyncTask represents an ICS URL synchronization task

@@ -14,15 +14,15 @@ import (
 	"strings"
 	"time"
 
+	caldavutil "github.com/ddletotam/ddmailserver/internal/caldav"
+	"github.com/ddletotam/ddmailserver/internal/caldav/importer"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
+	"github.com/ddletotam/ddmailserver/internal/tlsverify"
 	"github.com/emersion/go-ical"
 	"github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/caldav"
-	caldavutil "github.com/yourusername/mailserver/internal/caldav"
-	"github.com/yourusername/mailserver/internal/caldav/importer"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/timeutil"
-	"github.com/yourusername/mailserver/internal/tlsverify"
 )
 
 // Client is a CalDAV client for syncing with external calendars

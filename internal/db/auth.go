@@ -4,7 +4,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/yourusername/mailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/models"
 	"golang.org/x/crypto/bcrypt"
 )
 

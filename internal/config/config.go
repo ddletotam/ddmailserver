@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/yourusername/mailserver/internal/authlimit"
+	"github.com/ddletotam/ddmailserver/internal/authlimit"
 	"gopkg.in/yaml.v3"
 )
 

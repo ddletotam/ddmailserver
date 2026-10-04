@@ -3,7 +3,7 @@ package models
 import (
 	"strings"
 
-	"github.com/yourusername/mailserver/internal/timeutil"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
 // CalendarSource represents a source of calendars (local, CalDAV, or ICS import)

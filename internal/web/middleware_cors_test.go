@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/yourusername/mailserver/internal/clientip"
+	"github.com/ddletotam/ddmailserver/internal/clientip"
 )
 
 func corsRequest(t *testing.T, origin, host, remote, fwdHost string) *httptest.ResponseRecorder {

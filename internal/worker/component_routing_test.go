@@ -3,7 +3,7 @@ package worker
 import (
 	"testing"
 
-	"github.com/yourusername/mailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/models"
 )
 
 // TestComponentOf reads the component out of a queued body.

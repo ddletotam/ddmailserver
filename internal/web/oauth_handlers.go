@@ -4,10 +4,10 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/yourusername/mailserver/internal/config"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/oauth"
+	"github.com/ddletotam/ddmailserver/internal/config"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/oauth"
 )
 
 // HandleGoogleOAuthStart initiates the Google OAuth2 flow

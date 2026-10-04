@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/yourusername/mailserver/internal/config"
+	"github.com/ddletotam/ddmailserver/internal/config"
 )
 
 // Client is a Meilisearch client

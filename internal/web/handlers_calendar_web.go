@@ -11,15 +11,15 @@ import (
 	"strings"
 	"time"
 
+	caldavutil "github.com/ddletotam/ddmailserver/internal/caldav"
+	caldavclient "github.com/ddletotam/ddmailserver/internal/caldav/client"
+	"github.com/ddletotam/ddmailserver/internal/caldav/importer"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/oauth"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
+	"github.com/ddletotam/ddmailserver/internal/tlsverify"
 	"github.com/gorilla/mux"
-	caldavutil "github.com/yourusername/mailserver/internal/caldav"
-	caldavclient "github.com/yourusername/mailserver/internal/caldav/client"
-	"github.com/yourusername/mailserver/internal/caldav/importer"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/oauth"
-	"github.com/yourusername/mailserver/internal/timeutil"
-	"github.com/yourusername/mailserver/internal/tlsverify"
 )
 
 // CalendarsData holds data for the calendars page

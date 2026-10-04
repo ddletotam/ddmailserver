@@ -6,9 +6,9 @@ import (
 	"log"
 	"strings"
 
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/search"
 	"github.com/emersion/go-imap/backend"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/search"
 )
 
 // User represents an authenticated IMAP user

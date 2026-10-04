@@ -8,12 +8,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/oauth"
+	"github.com/ddletotam/ddmailserver/internal/tlsverify"
 	idle "github.com/emersion/go-imap-idle"
 	imapClient "github.com/emersion/go-imap/client"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/oauth"
-	"github.com/yourusername/mailserver/internal/tlsverify"
 )
 
 // idleSessionTTL — предельный возраст одной IDLE-сессии, после которого

@@ -6,11 +6,11 @@ import (
 	"log"
 	"strings"
 
-	caldavutil "github.com/yourusername/mailserver/internal/caldav"
-	caldavclient "github.com/yourusername/mailserver/internal/caldav/client"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/task"
+	caldavutil "github.com/ddletotam/ddmailserver/internal/caldav"
+	caldavclient "github.com/ddletotam/ddmailserver/internal/caldav/client"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/task"
 )
 
 // CalendarEventSyncTask pushes local calendar event changes back to the remote CalDAV server

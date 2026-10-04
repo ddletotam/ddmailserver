@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 	"github.com/emersion/go-ical"
 	"github.com/gorilla/mux"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // EventPatchRequest is the body shape for PATCH /api/desktop/v1/events/{id}.

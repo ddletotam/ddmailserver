@@ -7,12 +7,12 @@ import (
 	"net"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/authlimit"
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/notify"
+	"github.com/ddletotam/ddmailserver/internal/search"
 	"github.com/emersion/go-imap-idle"
 	"github.com/emersion/go-imap/server"
-	"github.com/yourusername/mailserver/internal/authlimit"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/notify"
-	"github.com/yourusername/mailserver/internal/search"
 )
 
 // Server wraps the IMAP server

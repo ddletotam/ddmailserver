@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/emersion/go-message/mail"
 	"github.com/emersion/go-smtp"
-	"github.com/yourusername/mailserver/internal/db"
-	"github.com/yourusername/mailserver/internal/models"
 )
 
 type fakeSenders struct {

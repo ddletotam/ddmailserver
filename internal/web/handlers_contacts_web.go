@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
+	carddavclient "github.com/ddletotam/ddmailserver/internal/carddav/client"
+	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/oauth"
+	"github.com/ddletotam/ddmailserver/internal/timeutil"
 	"github.com/gorilla/mux"
-	carddavclient "github.com/yourusername/mailserver/internal/carddav/client"
-	"github.com/yourusername/mailserver/internal/models"
-	"github.com/yourusername/mailserver/internal/oauth"
-	"github.com/yourusername/mailserver/internal/timeutil"
 )
 
 // ContactsData holds data for the contacts page
