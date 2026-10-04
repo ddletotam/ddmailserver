@@ -131,6 +131,7 @@ impl Resources for NoResources {
 mod dom;
 mod image;
 mod layout;
+mod media;
 #[cfg(feature = "net")]
 pub mod net;
 mod paint;

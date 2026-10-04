@@ -50,7 +50,7 @@ pub fn children(node: &Handle) -> Vec<Handle> {
 /// Elements whose subtree contributes nothing to a rendered mail.
 ///
 /// `<style>` is dropped here because its *content* is harvested separately
-/// (see [`crate::style::Stylesheet::collect`]) before layout runs.
+/// (see [`collect_style_text`]) before layout runs.
 pub fn is_dropped(tag: &str) -> bool {
     matches!(
         tag,
@@ -92,11 +92,20 @@ pub fn collect_style_text(root: &Handle) -> String {
 
 fn walk_styles(node: &Handle, out: &mut String) {
     if tag(node) == "style" {
+        // `<style media="…">` is the same thing as wrapping the sheet in
+        // `@media … { }`, and that is how the stylesheet parser gets to see it.
+        let media = attr(node, "media").filter(|m| !m.trim().is_empty() && !m.contains(['{', '}']));
+        if let Some(m) = &media {
+            out.push_str(&format!("@media {m} {{\n"));
+        }
         for c in children(node).iter() {
             if let Some(t) = text(c) {
                 out.push_str(&t);
                 out.push('\n');
             }
+        }
+        if media.is_some() {
+            out.push_str("}\n");
         }
         return;
     }

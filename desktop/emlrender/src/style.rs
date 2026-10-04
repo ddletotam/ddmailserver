@@ -2,7 +2,7 @@
 //!
 //! Sources feed a computed style in the CSS cascade order, lowest first:
 //! presentational attributes (`bgcolor`, `align`, `width`, …), `<style>` rules
-//! (selectors per [`crate::selector`]), the
+//! (selectors per [`crate::selector`], `@media` per [`crate::media`]), the
 //! inline `style=` attribute, then the `!important` halves of the `<style>`
 //! rules and of the inline style. Selectors we cannot honour are dropped
 //! rather than half-supported, because a wrong match looks worse than no match.
@@ -1097,8 +1097,10 @@ impl Stylesheet {
     /// Parse `<style>` text for a viewport `viewport_w` CSS px wide.
     ///
     /// Rules with a selector we do not support are dropped whole (a selector
-    /// list loses only its unsupported members). At-rules are skipped along
-    /// with their block, statement at-rules (`@import …;`) up to their `;`.
+    /// list loses only its unsupported members). `@media` blocks whose query
+    /// holds for the viewport are read as if inline (see [`crate::media`]);
+    /// every other at-rule — `@font-face`, `@import`, `@supports`,
+    /// `@keyframes` — is skipped.
     pub fn parse(src: &str, viewport_w: f32) -> Self {
         let src = strip_css_comments(src);
         let mut raw: Vec<(Selector, Rc<Vec<Decl>>)> = Vec::new();
@@ -1200,10 +1202,18 @@ fn parse_rules(
                     Some(';') => *i += 1,
                     Some('{') => {
                         *i += 1;
-                        // At-rule blocks — `@media` included, for now — are
-                        // skipped whole.
-                        let _ = (prelude, viewport_w);
-                        skip_block(s, i);
+                        let lower = prelude.to_ascii_lowercase();
+                        // Nesting is capped: past it, a block is skipped
+                        // rather than recursed into.
+                        let applies = match lower.strip_prefix("@media") {
+                            Some(q) if depth < 8 => crate::media::matches(q, viewport_w),
+                            _ => false,
+                        };
+                        if applies {
+                            parse_rules(s, i, viewport_w, out, depth + 1);
+                        } else {
+                            skip_block(s, i);
+                        }
                     }
                     _ => {} // `}` or end: the enclosing loop deals with it
                 }
