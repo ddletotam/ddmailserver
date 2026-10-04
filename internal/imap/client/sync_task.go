@@ -60,14 +60,14 @@ type SyncTask struct {
 
 func (t *SyncTask) SetNotifyFunc(fn func(NewMailNotice))    { t.notifyFunc = fn }
 func (t *SyncTask) SetFlagsNotifyFunc(fn func(changed int)) { t.flagsNotifyFunc = fn }
-
-// SetExpungeNotifyFunc sets the callback for messages removed locally because
-// they vanished from the source server (one call per local folder).
-func (t *SyncTask) SetExpungeNotifyFunc(fn func(ExpungeNotice)) { t.expungeNotifyFunc = fn }
 func (t *SyncTask) SetAnalyzer(analyzer *parser.Analyzer)   { t.analyzer = analyzer }
 func (t *SyncTask) SetOAuthRefresher(fn func(account *models.Account) error) {
 	t.refreshOAuth = fn
 }
+
+// SetExpungeNotifyFunc sets the callback for messages removed locally because
+// they vanished from the source server (one call per local folder).
+func (t *SyncTask) SetExpungeNotifyFunc(fn func(ExpungeNotice)) { t.expungeNotifyFunc = fn }
 
 func NewSyncTask(account *models.Account, database *db.DB) *SyncTask {
 	return &SyncTask{account: account, database: database, priority: 1}
