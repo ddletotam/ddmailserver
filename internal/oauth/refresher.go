@@ -5,8 +5,21 @@ import (
 	"log"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	"github.com/ddletotam/ddmailserver/internal/models"
 )
+
+// refreshError turns the token endpoint's error body into an error. A
+// refresh token the provider no longer honours (revoked, expired, password
+// changed) comes back as invalid_grant — that is a credentials rejection, not
+// a hiccup, and is marked as such for the login pause (package authfail).
+func refreshError(errResp map[string]interface{}) error {
+	err := fmt.Errorf("token refresh failed: %v", errResp)
+	if code, _ := errResp["error"].(string); code == "invalid_grant" {
+		return authfail.Mark(err)
+	}
+	return err
+}
 
 // AccountTokenStore is the minimal DB surface needed to persist refreshed tokens.
 type AccountTokenStore interface {
@@ -38,7 +51,7 @@ func (r *AccountTokenRefresher) Refresh(account *models.Account, force bool) (re
 		return false, nil
 	}
 	if account.OAuthRefreshToken == "" {
-		return false, fmt.Errorf("no refresh token available, please re-authenticate")
+		return false, authfail.Mark(fmt.Errorf("no refresh token available, please re-authenticate"))
 	}
 
 	log.Printf("Refreshing OAuth token for %s (force=%v, expires_ms=%d)", account.Email, force, account.OAuthTokenExpiry)

@@ -9,6 +9,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	"github.com/ddletotam/ddmailserver/internal/calendar"
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/models"
@@ -56,6 +57,8 @@ type SyncTask struct {
 	// Called to force-refresh the OAuth token when auth fails. The callback
 	// is expected to update the account in place (access token, expiry).
 	refreshOAuth func(account *models.Account) error
+	// manual: user-initiated run, not gated by the auth pause (SetManual).
+	manual bool
 }
 
 func (t *SyncTask) SetNotifyFunc(fn func(NewMailNotice))    { t.notifyFunc = fn }
@@ -90,8 +93,28 @@ func (t *SyncTask) accountLog(level, format string, args ...interface{}) {
 	}
 }
 
+// SetManual marks a sync the user asked for ("Sync now"): it is attempted
+// even while the account's login is paused after rejected credentials — one
+// click is one login, not the per-minute retry the pause exists to stop. The
+// outcome is recorded as usual.
+func (t *SyncTask) SetManual(manual bool) { t.manual = manual }
+
+func (t *SyncTask) authGuard() *authfail.Guard {
+	if t.database == nil {
+		return authfail.NewGuard(nil)
+	}
+	return authfail.NewGuard(t.database)
+}
+
 // Execute runs the synchronization and records the result in the DB
 func (t *SyncTask) Execute(ctx context.Context) error {
+	// Paused after the provider rejected the password: skip silently. The
+	// scheduler already filters paused accounts; this is the arbiter for
+	// the moment the pause expires and IDLE and the poll race for the one
+	// allowed attempt.
+	if !t.manual && !t.authGuard().Allow(authfail.AccountIMAP(t.account)) {
+		return nil
+	}
 	err := t.doExecute(ctx)
 	if err != nil {
 		if dbErr := t.database.SetAccountSyncError(t.account.ID, err.Error()); dbErr != nil {
@@ -111,15 +134,19 @@ func (t *SyncTask) doExecute(ctx context.Context) error {
 	client := &Client{account: t.account}
 	connectErr := client.Connect()
 	// On OAuth auth failure, force-refresh token and retry once
-	if connectErr != nil && t.account.IsOAuth() && t.refreshOAuth != nil && isAuthError(connectErr) {
+	if connectErr != nil && t.account.IsOAuth() && t.refreshOAuth != nil && authfail.Is(connectErr) {
 		t.accountLog("info", "OAuth auth failed (%v), forcing token refresh and retrying", connectErr)
 		if rerr := t.refreshOAuth(t.account); rerr != nil {
 			t.accountLog("error", "failed to refresh OAuth token: %v", rerr)
+			t.authGuard().Report(authfail.AccountIMAP(t.account), connectErr)
 			return fmt.Errorf("failed to connect: %w", connectErr)
 		}
 		client = &Client{account: t.account}
 		connectErr = client.Connect()
 	}
+	// The verdict on the credentials is the login, not the whole sync: a
+	// run that logged in and then failed on a folder proves the password.
+	t.authGuard().Report(authfail.AccountIMAP(t.account), connectErr)
 	if connectErr != nil {
 		t.accountLog("error", "failed to connect: %v", connectErr)
 		return fmt.Errorf("failed to connect: %w", connectErr)
@@ -657,19 +684,6 @@ buildMessage:
 		t.lastNew = msg
 	}
 	return true, isSpam, nil
-}
-
-// isAuthError returns true if the error looks like an OAuth authentication failure
-// that may be fixed by refreshing the token.
-func isAuthError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "auth") ||
-		strings.Contains(msg, "invalid_request") ||
-		strings.Contains(msg, "invalid_grant") ||
-		strings.Contains(msg, "unauthorized")
 }
 
 // recipientIncludesAccount returns true if any address in the To/Cc lists

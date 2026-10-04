@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	carddavclient "github.com/ddletotam/ddmailserver/internal/carddav/client"
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/models"
@@ -19,6 +20,8 @@ type ContactSyncTask struct {
 	database       *db.DB
 	googleOAuth    *oauth.GoogleOAuth
 	microsoftOAuth *oauth.MicrosoftOAuth
+	// authWatch of the run's CardDAV client (see CalendarSyncTask).
+	authWatch *authfail.HTTPWatch
 }
 
 // NewContactSyncTask creates a new contact sync task
@@ -33,9 +36,16 @@ func NewContactSyncTask(source *models.ContactSource, database *db.DB, googleOAu
 
 // Execute runs the contact sync task
 func (t *ContactSyncTask) Execute(ctx context.Context) error {
+	guard := authGuard(t.database)
+	sub := authfail.ContactSource(t.source)
+	if !guard.Allow(sub) {
+		return nil // credentials rejected, pause not over (auth_backoff)
+	}
+
 	log.Printf("Starting CardDAV sync for contact source %s (ID: %d)", t.source.Name, t.source.ID)
 
 	err := t.doSync(ctx)
+	reportDAVAuth(guard, sub, t.authWatch, err)
 	if err != nil {
 		// Save error to database so user can see it
 		if dbErr := t.database.UpdateContactSourceLastError(t.source.ID, err.Error()); dbErr != nil {
@@ -62,7 +72,9 @@ func (t *ContactSyncTask) doSync(ctx context.Context) error {
 	client := carddavclient.New(t.source, t.database)
 
 	// Connect to CardDAV server
-	if err := client.Connect(); err != nil {
+	err := client.Connect()
+	t.authWatch = client.AuthWatch()
+	if err != nil {
 		log.Printf("Failed to connect to CardDAV server for %s: %v", t.source.Name, err)
 		return fmt.Errorf("failed to connect: %w", err)
 	}
@@ -167,7 +179,7 @@ func (t *ContactSyncTask) refreshOAuthTokensIfNeeded() error {
 
 	// Need refresh token
 	if t.source.OAuthRefreshToken == "" {
-		return fmt.Errorf("no refresh token available, please re-authenticate")
+		return authfail.Mark(fmt.Errorf("no refresh token available, please re-authenticate"))
 	}
 
 	log.Printf("Refreshing OAuth token for contact source %s (expires: %v)", t.source.Name, t.source.OAuthTokenExpiry)

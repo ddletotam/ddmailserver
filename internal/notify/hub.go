@@ -34,6 +34,14 @@ const (
 	// no sidebar tint, no from-picker entry, no calendar — until the client was
 	// restarted. That is the opposite of importing a profile and seeing it work.
 	EventIdentitiesChanged EventType = "identities_changed"
+
+	// EventAuthFailed — the provider stopped accepting the credentials of one
+	// of the user's accounts or sources, and the server paused logging in
+	// with them (package authfail). Sent once per transition into that
+	// state, not on every rejected retry. Identity / Service / Since /
+	// NextAttemptAt say which and until when; the same data stays available
+	// in /api/desktop/identities (auth_failures) until the credentials work.
+	EventAuthFailed EventType = "auth_failed"
 )
 
 // Event represents a notification about a user-visible change.
@@ -63,6 +71,13 @@ type Event struct {
 
 	// Calendar fields
 	CalendarID int64 // Affected calendar (0 means "any calendar for this user")
+
+	// EventAuthFailed fields
+	Identity      string // address of the account / source identity
+	SubjectName   string // account or source display name
+	Service       string // imap, smtp, caldav, carddav
+	Since         int64  // first rejection, unix ms
+	NextAttemptAt int64  // next login attempt, unix ms
 }
 
 // Hub manages pub/sub for mailbox notifications

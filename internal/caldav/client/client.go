@@ -16,6 +16,7 @@ import (
 
 	caldavutil "github.com/ddletotam/ddmailserver/internal/caldav"
 	"github.com/ddletotam/ddmailserver/internal/caldav/importer"
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
@@ -31,6 +32,7 @@ type Client struct {
 	database   *db.DB
 	client     *caldav.Client
 	httpClient webdav.HTTPClient
+	authWatch  *authfail.HTTPWatch
 }
 
 // New creates a new CalDAV client
@@ -59,6 +61,18 @@ func (c *Client) buildFullURL(remotePath string) string {
 	return fmt.Sprintf("%s://%s%s", parsed.Scheme, parsed.Host, remotePath)
 }
 
+// watchAuth puts the credentials watch in front of the client's transport;
+// see AuthWatch.
+func (c *Client) watchAuth(base http.RoundTripper) http.RoundTripper {
+	c.authWatch = &authfail.HTTPWatch{Base: base}
+	return c.authWatch
+}
+
+// AuthWatch reports what the server said about the credentials during this
+// client's requests (401 → rejected), for the login pause. Nil before
+// Connect.
+func (c *Client) AuthWatch() *authfail.HTTPWatch { return c.authWatch }
+
 // Connect establishes a connection to the CalDAV server
 func (c *Client) Connect() error {
 	var client *caldav.Client
@@ -71,7 +85,7 @@ func (c *Client) Connect() error {
 		// host that omits its intermediate is otherwise unreachable, and the
 		// answer to that is completing the chain, not skipping the check.
 		httpClient = &http.Client{
-			Transport: &etagFixTransport{base: tlsverify.Transport()},
+			Transport: c.watchAuth(&etagFixTransport{base: tlsverify.Transport()}),
 			Timeout:   30 * time.Second,
 		}
 		authClient := webdav.HTTPClientWithBasicAuth(httpClient, c.source.CalDAVUsername, c.source.CalDAVPassword)
@@ -87,7 +101,7 @@ func (c *Client) Connect() error {
 			},
 		}
 		httpClient = &http.Client{
-			Transport: transport,
+			Transport: c.watchAuth(transport),
 			Timeout:   30 * time.Second,
 		}
 		client, err = caldav.NewClient(httpClient, c.source.CalDAVURL)

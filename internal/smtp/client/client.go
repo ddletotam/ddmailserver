@@ -10,6 +10,7 @@ import (
 	"net/smtp"
 	"strings"
 
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	"github.com/ddletotam/ddmailserver/internal/logmask"
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/tlsverify"
@@ -37,7 +38,7 @@ func (a *oauthBearerAuth) Start(server *smtp.ServerInfo) (string, []byte, error)
 func (a *oauthBearerAuth) Next(fromServer []byte, more bool) ([]byte, error) {
 	if more {
 		// Server sent an error response
-		return nil, fmt.Errorf("OAUTHBEARER error: %s", string(fromServer))
+		return nil, authfail.Mark(fmt.Errorf("OAUTHBEARER error: %s", string(fromServer)))
 	}
 	return nil, nil
 }
@@ -61,9 +62,9 @@ func (a *xoauth2Auth) Next(fromServer []byte, more bool) ([]byte, error) {
 		// Server sent an error response (base64 encoded JSON)
 		decoded, err := base64.StdEncoding.DecodeString(string(fromServer))
 		if err != nil {
-			return nil, fmt.Errorf("XOAUTH2 error: %s", string(fromServer))
+			return nil, authfail.Mark(fmt.Errorf("XOAUTH2 error: %s", string(fromServer)))
 		}
-		return nil, fmt.Errorf("XOAUTH2 error: %s", string(decoded))
+		return nil, authfail.Mark(fmt.Errorf("XOAUTH2 error: %s", string(decoded)))
 	}
 	return nil, nil
 }
@@ -71,7 +72,14 @@ func (a *xoauth2Auth) Next(fromServer []byte, more bool) ([]byte, error) {
 // Client wraps the SMTP client for external mail servers
 type Client struct {
 	account *models.Account
+	// authPassed: the last Send got past SMTP AUTH (TLS path only — the
+	// plain path goes through smtp.SendMail, which does not say).
+	authPassed bool
 }
+
+// AuthPassed reports whether the last Send was accepted at the AUTH step,
+// even if it failed later (a refused recipient proves the password works).
+func (c *Client) AuthPassed() bool { return c.authPassed }
 
 // New creates a new SMTP client for an account
 func New(account *models.Account) *Client {
@@ -104,6 +112,7 @@ func envelopeAddresses(addrs []string) []string {
 
 // Send sends an email through the external SMTP server
 func (c *Client) Send(from string, to []string, message []byte) error {
+	c.authPassed = false
 	// Normalised here rather than in the callers so no path out of this
 	// function can put a display name on the wire: an identity configured as
 	// "АппСек <user@example.org>" used to fail every send with 555 5.5.2 on
@@ -199,6 +208,7 @@ func (c *Client) sendTLS(addr string, auth smtp.Auth, from string, to []string, 
 		if err = client.Auth(auth); err != nil {
 			return fmt.Errorf("failed to authenticate: %w", err)
 		}
+		c.authPassed = true
 	}
 
 	// Set sender

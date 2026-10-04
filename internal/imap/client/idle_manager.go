@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/oauth"
@@ -47,16 +48,28 @@ type IdleManager struct {
 	watchers       map[int64]context.CancelFunc // account ID -> cancel
 	ctx            context.Context
 	cancel         context.CancelFunc
+	// auth gates logins on the account's IMAP credentials (auth_backoff):
+	// a rejected password must not be retried by the reconnect loop.
+	auth *authfail.Guard
+	// authPollInterval: how often a watcher sitting out an auth pause checks
+	// whether the pause was lifted (password edited, a sync logged in).
+	authPollInterval time.Duration
 }
 
 // NewIdleManager creates a new IDLE manager.
 func NewIdleManager(database *db.DB) *IdleManager {
 	ctx, cancel := context.WithCancel(context.Background())
+	var store authfail.Store
+	if database != nil {
+		store = database
+	}
 	return &IdleManager{
-		database: database,
-		watchers: make(map[int64]context.CancelFunc),
-		ctx:      ctx,
-		cancel:   cancel,
+		database:         database,
+		watchers:         make(map[int64]context.CancelFunc),
+		ctx:              ctx,
+		cancel:           cancel,
+		auth:             authfail.NewGuard(store),
+		authPollInterval: 30 * time.Second,
 	}
 }
 
@@ -149,10 +162,32 @@ func (m *IdleManager) watchAccount(ctx context.Context, account *models.Account)
 			return
 		}
 
+		// The provider rejected the password: no session until the pause
+		// is over. Before this the loop reconnected every 10s…5m forever
+		// and each reconnect was one more failed LOGIN on the provider's
+		// side — the pattern that gets accounts locked.
+		if !m.auth.Allow(authfail.AccountIMAP(account)) {
+			if !m.waitAuthPause(ctx, account.ID) {
+				return
+			}
+			fresh, ok := m.reloadAccount(account)
+			if !ok {
+				return
+			}
+			account = fresh
+			continue
+		}
+
 		started := time.Now()
 		err := m.runIdleSession(ctx, account)
 		if ctx.Err() != nil {
 			return
+		}
+		if authfail.Is(err) {
+			m.auth.Rejected(authfail.AccountIMAP(account), err)
+			m.accountLog(account.ID, "error", "%v — login paused, see the account page", err)
+			backoff = baseBackoff
+			continue
 		}
 
 		wait, next := reconnectDelay(err, time.Since(started), backoff, baseBackoff, maxBackoff)
@@ -170,16 +205,51 @@ func (m *IdleManager) watchAccount(ctx context.Context, account *models.Account)
 		}
 
 		// Reload account from DB in case credentials changed (e.g. OAuth refresh)
-		fresh, err := m.database.GetAccountByID(account.ID)
-		if err != nil {
-			log.Printf("IDLE watcher [%s]: failed to reload account: %v", account.Email, err)
-			continue
-		}
-		if !fresh.Enabled {
-			log.Printf("IDLE watcher [%s]: account disabled, stopping", account.Email)
+		fresh, ok := m.reloadAccount(account)
+		if !ok {
 			return
 		}
 		account = fresh
+	}
+}
+
+// reloadAccount re-reads the account (credentials may have changed). ok is
+// false when the account was disabled and the watcher must stop; a read error
+// keeps the old copy.
+func (m *IdleManager) reloadAccount(account *models.Account) (*models.Account, bool) {
+	fresh, err := m.database.GetAccountByID(account.ID)
+	if err != nil {
+		log.Printf("IDLE watcher [%s]: failed to reload account: %v", account.Email, err)
+		return account, true
+	}
+	if !fresh.Enabled {
+		log.Printf("IDLE watcher [%s]: account disabled, stopping", account.Email)
+		return nil, false
+	}
+	return fresh, true
+}
+
+// waitAuthPause sleeps while the account's IMAP login is paused, waking every
+// authPollInterval to notice a lifted pause early (password edited, a sync
+// logged in). Returns false when ctx is done.
+func (m *IdleManager) waitAuthPause(ctx context.Context, accountID int64) bool {
+	for {
+		wait := m.authPollInterval
+		st, err := m.database.GetAuthBackoff(models.AuthSubjectIMAP, accountID)
+		if err == nil {
+			now := time.Now().UnixMilli()
+			if !st.Paused(now) {
+				return true
+			}
+			if left := time.Duration(st.NextAttemptAt-now) * time.Millisecond; left < wait {
+				wait = left
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(wait):
+		}
 	}
 }
 
@@ -269,14 +339,15 @@ func (m *IdleManager) runIdleSession(ctx context.Context, account *models.Accoun
 				return fmt.Errorf("auth retry refresh: %w", rerr)
 			}
 			if authErr2 := oauthAuthenticate(conn, account); authErr2 != nil {
-				return fmt.Errorf("auth after refresh: %w", authErr2)
+				return fmt.Errorf("auth after refresh: %w", authfail.MarkLoginRefusal(authErr2))
 			}
 		}
 	} else {
 		if err := conn.Login(account.IMAPUsername, account.IMAPPassword); err != nil {
-			return fmt.Errorf("login: %w", err)
+			return fmt.Errorf("login: %w", authfail.MarkLoginRefusal(err))
 		}
 	}
+	m.auth.Accepted(authfail.AccountIMAP(account))
 
 	// Select INBOX
 	if _, err := conn.Select("INBOX", false); err != nil {

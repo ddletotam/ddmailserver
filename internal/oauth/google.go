@@ -196,7 +196,7 @@ func (g *GoogleOAuth) RefreshToken(refreshToken string) (*TokenResponse, error) 
 	if resp.StatusCode != http.StatusOK {
 		var errResp map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&errResp)
-		return nil, fmt.Errorf("token refresh failed: %v", errResp)
+		return nil, refreshError(errResp)
 	}
 
 	var tokenResp TokenResponse

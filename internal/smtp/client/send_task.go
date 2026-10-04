@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/logmask"
 	"github.com/ddletotam/ddmailserver/internal/models"
@@ -85,6 +86,18 @@ func (t *SendTask) Execute(ctx context.Context) error {
 		return ctx.Err()
 	}
 
+	// The provider rejects this account's SMTP password and the pause is not
+	// over: leave the message pending, untouched. The scheduler filters such
+	// messages already; this is the arbiter when the pause just expired.
+	guard := authfail.NewGuard(nil)
+	if t.database != nil {
+		guard = authfail.NewGuard(t.database)
+	}
+	sub := authfail.AccountSMTP(t.account)
+	if !guard.Allow(sub) {
+		return nil
+	}
+
 	// Update status to sending
 	// Claim the row before anything else. Losing the claim means another
 	// task already has it (or it is no longer due): sending anyway is how one
@@ -132,6 +145,23 @@ func (t *SendTask) Execute(ctx context.Context) error {
 
 	// Send email
 	err = client.Send(t.outboxMessage.From, recipients, emailData)
+
+	if err == nil || client.AuthPassed() {
+		guard.Accepted(sub)
+	}
+	if err != nil && authfail.Is(err) {
+		// The password, not the message: keep it pending without spending
+		// a retry — six rejected logins would otherwise mark a perfectly
+		// good message failed. It goes out when the pause ends or the
+		// password is edited (which lifts the pause at once).
+		guard.Rejected(sub, err)
+		reason := "deferred: the provider rejected the SMTP password of this account; " +
+			"the message will be sent once the password is updated (" + err.Error() + ")"
+		if dbErr := t.database.UpdateOutboxMessageStatus(t.outboxMessage.ID, "pending", reason); dbErr != nil {
+			log.Printf("Failed to mark message as deferred: %v", dbErr)
+		}
+		return fmt.Errorf("failed to send: %w", err)
+	}
 
 	if err != nil {
 		// Increment retries. The stored count decides when to give up —

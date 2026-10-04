@@ -8,6 +8,7 @@ import (
 
 	caldavutil "github.com/ddletotam/ddmailserver/internal/caldav"
 	caldavclient "github.com/ddletotam/ddmailserver/internal/caldav/client"
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/task"
@@ -51,6 +52,12 @@ func (t *CalendarEventSyncTask) Execute(ctx context.Context) error {
 		return nil
 	}
 
+	guard := authGuard(t.database)
+	sub := authfail.CalendarSource(t.source)
+	if !guard.Allow(sub) {
+		return nil // credentials rejected, pause not over (auth_backoff)
+	}
+
 	log.Printf("Calendar event sync: %d pending entries for %s", len(entries), t.source.Name)
 
 	// Connect to remote CalDAV
@@ -61,10 +68,15 @@ func (t *CalendarEventSyncTask) Execute(ctx context.Context) error {
 
 	successCount := 0
 	failCount := 0
+	var authErr error
+	defer func() { reportDAVAuth(guard, sub, client.AuthWatch(), authErr) }()
 
 	for _, entry := range entries {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if authErr != nil {
+			break
 		}
 
 		// A disabled calendar writes nothing to its source. An entry can only
@@ -156,6 +168,16 @@ func (t *CalendarEventSyncTask) Execute(ctx context.Context) error {
 			err = client.DeleteEvent(ctx, entry.RemoteID)
 		}
 
+		if err != nil && (authfail.Is(err) || client.AuthWatch().Rejected()) {
+			// The server rejects the password, not this change: stop the
+			// round (every further PUT would be one more failed login) and
+			// leave the entry's retry budget alone — burning it would
+			// dead-letter perfectly good changes while the user is still
+			// fixing the password.
+			log.Printf("Calendar event sync for %s stopped: credentials rejected (%v)", t.source.Name, err)
+			authErr = err
+			continue
+		}
 		if err != nil {
 			log.Printf("Calendar event sync failed for %s (%s, retry=%d): %v",
 				entry.UID, entry.Operation, entry.RetryCount, err)
@@ -204,6 +226,10 @@ func (t *CalendarEventSyncTask) Execute(ctx context.Context) error {
 		successCount++
 	}
 
+	if authErr != nil {
+		// Not a clean round: the warning counter must not be reset.
+		return nil
+	}
 	log.Printf("Calendar event sync completed for %s: %d success, %d failed",
 		t.source.Name, successCount, failCount)
 	return t.finish(failCount)

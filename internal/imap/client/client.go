@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/tlsverify"
 	"github.com/emersion/go-imap"
@@ -147,14 +148,14 @@ func (c *Client) Connect() error {
 		log.Printf("Authenticating with XOAUTH2 as %s", c.account.IMAPUsername)
 		if err := oauthAuthenticate(c.conn, c.account); err != nil {
 			c.conn.Logout()
-			return fmt.Errorf("failed to authenticate with OAuth: %w", err)
+			return fmt.Errorf("failed to authenticate with OAuth: %w", authfail.MarkLoginRefusal(err))
 		}
 	} else {
 		// Use plain LOGIN for password-based auth
 		log.Printf("Authenticating as %s", c.account.IMAPUsername)
 		if err := c.conn.Login(c.account.IMAPUsername, c.account.IMAPPassword); err != nil {
 			c.conn.Logout()
-			return fmt.Errorf("failed to login: %w", err)
+			return fmt.Errorf("failed to login: %w", authfail.MarkLoginRefusal(err))
 		}
 	}
 

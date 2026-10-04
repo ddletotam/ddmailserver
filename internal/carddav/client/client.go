@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/tlsverify"
@@ -26,6 +27,7 @@ type Client struct {
 	database   *db.DB
 	client     *carddav.Client
 	httpClient webdav.HTTPClient
+	authWatch  *authfail.HTTPWatch
 }
 
 // New creates a new CardDAV client
@@ -35,6 +37,18 @@ func New(source *models.ContactSource, database *db.DB) *Client {
 		database: database,
 	}
 }
+
+// watchAuth puts the credentials watch in front of the client's transport;
+// see AuthWatch.
+func (c *Client) watchAuth(base http.RoundTripper) http.RoundTripper {
+	c.authWatch = &authfail.HTTPWatch{Base: base}
+	return c.authWatch
+}
+
+// AuthWatch reports what the server said about the credentials during this
+// client's requests (401 → rejected), for the login pause. Nil before
+// Connect.
+func (c *Client) AuthWatch() *authfail.HTTPWatch { return c.authWatch }
 
 // Connect establishes a connection to the CardDAV server
 func (c *Client) Connect() error {
@@ -46,7 +60,7 @@ func (c *Client) Connect() error {
 		// tlsverify.Transport(): a CardDAV host that omits its intermediate
 		// stays reachable, without giving up verification to get there.
 		httpClient = &http.Client{
-			Transport: tlsverify.Transport(),
+			Transport: c.watchAuth(tlsverify.Transport()),
 			Timeout:   30 * time.Second,
 		}
 		authClient := webdav.HTTPClientWithBasicAuth(httpClient, c.source.CardDAVUsername, c.source.CardDAVPassword)
@@ -59,7 +73,7 @@ func (c *Client) Connect() error {
 			token: c.source.OAuthAccessToken,
 		}
 		httpClient = &http.Client{
-			Transport: transport,
+			Transport: c.watchAuth(transport),
 			Timeout:   30 * time.Second,
 		}
 		client, err = carddav.NewClient(httpClient, c.source.CardDAVURL)

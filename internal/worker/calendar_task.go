@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	caldavclient "github.com/ddletotam/ddmailserver/internal/caldav/client"
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/models"
@@ -21,6 +22,9 @@ type CalendarSyncTask struct {
 	googleOAuth    *oauth.GoogleOAuth
 	microsoftOAuth *oauth.MicrosoftOAuth
 	notifyHub      *notify.Hub
+	// authWatch of the run's CalDAV client: the server's verdict on the
+	// credentials (set by doSync once the client exists).
+	authWatch *authfail.HTTPWatch
 }
 
 // NewCalendarSyncTask creates a new calendar sync task
@@ -36,9 +40,18 @@ func NewCalendarSyncTask(source *models.CalendarSource, database *db.DB, googleO
 
 // Execute runs the calendar sync task
 func (t *CalendarSyncTask) Execute(ctx context.Context) error {
+	guard := authGuard(t.database)
+	sub := authfail.CalendarSource(t.source)
+	if !guard.Allow(sub) {
+		return nil // credentials rejected, pause not over (auth_backoff)
+	}
+
 	log.Printf("Starting CalDAV sync for source %s (ID: %d)", t.source.Name, t.source.ID)
 
 	err := t.doSync(ctx)
+	// The wire decides: a 401 on any request, even one swallowed into
+	// "partial sync errors", is a rejected password.
+	reportDAVAuth(guard, sub, t.authWatch, err)
 	if err != nil {
 		// Save error to database so user can see it
 		if dbErr := t.database.UpdateCalendarSourceLastError(t.source.ID, err.Error()); dbErr != nil {
@@ -65,7 +78,9 @@ func (t *CalendarSyncTask) doSync(ctx context.Context) error {
 	client := caldavclient.New(t.source, t.database)
 
 	// Connect to CalDAV server
-	if err := client.Connect(); err != nil {
+	err := client.Connect()
+	t.authWatch = client.AuthWatch()
+	if err != nil {
 		log.Printf("Failed to connect to CalDAV server for %s: %v", t.source.Name, err)
 		return fmt.Errorf("failed to connect: %w", err)
 	}
@@ -199,7 +214,7 @@ func (t *CalendarSyncTask) refreshOAuthTokensIfNeeded() error {
 
 	// Need refresh token
 	if t.source.OAuthRefreshToken == "" {
-		return fmt.Errorf("no refresh token available, please re-authenticate")
+		return authfail.Mark(fmt.Errorf("no refresh token available, please re-authenticate"))
 	}
 
 	log.Printf("Refreshing OAuth token for %s (expires: %v)", t.source.Name, t.source.OAuthTokenExpiry)

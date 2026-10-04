@@ -10,6 +10,7 @@ import (
 
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/dkimsign"
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	imapclient "github.com/ddletotam/ddmailserver/internal/imap/client"
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/notify"
@@ -57,6 +58,9 @@ type Scheduler struct {
 	// sends while a scan is pending or running cost one more scan, not one
 	// goroutine each. Drained by outboxLoop.
 	outboxKick chan struct{}
+	// cycleKick coalesces TriggerCycle calls the same way: one extra
+	// scheduling pass, run by the Start loop so it never overlaps a tick.
+	cycleKick chan struct{}
 	// sendMu serialises scheduleSMTPSend between the periodic tick and the
 	// outbox loop. Not a correctness guard — the atomic claim in the send
 	// tasks is — just no reason to read the same pending rows twice at once.
@@ -87,6 +91,19 @@ func NewScheduler(deps SchedulerDeps) *Scheduler {
 		analyzer:       deps.Analyzer,
 		dkimSigner:     deps.DKIMSigner,
 		outboxKick:     make(chan struct{}, 1),
+		cycleKick:      make(chan struct{}, 1),
+	}
+}
+
+// TriggerCycle runs one scheduling pass now instead of at the next tick.
+//
+// Called after the user edits an account or source: the edit lifts the login
+// pause (auth_backoff), and new credentials should be tried right away, not
+// up to a full interval later. Never blocks; calls coalesce.
+func (s *Scheduler) TriggerCycle() {
+	select {
+	case s.cycleKick <- struct{}{}:
+	default:
 	}
 }
 
@@ -239,6 +256,9 @@ func (s *Scheduler) Start() {
 
 		case <-ticker.C:
 			s.scheduleAllAccounts()
+
+		case <-s.cycleKick:
+			s.scheduleAllAccounts()
 		}
 	}
 }
@@ -253,26 +273,34 @@ func (s *Scheduler) Stop() {
 func (s *Scheduler) scheduleAllAccounts() {
 	log.Printf("Scheduling sync and send tasks")
 
+	// Credentials the providers currently reject: nothing below logs in
+	// with them until their pause is over (package authfail).
+	paused := s.loadAuthPaused()
+
 	// Schedule IMAP sync tasks
-	s.scheduleIMAPSync()
+	s.scheduleIMAPSync(paused)
 
 	// Schedule SMTP send tasks
 	s.scheduleSMTPSend()
 
 	// Schedule CalDAV sync tasks
-	s.scheduleCalendarSync()
+	s.scheduleCalendarSync(paused)
 
 	// Schedule CardDAV contact sync tasks
-	s.scheduleContactSync()
+	s.scheduleContactSync(paused)
 
 	// Schedule contact sync push tasks (reverse sync to remote CardDAV)
-	s.scheduleContactSyncPush()
+	s.scheduleContactSyncPush(paused)
 
 	// Schedule flag sync tasks (reverse proxy for external accounts)
-	s.scheduleFlagSync()
+	s.scheduleFlagSync(paused)
 
 	// Schedule calendar event reverse sync tasks
-	s.scheduleCalendarEventSync()
+	s.scheduleCalendarEventSync(paused)
+
+	// Tell users about credentials that just started being rejected (once
+	// per transition).
+	s.publishAuthFailures()
 
 	// Schedule calendar sync warning emails (one per source per day when
 	// retries pile up — see CalendarSyncWarningTask for the threshold).
@@ -318,7 +346,7 @@ func (s *Scheduler) refreshAccountOAuthTokenForce(account *models.Account, force
 // scheduleIMAPSync schedules IMAP synchronization tasks.
 // For poll-mode accounts: syncs when the account's poll_interval has elapsed.
 // For idle-mode accounts: syncs as a safety-net fallback every 300s.
-func (s *Scheduler) scheduleIMAPSync() {
+func (s *Scheduler) scheduleIMAPSync(paused authPaused) {
 	accounts, err := s.getAllEnabledAccounts()
 	if err != nil {
 		log.Printf("Failed to get enabled accounts: %v", err)
@@ -327,6 +355,12 @@ func (s *Scheduler) scheduleIMAPSync() {
 
 	synced := 0
 	for _, account := range accounts {
+		// Login paused after rejected credentials. LastSync does not move
+		// on a failed sync, so without this the poll retried every tick.
+		if paused.has(models.AuthSubjectIMAP, account.ID) {
+			continue
+		}
+
 		interval := 300 // default fallback for idle-mode accounts
 		if account.SyncMode == "poll" && account.PollInterval >= 120 {
 			interval = account.PollInterval
@@ -341,6 +375,9 @@ func (s *Scheduler) scheduleIMAPSync() {
 		if account.IsOAuth() {
 			if err := s.refreshAccountOAuthToken(account); err != nil {
 				log.Printf("Failed to refresh OAuth token for %s: %v", account.Email, err)
+				// invalid_grant: the grant is gone, a pause like a
+				// rejected password.
+				authGuard(s.database).Report(authfail.AccountIMAP(account), err)
 				continue
 			}
 		}
@@ -409,7 +446,21 @@ func (s *Scheduler) scheduleSMTPSend() {
 
 	log.Printf("Found %d pending messages to send", len(messages))
 
+	smtpPaused, err := s.database.GetAuthPausedIDs(models.AuthSubjectSMTP)
+	if err != nil {
+		log.Printf("Failed to load SMTP auth pauses: %v", err)
+	}
+	deferred := 0
+
 	for _, msg := range messages {
+		// Relay account whose SMTP password the provider rejects: the
+		// message stays pending (nothing is lost, retries are not spent)
+		// and goes out once the pause is over or the password is edited.
+		if msg.AccountID != 0 && smtpPaused[msg.AccountID] {
+			deferred++
+			continue
+		}
+
 		var sendTask taskpkg.Task
 
 		// Tell the user's clients the moment the copy lands in Sent. Queueing
@@ -450,6 +501,9 @@ func (s *Scheduler) scheduleSMTPSend() {
 
 		s.submit(task, fmt.Sprintf("send task for message %d", msg.ID))
 	}
+	if deferred > 0 {
+		log.Printf("%d outbox message(s) held: SMTP login of their account is paused after rejected credentials", deferred)
+	}
 }
 
 // getAllEnabledAccounts retrieves all enabled accounts
@@ -472,8 +526,9 @@ func (s *Scheduler) TriggerCalendarSyncForUser(userID int64) {
 
 	log.Printf("Triggering immediate calendar sync for user %d (%d sources)", userID, len(sources))
 
+	paused := s.loadAuthPaused()
 	for _, source := range sources {
-		if !source.SyncEnabled {
+		if !source.SyncEnabled || paused.has(models.AuthSubjectCalDAV, source.ID) {
 			continue
 		}
 
@@ -492,7 +547,7 @@ func (s *Scheduler) TriggerCalendarSyncForUser(userID int64) {
 }
 
 // scheduleCalendarSync schedules CalDAV and ICS URL synchronization tasks
-func (s *Scheduler) scheduleCalendarSync() {
+func (s *Scheduler) scheduleCalendarSync(paused authPaused) {
 	sources, err := s.database.GetAllEnabledCalendarSources()
 	if err != nil {
 		log.Printf("Failed to get enabled calendar sources: %v", err)
@@ -507,7 +562,7 @@ func (s *Scheduler) scheduleCalendarSync() {
 
 	for _, source := range sources {
 		// Check if source needs sync based on interval
-		if !source.NeedsSync() {
+		if !source.NeedsSync() || paused.has(models.AuthSubjectCalDAV, source.ID) {
 			continue
 		}
 
@@ -527,7 +582,7 @@ func (s *Scheduler) scheduleCalendarSync() {
 }
 
 // scheduleContactSync schedules CardDAV contact synchronization tasks
-func (s *Scheduler) scheduleContactSync() {
+func (s *Scheduler) scheduleContactSync(paused authPaused) {
 	sources, err := s.database.GetAllEnabledContactSources()
 	if err != nil {
 		log.Printf("Failed to get enabled contact sources: %v", err)
@@ -542,7 +597,7 @@ func (s *Scheduler) scheduleContactSync() {
 
 	for _, source := range sources {
 		// Check if source needs sync based on interval
-		if !source.NeedsSync() {
+		if !source.NeedsSync() || paused.has(models.AuthSubjectCardDAV, source.ID) {
 			continue
 		}
 
@@ -554,7 +609,7 @@ func (s *Scheduler) scheduleContactSync() {
 
 // scheduleContactSyncPush schedules contact sync push tasks
 // Pushes local contact changes back to external CardDAV servers
-func (s *Scheduler) scheduleContactSyncPush() {
+func (s *Scheduler) scheduleContactSyncPush(paused authPaused) {
 	sourceIDs, err := s.database.GetSourcesWithPendingContactSync()
 	if err != nil {
 		log.Printf("Failed to get sources with pending contact sync push: %v", err)
@@ -568,6 +623,9 @@ func (s *Scheduler) scheduleContactSyncPush() {
 	log.Printf("Found %d contact sources with pending sync push", len(sourceIDs))
 
 	for _, sourceID := range sourceIDs {
+		if paused.has(models.AuthSubjectCardDAV, sourceID) {
+			continue
+		}
 		source, err := s.database.GetContactSourceByID(sourceID)
 		if err != nil {
 			log.Printf("Failed to get contact source %d for sync push: %v", sourceID, err)
@@ -586,7 +644,7 @@ func (s *Scheduler) scheduleContactSyncPush() {
 
 // scheduleCalendarEventSync schedules calendar event reverse sync tasks
 // Pushes local event changes back to external CalDAV servers
-func (s *Scheduler) scheduleCalendarEventSync() {
+func (s *Scheduler) scheduleCalendarEventSync(paused authPaused) {
 	sourceIDs, err := s.database.GetSourcesWithPendingCalendarEventSync()
 	if err != nil {
 		log.Printf("Failed to get sources with pending calendar event sync: %v", err)
@@ -600,6 +658,9 @@ func (s *Scheduler) scheduleCalendarEventSync() {
 	log.Printf("Found %d calendar sources with pending event sync", len(sourceIDs))
 
 	for _, sourceID := range sourceIDs {
+		if paused.has(models.AuthSubjectCalDAV, sourceID) {
+			continue
+		}
 		source, err := s.database.GetCalendarSourceByID(sourceID)
 		if err != nil {
 			log.Printf("Failed to get calendar source %d for event sync: %v", sourceID, err)
@@ -628,7 +689,7 @@ func (s *Scheduler) scheduleCalendarSyncWarning() {
 
 // scheduleFlagSync schedules flag synchronization tasks for external IMAP accounts
 // This implements "reverse proxy" mode - pushing local flag changes back to source servers
-func (s *Scheduler) scheduleFlagSync() {
+func (s *Scheduler) scheduleFlagSync(paused authPaused) {
 	// Get accounts that have pending flag changes
 	accountIDs, err := s.database.GetAccountsWithPendingFlagSync()
 	if err != nil {
@@ -643,6 +704,9 @@ func (s *Scheduler) scheduleFlagSync() {
 	log.Printf("Found %d accounts with pending flag sync", len(accountIDs))
 
 	for _, accountID := range accountIDs {
+		if paused.has(models.AuthSubjectIMAP, accountID) {
+			continue
+		}
 		account, err := s.database.GetAccountByID(accountID)
 		if err != nil {
 			log.Printf("Failed to get account %d for flag sync: %v", accountID, err)
@@ -697,6 +761,13 @@ func (s *Scheduler) runAccountLogCleanup() {
 
 	if deleted > 0 {
 		log.Printf("Account log cleanup: deleted %d entries older than 5 days", deleted)
+	}
+
+	// Login pauses of deleted accounts and sources (no foreign key to them).
+	if n, err := s.database.CleanupOrphanAuthBackoffs(); err != nil {
+		log.Printf("Failed to cleanup auth backoff: %v", err)
+	} else if n > 0 {
+		log.Printf("Auth backoff cleanup: removed %d states of deleted accounts/sources", n)
 	}
 
 	s.accountLogCleanupLastRun = time.Now()

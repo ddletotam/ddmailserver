@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	"github.com/ddletotam/ddmailserver/internal/db"
 	imapclient "github.com/ddletotam/ddmailserver/internal/imap/client"
 	"github.com/ddletotam/ddmailserver/internal/models"
@@ -54,6 +55,14 @@ func (t *FlagSyncTask) Execute(ctx context.Context) error {
 		return nil
 	}
 
+	// Same IMAP credentials as the sync: while the provider rejects them,
+	// no login from here either.
+	guard := authGuard(t.database)
+	sub := authfail.AccountIMAP(t.account)
+	if !guard.Allow(sub) {
+		return nil
+	}
+
 	log.Printf("Flag sync: %d pending entries for %s", len(entries), t.account.Email)
 
 	// Create and connect IMAP client. A connect failure counts as a failed
@@ -66,7 +75,13 @@ func (t *FlagSyncTask) Execute(ctx context.Context) error {
 		return fmt.Errorf("failed to create IMAP client: %w", err)
 	}
 
-	if err := client.Connect(); err != nil {
+	err = client.Connect()
+	if guard.Report(sub, err) {
+		// Rejected credentials pause the whole account (auth_backoff);
+		// the entries keep their retry budget for when it works again.
+		return fmt.Errorf("failed to connect to IMAP server: %w", err)
+	}
+	if err != nil {
 		t.markAllFailed(entries, err)
 		return fmt.Errorf("failed to connect to IMAP server: %w", err)
 	}

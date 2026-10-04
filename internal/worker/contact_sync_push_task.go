@@ -6,6 +6,7 @@ import (
 	"log"
 
 	carddavclient "github.com/ddletotam/ddmailserver/internal/carddav/client"
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/task"
@@ -49,6 +50,12 @@ func (t *ContactSyncPushTask) Execute(ctx context.Context) error {
 		return nil
 	}
 
+	guard := authGuard(t.database)
+	sub := authfail.ContactSource(t.source)
+	if !guard.Allow(sub) {
+		return nil // credentials rejected, pause not over (auth_backoff)
+	}
+
 	log.Printf("Contact sync push: %d pending entries for %s", len(entries), t.source.Name)
 
 	// Connect to remote CardDAV
@@ -59,10 +66,15 @@ func (t *ContactSyncPushTask) Execute(ctx context.Context) error {
 
 	successCount := 0
 	failCount := 0
+	var authErr error
+	defer func() { reportDAVAuth(guard, sub, client.AuthWatch(), authErr) }()
 
 	for _, entry := range entries {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if authErr != nil {
+			break
 		}
 
 		var err error
@@ -96,6 +108,13 @@ func (t *ContactSyncPushTask) Execute(ctx context.Context) error {
 			err = client.DeleteContact(ctx, entry.RemoteID)
 		}
 
+		if err != nil && (authfail.Is(err) || client.AuthWatch().Rejected()) {
+			// Password rejected: stop the round instead of collecting one
+			// failed login per queued contact.
+			log.Printf("Contact sync push for %s stopped: credentials rejected (%v)", t.source.Name, err)
+			authErr = err
+			continue
+		}
 		if err != nil {
 			log.Printf("Contact sync push failed for %s (%s): %v", entry.UID, entry.Operation, err)
 			failCount++
