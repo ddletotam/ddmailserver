@@ -96,6 +96,36 @@ func (db *DB) GetOutboxMessageByID(id int64) (*models.OutboxMessage, error) {
 	return msg, nil
 }
 
+// ClaimOutboxMessage atomically moves a due message from 'pending' to
+// 'sending' and reports whether this caller won it. Only the winner may send.
+//
+// The status change used to be an unconditional UPDATE whose error was only
+// logged, so two send tasks for one row — two outbox scans racing (the
+// periodic tick and TriggerOutbox), a stale task still queued from an earlier
+// scan — both "took" it and both delivered it. The WHERE clause is the lock:
+// Postgres re-checks it on the row after waiting for any concurrent update,
+// so exactly one UPDATE sees status='pending' and returns a row.
+//
+// The next_attempt_at condition matches GetPendingOutboxMessages: a task
+// created before a failed attempt must not jump the backoff the failure set.
+func (db *DB) ClaimOutboxMessage(id int64) (bool, error) {
+	now := timeutil.Now()
+	var claimed int64
+	err := db.QueryRow(`
+		UPDATE outbox_messages
+		SET status = 'sending', last_error = '', updated_at = $2
+		WHERE id = $1 AND status = 'pending' AND COALESCE(next_attempt_at, 0) <= $2
+		RETURNING id
+	`, id, now).Scan(&claimed)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to claim outbox message %d: %w", id, err)
+	}
+	return true, nil
+}
+
 // UpdateOutboxMessageStatus updates the status of an outbox message
 func (db *DB) UpdateOutboxMessageStatus(id int64, status string, lastError string) error {
 	now := timeutil.Now()
@@ -184,6 +214,14 @@ func (db *DB) IncrementOutboxMessageRetries(id int64, lastError string) (int, er
 // Meant to be called at startup, where nothing can be genuinely in flight yet.
 // It assumes a single mailserver instance per database; with two running, one
 // starting up could hand the other's in-flight message back to the queue.
+//
+// Delivery is therefore at-least-once: a row is left in 'sending' only if the
+// process died between the claim and recording the outcome. If it died after
+// the remote server had accepted DATA but before MarkOutboxMessageSent, the
+// message goes out a second time on the next start. That window is the SMTP
+// transaction itself and cannot be closed from this side; graceful shutdown
+// lets in-flight sends finish (the send tasks do not abort on ctx once the row
+// is claimed) to keep it from being hit on routine restarts.
 func (db *DB) RecoverStrandedOutboxMessages() (int64, error) {
 	result, err := db.Exec(`
 		UPDATE outbox_messages

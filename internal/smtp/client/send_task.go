@@ -86,8 +86,18 @@ func (t *SendTask) Execute(ctx context.Context) error {
 	}
 
 	// Update status to sending
-	if err := t.database.UpdateOutboxMessageStatus(t.outboxMessage.ID, "sending", ""); err != nil {
-		log.Printf("Failed to update status to sending: %v", err)
+	// Claim the row before anything else. Losing the claim means another
+	// task already has it (or it is no longer due): sending anyway is how one
+	// message used to go out twice. After the claim the send runs to the end
+	// even if ctx is cancelled — abandoning it mid-way is what strands rows
+	// in 'sending' and gets them re-sent on the next start.
+	claimed, err := t.database.ClaimOutboxMessage(t.outboxMessage.ID)
+	if err != nil {
+		return fmt.Errorf("claim outbox message %d: %w", t.outboxMessage.ID, err)
+	}
+	if !claimed {
+		log.Printf("Outbox message %d is not pending any more (taken by another task, sent or backing off) — skipping", t.outboxMessage.ID)
+		return nil
 	}
 
 	// Create SMTP client
@@ -121,7 +131,7 @@ func (t *SendTask) Execute(ctx context.Context) error {
 	}
 
 	// Send email
-	err := client.Send(t.outboxMessage.From, recipients, emailData)
+	err = client.Send(t.outboxMessage.From, recipients, emailData)
 
 	if err != nil {
 		// Increment retries. The stored count decides when to give up —

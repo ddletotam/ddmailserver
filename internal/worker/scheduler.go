@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/ddletotam/ddmailserver/internal/db"
@@ -51,6 +52,15 @@ type Scheduler struct {
 	accountLogCleanupLastRun time.Time
 	vaultCleanupLastRun      time.Time
 	journalCompactLastRun    time.Time
+
+	// outboxKick coalesces TriggerOutbox calls: capacity 1, so any number of
+	// sends while a scan is pending or running cost one more scan, not one
+	// goroutine each. Drained by outboxLoop.
+	outboxKick chan struct{}
+	// sendMu serialises scheduleSMTPSend between the periodic tick and the
+	// outbox loop. Not a correctness guard — the atomic claim in the send
+	// tasks is — just no reason to read the same pending rows twice at once.
+	sendMu sync.Mutex
 }
 
 // NewScheduler creates a new task scheduler with all dependencies wired up.
@@ -76,6 +86,7 @@ func NewScheduler(deps SchedulerDeps) *Scheduler {
 		hostname:       deps.Hostname,
 		analyzer:       deps.Analyzer,
 		dkimSigner:     deps.DKIMSigner,
+		outboxKick:     make(chan struct{}, 1),
 	}
 }
 
@@ -90,11 +101,28 @@ func NewScheduler(deps SchedulerDeps) *Scheduler {
 // «Отправить» and found nothing there, so a reply sent from a different address
 // had no conversation to jump to (contract §1).
 //
-// Safe to call from a request handler: scheduleSMTPSend only submits tasks to the
-// pool, and a message already picked up is in status 'sending' so a second call
-// cannot double-send it.
+// Safe to call from a request handler: it never blocks. Calls coalesce — a
+// burst of sends triggers one scan of the outbox (see outboxLoop), not a
+// goroutine per call. Double delivery is prevented further down: a send task
+// atomically claims its row ('pending' → 'sending') before sending, so a row
+// picked up by two scans is sent once.
 func (s *Scheduler) TriggerOutbox() {
-	go s.scheduleSMTPSend()
+	select {
+	case s.outboxKick <- struct{}{}:
+	default: // a scan is already pending; it will see this message too
+	}
+}
+
+// outboxLoop runs one outbox scan per (coalesced) TriggerOutbox call.
+func (s *Scheduler) outboxLoop() {
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-s.outboxKick:
+			s.scheduleSMTPSend()
+		}
+	}
 }
 
 // TriggerSyncForAccount submits an immediate sync task for a single account.
@@ -176,6 +204,8 @@ func (s *Scheduler) getHostname() string {
 // Start starts the scheduler
 func (s *Scheduler) Start() {
 	log.Printf("Scheduler started with interval %v", s.interval)
+
+	go s.outboxLoop()
 
 	// Run initial sync immediately
 	s.scheduleAllAccounts()
@@ -342,6 +372,12 @@ func (s *Scheduler) scheduleIMAPSync() {
 
 // scheduleSMTPSend schedules SMTP send tasks for pending outbox messages
 func (s *Scheduler) scheduleSMTPSend() {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	if s.ctx.Err() != nil {
+		return
+	}
+
 	// Get pending outbox messages
 	messages, err := s.database.GetPendingOutboxMessages(100) // Limit to 100 at a time
 	if err != nil {
