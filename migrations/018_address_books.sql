@@ -110,6 +110,5 @@ CREATE INDEX IF NOT EXISTS idx_contacts_full_name ON contacts(full_name);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_uid ON contacts(address_book_id, uid);
 CREATE INDEX IF NOT EXISTS idx_contacts_remote_id ON contacts(address_book_id, remote_id) WHERE remote_id IS NOT NULL;
 
--- Full text search index for contacts
-CREATE INDEX IF NOT EXISTS idx_contacts_search ON contacts
-USING gin(to_tsvector('simple', COALESCE(full_name, '') || ' ' || COALESCE(email, '') || ' ' || COALESCE(organization, '')));
+-- (A full-text GIN index idx_contacts_search used to be created here. It never
+-- made it to production and nothing queries it, so it is gone.)

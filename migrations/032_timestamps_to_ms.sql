@@ -8,9 +8,8 @@
 --   3. DROP old_col
 --   4. RENAME new_col → old_col
 --
--- Wrapped in a transaction for atomicity.
+-- Atomic: the migration runner executes every file in its own transaction.
 
-BEGIN;
 
 -- ══════════════════════════════════════════════════════════════
 -- messages (date, created_at, updated_at, soft_deleted_at)
@@ -429,4 +428,3 @@ UPDATE eas_sync_state SET last_sync_ms = EXTRACT(EPOCH FROM last_sync) * 1000 WH
 ALTER TABLE eas_sync_state DROP COLUMN last_sync;
 ALTER TABLE eas_sync_state RENAME COLUMN last_sync_ms TO last_sync;
 
-COMMIT;

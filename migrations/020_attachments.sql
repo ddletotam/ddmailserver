@@ -20,6 +20,13 @@ CREATE TABLE IF NOT EXISTS attachments (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- The table above is skipped on every real database: 001_initial_schema
+-- already created attachments (filename/content_type/size/data). The two
+-- inline-image columns were then added on production by hand; these ALTERs
+-- record that step so an empty database ends up with the same table.
+ALTER TABLE attachments ADD COLUMN IF NOT EXISTS content_id VARCHAR(255);
+ALTER TABLE attachments ADD COLUMN IF NOT EXISTS is_inline BOOLEAN DEFAULT false;
+
 -- Index for fast lookup by message_id
 CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);
 

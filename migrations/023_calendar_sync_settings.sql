@@ -16,3 +16,8 @@ AND c.reverse_sync = false;
 -- Fix calendar_event_sync_queue: remove CASCADE on event_id
 -- This allows queuing delete operations BEFORE deleting the event
 ALTER TABLE calendar_event_sync_queue DROP CONSTRAINT IF EXISTS calendar_event_sync_queue_event_id_fkey;
+
+-- A delete is queued for an event that is about to disappear, so event_id is
+-- no longer guaranteed to point anywhere. Production dropped NOT NULL by hand;
+-- recorded here so an empty database matches it.
+ALTER TABLE calendar_event_sync_queue ALTER COLUMN event_id DROP NOT NULL;

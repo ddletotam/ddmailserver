@@ -1,5 +1,5 @@
 -- User administration: ban flag for blocking login without deletion.
--- (is_admin column already exists from earlier migration; this just adds is_banned.)
+-- (is_admin comes from 010_system_settings; this just adds is_banned.)
 
 ALTER TABLE users
     ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT FALSE;
