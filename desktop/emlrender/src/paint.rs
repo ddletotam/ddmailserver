@@ -459,24 +459,27 @@ fn paint_text(
         );
 
         // Words for the selection layer. A word is a maximal glyph span with no
-        // whitespace between the cluster boundaries.
-        let mut word_start: Option<(f32, f32, usize)> = None;
-        let flush = |word: Option<(f32, f32, usize)>, runs_out: &mut Vec<TextRun>, cont: bool| {
-            if let Some((x0, x1, start)) = word {
-                let text: String =
-                    run.text[start..].chars().take_while(|c| !c.is_whitespace()).collect();
-                if !text.is_empty() {
-                    runs_out.push(TextRun {
-                        x: (ox + x0) / scale,
-                        y: line_top / scale,
-                        w: (x1 - x0) / scale,
-                        h: line_h / scale,
-                        text,
-                        cont,
-                    });
+        // whitespace between the cluster boundaries. Its text ends where its
+        // last glyph ends, not at the next space: `run.text` is the whole
+        // source line, so a word cut by a wrap would otherwise carry the rest
+        // of itself into every fragment (a wrapped URL copied back N times).
+        let mut word_start: Option<(f32, f32, usize, usize)> = None;
+        let flush =
+            |word: Option<(f32, f32, usize, usize)>, runs_out: &mut Vec<TextRun>, cont: bool| {
+                if let Some((x0, x1, start, end)) = word {
+                    let text = run.text.get(start..end).unwrap_or("").to_string();
+                    if !text.is_empty() {
+                        runs_out.push(TextRun {
+                            x: (ox + x0) / scale,
+                            y: line_top / scale,
+                            w: (x1 - x0) / scale,
+                            h: line_h / scale,
+                            text,
+                            cont,
+                        });
+                    }
                 }
-            }
-        };
+            };
         let mut first_word = true;
         for glyph in run.glyphs {
             let cluster = run.text.get(glyph.start..glyph.end).unwrap_or("");
@@ -487,8 +490,12 @@ fn paint_text(
                 first_word = false;
             } else {
                 match &mut word_start {
-                    Some((_, x1, _)) => *x1 = glyph.x + glyph.w,
-                    None => word_start = Some((glyph.x, glyph.x + glyph.w, glyph.start)),
+                    Some((_, x1, start, end)) => {
+                        *x1 = glyph.x + glyph.w;
+                        *start = (*start).min(glyph.start);
+                        *end = (*end).max(glyph.end);
+                    }
+                    None => word_start = Some((glyph.x, glyph.x + glyph.w, glyph.start, glyph.end)),
                 }
             }
         }

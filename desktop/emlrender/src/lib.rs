@@ -345,6 +345,32 @@ mod tests {
         }
     }
 
+    /// A URL wrapped across lines copies back as exactly itself: the text
+    /// layer's fragments, joined the way copy joins them (`cont` → no
+    /// separator), must not repeat or drop a single character.
+    #[test]
+    fn wrapped_url_copies_back_unchanged() {
+        let url = "https://example.com/a-very-long-link-that-keeps-going/and-going/and-going/without-any-place-to-break-it";
+        for html in [format!("<p>{url}</p>"), format!("<p><a href=\"{url}\">{url}</a></p>")] {
+            for w in [120, 200, 333] {
+                let r = render(&html, &opts(w));
+                let mut joined = String::new();
+                for t in &r.runs {
+                    if !joined.is_empty() && !t.cont {
+                        joined.push(' ');
+                    }
+                    joined.push_str(&t.text);
+                }
+                assert_eq!(
+                    joined,
+                    url,
+                    "width {w}, runs {:?}",
+                    r.runs.iter().map(|t| (&t.text, t.cont)).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
     /// The rule the whole crate exists for: nothing is ever wider than asked.
     #[test]
     fn unbreakable_text_does_not_widen_the_bitmap() {
