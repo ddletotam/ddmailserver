@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/tlsverify"
@@ -62,6 +64,16 @@ func oauthAuthenticate(conn *client.Client, account *models.Account) error {
 type Client struct {
 	account *models.Account
 	conn    *client.Client
+
+	fetchMu sync.Mutex
+	fetches map[*fetchStream]struct{} // FETCH commands still running
+}
+
+// fetchStream is one FETCH in flight, see startFetch.
+type fetchStream struct {
+	abort     chan struct{} // closed by Disconnect: consumer is gone, drain
+	abortOnce sync.Once
+	finished  chan struct{} // closed once go-imap has returned and the stream is drained
 }
 
 // New creates a new IMAP client for an account
@@ -150,13 +162,56 @@ func (c *Client) Connect() error {
 	return nil
 }
 
-// Disconnect closes the connection
+// abandonedFetchWait bounds how long Disconnect waits for an aborted FETCH to
+// unwind after the connection is closed. Unwinding needs no network, so this
+// is only a guard against a library surprise, not a timeout anyone should hit.
+const abandonedFetchWait = 5 * time.Second
+
+// Disconnect closes the connection.
+//
+// If a FETCH started by FetchMessages/FetchMessagesByUID is still running —
+// the caller stopped reading the channel early, e.g. its context was
+// cancelled — the connection is closed outright instead of logging out.
+// LOGOUT would be answered only after the rest of the FETCH stream, and that
+// stream is stuck: go-imap's reader blocks handing the next message to a
+// channel nobody reads. Logout waited forever, the worker never returned, and
+// that is what held service shutdown until systemd killed the process.
 func (c *Client) Disconnect() error {
-	if c.conn != nil {
+	if c.conn == nil {
+		return nil
+	}
+
+	c.fetchMu.Lock()
+	active := make([]*fetchStream, 0, len(c.fetches))
+	for fs := range c.fetches {
+		active = append(active, fs)
+	}
+	c.fetchMu.Unlock()
+
+	if len(active) == 0 {
 		log.Printf("Disconnecting from %s", c.account.Email)
 		return c.conn.Logout()
 	}
-	return nil
+
+	log.Printf("Disconnecting from %s with %d unfinished FETCH — closing the connection", c.account.Email, len(active))
+	for _, fs := range active {
+		fs.abortOnce.Do(func() { close(fs.abort) })
+	}
+	err := c.conn.Terminate()
+
+	// The pumps now drain what go-imap still delivers; the closed socket makes
+	// the FETCH command return, which closes its channel and ends each pump.
+	deadline := time.NewTimer(abandonedFetchWait)
+	defer deadline.Stop()
+	for _, fs := range active {
+		select {
+		case <-fs.finished:
+		case <-deadline.C:
+			log.Printf("Disconnect %s: abandoned FETCH did not unwind within %v", c.account.Email, abandonedFetchWait)
+			return err
+		}
+	}
+	return err
 }
 
 // ListFolders returns all mailboxes
@@ -261,29 +316,75 @@ func (c *Client) selectResilient(name string) (string, error) {
 }
 
 // FetchMessages fetches messages from the current mailbox by sequence numbers
-// Returns a channel of messages and an error channel for async error handling
+// Returns a channel of messages and an error channel for async error handling.
+//
+// The caller may stop reading the message channel early (e.g. on context
+// cancellation) as long as it then calls Disconnect, which unwinds the FETCH.
 func (c *Client) FetchMessages(seqSet *imap.SeqSet, items []imap.FetchItem) (chan *imap.Message, chan error) {
-	messages := make(chan *imap.Message, 100)
-	done := make(chan error, 1)
-
-	go func() {
-		done <- c.conn.Fetch(seqSet, items, messages)
-	}()
-
-	return messages, done
+	return c.startFetch(func(ch chan *imap.Message) error {
+		return c.conn.Fetch(seqSet, items, ch)
+	})
 }
 
 // FetchMessagesByUID fetches messages from the current mailbox by UIDs
-// Returns a channel of messages and an error channel for async error handling
+// Returns a channel of messages and an error channel for async error handling.
+//
+// The caller may stop reading the message channel early (e.g. on context
+// cancellation) as long as it then calls Disconnect, which unwinds the FETCH.
 func (c *Client) FetchMessagesByUID(uidSet *imap.SeqSet, items []imap.FetchItem) (chan *imap.Message, chan error) {
-	messages := make(chan *imap.Message, 100)
+	return c.startFetch(func(ch chan *imap.Message) error {
+		return c.conn.UidFetch(uidSet, items, ch)
+	})
+}
+
+// startFetch runs a FETCH whose results go through a pump goroutine that
+// Disconnect can switch from forwarding to draining.
+//
+// Without it, a consumer that abandoned the channel left two goroutines stuck
+// for good: the one running the command, and go-imap's connection reader,
+// blocked delivering the next message into a full buffer. Nothing could free
+// them; the next command on the connection (LOGOUT) hung as well.
+//
+// Channel contract is unchanged: messages are delivered in order, the message
+// channel is closed after the command finished, and the error channel then
+// receives its result.
+func (c *Client) startFetch(run func(chan *imap.Message) error) (chan *imap.Message, chan error) {
+	raw := make(chan *imap.Message, 100) // filled by go-imap, closed when the command returns
+	out := make(chan *imap.Message)
 	done := make(chan error, 1)
 
+	fs := &fetchStream{abort: make(chan struct{}), finished: make(chan struct{})}
+	c.fetchMu.Lock()
+	if c.fetches == nil {
+		c.fetches = make(map[*fetchStream]struct{})
+	}
+	c.fetches[fs] = struct{}{}
+	c.fetchMu.Unlock()
+
 	go func() {
-		done <- c.conn.UidFetch(uidSet, items, messages)
+		done <- run(raw)
 	}()
 
-	return messages, done
+	go func() {
+		defer func() {
+			c.fetchMu.Lock()
+			delete(c.fetches, fs)
+			c.fetchMu.Unlock()
+			close(fs.finished)
+			close(out)
+		}()
+		for m := range raw {
+			select {
+			case out <- m:
+			case <-fs.abort:
+				for range raw {
+				}
+				return
+			}
+		}
+	}()
+
+	return out, done
 }
 
 // GetConnection returns the underlying IMAP connection
