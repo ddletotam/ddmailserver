@@ -87,6 +87,11 @@ arboard = "3"
 # next to the cache db; serde-derive used for the policy/window-state structs.
 serde = { version = "1", features = ["derive"] }
 cosmic-text = "0.19.0"
+# Секреты учёток (пароль IMAP, JWT, refresh-токен Google) — в хранилище ОС,
+# не в accounts.json (src/account_store.rs). Фичи по умолчанию (`v1`):
+# Windows Credential Manager и Secret Service через zbus — чистый Rust, без
+# libdbus-dev и OpenSSL при сборке на Linux.
+keyring = "4.2"
 
 # ── Platform integration (tray, window activation, file dialogs) ──
 

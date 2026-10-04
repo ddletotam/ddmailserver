@@ -83,9 +83,16 @@ Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; \
 ; оставляет пользователя на старом процессе.
 Filename: "{app}\{#AppExe}"; Flags: nowait; Check: WizardSilent
 
+[UninstallRun]
+; Секреты учёток живут не в accounts.json, а в хранилище ОС (Credential
+; Manager) — снос папки ниже их не задевает. exe стирает их сам, пока файлы
+; ещё на месте: [UninstallRun] идёт раньше удаления.
+Filename: "{app}\{#AppExe}"; Parameters: "--forget-secrets"; Flags: runhidden waituntilterminated; RunOnceId: "ForgetSecrets"
+
 [UninstallDelete]
-; Cache is regenerable (bodies/textures re-fetch); accounts.json holds the
-; login token — remove both so uninstall leaves no credentials behind.
+; Cache is regenerable (bodies/textures re-fetch); accounts.json lists the
+; accounts (secrets are wiped from the keyring by [UninstallRun] above) —
+; remove both so uninstall leaves no credentials behind.
 Type: filesandordirs; Name: "{userappdata}\ru.letotam.ddmail"
 
 [Code]

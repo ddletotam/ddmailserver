@@ -10,6 +10,7 @@
 use std::sync::Arc;
 use std::sync::mpsc;
 
+use crate::account_store as store;
 use ddmail_core::cache::Cache;
 use ddmail_core::event::{EngineEvent, Notifier};
 use ddmail_core::imap;
@@ -101,73 +102,16 @@ impl AccountConfig {
         })
     }
 
-    /// Parse one account object (shared by account.json and accounts.json[]).
-    /// `password` is optional for native-mode accounts (the login screen
-    /// stores a token instead of the IMAP password).
-    fn from_json(v: &serde_json::Value) -> Option<Self> {
-        let host = v.get("host")?.as_str()?.to_string();
-        let username = v.get("username")?.as_str()?.to_string();
-        let native = v.get("native_url").is_some() && v.get("native_token").is_some();
-        let password = match v.get("password").and_then(|x| x.as_str()) {
-            Some(p) => p.to_string(),
-            None if native => String::new(),
-            None => return None,
-        };
-        let email = v.get("email").and_then(|x| x.as_str()).unwrap_or(&username).to_string();
-        let smtp_host = v.get("smtp_host").and_then(|x| x.as_str()).unwrap_or(&host).to_string();
-        Some(AccountConfig {
-            host,
-            port: v.get("port").and_then(|x| x.as_u64()).unwrap_or(993) as u16,
-            username,
-            password,
-            use_tls: v.get("use_tls").and_then(|x| x.as_bool()).unwrap_or(true),
-            email,
-            smtp_host,
-            smtp_port: v.get("smtp_port").and_then(|x| x.as_u64()).unwrap_or(465) as u16,
-            native_url: v.get("native_url").and_then(|x| x.as_str()).map(String::from),
-            native_token: v.get("native_token").and_then(|x| x.as_str()).map(String::from),
-            carddav_url: v.get("carddav_url").and_then(|x| x.as_str()).map(String::from),
-            caldav_url: v.get("caldav_url").and_then(|x| x.as_str()).map(String::from),
-            oauth_refresh_token: v
-                .get("oauth_refresh_token")
-                .and_then(|x| x.as_str())
-                .map(String::from),
-        })
-    }
-
-    /// `%APPDATA%/ru.letotam.ddmail` or `$HOME/ru.letotam.ddmail`.
-    fn config_dir() -> Option<std::path::PathBuf> {
-        let base = std::env::var("APPDATA").or_else(|_| std::env::var("HOME")).ok()?;
-        Some(std::path::Path::new(&base).join("ru.letotam.ddmail"))
-    }
-
-    /// Load from the single-account `account.json` (legacy / fallback).
-    pub fn from_file() -> Option<Self> {
-        let path = Self::config_dir()?.join("account.json");
-        let data = std::fs::read_to_string(&path).ok()?;
-        let v: serde_json::Value = serde_json::from_str(&data).ok()?;
-        Self::from_json(&v)
-    }
-
-    /// Env first (handy for dev), then the on-disk config file.
-    pub fn load() -> Option<Self> {
-        Self::from_env().or_else(Self::from_file)
-    }
-
-    /// All configured accounts. Source of truth is `accounts.json` (an array);
-    /// falls back to an env override (dev, not persisted) or a single
-    /// `account.json` which is then migrated into `accounts.json`.
+    /// All configured accounts. Source of truth is `accounts.json` (an array;
+    /// secrets live in the OS keyring, see `account_store`); falls back to an
+    /// env override (dev, not persisted) or a single `account.json` which is
+    /// then migrated into `accounts.json`.
     pub fn load_all() -> Vec<AccountConfig> {
-        if let Some(dir) = Self::config_dir() {
-            if let Ok(data) = std::fs::read_to_string(dir.join("accounts.json")) {
-                if let Ok(serde_json::Value::Array(arr)) =
-                    serde_json::from_str::<serde_json::Value>(&data)
-                {
-                    let v: Vec<AccountConfig> = arr.iter().filter_map(Self::from_json).collect();
-                    if !v.is_empty() {
-                        return v;
-                    }
-                }
+        if let Some(dir) = store::config_dir() {
+            let _g = store::lock(&dir);
+            let v = store::load_all_in(&dir, store::os_store());
+            if !v.is_empty() {
+                return v;
             }
         }
         // Dev env override — used as-is, never written to disk.
@@ -175,31 +119,27 @@ impl AccountConfig {
             return vec![cfg];
         }
         // Legacy single account — migrate it into accounts.json going forward.
-        if let Some(cfg) = Self::from_file() {
-            cfg.migrate_to_accounts_json();
-            return vec![cfg];
+        if let Some(dir) = store::config_dir() {
+            let _g = store::lock(&dir);
+            if let Some(cfg) = store::load_legacy_in(&dir, store::os_store()) {
+                if !dir.join("accounts.json").exists() {
+                    store::save_all_in(&dir, std::slice::from_ref(&cfg), store::os_store());
+                }
+                return vec![cfg];
+            }
         }
         Vec::new()
     }
 
-    fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "host": self.host, "port": self.port, "use_tls": self.use_tls,
-            "username": self.username, "password": self.password, "email": self.email,
-            "smtp_host": self.smtp_host, "smtp_port": self.smtp_port,
-            "native_url": self.native_url, "native_token": self.native_token,
-            "carddav_url": self.carddav_url, "caldav_url": self.caldav_url,
-            "oauth_refresh_token": self.oauth_refresh_token,
-        })
-    }
-
-    /// Overwrite `accounts.json` with the given set. Best-effort.
-    pub fn save_all(accounts: &[AccountConfig]) {
-        let Some(dir) = Self::config_dir() else { return };
-        let arr = serde_json::Value::Array(accounts.iter().map(|a| a.to_json()).collect());
-        if let Ok(s) = serde_json::to_string_pretty(&arr) {
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(dir.join("accounts.json"), s);
+    /// Чтение-правка-запись `accounts.json` под одним замком: параллельные
+    /// правки (ротация токена с одного потока, добавление учётки с другого)
+    /// не затирают друг друга.
+    fn update_all(f: impl FnOnce(&mut Vec<AccountConfig>) -> bool) {
+        let Some(dir) = store::config_dir() else { return };
+        let _g = store::lock(&dir);
+        let mut all = store::load_all_in(&dir, store::os_store());
+        if f(&mut all) {
+            store::save_all_in(&dir, &all, store::os_store());
         }
     }
 
@@ -207,45 +147,44 @@ impl AccountConfig {
     /// Used by the connections settings — never clobbers other accounts.
     pub fn add_account(cfg: &AccountConfig) {
         let key = cfg.account_key();
-        let mut all: Vec<AccountConfig> =
-            Self::load_all().into_iter().filter(|a| a.account_key() != key).collect();
-        all.push(cfg.clone());
-        Self::save_all(&all);
+        Self::update_all(|all| {
+            all.retain(|a| a.account_key() != key);
+            all.push(cfg.clone());
+            true
+        });
     }
 
-    /// Remove a connection by account_key from accounts.json.
+    /// Remove a connection by account_key from accounts.json, and its secrets
+    /// from the keyring.
     pub fn remove_account(account_key: &str) {
-        let all: Vec<AccountConfig> =
-            Self::load_all().into_iter().filter(|a| a.account_key() != account_key).collect();
-        Self::save_all(&all);
+        let Some(dir) = store::config_dir() else { return };
+        let _g = store::lock(&dir);
+        store::remove_in(&dir, account_key, store::os_store());
     }
 
-    /// Persist a rotated JWT (native provider's auto-refresh) back into
-    /// `accounts.json`, so the next launch starts from the fresh token
-    /// instead of the stale one. `account_id` is the account email — the id
-    /// the provider was built with (see build_provider).
+    /// Деинсталляция (`--forget-secrets`): стереть секреты всех учёток из
+    /// keyring. Файлы удаляет сам деинсталлятор.
+    pub fn forget_all_secrets() {
+        let Some(dir) = store::config_dir() else { return };
+        let _g = store::lock(&dir);
+        store::forget_all_in(&dir, store::os_store());
+    }
+
+    /// Persist a rotated JWT (native provider's auto-refresh) back into the
+    /// keyring, so the next launch starts from the fresh token instead of the
+    /// stale one. `account_id` is the account email — the id the provider was
+    /// built with (see build_provider).
     pub fn persist_native_token(account_id: &str, token: &str) {
-        let mut accounts = Self::load_all();
-        let mut changed = false;
-        for a in accounts.iter_mut() {
-            if a.email == account_id && a.native_token.is_some() {
-                a.native_token = Some(token.to_string());
-                changed = true;
+        Self::update_all(|all| {
+            let mut changed = false;
+            for a in all.iter_mut() {
+                if a.email == account_id && a.native_token.is_some() {
+                    a.native_token = Some(token.to_string());
+                    changed = true;
+                }
             }
-        }
-        if changed {
-            Self::save_all(&accounts);
-        }
-    }
-
-    /// Write a one-element `accounts.json` from a legacy single account, unless
-    /// one already exists. Best-effort.
-    fn migrate_to_accounts_json(&self) {
-        let Some(dir) = Self::config_dir() else { return };
-        if dir.join("accounts.json").exists() {
-            return;
-        }
-        Self::save_all(std::slice::from_ref(self));
+            changed
+        });
     }
 
     pub fn account_key(&self) -> String {

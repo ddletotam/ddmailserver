@@ -9,6 +9,7 @@
 
 slint::include_modules!();
 
+mod account_store;
 mod calendar_settings;
 mod engine;
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -5856,6 +5857,12 @@ fn main() {
     // the process default, and rustls panics rather than guess. See
     // `ddmail_core::tls`.
     ddmail_core::tls::init();
+    // Деинсталлятор зовёт exe с этим флагом до удаления файлов: секреты
+    // учёток живут в keyring ОС, и снос папки конфига их не трогает.
+    if std::env::args().any(|a| a == "--forget-secrets") {
+        engine::AccountConfig::forget_all_secrets();
+        return;
+    }
     // Single-instance guard: a second launch exits instead of opening a
     // duplicate window. (Focusing the existing window needs IPC — TODO.)
     let _instance = single_instance::SingleInstance::new("ddmail-native-single").ok();
