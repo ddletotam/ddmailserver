@@ -22,11 +22,16 @@ import (
 type Session struct {
 	database    *db.DB
 	authLimiter *authlimit.Limiter
-	conn        *smtp.Conn
-	username    string
-	userID      int64
-	from        string
-	to          []string
+	// senders overrides database for sender-ownership lookups (tests).
+	senders  senderStore
+	conn     *smtp.Conn
+	username string
+	userID   int64
+	from     string
+	to       []string
+	// accountID is how the accepted MAIL FROM will be sent: >0 relays
+	// through that external account, 0 delivers directly (local mailbox).
+	accountID int64
 }
 
 // AuthMechanisms returns available auth mechanisms (advertised in EHLO)
@@ -85,16 +90,48 @@ func (s *Session) remoteIP() string {
 	return clientip.FromNetAddr(s.conn.Conn().RemoteAddr())
 }
 
-// Mail is called to set the sender
+// Mail is called to set the sender. Submission requires AUTH, and the
+// envelope sender must be one of the authenticated user's own addresses —
+// otherwise any user could send as any address of any local domain, DKIM
+// signed by us.
 func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	log.Printf("MAIL FROM: %s", logmask.Addr(from))
+	if s.userID == 0 {
+		return smtp.ErrAuthRequired
+	}
+
+	owned, err := senderIdentities(s.identityStore(), s.userID)
+	if err != nil {
+		log.Printf("SMTP: resolving sender identities for user %d: %v", s.userID, err)
+		return &smtp.SMTPError{
+			Code:         451,
+			EnhancedCode: smtp.EnhancedCode{4, 3, 0},
+			Message:      "Temporary failure resolving sender, try again later",
+		}
+	}
+
+	email := strings.ToLower(s.extractEmail(from))
+	accountID, ok := owned[email]
+	if !ok {
+		log.Printf("SMTP: user %s may not send as %s", s.username, logmask.Addr(from))
+		return &smtp.SMTPError{
+			Code:         553,
+			EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+			Message:      "Sender address rejected: not owned by authenticated user",
+		}
+	}
+
 	s.from = from
+	s.accountID = accountID
 	return nil
 }
 
 // Rcpt is called to set a recipient
 func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 	log.Printf("RCPT TO: %s", logmask.Addr(to))
+	if s.userID == 0 {
+		return smtp.ErrAuthRequired
+	}
 	s.to = append(s.to, to)
 	return nil
 }
@@ -102,6 +139,10 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 // Data is called when the client wants to send the message body
 func (s *Session) Data(r io.Reader) error {
 	log.Printf("Receiving message from %s to %s", logmask.Addr(s.from), logmask.AddrSlice(s.to))
+
+	if s.userID == 0 {
+		return smtp.ErrAuthRequired
+	}
 
 	if s.from == "" {
 		return errors.New("no sender specified")
@@ -144,6 +185,13 @@ func (s *Session) Data(r io.Reader) error {
 		}
 	}
 
+	// The header From (and Sender) is what recipients see and what DMARC
+	// checks; an owned envelope sender with a forged From header would still
+	// be a spoof, so every address there must be the user's own too.
+	if err := s.checkHeaderSenders(header); err != nil {
+		return err
+	}
+
 	// Dedup: if this Message-ID already exists in the user's Sent folder,
 	// the message was already delivered — return OK without re-queuing.
 	// This prevents buggy clients (e.g. eM Client) from flooding recipients
@@ -157,15 +205,8 @@ func (s *Session) Data(r io.Reader) error {
 
 	// Extract fields
 	subject, _ := header.Subject()
-	_, _ = header.AddressList("From")
-	_, _ = header.AddressList("To")
 	cc, _ := header.AddressList("Cc")
-
-	// Determine which account to use for sending
-	accountID, err := s.determineAccount(s.from)
-	if err != nil {
-		return fmt.Errorf("failed to determine account: %w", err)
-	}
+	accountID := s.accountID
 
 	// Extract body
 	var body, bodyHTML string
@@ -222,6 +263,7 @@ func (s *Session) Reset() {
 	log.Printf("Resetting SMTP session")
 	s.from = ""
 	s.to = nil
+	s.accountID = 0
 }
 
 // Logout is called when the client logs out
@@ -230,42 +272,104 @@ func (s *Session) Logout() error {
 	return nil
 }
 
-// determineAccount finds which account to use for sending based on the from address
-func (s *Session) determineAccount(fromAddr string) (int64, error) {
-	// Extract email from address (could be "Name <email@example.com>")
-	email := s.extractEmail(fromAddr)
+// senderStore is the part of the database sender ownership is decided from.
+type senderStore interface {
+	GetAccountsByUserID(userID int64) ([]*models.Account, error)
+	GetMailboxesWithDomainByUserID(userID int64) ([]*db.MailboxWithDomain, error)
+}
 
-	// Get all accounts for this user
-	accounts, err := s.database.GetAccountsByUserID(s.userID)
+// senderIdentities returns every address the user may send as, mapped to the
+// account it is sent through (0 = direct delivery with our DKIM signature).
+// It is the same set the clients are offered as identities (desktop
+// /identities, IMAP METADATA):
+//   - enabled local mailboxes owned by the user → direct delivery;
+//   - the address of each enabled external account → relay through it;
+//   - each alias of an enabled external account → relay through it.
+//
+// When one address qualifies twice, an account's own address wins over a
+// local mailbox, which wins over an alias. Owning a domain does not by itself
+// make every address on it sendable: a mailbox must exist.
+func senderIdentities(store senderStore, userID int64) (map[string]int64, error) {
+	owned := make(map[string]int64)
+
+	accounts, err := store.GetAccountsByUserID(userID)
 	if err != nil {
-		return 0, err
+		return nil, fmt.Errorf("loading accounts: %w", err)
+	}
+	mailboxes, err := store.GetMailboxesWithDomainByUserID(userID)
+	if err != nil {
+		return nil, fmt.Errorf("loading mailboxes: %w", err)
 	}
 
-	// Find account matching the from address
-	for _, account := range accounts {
-		if strings.EqualFold(account.Email, email) {
-			return account.ID, nil
+	for _, acc := range accounts {
+		if !acc.Enabled || acc.UserID != userID {
+			continue
+		}
+		for _, alias := range acc.GetAliases() {
+			owned[alias] = acc.ID
+		}
+	}
+	for _, mb := range mailboxes {
+		if !mb.Enabled || mb.UserID != userID || mb.LocalPart == "" || mb.DomainName == "" {
+			continue
+		}
+		owned[strings.ToLower(mb.LocalPart+"@"+mb.DomainName)] = 0
+	}
+	for _, acc := range accounts {
+		if !acc.Enabled || acc.UserID != userID {
+			continue
+		}
+		if email := strings.ToLower(strings.TrimSpace(acc.Email)); email != "" {
+			owned[email] = acc.ID
+		}
+	}
+	return owned, nil
+}
+
+// identityStore returns where sender ownership is looked up.
+func (s *Session) identityStore() senderStore {
+	if s.senders != nil {
+		return s.senders
+	}
+	return s.database
+}
+
+// checkHeaderSenders rejects a message whose From (or Sender) header names
+// an address the authenticated user does not own, or has no From at all.
+func (s *Session) checkHeaderSenders(header mail.Header) error {
+	reject := func(msg string) error {
+		return &smtp.SMTPError{
+			Code:         550,
+			EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+			Message:      msg,
 		}
 	}
 
-	// Check if sender is from a local domain — use direct delivery (accountID=0)
-	parts := strings.SplitN(email, "@", 2)
-	if len(parts) == 2 {
-		if _, err := s.database.GetDomainByName(parts[1]); err == nil {
-			log.Printf("Local domain sender %s, using direct delivery", logmask.Addr(email))
-			return 0, nil
-		}
+	from, err := header.AddressList("From")
+	if err != nil || len(from) == 0 {
+		return reject("A valid From header is required")
+	}
+	sender, err := header.AddressList("Sender")
+	if err != nil {
+		return reject("Invalid Sender header")
 	}
 
-	// If no exact match, use the first enabled account
-	for _, account := range accounts {
-		if account.Enabled {
-			log.Printf("No exact match for %s, using account %s", logmask.Addr(email), logmask.Addr(account.Email))
-			return account.ID, nil
+	owned, err := senderIdentities(s.identityStore(), s.userID)
+	if err != nil {
+		log.Printf("SMTP: resolving sender identities for user %d: %v", s.userID, err)
+		return &smtp.SMTPError{
+			Code:         451,
+			EnhancedCode: smtp.EnhancedCode{4, 3, 0},
+			Message:      "Temporary failure resolving sender, try again later",
 		}
 	}
-
-	return 0, fmt.Errorf("no suitable account found for sending")
+	for _, a := range append(from, sender...) {
+		if _, ok := owned[strings.ToLower(a.Address)]; !ok {
+			log.Printf("SMTP: user %s may not send with header address %s", s.username, logmask.Addr(a.Address))
+			return reject("From header address not owned by authenticated user")
+		}
+	}
+	return nil
 }
 
 // extractEmail extracts email address from various formats
