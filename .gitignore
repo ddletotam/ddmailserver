@@ -42,6 +42,7 @@ desktop/.claude/
 # Build artifacts
 /bin/
 /dist/
+/build/
 node_modules/
 screenshot-*.png
 test-ui.js
