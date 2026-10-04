@@ -1,0 +1,39 @@
+<html>
+<head>
+<style>
+  .desktoponly { display: block; }
+  .mobileonly { display: none; }
+  .printonly { display: none; }
+  .darkonly { display: none; }
+  .two-up td.half { width: 50%; }
+  @media screen and (max-width: 599.98px) {
+    .desktoponly { display: none !important; }
+    .mobileonly { display: block !important; }
+    .two-up td.half { display: block !important; width: 100% !important; }
+    .hero { width: 100% !important; height: auto !important; }
+  }
+  @media print { .printonly { display: block !important; } }
+  @media (prefers-color-scheme: dark) {
+    .darkonly { display: block !important; }
+    .lightbody { display: none !important; }
+  }
+  @media only screen and (max-device-width: 480px) { .devicewidth { display: none !important; } }
+</style>
+</head>
+<body>
+<div class="desktoponly">Widescreen greeting for large monitors</div>
+<div class="mobileonly">Compact greeting for narrow screens</div>
+<div class="printonly">Paper edition footer</div>
+<div class="darkonly">Nighttime banner</div>
+<div class="lightbody">Daylight paragraph stays visible</div>
+<div class="devicewidth">Devicewidth paragraph stays visible</div>
+<table class="two-up" width="600" cellpadding="0" cellspacing="0">
+  <tr>
+    <td class="half">Alpha column with a fairly long sentence that needs wrapping.</td>
+    <td class="half">Beta column with another fairly long sentence for balance.</td>
+  </tr>
+</table>
+<table width="700" style="width:700px"><tr><td><img class="hero" width="700" height="300" alt="Hero banner" src="https://example.com/hero.png"></td></tr></table>
+<p><a href="https://example.com/a-very-long-link-that-keeps-going/and-going/and-going/without-any-place-to-break-it">https://example.com/a-very-long-link-that-keeps-going/and-going/and-going/without-any-place-to-break-it</a></p>
+</body>
+</html>

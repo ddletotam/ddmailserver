@@ -1,0 +1,40 @@
+<html>
+<head>
+<style>
+  @charset "utf-8";
+  @import url("https://example.com/fonts.css");
+  @font-face { font-family: Fancy; src: url(https://example.com/fancy.woff2); }
+  /* Rules that only reach their target through a combinator. */
+  .main .notice p { color: #b00020; font-weight: bold; }
+  .main > .ghost { display: none; }
+  .list li + li { margin-top: 6px; }
+  .list li:first-child { font-weight: bold; }
+  h1 ~ .after-title { font-style: italic; }
+  div[data-role="secret"] { display: none; }
+  span[class^="tag-"] { background: #ffe8a3; padding: 0 4px; }
+  .a.b { text-decoration: underline; }
+  a:hover { display: none; }            /* never matches a static bitmap */
+  p::after { content: "should never show"; }
+  .main .notice .nested-ghost { display: none !important; }
+</style>
+</head>
+<body>
+<div class="main">
+  <h1>Quarterly report</h1>
+  <p class="after-title">Prepared by the Acme finance desk.</p>
+  <div class="notice">
+    <p>Important notice about invoices.</p>
+    <p class="nested-ghost" style="display:block">Inlinedisplay that important hides</p>
+  </div>
+  <div class="ghost">Childghost hidden through the child combinator</div>
+  <div data-role="secret">Attributeghost hidden through an attribute selector</div>
+  <ul class="list">
+    <li>First item</li>
+    <li>Second item</li>
+    <li>Third item with <span class="tag-new">new</span> label</li>
+  </ul>
+  <p class="a b">Two classes on one paragraph.</p>
+  <p><a href="https://example.com/report">Open the full report</a></p>
+</div>
+</body>
+</html>

@@ -1,0 +1,44 @@
+<html>
+<head>
+<style>
+  /* Container tables whose cells are turned into blocks — the classic
+     "responsive" trick of hand-made templates. */
+  table[class=body] { width: 100%; background: #eeeeee; }
+  table[class=body] td.stack { display: block; width: 100% !important; box-sizing: border-box; }
+  .card { background: #ffffff; padding: 16px; border: 1px solid #dddddd; }
+  .card h2 { font-size: 20px; margin: 0 0 8px 0; color: #222222; }
+  .card > p { font-size: 14px; color: #555555; }
+  .price { font-size: 18px; font-weight: bold; color: #2a9d8f; }
+</style>
+</head>
+<body>
+<table class="body" cellpadding="0" cellspacing="0">
+  <tr>
+    <td class="stack">
+      <div class="card">
+        <h2>Order confirmed</h2>
+        <p>Thank you for ordering from Acme Supplies.</p>
+        <table width="100%">
+          <tr><td>Portable hole</td><td align="right" class="price">$19.99</td></tr>
+          <tr><td>Giant slingshot</td><td align="right" class="price">$42.00</td></tr>
+          <tr>
+            <td colspan="2">
+              <table width="100%" style="border-top:1px solid #cccccc">
+                <tr><td><b>Total</b></td><td align="right" class="price">$61.99</td></tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </div>
+    </td>
+    <td class="stack">
+      <div class="card">
+        <h2>Delivery</h2>
+        <p>Your parcel leaves the depot tomorrow morning.</p>
+        <p><a href="https://example.com/track/12345">Track parcel</a></p>
+      </div>
+    </td>
+  </tr>
+</table>
+</body>
+</html>
