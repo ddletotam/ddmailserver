@@ -8,15 +8,25 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
-// CreateFolder creates a new folder
+// newUIDValiditySQL is the UIDVALIDITY of a folder being created for user $1:
+// the current unix time, bumped past every value the user's folders already
+// have. RFC 3501 wants a recreated mailbox to get a different (greater) value
+// than its predecessor, which two creations within one second would otherwise
+// share. Existing folders keep theirs — changing it makes clients re-download
+// the whole mailbox (0, as on the folders created before this, is served as 1).
+const newUIDValiditySQL = `GREATEST(EXTRACT(EPOCH FROM now())::INTEGER,
+	(SELECT COALESCE(MAX(uid_validity), 0) + 1 FROM folders WHERE user_id = $1))`
+
+// CreateFolder creates a new folder. A zero UIDValidity gets a fresh one (see
+// newUIDValiditySQL), written back into folder.
 func (db *DB) CreateFolder(folder *models.Folder) error {
 	folder.CreatedAt = timeutil.Now()
 	folder.UpdatedAt = timeutil.Now()
 
 	query := `
 		INSERT INTO folders (user_id, account_id, name, path, type, parent_id, uid_next, uid_validity, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		RETURNING id
+		VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE(NULLIF($8::INTEGER, 0), ` + newUIDValiditySQL + `), $9, $10)
+		RETURNING id, uid_validity
 	`
 
 	var parentID sql.NullInt64
@@ -35,7 +45,7 @@ func (db *DB) CreateFolder(folder *models.Folder) error {
 		query,
 		folder.UserID, accountID, folder.Name, folder.Path, folder.Type,
 		parentID, folder.UIDNext, folder.UIDValidity, folder.CreatedAt, folder.UpdatedAt,
-	).Scan(&folder.ID)
+	).Scan(&folder.ID, &folder.UIDValidity)
 
 	if err != nil {
 		return fmt.Errorf("failed to create folder: %w", err)
@@ -331,11 +341,11 @@ func (db *DB) GetOrCreateLocalFolder(userID int64, name, folderType string) (*mo
 	folder = &models.Folder{}
 	err = db.QueryRow(`
 		INSERT INTO folders (user_id, account_id, name, path, type, uid_next, uid_validity, created_at, updated_at)
-		VALUES ($1, NULL, $2, $3, $4, 1, $5, $6, $7)
+		VALUES ($1, NULL, $2, $3, $4, 1, `+newUIDValiditySQL+`, $5, $6)
 		ON CONFLICT (user_id, type) WHERE account_id IS NULL AND type != 'custom'
 		DO UPDATE SET updated_at = EXCLUDED.updated_at
 		RETURNING id, user_id, COALESCE(account_id, 0), name, path, type, COALESCE(parent_id, 0), uid_next, COALESCE(uid_validity, 0), created_at, updated_at
-	`, userID, name, name, folderType, uint32(now/1000), now, now).Scan(
+	`, userID, name, name, folderType, now, now).Scan(
 		&folder.ID, &folder.UserID, &folder.AccountID, &folder.Name, &folder.Path,
 		&folder.Type, &folder.ParentID, &folder.UIDNext, &folder.UIDValidity, &folder.CreatedAt, &folder.UpdatedAt,
 	)
