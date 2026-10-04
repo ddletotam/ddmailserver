@@ -84,7 +84,7 @@ func TestAuthBackoff_Lifecycle(t *testing.T) {
 	}
 
 	// Let the pause run out (moved into the past rather than waited for).
-	if _, err := db.DB.Exec(`UPDATE auth_backoff SET next_attempt_at = $3, last_failure_at = $3 - 60000, first_failure_at = $3 - 60000
+	if _, err := db.DB.Exec(`UPDATE auth_backoff SET next_attempt_at = $3::bigint, last_failure_at = $3::bigint - 60000, first_failure_at = $3::bigint - 60000
 		WHERE subject_kind = $1 AND subject_id = $2`, kind, acc.ID, timeutil.Now()-1); err != nil {
 		t.Fatal(err)
 	}

@@ -121,8 +121,8 @@ func TestSendTask_RejectedPasswordDefersMessage(t *testing.T) {
 	newMessage := func() *models.OutboxMessage {
 		var id int64
 		if err := raw.QueryRow(`
-			INSERT INTO outbox_messages (user_id, account_id, from_addr, to_addr, subject, body, status, retries, created_at, updated_at, next_attempt_at)
-			VALUES ($1, $2, $3, 'rcpt@example.org', 'auth deferral test', 'body', 'pending', 0, $4, $4, 0)
+			INSERT INTO outbox_messages (user_id, account_id, from_addr, to_addr, cc, bcc, subject, body, body_html, status, retries, last_error, created_at, updated_at, next_attempt_at)
+			VALUES ($1, $2, $3, 'rcpt@example.org', '', '', 'auth deferral test', 'body', '', 'pending', 0, '', $4, $4, 0)
 			RETURNING id`, user.ID, acc.ID, acc.Email, now).Scan(&id); err != nil {
 			t.Fatalf("insert outbox: %v", err)
 		}
