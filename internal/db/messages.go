@@ -992,57 +992,6 @@ func (db *DB) GetMessageUIDByMessageID(folderID int64, messageID string) (uint32
 	return uid, err
 }
 
-// CopyMessageToFolder copies a message to another folder with a new UID.
-// UID assignment and the row insert run in one transaction with an atomic
-// uid_next claim — concurrent COPY/MOVE/APPEND into the same folder must
-// never hand out the same UID (RFC 3501 §2.3.1.1).
-func (db *DB) CopyMessageToFolder(msgID, destFolderID int64) (uint32, error) {
-	tx, err := db.Begin()
-	if err != nil {
-		return 0, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	// Claim the next UID atomically (same pattern as GetNextUIDForFolder).
-	var newUID uint32
-	err = tx.QueryRow(
-		`UPDATE folders SET uid_next = uid_next + 1 WHERE id = $1 RETURNING uid_next - 1`,
-		destFolderID,
-	).Scan(&newUID)
-	if err != nil {
-		return 0, fmt.Errorf("failed to claim UID in destination folder: %w", err)
-	}
-
-	// Create copy in destination folder. Carry raw_email along.
-	now := timeutil.Now()
-	query := `
-		INSERT INTO messages (
-			account_id, user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
-			date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
-			in_reply_to, message_references, raw_email, created_at, updated_at
-		)
-		SELECT
-			account_id, user_id, $1, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
-			date, body, body_html, attachments, size, $2, seen, flagged, answered, draft, false,
-			in_reply_to, message_references, raw_email, $3, $3
-		FROM messages WHERE id = $4
-		RETURNING id
-	`
-
-	var newMsgID int64
-	err = tx.QueryRow(query, destFolderID, newUID, now, msgID).Scan(&newMsgID)
-	if err != nil {
-		// sql.ErrNoRows here means the source message vanished — surface it
-		// as a missing-source error rather than a generic copy failure.
-		return 0, fmt.Errorf("failed to copy message %d: %w", msgID, err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("failed to commit message copy: %w", err)
-	}
-	return newUID, nil
-}
-
 // selectColumns is the standard column list for message queries.
 // All columns are table-qualified so queries that JOIN folders (or any
 // other table that happens to share a column name like `account_id`)

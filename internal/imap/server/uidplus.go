@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -24,8 +25,7 @@ func (ext *UIDPLUSExtension) Capabilities(c imapserver.Conn) []string {
 
 func (ext *UIDPLUSExtension) Command(name string) imapserver.HandlerFactory {
 	// NOTE: go-imap v1 Enable() ignores extensions that handle UNSELECT, MOVE, or IDLE
-	// (treats them as built-in). So we don't register MOVE here.
-	// MOVE with COPYUID is handled via MoveMessagesUID in the existing Move handler fallback.
+	// (treats them as built-in). MOVE lives in MoveExtension instead.
 	switch strings.ToUpper(name) {
 	case "APPEND":
 		return func() imapserver.Handler { return &uidplusAppendHandler{} }
@@ -140,10 +140,86 @@ func (h *uidplusCopyHandler) handle(uid bool, conn imapserver.Conn) error {
 	return ctx.Mailbox.CopyMessages(uid, h.SeqSet, h.Mailbox)
 }
 
-// NOTE: MOVE with COPYUID is NOT handled here because go-imap v1 Enable()
-// silently ignores extensions that register MOVE/UNSELECT/IDLE commands.
-// MOVE still works through the built-in handler → MoveMessages().
-// COPYUID for MOVE can be added later if needed by patching go-imap.
+// ── MOVE with COPYUID ──
+
+// MoveExtension replaces go-imap's built-in MOVE handler with one that sends
+// COPYUID (RFC 6851 §4.3: an untagged OK before the EXPUNGEs) — Thunderbird
+// and iOS delete by MOVE to Trash and follow the message there by its new UID.
+//
+// go-imap v1's Enable() drops any extension whose Command("MOVE") is non-nil
+// (it treats MOVE as built-in), so the extension answers nil until Arm() is
+// called after Enable(); command lookup asks extensions first, so from then on
+// this handler wins over the built-in one.
+type MoveExtension struct {
+	armed bool
+}
+
+// NewMoveExtension returns the extension, disarmed; call Arm after Enable.
+func NewMoveExtension() *MoveExtension {
+	return &MoveExtension{}
+}
+
+// Arm makes the extension serve MOVE. Call it after Server.Enable, before
+// the server accepts connections.
+func (ext *MoveExtension) Arm() {
+	ext.armed = true
+}
+
+// Capabilities adds nothing: go-imap already advertises MOVE.
+func (ext *MoveExtension) Capabilities(c imapserver.Conn) []string {
+	return nil
+}
+
+func (ext *MoveExtension) Command(name string) imapserver.HandlerFactory {
+	if !ext.armed || !strings.EqualFold(name, "MOVE") {
+		return nil
+	}
+	return func() imapserver.Handler { return &uidplusMoveHandler{} }
+}
+
+type uidplusMoveHandler struct {
+	commands.Move
+}
+
+func (h *uidplusMoveHandler) Handle(conn imapserver.Conn) error {
+	return h.handle(false, conn)
+}
+
+func (h *uidplusMoveHandler) UidHandle(conn imapserver.Conn) error {
+	return h.handle(true, conn)
+}
+
+func (h *uidplusMoveHandler) handle(uid bool, conn imapserver.Conn) error {
+	ctx := conn.Context()
+	if ctx.Mailbox == nil {
+		return imapserver.ErrNoMailboxSelected
+	}
+	mb, ok := ctx.Mailbox.(*Mailbox)
+	if !ok {
+		if mm, ok := ctx.Mailbox.(backend.MoveMailbox); ok {
+			return mm.MoveMessages(uid, h.SeqSet, h.Mailbox)
+		}
+		return errors.New("MOVE extension not supported")
+	}
+
+	res, err := mb.transfer(uid, h.SeqSet, h.Mailbox, true)
+	if err != nil {
+		return err
+	}
+	if len(res.srcUIDs) > 0 {
+		code := fmt.Sprintf("COPYUID %d %s %s", res.uidValidity, formatUIDSet(res.srcUIDs), formatUIDSet(res.destUIDs))
+		log.Printf("UIDPLUS MOVE: %s", code)
+		if err := conn.WriteResp(&imap.StatusResp{
+			Type: imap.StatusRespOk,
+			Code: imap.StatusRespCode(code),
+			Info: "Moved UIDs.",
+		}); err != nil {
+			return err
+		}
+	}
+	mb.notifyExpungeDesc(res.expunged)
+	return nil
+}
 
 // formatUIDSet formats a slice of UIDs as a comma-separated IMAP UID set string.
 func formatUIDSet(uids []uint32) string {
@@ -158,6 +234,8 @@ func formatUIDSet(uids []uint32) string {
 var _ imapserver.Extension = &UIDPLUSExtension{}
 var _ imapserver.Handler = &uidplusAppendHandler{}
 var _ imapserver.Handler = &uidplusCopyHandler{}
+var _ imapserver.Extension = &MoveExtension{}
+var _ imapserver.UidHandler = &uidplusMoveHandler{}
 
 // COPY must support UID prefix
 var _ imapserver.UidHandler = &uidplusCopyHandler{}

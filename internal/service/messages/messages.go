@@ -31,6 +31,9 @@ type Tx interface {
 	SoftDeleteMessage(messageID int64) error
 	LockPurgeTargets(userID int64, ids []int64, addresses, domains []string) ([]*db.MessageSyncState, error)
 	HardDeleteUserMessages(userID int64, ids []int64) (int64, error)
+	ClaimFolderUID(userID, folderID int64) (uint32, string, error)
+	MoveMessageRow(messageID, folderID int64, uid uint32) error
+	CopyMessageRow(messageID, folderID int64, uid uint32) (int64, error)
 }
 
 // Store opens transactions.

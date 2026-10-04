@@ -167,6 +167,10 @@ func NewWithTLSAndHub(database *db.DB, addr string, certFile, keyFile string, hu
 	s.Enable(NewMetadataExtension())
 	// Enable UIDPLUS (RFC 4315) + SPECIAL-USE (RFC 6154)
 	s.Enable(NewUIDPLUSExtension())
+	// MOVE with COPYUID: armed after Enable, which would drop it (see MoveExtension)
+	moveExt := NewMoveExtension()
+	s.Enable(moveExt)
+	moveExt.Arm()
 	log.Printf("IMAP server with TLS, IDLE, UIDPLUS extensions enabled, will listen on %s", addr)
 
 	return &Server{

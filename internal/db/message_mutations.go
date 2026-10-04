@@ -27,11 +27,15 @@ type MessageFlags struct {
 }
 
 // MessageSyncState is what a mutation needs to know about a message: who owns
-// it, its current flags and where it lives on the source server (AccountID 0 =
-// delivered by our own MX, RemoteUID 0 = source UID never learned).
+// it, where it is (folder, UID, RFC Message-ID), its current flags and where it
+// lives on the source server (AccountID 0 = delivered by our own MX,
+// RemoteUID 0 = source UID never learned).
 type MessageSyncState struct {
 	ID           int64
 	UserID       int64
+	FolderID     int64
+	UID          uint32
+	MessageID    string // RFC Message-ID, "" when the message has none
 	AccountID    int64
 	RemoteUID    uint32
 	RemoteFolder string
@@ -65,12 +69,13 @@ func (db *DB) InTx(ctx context.Context, fn func(*Tx) error) (err error) {
 	return nil
 }
 
-const messageSyncStateColumns = `id, user_id, COALESCE(account_id, 0), COALESCE(remote_uid, 0),
+const messageSyncStateColumns = `id, user_id, folder_id, uid, COALESCE(message_id, ''),
+	COALESCE(account_id, 0), COALESCE(remote_uid, 0),
 	COALESCE(remote_folder, 'INBOX'), seen, flagged, answered, deleted, draft`
 
 func scanMessageSyncState(sc interface{ Scan(...interface{}) error }) (*MessageSyncState, error) {
 	st := &MessageSyncState{}
-	err := sc.Scan(&st.ID, &st.UserID, &st.AccountID, &st.RemoteUID, &st.RemoteFolder,
+	err := sc.Scan(&st.ID, &st.UserID, &st.FolderID, &st.UID, &st.MessageID, &st.AccountID, &st.RemoteUID, &st.RemoteFolder,
 		&st.Flags.Seen, &st.Flags.Flagged, &st.Flags.Answered, &st.Flags.Deleted, &st.Flags.Draft)
 	if err != nil {
 		return nil, err

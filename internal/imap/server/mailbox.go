@@ -34,12 +34,12 @@ type Mailbox struct {
 	backend       *Backend // for pushing untagged EXPUNGE/FETCH updates to sessions
 }
 
-// clientSeqNums maps the given UIDs (any order) to their 1-based positions
-// in the client-facing sequence of this folder: the UID-ordered union of
-// visible and \Deleted-flagged (not yet expunged) messages. The visible
-// list alone is wrong here — clients still count \Deleted-flagged rows
-// until they receive EXPUNGE. Returned seqnums are ascending.
-func (m *Mailbox) clientSeqNums(uids []uint32) []uint32 {
+// clientSeqMap maps the given UIDs to their 1-based positions in the
+// client-facing sequence of this folder: the UID-ordered union of visible and
+// \Deleted-flagged (not yet expunged) messages. The visible list alone is
+// wrong here — clients still count \Deleted-flagged rows until they receive
+// EXPUNGE. UIDs not in the folder are absent; nil on a read error.
+func (m *Mailbox) clientSeqMap(uids []uint32) map[uint32]uint32 {
 	want := make(map[uint32]bool, len(uids))
 	for _, u := range uids {
 		want[u] = true
@@ -47,17 +47,17 @@ func (m *Mailbox) clientSeqNums(uids []uint32) []uint32 {
 
 	visible, err := m.database.GetFolderMessageRefs(m.folderID)
 	if err != nil {
-		log.Printf("clientSeqNums: failed to load visible messages: %v", err)
+		log.Printf("clientSeqMap: failed to load visible messages: %v", err)
 		return nil
 	}
 	flagged, err := m.database.GetDeletedFolderUIDs(m.folderID)
 	if err != nil {
-		log.Printf("clientSeqNums: failed to load deleted-flagged messages: %v", err)
+		log.Printf("clientSeqMap: failed to load deleted-flagged messages: %v", err)
 		return nil
 	}
 
 	// Merge the two UID-ascending lists, recording positions of wanted UIDs.
-	seqNums := make([]uint32, 0, len(uids))
+	seqOf := make(map[uint32]uint32, len(uids))
 	i, j := 0, 0
 	var pos uint32
 	for i < len(visible) || j < len(flagged) {
@@ -71,9 +71,20 @@ func (m *Mailbox) clientSeqNums(uids []uint32) []uint32 {
 			j++
 		}
 		if want[uid] {
-			seqNums = append(seqNums, pos)
+			seqOf[uid] = pos
 		}
 	}
+	return seqOf
+}
+
+// clientSeqNums is clientSeqMap as an ascending list of positions.
+func (m *Mailbox) clientSeqNums(uids []uint32) []uint32 {
+	seqOf := m.clientSeqMap(uids)
+	seqNums := make([]uint32, 0, len(seqOf))
+	for _, seq := range seqOf {
+		seqNums = append(seqNums, seq)
+	}
+	sort.Slice(seqNums, func(i, j int) bool { return seqNums[i] < seqNums[j] })
 	return seqNums
 }
 
@@ -771,179 +782,98 @@ func (m *Mailbox) CreateMessageUID(flags []string, date time.Time, body imap.Lit
 	return uid, m.getUIDValidity(), nil
 }
 
-// CopyMessagesUID is like CopyMessages but returns UID mapping for UIDPLUS.
-func (m *Mailbox) CopyMessagesUID(uid bool, seqSet *imap.SeqSet, destName string) (uidValidity uint32, srcUIDs, destUIDs []uint32, err error) {
-	destFolder, err := m.database.GetOrCreateFolderByNameAndUser(m.user.userID, destName, inferFolderType(destName))
-	if err != nil {
-		return 0, nil, nil, fmt.Errorf("failed to get destination folder: %w", err)
-	}
-
-	picks, _, err := m.selectMessages(uid, seqSet)
-	if err != nil {
-		return 0, nil, nil, err
-	}
-
-	for _, p := range picks {
-		msg := p.ref
-		newUID, copyErr := m.database.CopyMessageToFolder(msg.ID, destFolder.ID)
-		if copyErr != nil {
-			log.Printf("CopyMessagesUID: failed to copy message %d: %v", msg.ID, copyErr)
-			continue
-		}
-		srcUIDs = append(srcUIDs, msg.UID)
-		destUIDs = append(destUIDs, newUID)
-	}
-
-	// Get destination folder UIDVALIDITY
-	df, _ := m.database.GetFolderByID(destFolder.ID)
-	uidValidity = 1
-	if df != nil && df.UIDValidity > 0 {
-		uidValidity = df.UIDValidity
-	}
-
-	log.Printf("CopyMessagesUID: copied %d messages to %s", len(srcUIDs), destName)
-	return uidValidity, srcUIDs, destUIDs, nil
+// transferResult is what COPY/MOVE did: the UIDPLUS mapping (COPYUID) and the
+// source sequence numbers that left the folder (for EXPUNGE).
+type transferResult struct {
+	uidValidity uint32   // of the destination
+	srcUIDs     []uint32 // paired with destUIDs
+	destUIDs    []uint32
+	expunged    []uint32 // ascending client-facing seqnums in this mailbox
 }
 
-// MoveMessagesUID is like MoveMessages but returns UID mapping for UIDPLUS.
-func (m *Mailbox) MoveMessagesUID(uid bool, seqSet *imap.SeqSet, destName string) (uidValidity uint32, srcUIDs, destUIDs []uint32, err error) {
+// transfer runs COPY (move=false) or MOVE through the message service, all
+// selected messages in one transaction. Any failure is returned — the client
+// gets NO and nothing has changed; it used to be logged and answered OK.
+// See messages.Service.Transfer for why COPY of a message that has a
+// Message-ID moves it.
+func (m *Mailbox) transfer(uid bool, seqSet *imap.SeqSet, destName string, move bool) (*transferResult, error) {
+	op := "COPY"
+	if move {
+		op = "MOVE"
+	}
 	destFolder, err := m.database.GetOrCreateFolderByNameAndUser(m.user.userID, destName, inferFolderType(destName))
 	if err != nil {
-		return 0, nil, nil, fmt.Errorf("failed to get destination folder: %w", err)
+		return nil, fmt.Errorf("%s: destination folder %s: %w", op, destName, err)
+	}
+	res := &transferResult{uidValidity: destFolder.UIDValidity}
+	if res.uidValidity == 0 {
+		res.uidValidity = 1
 	}
 
 	picks, _, err := m.selectMessages(uid, seqSet)
 	if err != nil {
-		return 0, nil, nil, err
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
-
-	var movedMsgIDs []int64
-	for _, p := range picks {
-		msg := p.ref
-		newUID, copyErr := m.database.CopyMessageToFolder(msg.ID, destFolder.ID)
-		if copyErr != nil {
-			log.Printf("MoveMessagesUID: failed to move message %d: %v", msg.ID, copyErr)
-			continue
-		}
-		srcUIDs = append(srcUIDs, msg.UID)
-		destUIDs = append(destUIDs, newUID)
-		movedMsgIDs = append(movedMsgIDs, msg.ID)
+	if len(picks) == 0 {
+		return res, nil
 	}
-
-	// Map UIDs to client-facing seqnums while the source rows still exist,
-	// then notify all sessions after the deletes (same as MoveMessages).
-	expungeSeqNums := m.clientSeqNums(srcUIDs)
-	defer m.notifyExpungeDesc(expungeSeqNums)
-
-	for _, msgID := range movedMsgIDs {
-		if delErr := m.database.DeleteMessage(msgID); delErr != nil {
-			log.Printf("MoveMessagesUID: failed to delete original message %d: %v", msgID, delErr)
-		}
+	ids := make([]int64, len(picks))
+	uids := make([]uint32, len(picks))
+	for i, p := range picks {
+		ids[i] = p.ref.ID
+		uids[i] = p.ref.UID
 	}
+	// Positions as clients count them, read while the rows are still here.
+	seqOf := m.clientSeqMap(uids)
 
-	df, _ := m.database.GetFolderByID(destFolder.ID)
-	uidValidity = 1
-	if df != nil && df.UIDValidity > 0 {
-		uidValidity = df.UIDValidity
-	}
-
-	log.Printf("MoveMessagesUID: moved %d messages to %s", len(srcUIDs), destName)
-	return uidValidity, srcUIDs, destUIDs, nil
-}
-
-// CopyMessages copies messages to another mailbox
-func (m *Mailbox) CopyMessages(uid bool, seqSet *imap.SeqSet, destName string) error {
-	log.Printf("CopyMessages called: uid=%v, seqSet=%v, destName=%s", uid, seqSet, destName)
-
-	// Get or create destination folder
-	destFolder, err := m.database.GetOrCreateFolderByNameAndUser(m.user.userID, destName, inferFolderType(destName))
+	moved, err := m.messageService().Transfer(context.Background(), m.user.userID, ids, destFolder.ID, move)
 	if err != nil {
-		log.Printf("CopyMessages: failed to get/create destination folder %s: %v", destName, err)
-		return fmt.Errorf("failed to get destination folder: %w", err)
+		log.Printf("%s %s -> %s failed: %v", op, m.name, destName, err)
+		return nil, fmt.Errorf("%s failed: %w", op, err)
 	}
-
-	picks, _, err := m.selectMessages(uid, seqSet)
-	if err != nil {
-		log.Printf("CopyMessages: failed to get messages from source folder: %v", err)
-		return err
-	}
-
-	// Copy matching messages
-	copiedCount := 0
-	for _, p := range picks {
-		msg := p.ref
-
-		// Copy message to destination folder
-		newUID, err := m.database.CopyMessageToFolder(msg.ID, destFolder.ID)
-		if err != nil {
-			log.Printf("CopyMessages: failed to copy message %d to folder %s: %v", msg.ID, destName, err)
-			// Continue with other messages even if one fails
-			continue
-		}
-
-		copiedCount++
-		log.Printf("CopyMessages: copied message %d (UID %d) to folder %s with new UID %d",
-			msg.ID, msg.UID, destName, newUID)
-	}
-
-	log.Printf("CopyMessages: copied %d messages to %s", copiedCount, destName)
-	return nil
-}
-
-// MoveMessages moves messages to another mailbox (MOVE extension)
-func (m *Mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string) error {
-	log.Printf("MoveMessages called: uid=%v, seqSet=%v, destName=%s", uid, seqSet, destName)
-
-	// Get or create destination folder
-	destFolder, err := m.database.GetOrCreateFolderByNameAndUser(m.user.userID, destName, inferFolderType(destName))
-	if err != nil {
-		log.Printf("MoveMessages: failed to get/create destination folder %s: %v", destName, err)
-		return fmt.Errorf("failed to get destination folder: %w", err)
-	}
-
-	picks, _, err := m.selectMessages(uid, seqSet)
-	if err != nil {
-		log.Printf("MoveMessages: failed to get messages from source folder: %v", err)
-		return err
-	}
-
-	// Move matching messages
-	movedCount := 0
-	var movedMsgIDs []int64
-	var movedUIDs []uint32
-	for _, p := range picks {
-		msg := p.ref
-
-		// Copy message to destination folder
-		newUID, err := m.database.CopyMessageToFolder(msg.ID, destFolder.ID)
-		if err != nil {
-			log.Printf("MoveMessages: failed to copy message %d to folder %s: %v", msg.ID, destName, err)
-			continue
-		}
-
-		movedMsgIDs = append(movedMsgIDs, msg.ID)
-		movedUIDs = append(movedUIDs, msg.UID)
-		movedCount++
-		log.Printf("MoveMessages: moved message %d (UID %d) to folder %s with new UID %d",
-			msg.ID, msg.UID, destName, newUID)
-	}
-
-	// Delete original messages from source folder
-	if len(movedMsgIDs) > 0 {
-		// Map UIDs to client-facing seqnums while the rows still exist.
-		expungeSeqNums := m.clientSeqNums(movedUIDs)
-		for _, msgID := range movedMsgIDs {
-			if err := m.database.DeleteMessage(msgID); err != nil {
-				log.Printf("MoveMessages: failed to delete original message %d: %v", msgID, err)
+	for _, t := range moved {
+		res.srcUIDs = append(res.srcUIDs, t.SrcUID)
+		res.destUIDs = append(res.destUIDs, t.DestUID)
+		if t.Removed {
+			if seq, ok := seqOf[t.SrcUID]; ok {
+				res.expunged = append(res.expunged, seq)
 			}
 		}
-		// Untagged EXPUNGE for the source mailbox — without it, other live
-		// sessions (and the originator: go-imap generates nothing for MOVE
-		// when a backend Updates channel exists) keep showing moved messages.
-		m.notifyExpungeDesc(expungeSeqNums)
 	}
+	sort.Slice(res.expunged, func(i, j int) bool { return res.expunged[i] < res.expunged[j] })
+	log.Printf("%s: %d messages %s -> %s, %d left the source", op, len(moved), m.name, destName, len(res.expunged))
+	return res, nil
+}
 
-	log.Printf("MoveMessages: moved %d messages to %s", movedCount, destName)
+// CopyMessagesUID is COPY returning the UID mapping for UIDPLUS (COPYUID).
+// Messages that left this mailbox (see transfer) are announced as EXPUNGE.
+func (m *Mailbox) CopyMessagesUID(uid bool, seqSet *imap.SeqSet, destName string) (uidValidity uint32, srcUIDs, destUIDs []uint32, err error) {
+	res, err := m.transfer(uid, seqSet, destName, false)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	m.notifyExpungeDesc(res.expunged)
+	return res.uidValidity, res.srcUIDs, res.destUIDs, nil
+}
+
+// CopyMessages copies messages to another mailbox.
+func (m *Mailbox) CopyMessages(uid bool, seqSet *imap.SeqSet, destName string) error {
+	_, _, _, err := m.CopyMessagesUID(uid, seqSet, destName)
+	return err
+}
+
+// MoveMessages moves messages to another mailbox (MOVE extension). The MOVE
+// command itself is served by uidplusMoveHandler, which also sends COPYUID;
+// this is the backend.MoveMailbox fallback.
+func (m *Mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string) error {
+	res, err := m.transfer(uid, seqSet, destName, true)
+	if err != nil {
+		return err
+	}
+	// Untagged EXPUNGE for the source mailbox — without it, other live
+	// sessions (and the originator: go-imap generates nothing for MOVE when a
+	// backend Updates channel exists) keep showing moved messages.
+	m.notifyExpungeDesc(res.expunged)
 	return nil
 }
 

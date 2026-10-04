@@ -23,17 +23,26 @@ type fakeQueueEntry struct {
 
 // fakeStore is an in-memory Store with real transaction semantics: every
 // InTx works on a copy that is only published when fn returns nil.
+type fakeFolder struct {
+	userID  int64
+	typ     string
+	uidNext uint32
+}
+
 type fakeStore struct {
 	messages map[int64]*fakeMessage
 	queue    map[int64]fakeQueueEntry
-	writes   int // flag writes, to prove no-ops write nothing
+	folders  map[int64]fakeFolder
+	nextID   int64 // id of the next copied row
+	writes   int   // flag writes, to prove no-ops write nothing
 
 	// failOn makes the named Tx method fail (simulated DB error).
 	failOn string
 }
 
 func newFakeStore(msgs ...fakeMessage) *fakeStore {
-	s := &fakeStore{messages: map[int64]*fakeMessage{}, queue: map[int64]fakeQueueEntry{}}
+	s := &fakeStore{messages: map[int64]*fakeMessage{}, queue: map[int64]fakeQueueEntry{},
+		folders: map[int64]fakeFolder{}, nextID: 1000}
 	for i := range msgs {
 		m := msgs[i]
 		s.messages[m.state.ID] = &m
@@ -44,7 +53,11 @@ func newFakeStore(msgs ...fakeMessage) *fakeStore {
 var errInjected = errors.New("injected failure")
 
 func (s *fakeStore) InTx(_ context.Context, fn func(Tx) error) error {
-	tx := &fakeTx{store: s, messages: map[int64]*fakeMessage{}, queue: map[int64]fakeQueueEntry{}, writes: s.writes}
+	tx := &fakeTx{store: s, messages: map[int64]*fakeMessage{}, queue: map[int64]fakeQueueEntry{},
+		folders: map[int64]fakeFolder{}, nextID: s.nextID, writes: s.writes}
+	for id, f := range s.folders {
+		tx.folders[id] = f
+	}
 	for id, m := range s.messages {
 		c := *m
 		tx.messages[id] = &c
@@ -55,7 +68,7 @@ func (s *fakeStore) InTx(_ context.Context, fn func(Tx) error) error {
 	if err := fn(tx); err != nil {
 		return err // rollback: the copies are dropped
 	}
-	s.messages, s.queue, s.writes = tx.messages, tx.queue, tx.writes
+	s.messages, s.queue, s.folders, s.nextID, s.writes = tx.messages, tx.queue, tx.folders, tx.nextID, tx.writes
 	return nil
 }
 
@@ -63,6 +76,8 @@ type fakeTx struct {
 	store    *fakeStore
 	messages map[int64]*fakeMessage
 	queue    map[int64]fakeQueueEntry
+	folders  map[int64]fakeFolder
+	nextID   int64
 	writes   int
 }
 
@@ -157,4 +172,45 @@ func (t *fakeTx) HardDeleteUserMessages(userID int64, ids []int64) (int64, error
 		}
 	}
 	return n, nil
+}
+
+func (t *fakeTx) ClaimFolderUID(userID, folderID int64) (uint32, string, error) {
+	if err := t.fail("claim"); err != nil {
+		return 0, "", err
+	}
+	f, ok := t.folders[folderID]
+	if !ok || f.userID != userID {
+		return 0, "", db.ErrNotFound
+	}
+	uid := f.uidNext
+	f.uidNext++
+	t.folders[folderID] = f
+	return uid, f.typ, nil
+}
+
+func (t *fakeTx) MoveMessageRow(messageID, folderID int64, uid uint32) error {
+	if err := t.fail("move"); err != nil {
+		return err
+	}
+	m, ok := t.messages[messageID]
+	if !ok {
+		return db.ErrNotFound
+	}
+	m.state.FolderID, m.state.UID, m.state.Flags.Deleted = folderID, uid, false
+	return nil
+}
+
+func (t *fakeTx) CopyMessageRow(messageID, folderID int64, uid uint32) (int64, error) {
+	if err := t.fail("copy"); err != nil {
+		return 0, err
+	}
+	m, ok := t.messages[messageID]
+	if !ok {
+		return 0, db.ErrNotFound
+	}
+	c := *m
+	c.state.ID, c.state.FolderID, c.state.UID, c.state.Flags.Deleted = t.nextID, folderID, uid, false
+	t.messages[t.nextID] = &c
+	t.nextID++
+	return c.state.ID, nil
 }
