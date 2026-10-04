@@ -134,6 +134,7 @@ mod layout;
 #[cfg(feature = "net")]
 pub mod net;
 mod paint;
+mod selector;
 mod style;
 mod table;
 mod text;
@@ -189,7 +190,9 @@ fn render_inner(
 
     let root = dom::parse(html);
     phase("parse");
-    let sheet = style::Stylesheet::parse(&dom::collect_style_text(&root));
+    // Media queries see the viewport in CSS px — the width the caller asked
+    // for, before the device scale.
+    let sheet = style::Stylesheet::parse(&dom::collect_style_text(&root), width_px as f32 / scale);
     phase("css");
     let resolver = style::Resolver { scale, sheet };
 
@@ -633,6 +636,73 @@ mod tests {
         let r = render(&html, &opts(60));
         assert_eq!(pixel(&r, 20, 20)[0..3], [220, 20, 60], "middle should be the image");
         assert!(pixel(&r, 1, 1)[3] < 40, "corner should have been clipped away");
+    }
+
+    /// Background colour of a 20 px block styled by `css`, sampled mid-block.
+    fn bg_of(css: &str, body: &str) -> [u8; 4] {
+        let html = format!("<style>{css}</style>{body}");
+        let r = render(&html, &opts(100));
+        pixel(&r, 50, 10)
+    }
+
+    const BOX: &str = r#"<table class="body"><tr><td><div class="a b" id="x"
+        style="height:20px;width:100px">&nbsp;</div></td></tr></table>"#;
+
+    /// Combinators, compound classes and attribute tests — the selectors
+    /// template CSS is written in — match; a selector we cannot honour does
+    /// not match anything.
+    #[test]
+    fn complex_selectors_match() {
+        let red = [255, 0, 0, 255];
+        for css in [
+            "td div { background: #f00 }",
+            "td > div { background: #f00 }",
+            "table[class=body] .a { background: #f00 }",
+            ".a.b { background: #f00 }",
+            "table.body td #x { background: #f00 }",
+            "[id] { background: #f00 }",
+            "tr:first-child div { background: #f00 }",
+        ] {
+            assert_eq!(bg_of(css, BOX), red, "{css}");
+        }
+        for css in [
+            "table > div { background: #f00 }",
+            ".a.c { background: #f00 }",
+            "div:hover { background: #f00 }",
+            "table[class=main] div { background: #f00 }",
+            "p + div { background: #f00 }",
+        ] {
+            assert_ne!(bg_of(css, BOX), red, "{css}");
+        }
+    }
+
+    /// Specificity is the CSS triple, not a sum: eleven classes do not beat
+    /// one id.
+    #[test]
+    fn specificity_orders_rules() {
+        let css = "#x { background: #00f } .a.b.a.b.a.b.a.b.a.b.a { background: #f00 }";
+        assert_eq!(bg_of(css, BOX), [0, 0, 255, 255]);
+        let css = "div.a { background: #00f } td .a { background: #f00 }";
+        assert_eq!(bg_of(css, BOX), [255, 0, 0, 255], "equal specificity: later wins");
+    }
+
+    /// `!important` in `<style>` beats a normal inline declaration; an
+    /// important inline one beats both.
+    #[test]
+    fn important_cascades_above_inline() {
+        let html = r#"<style>.a { background: #f00 !important }</style>
+            <div class="a" style="height:20px;background:#00f">&nbsp;</div>"#;
+        assert_eq!(pixel(&render(html, &opts(100)), 50, 10), [255, 0, 0, 255]);
+        let html = r#"<style>.a { background: #f00 ! IMPORTANT }</style>
+            <div class="a" style="height:20px;background:#00f !important">&nbsp;</div>"#;
+        assert_eq!(pixel(&render(html, &opts(100)), 50, 10), [0, 0, 255, 255]);
+    }
+
+    /// A statement at-rule has no block: it must not swallow the rule after it.
+    #[test]
+    fn statement_at_rule_does_not_eat_the_next_rule() {
+        let css = "@charset \"utf-8\"; @import url(x.css); .a { background: #f00 }";
+        assert_eq!(bg_of(css, BOX), [255, 0, 0, 255]);
     }
 
     /// Malformed input must cost a bad-looking bubble, never a panic.

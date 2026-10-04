@@ -1,10 +1,11 @@
 //! Computed style: the CSS subset that email actually uses.
 //!
-//! Three sources feed a computed style, in ascending priority: presentational
-//! attributes (`bgcolor`, `align`, `width`, …), `<style>` rules matched by a
-//! flat tag/class/id selector, and the inline `style=` attribute. Anything
-//! beyond that — combinators, pseudo-classes, `@media` — is ignored rather
-//! than half-supported, because a wrong match looks worse than no match.
+//! Sources feed a computed style in the CSS cascade order, lowest first:
+//! presentational attributes (`bgcolor`, `align`, `width`, …), `<style>` rules
+//! (selectors per [`crate::selector`]), the
+//! inline `style=` attribute, then the `!important` halves of the `<style>`
+//! rules and of the inline style. Selectors we cannot honour are dropped
+//! rather than half-supported, because a wrong match looks worse than no match.
 //!
 //! All lengths are stored in **device px** (CSS px × scale): the renderer works
 //! in a single coordinate space and only converts back at the API boundary.
@@ -12,7 +13,11 @@
 //! symbolic until layout.
 
 use crate::dom::{attr, tag};
-use markup5ever_rcdom::Handle;
+use crate::selector::{self, Key, Selector};
+use markup5ever_rcdom::{Handle, NodeData};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Display {
@@ -314,18 +319,22 @@ impl Resolver {
         apply_tag_defaults(t, &mut s, self.scale);
         apply_presentational(node, t, &mut s, self.scale);
 
-        for decls in self.sheet.matching(node, t) {
-            self.apply_decls(decls, &mut s, parent);
-        }
-        if let Some(inline) = attr(node, "style") {
-            self.apply_decls(&parse_decls(&inline), &mut s, parent);
+        // Cascade: author normal < inline normal < author important < inline
+        // important. Within each, the sheet is already in specificity order.
+        let matched = self.sheet.matching(node);
+        let inline = attr(node, "style").map(|v| parse_decls(&v)).unwrap_or_default();
+        for important in [false, true] {
+            for &n in matched.iter() {
+                self.apply_decls(&self.sheet.rules[n as usize].decls, important, &mut s, parent);
+            }
+            self.apply_decls(&inline, important, &mut s, parent);
         }
         s
     }
 
-    fn apply_decls(&self, decls: &[(String, String)], s: &mut Style, parent: &Style) {
-        for (prop, val) in decls {
-            self.apply_one(prop, val, s, parent);
+    fn apply_decls(&self, decls: &[Decl], important: bool, s: &mut Style, parent: &Style) {
+        for d in decls.iter().filter(|d| d.important == important) {
+            self.apply_one(&d.prop, &d.val, s, parent);
         }
     }
 
@@ -990,24 +999,24 @@ fn named_color(name: &str) -> Option<Rgba> {
 
 // -------------------------------------------------------------- declarations
 
-/// Split a declaration block into `(property, value)` pairs.
+/// One `property: value` pair, with its `!important` flag split off.
+#[derive(Clone, Debug)]
+pub struct Decl {
+    pub prop: String,
+    pub val: String,
+    pub important: bool,
+}
+
+/// Split a declaration block into declarations.
 ///
 /// Naive splitting breaks on `url(data:image/png;base64,…)`, which is
 /// everywhere in mail, so `;` and `:` inside parentheses or quotes are ignored.
-pub fn parse_decls(src: &str) -> Vec<(String, String)> {
+pub fn parse_decls(src: &str) -> Vec<Decl> {
     let mut out = Vec::new();
     let mut depth = 0usize;
     let mut quote: Option<char> = None;
     let mut start = 0usize;
-    let bytes: Vec<char> = src.chars().collect();
-    let push = |from: usize, to: usize, out: &mut Vec<(String, String)>| {
-        let decl: String = bytes[from..to].iter().collect();
-        if let Some((p, v)) = split_decl(&decl) {
-            out.push((p, v));
-        }
-    };
-    for i in 0..bytes.len() {
-        let c = bytes[i];
+    for (i, c) in src.char_indices() {
         match c {
             '"' | '\'' => {
                 quote = match quote {
@@ -1019,17 +1028,17 @@ pub fn parse_decls(src: &str) -> Vec<(String, String)> {
             '(' if quote.is_none() => depth += 1,
             ')' if quote.is_none() => depth = depth.saturating_sub(1),
             ';' if quote.is_none() && depth == 0 => {
-                push(start, i, &mut out);
+                out.extend(split_decl(&src[start..i]));
                 start = i + 1;
             }
             _ => {}
         }
     }
-    push(start, bytes.len(), &mut out);
+    out.extend(split_decl(&src[start..]));
     out
 }
 
-fn split_decl(decl: &str) -> Option<(String, String)> {
+fn split_decl(decl: &str) -> Option<Decl> {
     let mut depth = 0usize;
     for (i, c) in decl.char_indices() {
         match c {
@@ -1037,11 +1046,11 @@ fn split_decl(decl: &str) -> Option<(String, String)> {
             ')' => depth = depth.saturating_sub(1),
             ':' if depth == 0 => {
                 let prop = decl[..i].trim().to_ascii_lowercase();
-                let val = decl[i + 1..].trim().trim_end_matches("!important").trim().to_string();
+                let (val, important) = strip_important(decl[i + 1..].trim());
                 if prop.is_empty() || val.is_empty() {
                     return None;
                 }
-                return Some((prop, val));
+                return Some(Decl { prop, val: val.to_string(), important });
             }
             _ => {}
         }
@@ -1049,145 +1058,203 @@ fn split_decl(decl: &str) -> Option<(String, String)> {
     None
 }
 
+/// `red !important`, `red!IMPORTANT`, `red ! important` → (`red`, true).
+fn strip_important(v: &str) -> (&str, bool) {
+    let n = v.len();
+    if n >= 9 && v.is_char_boundary(n - 9) && v[n - 9..].eq_ignore_ascii_case("important") {
+        let head = v[..n - 9].trim_end();
+        if let Some(val) = head.strip_suffix('!') {
+            return (val.trim_end(), true);
+        }
+    }
+    (v, false)
+}
+
 // ---------------------------------------------------------------- stylesheet
 
-struct SimpleSel {
-    tag: Option<String>,
-    class: Option<String>,
-    id: Option<String>,
-}
-
 struct Rule {
-    sel: SimpleSel,
-    decls: Vec<(String, String)>,
-    /// id/class/tag specificity, then document order — the usual cascade.
-    spec: u32,
-    order: usize,
+    sel: Selector,
+    decls: Rc<Vec<Decl>>,
 }
 
+/// Author rules in cascade order (specificity, then document order), plus an
+/// index from the rightmost compound's id / class / tag to the rules keyed
+/// there. A node tests only the rules that could match it: mail stylesheets
+/// run to hundreds of rules, and the layout resolves every node several times.
 #[derive(Default)]
 pub struct Stylesheet {
     rules: Vec<Rule>,
+    by_id: HashMap<String, Vec<u32>>,
+    by_class: HashMap<String, Vec<u32>>,
+    by_tag: HashMap<String, Vec<u32>>,
+    any: Vec<u32>,
+    /// Matched rule indices per element, by node address. The DOM outlives the
+    /// sheet's use, and a node's matches depend on the tree alone.
+    cache: RefCell<HashMap<usize, Rc<[u32]>>>,
 }
 
 impl Stylesheet {
-    /// Parse `<style>` text. Unsupported selectors are skipped whole; at-rules
-    /// (`@media`, `@font-face`) are skipped along with their block.
-    pub fn parse(src: &str) -> Self {
+    /// Parse `<style>` text for a viewport `viewport_w` CSS px wide.
+    ///
+    /// Rules with a selector we do not support are dropped whole (a selector
+    /// list loses only its unsupported members). At-rules are skipped along
+    /// with their block, statement at-rules (`@import …;`) up to their `;`.
+    pub fn parse(src: &str, viewport_w: f32) -> Self {
         let src = strip_css_comments(src);
-        let mut rules = Vec::new();
+        let mut raw: Vec<(Selector, Rc<Vec<Decl>>)> = Vec::new();
         let chars: Vec<char> = src.chars().collect();
         let mut i = 0usize;
-        let mut order = 0usize;
-        while i < chars.len() {
-            // selector text up to '{'
-            let sel_start = i;
-            while i < chars.len() && chars[i] != '{' {
-                i += 1;
+        parse_rules(&chars, &mut i, viewport_w, &mut raw, 0);
+
+        // Stable sort: equal specificity keeps document order.
+        raw.sort_by_key(|(sel, _)| sel.spec);
+        let mut sheet = Stylesheet::default();
+        for (n, (sel, decls)) in raw.into_iter().enumerate() {
+            let n = n as u32;
+            match sel.key() {
+                Key::Id(k) => sheet.by_id.entry(k.to_string()).or_default().push(n),
+                Key::Class(k) => sheet.by_class.entry(k.to_string()).or_default().push(n),
+                Key::Tag(k) => sheet.by_tag.entry(k.to_string()).or_default().push(n),
+                Key::Any => sheet.any.push(n),
             }
-            if i >= chars.len() {
-                break;
-            }
-            let sel_text: String = chars[sel_start..i].iter().collect();
-            i += 1; // past '{'
-            let body_start = i;
-            let mut depth = 1usize;
-            while i < chars.len() && depth > 0 {
-                match chars[i] {
-                    '{' => depth += 1,
-                    '}' => depth -= 1,
-                    _ => {}
-                }
-                i += 1;
-            }
-            let body: String = chars[body_start..i.saturating_sub(1)].iter().collect();
-            let sel_text = sel_text.trim().to_string();
-            if sel_text.starts_with('@') {
-                continue; // whole at-rule block skipped
-            }
-            let decls = parse_decls(&body);
-            if decls.is_empty() {
-                continue;
-            }
-            for one in sel_text.split(',') {
-                if let Some((sel, spec)) = parse_simple_selector(one.trim()) {
-                    rules.push(Rule { sel, decls: decls.clone(), spec, order });
-                    order += 1;
-                }
-            }
+            sheet.rules.push(Rule { sel, decls });
         }
-        rules.sort_by_key(|r| (r.spec, r.order));
-        Self { rules }
+        sheet
     }
 
-    fn matching(&self, node: &Handle, t: &str) -> Vec<&Vec<(String, String)>> {
+    /// Declarations of every rule matching `node`, in cascade order.
+    fn matching(&self, node: &Handle) -> Rc<[u32]> {
+        let NodeData::Element { name, attrs, .. } = &node.data else { return Rc::from([]) };
         if self.rules.is_empty() {
-            return Vec::new();
+            return Rc::from([]);
         }
-        let classes = attr(node, "class").unwrap_or_default().to_ascii_lowercase();
-        let id = attr(node, "id").unwrap_or_default().to_ascii_lowercase();
-        self.rules
-            .iter()
-            .filter(|r| {
-                r.sel.tag.as_deref().is_none_or(|s| s == t)
-                    && r.sel
-                        .class
-                        .as_deref()
-                        .is_none_or(|c| classes.split_whitespace().any(|have| have == c))
-                    && r.sel.id.as_deref().is_none_or(|i| i == id)
-            })
-            .map(|r| &r.decls)
-            .collect()
+        let key = Rc::as_ptr(node) as usize;
+        if let Some(hit) = self.cache.borrow().get(&key) {
+            return hit.clone();
+        }
+        let mut cand: Vec<u32> = self.any.clone();
+        {
+            let attrs = attrs.borrow();
+            let get = |want: &str| {
+                attrs
+                    .iter()
+                    .find(|a| a.name.local.as_ref().eq_ignore_ascii_case(want))
+                    .map(|a| a.value.to_ascii_lowercase())
+            };
+            if let Some(id) = get("id") {
+                if let Some(v) = self.by_id.get(id.trim()) {
+                    cand.extend_from_slice(v);
+                }
+            }
+            if let Some(classes) = get("class") {
+                for c in classes.split_whitespace() {
+                    if let Some(v) = self.by_class.get(c) {
+                        cand.extend_from_slice(v);
+                    }
+                }
+            }
+        }
+        if let Some(v) = self.by_tag.get(name.local.as_ref()) {
+            cand.extend_from_slice(v);
+        }
+        cand.sort_unstable();
+        cand.dedup();
+        cand.retain(|&n| self.rules[n as usize].sel.matches(node));
+        let out: Rc<[u32]> = Rc::from(cand);
+        self.cache.borrow_mut().insert(key, out.clone());
+        out
     }
 }
 
-/// Accept `tag`, `.class`, `#id`, `tag.class`, `*`. Reject everything with a
-/// combinator, attribute test or pseudo — a wrong match is worse than none.
-fn parse_simple_selector(sel: &str) -> Option<(SimpleSel, u32)> {
-    let sel = sel.trim();
-    if sel.is_empty() || sel.contains([' ', '>', '+', '~', '[', ':', '(', '*']) {
-        return if sel == "*" {
-            Some((SimpleSel { tag: None, class: None, id: None }, 0))
-        } else {
-            None
-        };
-    }
-    let lower = sel.to_ascii_lowercase();
-    let mut out = SimpleSel { tag: None, class: None, id: None };
-    let mut spec = 0u32;
-    let mut rest = lower.as_str();
-    // leading tag, if any
-    let split = rest.find(['.', '#']).unwrap_or(rest.len());
-    if split > 0 {
-        out.tag = Some(rest[..split].to_string());
-        spec += 1;
-    }
-    rest = &rest[split..];
-    while !rest.is_empty() {
-        let kind = rest.as_bytes()[0] as char;
-        rest = &rest[1..];
-        let end = rest.find(['.', '#']).unwrap_or(rest.len());
-        let name = &rest[..end];
-        if name.is_empty() {
-            return None;
+/// Rules up to the end of input or the `}` that closes the enclosing block.
+fn parse_rules(
+    s: &[char],
+    i: &mut usize,
+    viewport_w: f32,
+    out: &mut Vec<(Selector, Rc<Vec<Decl>>)>,
+    depth: usize,
+) {
+    while *i < s.len() {
+        while *i < s.len() && s[*i].is_whitespace() {
+            *i += 1;
         }
-        match kind {
-            '.' => {
-                if out.class.is_some() {
-                    return None; // multi-class: rare, and we'd match too loosely
+        if *i >= s.len() {
+            return;
+        }
+        match s[*i] {
+            '}' => {
+                *i += 1;
+                if depth > 0 {
+                    return;
                 }
-                out.class = Some(name.to_string());
-                spec += 10;
+                // A stray `}` at top level: skip it, as browsers do.
             }
-            '#' => {
-                out.id = Some(name.to_string());
-                spec += 100;
+            '@' => {
+                // Prelude up to `;` (statement at-rule) or `{` (block).
+                let start = *i;
+                while *i < s.len() && s[*i] != ';' && s[*i] != '{' && s[*i] != '}' {
+                    *i += 1;
+                }
+                let prelude: String = s[start..*i].iter().collect();
+                match s.get(*i) {
+                    Some(';') => *i += 1,
+                    Some('{') => {
+                        *i += 1;
+                        // At-rule blocks — `@media` included, for now — are
+                        // skipped whole.
+                        let _ = (prelude, viewport_w);
+                        skip_block(s, i);
+                    }
+                    _ => {} // `}` or end: the enclosing loop deals with it
+                }
             }
-            _ => return None,
+            _ => {
+                let sel_start = *i;
+                while *i < s.len() && s[*i] != '{' && s[*i] != '}' {
+                    *i += 1;
+                }
+                if s.get(*i) != Some(&'{') {
+                    continue; // garbage up to a `}`: the next iteration eats it
+                }
+                let sel_text: String = s[sel_start..*i].iter().collect();
+                *i += 1;
+                let body_start = *i;
+                skip_block(s, i);
+                // Just past the closing `}`, or at the end of an unclosed block.
+                let body_end = if s.get(i.wrapping_sub(1)) == Some(&'}') { *i - 1 } else { *i };
+                let body: String = s[body_start..body_end.max(body_start)].iter().collect();
+                let decls = parse_decls(&body);
+                if decls.is_empty() {
+                    continue;
+                }
+                let decls = Rc::new(decls);
+                for one in sel_text.split(',') {
+                    if let Some(sel) = selector::parse(one) {
+                        out.push((sel, decls.clone()));
+                    }
+                }
+            }
         }
-        rest = &rest[end..];
     }
-    Some((out, spec))
+}
+
+/// From just inside a `{`, to just past its matching `}`.
+fn skip_block(s: &[char], i: &mut usize) {
+    let mut depth = 1usize;
+    while *i < s.len() {
+        match s[*i] {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    *i += 1;
+                    return;
+                }
+            }
+            _ => {}
+        }
+        *i += 1;
+    }
 }
 
 fn strip_css_comments(src: &str) -> String {
