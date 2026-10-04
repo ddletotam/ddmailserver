@@ -159,9 +159,9 @@ func (t *SyncTask) syncOneFolder(ctx context.Context, c remoteMailbox, localInbo
 	proven := func() folderPresence {
 		switch {
 		case byUID:
-			return folderPresence{name: name, mode: presenceByUID, lastSeen: plan.lastSeen, present: present, before: before}
+			return folderPresence{name: name, mode: presenceByUID, lastSeen: plan.lastSeen, present: present, before: before, junk: class == folderJunk}
 		case byMessageID:
-			return folderPresence{name: name, mode: presenceByMessageID, before: before}
+			return folderPresence{name: name, mode: presenceByMessageID, before: before, junk: class == folderJunk}
 		}
 		return folderPresence{name: name}
 	}

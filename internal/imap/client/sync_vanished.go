@@ -30,7 +30,11 @@ import (
 //  3. Mass-deletion guard per folder: more than vanishGuardMin rows AND more
 //     than half the folder's rows gone at once is far more likely a broken
 //     server answer or a folder rename than a real delete — nothing is
-//     deleted, a warning is logged for manual review.
+//     deleted, a warning is logged for manual review. Spam folders are
+//     exempt: providers expire them wholesale (Yandex, iCloud — 30 days), so
+//     "most of Junk gone" is the normal case there, and a local spam copy
+//     going to the vault costs nothing. On prod the guard held 60 of 61 in
+//     Yandex «Спам» and 35 of 36 in iCloud Junk forever, warning every cycle.
 //  4. Confirmation upstream: every remaining candidate is looked up by
 //     Message-ID (`UID SEARCH HEADER Message-ID`) in every synced folder and
 //     in All-Mail-style folders (Gmail archive = only in All Mail). Found →
@@ -89,6 +93,7 @@ type folderPresence struct {
 	lastSeen uint32                         // presenceByUID: UIDs above it are not judged
 	present  map[uint32]bool                // presenceByUID: UIDs <= lastSeen still on the server
 	before   map[uint32]db.RemoteMessageRef // rows pointing at the folder before the run
+	junk     bool                           // spam folder: no mass-deletion guard (step 3)
 }
 
 // goneRef is a row whose remote message is not where it pointed.
@@ -165,7 +170,7 @@ func planVanished(accountID int64, presences []folderPresence, seen map[string]b
 			}
 			cands = append(cands, g)
 		}
-		if n := len(cands); n > vanishGuardMin && n*2 > live[p.name] {
+		if n := len(cands); !p.junk && n > vanishGuardMin && n*2 > live[p.name] {
 			plan.held[p.name] = n
 			continue
 		}

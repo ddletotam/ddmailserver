@@ -195,6 +195,16 @@ func TestPlanVanishedMassGuard(t *testing.T) {
 	if len(plan.candidates) != 2 {
 		t.Fatalf("small folder emptied: %+v", plan)
 	}
+	// A spam folder expired wholesale by the provider: no guard.
+	spam := byUID("Junk", 40, nil, before)
+	spam.junk = true
+	for i := 1; i <= 30; i++ {
+		cur[int64(i)] = ptr(int64(i), "Junk", uint32(i))
+	}
+	plan = planVanished(5, []folderPresence{spam}, nil, cur, map[string]int{"Junk": 31})
+	if len(plan.candidates) != 30 || len(plan.held) != 0 {
+		t.Fatalf("expired spam must pass the guard: %d held %v", len(plan.candidates), plan.held)
+	}
 }
 
 func TestConfirmVanished(t *testing.T) {
