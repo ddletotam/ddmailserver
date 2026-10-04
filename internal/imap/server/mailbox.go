@@ -396,149 +396,17 @@ func refMessage(r db.FolderMessageRef) *models.Message {
 	}
 }
 
-// SearchMessages searches for messages
+// SearchMessages answers SEARCH / UID SEARCH: every RFC 3501 criterion,
+// evaluated in stages so that flag/UID-only searches never leave the folder
+// index and string searches never pull bodies into memory (see search.go).
 func (m *Mailbox) SearchMessages(uid bool, criteria *imap.SearchCriteria) ([]uint32, error) {
-	log.Printf("Searching messages in mailbox %s (uid: %v)", m.name, uid)
-
-	// Extract text query from criteria for Meilisearch
-	textQuery := m.extractTextQuery(criteria)
-
-	var messages []*models.Message
-	var err error
-
-	if textQuery != "" {
-		// Text search REQUIRES the search indexer. If it isn't available or fails,
-		// return zero hits — falling back to "all messages in folder" produces
-		// massively confusing results for the user.
-		if m.searchIndexer == nil {
-			log.Printf("Text search requested but search indexer unavailable; returning empty")
-			return nil, nil
-		}
-		log.Printf("Using Meilisearch for text query: %s", textQuery)
-		searchResult, searchErr := m.searchIndexer.SearchInFolder(m.user.userID, m.folderID, textQuery, 10000, 0)
-		if searchErr != nil || searchResult == nil {
-			log.Printf("Meilisearch query failed: %v", searchErr)
-			return nil, nil
-		}
-		ids := make([]int64, 0, len(searchResult.Hits))
-		for _, hit := range searchResult.Hits {
-			ids = append(ids, hit.ID)
-		}
-		if len(ids) == 0 {
-			return nil, nil
-		}
-		messages, err = m.database.GetMessagesMetaByIDs(ids)
-	} else {
-		// No text query — the non-text criteria matchesCriteria knows are
-		// flags, so the folder's index is enough, however large the folder.
-		var refs []db.FolderMessageRef
-		refs, err = m.database.GetFolderMessageRefs(m.folderID)
-		for _, r := range refs {
-			messages = append(messages, refMessage(r))
-		}
-	}
-
+	results, err := runSearch(&dbSearchSource{m: m}, uid, criteria)
 	if err != nil {
+		log.Printf("SEARCH in mailbox %s failed: %v", m.name, err)
 		return nil, err
 	}
-
-	// Apply non-text criteria filters
-	var results []uint32
-	if uid {
-		for _, msg := range messages {
-			if m.matchesCriteria(msg, criteria) {
-				results = append(results, msg.UID)
-			}
-		}
-	} else {
-		// IMAP SEARCH returns sequence numbers relative to the SELECTed mailbox,
-		// NOT the index inside the matched-result subset. Build UID→seqno from
-		// the full mailbox once, then look up each match.
-		uidToSeq, mapErr := m.uidSeqMap()
-		if mapErr != nil {
-			log.Printf("uidSeqMap failed (%v); falling back to UIDs in SEARCH response", mapErr)
-		}
-		for _, msg := range messages {
-			if !m.matchesCriteria(msg, criteria) {
-				continue
-			}
-			if uidToSeq == nil {
-				results = append(results, msg.UID)
-				continue
-			}
-			if seq, ok := uidToSeq[msg.UID]; ok {
-				results = append(results, seq)
-			}
-		}
-	}
-
-	log.Printf("Search found %d messages", len(results))
+	log.Printf("SEARCH in mailbox %s (uid: %v) found %d messages", m.name, uid, len(results))
 	return results, nil
-}
-
-// uidSeqMap returns a UID → 1-based sequence-number map for the entire mailbox,
-// ordered by UID ascending (which is the standard IMAP sequence ordering).
-func (m *Mailbox) uidSeqMap() (map[uint32]uint32, error) {
-	all, err := m.database.GetFolderMessageRefs(m.folderID)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[uint32]uint32, len(all))
-	for i, r := range all {
-		out[r.UID] = uint32(i + 1)
-	}
-	return out, nil
-}
-
-// extractTextQuery extracts text search terms from criteria.
-// Only TEXT, BODY and SUBJECT contribute — the search index is built over
-// subject+body, so FROM/TO/CC criteria are ignored here.
-//
-// Recurses into the Or list: clients that send `OR SUBJECT "x" BODY "x"` parse into
-// criteria.Or = [[<SUBJECT>, <BODY>]] rather than flat Header+Body, so the surface-
-// level fields are empty and a non-recursive walk would think the query is empty —
-// which makes SearchMessages fall through to the "no text query" branch and dump
-// the entire folder.
-func (m *Mailbox) extractTextQuery(criteria *imap.SearchCriteria) string {
-	if criteria == nil {
-		return ""
-	}
-	parts := collectTextParts(criteria)
-	return strings.Join(parts, " ")
-}
-
-func collectTextParts(criteria *imap.SearchCriteria) []string {
-	if criteria == nil {
-		return nil
-	}
-	var parts []string
-	for _, text := range criteria.Text {
-		if text != "" {
-			parts = append(parts, text)
-		}
-	}
-	for _, body := range criteria.Body {
-		if body != "" {
-			parts = append(parts, body)
-		}
-	}
-	for key, values := range criteria.Header {
-		if !strings.EqualFold(key, "SUBJECT") {
-			continue
-		}
-		for _, v := range values {
-			if v != "" {
-				parts = append(parts, v)
-			}
-		}
-	}
-	for _, pair := range criteria.Or {
-		parts = append(parts, collectTextParts(pair[0])...)
-		parts = append(parts, collectTextParts(pair[1])...)
-	}
-	// Note: criteria.Not is intentionally skipped — those terms must NOT appear,
-	// so they shouldn't be sent to the full-text index as "find these".
-	return parts
 }
 
 // CreateMessage creates a new message (APPEND command)
@@ -1493,36 +1361,6 @@ func (m *Mailbox) buildSectionLiteral(msg *models.Message, section *imap.BodySec
 
 	// Fallback: return empty
 	return strings.NewReader("")
-}
-
-// Helper function to match message against search criteria
-func (m *Mailbox) matchesCriteria(msg *models.Message, criteria *imap.SearchCriteria) bool {
-	// Simple implementation - just check flags for now
-	// TODO: Implement full search criteria
-
-	if criteria.WithoutFlags != nil {
-		for _, flag := range criteria.WithoutFlags {
-			if flag == imap.SeenFlag && msg.Seen {
-				return false
-			}
-			if flag == imap.FlaggedFlag && msg.Flagged {
-				return false
-			}
-		}
-	}
-
-	if criteria.WithFlags != nil {
-		for _, flag := range criteria.WithFlags {
-			if flag == imap.SeenFlag && !msg.Seen {
-				return false
-			}
-			if flag == imap.FlaggedFlag && !msg.Flagged {
-				return false
-			}
-		}
-	}
-
-	return true
 }
 
 // Helper function to parse address strings

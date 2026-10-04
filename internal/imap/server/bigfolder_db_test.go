@@ -151,6 +151,27 @@ func TestBigFolder_DB(t *testing.T) {
 		t.Fatalf("SEARCH FLAGGED = %v, want [%d]", seqs, n)
 	}
 
+	// String searches over the whole folder (past the id-list limit, so the
+	// query scans the folder) find exactly the one message.
+	header := imap.NewSearchCriteria()
+	header.Header.Add("Message-ID", fmt.Sprintf("%s-%d", tag, n-1))
+	uids, err := mb.SearchMessages(true, header)
+	if err != nil {
+		t.Fatalf("UID SEARCH HEADER Message-ID: %v", err)
+	}
+	if len(uids) != 1 || uids[0] != 2*(n-1) {
+		t.Fatalf("UID SEARCH HEADER Message-ID = %v, want [%d]", uids, 2*(n-1))
+	}
+	subject := imap.NewSearchCriteria()
+	subject.Header.Add("Subject", "big 10001")
+	subject.WithoutFlags = []string{imap.SeenFlag}
+	if uids, err = mb.SearchMessages(true, subject); err != nil {
+		t.Fatalf("UID SEARCH UNSEEN SUBJECT: %v", err)
+	}
+	if len(uids) != 1 || uids[0] != 20002 {
+		t.Fatalf("UID SEARCH UNSEEN SUBJECT \"big 10001\" = %v, want [20002]", uids)
+	}
+
 	if err := mb.CopyMessages(true, parseSet(t, "*"), second.Name); err != nil {
 		t.Fatalf("COPY: %v", err)
 	}
