@@ -33,8 +33,8 @@ use crate::render_common::{LinkRect, TextRun};
 use crate::texture_cache::{self, TextureDiskCache};
 use crate::{
     MainWindow, PENDING_FOLDER, RENDER_TEMPLATE_EPOCH, RowItem, SHARED, SelRect, build_body_html,
-    build_source_html, build_text_only_html, nudge_chat_scroll, policy, recipients_tip, render,
-    sanitize,
+    build_source_html, build_text_only_html, mail_viewport, nudge_chat_scroll, policy,
+    recipients_tip, render, sanitize,
 };
 
 pub(crate) enum Job {
@@ -152,6 +152,7 @@ struct ImageJob {
     html: String,
     gate: Gate,
     width: u32,
+    viewport: Option<u32>,
     scale: f32,
 }
 
@@ -428,7 +429,8 @@ fn first_pass(ctx: &Ctx, job: &ConvJob, i: usize) -> (Packed, Source, Option<Ima
         Box::new(job.policy.media_gate(&body.from_addr))
     };
     let (images, complete) = render::cached_images(&html, &*gate);
-    let result = render::render_with(&html, job.width, job.scale, &images);
+    let viewport = (!force_text).then(|| mail_viewport(job.width, body));
+    let result = render::render_with(&html, job.width, viewport, job.scale, &images);
     let (result, source, complete) = if !result.successful() && has_text && !force_text {
         let text_html = build_text_only_html(body, job.merged);
         (
@@ -461,7 +463,16 @@ fn first_pass(ctx: &Ctx, job: &ConvJob, i: usize) -> (Packed, Source, Option<Ima
         ctx.remember(key, &p);
         None
     } else {
-        Some(ImageJob { seq: job.seq, row: i, key, html, gate, width: job.width, scale: job.scale })
+        Some(ImageJob {
+            seq: job.seq,
+            row: i,
+            key,
+            html,
+            gate,
+            width: job.width,
+            viewport,
+            scale: job.scale,
+        })
     };
     (p, source, fetch)
 }
@@ -650,7 +661,7 @@ fn fetch_and_rerender(ctx: &Ctx, job: ImageJob) {
         // this mail paints it straight away.
         return;
     }
-    let result = render::render_with(&job.html, job.width, job.scale, &images);
+    let result = render::render_with(&job.html, job.width, job.viewport, job.scale, &images);
     if !result.successful() {
         // Keep the first-pass bubble, placeholders and all.
         return;

@@ -43,7 +43,7 @@ fn main() {
     // the source viewer renders at 760 px, for instance.
     let width = std::env::var("PROBE_W").ok().and_then(|v| v.parse().ok()).unwrap_or(420);
     let scale = std::env::var("PROBE_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0);
-    let opts = RenderOptions { width, scale, block_remote: !cfg!(feature = "net") };
+    let opts = RenderOptions { width, scale, block_remote: !cfg!(feature = "net"), viewport: None };
     let r = render_one(html, &opts);
     println!(
         "{}x{} links={} runs={} in {} ms",

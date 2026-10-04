@@ -26,11 +26,17 @@ pub struct RenderOptions {
     /// placeholder box of the declared size. `cid:` / `data:` inline images
     /// still render.
     pub block_remote: bool,
+    /// Width in CSS px that `@media` queries see; `None` means `width`. A host
+    /// that wraps the mail in chrome of its own (a bubble with padding inside
+    /// a wider panel) renders the whole page at the panel `width` but passes
+    /// the mail's own content width here, so a template's `max-width: 600px`
+    /// branch switches on when the *mail* is that narrow, not the panel.
+    pub viewport: Option<u32>,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        Self { width: 420, scale: 1.0, block_remote: true }
+        Self { width: 420, scale: 1.0, block_remote: true, viewport: None }
     }
 }
 
@@ -156,7 +162,7 @@ pub fn render_with(html: &str, opts: &RenderOptions, resources: &dyn Resources) 
     // The pipeline is written not to panic, but it runs on bytes that arrived
     // from strangers: a bug here must cost one blank bubble, not the client.
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        render_inner(html, scale, width_px, opts.block_remote, resources)
+        render_inner(html, scale, width_px, opts.viewport, opts.block_remote, resources)
     }))
     // No engine reset here: the text engine the panic unwound through was
     // discarded by its guard on the way out (`text::EngineGuard`).
@@ -174,6 +180,7 @@ fn render_inner(
     html: &str,
     scale: f32,
     width_px: u32,
+    viewport: Option<u32>,
     block_remote: bool,
     resources: &dyn Resources,
 ) -> Rendered {
@@ -190,9 +197,11 @@ fn render_inner(
 
     let root = dom::parse(html);
     phase("parse");
-    // Media queries see the viewport in CSS px — the width the caller asked
-    // for, before the device scale.
-    let sheet = style::Stylesheet::parse(&dom::collect_style_text(&root), width_px as f32 / scale);
+    // Media queries see the viewport in CSS px — the mail's own width when
+    // the caller says what it is, else the width it asked for, before the
+    // device scale.
+    let viewport = viewport.map_or(width_px as f32 / scale, |v| v as f32);
+    let sheet = style::Stylesheet::parse(&dom::collect_style_text(&root), viewport);
     phase("css");
     let resolver = style::Resolver { scale, sheet };
 
@@ -237,7 +246,7 @@ mod tests {
     use super::*;
 
     fn opts(width: u32) -> RenderOptions {
-        RenderOptions { width, scale: 1.0, block_remote: true }
+        RenderOptions { width, scale: 1.0, block_remote: true, viewport: None }
     }
 
     /// Straight-alpha pixel at (x, y).
@@ -343,6 +352,17 @@ mod tests {
             let r = render(html, &opts(400));
             assert!(r.runs.iter().any(|t| t.text.contains("письмо")), "lost content of {html}");
         }
+    }
+
+    /// `@media` follows `viewport` when given, the render width otherwise.
+    #[test]
+    fn media_queries_see_the_viewport() {
+        let html = "<style>.d{display:none} @media (max-width:600px){.d{display:block}}</style>\
+                    <p class=d>узко</p>";
+        let has = |o: &RenderOptions| render(html, o).runs.iter().any(|t| t.text == "узко");
+        assert!(!has(&opts(800)), "800 px is not narrow");
+        assert!(has(&RenderOptions { viewport: Some(500), ..opts(800) }), "the mail is 500 px");
+        assert!(has(&opts(500)));
     }
 
     /// A URL wrapped across lines copies back as exactly itself: the text

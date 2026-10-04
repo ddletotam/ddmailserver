@@ -236,7 +236,26 @@ pub(crate) fn attachment_chips(b: &MessageBody) -> String {
 /// Bump whenever the bubble/render HTML template or its CSS changes: the
 /// texture cache keys renders by fnv1a(body.html) only, so without this a
 /// template/CSS edit would keep serving stale cached bitmaps (RAM + disk).
-pub(crate) const RENDER_TEMPLATE_EPOCH: u64 = 9;
+pub(crate) const RENDER_TEMPLATE_EPOCH: u64 = 10;
+
+/// Bubble geometry, CSS px. The template's CSS is formatted from these, and
+/// [`mail_viewport`] derives the mail's own width from the same numbers, so
+/// the two cannot drift apart.
+const ROW_PAD_X: u32 = 60;
+const BUBBLE_PAD_X: u32 = 14;
+const NARROW_BUBBLE_PCT: u32 = 72;
+
+/// The width, in CSS px, the mail itself gets inside its bubble when the
+/// page is rendered `panel_w` wide — what its `@media` queries should see.
+/// HTML mail from others sits in a wide bubble (the whole row); everything
+/// else in a narrow one (72 % of it). Mirrors `.ddm-row`/`.ddm-bubble`/
+/// `.ddm-wide` below.
+pub(crate) fn mail_viewport(panel_w: u32, b: &MessageBody) -> u32 {
+    let row = panel_w.saturating_sub(2 * ROW_PAD_X);
+    let has_html = b.html.as_deref().is_some_and(|h| !h.trim().is_empty());
+    let bubble = if has_html && !b.is_outgoing { row } else { row * NARROW_BUBBLE_PCT / 100 };
+    bubble.saturating_sub(2 * BUBBLE_PAD_X).max(1)
+}
 
 /// ВСЕ классы обвязки пузыря пишутся с этим префиксом. Документ пузыря —
 /// общая песочница для нашей вёрстки и присланного HTML, а письма сплошь
@@ -291,17 +310,17 @@ pub(crate) fn bubble_template_wide(
            now): a selector that reaches into the bubble also reaches into
            the sender's markup, and flat specificity keeps our chrome from
            outranking the mail's own rules. */
-        .{CSS_NS}-row {{ padding: 6px 60px; }}
+        .{CSS_NS}-row {{ padding: 6px {ROW_PAD_X}px; }}
         .{CSS_NS}-bubble-out {{ margin-left: auto; margin-right: 0; }}
         .{CSS_NS}-bubble-in  {{ margin-left: 0; margin-right: auto; }}
         .{CSS_NS}-bubble {{
-            max-width: 72%; background: {bg}; border-radius: 16px; padding: 10px 14px;
+            max-width: {NARROW_BUBBLE_PCT}%; background: {bg}; border-radius: 16px; padding: 10px {BUBBLE_PAD_X}px;
             font-size: 15px; line-height: 1.4; color: #0f1419;
             box-shadow: 0 1px 2px rgba(0,0,0,0.12); overflow-wrap: anywhere;
         }}
         /* Одноклассовый и ПОСЛЕ .ddm-bubble: специфичность у них равная, так
-           что переопределяет порядок в стилях. В `.ddm-bubble.ddm-wide` смысла
-           нет — второй класс в селекторе матчер emlrender не понимает. */
+           что переопределяет порядок в стилях — без составного селектора,
+           по той же причине, что и выше. */
         .{CSS_NS}-wide {{ max-width: 100%; }}
         .{CSS_NS}-bubble-out {{ border-bottom-right-radius: 4px; }}
         .{CSS_NS}-bubble-in  {{ border-bottom-left-radius: 4px; }}
@@ -322,7 +341,7 @@ pub(crate) fn bubble_template_wide(
 
 #[cfg(test)]
 mod bubble_css_tests {
-    use super::{build_body_html, policy};
+    use super::{build_body_html, mail_viewport, policy};
     use ddmail_core::types::MessageBody;
 
     fn html_body(html: &str) -> MessageBody {
@@ -345,6 +364,18 @@ mod bubble_css_tests {
             references: vec![],
             raw_headers: String::new(),
         }
+    }
+
+    /// `@media` письма видит ширину самого письма в пузыре: широкий пузырь
+    /// входящего HTML — строка минус отступы, остальные — 72 % строки.
+    #[test]
+    fn mail_viewport_is_the_bubble_content() {
+        let wide = html_body("<p>x</p>");
+        assert_eq!(mail_viewport(800, &wide), 800 - 120 - 28);
+        let mut own = html_body("<p>x</p>");
+        own.is_outgoing = true;
+        assert_eq!(mail_viewport(800, &own), (800 - 120) * 72 / 100 - 28);
+        assert_eq!(mail_viewport(100, &wide), 1, "never zero on a tiny panel");
     }
 
     /// Классы обвязки пузыря обязаны быть в своём пространстве имён: письма

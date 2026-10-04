@@ -81,14 +81,22 @@ pub fn cached_images(html: &str, allow_host: &RemoteGate) -> (Images, bool) {
 /// (blocking, see [`fetch_images`]). For documents of our own that have none
 /// (`no_remote`), this is plain layout.
 pub fn render(html: &str, width: u32, scale: f32, allow_host: &RemoteGate) -> RenderResult {
-    render_with(html, width, scale, &fetch_images(html, allow_host))
+    render_with(html, width, None, scale, &fetch_images(html, allow_host))
 }
 
 /// Lay out and rasterize one document with the images at hand. Stateless and
 /// synchronous, safe to call from several threads at once: each render
-/// borrows its own text engine from emlrender's pool.
-pub fn render_with(html: &str, width: u32, scale: f32, images: &Images) -> RenderResult {
-    let opts = emlrender::RenderOptions { width, scale, block_remote: false };
+/// borrows its own text engine from emlrender's pool. `viewport` is the
+/// mail's own width for its `@media` queries (see
+/// [`crate::bubble_html::mail_viewport`]); `None` — the page width.
+pub fn render_with(
+    html: &str,
+    width: u32,
+    viewport: Option<u32>,
+    scale: f32,
+    images: &Images,
+) -> RenderResult {
+    let opts = emlrender::RenderOptions { width, scale, block_remote: false, viewport };
     let r = emlrender::render_with(html, &opts, images);
     RenderResult {
         bitmap: Bitmap { rgba: r.rgba, width: r.width_px, height: r.height_px },

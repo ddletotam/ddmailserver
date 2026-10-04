@@ -272,7 +272,8 @@ fn main() {
 
     let index_path = golden.join("index.tsv");
     let mut index = read_index(&index_path);
-    let opts = RenderOptions { width: args.width, scale: args.scale, block_remote: true };
+    let opts =
+        RenderOptions { width: args.width, scale: args.scale, block_remote: true, viewport: None };
     let limit = (args.width as f32 * args.scale).round() as u32;
 
     let mut total_ms = 0f64;

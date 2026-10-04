@@ -69,7 +69,8 @@ fn strips() -> &'static Strips {
         // markers go, and before the block pass, which would otherwise
         // swallow the content up to the closer (Steam and Gosuslugi lost
         // whole sections that way).
-        re_mso_revealed_open: Regex::new(r"(?is)<!--\s*\[if\s+[^\]]*\]>\s*<!--(?:\s*--)?>").unwrap(),
+        re_mso_revealed_open: Regex::new(r"(?is)<!--\s*\[if\s+[^\]]*\]>\s*<!--(?:\s*--)?>")
+            .unwrap(),
         re_mso_revealed_close: Regex::new(r"(?is)<!--\s*<!\s*\[endif\]\s*-->").unwrap(),
         // Inline event handlers — non-functional anyway since we don't
         // run JS, but parsing them slows the layout and occasionally
@@ -113,8 +114,7 @@ pub fn first_external_host(html: &str) -> String {
         return String::new();
     }
     let res = block_res();
-    res
-        .re_img
+    res.re_img
         .captures_iter(html)
         .filter_map(|c| {
             c.get(4)

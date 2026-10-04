@@ -71,7 +71,12 @@ fn main() {
         print!("{:34} ", path.file_stem().unwrap_or_default().to_string_lossy());
         let _ = std::io::Write::flush(&mut std::io::stdout());
         let t0 = Instant::now();
-        let opts = RenderOptions { width: WIDTH, scale: SCALE, block_remote: !load_images };
+        let opts = RenderOptions {
+            width: WIDTH,
+            scale: SCALE,
+            block_remote: !load_images,
+            viewport: None,
+        };
         let r = render_one(&html, &opts, load_images);
         let ms = t0.elapsed().as_millis();
         total_ms += ms;

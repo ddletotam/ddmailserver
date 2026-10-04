@@ -89,7 +89,7 @@ fn load(file: &str) -> String {
 }
 
 fn rendered(file: &str, width: u32, scale: f32) -> Rendered {
-    render(&load(file), &RenderOptions { width, scale, block_remote: true })
+    render(&load(file), &RenderOptions { width, scale, block_remote: true, viewport: None })
 }
 
 /// The text layer as a reader would copy it: runs that continue a word are
@@ -212,7 +212,7 @@ fn combinator_rules_reach_their_targets() {
     assert!(notice.w > 0.0);
     let plain = render(
         "<p>Important notice about invoices.</p>",
-        &RenderOptions { width: 420, scale: 1.0, block_remote: true },
+        &RenderOptions { width: 420, scale: 1.0, block_remote: true, viewport: None },
     );
     let plain_w = plain.runs.iter().find(|r| r.text.trim() == "invoices.").expect("plain").w;
     assert!(notice.w > plain_w + 0.5, "bold via descendant rule: {} vs {plain_w}", notice.w);
