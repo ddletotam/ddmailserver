@@ -45,6 +45,9 @@ type SyncTask struct {
 	// clients update unread state without waiting for new mail.
 	flagsChanged    int
 	flagsNotifyFunc func(changed int)
+	// Per-run memo of CheckSpamRules for already-known messages: the flag
+	// pass re-evaluates every known message each cycle, and senders repeat.
+	spamRuleMemo map[string]spamRuleVerdict
 	// Called to force-refresh the OAuth token when auth fails. The callback
 	// is expected to update the account in place (access token, expiry).
 	refreshOAuth func(account *models.Account) error
@@ -164,22 +167,32 @@ func (t *SyncTask) syncAllRemoteFolders(ctx context.Context, client *Client, loc
 		return nil
 	}
 
-	totalNew, totalSkipped, totalSpam := 0, 0, 0
+	totalNew, totalSkipped, totalSpam, totalBodies := 0, 0, 0, 0
+	var fullPasses []string
 	for _, j := range jobs {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		newN, skipN, spamN, err := t.syncOneFolder(ctx, client, localInbox, j.name, j.class)
+		res, err := t.syncOneFolder(ctx, client, localInbox, j.name, j.class)
+		// Partial results count even on error: whatever was saved is saved.
+		totalNew += res.newCount
+		totalSkipped += res.skipped
+		totalSpam += res.spam
+		totalBodies += res.bodies
+		if res.fullReason != "" {
+			fullPasses = append(fullPasses, fmt.Sprintf("%s (%s)", j.name, res.fullReason))
+		}
 		if err != nil {
 			log.Printf("Sync [%s]: folder %q failed: %v", t.account.Email, j.name, err)
-			continue
 		}
-		totalNew += newN
-		totalSkipped += skipN
-		totalSpam += spamN
 	}
-	t.accountLog("info", "synced %d new messages (skipped %d duplicates, %d classified spam) across %d folders",
-		totalNew, totalSkipped, totalSpam, len(jobs))
+	full := "none"
+	if len(fullPasses) > 0 {
+		full = strings.Join(fullPasses, ", ")
+	}
+	t.accountLog("info", "synced %d new messages (skipped %d duplicates, %d classified spam) across %d folders; "+
+		"downloaded %d bodies, flags updated on %d messages; full pass: %s",
+		totalNew, totalSkipped, totalSpam, len(jobs), totalBodies, t.flagsChanged, full)
 	// Push gate: t.lastNew is set by every non-spam save of this run, so its
 	// presence is direct evidence the user got something worth announcing.
 	// The old arithmetic gate (totalNew > totalSpam) silently swallowed the
@@ -215,47 +228,6 @@ func (t *SyncTask) syncAllRemoteFolders(ctx context.Context, client *Client, loc
 	return nil
 }
 
-// syncOneFolder pulls all messages from a single remote mailbox and
-// dispatches them through saveMessageToInbox with the appropriate
-// folder role. Returns (newCount, skippedCount, spamCount).
-func (t *SyncTask) syncOneFolder(ctx context.Context, client *Client, localInbox *models.Folder, name string, class folderClass) (int, int, int, error) {
-	mbox, err := client.SelectFolder(name)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	if mbox.Messages == 0 {
-		return 0, 0, 0, nil
-	}
-	uidSet := new(imap.SeqSet)
-	uidSet.AddRange(1, 0)
-	section := &imap.BodySectionName{Peek: true}
-	items := []imap.FetchItem{imap.FetchEnvelope, imap.FetchFlags, imap.FetchUid, section.FetchItem()}
-	messages, fetchDone := client.FetchMessagesByUID(uidSet, items)
-	newCount, skippedCount, spamCount := 0, 0, 0
-	for msg := range messages {
-		if ctx.Err() != nil {
-			return newCount, skippedCount, spamCount, ctx.Err()
-		}
-		saved, isSpam, err := t.saveMessageToInbox(msg, localInbox, name, class)
-		if err != nil {
-			log.Printf("Sync [%s] %s: save failed: %v", t.account.Email, name, err)
-			continue
-		}
-		if saved {
-			newCount++
-			if isSpam {
-				spamCount++
-			}
-		} else {
-			skippedCount++
-		}
-	}
-	if err := <-fetchDone; err != nil {
-		return newCount, skippedCount, spamCount, fmt.Errorf("IMAP fetch on %q failed: %w", name, err)
-	}
-	return newCount, skippedCount, spamCount, nil
-}
-
 // folderClass classifies a remote IMAP mailbox for our sync purposes.
 type folderClass int
 
@@ -266,6 +238,11 @@ const (
 	folderSent                      // Sent / Отправленные — outgoing
 	folderDrafts                    // Drafts / Черновики
 )
+
+// SyncableMailbox reports whether the sync pulls this mailbox at all — the
+// same rule as syncAllRemoteFolders, for tools that must walk exactly the
+// folders the sync walks (cmd/msgid-audit).
+func SyncableMailbox(mb *imap.MailboxInfo) bool { return classifyMailbox(mb) != folderSkip }
 
 // classifyMailbox decides whether and how to sync a given mailbox.
 // Trash-class folders and Gmail-style "All Mail" duplicates are
@@ -424,69 +401,8 @@ func (t *SyncTask) saveMessageToInbox(imapMsg *imap.Message, inbox *models.Folde
 		return false, false, err
 	}
 	if exists {
-		// Inbox path just refreshes the remote pointer if we never
-		// recorded one. Spam path is more interesting: the upstream
-		// provider has just (re-)classified an already-known message
-		// as junk. Flip is_spam on the local row, unless the user has
-		// a whitelist rule for that sender — that's the rescue path.
-		if treatAsSpam {
-			fromAddr := parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.From))
-			action, matchedRule, ruleErr := t.database.CheckSpamRules(t.account.UserID, fromAddr)
-			if ruleErr != nil {
-				log.Printf("IMAP sync: check spam rules during reclassify: %v", ruleErr)
-			}
-			rescue := action == "allow"
-			if rescue {
-				log.Printf("IMAP sync: remote-spam %s rescued by whitelist rule %d", messageID, matchedRule.ID)
-			} else {
-				log.Printf("IMAP sync: remote-spam %s reclassified as spam (folder=%s)", messageID, remoteFolderName)
-			}
-			if err := t.database.ReclassifyMessageFromRemoteSpam(
-				t.account.UserID, t.account.ID, messageID, imapMsg.Uid, remoteFolderName, !rescue,
-			); err != nil {
-				log.Printf("IMAP sync: reclassify failed for %s: %v", messageID, err)
-			}
-			return false, !rescue, nil
-		}
-		// Inbox path on an already-known row: sync flags from the
-		// remote side AND decide is_spam based on the user's current
-		// spam rules. Earlier this branch unconditionally downgraded
-		// is_spam=false (to handle "user moved out of upstream Junk
-		// back into INBOX") — which silently killed blacklisting:
-		// the next sync after a Spam-button click would resurrect
-		// every previously-blocked message because it sat in upstream
-		// INBOX. We now re-evaluate the rule on every dedup hit so
-		// blacklist verdicts stick across re-syncs and whitelist /
-		// no-rule cases still rescue.
-		fromAddrCheck := parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.From))
-		ruleAction, ruleMatched, ruleErr := t.database.CheckSpamRules(t.account.UserID, fromAddrCheck)
-		if ruleErr != nil {
-			log.Printf("IMAP sync: check spam rules on existing %s: %v", messageID, ruleErr)
-		}
-		downgrade := ruleAction != "spam" // spam-rule keeps is_spam=true; allow / no-rule lets remote INBOX rescue
-		changed, err := t.database.RefreshExistingFromRemote(
-			t.account.UserID, t.account.ID, messageID, imapMsg.Uid, remoteFolderName,
-			hasFlag(imapMsg.Flags, imap.SeenFlag),
-			hasFlag(imapMsg.Flags, imap.FlaggedFlag),
-			hasFlag(imapMsg.Flags, imap.AnsweredFlag),
-			downgrade,
-		)
-		if err != nil {
-			log.Printf("IMAP sync: refresh existing %s failed: %v", messageID, err)
-		} else if changed {
-			t.flagsChanged++
-		}
-		if !downgrade && ruleMatched != nil {
-			// Make sure the row is actually flagged spam and that
-			// spam_rule_id points at the rule. Cheap UPDATE; if the
-			// row is already in this state, RowsAffected is 0.
-			if err := t.database.ReclassifyMessageFromRemoteSpam(
-				t.account.UserID, t.account.ID, messageID, imapMsg.Uid, remoteFolderName, true,
-			); err != nil {
-				log.Printf("IMAP sync: re-flag spam on existing %s: %v", messageID, err)
-			}
-		}
-		return false, ruleAction == "spam", nil
+		fromAddr := parser.SanitizeUTF8(formatAddressList(imapMsg.Envelope.From))
+		return false, t.refreshKnownMessage(messageID, fromAddr, imapMsg.Uid, imapMsg.Flags, remoteFolderName, class), nil
 	}
 	var body, bodyHTML string
 	var attachments []parser.ParsedAttachment
