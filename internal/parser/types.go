@@ -24,6 +24,10 @@ const (
 	AuthResultSoftfail AuthResult = "softfail"
 	AuthResultNeutral  AuthResult = "neutral"
 	AuthResultNone     AuthResult = "none"
+	// AuthResultPermError: the published policy is broken (RFC 7208 §2.6.7).
+	AuthResultPermError AuthResult = "permerror"
+	// AuthResultTempError: a transient DNS failure (RFC 7208 §2.6.6).
+	AuthResultTempError AuthResult = "temperror"
 )
 
 // AuthResults contains the results of SPF/DKIM/DMARC checks
