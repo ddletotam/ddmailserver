@@ -45,6 +45,8 @@ struct Cell {
 struct Row {
     style: Style,
     cells: Vec<Cell>,
+    /// A cell of this row was declared `display: block` (or `list-item`).
+    stack: bool,
 }
 
 struct Grid {
@@ -52,6 +54,11 @@ struct Grid {
     cols: usize,
     /// `cellspacing`, in device px, applied between and around cells.
     spacing: f32,
+    /// Some row puts two or more cells declared as blocks side by side — the
+    /// mobile branch of a responsive template (`td.col { display: block
+    /// !important; width: 100% !important }`). A browser stacks those, so
+    /// the table is laid out linearised.
+    stacked: bool,
 }
 
 /// One column's width demands, gathered from every cell that sits in it.
@@ -132,7 +139,7 @@ impl Ctx<'_> {
         let content_w = (outer - border.horizontal() - pad.horizontal()).max(1.0);
         let usable = (content_w - gaps).max(1.0);
         let min_sum: f32 = cols.iter().map(|c| c.min).sum();
-        let linear = grid.cols >= 2 && min_sum > usable;
+        let linear = grid.stacked || (grid.cols >= 2 && min_sum > usable);
 
         // `align="center"` places the box; an inherited alignment (from
         // `<center>`, the way half the corpus centres things) does too.
@@ -200,7 +207,8 @@ impl Ctx<'_> {
         );
         let cols =
             rows.iter().flat_map(|r| r.cells.iter()).map(|c| c.col + c.colspan).max().unwrap_or(0);
-        Grid { rows, cols, spacing }
+        let stacked = rows.iter().any(|r| r.stack && r.cells.len() >= 2);
+        Grid { rows, cols, spacing, stacked }
     }
 
     /// Gather rows, descending through row groups. `occupied` carries the rows
@@ -249,6 +257,7 @@ impl Ctx<'_> {
             }
 
             let mut cells = Vec::new();
+            let mut stack = false;
             let mut col = 0usize;
             for kid in children(&child) {
                 let kt = tag(&kid);
@@ -268,6 +277,7 @@ impl Ctx<'_> {
                     if !matches!(kt, "td" | "th") {
                         continue;
                     }
+                    stack |= matches!(cst.display, Display::Block | Display::ListItem);
                     cst.display = Display::TableCell;
                 }
                 while col < occupied.len() && occupied[col] > 0 {
@@ -303,7 +313,7 @@ impl Ctx<'_> {
             for slot in occupied.iter_mut() {
                 *slot = slot.saturating_sub(1);
             }
-            rows.push(Row { style: cs, cells });
+            rows.push(Row { style: cs, cells, stack });
         }
     }
 

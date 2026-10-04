@@ -84,6 +84,8 @@ pub struct Layout {
 /// a truncated render, not a hung worker.
 const MAX_HEIGHT_CSS: f32 = 8000.0;
 const MAX_NODES: usize = 60_000;
+/// Longest run of no-break spaces reserving an inline-level box on a line.
+const MAX_NBSP: f32 = 600.0;
 pub(crate) const MAX_DEPTH: usize = 96;
 /// Nodes the table column measurer may visit across the whole document. Sizing
 /// a column means walking the cell subtree ahead of laying it out, and deeply
@@ -961,8 +963,16 @@ impl Ctx<'_> {
         // A run of no-break spaces as wide as the object. One glyph widened by
         // letter spacing would be tidier — and unbreakable — but a glyph's ink
         // width is not its advance, and the placement below reads glyph extents.
-        let nbsp = text::nbsp_advance(self.eng, &span).max(0.5);
-        let count = ((w / nbsp).ceil() as usize).clamp(1, 600);
+        let mut nbsp = text::nbsp_advance(self.eng, &span).max(0.01);
+        // MJML sets `font-size: 0` on its columns to kill the gap between
+        // them, which shrinks the space to a fraction of a pixel: the capped
+        // run below then covered barely half the box, and the next column was
+        // drawn over this one. Size the run's font up until the cap suffices.
+        if nbsp * MAX_NBSP < w {
+            span.size = (span.size * w / (nbsp * MAX_NBSP) * 1.05).min(400.0 * self.scale);
+            nbsp = text::nbsp_advance(self.eng, &span).max(0.01);
+        }
+        let count = ((w / nbsp).ceil() as usize).clamp(1, MAX_NBSP as usize);
         span.text = std::iter::repeat_n(text::NBSP, count).collect();
         span.object = Some(self.objects.len());
         self.objects.push(InlineObject { cmds, w, h, lead });
@@ -1048,9 +1058,12 @@ impl Ctx<'_> {
                 (max + frame).clamp(floor, avail_w.max(floor))
             }
         };
-        let w = want.clamp(1.0, avail_w.max(1.0));
-        // Fills the line anyway: nothing can sit beside it, so a block box is
-        // both simpler and identical on screen.
+        let want = match style.max_width {
+            Some(len) => want.min(len.resolve(avail_w)),
+            None => want,
+        };
+        let w = want.clamp(1.0, avail_w.max(1.0)); // Fills the line anyway: nothing can sit beside it, so a block box is
+                                                   // both simpler and identical on screen.
         if w > avail_w * 0.95 {
             return false;
         }
@@ -1063,9 +1076,16 @@ impl Ctx<'_> {
         let mut inner = style.clone();
         inner.margin = Edges::default();
         inner.margin_pct = Edges::default();
+        // The box is already sized: its declared width was resolved against
+        // the line above. Left on the style, a percentage would resolve a
+        // second time against the box itself — MJML's `width: 50%` column
+        // came out a quarter of the line.
+        inner.width = None;
+        inner.max_width = None;
         let lead = style.mar(avail_w).left;
         let h = if tag(node) == "table" || style.display == Display::Table {
             inner.display = Display::Table;
+            inner.width = Some(Len::Px(w));
             self.table(node, &inner, 0.0, 0.0, w, link, depth)
         } else {
             inner.display = Display::Block;
