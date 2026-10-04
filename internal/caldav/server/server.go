@@ -3,6 +3,7 @@ package server
 import (
 	"crypto/sha256"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yourusername/mailserver/internal/authlimit"
 	"github.com/yourusername/mailserver/internal/caldav/importer"
+	"github.com/yourusername/mailserver/internal/clientip"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/timeutil"
@@ -22,6 +25,8 @@ type Server struct {
 	database       *db.DB
 	prefix         string
 	subdomainHosts map[string]bool // hosts where CalDAV is at root (nginx proxies / → /caldav/)
+	authLimiter    *authlimit.Limiter
+	clientIP       *clientip.Resolver
 }
 
 // New creates a new CalDAV server
@@ -29,6 +34,7 @@ func New(database *db.DB, prefix string) *Server {
 	return &Server{
 		database: database,
 		prefix:   prefix,
+		clientIP: clientip.Default(),
 		subdomainHosts: map[string]bool{
 			"caldav.letotam.ru": true,
 		},
@@ -96,15 +102,34 @@ func (s *Server) authenticate(r *http.Request) (*models.User, error) {
 		return nil, fmt.Errorf("no credentials")
 	}
 
+	ip := s.clientIP.FromRequest(r)
+	if !s.authLimiter.Allow(ip, username) {
+		log.Printf("CalDAV auth throttled for user: %s from %s", username, ip)
+		return nil, fmt.Errorf("invalid credentials")
+	}
+
 	// Accepts the account password or an application password — a device
 	// profile carries the latter, so that a leaked profile costs one revoke
 	// instead of an account-wide password change.
 	user, err := s.database.AuthenticateProtocol(username, password)
 	if err != nil {
+		if errors.Is(err, db.ErrInvalidCredentials) {
+			s.authLimiter.Failure(ip, username, password)
+		}
 		return nil, fmt.Errorf("invalid credentials")
 	}
+	s.authLimiter.Success(ip, user.Username)
 
 	return user, nil
+}
+
+// SetAuthLimiter enables failed-login throttling. r decides which proxies'
+// forwarding headers identify the client; nil keeps the loopback default.
+func (s *Server) SetAuthLimiter(l *authlimit.Limiter, r *clientip.Resolver) {
+	s.authLimiter = l
+	if r != nil {
+		s.clientIP = r
+	}
 }
 
 func (s *Server) handleOptions(w http.ResponseWriter, r *http.Request) {

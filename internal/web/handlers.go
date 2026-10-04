@@ -186,18 +186,29 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Throttled clients get the ordinary failure without a password check.
+	ip := s.clientIP.FromRequest(r)
+	if !s.authLimiter.Allow(ip, req.Username) {
+		log.Printf("Web login throttled for user: %s from %s", req.Username, ip)
+		respondHTMXError(w, r, http.StatusUnauthorized, "Invalid username or password")
+		return
+	}
+
 	// Get user
 	user, err := s.database.GetUserByUsername(req.Username)
 	if err != nil {
+		s.authLimiter.Failure(ip, req.Username, req.Password)
 		respondHTMXError(w, r, http.StatusUnauthorized, "Invalid username or password")
 		return
 	}
 
 	// Verify password
 	if !VerifyPassword(user.PasswordHash, req.Password) {
+		s.authLimiter.Failure(ip, req.Username, req.Password)
 		respondHTMXError(w, r, http.StatusUnauthorized, "Invalid username or password")
 		return
 	}
+	s.authLimiter.Success(ip, user.Username)
 
 	// Banned users get the same generic error as wrong password — exposing
 	// "you're banned" leaks user state to anyone with the password.
@@ -555,8 +566,11 @@ func (s *Server) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify current password
-	if !VerifyPassword(user.PasswordHash, req.CurrentPassword) {
+	// Verify current password. A stolen session must not become a free
+	// password-guessing oracle, so this goes through the limiter too.
+	ip := s.clientIP.FromRequest(r)
+	if !s.authLimiter.Allow(ip, user.Username) || !VerifyPassword(user.PasswordHash, req.CurrentPassword) {
+		s.authLimiter.Failure(ip, user.Username, req.CurrentPassword)
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write([]byte(`<div class="error-message">Current password is incorrect</div>`))

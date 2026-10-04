@@ -5,11 +5,13 @@ import (
 	"log"
 
 	"github.com/emersion/go-smtp"
+	"github.com/yourusername/mailserver/internal/authlimit"
 	"github.com/yourusername/mailserver/internal/db"
 )
 
 // Server wraps the SMTP server
 type Server struct {
+	backend    *Backend
 	smtpServer *smtp.Server
 	addr       string
 	tlsConfig  *tls.Config
@@ -34,6 +36,7 @@ func New(database *db.DB, addr string, hostname string, allowInsecureAuth bool) 
 	log.Printf("SMTP server created, will listen on %s (insecure auth: %v)", addr, allowInsecureAuth)
 
 	return &Server{
+		backend:    be,
 		smtpServer: s,
 		addr:       addr,
 	}
@@ -67,10 +70,16 @@ func NewWithTLS(database *db.DB, addr string, hostname string, certFile, keyFile
 	log.Printf("SMTP server with TLS created, will listen on %s", addr)
 
 	return &Server{
+		backend:    be,
 		smtpServer: s,
 		addr:       addr,
 		tlsConfig:  tlsConfig,
 	}, nil
+}
+
+// SetAuthLimiter enables failed-AUTH throttling. Call before Start.
+func (s *Server) SetAuthLimiter(l *authlimit.Limiter) {
+	s.backend.authLimiter = l
 }
 
 // Start starts the SMTP server

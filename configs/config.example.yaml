@@ -39,6 +39,16 @@ security:
   # an explicit empty list [] trusts nobody.
   # trusted_proxies: ["127.0.0.0/8", "::1/128"]
 
+  # Failed-login throttling shared by web, desktop API, IMAP, SMTP, CalDAV
+  # and CardDAV. Repeating the same wrong password counts once; an IP that
+  # logged in successfully is exempt from that user's username block.
+  # auth_limit:
+  #   max_failures_per_ip: 10    # per IPv4 address / IPv6 /64
+  #   max_failures_per_user: 10
+  #   window: 15m
+  #   block_duration: 15m
+  #   known_ip_ttl: 168h
+
 # Sync settings
 sync:
   # How often to check for new emails (in seconds)

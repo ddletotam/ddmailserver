@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/yourusername/mailserver/internal/authlimit"
 	caldavserver "github.com/yourusername/mailserver/internal/caldav/server"
 	carddavserver "github.com/yourusername/mailserver/internal/carddav/server"
 	"github.com/yourusername/mailserver/internal/clientip"
@@ -30,7 +31,10 @@ type Server struct {
 	authRateLimiter *RateLimiter
 	// clientIP decides which forwarding headers to believe. Defaults to
 	// trusting loopback only; see SetClientIPResolver.
-	clientIP        *clientip.Resolver
+	clientIP *clientip.Resolver
+	// authLimiter throttles failed logins (shared with IMAP/SMTP/DAV);
+	// nil disables throttling. See SetAuthLimiter.
+	authLimiter     *authlimit.Limiter
 	oauthConfig     *config.OAuthConfig
 	googleOAuth     *oauth.GoogleOAuth
 	microsoftOAuth  *oauth.MicrosoftOAuth
@@ -469,6 +473,21 @@ func (s *Server) SetClientIPResolver(r *clientip.Resolver) {
 	if r != nil {
 		s.clientIP = r
 	}
+	s.wireDAVAuth()
+}
+
+// SetAuthLimiter enables failed-login throttling for the web, desktop,
+// CalDAV and CardDAV logins.
+func (s *Server) SetAuthLimiter(l *authlimit.Limiter) {
+	s.authLimiter = l
+	s.wireDAVAuth()
+}
+
+// wireDAVAuth hands the limiter and client-IP resolver to the embedded DAV
+// servers; called from both setters so their order does not matter.
+func (s *Server) wireDAVAuth() {
+	s.caldavServer.SetAuthLimiter(s.authLimiter, s.clientIP)
+	s.carddavServer.SetAuthLimiter(s.authLimiter, s.clientIP)
 }
 
 // SetPublicEndpoints wires the internet-facing hostname and ports used when

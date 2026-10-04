@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/emersion/go-message"
+	"github.com/yourusername/mailserver/internal/authlimit"
 	"github.com/yourusername/mailserver/internal/caldav/importer"
 	"github.com/yourusername/mailserver/internal/clientip"
 	"github.com/yourusername/mailserver/internal/config"
@@ -63,6 +64,13 @@ func main() {
 	clientIPResolver, err := clientip.New(cfg.Security.TrustedProxies)
 	if err != nil {
 		log.Fatalf("Invalid security.trusted_proxies: %v", err)
+	}
+
+	// One limiter for every protocol, so guesses spread over IMAP, SMTP,
+	// DAV and the web all count against the same IP and username.
+	authLimiter, err := authlimit.New(cfg.Security.AuthLimit)
+	if err != nil {
+		log.Fatalf("Failed to create auth limiter: %v", err)
 	}
 
 	// Connect to database
@@ -231,6 +239,7 @@ func main() {
 	log.Printf("Initializing IMAP server (plain, no IDLE)...")
 	imapAddr := fmt.Sprintf("%s:%d", cfg.Server.WebHost, cfg.Server.IMAPPort)
 	imapSrv := imapserver.NewWithHub(database, imapAddr, notifyHub)
+	imapSrv.SetAuthLimiter(authLimiter)
 	if searchIndexer != nil {
 		imapSrv.SetSearchIndexer(searchIndexer)
 	}
@@ -249,6 +258,7 @@ func main() {
 		if err != nil {
 			log.Printf("Failed to create IMAP TLS server: %v", err)
 		} else {
+			imapTLSSrv.SetAuthLimiter(authLimiter)
 			if searchIndexer != nil {
 				imapTLSSrv.SetSearchIndexer(searchIndexer)
 			}
@@ -267,6 +277,7 @@ func main() {
 	log.Printf("Initializing SMTP server...")
 	smtpAddr := fmt.Sprintf("%s:%d", cfg.Server.WebHost, cfg.Server.SMTPPort)
 	smtpSrv := smtpserver.New(database, smtpAddr, hostname, !hasTLS)
+	smtpSrv.SetAuthLimiter(authLimiter)
 	go func() {
 		if err := smtpSrv.Start(); err != nil && !errors.Is(err, net.ErrClosed) {
 			log.Fatalf("SMTP server error: %v", err)
@@ -282,6 +293,7 @@ func main() {
 		if err != nil {
 			log.Printf("Failed to create SMTP TLS server: %v", err)
 		} else {
+			smtpTLSSrv.SetAuthLimiter(authLimiter)
 			go func() {
 				if err := smtpTLSSrv.StartTLS(); err != nil {
 					log.Printf("SMTP TLS server error: %v", err)
@@ -320,6 +332,7 @@ func main() {
 	webSrv := web.New(database, cfg.Security.JWTSecret, cfg.Server.WebHost, cfg.Server.WebPort, cfg.Server.Locale, &cfg.OAuth)
 	webSrv.SetSyncIntervalSec(cfg.Sync.Interval)
 	webSrv.SetClientIPResolver(clientIPResolver)
+	webSrv.SetAuthLimiter(authLimiter)
 	webSrv.SetNotifyHub(notifyHub)
 	// What device profiles tell clients to connect to. Not the listen ports:
 	// this deployment binds 10993/10465 behind a firewall redirect from

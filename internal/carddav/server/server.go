@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -10,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/emersion/go-vcard"
+	"github.com/yourusername/mailserver/internal/authlimit"
+	"github.com/yourusername/mailserver/internal/clientip"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/models"
 )
@@ -23,8 +26,10 @@ var hrefRe = regexp.MustCompile(`(?is)<[a-z0-9]*:?href[^>]*>(.*?)</[a-z0-9]*:?hr
 
 // Server is a CardDAV server
 type Server struct {
-	database *db.DB
-	prefix   string
+	database    *db.DB
+	prefix      string
+	authLimiter *authlimit.Limiter
+	clientIP    *clientip.Resolver
 }
 
 // New creates a new CardDAV server
@@ -32,6 +37,7 @@ func New(database *db.DB, prefix string) *Server {
 	return &Server{
 		database: database,
 		prefix:   prefix,
+		clientIP: clientip.Default(),
 	}
 }
 
@@ -79,14 +85,33 @@ func (s *Server) authenticate(r *http.Request) (*models.User, error) {
 		return nil, fmt.Errorf("no credentials")
 	}
 
+	ip := s.clientIP.FromRequest(r)
+	if !s.authLimiter.Allow(ip, username) {
+		log.Printf("CardDAV auth throttled for user: %s from %s", username, ip)
+		return nil, fmt.Errorf("invalid credentials")
+	}
+
 	// Accepts the account password or an application password — see the CalDAV
 	// server's authenticate for why a device profile carries the latter.
 	user, err := s.database.AuthenticateProtocol(username, password)
 	if err != nil {
+		if errors.Is(err, db.ErrInvalidCredentials) {
+			s.authLimiter.Failure(ip, username, password)
+		}
 		return nil, fmt.Errorf("invalid credentials")
 	}
+	s.authLimiter.Success(ip, user.Username)
 
 	return user, nil
+}
+
+// SetAuthLimiter enables failed-login throttling. r decides which proxies'
+// forwarding headers identify the client; nil keeps the loopback default.
+func (s *Server) SetAuthLimiter(l *authlimit.Limiter, r *clientip.Resolver) {
+	s.authLimiter = l
+	if r != nil {
+		s.clientIP = r
+	}
 }
 
 func (s *Server) handleOptions(w http.ResponseWriter, r *http.Request) {

@@ -11,6 +11,8 @@ import (
 	"github.com/emersion/go-message/mail"
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
+	"github.com/yourusername/mailserver/internal/authlimit"
+	"github.com/yourusername/mailserver/internal/clientip"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/logmask"
 	"github.com/yourusername/mailserver/internal/models"
@@ -18,12 +20,13 @@ import (
 
 // Session represents an SMTP session
 type Session struct {
-	database *db.DB
-	conn     *smtp.Conn
-	username string
-	userID   int64
-	from     string
-	to       []string
+	database    *db.DB
+	authLimiter *authlimit.Limiter
+	conn        *smtp.Conn
+	username    string
+	userID      int64
+	from        string
+	to          []string
 }
 
 // AuthMechanisms returns available auth mechanisms (advertised in EHLO)
@@ -47,13 +50,23 @@ func (s *Session) Auth(mech string) (sasl.Server, error) {
 func (s *Session) AuthPlain(username, password string) error {
 	log.Printf("SMTP AUTH PLAIN for user: %s", username)
 
+	ip := s.remoteIP()
+	if !s.authLimiter.Allow(ip, username) {
+		log.Printf("SMTP auth throttled for user: %s from %s", username, ip)
+		return errors.New("invalid credentials")
+	}
+
 	// Accepts the account password or an application password; also strips the
 	// @domain part some clients insist on sending.
 	user, err := s.database.AuthenticateProtocol(username, password)
 	if err != nil {
-		log.Printf("SMTP auth failed for user: %s", username)
+		if errors.Is(err, db.ErrInvalidCredentials) {
+			s.authLimiter.Failure(ip, username, password)
+		}
+		log.Printf("SMTP auth failed for user: %s from %s", username, ip)
 		return errors.New("invalid credentials")
 	}
+	s.authLimiter.Success(ip, user.Username)
 	username = user.Username
 
 	log.Printf("User %s authenticated successfully", username)
@@ -62,6 +75,14 @@ func (s *Session) AuthPlain(username, password string) error {
 	s.userID = user.ID
 
 	return nil
+}
+
+// remoteIP returns the client IP of the session, "" if unknown.
+func (s *Session) remoteIP() string {
+	if s.conn == nil || s.conn.Conn() == nil {
+		return ""
+	}
+	return clientip.FromNetAddr(s.conn.Conn().RemoteAddr())
 }
 
 // Mail is called to set the sender

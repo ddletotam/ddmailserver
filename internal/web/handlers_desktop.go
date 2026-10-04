@@ -38,15 +38,29 @@ func (s *Server) HandleDesktopLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ip := s.clientIP.FromRequest(r)
+	if !s.authLimiter.Allow(ip, req.Username) {
+		log.Printf("Desktop login throttled for user: %s from %s", req.Username, ip)
+		respondError(w, http.StatusUnauthorized, "invalid credentials")
+		return
+	}
+
 	user, err := s.database.GetUserByUsername(req.Username)
 	if err != nil {
+		s.authLimiter.Failure(ip, req.Username, req.Password)
 		respondError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
-	if !VerifyPassword(user.PasswordHash, req.Password) || user.IsBanned() {
+	if !VerifyPassword(user.PasswordHash, req.Password) {
+		s.authLimiter.Failure(ip, req.Username, req.Password)
 		respondError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
+	if user.IsBanned() {
+		respondError(w, http.StatusUnauthorized, "invalid credentials")
+		return
+	}
+	s.authLimiter.Success(ip, user.Username)
 
 	token, err := GenerateToken(user.ID, user.Username, s.jwtSecret)
 	if err != nil {

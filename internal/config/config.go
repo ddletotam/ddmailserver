@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/yourusername/mailserver/internal/authlimit"
 	"gopkg.in/yaml.v3"
 )
 
@@ -135,6 +136,10 @@ type SecurityConfig struct {
 	// X-Forwarded-Host headers are believed. Unset means loopback only
 	// (nginx on the same host); an explicit empty list trusts nobody.
 	TrustedProxies []string `yaml:"trusted_proxies"`
+
+	// AuthLimit throttles failed logins on every protocol; unset fields use
+	// authlimit.DefaultConfig.
+	AuthLimit authlimit.Config `yaml:"auth_limit"`
 }
 
 type SyncConfig struct {

@@ -264,12 +264,9 @@ func ValidateFieldLength(value string, maxLen int, fieldName string) error {
 func (s *Server) RateLimitMiddleware(rl *RateLimiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Extract IP from RemoteAddr or X-Forwarded-For
-			ip := r.RemoteAddr
-			if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-				ip = strings.Split(forwarded, ",")[0]
-			}
-			ip = strings.TrimSpace(strings.Split(ip, ":")[0])
+			// Forwarding headers count only from a trusted proxy; IPv6
+			// addresses keep their colons (and their own bucket).
+			ip := s.clientIP.FromRequest(r)
 
 			if !rl.Allow(ip) {
 				log.Printf("Rate limit exceeded for IP: %s on %s", ip, r.URL.Path)

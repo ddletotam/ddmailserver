@@ -9,6 +9,7 @@ import (
 
 	"github.com/emersion/go-imap-idle"
 	"github.com/emersion/go-imap/server"
+	"github.com/yourusername/mailserver/internal/authlimit"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/notify"
 	"github.com/yourusername/mailserver/internal/search"
@@ -226,6 +227,11 @@ func (ln *tcpKeepAliveListener) Accept() (net.Conn, error) {
 func (s *Server) Stop() error {
 	log.Printf("Stopping IMAP server")
 	return s.imapServer.Close()
+}
+
+// SetAuthLimiter enables failed-login throttling. Call before Start.
+func (s *Server) SetAuthLimiter(l *authlimit.Limiter) {
+	s.backend.authLimiter = l
 }
 
 // SetSearchIndexer sets the Meilisearch indexer for full-text search

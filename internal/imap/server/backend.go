@@ -7,6 +7,8 @@ import (
 
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/backend"
+	"github.com/yourusername/mailserver/internal/authlimit"
+	"github.com/yourusername/mailserver/internal/clientip"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/notify"
 	"github.com/yourusername/mailserver/internal/search"
@@ -19,6 +21,8 @@ type Backend struct {
 	updates       chan backend.Update
 	searchIndexer *search.Indexer
 	bodyCache     *bodyCache
+	// authLimiter throttles failed logins; nil disables throttling.
+	authLimiter *authlimit.Limiter
 }
 
 // NewBackend creates a new IMAP backend
@@ -143,13 +147,26 @@ func (b *Backend) notifyFlags(username, mailbox string, seqNum, uid uint32, flag
 func (b *Backend) Login(connInfo *imap.ConnInfo, username, password string) (backend.User, error) {
 	log.Printf("IMAP login attempt for user: %s", username)
 
+	var ip string
+	if connInfo != nil {
+		ip = clientip.FromNetAddr(connInfo.RemoteAddr)
+	}
+	if !b.authLimiter.Allow(ip, username) {
+		log.Printf("IMAP login throttled for user: %s from %s", username, ip)
+		return nil, errors.New("invalid credentials")
+	}
+
 	// Accepts the account password or an application password; also strips the
 	// @domain part, which New Outlook and some other clients insist on sending.
 	user, err := b.database.AuthenticateProtocol(username, password)
 	if err != nil {
-		log.Printf("IMAP login failed for user: %s", username)
+		if errors.Is(err, db.ErrInvalidCredentials) {
+			b.authLimiter.Failure(ip, username, password)
+		}
+		log.Printf("IMAP login failed for user: %s from %s", username, ip)
 		return nil, errors.New("invalid credentials")
 	}
+	b.authLimiter.Success(ip, user.Username)
 	username = user.Username
 
 	log.Printf("User %s logged in successfully", username)

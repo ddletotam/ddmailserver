@@ -58,10 +58,19 @@ func (s *Server) HandleForgotPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The recovery key is a credential like a password: throttle guessing.
+	ip := s.clientIP.FromRequest(r)
+	if !s.authLimiter.Allow(ip, req.Username) {
+		log.Printf("Password recovery throttled for user: %s from %s", req.Username, ip)
+		respondError(w, http.StatusUnauthorized, "invalid username or recovery key")
+		return
+	}
+
 	// Get user by username
 	user, err := s.database.GetUserByUsername(req.Username)
 	if err != nil {
 		log.Printf("User not found: %v", err)
+		s.authLimiter.Failure(ip, req.Username, req.RecoveryKey)
 		respondError(w, http.StatusUnauthorized, "invalid username or recovery key")
 		return
 	}
@@ -69,6 +78,7 @@ func (s *Server) HandleForgotPassword(w http.ResponseWriter, r *http.Request) {
 	// Verify recovery key
 	if !VerifyRecoveryKey(req.RecoveryKey, user.RecoveryKeyHash) {
 		log.Printf("Invalid recovery key for user: %s", req.Username)
+		s.authLimiter.Failure(ip, req.Username, req.RecoveryKey)
 		respondError(w, http.StatusUnauthorized, "invalid username or recovery key")
 		return
 	}
