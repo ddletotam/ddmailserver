@@ -1,7 +1,6 @@
 package importer
 
 import (
-	"database/sql"
 	"fmt"
 	"log"
 	"strings"
@@ -23,49 +22,18 @@ import (
 // raw ical_data but never populated the structured attendees table — leaving
 // the desktop's RSVP bar permanently hidden for externally-synced meetings.
 func BackfillAttendees(database *db.DB) error {
-	rows, err := database.Query(`
-		SELECT e.id, e.ical_data, e.organizer_email, e.organizer_name
-		FROM calendar_events e
-		WHERE e.ical_data IS NOT NULL AND e.ical_data != ''
-		  AND NOT EXISTS (SELECT 1 FROM calendar_attendees a WHERE a.event_id = e.id)
-	`)
+	todo, err := database.GetAttendeeBackfillCandidates()
 	if err != nil {
-		return fmt.Errorf("query events for backfill: %w", err)
-	}
-	defer rows.Close()
-
-	type pending struct {
-		id             int64
-		icalData       string
-		organizerEmail string
-		organizerName  string
-	}
-	var todo []pending
-	for rows.Next() {
-		var p pending
-		var orgEmail, orgName sql.NullString
-		if err := rows.Scan(&p.id, &p.icalData, &orgEmail, &orgName); err != nil {
-			return fmt.Errorf("scan event row: %w", err)
-		}
-		if orgEmail.Valid {
-			p.organizerEmail = orgEmail.String
-		}
-		if orgName.Valid {
-			p.organizerName = orgName.String
-		}
-		todo = append(todo, p)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate event rows: %w", err)
+		return fmt.Errorf("attendee backfill: %w", err)
 	}
 
 	var backfilled, organizerFilled int
 	for _, p := range todo {
 		// Fast skip: if no ATTENDEE substring AND organizer already set,
 		// there's nothing to do for this row.
-		hasAttendee := strings.Contains(p.icalData, "ATTENDEE")
-		hasOrganizer := strings.Contains(p.icalData, "ORGANIZER")
-		needOrganizer := p.organizerEmail == "" && hasOrganizer
+		hasAttendee := strings.Contains(p.ICalData, "ATTENDEE")
+		hasOrganizer := strings.Contains(p.ICalData, "ORGANIZER")
+		needOrganizer := p.OrganizerEmail == "" && hasOrganizer
 		if !hasAttendee && !needOrganizer {
 			continue
 		}
@@ -75,7 +43,7 @@ func BackfillAttendees(database *db.DB) error {
 		// VTIMEZONE preambles that confuse the strict parser).
 		var attendees []models.CalendarAttendee
 		var orgEmail, orgName string
-		if cal, err := ical.NewDecoder(strings.NewReader(p.icalData)).Decode(); err == nil {
+		if cal, err := ical.NewDecoder(strings.NewReader(p.ICalData)).Decode(); err == nil {
 			for _, ev := range cal.Events() {
 				if hasAttendee {
 					attendees = ParseAttendees(&ev)
@@ -87,27 +55,24 @@ func BackfillAttendees(database *db.DB) error {
 			}
 		} else {
 			if hasAttendee {
-				attendees = ParseAttendeesSimple(p.icalData)
+				attendees = ParseAttendeesSimple(p.ICalData)
 			}
 			if needOrganizer {
-				orgEmail, orgName = ParseOrganizerSimple(p.icalData)
+				orgEmail, orgName = ParseOrganizerSimple(p.ICalData)
 			}
 		}
 
 		if len(attendees) > 0 {
-			if err := database.ReplaceAttendees(p.id, AttendeePtrs(attendees)); err != nil {
-				log.Printf("backfill: ReplaceAttendees failed for event %d: %v", p.id, err)
+			if err := database.ReplaceAttendees(p.EventID, AttendeePtrs(attendees)); err != nil {
+				log.Printf("backfill: ReplaceAttendees failed for event %d: %v", p.EventID, err)
 				continue
 			}
 			backfilled++
 		}
 
 		if needOrganizer && orgEmail != "" {
-			if _, err := database.Exec(
-				`UPDATE calendar_events SET organizer_email = $1, organizer_name = $2 WHERE id = $3`,
-				orgEmail, orgName, p.id,
-			); err != nil {
-				log.Printf("backfill: organizer update failed for event %d: %v", p.id, err)
+			if err := database.SetEventOrganizer(p.EventID, orgEmail, orgName); err != nil {
+				log.Printf("backfill: organizer update failed for event %d: %v", p.EventID, err)
 				continue
 			}
 			organizerFilled++
