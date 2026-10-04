@@ -44,9 +44,6 @@ const WRAP_HEAD: &str = r#"<!DOCTYPE html><html><head><meta charset="utf-8"><sty
         .ddm-wide { max-width: 100%; }
         .ddm-bubble-out { border-bottom-right-radius: 4px; }
         .ddm-bubble-in  { border-bottom-left-radius: 4px; }
-        .ddm-bubble * { max-width: 100% !important; border: 0 !important; background-image: none !important; }
-        .ddm-bubble table, .ddm-bubble td, .ddm-bubble th { border-collapse: collapse !important; }
-        .ddm-bubble img { max-width: 100% !important; height: auto !important; }
         a { color: #10b981; }
         .ddm-time { text-align: right; font-size: 11px; color: #8a97a5;
                  margin-top: 4px; user-select: none; }

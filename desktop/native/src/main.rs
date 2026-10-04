@@ -1469,7 +1469,7 @@ fn attachment_chips(b: &MessageBody) -> String {
 /// Bump whenever the bubble/render HTML template or its CSS changes: the
 /// texture cache keys renders by fnv1a(body.html) only, so without this a
 /// template/CSS edit would keep serving stale cached bitmaps (RAM + disk).
-const RENDER_TEMPLATE_EPOCH: u64 = 8;
+const RENDER_TEMPLATE_EPOCH: u64 = 9;
 
 /// ВСЕ классы обвязки пузыря пишутся с этим префиксом. Документ пузыря —
 /// общая песочница для нашей вёрстки и присланного HTML, а письма сплошь
@@ -1480,8 +1480,10 @@ const RENDER_TEMPLATE_EPOCH: u64 = 8;
 /// вправо и снимал с неё выделение.
 ///
 /// Инвариант держит тест `bubble_css_tests::chrome_classes_are_namespaced`.
-/// Намеренно достают до письма только два селектора: `.ddm-bubble *` (сбросы
-/// max-width/border/background-image) и `a` (ссылки в цвет акцента).
+/// Намеренно достаёт до письма только один селектор: `a` (ссылки в цвет
+/// акцента). Сбросы `.ddm-bubble * {… !important}` из эпохи WebView убраны:
+/// emlrender сам держит ширину, а с комбинаторами они стирали письму рамки,
+/// градиенты и авторские max-width.
 const CSS_NS: &str = "ddm";
 
 fn bubble_template(is_outgoing: bool, time: &str, inner: &str) -> String {
@@ -1528,9 +1530,6 @@ fn bubble_template_wide(is_outgoing: bool, time: &str, inner: &str, wide: bool) 
         .{CSS_NS}-wide {{ max-width: 100%; }}
         .{CSS_NS}-bubble-out {{ border-bottom-right-radius: 4px; }}
         .{CSS_NS}-bubble-in  {{ border-bottom-left-radius: 4px; }}
-        .{CSS_NS}-bubble * {{ max-width: 100% !important; border: 0 !important; background-image: none !important; }}
-        .{CSS_NS}-bubble table, .{CSS_NS}-bubble td, .{CSS_NS}-bubble th {{ border-collapse: collapse !important; }}
-        .{CSS_NS}-bubble img {{ max-width: 100% !important; height: auto !important; }}
         a {{ color: #10b981; }}
         .{CSS_NS}-atts {{ margin-top: 8px; }}
         .{CSS_NS}-att {{ display: inline-block; background: rgba(0,0,0,0.06); border-radius: 8px;
