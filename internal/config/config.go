@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/yourusername/mailserver/internal/authlimit"
 	"gopkg.in/yaml.v3"
@@ -96,7 +97,19 @@ type PublicEndpoints struct {
 	IMAPPort  int    `yaml:"imap_port"`  // defaults to 993 (implicit TLS)
 	SMTPPort  int    `yaml:"smtp_port"`  // defaults to 465 (implicit TLS)
 	HTTPSPort int    `yaml:"https_port"` // defaults to 443, used for CalDAV/CardDAV
+
+	// SecureCookies sets the Secure flag on session and OAuth cookies:
+	// "auto" (default) marks them Secure unless the request is known to be
+	// plain HTTP (see web.secureCookie); "true"/"false" force it.
+	SecureCookies string `yaml:"secure_cookies"`
 }
+
+// Valid values of PublicEndpoints.SecureCookies.
+const (
+	SecureCookiesAuto  = "auto"
+	SecureCookiesTrue  = "true"
+	SecureCookiesFalse = "false"
+)
 
 // PublicWithDefaults resolves the public endpoints, filling anything the
 // config left unset with the standard port for that protocol.
@@ -113,6 +126,10 @@ func (c *Config) PublicWithDefaults() PublicEndpoints {
 	}
 	if p.HTTPSPort == 0 {
 		p.HTTPSPort = 443
+	}
+	p.SecureCookies = strings.ToLower(strings.TrimSpace(p.SecureCookies))
+	if p.SecureCookies == "" {
+		p.SecureCookies = SecureCookiesAuto
 	}
 	return p
 }
@@ -207,6 +224,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Workers.QueueSize < 1 {
 		return fmt.Errorf("queue size must be at least 1")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Server.Public.SecureCookies)) {
+	case "", SecureCookiesAuto, SecureCookiesTrue, SecureCookiesFalse:
+	default:
+		return fmt.Errorf("server.public.secure_cookies must be auto, true or false, got %q", c.Server.Public.SecureCookies)
 	}
 	return nil
 }

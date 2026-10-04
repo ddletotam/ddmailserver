@@ -36,3 +36,37 @@ security:
 		t.Fatal("unset trusted_proxies must stay nil (selects the loopback default)")
 	}
 }
+
+func TestSecureCookiesConfig(t *testing.T) {
+	// Unquoted true/false are YAML booleans; they must still land in the
+	// string field.
+	for src, want := range map[string]string{"true": "true", "false": "false", "auto": "auto", `"TRUE"`: "true"} {
+		var cfg Config
+		if err := yaml.Unmarshal([]byte("server:\n  public:\n    secure_cookies: "+src+"\n"), &cfg); err != nil {
+			t.Fatalf("%s: %v", src, err)
+		}
+		if got := cfg.PublicWithDefaults().SecureCookies; got != want {
+			t.Errorf("%s: got %q, want %q", src, got, want)
+		}
+	}
+	var cfg Config
+	if got := cfg.PublicWithDefaults().SecureCookies; got != SecureCookiesAuto {
+		t.Fatalf("default: got %q, want auto", got)
+	}
+}
+
+func TestValidateRejectsBadSecureCookies(t *testing.T) {
+	cfg := Config{
+		Server:   ServerConfig{IMAPPort: 1, SMTPPort: 1, WebPort: 1, Public: PublicEndpoints{SecureCookies: "yes"}},
+		Database: DatabaseConfig{Host: "h", DBName: "d"},
+		Security: SecurityConfig{JWTSecret: "s", EncryptionKey: "0123456789abcdef0123456789abcdef"},
+		Workers:  WorkersConfig{CPULimit: 1, QueueSize: 1},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("secure_cookies: yes accepted")
+	}
+	cfg.Server.Public.SecureCookies = "auto"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
+}

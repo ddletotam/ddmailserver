@@ -17,6 +17,13 @@ server:
   # Web UI language (en, ru)
   locale: "en"
 
+  # Internet-facing endpoints (device profiles, OAuth redirect URIs, cookies).
+  # public:
+  #   hostname: "mail.example.com"   # defaults to server.domain
+  #   # Secure flag on session/OAuth cookies: auto (default: Secure unless the
+  #   # request is known to be plain HTTP or local), true, or false.
+  #   secure_cookies: auto
+
 database:
   host: "localhost"
   port: 5432

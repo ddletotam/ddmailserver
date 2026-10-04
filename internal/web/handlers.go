@@ -138,7 +138,7 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	log.Printf("User registered: %s", user.Username)
 
 	// Set session cookie for web UI
-	s.SetSessionCookie(w, token)
+	s.SetSessionCookie(w, r, token)
 
 	// Set recovery key in secure temporary cookie (one-time use)
 	// This avoids exposing the key in URL parameters or logs
@@ -229,7 +229,7 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	log.Printf("User logged in: %s", user.Username)
 
 	// Set session cookie for web UI
-	s.SetSessionCookie(w, token)
+	s.SetSessionCookie(w, r, token)
 
 	// For HTMX requests, return empty response - JS will handle redirect
 	if r.Header.Get("HX-Request") == "true" {
@@ -673,13 +673,7 @@ func (s *Server) HandleDeleteUserAccount(w http.ResponseWriter, r *http.Request)
 
 	log.Printf("User account deleted: %d", userID)
 
-	// Clear session cookie
-	http.SetCookie(w, &http.Cookie{
-		Name:   "session",
-		Value:  "",
-		Path:   "/",
-		MaxAge: -1,
-	})
+	s.clearSessionCookie(w, r)
 
 	// Redirect to login page
 	w.Header().Set("HX-Redirect", "/login")

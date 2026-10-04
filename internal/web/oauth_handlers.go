@@ -33,7 +33,7 @@ func (s *Server) HandleGoogleOAuthStart(w http.ResponseWriter, r *http.Request) 
 		MaxAge:   600, // 10 minutes
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode, // Lax needed for OAuth redirect
-		Secure:   r.TLS != nil,
+		Secure:   s.secureCookie(r),
 	})
 
 	// Redirect to Google
@@ -291,7 +291,7 @@ func (s *Server) HandleMicrosoftOAuthStart(w http.ResponseWriter, r *http.Reques
 		MaxAge:   600, // 10 minutes
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode, // Lax needed for OAuth redirect
-		Secure:   r.TLS != nil,
+		Secure:   s.secureCookie(r),
 	})
 
 	// Redirect to Microsoft
@@ -555,7 +555,7 @@ func (s *Server) HandleGoogleCalendarOAuthStart(w http.ResponseWriter, r *http.R
 		MaxAge:   600, // 10 minutes
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil,
+		Secure:   s.secureCookie(r),
 	})
 
 	// Build redirect URI for calendar callback
@@ -569,7 +569,7 @@ func (s *Server) HandleGoogleCalendarOAuthStart(w http.ResponseWriter, r *http.R
 		MaxAge:   600,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil,
+		Secure:   s.secureCookie(r),
 	})
 
 	// Redirect to Google
@@ -697,14 +697,14 @@ func (s *Server) HandleGoogleContactsOAuthStart(w http.ResponseWriter, r *http.R
 
 	http.SetCookie(w, &http.Cookie{
 		Name: "oauth_state", Value: state, Path: "/",
-		MaxAge: 600, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil,
+		MaxAge: 600, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.secureCookie(r),
 	})
 
 	redirectURI := s.publicBaseURL(r) + "/oauth/google/contacts/callback"
 
 	http.SetCookie(w, &http.Cookie{
 		Name: "oauth_redirect_uri", Value: redirectURI, Path: "/",
-		MaxAge: 600, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil,
+		MaxAge: 600, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.secureCookie(r),
 	})
 
 	authURL := s.googleOAuth.GetContactsAuthURL(state, redirectURI)

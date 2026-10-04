@@ -777,12 +777,6 @@ func (s *Server) HandleSettingsPage(w http.ResponseWriter, r *http.Request) {
 
 // HandleLogout logs out the user
 func (s *Server) HandleLogout(w http.ResponseWriter, r *http.Request) {
-	// Clear session cookie
-	http.SetCookie(w, &http.Cookie{
-		Name:   "session",
-		Value:  "",
-		Path:   "/",
-		MaxAge: -1,
-	})
+	s.clearSessionCookie(w, r)
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }

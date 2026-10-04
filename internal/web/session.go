@@ -3,7 +3,8 @@ package web
 import (
 	"context"
 	"net/http"
-	"strings"
+
+	"github.com/yourusername/mailserver/internal/config"
 
 	"github.com/yourusername/mailserver/internal/models"
 )
@@ -99,7 +100,7 @@ func (s *Server) GetUserFromContext(ctx context.Context) *models.User {
 }
 
 // SetSessionCookie sets the session cookie with JWT
-func (s *Server) SetSessionCookie(w http.ResponseWriter, token string) {
+func (s *Server) SetSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "session",
 		Value:    token,
@@ -107,13 +108,48 @@ func (s *Server) SetSessionCookie(w http.ResponseWriter, token string) {
 		MaxAge:   86400 * 7, // 7 days
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode, // Lax allows OAuth redirects while protecting against CSRF
-		Secure:   s.isProduction(),     // Enable in production with HTTPS
+		Secure:   s.secureCookie(r),
 	})
 }
 
-// isProduction checks if running in production mode
-func (s *Server) isProduction() bool {
-	// Check if not running on localhost (indicates production)
-	return s.addr != "localhost" && s.addr != "127.0.0.1" &&
-		!strings.HasPrefix(s.addr, "localhost:") && !strings.HasPrefix(s.addr, "127.0.0.1:")
+// clearSessionCookie expires the session cookie.
+func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   s.secureCookie(r),
+	})
+}
+
+// secureCookie decides the Secure flag for every cookie this server sets
+// (session, OAuth state and redirect URI), from one rule:
+//
+//   - server.public.secure_cookies "true"/"false" forces it;
+//   - "auto" (default): Secure when the client is known to use HTTPS (TLS
+//     here, or X-Forwarded-Proto: https from a trusted proxy). When the
+//     scheme is unknown — e.g. a proxy that sends no X-Forwarded-Proto —
+//     it stays Secure unless the request addresses a loopback host, so
+//     production never silently loses the flag; only an explicit
+//     "http" from a trusted proxy or local development turns it off.
+//
+// The flag used to come from r.TLS alone (never set behind nginx) for the
+// OAuth cookies and from the listen address for the session cookie.
+func (s *Server) secureCookie(r *http.Request) bool {
+	switch s.publicEndpoints.SecureCookies {
+	case config.SecureCookiesTrue:
+		return true
+	case config.SecureCookiesFalse:
+		return false
+	}
+	switch s.clientIP.RequestScheme(r) {
+	case "https":
+		return true
+	case "http":
+		return false
+	}
+	return !isLoopbackName(hostWithoutPort(r.Host))
 }
