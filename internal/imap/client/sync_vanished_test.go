@@ -243,6 +243,7 @@ type vanishEnv struct {
 	acc      *fakeAccount
 	tag      string
 	notices  []ExpungeNotice
+	last     vanishStats
 }
 
 func newVanishEnv(t *testing.T) *vanishEnv {
@@ -293,6 +294,7 @@ func (e *vanishEnv) cycle() {
 	if err := task.syncAllRemoteFolders(context.Background(), e.acc, e.inbox); err != nil {
 		e.t.Fatalf("sync: %v", err)
 	}
+	e.last = task.vanished
 }
 
 // state reports (soft_deleted, remote_folder, remote_uid) of a message.
@@ -353,6 +355,14 @@ func TestUpstreamDeletionCycle(t *testing.T) {
 	e.cycle()
 	e.wantVault("a")
 	e.wantLive("b", "c", "d", "e", "x")
+	if e.last.removed != 1 {
+		t.Fatalf("summary: %+v, want 1 removed", e.last)
+	}
+	var kind int
+	if err := e.database.QueryRow(`SELECT kind FROM message_changes WHERE user_id = $1 AND message_id = $2
+		ORDER BY seq DESC LIMIT 1`, e.account.UserID, e.mid("a")).Scan(&kind); err != nil || kind != 2 {
+		t.Fatalf("no delete tombstone in the change journal: kind=%d err=%v", kind, err)
+	}
 	if len(e.notices) != 1 || e.notices[0].FolderID != e.inbox.ID || len(e.notices[0].SeqNums) != 1 {
 		t.Fatalf("expunge notices: %+v", e.notices)
 	}
@@ -363,6 +373,9 @@ func TestUpstreamDeletionCycle(t *testing.T) {
 	e.acc.move("INBOX", "Archive", e.mid("b"))
 	e.cycle()
 	e.wantLive("x", "b")
+	if e.last.moved != 2 {
+		t.Fatalf("moves counted: %+v, want 2", e.last)
+	}
 	if _, f, _ := e.state("b"); f != "Archive" {
 		t.Fatalf("b not re-pointed to Archive: %q", f)
 	}
@@ -448,6 +461,9 @@ func TestUpstreamDeletionMassGuard(t *testing.T) {
 	}
 	if len(e.notices) != 0 {
 		t.Fatalf("notices sent for held deletes: %+v", e.notices)
+	}
+	if e.last.held != 25 || e.last.removed != 0 {
+		t.Fatalf("summary: %+v, want 25 held", e.last)
 	}
 
 	// A folder gone from LIST entirely: messages stay.

@@ -122,7 +122,11 @@ type folderSyncResult struct {
 // syncOneFolder pulls one remote mailbox incrementally (see the file
 // comment) and dispatches new messages through saveMessageToInbox with the
 // appropriate folder role.
-func (t *SyncTask) syncOneFolder(ctx context.Context, c remoteMailbox, localInbox *models.Folder, name string, class folderClass) (folderSyncResult, error) {
+//
+// before is the account's rows pointing at this folder, snapshotted at the
+// start of the cycle (before any folder of the cycle could re-point them);
+// nil = snapshot it now.
+func (t *SyncTask) syncOneFolder(ctx context.Context, c remoteMailbox, localInbox *models.Folder, name string, class folderClass, before map[uint32]db.RemoteMessageRef) (folderSyncResult, error) {
 	var res folderSyncResult
 	mbox, err := c.SelectFolder(name)
 	if err != nil {
@@ -139,14 +143,13 @@ func (t *SyncTask) syncOneFolder(ctx context.Context, c remoteMailbox, localInbo
 		res.fullReason = plan.reason
 	}
 	// Rows pointing at this folder before the run: the baseline the
-	// vanished-upstream check compares against. Only taken when the run can
-	// prove absence — by UID under the same UIDVALIDITY, or by Message-ID
-	// after a full pass that follows a UIDVALIDITY change. A first pass (no
-	// state) or a server without UIDVALIDITY proves nothing.
-	var before map[uint32]db.RemoteMessageRef
+	// vanished-upstream check compares against. Absence can be proven by UID
+	// under the same UIDVALIDITY, or by Message-ID after a full pass that
+	// follows a UIDVALIDITY change. A first pass (no state) or a server
+	// without UIDVALIDITY proves nothing.
 	byUID := !plan.full
 	byMessageID := plan.full && st != nil && mbox.UidValidity != 0
-	if byUID || byMessageID {
+	if (byUID || byMessageID) && before == nil {
 		if before, err = t.database.GetRemoteMessageRefs(t.account.ID, name); err != nil {
 			log.Printf("Sync [%s] %s: %v — upstream deletions not checked this run", t.account.Email, name, err)
 			before, byUID, byMessageID = nil, false, false

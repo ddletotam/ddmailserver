@@ -52,6 +52,7 @@ type SyncTask struct {
 	// seen anywhere has not vanished (sync_vanished.go).
 	seenIDs           map[string]bool
 	expungeNotifyFunc func(ExpungeNotice)
+	vanished          vanishStats // this run's upstream-deletion summary
 	// Called to force-refresh the OAuth token when auth fails. The callback
 	// is expected to update the account in place (access token, expiry).
 	refreshOAuth func(account *models.Account) error
@@ -183,12 +184,24 @@ func (t *SyncTask) syncAllRemoteFolders(ctx context.Context, client remoteAccoun
 	var presences []folderPresence
 	synced := make([]string, 0, len(jobs))
 	allComplete := true
+	// Baselines of every folder up front: a message moved upstream into a
+	// folder synced earlier in this cycle is re-pointed before its old folder
+	// runs, and must still show up there as "moved".
+	baselines := make(map[string]map[uint32]db.RemoteMessageRef, len(jobs))
+	for _, j := range jobs {
+		refs, err := t.database.GetRemoteMessageRefs(t.account.ID, j.name)
+		if err != nil {
+			log.Printf("Sync [%s] %s: %v", t.account.Email, j.name, err)
+			continue
+		}
+		baselines[j.name] = refs
+	}
 	for _, j := range jobs {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		synced = append(synced, j.name)
-		res, err := t.syncOneFolder(ctx, client, localInbox, j.name, j.class)
+		res, err := t.syncOneFolder(ctx, client, localInbox, j.name, j.class, baselines[j.name])
 		if err != nil {
 			allComplete = false
 		} else if res.presence.mode != presenceNone {
@@ -210,6 +223,7 @@ func (t *SyncTask) syncAllRemoteFolders(ctx context.Context, client remoteAccoun
 	if ctx.Err() == nil {
 		vs = t.reconcileVanished(ctx, client, mailboxes, synced, presences, allComplete)
 	}
+	t.vanished = vs
 	full := "none"
 	if len(fullPasses) > 0 {
 		full = strings.Join(fullPasses, ", ")

@@ -414,7 +414,7 @@ func (t *SyncTask) deleteVanished(ctx context.Context, victims []goneRef, cur ma
 	if len(touched) == 0 || t.expungeNotifyFunc == nil {
 		return
 	}
-	user, err := t.database.GetUserByID(t.account.UserID)
+	username, err := t.database.GetUsernameByID(t.account.UserID)
 	if err != nil {
 		log.Printf("Sync [%s]: expunge notice: %v", t.account.Email, err)
 		return
@@ -428,7 +428,7 @@ func (t *SyncTask) deleteVanished(ctx context.Context, victims []goneRef, cur ma
 		seqs := removed[folderID]
 		sort.Slice(seqs, func(i, j int) bool { return seqs[i] > seqs[j] })
 		t.expungeNotifyFunc(ExpungeNotice{
-			Username: user.Username, Mailbox: folder.Name, FolderID: folderID, SeqNums: seqs,
+			Username: username, Mailbox: folder.Name, FolderID: folderID, SeqNums: seqs,
 		})
 	}
 }

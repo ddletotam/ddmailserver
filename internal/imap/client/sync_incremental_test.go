@@ -256,7 +256,7 @@ func TestSyncOneFolderIncremental(t *testing.T) {
 		t.Helper()
 		task := NewSyncTask(account, database)
 		remote.calls = nil
-		res, err := task.syncOneFolder(context.Background(), remote, inbox, "INBOX", folderInbox)
+		res, err := task.syncOneFolder(context.Background(), remote, inbox, "INBOX", folderInbox, nil)
 		if err != nil {
 			t.Fatalf("syncOneFolder: %v", err)
 		}

@@ -72,6 +72,20 @@ func (db *DB) GetUserByUsername(username string) (*models.User, error) {
 	return user, nil
 }
 
+// GetUsernameByID returns just the login name of a user — what notification
+// routing needs, without the rest of the row.
+func (db *DB) GetUsernameByID(id int64) (string, error) {
+	var name string
+	err := db.QueryRow(`SELECT username FROM users WHERE id = $1`, id).Scan(&name)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("user %d not found", id)
+	}
+	if err != nil {
+		return "", fmt.Errorf("get username of user %d: %w", id, err)
+	}
+	return name, nil
+}
+
 // GetUserByID retrieves a user by ID
 func (db *DB) GetUserByID(id int64) (*models.User, error) {
 	user := &models.User{}
