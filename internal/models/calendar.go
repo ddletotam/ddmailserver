@@ -41,6 +41,10 @@ type CalendarSource struct {
 	LastError    string `json:"last_error,omitempty"`
 	SyncToken    string `json:"-"`
 
+	// Set while the CalDAV server rejects the credentials (auth_backoff).
+	// Not a column: filled by handlers that show status.
+	AuthFailure *AuthFailureView `json:"auth_failure,omitempty"`
+
 	Color     string `json:"color"`
 	CreatedAt int64  `json:"created_at"`
 	UpdatedAt int64  `json:"updated_at"`

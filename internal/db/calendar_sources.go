@@ -265,7 +265,8 @@ func (db *DB) UpdateCalendarSource(source *models.CalendarSource) error {
 		return fmt.Errorf("failed to update calendar source: %w", err)
 	}
 
-	return nil
+	// Edited by the user — possibly a new password: attempt on the next cycle.
+	return db.ResetAuthBackoff(models.AuthSubjectCalDAV, source.ID)
 }
 
 // DeleteCalendarSource deletes a calendar source (cascades to calendars and events)

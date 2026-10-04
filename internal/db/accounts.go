@@ -255,7 +255,11 @@ func updateAccount(q querier, encryptionKey string, account *models.Account) err
 		return fmt.Errorf("failed to update account: %w", err)
 	}
 
-	return nil
+	// Every caller is a user editing the account (web form, API, .mobileconfig
+	// import, enable/disable): whatever made the provider reject the old
+	// credentials may be fixed now, so the next cycle tries at once instead of
+	// sitting out the rest of an hour-long pause.
+	return resetAccountAuthBackoff(q, account.ID)
 }
 
 // DeleteAccount deletes an account

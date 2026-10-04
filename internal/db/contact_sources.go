@@ -254,7 +254,8 @@ func (db *DB) UpdateContactSource(source *models.ContactSource) error {
 		return fmt.Errorf("failed to update contact source: %w", err)
 	}
 
-	return nil
+	// Edited by the user — possibly a new password: attempt on the next cycle.
+	return db.ResetAuthBackoff(models.AuthSubjectCardDAV, source.ID)
 }
 
 // DeleteContactSource deletes a contact source and all its address books/contacts

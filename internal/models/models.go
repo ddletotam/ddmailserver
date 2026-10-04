@@ -88,6 +88,11 @@ type Account struct {
 	LastSyncError     string `json:"last_sync_error,omitempty"`
 	ConsecutiveErrors int    `json:"consecutive_errors"`
 
+	// Credentials the provider currently rejects (IMAP and/or SMTP), with the
+	// pause before the next attempt. Not a column: filled from auth_backoff
+	// by handlers that show account status (db.AttachAccountAuthFailures).
+	AuthFailures []AuthFailureView `json:"auth_failures,omitempty"`
+
 	// OAuth2 fields
 	AuthType          string `json:"auth_type"` // "password" or "oauth2_google"
 	OAuthAccessToken  string `json:"-"`         // Encrypted in DB

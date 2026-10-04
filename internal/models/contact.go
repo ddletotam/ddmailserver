@@ -32,6 +32,10 @@ type ContactSource struct {
 	LastSync     int64  `json:"last_sync,omitempty"`
 	LastError    string `json:"last_error,omitempty"`
 
+	// Set while the CardDAV server rejects the credentials (auth_backoff).
+	// Not a column: filled by handlers that show status.
+	AuthFailure *AuthFailureView `json:"auth_failure,omitempty"`
+
 	CreatedAt int64 `json:"created_at"`
 	UpdatedAt int64 `json:"updated_at"`
 }
