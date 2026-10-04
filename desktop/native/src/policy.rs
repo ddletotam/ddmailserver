@@ -62,6 +62,25 @@ impl Policy {
         let k = host.to_lowercase();
         self.media_hosts.contains(&k) || self.allow_domains.contains(&k)
     }
+    /// The gate the image loader asks before it contacts a host — the one
+    /// that actually keeps a tracking pixel offline. `block_external`'s
+    /// rewrite only feeds the «Медиа…» menu; whatever it misses, this still
+    /// refuses. Hosts arrive as the loader's URL parser spells them
+    /// (lowercase, IDNA, no port), so the allow-list is normalised the same
+    /// way once, here, instead of trusting both sides to agree.
+    pub fn media_gate(&self, sender: &str) -> impl Fn(&str) -> bool + Send + Sync + 'static {
+        let all = self.media_allowed(sender);
+        let hosts: HashSet<String> = if all {
+            HashSet::new()
+        } else {
+            self.media_hosts
+                .iter()
+                .chain(self.allow_domains.iter())
+                .filter_map(|h| emlrender::net::normalize_host(h))
+                .collect()
+        };
+        move |host: &str| all || hosts.contains(&host.to_ascii_lowercase())
+    }
     /// External <script src> from this host may survive sanitization.
     pub fn script_host_allowed(&self, host: &str) -> bool {
         self.allow_all || self.allow_all_scripts || self.script_hosts.contains(&host.to_lowercase())
@@ -165,5 +184,38 @@ pub fn save(policy: &Policy) {
     }
     if let Ok(json) = serde_json::to_vec_pretty(policy) {
         let _ = fs::write(&path, json);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_gate_refuses_by_default() {
+        let gate = Policy::default().media_gate("news@sender.example");
+        assert!(!gate("t.example"));
+        assert!(!gate("127.0.0.1"));
+    }
+
+    #[test]
+    fn media_gate_follows_sender_and_all_switches() {
+        let mut p = Policy::default();
+        p.toggle_media("News@Sender.example");
+        assert!(p.media_gate("news@sender.example")("anything.example"));
+        assert!(!p.media_gate("other@sender.example")("anything.example"));
+        let all = Policy { allow_all_media: true, ..Policy::default() };
+        assert!(all.media_gate("x@y")("anything.example"));
+    }
+
+    #[test]
+    fn media_gate_hosts_are_normalised_like_the_loader() {
+        let mut p = Policy::default();
+        p.toggle_media_host("CDN.Example:8443");
+        p.allow_domains.insert("пример.рф".to_string());
+        let gate = p.media_gate("x@y");
+        assert!(gate("cdn.example"));
+        assert!(gate("xn--e1afmkfd.xn--p1ai"));
+        assert!(!gate("evil.example"));
     }
 }

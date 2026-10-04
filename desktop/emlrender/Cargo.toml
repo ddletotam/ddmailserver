@@ -44,9 +44,12 @@ reqwest = { version = "0.12", default-features = false, features = [
     "blocking",
     "rustls-tls-native-roots",
 ], optional = true }
+# Host classification for the address check (IP literal vs. name); already in
+# the graph through reqwest.
+url = { version = "2", optional = true }
 
 [features]
-net = ["dep:reqwest"]
+net = ["dep:reqwest", "dep:url"]
 
 [dev-dependencies]
 # for the `dump` example (render samples/*.html → out/*.png)

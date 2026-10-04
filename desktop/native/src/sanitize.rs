@@ -128,7 +128,12 @@ pub fn first_external_hosts(html: &str) -> (String, String) {
     let img_host = res
         .re_img
         .captures_iter(html)
-        .filter_map(|c| c.get(4).or_else(|| c.get(5)).and_then(|m| extract_host(m.as_str())))
+        .filter_map(|c| {
+            c.get(4)
+                .or_else(|| c.get(5))
+                .or_else(|| c.get(6))
+                .and_then(|m| extract_host(m.as_str()))
+        })
         .next()
         .unwrap_or_default();
     let script_host = script_src_re()
@@ -158,9 +163,12 @@ fn block_res() -> &'static BlockRes {
     static R: OnceLock<BlockRes> = OnceLock::new();
     R.get_or_init(|| BlockRes {
         // src= on media/iframe-ish tags (iframe already removed by sanitize,
-        // but we keep it here for safety).
+        // but we keep it here for safety). Quoted or not: an unquoted `src`
+        // the rewrite skipped would still be blocked by the loader's own gate
+        // (`Policy::media_gate`), but its host would be missing from the
+        // «Медиа…» menu, leaving the user nothing to click.
         re_img: Regex::new(
-            r#"(?is)<(img|video|audio|source|iframe|embed)\b([^>]*?)\bsrc\s*=\s*("([^"]*)"|'([^']*)')"#,
+            r#"(?is)<(img|video|audio|source|iframe|embed)\b([^>]*?)\bsrc\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'>]+))"#,
         )
         .unwrap(),
         // External CSS stylesheets via <link>.
@@ -175,7 +183,7 @@ fn block_res() -> &'static BlockRes {
         .unwrap(),
         // Old-school background="https://..." attribute.
         re_bg_attr: Regex::new(
-            r#"(?is)\bbackground\s*=\s*("([^"]*)"|'([^']*)')"#,
+            r#"(?is)\bbackground\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'>]+))"#,
         )
         .unwrap(),
     })
@@ -231,7 +239,12 @@ pub fn block_external(input: &str, policy: &Policy, sender: &str) -> BlockOutcom
         .replace_all(input, |caps: &regex::Captures| {
             let tag = &caps[1];
             let attrs_before_src = &caps[2];
-            let url = caps.get(4).or_else(|| caps.get(5)).map(|m| m.as_str()).unwrap_or("");
+            let url = caps
+                .get(4)
+                .or_else(|| caps.get(5))
+                .or_else(|| caps.get(6))
+                .map(|m| m.as_str())
+                .unwrap_or("");
             match extract_host(url) {
                 Some(host) if !policy.domain_allowed(&host) => {
                     blocked.insert(host);
@@ -262,7 +275,12 @@ pub fn block_external(input: &str, policy: &Policy, sender: &str) -> BlockOutcom
     out = res
         .re_bg_attr
         .replace_all(&out, |caps: &regex::Captures| {
-            let url = caps.get(2).or_else(|| caps.get(3)).map(|m| m.as_str()).unwrap_or("");
+            let url = caps
+                .get(2)
+                .or_else(|| caps.get(3))
+                .or_else(|| caps.get(4))
+                .map(|m| m.as_str())
+                .unwrap_or("");
             match extract_host(url) {
                 Some(host) if !policy.domain_allowed(&host) => {
                     blocked.insert(host);
@@ -293,4 +311,19 @@ pub fn block_external(input: &str, policy: &Policy, sender: &str) -> BlockOutcom
         .into_owned();
 
     BlockOutcome { html: out, blocked_domains: blocked.into_iter().collect() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unquoted_src_is_blocked_and_offered_in_the_menu() {
+        let html = r#"<img src=https://t.example/p.gif><td background=https://b.example/bg.gif>"#;
+        let out = block_external(html, &Policy::default(), "news@sender.example");
+        assert!(!out.html.contains("src=https://"), "{}", out.html);
+        assert!(!out.html.contains("background=https://"), "{}", out.html);
+        assert_eq!(out.blocked_domains, ["b.example", "t.example"]);
+        assert_eq!(first_external_hosts(html).0, "t.example");
+    }
 }

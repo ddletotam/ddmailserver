@@ -37,6 +37,15 @@ impl RenderResult {
     }
 }
 
+/// Per-host permission for remote images, as `HttpResources::prefetch` takes it.
+pub type RemoteGate = dyn Fn(&str) -> bool + Sync;
+
+/// The gate for HTML we built ourselves (text fallback, source viewer): no
+/// remote image of ours exists, so nothing may load.
+pub fn no_remote(_host: &str) -> bool {
+    false
+}
+
 /// Stateless: there is no view to own, no message pump to drive, and no
 /// navigation to wait for. Kept as a struct so the call sites do not change.
 pub struct Engine;
@@ -61,18 +70,27 @@ impl Engine {
         html: &str,
         width: u32,
         scale: f32,
+        allow_host: &RemoteGate,
     ) -> (RenderResult, bool) {
-        (self.render_one(html, width, scale), false)
+        (self.render_one(html, width, scale, allow_host), false)
     }
 
-    pub fn render_one(&mut self, html: &str, width: u32, scale: f32) -> RenderResult {
-        // `block_remote: false` is not "load everything": the permission gate
-        // already ran. `sanitize::block_external` blanks the `src` of any image
-        // this sender is not allowed to load, so every absolute URL still
-        // standing in `html` is one the user said yes to — exactly what the
-        // browser backends loaded implicitly.
+    /// `allow_host` decides, per host, whether this message's remote images
+    /// may be fetched — `Policy::media_gate` for a mail body, [`no_remote`]
+    /// for anything we generated ourselves. It is the security boundary:
+    /// `sanitize::block_external` blanks what it recognises for the «Медиа…»
+    /// menu, but a spelling its regexes miss (unquoted `src`, entities, CSS)
+    /// still reaches the loader, which parses the same DOM layout does and
+    /// asks `allow_host` about every URL and every redirect hop.
+    pub fn render_one(
+        &mut self,
+        html: &str,
+        width: u32,
+        scale: f32,
+        allow_host: &RemoteGate,
+    ) -> RenderResult {
         let opts = emlrender::RenderOptions { width, scale, block_remote: false };
-        let images = emlrender::net::HttpResources::prefetch(html);
+        let images = emlrender::net::HttpResources::prefetch(html, allow_host);
         let r = emlrender::render_with(html, &opts, &images);
         RenderResult {
             bitmap: Bitmap { rgba: r.rgba, width: r.width_px, height: r.height_px },

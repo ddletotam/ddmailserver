@@ -13,7 +13,7 @@ use emlrender::{render, RenderOptions, Rendered};
 fn render_one(html: &str, opts: &RenderOptions, load_images: bool) -> Rendered {
     #[cfg(feature = "net")]
     if load_images {
-        let images = emlrender::net::HttpResources::prefetch(html);
+        let images = emlrender::net::HttpResources::prefetch(html, &|_| true);
         return emlrender::render_with(html, opts, &images);
     }
     let _ = load_images;

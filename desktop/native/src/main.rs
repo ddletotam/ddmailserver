@@ -6268,8 +6268,12 @@ fn main() {
                                     build_body_html(body, &policy, merged)
                                 };
                                 let t_r = Instant::now();
+                                // Текстовой версии картинки не положены вовсе.
+                                let gate = policy.media_gate(&body.from_addr);
+                                let gate: &render::RemoteGate =
+                                    if force_text { &render::no_remote } else { &gate };
                                 let (mut result, panicked) =
-                                    engine.render_one_guarded(&html, width, scale);
+                                    engine.render_one_guarded(&html, width, scale, gate);
                                 if panicked {
                                     engine_needs_rebuild = true;
                                 }
@@ -6287,8 +6291,12 @@ fn main() {
                                 {
                                     fallback_used += 1;
                                     let text_html = build_text_only_html(body, merged);
-                                    let (r2, p2) =
-                                        engine.render_one_guarded(&text_html, width, scale);
+                                    let (r2, p2) = engine.render_one_guarded(
+                                        &text_html,
+                                        width,
+                                        scale,
+                                        &render::no_remote,
+                                    );
                                     result = r2;
                                     if p2 {
                                         engine_needs_rebuild = true;
@@ -6522,7 +6530,8 @@ fn main() {
                         // bitmap + word rects. The modal then selects via the
                         // fast Rust text-run layer, not Slint's TextInput.
                         let html = build_source_html(&text);
-                        let (result, panicked) = engine.render_one_guarded(&html, width, scale);
+                        let (result, panicked) =
+                            engine.render_one_guarded(&html, width, scale, &render::no_remote);
                         if panicked {
                             engine_needs_rebuild = true;
                         }
