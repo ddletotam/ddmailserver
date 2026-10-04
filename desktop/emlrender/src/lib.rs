@@ -158,16 +158,15 @@ pub fn render_with(html: &str, opts: &RenderOptions, resources: &dyn Resources) 
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         render_inner(html, scale, width_px, opts.block_remote, resources)
     }))
-    .unwrap_or_else(|_| {
-        text::reset_engine();
-        Rendered {
-            rgba: vec![0; (width_px as usize) * 4],
-            width_px,
-            height_px: 1,
-            links: Vec::new(),
-            runs: Vec::new(),
-            scale,
-        }
+    // No engine reset here: the text engine the panic unwound through was
+    // discarded by its guard on the way out (`text::EngineGuard`).
+    .unwrap_or_else(|_| Rendered {
+        rgba: vec![0; (width_px as usize) * 4],
+        width_px,
+        height_px: 1,
+        links: Vec::new(),
+        runs: Vec::new(),
+        scale,
     })
 }
 
@@ -252,6 +251,26 @@ mod tests {
         let mut out = std::io::Cursor::new(Vec::new());
         img.write_to(&mut out, ::image::ImageFormat::Png).expect("encode png");
         out.into_inner()
+    }
+
+    /// Renders on several threads at once each get their own text engine
+    /// (`text::engine` pools them) and must come out exactly as a render on
+    /// one thread does: same pixels, same geometry.
+    #[test]
+    fn concurrent_renders_match_a_lone_one() {
+        let html = "<p>Привет, <b>мир</b>! <a href=\"https://example.com\">ссылка</a></p>\
+                    <table><tr><td>1</td><td>два</td></tr></table>";
+        let alone = render(html, &opts(320));
+        let results: Vec<Rendered> = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..4).map(|_| s.spawn(|| render(html, &opts(320)))).collect();
+            hs.into_iter().map(|h| h.join().expect("render thread")).collect()
+        });
+        for r in &results {
+            assert_eq!((r.width_px, r.height_px), (alone.width_px, alone.height_px));
+            assert!(r.rgba == alone.rgba, "pixels differ between threads");
+            assert_eq!(r.links.len(), alone.links.len());
+            assert_eq!(r.runs.len(), alone.runs.len());
+        }
     }
 
     struct OneImage(Vec<u8>);

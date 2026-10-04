@@ -185,6 +185,34 @@ impl HttpResources {
     }
 }
 
+impl HttpResources {
+    /// What [`prefetch`](Self::prefetch) can hand over right now without
+    /// touching the network: this document's allowed images that are already
+    /// in the in-memory cache, and whether that is all of them (`true`) or
+    /// `prefetch` would still have to go out for some (`false`).
+    ///
+    /// Lets a host paint a mail at once — with placeholders for what is not
+    /// here yet — and fetch the rest off its paint path. Same plan and same
+    /// gate as `prefetch`; a URL already known to fail counts as resolved,
+    /// exactly as `prefetch` would not ask for it again.
+    pub fn cached(html: &str, allow_host: &(dyn Fn(&str) -> bool + Sync)) -> (Self, bool) {
+        let wanted = plan(html, allow_host);
+        let mut out: HashMap<String, Arc<Vec<u8>>> = HashMap::new();
+        let mut complete = true;
+        let cache = cache().lock().unwrap_or_else(|p| p.into_inner());
+        for (src, _) in wanted {
+            match cache.entries.get(&src) {
+                Some(Some(bytes)) => {
+                    out.insert(src, Arc::clone(bytes));
+                }
+                Some(None) => {}
+                None => complete = false,
+            }
+        }
+        (HttpResources(out), complete)
+    }
+}
+
 /// What `prefetch` will download for `html`: the remote images layout would
 /// ask for, minus everything `allow_host` rejects, deduplicated and capped.
 /// Keyed by the `src` exactly as layout will pass it to [`Resources::fetch`].
@@ -420,6 +448,26 @@ mod tests {
 
     fn deny_all(_: &str) -> bool {
         false
+    }
+
+    #[test]
+    fn cached_reports_what_still_needs_the_network() {
+        let html = r#"<img src="https://cached-probe.invalid/a.gif">"#;
+        // Denied: nothing to fetch, so the cache-only view is already complete.
+        let (_, complete) = HttpResources::cached(html, &deny_all);
+        assert!(complete);
+        // Allowed but never fetched: incomplete, and no request was made.
+        let (res, complete) = HttpResources::cached(html, &|_| true);
+        assert!(!complete);
+        assert!(res.fetch("https://cached-probe.invalid/a.gif").is_none());
+        // Known-bad counts as resolved, as `prefetch` would not retry it.
+        cache()
+            .lock()
+            .unwrap()
+            .entries
+            .insert("https://cached-probe.invalid/a.gif".to_string(), None);
+        let (_, complete) = HttpResources::cached(html, &|_| true);
+        assert!(complete);
     }
 
     /// Every way a mail can spell a remote image. None of it is allowed, so

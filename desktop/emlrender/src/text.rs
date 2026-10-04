@@ -6,7 +6,8 @@
 //! tagged with `metadata` = index into our span table, and read that tag back
 //! off each glyph at paint time to recover colour, underline and link.
 
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::ops::{Deref, DerefMut};
+use std::sync::{Mutex, OnceLock};
 
 use cosmic_text::{
     Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Stretch, Style as FontStyle, SwashCache,
@@ -64,35 +65,81 @@ impl Span {
     }
 }
 
-/// Font database plus glyph raster cache. Scanning system fonts costs a few
-/// hundred ms, and we render hundreds of mails in a row, so both live for the
-/// lifetime of the process behind one lock.
+/// Font database plus glyph raster cache. Both are expensive to warm up and
+/// we render hundreds of mails in a row, so engines live for the lifetime of
+/// the process in a small pool (see [`engine`]).
 pub struct TextEngine {
     pub fonts: FontSystem,
     pub swash: SwashCache,
 }
 
-fn shared() -> &'static Mutex<TextEngine> {
-    static ENGINE: OnceLock<Mutex<TextEngine>> = OnceLock::new();
-    ENGINE.get_or_init(|| {
-        Mutex::new(TextEngine { fonts: FontSystem::new(), swash: SwashCache::new() })
-    })
-}
-
-pub fn engine() -> MutexGuard<'static, TextEngine> {
-    shared().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// Throw the shared engine away and build a fresh one.
+/// Engines not lent out right now.
 ///
-/// Call this after a panic escapes a render. Unwinding out of the middle of
-/// shaping leaves cosmic-text's internal caches half-updated, and reusing them
-/// does not merely produce a wrong glyph — it has been observed to spin
-/// forever on the *next* mail. Rescanning system fonts costs a few hundred ms,
-/// which is the right price for a state we can no longer trust.
-pub fn reset_engine() {
-    let mut guard = engine();
-    *guard = TextEngine { fonts: FontSystem::new(), swash: SwashCache::new() };
+/// A pool rather than one engine behind a lock: a render holds its engine for
+/// the whole layout + paint, so with a single shared engine renders on several
+/// threads queue up and run one at a time. Each concurrent render gets its own
+/// engine instead; the pool grows to the peak number of concurrent renders
+/// and no further.
+fn idle() -> &'static Mutex<Vec<TextEngine>> {
+    static IDLE: OnceLock<Mutex<Vec<TextEngine>>> = OnceLock::new();
+    IDLE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn new_engine() -> TextEngine {
+    // Scanning system fonts costs a few hundred ms; cloning the index the first
+    // scan produced costs next to nothing (faces stay on disk, memory-mapped on
+    // use). So only the first engine scans.
+    static SCANNED: OnceLock<(String, cosmic_text::fontdb::Database)> = OnceLock::new();
+    let fonts = match SCANNED.get() {
+        Some((locale, db)) => FontSystem::new_with_locale_and_db(locale.clone(), db.clone()),
+        None => {
+            let fonts = FontSystem::new();
+            let _ = SCANNED.set((fonts.locale().to_string(), fonts.db().clone()));
+            fonts
+        }
+    };
+    TextEngine { fonts, swash: SwashCache::new() }
+}
+
+/// An engine lent to one render; goes back to the pool on drop.
+pub struct EngineGuard(Option<TextEngine>);
+
+impl Deref for EngineGuard {
+    type Target = TextEngine;
+    fn deref(&self) -> &TextEngine {
+        self.0.as_ref().expect("engine present until drop")
+    }
+}
+
+impl DerefMut for EngineGuard {
+    fn deref_mut(&mut self) -> &mut TextEngine {
+        self.0.as_mut().expect("engine present until drop")
+    }
+}
+
+impl Drop for EngineGuard {
+    fn drop(&mut self) {
+        // Dropped by an unwinding panic: the engine is thrown away, not
+        // returned. Unwinding out of the middle of shaping leaves cosmic-text's
+        // internal caches half-updated, and reusing them does not merely
+        // produce a wrong glyph — it has been observed to spin forever on the
+        // *next* mail. The next render that finds the pool empty builds a
+        // fresh engine, which is the right price for a state we can no longer
+        // trust.
+        if std::thread::panicking() {
+            return;
+        }
+        if let Some(e) = self.0.take() {
+            idle().lock().unwrap_or_else(|p| p.into_inner()).push(e);
+        }
+    }
+}
+
+/// Borrow an engine for one render: an idle one from the pool, or a new one
+/// when every engine is busy on another thread.
+pub fn engine() -> EngineGuard {
+    let pooled = idle().lock().unwrap_or_else(|p| p.into_inner()).pop();
+    EngineGuard(Some(pooled.unwrap_or_else(new_engine)))
 }
 
 fn attrs_for(span: &Span, index: usize) -> Attrs<'_> {
