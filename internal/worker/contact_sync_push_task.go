@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 
-	carddavclient "github.com/ddletotam/ddmailserver/internal/carddav/client"
 	"github.com/ddletotam/ddmailserver/internal/authfail"
+	carddavclient "github.com/ddletotam/ddmailserver/internal/carddav/client"
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/task"

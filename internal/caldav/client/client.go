@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	caldavutil "github.com/ddletotam/ddmailserver/internal/caldav"
 	"github.com/ddletotam/ddmailserver/internal/caldav/importer"
-	"github.com/ddletotam/ddmailserver/internal/authfail"
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/timeutil"

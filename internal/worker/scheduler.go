@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/dkimsign"
-	"github.com/ddletotam/ddmailserver/internal/authfail"
 	imapclient "github.com/ddletotam/ddmailserver/internal/imap/client"
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/notify"

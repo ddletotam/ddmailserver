@@ -6,9 +6,9 @@ import (
 	"log"
 	"strings"
 
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	caldavutil "github.com/ddletotam/ddmailserver/internal/caldav"
 	caldavclient "github.com/ddletotam/ddmailserver/internal/caldav/client"
-	"github.com/ddletotam/ddmailserver/internal/authfail"
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/task"
