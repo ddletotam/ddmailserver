@@ -34,6 +34,8 @@ type Tx interface {
 	ClaimFolderUID(userID, folderID int64) (uint32, string, error)
 	MoveMessageRow(messageID, folderID int64, uid uint32) error
 	CopyMessageRow(messageID, folderID int64, uid uint32) (int64, error)
+	UpstreamVanishGuard(messageID int64) (db.UpstreamVanishGuard, error)
+	ClearRemoteUID(messageID int64) error
 }
 
 // Store opens transactions.

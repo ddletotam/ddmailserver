@@ -53,6 +53,7 @@ func (db *DB) SaveRemoteFolderState(accountID int64, remoteFolder string, st Rem
 
 // RemoteMessageRef identifies the local row that mirrors one remote message.
 type RemoteMessageRef struct {
+	ID        int64  // messages.id
 	MessageID string // RFC 5322 Message-ID (or the derived one)
 	From      string // stored From header — enough for CheckSpamRules
 }
@@ -64,7 +65,7 @@ type RemoteMessageRef struct {
 // reclassification key on. Served by idx_messages_remote.
 func (db *DB) GetRemoteMessageRefs(accountID int64, remoteFolder string) (map[uint32]RemoteMessageRef, error) {
 	rows, err := db.Query(
-		`SELECT remote_uid, message_id, COALESCE(from_addr, '')
+		`SELECT id, remote_uid, message_id, COALESCE(from_addr, '')
 		   FROM messages
 		  WHERE account_id = $1 AND remote_folder = $2
 		    AND remote_uid IS NOT NULL AND remote_uid > 0
@@ -79,7 +80,7 @@ func (db *DB) GetRemoteMessageRefs(accountID int64, remoteFolder string) (map[ui
 	for rows.Next() {
 		var uid int64
 		var ref RemoteMessageRef
-		if err := rows.Scan(&uid, &ref.MessageID, &ref.From); err != nil {
+		if err := rows.Scan(&ref.ID, &uid, &ref.MessageID, &ref.From); err != nil {
 			return nil, fmt.Errorf("scan remote message ref: %w", err)
 		}
 		refs[uint32(uid)] = ref

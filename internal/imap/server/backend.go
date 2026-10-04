@@ -103,6 +103,12 @@ func (b *Backend) listenNotifications() {
 			case <-time.After(5 * time.Second):
 				log.Printf("IMAP Backend: TIMEOUT - channel not being read! len=%d", len(b.updates))
 			}
+		case notify.EventExpunge:
+			// Messages removed outside an IMAP session (vanished upstream).
+			// Events without sequence numbers are desktop-only.
+			if len(event.SeqNums) > 0 && event.Username != "" && event.Mailbox != "" {
+				b.notifyExpunge(event.Username, event.Mailbox, event.SeqNums)
+			}
 		}
 	}
 }

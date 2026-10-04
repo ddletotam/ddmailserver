@@ -214,3 +214,27 @@ func (t *fakeTx) CopyMessageRow(messageID, folderID int64, uid uint32) (int64, e
 	t.nextID++
 	return c.state.ID, nil
 }
+
+func (t *fakeTx) UpstreamVanishGuard(messageID int64) (db.UpstreamVanishGuard, error) {
+	if err := t.fail("guard"); err != nil {
+		return db.UpstreamVanishGuard{}, err
+	}
+	m, ok := t.messages[messageID]
+	if !ok {
+		return db.UpstreamVanishGuard{}, db.ErrNotFound
+	}
+	_, pending := t.queue[messageID]
+	return db.UpstreamVanishGuard{
+		SoftDeleted: m.softDeleted,
+		Pending:     pending,
+		FolderType:  t.folders[m.state.FolderID].typ,
+	}, nil
+}
+
+func (t *fakeTx) ClearRemoteUID(messageID int64) error {
+	if err := t.fail("clearuid"); err != nil {
+		return err
+	}
+	t.messages[messageID].state.RemoteUID = 0
+	return nil
+}

@@ -55,6 +55,11 @@ type Event struct {
 	Subject   string
 	MessageID int64 // messages.id — the client's native-mode uid
 	NewCount  int   // how many NEW messages this event describes (>=1)
+	// SeqNums (EventExpunge only, optional): IMAP sequence numbers of the
+	// removed messages in Mailbox, descending. When set, the IMAP backend
+	// sends untagged EXPUNGE for them; without it the event only reaches the
+	// desktop.
+	SeqNums []uint32
 
 	// Calendar fields
 	CalendarID int64 // Affected calendar (0 means "any calendar for this user")

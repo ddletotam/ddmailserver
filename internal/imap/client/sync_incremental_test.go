@@ -24,6 +24,9 @@ type fakeRemote struct {
 	status *imap.MailboxStatus
 	msgs   []*fakeMsg
 	calls  []fakeFetch
+	// failFetch, when set, ends every FETCH with this error after sending
+	// whatever matched — a broken / truncated server answer.
+	failFetch error
 }
 
 type fakeMsg struct {
@@ -105,7 +108,7 @@ func (f *fakeRemote) FetchMessagesByUID(set *imap.SeqSet, items []imap.FetchItem
 		ch <- out
 	}
 	close(ch)
-	done <- nil
+	done <- f.failFetch
 	return ch, done
 }
 

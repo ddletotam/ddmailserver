@@ -32,8 +32,10 @@ import (
 // 1:*, i.e. the old Message-ID dedup, but envelopes first and bodies only for
 // unknown messages. The bookmark is written after the pass.
 //
-// Remote deletions are not mirrored here (they never were): a message that
-// vanished upstream keeps its local row.
+// Every successful run also reports which already-known remote messages of
+// the folder are no longer there (folderPresence); the account-level pass in
+// sync_vanished.go decides, after all folders, which of them really vanished
+// upstream and mirrors that as a vault delete.
 
 // remoteMailbox is the part of *Client the per-folder sync drives; tests
 // substitute a fake.
@@ -112,6 +114,9 @@ type folderSyncResult struct {
 	newCount, skipped, spam int
 	bodies                  int    // messages fetched with BODY.PEEK[]
 	fullReason              string // non-empty when the folder got a full pass
+	// presence is what the run proved about the folder's known messages;
+	// mode presenceNone unless the run completed without any error.
+	presence folderPresence
 }
 
 // syncOneFolder pulls one remote mailbox incrementally (see the file
@@ -132,6 +137,30 @@ func (t *SyncTask) syncOneFolder(ctx context.Context, c remoteMailbox, localInbo
 	plan := planFolderSync(st, mbox.UidValidity)
 	if plan.full {
 		res.fullReason = plan.reason
+	}
+	// Rows pointing at this folder before the run: the baseline the
+	// vanished-upstream check compares against. Only taken when the run can
+	// prove absence — by UID under the same UIDVALIDITY, or by Message-ID
+	// after a full pass that follows a UIDVALIDITY change. A first pass (no
+	// state) or a server without UIDVALIDITY proves nothing.
+	var before map[uint32]db.RemoteMessageRef
+	byUID := !plan.full
+	byMessageID := plan.full && st != nil && mbox.UidValidity != 0
+	if byUID || byMessageID {
+		if before, err = t.database.GetRemoteMessageRefs(t.account.ID, name); err != nil {
+			log.Printf("Sync [%s] %s: %v — upstream deletions not checked this run", t.account.Email, name, err)
+			before, byUID, byMessageID = nil, false, false
+		}
+	}
+	present := map[uint32]bool{}
+	proven := func() folderPresence {
+		switch {
+		case byUID:
+			return folderPresence{name: name, mode: presenceByUID, lastSeen: plan.lastSeen, present: present, before: before}
+		case byMessageID:
+			return folderPresence{name: name, mode: presenceByMessageID, before: before}
+		}
+		return folderPresence{name: name}
 	}
 	save := func(last uint32) {
 		if !plan.persist {
@@ -155,18 +184,28 @@ func (t *SyncTask) syncOneFolder(ctx context.Context, c remoteMailbox, localInbo
 			last = mbox.UidNext - 1
 		}
 		save(last)
+		if byUID {
+			// SELECT said 0 messages: every known UID is gone.
+			res.presence = proven()
+		}
 		return res, nil
 	}
 
 	if !plan.full && plan.lastSeen > 0 {
-		if err := t.refreshFlagsUpTo(ctx, c, name, class, plan.lastSeen); err != nil {
+		got, err := t.refreshFlagsUpTo(ctx, c, name, class, plan.lastSeen, before)
+		if err != nil {
 			// Flags are refreshed again next run; new mail still matters.
+			// Without the full UID list nothing may be judged gone.
 			log.Printf("Sync [%s] %s: flag refresh failed: %v", t.account.Email, name, err)
+			byUID = false
+		} else {
+			present = got
 		}
 		if ctx.Err() != nil {
 			return res, ctx.Err()
 		}
 		if !hasUIDsAbove(plan.lastSeen, mbox.UidNext) {
+			res.presence = proven()
 			return res, nil
 		}
 	}
@@ -236,6 +275,12 @@ func (t *SyncTask) syncOneFolder(ctx context.Context, c remoteMailbox, localInbo
 		}
 	}
 	save(nextLastSeen(plan.lastSeen, maxScanned, failed))
+	if len(failed) > 0 {
+		// A message that failed triage/save was not recorded as seen: by
+		// Message-ID it would look gone.
+		byMessageID = false
+	}
+	res.presence = proven()
 	return res, nil
 }
 
@@ -251,6 +296,8 @@ func (t *SyncTask) triageEnvelope(m *imap.Message, remoteFolder string, class fo
 		return false, nil
 	}
 	if hasFlag(m.Flags, imap.DeletedFlag) {
+		// Still there (about to be expunged upstream) — not vanished yet.
+		t.markSeen(m.Envelope.MessageId)
 		return false, nil
 	}
 	messageID := m.Envelope.MessageId
@@ -270,26 +317,36 @@ func (t *SyncTask) triageEnvelope(m *imap.Message, remoteFolder string, class fo
 }
 
 // refreshFlagsUpTo is the light pass over already-processed UIDs 1:lastSeen:
-// FLAGS only, resolved to local rows by remote_uid. UIDs with no local row of
-// this account in this folder (skipped, deleted locally, or owned by another
-// folder/source) are left alone — they were handled when first seen.
-func (t *SyncTask) refreshFlagsUpTo(ctx context.Context, c remoteMailbox, name string, class folderClass, lastSeen uint32) error {
+// FLAGS only, resolved to local rows by remote_uid (refs; loaded here when
+// nil). UIDs with no local row of this account in this folder (skipped,
+// deleted locally, or owned by another folder/source) are left alone — they
+// were handled when first seen.
+//
+// It returns every UID <= lastSeen the server still has — the complete list,
+// since the fetch either succeeded as a whole or returned an error — which is
+// what the vanished-upstream check judges absence by.
+func (t *SyncTask) refreshFlagsUpTo(ctx context.Context, c remoteMailbox, name string, class folderClass, lastSeen uint32, refs map[uint32]db.RemoteMessageRef) (map[uint32]bool, error) {
 	set := new(imap.SeqSet)
 	set.AddRange(1, lastSeen)
 	msgs, err := fetchUIDRange(c, set, []imap.FetchItem{imap.FetchUid, imap.FetchFlags}, 1, lastSeen)
 	if err != nil {
-		return fmt.Errorf("IMAP flags fetch on %q failed: %w", name, err)
+		return nil, fmt.Errorf("IMAP flags fetch on %q failed: %w", name, err)
+	}
+	present := make(map[uint32]bool, len(msgs))
+	for _, m := range msgs {
+		present[m.Uid] = true
 	}
 	if len(msgs) == 0 {
-		return nil
+		return present, nil
 	}
-	refs, err := t.database.GetRemoteMessageRefs(t.account.ID, name)
-	if err != nil {
-		return err
+	if refs == nil {
+		if refs, err = t.database.GetRemoteMessageRefs(t.account.ID, name); err != nil {
+			return nil, err
+		}
 	}
 	for _, m := range msgs {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
 		if hasFlag(m.Flags, imap.DeletedFlag) {
 			continue
@@ -300,7 +357,7 @@ func (t *SyncTask) refreshFlagsUpTo(ctx context.Context, c remoteMailbox, name s
 		}
 		t.refreshKnownMessage(ref.MessageID, ref.From, m.Uid, m.Flags, name, class)
 	}
-	return nil
+	return present, nil
 }
 
 // spamRuleVerdict is one memoised CheckSpamRules answer.
@@ -336,6 +393,7 @@ func (t *SyncTask) checkSpamRulesMemo(fromAddr string) (string, *db.SpamRule, er
 // exists: refresh remote pointer + flags, re-evaluate spam. Returns whether
 // the message counts as spam.
 func (t *SyncTask) refreshKnownMessage(messageID, fromAddr string, uid uint32, flags []string, remoteFolderName string, class folderClass) bool {
+	t.markSeen(messageID)
 	// Inbox path just refreshes the remote pointer if we never
 	// recorded one. Spam path is more interesting: the upstream
 	// provider has just (re-)classified an already-known message

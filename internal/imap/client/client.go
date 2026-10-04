@@ -315,6 +315,15 @@ func (c *Client) selectResilient(name string) (string, error) {
 	}
 }
 
+// UIDSearch runs UID SEARCH in the selected mailbox.
+func (c *Client) UIDSearch(criteria *imap.SearchCriteria) ([]uint32, error) {
+	uids, err := c.conn.UidSearch(criteria)
+	if err != nil {
+		return nil, fmt.Errorf("UID SEARCH: %w", err)
+	}
+	return uids, nil
+}
+
 // FetchMessages fetches messages from the current mailbox by sequence numbers
 // Returns a channel of messages and an error channel for async error handling.
 //

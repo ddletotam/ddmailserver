@@ -160,6 +160,7 @@ func (s *Scheduler) TriggerSyncForAccount(account *models.Account) {
 				Mailbox: "INBOX",
 			})
 		})
+		task.SetExpungeNotifyFunc(expungePublisher(s.notifyHub, userID))
 	}
 	if s.analyzer != nil {
 		task.SetAnalyzer(s.analyzer)
@@ -169,6 +170,22 @@ func (s *Scheduler) TriggerSyncForAccount(account *models.Account) {
 	})
 
 	s.submit(task, fmt.Sprintf("IDLE-triggered sync for %s", account.Email))
+}
+
+// expungePublisher turns a sync's "vanished upstream" notice into an expunge
+// event: untagged EXPUNGE for IMAP sessions with that folder selected, and an
+// `expunge` push that makes the desktop pull the change journal.
+func expungePublisher(hub *notify.Hub, userID int64) func(imapclient.ExpungeNotice) {
+	return func(n imapclient.ExpungeNotice) {
+		hub.Publish(notify.Event{
+			UserID:   userID,
+			Type:     notify.EventExpunge,
+			Username: n.Username,
+			FolderID: n.FolderID,
+			Mailbox:  n.Mailbox,
+			SeqNums:  n.SeqNums,
+		})
+	}
 }
 
 // submit puts a task in the pool and logs the outcome uniformly.
@@ -352,6 +369,7 @@ func (s *Scheduler) scheduleIMAPSync() {
 					Mailbox: "INBOX",
 				})
 			})
+			task.SetExpungeNotifyFunc(expungePublisher(s.notifyHub, uid))
 		}
 		if s.analyzer != nil {
 			task.SetAnalyzer(s.analyzer)

@@ -48,6 +48,10 @@ type SyncTask struct {
 	// Per-run memo of CheckSpamRules for already-known messages: the flag
 	// pass re-evaluates every known message each cycle, and senders repeat.
 	spamRuleMemo map[string]spamRuleVerdict
+	// Message-IDs present upstream in any synced folder this run — a message
+	// seen anywhere has not vanished (sync_vanished.go).
+	seenIDs           map[string]bool
+	expungeNotifyFunc func(ExpungeNotice)
 	// Called to force-refresh the OAuth token when auth fails. The callback
 	// is expected to update the account in place (access token, expiry).
 	refreshOAuth func(account *models.Account) error
@@ -55,6 +59,10 @@ type SyncTask struct {
 
 func (t *SyncTask) SetNotifyFunc(fn func(NewMailNotice))    { t.notifyFunc = fn }
 func (t *SyncTask) SetFlagsNotifyFunc(fn func(changed int)) { t.flagsNotifyFunc = fn }
+
+// SetExpungeNotifyFunc sets the callback for messages removed locally because
+// they vanished from the source server (one call per local folder).
+func (t *SyncTask) SetExpungeNotifyFunc(fn func(ExpungeNotice)) { t.expungeNotifyFunc = fn }
 func (t *SyncTask) SetAnalyzer(analyzer *parser.Analyzer)   { t.analyzer = analyzer }
 func (t *SyncTask) SetOAuthRefresher(fn func(account *models.Account) error) {
 	t.refreshOAuth = fn
@@ -144,7 +152,10 @@ func (t *SyncTask) doExecute(ctx context.Context) error {
 // All synced messages share the same local folder (`localInbox`).
 // remote_folder on each row records the upstream mailbox, so the
 // flag-sync / delete-sync workers know where to push back.
-func (t *SyncTask) syncAllRemoteFolders(ctx context.Context, client *Client, localInbox *models.Folder) error {
+//
+// After every folder is synced, messages that vanished upstream are mirrored
+// as vault deletes (reconcileVanished, sync_vanished.go).
+func (t *SyncTask) syncAllRemoteFolders(ctx context.Context, client remoteAccount, localInbox *models.Folder) error {
 	mailboxes, err := client.ListFolders()
 	if err != nil {
 		return fmt.Errorf("list folders: %w", err)
@@ -169,11 +180,20 @@ func (t *SyncTask) syncAllRemoteFolders(ctx context.Context, client *Client, loc
 
 	totalNew, totalSkipped, totalSpam, totalBodies := 0, 0, 0, 0
 	var fullPasses []string
+	var presences []folderPresence
+	synced := make([]string, 0, len(jobs))
+	allComplete := true
 	for _, j := range jobs {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		synced = append(synced, j.name)
 		res, err := t.syncOneFolder(ctx, client, localInbox, j.name, j.class)
+		if err != nil {
+			allComplete = false
+		} else if res.presence.mode != presenceNone {
+			presences = append(presences, res.presence)
+		}
 		// Partial results count even on error: whatever was saved is saved.
 		totalNew += res.newCount
 		totalSkipped += res.skipped
@@ -186,13 +206,20 @@ func (t *SyncTask) syncAllRemoteFolders(ctx context.Context, client *Client, loc
 			log.Printf("Sync [%s]: folder %q failed: %v", t.account.Email, j.name, err)
 		}
 	}
+	var vs vanishStats
+	if ctx.Err() == nil {
+		vs = t.reconcileVanished(ctx, client, mailboxes, synced, presences, allComplete)
+	}
 	full := "none"
 	if len(fullPasses) > 0 {
 		full = strings.Join(fullPasses, ", ")
 	}
 	t.accountLog("info", "synced %d new messages (skipped %d duplicates, %d classified spam) across %d folders; "+
-		"downloaded %d bodies, flags updated on %d messages; full pass: %s",
-		totalNew, totalSkipped, totalSpam, len(jobs), totalBodies, t.flagsChanged, full)
+		"downloaded %d bodies, flags updated on %d messages; full pass: %s; "+
+		"upstream deletions: %d removed, %d recognised as moved, %d held by mass-delete guard, "+
+		"%d left alone (pending local change or local delete in flight), %d deferred",
+		totalNew, totalSkipped, totalSpam, len(jobs), totalBodies, t.flagsChanged, full,
+		vs.removed, vs.moved, vs.held, vs.pending, vs.deferred)
 	// Push gate: t.lastNew is set by every non-spam save of this run, so its
 	// presence is direct evidence the user got something worth announcing.
 	// The old arithmetic gate (totalNew > totalSpam) silently swallowed the
