@@ -1517,8 +1517,11 @@ fn bubble_template_wide(is_outgoing: bool, time: &str, inner: &str, wide: bool) 
         body {{ font-family: 'Segoe UI', system-ui, sans-serif; }}
         /* Auto margins, not flex: the standard way to align a block, and it
            renders the same in a browser. Single-class selectors on the bubble
-           itself rather than `.row.out .bubble` — the in-house renderer
-           matches one class and no combinators (see docs/backlog.md). */
+           itself rather than `.row.out .bubble` — by choice, not because
+           emlrender can't (it matches combinators, !important and @media
+           now): a selector that reaches into the bubble also reaches into
+           the sender's markup, and flat specificity keeps our chrome from
+           outranking the mail's own rules. */
         .{CSS_NS}-row {{ padding: 6px 60px; }}
         .{CSS_NS}-bubble-out {{ margin-left: auto; margin-right: 0; }}
         .{CSS_NS}-bubble-in  {{ margin-left: 0; margin-right: auto; }}
