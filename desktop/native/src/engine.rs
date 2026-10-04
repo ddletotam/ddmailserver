@@ -1,6 +1,7 @@
 //! Live mail engine for the native client. Runs the ddmail-core providers on a
 //! dedicated tokio runtime/thread, talking to the UI via command/result
-//! channels. Kept off the Ultralight render thread (which is single-threaded).
+//! channels. Kept apart from the bubble render worker: a layout pass and a
+//! network round trip must never wait for each other.
 //!
 //! Account config comes from env vars for now (no login UI yet):
 //!   DDMAIL_IMAP_HOST, DDMAIL_IMAP_PORT, DDMAIL_IMAP_USER, DDMAIL_IMAP_PASS,
@@ -50,26 +51,6 @@ pub struct AccountConfig {
     /// Google OAuth refresh token (standalone Gmail accounts). Present ⇒ DAV
     /// uses Bearer and IMAP uses XOAUTH2; the access token is minted lazily.
     pub oauth_refresh_token: Option<String>,
-}
-
-/// Заменить парные маркеры на тег. Непарный хвост остаётся текстом.
-fn apply_marker(text: &str, marker: &str, tag: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(open) = rest.find(marker) {
-        let after = &rest[open + marker.len()..];
-        // Пустая пара (`****`) — не разметка, а просто звёздочки.
-        match after.find(marker).filter(|end| *end > 0) {
-            Some(end) => {
-                out.push_str(&rest[..open]);
-                out.push_str(&format!("<{tag}>{}</{tag}>", &after[..end]));
-                rest = &after[end + marker.len()..];
-            }
-            None => break,
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 impl AccountConfig {

@@ -1,13 +1,24 @@
-//! Pre-Ultralight HTML cleanup.
+//! Regex cleanup of inbound mail HTML before it is wrapped into the bubble
+//! document and handed to `emlrender`.
 //!
-//! The bundled Ultralight (a fork of WebKit 615.x) is more brittle than
-//! modern browsers when it meets the kind of HTML you actually find in
-//! mail bodies — `<script>`, `<iframe>`, MS-Outlook conditional
-//! comments, inline `on*=` handlers, etc. Whole bubbles silently render
-//! blank when we hit a rough edge, so we shake the worst of it out
-//! before handing the markup to the renderer. Conservative: anything
-//! we don't recognise is left alone, including `<style>` (Ultralight
-//! still needs that for layout).
+//! What it is NOT: a security boundary for rendering. `emlrender` executes
+//! no script, opens no socket and drops the active elements' subtrees on its
+//! own (`dom::is_dropped`: `script`, `iframe`, `object`, `embed`, `form`,
+//! `base`, `meta`, …); remote images reach the wire only through the
+//! loader's per-host gate (`render.rs`, `Policy::media_gate`).
+//!
+//! What it is for:
+//!   * MS-Outlook conditional blocks (`<!--[if …]>…<![endif]-->`) are
+//!     removed wholesale — they carry Outlook-only alternative markup;
+//!   * the «Медиа…» menu semantics for scripts (`sanitize_email_html_for`
+//!     keeps them for a trusted sender / allowed host), and the
+//!     `data-blocked-src` placeholders plus the per-host menu entries
+//!     (`block_external`, `first_external_hosts`);
+//!   * keeping the bubble document small and predictable: one DOM serves both
+//!     our chrome and the sender's markup (contract §4б), and stripped
+//!     subtrees cannot interact with our `ddm-` rules.
+//! Conservative: anything we don't recognise is left alone, including
+//! `<style>`, which holds the mail's own layout together.
 //!
 //! This is a regex pass, not a real parser — Outlook-generated mail
 //! routinely violates spec, and a strict parser would either bail or
@@ -15,7 +26,6 @@
 //! and stay fast on the hot path.
 
 use regex::Regex;
-use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 use crate::policy::Policy;
@@ -46,9 +56,9 @@ fn strips() -> &'static Strips {
             r#"(?is)<meta\b[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*/?>"#,
         )
         .unwrap(),
-        // Outlook conditional comments wrap whole alternative trees and
-        // contain MS-only markup Ultralight chokes on. Drop the whole
-        // block.
+        // Outlook conditional comments wrap whole alternative trees of
+        // MS-only markup (VML buttons, fixed-width ghost tables). Drop the
+        // whole block.
         re_mso_conditional: Regex::new(r"(?is)<!--\s*\[if\s+[^\]]*\]>.*?<!\s*\[endif\]\s*-->")
             .unwrap(),
         // Inline event handlers — non-functional anyway since we don't
@@ -59,13 +69,7 @@ fn strips() -> &'static Strips {
     })
 }
 
-/// Apply the strip passes. Empty in → empty out. Strict variant: scripts
-/// and handlers always go — used everywhere a Policy isn't in scope.
-pub fn sanitize_email_html(input: &str) -> String {
-    sanitize_email_html_for(input, &Policy::default(), "")
-}
-
-/// Policy-aware strip pass (the «Медиа…» menu semantics):
+/// Policy-aware strip pass (the «Медиа…» menu semantics). Empty in → empty out.
 ///   * sender/global scripts allowed → <script> and on*= handlers survive;
 ///   * otherwise inline <script> is stripped, and external <script src>
 ///     survives only when its host is on the script_hosts allow-list.
@@ -105,8 +109,9 @@ pub fn sanitize_email_html_for(input: &str, policy: &Policy, sender: &str) -> St
         out = s.re_on_handler_unquoted.replace_all(&out, "").into_owned();
     }
     // Note: we intentionally do NOT strip <head>/<style>/<html>/<body> —
-    // the email's own <style> block is what holds its layout together,
-    // and WebKit tolerates the nested-doctype shape we end up with.
+    // the email's own <style> block is what holds its layout together, and
+    // html5ever (emlrender's parser) folds the nested-document shape we end
+    // up with inside the bubble template the same way a browser does.
     out
 }
 
@@ -142,14 +147,6 @@ pub fn first_external_hosts(html: &str) -> (String, String) {
         .next()
         .unwrap_or_default();
     (img_host, script_host)
-}
-
-/// Result of running the external-content blocker over a message body.
-pub struct BlockOutcome {
-    pub html: String,
-    /// Domains that we replaced/blocked, sorted, lowercased. The UI
-    /// uses this to populate the "allow per-domain" submenu.
-    pub blocked_domains: Vec<String>,
 }
 
 struct BlockRes {
@@ -217,22 +214,22 @@ fn extract_host(url: &str) -> Option<String> {
 /// Strip / blank out external resource URLs unless the sender is
 /// trusted (per `policy.media_allowed`) or the resource's host is
 /// already on the allow-list. Pure HTML regex pass — runs on the
-/// post-sanitized body before WebKit sees it.
+/// post-sanitized body before `emlrender` sees it.
 ///
-/// Returns the rewritten HTML plus the set of domains we blocked, so
-/// the UI can offer per-domain "allow" toggles.
-pub fn block_external(input: &str, policy: &Policy, sender: &str) -> BlockOutcome {
+/// Presentation only: the URL survives in `data-blocked-src`, and the
+/// «Медиа…» menu takes its hosts from `first_external_hosts`. Whatever a
+/// regex here misses is still refused by the loader's gate.
+pub fn block_external(input: &str, policy: &Policy, sender: &str) -> String {
     if input.is_empty() {
-        return BlockOutcome { html: String::new(), blocked_domains: Vec::new() };
+        return String::new();
     }
     if policy.media_allowed(sender) {
         // Sender-trusted: nothing to block. Domain-allow list still
         // applies to scripts elsewhere but doesn't change <img>/url().
-        return BlockOutcome { html: input.to_string(), blocked_domains: Vec::new() };
+        return input.to_string();
     }
 
     let res = block_res();
-    let mut blocked: BTreeSet<String> = BTreeSet::new();
 
     let mut out = res
         .re_img
@@ -247,7 +244,6 @@ pub fn block_external(input: &str, policy: &Policy, sender: &str) -> BlockOutcom
                 .unwrap_or("");
             match extract_host(url) {
                 Some(host) if !policy.domain_allowed(&host) => {
-                    blocked.insert(host);
                     format!(
                         r#"<{tag}{attrs_before_src} data-blocked-src="{}" src="""#,
                         url.replace('"', "&quot;")
@@ -264,7 +260,6 @@ pub fn block_external(input: &str, policy: &Policy, sender: &str) -> BlockOutcom
             let url = caps.get(2).or_else(|| caps.get(3)).map(|m| m.as_str()).unwrap_or("");
             match extract_host(url) {
                 Some(host) if !policy.domain_allowed(&host) => {
-                    blocked.insert(host);
                     String::new() // drop the whole <link>
                 }
                 _ => caps[0].to_string(),
@@ -282,10 +277,7 @@ pub fn block_external(input: &str, policy: &Policy, sender: &str) -> BlockOutcom
                 .map(|m| m.as_str())
                 .unwrap_or("");
             match extract_host(url) {
-                Some(host) if !policy.domain_allowed(&host) => {
-                    blocked.insert(host);
-                    String::new()
-                }
+                Some(host) if !policy.domain_allowed(&host) => String::new(),
                 _ => caps[0].to_string(),
             }
         })
@@ -301,16 +293,13 @@ pub fn block_external(input: &str, policy: &Policy, sender: &str) -> BlockOutcom
                 .map(|m| m.as_str())
                 .unwrap_or("");
             match extract_host(url) {
-                Some(host) if !policy.domain_allowed(&host) => {
-                    blocked.insert(host);
-                    "url()".to_string()
-                }
+                Some(host) if !policy.domain_allowed(&host) => "url()".to_string(),
                 _ => caps[0].to_string(),
             }
         })
         .into_owned();
 
-    BlockOutcome { html: out, blocked_domains: blocked.into_iter().collect() }
+    out
 }
 
 #[cfg(test)]
@@ -321,9 +310,9 @@ mod tests {
     fn unquoted_src_is_blocked_and_offered_in_the_menu() {
         let html = r#"<img src=https://t.example/p.gif><td background=https://b.example/bg.gif>"#;
         let out = block_external(html, &Policy::default(), "news@sender.example");
-        assert!(!out.html.contains("src=https://"), "{}", out.html);
-        assert!(!out.html.contains("background=https://"), "{}", out.html);
-        assert_eq!(out.blocked_domains, ["b.example", "t.example"]);
+        assert!(!out.contains("src=https://"), "{out}");
+        assert!(!out.contains("background=https://"), "{out}");
+        assert!(out.contains(r#"data-blocked-src="https://t.example/p.gif""#), "{out}");
         assert_eq!(first_external_hosts(html).0, "t.example");
     }
 }

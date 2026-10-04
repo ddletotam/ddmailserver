@@ -224,17 +224,6 @@ pub fn close(id: u64) {
     }
 }
 
-/// Close every toast belonging to a given (event, occurrence) — used when the
-/// «✕» on a «наступило» toast must wipe all notifications for that occurrence.
-/// (Mapping id→event is the caller's job in the full feature; for now this is
-/// the primitive the caller composes.)
-pub fn close_all() {
-    let ids: Vec<u64> = REG.with(|r| r.borrow().items.iter().map(|e| e.id).collect());
-    for id in ids {
-        close(id);
-    }
-}
-
 /// Is a toast for this event currently on screen? Used to dedup — spec: don't
 /// raise a second «скоро» for an event while one is already showing (e.g. a
 /// burst of repeats right after the client starts).

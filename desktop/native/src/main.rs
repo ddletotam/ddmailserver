@@ -1275,14 +1275,14 @@ fn message_hits(envs: &[MessageEnvelope]) -> Vec<MessageHit> {
 /// Bubble wrapper + email-HTML normalization (tames ugly notification emails).
 /// External-resource blocking is applied here per the current `Policy` —
 /// images / stylesheets / `url(...)` references to non-allowlisted hosts
-/// are replaced with empty `src=""` (kept as `data-blocked-src` for the
-/// future "show domain X" UX).
+/// are replaced with empty `src=""` (kept as `data-blocked-src`). That is
+/// presentation only; the loader's own gate is what keeps them off the wire.
 fn build_body_html(b: &MessageBody, policy: &policy::Policy, caption: bool) -> String {
     let has_html = b.html.as_deref().map(|h| !h.trim().is_empty()).unwrap_or(false);
     let inner = match b.html.as_deref() {
         Some(h) if !h.trim().is_empty() => {
             let sanitized = sanitize::sanitize_email_html_for(h, policy, &b.from_addr);
-            sanitize::block_external(&sanitized, policy, &b.from_addr).html
+            sanitize::block_external(&sanitized, policy, &b.from_addr)
         }
         _ => format!(
             "<div style=\"white-space:pre-wrap\">{}</div>",
@@ -1565,8 +1565,8 @@ enum Job {
         /// Per-body render mode, parallel to `bodies`: 0 = auto
         /// (HTML when present), 1 = force the text-only bubble.
         modes: Vec<u8>,
-        /// UI window scale factor — the WebView rasterizes at this scale so
-        /// the capture is 1:1 with physical pixels (crisp on HiDPI).
+        /// UI window scale factor — emlrender rasterizes at this scale so
+        /// the bitmap is 1:1 with physical pixels (crisp on HiDPI).
         scale: f32,
         /// Склеенный диалог: пузыри подписаны темой, у своих — подсказка с
         /// адресатами (контракт §4, «Склеенный диалог»).
@@ -2755,7 +2755,6 @@ fn selection_text(sh: &Shared) -> Option<String> {
     selection_text_for(runs, sh.sel_anchor.get(), sh.sel_head.get())
 }
 
-/// Put text on the system clipboard (best-effort).
 thread_local! {
     // Held for the whole session. On X11 the clipboard is served live by the
     // owning process, so a Clipboard created per-call and dropped immediately
@@ -6056,29 +6055,21 @@ fn main() {
         ui.set_active_color(slint::Brush::SolidColor(hex(&d0.color)));
     }
 
-    // ----- Ultralight render worker -----
+    // ----- Bubble render worker (emlrender) -----
     //
-    // Holds two pieces of state across jobs:
-    //   * `body_cache` — finished Slint `RowItem`s keyed by
-    //     (folder, uid, width). Re-opening a conversation reuses the
-    //     bitmaps instead of re-rendering them through Ultralight, which
-    //     is what dominates the latency budget (Notion 21 msgs: ~6.4 s
-    //     cold vs ~0 ms warm). Pack-to-Image (memcpy of RGBA into a
-    //     `SharedPixelBuffer`) runs on THIS thread now, so the UI thread
-    //     stays responsive — previously it spent ~1 s per heavy
-    //     conversation just packing.
-    //   * `row_view_indices` — parallel to the rendered rows, mapping
-    //     a row index to its Ultralight `View` inside the engine for
-    //     hit-testing. `None` means the row was served from cache and
-    //     has no live view; link clicks on those rows are ignored until
-    //     a future iteration that caches views too.
+    // Holds `body_cache` across jobs: packed bubble bitmaps keyed by
+    // (folder, uid, width, policy_gen, mode, fingerprint). Re-opening a
+    // conversation reuses them instead of laying the mail out again, which
+    // is what dominates the latency budget. Pack-to-buffer (memcpy of RGBA
+    // into a `SharedPixelBuffer`) runs on THIS thread, so the UI thread only
+    // wraps finished buffers in `Image`s.
     let (tx, rx) = mpsc::channel::<Job>();
     let rx = Arc::new(Mutex::new(rx));
     // Shared with Job::SetConversation senders (send_render_job): holds the
     // seq of the newest enqueued job so the worker can skip/abort stale ones.
     let render_seq = Arc::new(AtomicU64::new(0));
     // Disk layer under the RAM texture cache — survives restarts, so warm
-    // conversations skip the WebView entirely after a relaunch.
+    // conversations skip layout entirely after a relaunch.
     let tex_disk = cache_db_path()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .and_then(texture_cache::TextureDiskCache::open);
@@ -6088,7 +6079,6 @@ fn main() {
         let latest_seq = Arc::clone(&render_seq);
         let ui_weak = ui_weak.clone();
         std::thread::spawn(move || {
-            let mut engine = render::Engine::new();
             // Cache holds the (already-packed) RGBA pixel buffer + height
             // per (folder, uid, width). `SharedPixelBuffer<Rgba8Pixel>` is
             // Send + Sync (unlike Slint's `Image`, which is UI-thread-only),
@@ -6115,20 +6105,12 @@ fn main() {
             let mut row_links: Vec<Vec<render_common::LinkRect>> = Vec::new();
             // Per-row text layer (word rects) — mouse selection support.
             let mut row_runs: Vec<Vec<render_common::TextRun>> = Vec::new();
-            // Set when a render panics mid-job: the WebView/COM state may be
-            // wedged, so we throw the engine away and build a fresh one before
-            // the next job rather than risk every later render failing too.
-            let mut engine_needs_rebuild = false;
             loop {
                 let job = {
                     let lock = rx.lock().unwrap();
                     lock.recv()
                 };
                 let Ok(job) = job else { break };
-                if engine_needs_rebuild {
-                    engine = render::Engine::new();
-                    engine_needs_rebuild = false;
-                }
                 match job {
                     Job::SetConversation {
                         bodies,
@@ -6150,7 +6132,6 @@ fn main() {
                         }
                         let t_wall = Instant::now();
                         let n = bodies.len();
-                        engine.clear_views();
                         row_links.clear();
                         row_runs.clear();
 
@@ -6172,7 +6153,7 @@ fn main() {
                         for (i, body) in bodies.iter().enumerate() {
                             // Cheap mid-render cancellation: a newer job
                             // arrived (conversation switch, next resize step)
-                            // — stop burning WebView time on this one.
+                            // — stop spending layout time on this one.
                             if seq < latest_seq.load(Ordering::SeqCst) {
                                 aborted = true;
                                 break;
@@ -6224,15 +6205,15 @@ fn main() {
                                     0
                                 };
                             let key = (body.folder.clone(), body.uid, width, policy_gen, mode, fp);
-                            let mut remember = |key: &(String, u32, u32, u64, u8, u64),
-                                                entry: &(
+                            let remember = |key: &(String, u32, u32, u64, u8, u64),
+                                            entry: &(
                                 SharedPixelBuffer<Rgba8Pixel>,
                                 f32,
                                 Vec<render_common::LinkRect>,
                                 Vec<render_common::TextRun>,
                             ),
-                                                body_cache: &mut HashMap<_, _>,
-                                                ram_order: &mut Vec<(
+                                            body_cache: &mut HashMap<_, _>,
+                                            ram_order: &mut Vec<(
                                 String,
                                 u32,
                                 u32,
@@ -6254,7 +6235,7 @@ fn main() {
                                 t.load(&body.folder, body.uid, width, policy_gen, mode, fp)
                             }) {
                                 // Disk layer: rendered in a previous session —
-                                // a PNG decode instead of a WebView pass.
+                                // a PNG decode instead of a layout pass.
                                 disk_hits += 1;
                                 let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
                                     &de.rgba, de.width, de.height,
@@ -6264,10 +6245,11 @@ fn main() {
                                 entry
                             } else {
                                 // First render: try the full HTML (unless the
-                                // text view is forced). If the renderer doesn't
-                                // paint anything we retry with the text-only
-                                // bubble — keeps "missing bubble" failures from
-                                // being silent.
+                                // text view is forced). If the layout broke on
+                                // this mail (`successful()` explains the
+                                // signal) we retry with the text-only bubble —
+                                // keeps "missing bubble" failures from being
+                                // silent.
                                 let html = if force_text {
                                     build_text_only_html(body, merged)
                                 } else {
@@ -6278,42 +6260,27 @@ fn main() {
                                 let gate = policy.media_gate(&body.from_addr);
                                 let gate: &render::RemoteGate =
                                     if force_text { &render::no_remote } else { &gate };
-                                let (mut result, panicked) =
-                                    engine.render_one_guarded(&html, width, scale, gate);
-                                if panicked {
-                                    engine_needs_rebuild = true;
-                                }
+                                let mut result = render::render(&html, width, scale, gate);
                                 let text_available = body
                                     .text
                                     .as_deref()
                                     .map(|s| !s.trim().is_empty())
                                     .unwrap_or(false);
-                                // Don't poke a just-panicked engine again this
-                                // job — the text fallback would likely panic too.
-                                if !result.successful()
-                                    && text_available
-                                    && !force_text
-                                    && !panicked
-                                {
+                                if !result.successful() && text_available && !force_text {
                                     fallback_used += 1;
                                     let text_html = build_text_only_html(body, merged);
-                                    let (r2, p2) = engine.render_one_guarded(
+                                    result = render::render(
                                         &text_html,
                                         width,
                                         scale,
                                         &render::no_remote,
                                     );
-                                    result = r2;
-                                    if p2 {
-                                        engine_needs_rebuild = true;
-                                    }
                                 }
                                 render_ms_total += t_r.elapsed().as_millis();
-                                // A failed paint (load timed out, DOM never
-                                // parsed, empty document) must NOT be cached —
-                                // otherwise the degenerate 1px bitmap sticks on
-                                // disk and every later open serves that instead
-                                // of retrying. We still return it for this pass
+                                // A failed layout (see `successful()`) must NOT
+                                // be cached — otherwise the degenerate 1px
+                                // bitmap sticks on disk and every later open
+                                // serves that instead of retrying. We still return it for this pass
                                 // (an empty bubble beats a missing one), just
                                 // don't persist it.
                                 let succeeded = result.successful();
@@ -6333,11 +6300,9 @@ fn main() {
                                 let entry =
                                     (buf, bitmap.height as f32 / rscale, result.links, result.runs);
                                 println!(
-                                    "[perf]   body uid={} h={}px painted={} ready={} links={} runs={} cached={}",
+                                    "[perf]   body uid={} h={}px links={} runs={} cached={}",
                                     body.uid,
                                     bitmap.height,
-                                    result.painted_height,
-                                    result.view_ready,
                                     entry.2.len(),
                                     entry.3.len(),
                                     succeeded
@@ -6421,7 +6386,7 @@ fn main() {
                         println!(
                             "[perf] render N={n} width={width}px cache_hits={cache_hits} \
                              disk_hits={disk_hits} fallback={fallback_used} \
-                             ultralight={render_ms_total}ms pack={pack_ms_total}ms total_job={}ms",
+                             layout={render_ms_total}ms pack={pack_ms_total}ms total_job={}ms",
                             t_wall.elapsed().as_millis()
                         );
                         // UI-thread link/text rects for the pointer cursor
@@ -6536,11 +6501,7 @@ fn main() {
                         // bitmap + word rects. The modal then selects via the
                         // fast Rust text-run layer, not Slint's TextInput.
                         let html = build_source_html(&text);
-                        let (result, panicked) =
-                            engine.render_one_guarded(&html, width, scale, &render::no_remote);
-                        if panicked {
-                            engine_needs_rebuild = true;
-                        }
+                        let result = render::render(&html, width, scale, &render::no_remote);
                         let rscale = result.scale.max(0.25);
                         let bmp = result.bitmap;
                         let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
@@ -8857,33 +8818,27 @@ fn main() {
     });
     // Snooze modal choice → commit through the same action machine the
     // toast buttons use ("snz:5" … "snz:atstart").
-    let ui_weak_snz = ui.as_weak();
     let sh_snz = shared.clone();
     ui.on_snooze_choice(move |choice| {
-        if let Some(ui) = ui_weak_snz.upgrade() {
-            let (eid, occ, occ_end, toast_id, summary) = sh_snz.snooze_ctx.borrow().clone();
-            if eid != 0 {
-                let now_ms = chrono::Utc::now().timestamp_millis();
-                let at_start = choice == "atstart";
-                let fire_at = if at_start {
-                    occ
-                } else {
-                    now_ms + choice.parse::<i64>().unwrap_or(5) * 60_000
-                };
-                // User made a choice: cascade → one reminder; toast closes
-                // immediately and silently (no cascade-advancing timeout).
-                if let Some(c) = sh_snz.cache.as_ref() {
-                    if let Err(e) =
-                        c.user_choice_reminder(eid, occ, occ_end, fire_at, at_start, &summary)
-                    {
-                        eprintln!("reminders: user choice failed for {eid}: {e}");
-                    }
+        let (eid, occ, occ_end, toast_id, summary) = sh_snz.snooze_ctx.borrow().clone();
+        if eid != 0 {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let at_start = choice == "atstart";
+            let fire_at =
+                if at_start { occ } else { now_ms + choice.parse::<i64>().unwrap_or(5) * 60_000 };
+            // User made a choice: cascade → one reminder; toast closes
+            // immediately and silently (no cascade-advancing timeout).
+            if let Some(c) = sh_snz.cache.as_ref() {
+                if let Err(e) =
+                    c.user_choice_reminder(eid, occ, occ_end, fire_at, at_start, &summary)
+                {
+                    eprintln!("reminders: user choice failed for {eid}: {e}");
                 }
-                toast_window::stop_timer(toast_id); // disarm the timeout hook
-                toast_window::close(toast_id);
             }
-            sh_snz.snooze_ctx.replace((0, 0, 0, 0, String::new()));
+            toast_window::stop_timer(toast_id); // disarm the timeout hook
+            toast_window::close(toast_id);
         }
+        sh_snz.snooze_ctx.replace((0, 0, 0, 0, String::new()));
     });
     // Snooze dialog dismissed WITHOUT a choice: the toast behaves as if the
     // button was never pressed — resume its paused countdown.
@@ -9166,7 +9121,7 @@ fn main() {
     // and all other fields are preserved.
     let ui_weak_gm = ui.as_weak();
     let sh_gm = shared.clone();
-    ui.on_grid_event_moved(move |id, orig_x, orig_y, new_x, new_y| {
+    ui.on_grid_event_moved(move |id, orig_x, _orig_y, new_x, new_y| {
         let Some(ui) = ui_weak_gm.upgrade() else { return };
         const GUTTER: f32 = 48.0;
         let day_count = ui.get_day_count();
@@ -9446,7 +9401,7 @@ fn main() {
                         // no cascade advance (this is the terminal alarm).
                         let s_body = summary.clone();
                         let id = toast_window::show(
-                            2,
+                            toast_window::KIND_STARTED,
                             eid,
                             &title,
                             &body,
@@ -9470,7 +9425,7 @@ fn main() {
                         let s_body = summary.clone();
                         let s_act = summary.clone();
                         let id = toast_window::show(
-                            1,
+                            toast_window::KIND_SOON,
                             eid,
                             &title,
                             &body,
@@ -11068,7 +11023,6 @@ fn parse_headers(raw: &str) -> Vec<(String, String)> {
 /// loop.
 #[cfg(not(target_os = "linux"))]
 fn pick_attachment_files(ui: &MainWindow) -> Vec<std::path::PathBuf> {
-    use raw_window_handle::HasWindowHandle;
     let handle = ui.window().window_handle();
     rfd::FileDialog::new().set_parent(&handle).pick_files().unwrap_or_default()
 }
@@ -11130,7 +11084,6 @@ fn pick_attachment_files(ui: &MainWindow) -> Vec<std::path::PathBuf> {
 /// kdialog/zenity отдельным процессом (gtk в сборке нет вовсе).
 #[cfg(not(target_os = "linux"))]
 fn pick_save_path(ui: &MainWindow, filename: &str) -> Option<std::path::PathBuf> {
-    use raw_window_handle::HasWindowHandle;
     let handle = ui.window().window_handle();
     rfd::FileDialog::new().set_parent(&handle).set_file_name(filename).save_file()
 }

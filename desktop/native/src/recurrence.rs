@@ -81,7 +81,7 @@ pub fn expand(
     // `produced` counts every occurrence the series has yielded from its
     // start — that, not the in-window count, is what COUNT bounds.
     let mut produced = 0usize;
-    let mut push = |start: i64, out: &mut Vec<Occurrence>| {
+    let push = |start: i64, out: &mut Vec<Occurrence>| {
         if overlaps(start) && !excluded(start) {
             out.push(emit(start));
         }

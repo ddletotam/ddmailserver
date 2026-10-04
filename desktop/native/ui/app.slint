@@ -882,8 +882,9 @@ export component MainWindow inherits Window {
     // и читает приоритетно на отправке — тот же принцип, что «Кому»/тема в §1.
     callback identity-picked(int);
 
-    // Render progress: while a conversation's bubbles stream in from
-    // Ultralight, a thin bar above the bubble list shows "M of N done".
+    // Render progress: while a conversation's bubbles are being laid out
+    // (emlrender, render worker), a thin bar above the bubble list shows
+    // "M of N done".
     // Visible when total > 0 AND progress < total.
     in property <int> render-progress: 0;
     in property <int> render-total: 0;
@@ -2157,8 +2158,8 @@ export component MainWindow inherits Window {
                     root.viewport-resized(self.width);
                 }
 
-                // Thin loader bar overlaid at the top while Ultralight is
-                // still chewing through the conversation's bubbles. Becomes
+                // Thin loader bar overlaid at the top while the render worker
+                // is still laying out the conversation's bubbles. Becomes
                 // invisible the moment progress catches up with total.
                 if root.render-total > 0 && root.render-progress < root.render-total: bar := Rectangle {
                     x: 0;
@@ -4874,7 +4875,7 @@ export component MainWindow inherits Window {
                         clip: true;
 
                         // Raw text (source / body source): rendered to a bitmap
-                        // by WebKit (like a message bubble), selected via the
+                        // by emlrender (like a message bubble), selected via the
                         // fast Rust text-run layer — Slint's TextInput lays out
                         // the whole string on every selection event and crawls
                         // even on small text. «Копировать всё» copies the full

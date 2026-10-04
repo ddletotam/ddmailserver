@@ -261,7 +261,6 @@ pub fn body_for(t: &DueToast, now_ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     /// Кэш в temp-каталоге, который убирает за собой.
     ///

@@ -128,17 +128,6 @@ impl Policy {
             true
         }
     }
-
-    pub fn toggle_domain(&mut self, host: &str) -> bool {
-        let k = host.to_lowercase();
-        if self.allow_domains.contains(&k) {
-            self.allow_domains.remove(&k);
-            false
-        } else {
-            self.allow_domains.insert(k);
-            true
-        }
-    }
 }
 
 fn policy_path() -> Option<PathBuf> {

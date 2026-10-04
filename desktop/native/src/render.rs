@@ -3,7 +3,8 @@
 //!
 //! Coordinate contract: bitmap px = CSS px × `scale`, links and runs in CSS px.
 //! Everything above this file — the bubble bitmaps, the PDF-style selection
-//! layer, the link hit-test — is unchanged from when this was one of three.
+//! layer, the link hit-test against stored `LinkRect`s — works on that
+//! geometry alone; nothing keeps a live document around after a render.
 //!
 //! Why the browser engines went: WebView2 and WebKitGTK each lay out to their
 //! own idea of a viewport and overflow horizontally out of the bubble, and no
@@ -22,8 +23,6 @@ pub struct Bitmap {
 
 pub struct RenderResult {
     pub bitmap: Bitmap,
-    pub view_ready: bool,
-    pub painted_height: u32,
     pub links: Vec<LinkRect>,
     /// Per-word text layer for mouse selection (PDF-viewer style).
     pub runs: Vec<TextRun>,
@@ -32,8 +31,14 @@ pub struct RenderResult {
 }
 
 impl RenderResult {
+    /// Did the layout actually produce a page? `emlrender::render_with` never
+    /// fails outright — a panic inside the pipeline is caught there and comes
+    /// back as a blank strip exactly one pixel high. Every real bubble is
+    /// taller than that (the chrome alone has padding and a timestamp line),
+    /// so a 1-px result is the crate's "this mail broke me" signal: the caller
+    /// retries with the text-only bubble and must not cache the strip.
     pub fn successful(&self) -> bool {
-        self.view_ready && self.painted_height > 0
+        self.bitmap.height > 1
     }
 }
 
@@ -46,70 +51,25 @@ pub fn no_remote(_host: &str) -> bool {
     false
 }
 
-/// Stateless: there is no view to own, no message pump to drive, and no
-/// navigation to wait for. Kept as a struct so the call sites do not change.
-pub struct Engine;
-
-impl Default for Engine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Engine {
-    pub fn new() -> Self {
-        Engine
-    }
-
-    /// `emlrender::render` already catches panics internally and rebuilds its
-    /// text engine, so the "did it panic" flag the callers use to fall back to
-    /// the plain-text body is always false: a failure here is a short bitmap,
-    /// not a lost worker.
-    pub fn render_one_guarded(
-        &mut self,
-        html: &str,
-        width: u32,
-        scale: f32,
-        allow_host: &RemoteGate,
-    ) -> (RenderResult, bool) {
-        (self.render_one(html, width, scale, allow_host), false)
-    }
-
-    /// `allow_host` decides, per host, whether this message's remote images
-    /// may be fetched — `Policy::media_gate` for a mail body, [`no_remote`]
-    /// for anything we generated ourselves. It is the security boundary:
-    /// `sanitize::block_external` blanks what it recognises for the «Медиа…»
-    /// menu, but a spelling its regexes miss (unquoted `src`, entities, CSS)
-    /// still reaches the loader, which parses the same DOM layout does and
-    /// asks `allow_host` about every URL and every redirect hop.
-    pub fn render_one(
-        &mut self,
-        html: &str,
-        width: u32,
-        scale: f32,
-        allow_host: &RemoteGate,
-    ) -> RenderResult {
-        let opts = emlrender::RenderOptions { width, scale, block_remote: false };
-        let images = emlrender::net::HttpResources::prefetch(html, allow_host);
-        let r = emlrender::render_with(html, &opts, &images);
-        RenderResult {
-            bitmap: Bitmap { rgba: r.rgba, width: r.width_px, height: r.height_px },
-            // No view to become ready and nothing asynchronous to wait for.
-            view_ready: true,
-            painted_height: r.height_px,
-            links: r.links.into_iter().map(into_link).collect(),
-            runs: r.runs.into_iter().map(into_run).collect(),
-            scale: r.scale,
-        }
-    }
-
-    /// No views to release.
-    pub fn clear_views(&mut self) {}
-
-    /// Hit-testing lives in `main.rs` against the stored `LinkRect`s; the
-    /// browser backends kept this for their live-DOM path.
-    pub fn hit(&self, _row: usize, _x: f32, _y: f32) -> Option<String> {
-        None
+/// Lay out and rasterize one document. Stateless and synchronous: no view to
+/// own, no message pump, nothing to wait for but the remote images.
+///
+/// `allow_host` decides, per host, whether this message's remote images
+/// may be fetched — `Policy::media_gate` for a mail body, [`no_remote`]
+/// for anything we generated ourselves. It is the security boundary:
+/// `sanitize::block_external` blanks what it recognises for the «Медиа…»
+/// menu, but a spelling its regexes miss (unquoted `src`, entities, CSS)
+/// still reaches the loader, which parses the same DOM layout does and
+/// asks `allow_host` about every URL and every redirect hop.
+pub fn render(html: &str, width: u32, scale: f32, allow_host: &RemoteGate) -> RenderResult {
+    let opts = emlrender::RenderOptions { width, scale, block_remote: false };
+    let images = emlrender::net::HttpResources::prefetch(html, allow_host);
+    let r = emlrender::render_with(html, &opts, &images);
+    RenderResult {
+        bitmap: Bitmap { rgba: r.rgba, width: r.width_px, height: r.height_px },
+        links: r.links.into_iter().map(into_link).collect(),
+        runs: r.runs.into_iter().map(into_run).collect(),
+        scale: r.scale,
     }
 }
 

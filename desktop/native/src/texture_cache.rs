@@ -1,8 +1,9 @@
 //! Disk-persistent cache of rendered bubble textures.
 //!
 //! The render worker's RAM cache dies with the process, so every restart
-//! re-rendered every bubble through the WebView — seconds per conversation
-//! that this layer turns into a PNG decode (~ms). One entry = a PNG of the
+//! would lay every bubble out again — up to seconds per conversation on
+//! heavy newsletters — which this layer turns into a PNG decode (~ms). One
+//! entry = a PNG of the
 //! RGBA bitmap + a JSON sidecar `{h, links}`; the key mirrors the RAM key
 //! `(folder, uid, width, policy_gen)`. policy_gen persists across restarts
 //! (see policy::Policy::gen), so stale-policy textures can never resurrect.

@@ -1,4 +1,7 @@
 /target
+# Leftovers of the long-gone Ultralight renderer (SDK libs, its resources, its
+# session dir). Nothing creates them any more; they stay ignored so a station
+# that still has them cannot commit hundreds of MB of SDK by accident.
 /assets/resources
 /ultralight-lib
 /ulsession

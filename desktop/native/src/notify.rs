@@ -1,15 +1,8 @@
-//! Thin wrapper over `notify-rust` for desktop notifications. Cross-platform
-//! (Linux zbus / Windows WinRT toast / macOS) behind one call; failures are
-//! swallowed — a missing notification daemon must never crash the client.
+//! Thin wrapper over `notify-rust` for the non-Windows mail toast (Windows
+//! uses WinRT directly, see `toast.rs`). Failures are swallowed — a missing
+//! notification daemon must never crash the client.
 
-/// Show a desktop notification. Best-effort.
-pub fn notify(title: &str, body: &str) {
-    if let Err(e) = notify_rust::Notification::new().summary(title).body(body).show() {
-        eprintln!("notify: {e}");
-    }
-}
-
-/// То же, но по плашке можно кликнуть.
+/// Уведомление, по плашке которого можно кликнуть.
 ///
 /// Действие с ключом `"default"` freedesktop-демоны вешают на само тело
 /// уведомления (так предписывает спецификация), поэтому отдельной кнопки
