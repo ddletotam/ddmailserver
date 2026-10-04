@@ -1,0 +1,701 @@
+//! The calendar view (`view-mode 1`): week grid geometry and zoom, event
+//! blocks and overlap lanes, the calendar list with colours and visibility,
+//! and the settings it persists.
+
+use super::*;
+
+/// Calendar palette, modelled on Google Calendar's event colours — the
+/// reference design for "distinct, calm, and readable with white text on
+/// event blocks". Their Banana yellow is swapped for a darker amber (white
+/// text drowns on yellow).
+pub(crate) const CAL_PALETTE: [&str; 12] = [
+    "#D50000", // tomato
+    "#E67C73", // flamingo
+    "#F4511E", // tangerine
+    "#F09300", // amber
+    "#33B679", // sage
+    "#0B8043", // basil
+    "#039BE5", // peacock
+    "#3F51B5", // blueberry
+    "#7986CB", // lavender
+    "#8E24AA", // grape
+    "#616161", // graphite
+    "#009688", // teal
+];
+
+/// Stable default colour for a calendar that the server gave no colour for.
+/// Keyed on the calendar id via a multiplicative hash so the mapping is
+/// deterministic across sessions and spreads ids across the palette.
+pub(crate) fn default_cal_color(id: i64) -> &'static str {
+    let idx = ((id.unsigned_abs().wrapping_mul(2_654_435_761)) >> 16) as usize % CAL_PALETTE.len();
+    CAL_PALETTE[idx]
+}
+
+/// Colour to actually paint a calendar with. The CalDAV import stamps most
+/// calendars with the generic placeholder `#3788d8`, so we treat that (and
+/// an empty value) as "no real colour" and fall back to our distinct
+/// per-calendar palette; a genuinely customised colour is kept.
+pub(crate) fn cal_color(id: i64, server_color: &str) -> String {
+    if server_color.is_empty() || server_color.eq_ignore_ascii_case("#3788d8") {
+        default_cal_color(id).to_string()
+    } else {
+        server_color.to_string()
+    }
+}
+
+/// Days-since-epoch for the Monday of the calendar week containing
+/// "today" (local time).
+pub(crate) fn week_start_days_today() -> i64 {
+    use chrono::{Datelike, Duration, Local};
+    let today = Local::now().date_naive();
+    let from_mon = today.weekday().num_days_from_monday() as i64;
+    let monday = today - Duration::days(from_mon);
+    monday.signed_duration_since(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()).num_days()
+}
+
+/// Same, but for the week containing an arbitrary timestamp — used to
+/// navigate the calendar to a reminder's occurrence.
+pub(crate) fn week_start_days_for_ms(ms: i64) -> i64 {
+    use chrono::{Datelike, Duration, Local, TimeZone};
+    let date = Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .map(|t| t.date_naive())
+        .unwrap_or_else(|| Local::now().date_naive());
+    let monday = date - Duration::days(date.weekday().num_days_from_monday() as i64);
+    monday.signed_duration_since(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()).num_days()
+}
+
+/// Side-by-side lanes for overlapping blocks within a day column: events
+/// that share time split the column into equal-width lanes, like every
+/// desktop calendar. Without this, same-time events from different
+/// calendars paint over each other and only the topmost stays visible.
+pub(crate) fn assign_overlap_lanes(blocks: &mut [EventBlock], day_count: i32) {
+    // Assign greedy lanes within one cluster of transitively-overlapping
+    // blocks, then split the column between the lanes used.
+    fn flush(blocks: &mut [EventBlock], cluster: &mut Vec<usize>) {
+        if cluster.is_empty() {
+            return;
+        }
+        let mut lane_ends: Vec<f32> = Vec::new();
+        let mut lane_of: Vec<usize> = Vec::with_capacity(cluster.len());
+        for &i in cluster.iter() {
+            let top = blocks[i].top;
+            let lane = match lane_ends.iter().position(|&e| e <= top) {
+                Some(l) => l,
+                None => {
+                    lane_ends.push(f32::MIN);
+                    lane_ends.len() - 1
+                }
+            };
+            lane_ends[lane] = top + blocks[i].h;
+            lane_of.push(lane);
+        }
+        let n = lane_ends.len() as f32;
+        for (k, &i) in cluster.iter().enumerate() {
+            blocks[i].xf = lane_of[k] as f32 / n;
+            blocks[i].wf = 1.0 / n;
+        }
+        cluster.clear();
+    }
+
+    for day in 0..day_count {
+        let mut idx: Vec<usize> = (0..blocks.len()).filter(|&i| blocks[i].day == day).collect();
+        idx.sort_by(|&a, &b| {
+            blocks[a].top.partial_cmp(&blocks[b].top).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut cluster: Vec<usize> = Vec::new();
+        let mut cluster_end = f32::MIN;
+        for i in idx {
+            if !cluster.is_empty() && blocks[i].top >= cluster_end {
+                flush(blocks, &mut cluster);
+                cluster_end = f32::MIN;
+            }
+            cluster_end = cluster_end.max(blocks[i].top + blocks[i].h);
+            cluster.push(i);
+        }
+        flush(blocks, &mut cluster);
+    }
+}
+
+/// Absolute ms of local midnight for the given calendar date. None only if
+/// the local timezone genuinely has no midnight that day (DST gap).
+pub(crate) fn local_midnight_ms(date: chrono::NaiveDate) -> Option<i64> {
+    use chrono::{Local, TimeZone};
+    Local.from_local_datetime(&date.and_hms_opt(0, 0, 0)?).single().map(|d| d.timestamp_millis())
+}
+
+/// Compute the [from_ms, to_ms) range covering the displayed week
+/// (5 or 7 days, full 24h regardless of hour-toggle), anchored to LOCAL
+/// Monday midnight — must match apply_calendar_view's window.
+pub(crate) fn week_range_ms(week_start_days: i64, day_count: i32) -> (i64, i64) {
+    use chrono::Duration;
+    let day_ms: i64 = 24 * 60 * 60 * 1000;
+    let monday =
+        chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap() + Duration::days(week_start_days);
+    let from = local_midnight_ms(monday).unwrap_or(week_start_days * day_ms);
+    let to = from + day_count as i64 * day_ms;
+    (from, to)
+}
+
+/// Snapshot the current calendar-view preferences into calendar.json.
+/// Called immediately after every change (visibility / colour /
+/// day- and hour-range toggles) — never deferred to exit.
+pub(crate) fn save_calendar_settings(ui: &MainWindow, sh: &Shared) {
+    let hidden: Vec<i64> = sh
+        .calendar_visible
+        .borrow()
+        .iter()
+        .filter(|(_, visible)| !**visible)
+        .map(|(id, _)| *id)
+        .collect();
+    calendar_settings::save(&calendar_settings::CalendarSettings {
+        hidden,
+        colors: sh.calendar_colors.borrow().clone(),
+        notify_sound: ui.get_notify_sound_on(),
+        work_start_hour: sh.work_start.get(),
+        work_end_hour: sh.work_end.get(),
+        manual_hour_height: sh.manual_hour_h.get(),
+        manual_col_width: sh.manual_col_w.get(),
+        last_conversation: sh.last_conv_id.borrow().clone(),
+    });
+}
+
+/// Scroll the calendar grid so `hour` (fractional local hours) sits at the
+/// top of the viewport. Entering the calendar always lands on the working
+/// day, not on 00:00 — with a manual hour-zoom the grid models the full 0–24
+/// and would otherwise open on the night hours. In the no-scroll band layout
+/// the clamp in the .slint bridge makes this a no-op.
+pub(crate) fn scroll_calendar_to_hour(ui: &MainWindow, hour: f32) {
+    let top = (hour - ui.get_hour_start() as f32).max(0.0) * ui.get_hour_height();
+    ui.set_grid_scroll_y(top);
+    // pending: the pane may be instantiating right now (view-mode just
+    // switched) — the Flickable then applies this on its first layout.
+    ui.set_grid_scroll_pending(true);
+    ui.set_grid_scroll_seq(ui.get_grid_scroll_seq() + 1);
+    // The conditional pane misses BOTH triggers when it instantiates with
+    // its final geometry (second visit, data already cached): the seq bump
+    // predates the bridge and the first layout isn't a property *change*.
+    // One delayed re-bump lands after instantiation and covers that hole.
+    let ui_weak = ui.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_millis(120), move || {
+        if let Some(ui) = ui_weak.upgrade() {
+            if ui.get_grid_scroll_pending() {
+                ui.set_grid_scroll_seq(ui.get_grid_scroll_seq() + 1);
+            }
+        }
+    });
+}
+
+/// Hard floors from the spec: an hour cell is never shorter than 52px nor a
+/// day column narrower than 300px. The 48px gutter holds the time labels.
+pub(crate) const MIN_HOUR_H: f32 = 52.0;
+
+pub(crate) const MIN_COL_W: f32 = 300.0;
+
+pub(crate) const GUTTER_W: f32 = 48.0;
+
+/// Choose day-count + column width for the available width.
+///   - manual day-zoom → 7-day content at the chosen width (horizontal scroll)
+///   - else 7 days if they fit at ≥300px (filling the width)
+///   - else 5 days (Mon–Fri) if they fit
+///   - else 5 days at the 300px floor (horizontal scroll)
+pub(crate) fn compute_horizontal(canvas_w: f32, manual_col_w: f32) -> (i32, f32) {
+    let avail = (canvas_w - GUTTER_W).max(MIN_COL_W);
+    if manual_col_w > 0.0 {
+        return (7, manual_col_w.clamp(MIN_COL_W, avail));
+    }
+    if avail >= 7.0 * MIN_COL_W {
+        (7, avail / 7.0)
+    } else if avail >= 5.0 * MIN_COL_W {
+        (5, avail / 5.0)
+    } else {
+        (5, MIN_COL_W)
+    }
+}
+
+/// Choose the visible hour band + hour height for the available height.
+/// Returns (vis_start, vis_end, hour_height) where the band is [vis_start,
+/// vis_end) local hours.
+///   - manual hour-zoom → full 0–24 at the chosen height (vertical scroll)
+///   - else if 24h fits at ≥52px → fill the canvas with all 24h
+///   - else if there are events outside work hours → full 0–24 scroll at 52px
+///   - else hide non-work symmetrically: the work window plus as many equal
+///     padding hours above/below as fit, filling the canvas (no scroll)
+pub(crate) fn compute_vertical(
+    canvas_h: f32,
+    work_start: i32,
+    work_end: i32,
+    has_out_of_work: bool,
+    manual_hour_h: f32,
+) -> (i32, i32, f32) {
+    let ws = work_start.clamp(0, 23);
+    let we = work_end.clamp(ws + 1, 24);
+    let h = canvas_h.max(MIN_HOUR_H);
+
+    if manual_hour_h > 0.0 {
+        return (0, 24, manual_hour_h.clamp(MIN_HOUR_H, h));
+    }
+    if h >= 24.0 * MIN_HOUR_H {
+        return (0, 24, h / 24.0); // all day fits — fill
+    }
+    if has_out_of_work {
+        return (0, 24, MIN_HOUR_H); // must show everything — scroll
+    }
+    // Hide non-work, keep work window + symmetric padding that still fits.
+    let work_hours = (we - ws).max(1);
+    let fit_rows = (h / MIN_HOUR_H).floor() as i32;
+    if fit_rows <= work_hours {
+        return (ws, we, MIN_HOUR_H); // even the work window must scroll
+    }
+    let extra = fit_rows - work_hours;
+    let pad = (extra / 2).min(ws).min(24 - we);
+    let top = ws - pad;
+    let bottom = we + pad;
+    let rows = (bottom - top).max(1);
+    (top, bottom, h / rows as f32)
+}
+
+#[cfg(test)]
+mod grid_layout_tests {
+    use super::{MIN_COL_W, MIN_HOUR_H, compute_horizontal, compute_vertical};
+
+    #[test]
+    fn horizontal_seven_then_five_then_scroll() {
+        // Wide enough for 7 columns → 7, filling the width.
+        let (d, w) = compute_horizontal(48.0 + 7.0 * 320.0, 0.0);
+        assert_eq!(d, 7);
+        assert!((w - 320.0).abs() < 0.1);
+        // Fits 5 but not 7 → 5 days, filled.
+        let (d, w) = compute_horizontal(48.0 + 5.0 * 320.0, 0.0);
+        assert_eq!(d, 5);
+        assert!(w >= MIN_COL_W);
+        // Too narrow even for 5 at the floor → 5 days at the 300px floor.
+        let (d, w) = compute_horizontal(48.0 + 3.0 * MIN_COL_W, 0.0);
+        assert_eq!(d, 5);
+        assert!((w - MIN_COL_W).abs() < 0.1);
+    }
+
+    #[test]
+    fn horizontal_manual_zoom_is_seven_days_clamped() {
+        let (d, w) = compute_horizontal(2000.0, 9999.0);
+        assert_eq!(d, 7);
+        assert!(w <= 2000.0 - 48.0 + 0.1); // clamped to available width
+        let (_, w) = compute_horizontal(2000.0, 100.0);
+        assert!((w - MIN_COL_W).abs() < 0.1); // clamped up to the floor
+    }
+
+    #[test]
+    fn vertical_fills_when_all_day_fits() {
+        // Plenty of height → all 24h, filled (hour height > floor).
+        let (s, e, hh) = compute_vertical(24.0 * 80.0, 8, 19, false, 0.0);
+        assert_eq!((s, e), (0, 24));
+        assert!((hh - 80.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn vertical_scrolls_full_day_when_out_of_work_events() {
+        // Can't fit 24h and there ARE out-of-work events → 0–24 at the floor.
+        let (s, e, hh) = compute_vertical(10.0 * MIN_HOUR_H, 8, 19, true, 0.0);
+        assert_eq!((s, e), (0, 24));
+        assert!((hh - MIN_HOUR_H).abs() < 0.1);
+    }
+
+    #[test]
+    fn vertical_hides_non_work_symmetrically() {
+        // Work window 8–19 (11h). Room for ~15 rows → 4 extra → 2 above/below.
+        let h = 15.0 * MIN_HOUR_H;
+        let (s, e, hh) = compute_vertical(h, 8, 19, false, 0.0);
+        assert_eq!(s, 6);
+        assert_eq!(e, 21);
+        assert!(hh >= MIN_HOUR_H); // fills, no scroll
+        assert!((hh - h / 15.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn vertical_manual_zoom_full_day_scroll() {
+        let (s, e, hh) = compute_vertical(600.0, 8, 19, false, 120.0);
+        assert_eq!((s, e), (0, 24));
+        assert!((hh - 120.0).abs() < 0.1);
+    }
+}
+
+pub(crate) fn apply_calendar_view(ui: &MainWindow, sh: &Shared) {
+    use chrono::{Datelike, Duration, NaiveDate};
+    let (day_count, col_width) = compute_horizontal(sh.grid_canvas_w.get(), sh.manual_col_w.get());
+    ui.set_col_width(col_width);
+    // Dash segments per quarter-hour line (24px period), capped so a very
+    // wide manual zoom can't spawn an absurd number of rects.
+    let dash_count = ((day_count as f32 * col_width) / 24.0).floor().clamp(0.0, 160.0) as i32;
+    ui.set_dash_count(dash_count);
+    let week_days = sh.calendar_week_start_days.get();
+    let monday = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap() + Duration::days(week_days);
+    let headers: Vec<slint::SharedString> = (0..day_count as i64)
+        .map(|i| {
+            let d = monday + Duration::days(i);
+            const NAMES: [&str; 7] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+            let n = NAMES[d.weekday().num_days_from_monday() as usize];
+            format!("{n}, {:02}.{:02}", d.day(), d.month()).into()
+        })
+        .collect();
+    ui.set_day_headers(slint::ModelRc::new(slint::VecModel::from(headers)));
+    ui.set_day_count(day_count);
+    // Mark "today" when it falls inside the displayed week: its column
+    // index drives the header highlight + column tint, and the current
+    // local time drives the now-line.
+    {
+        let now = chrono::Local::now();
+        let today_days =
+            (now.date_naive() - NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()).num_days();
+        let col = today_days - week_days;
+        let in_view = (0..day_count as i64).contains(&col);
+        ui.set_today_col(if in_view { col as i32 } else { -1 });
+        use chrono::Timelike;
+        ui.set_now_hour(now.hour() as f32 + now.minute() as f32 / 60.0);
+    }
+    let title = {
+        const MONTHS: [&str; 12] = [
+            "Январь",
+            "Февраль",
+            "Март",
+            "Апрель",
+            "Май",
+            "Июнь",
+            "Июль",
+            "Август",
+            "Сентябрь",
+            "Октябрь",
+            "Ноябрь",
+            "Декабрь",
+        ];
+        format!("{} {}", MONTHS[(monday.month() - 1) as usize], monday.year())
+    };
+    ui.set_week_title(title.into());
+
+    // Sidebar — calendar list. Sorted by name for stability. User-picked
+    // colour overrides win over server colour / palette default.
+    let cal_items: Vec<CalendarItem> = {
+        let cals = sh.calendars.borrow();
+        let visibility = sh.calendar_visible.borrow();
+        let overrides = sh.calendar_colors.borrow();
+        let mut v: Vec<&ddmail_core::types::DesktopCalendar> = cals.iter().collect();
+        v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        v.into_iter()
+            .map(|c| CalendarItem {
+                id: c.id as i32,
+                name: c.name.clone().into(),
+                color: hex(&overrides
+                    .get(&c.id)
+                    .cloned()
+                    .unwrap_or_else(|| cal_color(c.id, &c.color)))
+                .into(),
+                visible: *visibility.get(&c.id).unwrap_or(&true),
+            })
+            .collect()
+    };
+    ui.set_calendars(slint::ModelRc::new(slint::VecModel::from(cal_items)));
+
+    // Place event blocks in two passes. Pass 1 expands every event into
+    // per-day timed segments + all-day chips, recording whether anything
+    // falls outside the work window (drives the vertical layout choice).
+    // Pass 2 — after the vertical band is known — turns segments into
+    // positioned blocks.
+    let day_ms: i64 = 24 * 60 * 60 * 1000;
+    // Week window in LOCAL time: the grid's day columns are local days, so
+    // the window must start at local Monday midnight, not UTC midnight.
+    let week_start_ms = local_midnight_ms(monday).unwrap_or(week_days * day_ms);
+    // Always expand a full 7 days so dropping to a 5-day view doesn't lose
+    // data and the out-of-work scan stays stable; layout clamps to day_count.
+    let week_end_ms = week_start_ms + 7 * day_ms;
+
+    /// One timed segment confined to a single day column.
+    struct Seg {
+        id: i32,
+        day: i32,
+        start_in_day: i64, // ms from that day's local midnight
+        end_in_day: i64,
+        color: slint::Color,
+        title: slint::SharedString,
+        time: slint::SharedString,
+        count: i32,
+        tentative: bool,
+        writable: bool, // calendar can_write → drag/resize allowed
+    }
+
+    let (segs, all_day_blocks, all_day_rows, has_out_of_work, occ_map) = {
+        let events = sh.calendar_events.borrow();
+        let visibility = sh.calendar_visible.borrow();
+        let cals = sh.calendars.borrow();
+        let overrides = sh.calendar_colors.borrow();
+        let color_for = |cal_id: i64| -> slint::Color {
+            let raw = overrides.get(&cal_id).cloned().unwrap_or_else(|| {
+                cals.iter()
+                    .find(|c| c.id == cal_id)
+                    .map(|c| cal_color(c.id, &c.color))
+                    .unwrap_or_else(|| "#3788d8".to_string())
+            });
+            hex(&raw)
+        };
+        let fmt_hm = |abs_ms: i64| -> String {
+            use chrono::{Local, TimeZone, Timelike};
+            match Local.timestamp_millis_opt(abs_ms).single() {
+                Some(d) => format!("{:02}:{:02}", d.hour(), d.minute()),
+                None => "??:??".into(),
+            }
+        };
+
+        let mut segs: Vec<Seg> = Vec::new();
+        let mut occ_map: HashMap<(i32, i32), (i64, i64, bool)> = HashMap::new();
+        let mut all_day_blocks: Vec<AllDayBlock> = Vec::new();
+        let mut all_day_fill = vec![0i32; day_count.max(0) as usize];
+        let idents = sh.identity_colors.borrow();
+        let me_key = sh.key.to_lowercase();
+        let ws_ms = sh.work_start.get() as i64 * 3_600_000;
+        let we_ms = sh.work_end.get() as i64 * 3_600_000;
+        let mut has_out_of_work = false;
+
+        for e in events.iter() {
+            if !*visibility.get(&e.calendar_id).unwrap_or(&true) {
+                continue;
+            }
+            let color = color_for(e.calendar_id);
+            let writable =
+                cals.iter().find(|c| c.id == e.calendar_id).map(|c| c.can_write).unwrap_or(false);
+            let att_count = e.attendees.len() as i32;
+            let tentative = att_count >= 2
+                && e.attendees
+                    .iter()
+                    .find(|a| {
+                        let lc = a.email.to_lowercase();
+                        lc == me_key || idents.contains_key(&lc)
+                    })
+                    .map(|a| {
+                        let ps = a.partstat.to_uppercase();
+                        ps.is_empty() || ps == "NEEDS-ACTION"
+                    })
+                    .unwrap_or(false);
+            let occ = recurrence::expand(
+                e.dtstart,
+                e.dtend,
+                &e.rrule,
+                &e.exdates,
+                week_start_ms,
+                week_end_ms,
+            );
+            if occ.is_empty() && !e.rrule.is_empty() {
+                println!(
+                    "[cal] no-occurrence: id={} dtstart={} rrule={:?} exdates={} {:?}",
+                    e.id,
+                    e.dtstart,
+                    e.rrule,
+                    e.exdates.len(),
+                    e.summary.chars().take(30).collect::<String>()
+                );
+            }
+            for o in occ {
+                let first = ((o.start_ms - week_start_ms) / day_ms) as i32;
+                let last = (((o.end_ms - 1) - week_start_ms) / day_ms) as i32;
+                if e.all_day {
+                    for day in first.max(0)..=last.min(day_count - 1) {
+                        let idx = day as usize;
+                        let row = all_day_fill[idx];
+                        all_day_fill[idx] += 1;
+                        all_day_blocks.push(AllDayBlock {
+                            id: e.id as i32,
+                            day,
+                            row,
+                            color,
+                            title: e.summary.clone().into(),
+                        });
+                    }
+                    continue;
+                }
+                let title: slint::SharedString = if e.summary.is_empty() {
+                    "(без названия)".into()
+                } else {
+                    e.summary.clone().into()
+                };
+                let time: slint::SharedString =
+                    format!("{} – {}", fmt_hm(o.start_ms), fmt_hm(o.end_ms)).into();
+                for day in first.max(0)..=last.min(day_count - 1) {
+                    let day_start_ms = week_start_ms + day as i64 * day_ms;
+                    let start_in_day = (o.start_ms - day_start_ms).max(0);
+                    let end_in_day = (o.end_ms - day_start_ms).min(day_ms);
+                    if end_in_day <= start_in_day {
+                        continue;
+                    }
+                    if start_in_day < ws_ms || end_in_day > we_ms {
+                        has_out_of_work = true;
+                    }
+                    segs.push(Seg {
+                        id: e.id as i32,
+                        day,
+                        start_in_day,
+                        end_in_day,
+                        color,
+                        title: title.clone(),
+                        time: time.clone(),
+                        count: att_count,
+                        tentative,
+                        writable,
+                    });
+                    // Exact instance bounds for drag-move (recurrence_id +
+                    // duration). Recurring → only a scope=single override moves
+                    // the day (an "all" dtstart shift keeps BYDAY's weekday).
+                    // An override row (non-empty recurrence_id, empty rrule)
+                    // must ALSO stay scope=single: patching it as "all" would
+                    // rewrite the master series' times with one occurrence's.
+                    occ_map.insert(
+                        (e.id as i32, day),
+                        (o.start_ms, o.end_ms, !e.rrule.is_empty() || !e.recurrence_id.is_empty()),
+                    );
+                }
+            }
+        }
+        let rows = *all_day_fill.iter().max().unwrap_or(&0);
+        (segs, all_day_blocks, rows, has_out_of_work, occ_map)
+    };
+    *sh.cal_occ.borrow_mut() = occ_map;
+
+    // Vertical band now that we know whether anything sits outside work hours.
+    let (vis_start, vis_end, hour_height) = compute_vertical(
+        sh.grid_canvas_h.get(),
+        sh.work_start.get(),
+        sh.work_end.get(),
+        has_out_of_work,
+        sh.manual_hour_h.get(),
+    );
+    ui.set_hour_height(hour_height);
+    ui.set_hour_start(vis_start);
+    ui.set_hour_end(vis_end);
+    ui.set_work_start(sh.work_start.get());
+    ui.set_work_end(sh.work_end.get());
+
+    let visible_top_ms = vis_start as i64 * 3_600_000;
+    let visible_bottom_ms = vis_end as i64 * 3_600_000;
+    let to_px = |ms: i64| -> f32 { (ms - visible_top_ms) as f32 / 3_600_000.0 * hour_height };
+    let mut blocks: Vec<EventBlock> = segs
+        .iter()
+        .filter_map(|s| {
+            let top_ms = s.start_in_day.max(visible_top_ms);
+            let bot_ms = s.end_in_day.min(visible_bottom_ms);
+            if bot_ms <= top_ms {
+                return None;
+            }
+            let top = to_px(top_ms);
+            let h = (to_px(bot_ms) - top).max(18.0);
+            Some(EventBlock {
+                id: s.id,
+                day: s.day,
+                top,
+                h,
+                color: s.color,
+                title: s.title.clone(),
+                time: s.time.clone(),
+                all_day: false,
+                xf: 0.0,
+                wf: 1.0,
+                count: s.count,
+                tentative: s.tentative,
+                writable: s.writable,
+            })
+        })
+        .collect();
+    println!(
+        "[cal] layout: blocks={} all_day={} days={} col_w={:.0} vis=[{}..{}) hh={:.0} oow={}",
+        blocks.len(),
+        all_day_blocks.len(),
+        day_count,
+        col_width,
+        vis_start,
+        vis_end,
+        hour_height,
+        has_out_of_work
+    );
+    assign_overlap_lanes(&mut blocks, day_count);
+    ui.set_events(slint::ModelRc::new(slint::VecModel::from(blocks)));
+    ui.set_all_day_events(slint::ModelRc::new(slint::VecModel::from(all_day_blocks)));
+    ui.set_all_day_rows(all_day_rows);
+
+    // Requested grid scroll (entering the view / opening from a toast).
+    // Issued only now — against the hour props THIS layout just set. Kept
+    // pending until the week's EVENTS have arrived: they decide whether the
+    // grid is the no-scroll work band or the full 0–24 scroll (out-of-work
+    // events force the latter), and a pixel target computed before that
+    // settles points at the wrong hour.
+    if let Some(hour) = sh.pending_cal_scroll.get() {
+        if !sh.calendar_events.borrow().is_empty() {
+            sh.pending_cal_scroll.set(None);
+        }
+        scroll_calendar_to_hour(ui, hour);
+    }
+}
+
+/// Re-fire FetchCalendarEvents for the currently displayed week. Also
+/// flips `calendar-loading` on so the topbar shows a "Загрузка…" pill
+/// until the result lands.
+pub(crate) fn refetch_calendar_events(ui: &MainWindow, sh: &Shared) {
+    // Always fetch the full 7-day week so toggling to a 5-day view (or
+    // horizontal scroll) never needs a refetch.
+    let (from_ms, to_ms) = week_range_ms(sh.calendar_week_start_days.get(), 7);
+    if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+        ui.set_calendar_loading(true);
+        let _ = etx.send(engine::EngineCmd::FetchCalendarEvents {
+            from_ms,
+            to_ms,
+            calendar_ids: Vec::new(),
+            for_reminders: false,
+        });
+    }
+}
+
+/// Seed the calendar view's read-only state before the engine produces
+/// events: day labels for the current week + a sane initial vertical band
+/// so the grid isn't blank. Real layout is computed in `apply_calendar_view`
+/// once the grid's on-screen size is known.
+pub(crate) fn apply_calendar_defaults(ui: &MainWindow) {
+    use chrono::{Datelike, Duration, Local};
+    let day_count = 7;
+    let now = Local::now();
+    // Week starts on Monday (ISO).
+    let weekday_from_mon = now.weekday().num_days_from_monday() as i64;
+    let monday = now.date_naive() - Duration::days(weekday_from_mon);
+    let headers: Vec<slint::SharedString> = (0..day_count as i64)
+        .map(|i| {
+            let d = monday + Duration::days(i);
+            const NAMES: [&str; 7] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+            let n = NAMES[d.weekday().num_days_from_monday() as usize];
+            format!("{n}, {:02}.{:02}", d.day(), d.month()).into()
+        })
+        .collect();
+    ui.set_day_headers(slint::ModelRc::new(slint::VecModel::from(headers)));
+    ui.set_day_count(day_count);
+    ui.set_col_width(MIN_COL_W);
+    let title = {
+        use chrono::Datelike as _;
+        const MONTHS: [&str; 12] = [
+            "Январь",
+            "Февраль",
+            "Март",
+            "Апрель",
+            "Май",
+            "Июнь",
+            "Июль",
+            "Август",
+            "Сентябрь",
+            "Октябрь",
+            "Ноябрь",
+            "Декабрь",
+        ];
+        format!("{} {}", MONTHS[(monday.month() - 1) as usize], monday.year())
+    };
+    ui.set_week_title(title.into());
+    ui.set_hour_height(MIN_HOUR_H);
+    if ui.get_hour_end() == 0 {
+        ui.set_hour_start(8);
+        ui.set_hour_end(19);
+    }
+    // Empty models so the for-loops don't trip on undefined.
+    ui.set_calendars(slint::ModelRc::new(slint::VecModel::from(Vec::<CalendarItem>::new())));
+    ui.set_events(slint::ModelRc::new(slint::VecModel::from(Vec::<EventBlock>::new())));
+}
