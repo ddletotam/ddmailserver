@@ -246,6 +246,7 @@ func (m *Mailbox) ListMessages(uid bool, seqSet *imap.SeqSet, items []imap.Fetch
 		full   bool // body/attachments loaded, not just metadata
 	}
 	var picks []selected
+	seqSet = resolveSeqSet(seqSet, uid, metas)
 	for seqNum, msg := range metas {
 		id := uint32(seqNum + 1)
 		if uid {
@@ -614,6 +615,7 @@ func (m *Mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, operation i
 
 	// Update matching messages
 	updatedAny := false
+	seqSet = resolveSeqSet(seqSet, uid, messages)
 	for seqNum, msg := range messages {
 		id := uint32(seqNum + 1)
 		if uid {
@@ -697,6 +699,7 @@ func (m *Mailbox) CopyMessagesUID(uid bool, seqSet *imap.SeqSet, destName string
 		return 0, nil, nil, err
 	}
 
+	seqSet = resolveSeqSet(seqSet, uid, messages)
 	for seqNum, msg := range messages {
 		id := uint32(seqNum + 1)
 		if uid {
@@ -739,6 +742,7 @@ func (m *Mailbox) MoveMessagesUID(uid bool, seqSet *imap.SeqSet, destName string
 	}
 
 	var movedMsgIDs []int64
+	seqSet = resolveSeqSet(seqSet, uid, messages)
 	for seqNum, msg := range messages {
 		id := uint32(seqNum + 1)
 		if uid {
@@ -799,6 +803,7 @@ func (m *Mailbox) CopyMessages(uid bool, seqSet *imap.SeqSet, destName string) e
 
 	// Copy matching messages
 	copiedCount := 0
+	seqSet = resolveSeqSet(seqSet, uid, messages)
 	for seqNum, msg := range messages {
 		id := uint32(seqNum + 1)
 		if uid {
@@ -848,6 +853,7 @@ func (m *Mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string) e
 	movedCount := 0
 	var movedMsgIDs []int64
 	var movedUIDs []uint32
+	seqSet = resolveSeqSet(seqSet, uid, messages)
 	for seqNum, msg := range messages {
 		id := uint32(seqNum + 1)
 		if uid {
@@ -1599,4 +1605,41 @@ func splitEmail(email string) (mailbox, host string) {
 		return email[:at], email[at+1:]
 	}
 	return email, ""
+}
+
+// resolveSeqSet turns the client's set into explicit ranges against the
+// mailbox as loaded: "*" becomes the largest sequence number (or UID) present
+// and a range no longer depends on the order of its ends ("5:2" == "2:5").
+// RFC 3501 §6.4.8: "n:*" always includes the last message, even when n lies
+// past it — that is how a client asks "anything new since UIDNEXT?".
+// go-imap's Seq.Contains never matches a bare "*" and drops such ranges, so
+// FETCH * and UID FETCH <uidnext>:* used to answer with nothing.
+func resolveSeqSet(set *imap.SeqSet, uid bool, msgs []*models.Message) *imap.SeqSet {
+	out := new(imap.SeqSet)
+	if set == nil || len(msgs) == 0 {
+		return out
+	}
+	max := uint32(len(msgs))
+	if uid {
+		max = 0
+		for _, m := range msgs {
+			if m.UID > max {
+				max = m.UID
+			}
+		}
+	}
+	for _, r := range set.Set {
+		a, b := r.Start, r.Stop
+		if a == 0 {
+			a = max
+		}
+		if b == 0 {
+			b = max
+		}
+		if a > b {
+			a, b = b, a
+		}
+		out.AddRange(a, b)
+	}
+	return out
 }
