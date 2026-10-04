@@ -1,16 +1,19 @@
 //! Content-permission policy for email rendering — port of the
 //! svelte-era `permissionStore`.
 //!
-//! Three toggles per sender / globally:
+//! Toggles per sender / globally:
 //!   * `allow_media[addr]`  — load external images & background-images
 //!     from messages by that sender.
-//!   * `allow_scripts[addr]` — let `<script>`/event handlers survive
-//!     the sanitizer for that sender (off by default; scripts almost
-//!     never produce useful rendering and add risk).
 //!   * `allow_domains`      — trusted hosts whose resources load no
 //!     matter who sent the mail (e.g. `mc.yandex.ru`, MIME-server
 //!     CDNs). Per-domain instead of per-sender so widgets work
 //!     across senders.
+//!
+//! There is no script permission: emlrender never runs JavaScript, so a
+//! «run scripts» switch would promise something that cannot happen. Scripts
+//! and event handlers are always stripped. Old `permissions.json` files that
+//! still carry `allow_scripts`/`script_hosts`/`allow_all_scripts` load fine —
+//! unknown fields are ignored.
 //!
 //! State lives on disk as JSON at
 //! `$XDG_CONFIG_HOME/ru.letotam.ddmail/permissions.json` (or
@@ -26,9 +29,8 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct Policy {
     pub allow_media: HashSet<String>,
-    pub allow_scripts: HashSet<String>,
     /// Legacy shared per-host allow-list (pre-«Медиа…» menu). Read as a
-    /// synonym of media_hosts; new toggles write media_hosts/script_hosts.
+    /// synonym of media_hosts; new toggles write media_hosts.
     pub allow_domains: HashSet<String>,
     /// Monotonic generation, bumped on every mutation and persisted with
     /// the policy. Part of the rendered-texture cache key (RAM and disk),
@@ -37,22 +39,15 @@ pub struct Policy {
     pub generation: u64,
     /// «Разрешить всё» — master switch, overrides everything below.
     pub allow_all: bool,
-    /// «Изображения → разрешить все» / «Скрипты → разрешить все».
+    /// «Изображения → разрешить все».
     pub allow_all_media: bool,
-    pub allow_all_scripts: bool,
-    /// Per-host allow-lists, split by resource class.
+    /// Per-host allow-list for images and CSS resources.
     pub media_hosts: HashSet<String>,
-    pub script_hosts: HashSet<String>,
 }
 
 impl Policy {
     pub fn media_allowed(&self, sender: &str) -> bool {
         self.allow_all || self.allow_all_media || self.allow_media.contains(&sender.to_lowercase())
-    }
-    pub fn scripts_allowed(&self, sender: &str) -> bool {
-        self.allow_all
-            || self.allow_all_scripts
-            || self.allow_scripts.contains(&sender.to_lowercase())
     }
     /// Image/CSS resources from this host may load.
     pub fn domain_allowed(&self, host: &str) -> bool {
@@ -81,11 +76,6 @@ impl Policy {
         };
         move |host: &str| all || hosts.contains(&host.to_ascii_lowercase())
     }
-    /// External <script src> from this host may survive sanitization.
-    pub fn script_host_allowed(&self, host: &str) -> bool {
-        self.allow_all || self.allow_all_scripts || self.script_hosts.contains(&host.to_lowercase())
-    }
-
     pub fn toggle_media_host(&mut self, host: &str) -> bool {
         let k = host.to_lowercase();
         // Migrate a legacy allow_domains entry into media_hosts on touch.
@@ -97,16 +87,6 @@ impl Policy {
         }
     }
 
-    pub fn toggle_script_host(&mut self, host: &str) -> bool {
-        let k = host.to_lowercase();
-        if self.script_hosts.remove(&k) {
-            false
-        } else {
-            self.script_hosts.insert(k);
-            true
-        }
-    }
-
     pub fn toggle_media(&mut self, sender: &str) -> bool {
         let k = sender.to_lowercase();
         if self.allow_media.contains(&k) {
@@ -114,17 +94,6 @@ impl Policy {
             false
         } else {
             self.allow_media.insert(k);
-            true
-        }
-    }
-
-    pub fn toggle_scripts(&mut self, sender: &str) -> bool {
-        let k = sender.to_lowercase();
-        if self.allow_scripts.contains(&k) {
-            self.allow_scripts.remove(&k);
-            false
-        } else {
-            self.allow_scripts.insert(k);
             true
         }
     }

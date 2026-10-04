@@ -79,11 +79,8 @@ struct RowMeta {
     viewing_html: bool,
     sender: String,
     media_host: String,
-    script_host: String,
     m_sender_on: bool,
-    s_sender_on: bool,
     m_host_on: bool,
-    s_host_on: bool,
     /// Подсказка с адресатами своего письма в склеенном диалоге; пусто —
     /// подсказки нет.
     recipients: String,
@@ -328,8 +325,7 @@ impl ConvJob<'_> {
         let (has_html, has_text) = content_of(body);
         let force_text = self.mode(i) == 1 && has_html;
         let sender_lc = body.from_addr.to_lowercase();
-        let (media_host, script_host) =
-            sanitize::first_external_hosts(body.html.as_deref().unwrap_or(""));
+        let media_host = sanitize::first_external_host(body.html.as_deref().unwrap_or(""));
         RowMeta {
             recipients: if self.merged && body.is_outgoing {
                 recipients_tip(body)
@@ -340,14 +336,11 @@ impl ConvJob<'_> {
             has_text,
             viewing_html: has_html && !force_text,
             m_sender_on: policy.allow_media.contains(&sender_lc),
-            s_sender_on: policy.allow_scripts.contains(&sender_lc),
             m_host_on: !media_host.is_empty()
                 && (policy.media_hosts.contains(&media_host)
                     || policy.allow_domains.contains(&media_host)),
-            s_host_on: !script_host.is_empty() && policy.script_hosts.contains(&script_host),
             sender: body.from_addr.clone(),
             media_host,
-            script_host,
         }
     }
 }
@@ -602,11 +595,8 @@ fn install_rows(ctx: &Ctx, rows: Vec<(Packed, RowMeta)>, width: u32, scroll_to: 
                 viewing_html: m.viewing_html,
                 sender: m.sender.into(),
                 media_host: m.media_host.into(),
-                script_host: m.script_host.into(),
                 m_sender_on: m.m_sender_on,
-                s_sender_on: m.s_sender_on,
                 m_host_on: m.m_host_on,
-                s_host_on: m.s_host_on,
                 recipients: m.recipients.into(),
             })
             .collect();

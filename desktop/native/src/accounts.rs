@@ -614,7 +614,6 @@ pub(crate) fn wire_settings(ui: &MainWindow, shared: &Rc<Shared>) {
             let mut p = sh_mg.policy.borrow_mut();
             match which.as_str() {
                 "allow-all" => p.allow_all = !p.allow_all,
-                "scripts-all" => p.allow_all_scripts = !p.allow_all_scripts,
                 "images-all" => p.allow_all_media = !p.allow_all_media,
                 other => {
                     println!("media global {other} — not wired");

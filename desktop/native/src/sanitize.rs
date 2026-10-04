@@ -79,47 +79,26 @@ fn strips() -> &'static Strips {
     })
 }
 
-/// Policy-aware strip pass (the «Медиа…» menu semantics). Empty in → empty out.
-///   * sender/global scripts allowed → <script> and on*= handlers survive;
-///   * otherwise inline <script> is stripped, and external <script src>
-///     survives only when its host is on the script_hosts allow-list.
-pub fn sanitize_email_html_for(input: &str, policy: &Policy, sender: &str) -> String {
+/// Strip pass. Empty in → empty out. `<script>` and `on*=` handlers always
+/// go: emlrender runs no JavaScript, so there is nothing to permit.
+pub fn sanitize_email_html(input: &str) -> String {
     if input.is_empty() {
         return String::new();
     }
     let s = strips();
-    let scripts_ok = policy.scripts_allowed(sender);
     let mut out = input.to_string();
     out = s.re_mso_revealed_open.replace_all(&out, "").into_owned();
     out = s.re_mso_revealed_close.replace_all(&out, "").into_owned();
     out = s.re_mso_conditional.replace_all(&out, "").into_owned();
-    if !scripts_ok {
-        let re_src = script_src_re();
-        out = s
-            .re_script
-            .replace_all(&out, |caps: &regex::Captures| {
-                let tag = &caps[0];
-                let host = re_src
-                    .captures(tag)
-                    .and_then(|c| c.get(2).or_else(|| c.get(3)))
-                    .and_then(|m| extract_host(m.as_str()));
-                match host {
-                    Some(h) if policy.script_host_allowed(&h) => tag.to_string(),
-                    _ => String::new(),
-                }
-            })
-            .into_owned();
-    }
+    out = s.re_script.replace_all(&out, "").into_owned();
     out = s.re_iframe.replace_all(&out, "").into_owned();
     out = s.re_form.replace_all(&out, "").into_owned();
     out = s.re_object.replace_all(&out, "").into_owned();
     out = s.re_embed_self.replace_all(&out, "").into_owned();
     out = s.re_base.replace_all(&out, "").into_owned();
     out = s.re_meta_refresh.replace_all(&out, "").into_owned();
-    if !scripts_ok {
-        out = s.re_on_handler_quoted.replace_all(&out, "").into_owned();
-        out = s.re_on_handler_unquoted.replace_all(&out, "").into_owned();
-    }
+    out = s.re_on_handler_quoted.replace_all(&out, "").into_owned();
+    out = s.re_on_handler_unquoted.replace_all(&out, "").into_owned();
     // Note: we intentionally do NOT strip <head>/<style>/<html>/<body> —
     // the email's own <style> block is what holds its layout together, and
     // html5ever (emlrender's parser) folds the nested-document shape we end
@@ -127,22 +106,14 @@ pub fn sanitize_email_html_for(input: &str, policy: &Policy, sender: &str) -> St
     out
 }
 
-fn script_src_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| {
-        Regex::new(r#"(?is)<script\b[^>]*?\bsrc\s*=\s*("([^"]*)"|'([^']*)')"#).unwrap()
-    })
-}
-
-/// First external image host and first external <script src> host in the
-/// raw message HTML — feeds the per-host items of the «Медиа…» menu.
-/// Empty strings when the message has no such resource.
-pub fn first_external_hosts(html: &str) -> (String, String) {
+/// First external image host in the raw message HTML — feeds the per-host
+/// item of the «Медиа…» menu. Empty when the message has no such resource.
+pub fn first_external_host(html: &str) -> String {
     if html.is_empty() {
-        return (String::new(), String::new());
+        return String::new();
     }
     let res = block_res();
-    let img_host = res
+    res
         .re_img
         .captures_iter(html)
         .filter_map(|c| {
@@ -152,13 +123,7 @@ pub fn first_external_hosts(html: &str) -> (String, String) {
                 .and_then(|m| extract_host(m.as_str()))
         })
         .next()
-        .unwrap_or_default();
-    let script_host = script_src_re()
-        .captures_iter(html)
-        .filter_map(|c| c.get(2).or_else(|| c.get(3)).and_then(|m| extract_host(m.as_str())))
-        .next()
-        .unwrap_or_default();
-    (img_host, script_host)
+        .unwrap_or_default()
 }
 
 struct BlockRes {
@@ -325,7 +290,7 @@ mod tests {
         let html = r#"<p>до</p><!--[if mso]><table><tr><td>VML-кнопка</td></tr></table><![endif]-->
             <!--[if !mso]><!--><a href="https://x.example">Кнопка</a><!--<![endif]-->
             <!--[if !mso]><!-- --><b>ещё</b><!--<![endif]--><p>после</p>"#;
-        let out = sanitize_email_html_for(html, &Policy::default(), "");
+        let out = sanitize_email_html(html);
         assert!(out.contains("Кнопка</a>"), "{out}");
         assert!(out.contains("<b>ещё</b>"), "{out}");
         assert!(!out.contains("VML-кнопка"), "{out}");
@@ -340,6 +305,6 @@ mod tests {
         assert!(!out.contains("src=https://"), "{out}");
         assert!(!out.contains("background=https://"), "{out}");
         assert!(out.contains(r#"data-blocked-src="https://t.example/p.gif""#), "{out}");
-        assert_eq!(first_external_hosts(html).0, "t.example");
+        assert_eq!(first_external_host(html), "t.example");
     }
 }

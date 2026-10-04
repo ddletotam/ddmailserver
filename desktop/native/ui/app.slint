@@ -135,15 +135,12 @@ struct RowItem {
     has-html: bool,
     has-text: bool,
     viewing-html: bool,
-    // «Медиа…» menu data: sender address, first external image/script
-    // hosts (empty = none), and the per-sender/per-host checkbox states.
+    // «Медиа…» menu data: sender address, first external image host
+    // (empty = none), and the per-sender/per-host checkbox states.
     sender: string,
     media-host: string,
-    script-host: string,
     m-sender-on: bool,
-    s-sender-on: bool,
     m-host-on: bool,
-    s-host-on: bool,
     // Склеенный диалог, своё письмо: кому ушло («Кому: …» / «Копия: …»),
     // показывается подсказкой при наведении. Пусто — подсказки нет.
     recipients: string,
@@ -1267,7 +1264,6 @@ export component MainWindow inherits Window {
     // Global «Медиа…» switches, mirrored from the Rust policy.
     in property <bool> media-allow-all-on: false;
     in property <bool> media-all-images-on: false;
-    in property <bool> media-all-scripts-on: false;
     // Bump to pull keyboard focus into the «Кому» field (bridge inside
     // the composer panel scope — same pattern as chat-scroll-seq).
     in-out property <int> focus-to-seq: 0;
@@ -1312,7 +1308,7 @@ export component MainWindow inherits Window {
     in property <string> conn-smtp: "";
     in property <string> conn-native: "";
     // Global media policy (mirrors the per-message «Медиа…» allow-alls).
-    callback set-media-global(string); // "allow-all" / "scripts-all" / "images-all"
+    callback set-media-global(string); // "allow-all" / "images-all"
     // ── Event hover tooltip (Tauri-era «HH:MM–HH:MM — summary») ──
     // No built-in tooltip in Slint, so a chip arms this on hover and a
     // short timer reveals a floating overlay rendered above the grid.
@@ -2405,24 +2401,6 @@ export component MainWindow inherits Window {
                                         MenuItem {
                                             title: (root.media-allow-all-on ? "✓ " : "") + "Разрешить всё";
                                             activated => { root.msg-action(idx, "media-allow-all"); }
-                                        }
-                                        Menu {
-                                            title: "Скрипты…";
-                                            enabled: !root.media-allow-all-on;
-                                            MenuItem {
-                                                title: (root.media-all-scripts-on ? "✓ " : "") + "Разрешить все";
-                                                activated => { root.msg-action(idx, "media-scripts-all"); }
-                                            }
-                                            MenuItem {
-                                                title: (msg.s-sender-on ? "✓ " : "") + "Разрешить все от " + msg.sender;
-                                                enabled: !root.media-all-scripts-on;
-                                                activated => { root.msg-action(idx, "media-scripts-sender"); }
-                                            }
-                                            if msg.script-host != "": MenuItem {
-                                                title: (msg.s-host-on ? "✓ " : "") + "Разрешить все для " + msg.script-host;
-                                                enabled: !root.media-all-scripts-on;
-                                                activated => { root.msg-action(idx, "media-scripts-host"); }
-                                            }
                                         }
                                         Menu {
                                             title: "Изображения…";
@@ -5462,16 +5440,6 @@ export component MainWindow inherits Window {
                                         enabled: !root.media-allow-all-on;
                                         on: root.media-all-images-on || root.media-allow-all-on;
                                         toggled => { root.set-media-global("images-all"); }
-                                    }
-                                }
-                                Rectangle { height: 1px; background: #eef1f5; }
-                                SettingRow {
-                                    title: "Выполнять скрипты";
-                                    subtitle: "Рискованно: разрешает JS во всех письмах";
-                                    Toggle {
-                                        enabled: !root.media-allow-all-on;
-                                        on: root.media-all-scripts-on || root.media-allow-all-on;
-                                        toggled => { root.set-media-global("scripts-all"); }
                                     }
                                 }
                             }

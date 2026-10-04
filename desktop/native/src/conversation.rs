@@ -228,7 +228,6 @@ pub(crate) fn apply_active_header(ui: &MainWindow, sh: &Shared, idx: usize) {
 pub(crate) fn sync_media_globals(ui: &MainWindow, p: &policy::Policy) {
     ui.set_media_allow_all_on(p.allow_all);
     ui.set_media_all_images_on(p.allow_all_media);
-    ui.set_media_all_scripts_on(p.allow_all_scripts);
 }
 
 /// Consume the pending post-open scroll: row index of the LAST unread
@@ -432,7 +431,7 @@ pub(crate) fn wire_message_actions(ui: &MainWindow, shared: &Rc<Shared>) {
         let action = action.to_string();
         let msg = sh_act.current_msgs.borrow().get(row).cloned();
         let Some(msg) = msg else { return };
-        // Toggle per-sender media/scripts allowance. Cache-aware: bumps
+        // Toggle per-sender media allowance. Cache-aware: bumps
         // policy_gen so the body_cache misses for entries rendered
         // under the old policy, and re-fires SetConversation so the
         // bubbles repaint immediately.
@@ -443,22 +442,11 @@ pub(crate) fn wire_message_actions(ui: &MainWindow, shared: &Rc<Shared>) {
             let body_opt = sh_act.current_bodies.borrow().get(row).cloned();
             let Some(b) = body_opt else { return };
             let sender = b.from_addr.clone();
-            let (media_host, script_host) =
-                sanitize::first_external_hosts(b.html.as_deref().unwrap_or(""));
+            let media_host = sanitize::first_external_host(b.html.as_deref().unwrap_or(""));
             {
                 let mut p = sh_act.policy.borrow_mut();
                 match action.as_str() {
                     "media-allow-all" => p.allow_all = !p.allow_all,
-                    "media-scripts-all" => p.allow_all_scripts = !p.allow_all_scripts,
-                    "media-scripts-sender" => {
-                        p.toggle_scripts(&sender);
-                    }
-                    "media-scripts-host" => {
-                        if script_host.is_empty() {
-                            return;
-                        }
-                        p.toggle_script_host(&script_host);
-                    }
                     "media-images-all" => p.allow_all_media = !p.allow_all_media,
                     "media-images-sender" => {
                         p.toggle_media(&sender);
@@ -474,7 +462,7 @@ pub(crate) fn wire_message_actions(ui: &MainWindow, shared: &Rc<Shared>) {
                         return;
                     }
                 }
-                println!("[policy] {action} (sender={sender}, img={media_host}, js={script_host})");
+                println!("[policy] {action} (sender={sender}, img={media_host})");
                 // Bump the persisted generation BEFORE saving: the texture
                 // cache key must change atomically with the policy.
                 p.generation += 1;

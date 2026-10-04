@@ -48,7 +48,7 @@ pub(crate) fn build_body_html(b: &MessageBody, policy: &policy::Policy, caption:
     let has_html = b.html.as_deref().map(|h| !h.trim().is_empty()).unwrap_or(false);
     let inner = match b.html.as_deref() {
         Some(h) if !h.trim().is_empty() => {
-            let sanitized = sanitize::sanitize_email_html_for(h, policy, &b.from_addr);
+            let sanitized = sanitize::sanitize_email_html(h);
             sanitize::block_external(&sanitized, policy, &b.from_addr)
         }
         _ => format!(
