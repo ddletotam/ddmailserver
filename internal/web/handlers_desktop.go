@@ -25,7 +25,6 @@ import (
 	msgsvc "github.com/ddletotam/ddmailserver/internal/service/messages"
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
 	"github.com/gorilla/mux"
-	"github.com/lib/pq"
 )
 
 // ── Auth ──
@@ -536,9 +535,11 @@ func (s *Server) HandleDesktopMarkSpamByDomain(w http.ResponseWriter, r *http.Re
 // quick-action: blacklist the sender (domain or address) AND
 // hard-DELETE every message from that sender for this user. Hard-
 // delete, not soft — user intent is "this is unwanted and I don't
-// want it anywhere, including the spam vault." Future arrivals from
-// the same sender still get caught by the new spam rule and land
-// is_spam=true at import time.
+// want it anywhere, including the spam vault." "Anywhere" includes the
+// source server of an external account: the purge queues the upstream
+// delete (messages.Service.Purge). Future arrivals from the same sender
+// still get caught by the new spam rule and land is_spam=true at import
+// time.
 //
 // Per-user: the spam rule is scoped to user_id, so no cross-account
 // pollution. Existing rules for the same (rule_type, rule_value)
@@ -581,23 +582,9 @@ func (s *Server) HandleDesktopBlacklistAndPurge(w http.ResponseWriter, r *http.R
 	// the group/BCC-blast case: a spam blast with From=spammer, To=someone
 	// else lands both addresses in the participant set, and the old code
 	// blacklisted whichever sorted first — often the innocent To address.
-	var fromAddrs []string
-	if len(req.MessageIDs) > 0 {
-		rows, err := s.database.Query(
-			`SELECT from_addr FROM messages WHERE user_id = $1 AND id = ANY($2)`,
-			user.ID, pq.Array(req.MessageIDs),
-		)
-		if err != nil {
-			log.Printf("blacklist-and-purge: sender lookup failed: %v", err)
-		} else {
-			defer rows.Close()
-			for rows.Next() {
-				var fa string
-				if rows.Scan(&fa) == nil {
-					fromAddrs = append(fromAddrs, fa)
-				}
-			}
-		}
+	fromAddrs, err := s.database.GetSenderAddrsByIDs(user.ID, req.MessageIDs)
+	if err != nil {
+		log.Printf("blacklist-and-purge: sender lookup failed: %v", err)
 	}
 	rules := spamBlockRules(fromAddrs, req.Address, req.Domain, scope)
 	if len(rules) == 0 {
@@ -613,49 +600,37 @@ func (s *Server) HandleDesktopBlacklistAndPurge(w http.ResponseWriter, r *http.R
 		}
 	}
 
-	// Two deletion passes:
-	//   1. By ID for the exact conversation rows (covers outgoing-from-us
-	//      threads where the from-pattern misses).
-	//   2. By from-pattern for each resolved sender/domain across the whole
-	//      mailbox (historical mail from the same source).
-	totalDeleted := int64(0)
-	if len(req.MessageIDs) > 0 {
-		res, err := s.database.Exec(
-			`DELETE FROM messages WHERE user_id = $1 AND id = ANY($2)`,
-			user.ID, pq.Array(req.MessageIDs),
-		)
-		if err != nil {
-			log.Printf("blacklist-and-purge: id-delete failed: %v", err)
-		} else {
-			n, _ := res.RowsAffected()
-			totalDeleted += n
-		}
-	}
+	// Purge, in one transaction:
+	//   - by ID the exact conversation rows (covers outgoing-from-us
+	//     threads where the sender match misses);
+	//   - by sender address/domain across the whole mailbox (historical
+	//     mail from the same source), matched literally — a domain like
+	//     "%" or "a_b.com" used to be a LIKE pattern and could widen the
+	//     purge to unrelated senders;
+	//   - external-account messages get their delete queued for the source
+	//     server: the hard DELETE used to remove them only locally.
+	sel := msgsvc.PurgeSelector{IDs: req.MessageIDs}
 	for _, br := range rules {
-		var pattern string
 		if br.ruleType == "domain" {
-			pattern = "%@" + br.ruleValue + ">%"
+			sel.SenderDomains = append(sel.SenderDomains, br.ruleValue)
 		} else {
-			pattern = "%<" + br.ruleValue + ">%"
-		}
-		res, err := s.database.Exec(
-			`DELETE FROM messages WHERE user_id = $1 AND from_addr ILIKE $2`,
-			user.ID, pattern,
-		)
-		if err != nil {
-			log.Printf("blacklist-and-purge: pattern-delete (%s) failed: %v", pattern, err)
-		} else {
-			n, _ := res.RowsAffected()
-			totalDeleted += n
+			sel.SenderAddresses = append(sel.SenderAddresses, br.ruleValue)
 		}
 	}
+	purged, err := s.messageService().Purge(r.Context(), user.ID, sel)
+	if err != nil {
+		log.Printf("blacklist-and-purge: purge failed: %v", err)
+		respondError(w, http.StatusInternalServerError, "purge failed")
+		return
+	}
+	totalDeleted := purged.Deleted
 
 	primaryType, primaryValue := "", ""
 	if len(rules) > 0 {
 		primaryType, primaryValue = rules[0].ruleType, rules[0].ruleValue
 	}
-	log.Printf("blacklist-and-purge: user=%d scope=%s rules=%d primary=%s=%s deleted=%d",
-		user.ID, scope, len(rules), primaryType, primaryValue, totalDeleted)
+	log.Printf("blacklist-and-purge: user=%d scope=%s rules=%d primary=%s=%s deleted=%d queued_remote=%d",
+		user.ID, scope, len(rules), primaryType, primaryValue, totalDeleted, purged.Queued)
 	respondJSON(w, http.StatusOK, map[string]any{
 		"deleted":    totalDeleted,
 		"rule_type":  primaryType,
@@ -694,30 +669,18 @@ func (s *Server) HandleDesktopDeleteMessages(w http.ResponseWriter, r *http.Requ
 		if msg == nil {
 			continue
 		}
-		if err := s.database.SoftDeleteMessage(msg.ID); err != nil {
+		// Soft delete (vault) + for an external account the delete queued
+		// for the source server, in one transaction — see messages.Delete.
+		res, err := s.messageService().Delete(r.Context(), user.ID, msg.ID)
+		if err != nil {
+			if !errors.Is(err, msgsvc.ErrNotFound) {
+				log.Printf("desktop delete: msg %d: %v", msg.ID, err)
+			}
 			continue
 		}
 		deleted++
-
-		// External-account messages need the delete proxied to the source
-		// IMAP server — otherwise the message stays in the user's "real"
-		// inbox on small.kz / yandex / etc. forever. We queue a flag-sync
-		// entry with deleted=true; the worker stores \Deleted + UID
-		// EXPUNGE on the remote folder.
-		//
-		// account_id = 0 means a locally-delivered message (our own MX);
-		// remote_uid = 0 means we never learned the source UID (e.g. the
-		// message predates the remote_uid tracking migration). In both
-		// cases there's nothing to push.
-		if msg.AccountID > 0 && msg.RemoteUID > 0 {
-			if err := s.database.QueueFlagSync(
-				msg.ID, msg.AccountID, msg.RemoteFolder, msg.RemoteUID,
-				msg.Seen, msg.Flagged, msg.Answered, true,
-			); err != nil {
-				log.Printf("desktop delete: queue flag sync failed for msg %d: %v", msg.ID, err)
-			} else {
-				queued++
-			}
+		if res.Queued {
+			queued++
 		}
 	}
 

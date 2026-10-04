@@ -1,6 +1,7 @@
 package web
 
 import (
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ddletotam/ddmailserver/internal/models"
+	msgsvc "github.com/ddletotam/ddmailserver/internal/service/messages"
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
 	"github.com/gorilla/mux"
 )
@@ -28,12 +30,14 @@ func (s *Server) HandleDeleteMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.database.GetMessageByIDForUser(id, user.ID); err != nil {
-		http.Error(w, "Message not found", http.StatusNotFound)
-		return
-	}
-
-	if err := s.database.SoftDeleteMessage(id); err != nil {
+	// Same delete as the desktop API: vault + upstream delete for an
+	// external account (the old direct soft delete left the message on
+	// the source server).
+	if _, err := s.messageService().Delete(r.Context(), user.ID, id); err != nil {
+		if errors.Is(err, msgsvc.ErrNotFound) {
+			http.Error(w, "Message not found", http.StatusNotFound)
+			return
+		}
 		log.Printf("Failed to soft-delete message %d: %v", id, err)
 		http.Error(w, "Failed to delete message", http.StatusInternalServerError)
 		return

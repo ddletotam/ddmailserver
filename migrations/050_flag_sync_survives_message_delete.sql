@@ -1,0 +1,17 @@
+-- flag_sync_queue: drop the ON DELETE CASCADE foreign key on message_id.
+--
+-- A queued upstream delete (deleted = true) must outlive the local row: a hard
+-- delete — the desktop "spam: blacklist and purge" action, IMAP EXPUNGE in
+-- Trash, permanent delete from the vault — removes the message right after
+-- queuing its delete for the source server. With the cascade the queue row
+-- vanished together with the message, the worker never ran STORE \Deleted +
+-- UID EXPUNGE upstream, and the message stayed in the user's real mailbox.
+--
+-- The worker needs nothing from messages: account_id, remote_folder and
+-- remote_uid are copied into the queue row. Orphans are drained by the worker
+-- (success deletes the row) and by CleanupOldFlagSync.
+--
+-- Same fix as 023 for calendar_event_sync_queue. Without this migration the
+-- code still works, the upstream delete of a purged message is just lost (the
+-- behaviour before it).
+ALTER TABLE flag_sync_queue DROP CONSTRAINT IF EXISTS flag_sync_queue_message_id_fkey;
