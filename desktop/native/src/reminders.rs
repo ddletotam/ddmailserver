@@ -11,7 +11,7 @@
 //!
 //! Data lives in the core cache (`reminders2`); this module owns seeding
 //! from the fetched events and the scan-side state machine. Toast plumbing
-//! (windows, buttons, navigation) stays in main.rs.
+//! (windows, buttons, navigation) lives in reminder_ui.rs / toast_window.rs.
 
 use ddmail_core::cache::{Cache, ReminderRow};
 use ddmail_core::types::DesktopCalendarEvent;

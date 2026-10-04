@@ -6,7 +6,7 @@
 //! Linux: ksni (StatusNotifierItem), which runs its own D-Bus service on a
 //! background thread and never touches gtk — this build links no gtk at all.
 //! Its menu/activate callbacks fire on the ksni thread, so the closures handed
-//! in from main.rs marshal UI work back to the Slint event loop themselves.
+//! in from platform.rs marshal UI work back to the Slint event loop themselves.
 //!
 //! macOS tray is still deferred.
 //!

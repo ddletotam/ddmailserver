@@ -17,7 +17,7 @@
 //!     the rows are already on screen.
 //!
 //! Link clicks never come through here: they are resolved on the UI thread
-//! against the link rects shipped with the rows (`on_hit_test` in main.rs),
+//! against the link rects shipped with the rows (`on_hit_test` in links.rs),
 //! so a click is never stuck behind a render.
 
 use std::collections::{HashMap, VecDeque};

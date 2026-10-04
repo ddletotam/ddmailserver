@@ -98,7 +98,7 @@ keyring = "4.2"
 # Native file dialogs, everywhere except Linux. rfd's synchronous API needs the
 # gtk3 backend on Linux (the default xdg-portal one is async-only), and linking
 # gtk for a file dialog is exactly what dropping WebKitGTK got rid of — so Linux
-# shells out to kdialog/zenity instead (see `pick_attachment_files` in main.rs).
+# shells out to kdialog/zenity instead (see `pick_attachment_files` in src/platform.rs).
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 rfd = { version = "0.15", default-features = false }
 

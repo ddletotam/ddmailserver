@@ -1,4 +1,4 @@
-//! Geometry the renderer hands up to main.rs, plus the JSON round-trip the
+//! Geometry the renderer hands up to the UI side, plus the JSON round-trip the
 //! texture cache stores it as. Kept tiny and dependency-free.
 
 /// A clickable `<a href>` rectangle extracted at render time, in CSS px

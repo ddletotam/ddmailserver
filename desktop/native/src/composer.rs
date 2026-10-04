@@ -311,7 +311,7 @@ pub(crate) fn enter_forward_mode(sh: &Shared, ui: &MainWindow, body: MessageBody
 /// Shared logic for "enter transient compose mode". Pins the chat header
 /// to the new recipient, blanks the bubble list, deselects the sidebar
 /// row (none of the existing conversations match), and stashes the
-/// target email on `Shared.pending_compose` for `on_send` to pick up.
+/// target email on `Shared.compose.pending_compose` for `on_send` to pick up.
 pub(crate) fn enter_compose_mode(sh: &Shared, ui: &MainWindow, email: &str) {
     let email = email.trim().to_lowercase();
     *sh.compose.pending_compose.borrow_mut() = Some(email.clone());
