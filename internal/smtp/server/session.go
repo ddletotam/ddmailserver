@@ -23,7 +23,7 @@ type Session struct {
 	database    *db.DB
 	authLimiter *authlimit.Limiter
 	// senders overrides database for sender-ownership lookups (tests).
-	senders  senderStore
+	senders  db.SenderStore
 	conn     *smtp.Conn
 	username string
 	userID   int64
@@ -100,7 +100,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 		return smtp.ErrAuthRequired
 	}
 
-	owned, err := senderIdentities(s.identityStore(), s.userID)
+	owned, err := db.SenderIdentities(s.identityStore(), s.userID)
 	if err != nil {
 		log.Printf("SMTP: resolving sender identities for user %d: %v", s.userID, err)
 		return &smtp.SMTPError{
@@ -272,62 +272,8 @@ func (s *Session) Logout() error {
 	return nil
 }
 
-// senderStore is the part of the database sender ownership is decided from.
-type senderStore interface {
-	GetAccountsByUserID(userID int64) ([]*models.Account, error)
-	GetMailboxesWithDomainByUserID(userID int64) ([]*db.MailboxWithDomain, error)
-}
-
-// senderIdentities returns every address the user may send as, mapped to the
-// account it is sent through (0 = direct delivery with our DKIM signature).
-// It is the same set the clients are offered as identities (desktop
-// /identities, IMAP METADATA):
-//   - enabled local mailboxes owned by the user → direct delivery;
-//   - the address of each enabled external account → relay through it;
-//   - each alias of an enabled external account → relay through it.
-//
-// When one address qualifies twice, an account's own address wins over a
-// local mailbox, which wins over an alias. Owning a domain does not by itself
-// make every address on it sendable: a mailbox must exist.
-func senderIdentities(store senderStore, userID int64) (map[string]int64, error) {
-	owned := make(map[string]int64)
-
-	accounts, err := store.GetAccountsByUserID(userID)
-	if err != nil {
-		return nil, fmt.Errorf("loading accounts: %w", err)
-	}
-	mailboxes, err := store.GetMailboxesWithDomainByUserID(userID)
-	if err != nil {
-		return nil, fmt.Errorf("loading mailboxes: %w", err)
-	}
-
-	for _, acc := range accounts {
-		if !acc.Enabled || acc.UserID != userID {
-			continue
-		}
-		for _, alias := range acc.GetAliases() {
-			owned[alias] = acc.ID
-		}
-	}
-	for _, mb := range mailboxes {
-		if !mb.Enabled || mb.UserID != userID || mb.LocalPart == "" || mb.DomainName == "" {
-			continue
-		}
-		owned[strings.ToLower(mb.LocalPart+"@"+mb.DomainName)] = 0
-	}
-	for _, acc := range accounts {
-		if !acc.Enabled || acc.UserID != userID {
-			continue
-		}
-		if email := strings.ToLower(strings.TrimSpace(acc.Email)); email != "" {
-			owned[email] = acc.ID
-		}
-	}
-	return owned, nil
-}
-
 // identityStore returns where sender ownership is looked up.
-func (s *Session) identityStore() senderStore {
+func (s *Session) identityStore() db.SenderStore {
 	if s.senders != nil {
 		return s.senders
 	}
@@ -354,7 +300,7 @@ func (s *Session) checkHeaderSenders(header mail.Header) error {
 		return reject("Invalid Sender header")
 	}
 
-	owned, err := senderIdentities(s.identityStore(), s.userID)
+	owned, err := db.SenderIdentities(s.identityStore(), s.userID)
 	if err != nil {
 		log.Printf("SMTP: resolving sender identities for user %d: %v", s.userID, err)
 		return &smtp.SMTPError{

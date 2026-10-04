@@ -115,7 +115,7 @@ func TestAccountAddressBeatsMailboxAndAlias(t *testing.T) {
 	// mailbox with the same address.
 	st := testStore()
 	st.mailboxes = append(st.mailboxes, mailbox(7, "ext", "gmail.test", true))
-	owned, err := senderIdentities(st, 7)
+	owned, err := db.SenderIdentities(st, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestOtherUsersRowsIgnored(t *testing.T) {
 		accounts:  []*models.Account{{ID: 99, UserID: 8, Email: "victim@x.test", Enabled: true}},
 		mailboxes: []*db.MailboxWithDomain{mailbox(8, "victim", "local.test", true)},
 	}
-	owned, err := senderIdentities(st, 7)
+	owned, err := db.SenderIdentities(st, 7)
 	if err != nil {
 		t.Fatal(err)
 	}

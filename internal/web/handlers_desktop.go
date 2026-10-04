@@ -19,6 +19,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/lib/pq"
 	"github.com/yourusername/mailserver/internal/db"
+	"github.com/yourusername/mailserver/internal/logmask"
 	"github.com/yourusername/mailserver/internal/models"
 	"github.com/yourusername/mailserver/internal/notify"
 	"github.com/yourusername/mailserver/internal/parser"
@@ -905,17 +906,39 @@ func (s *Server) HandleDesktopSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine account
-	accountID := int64(0)
-	accounts, err := s.database.GetAccountsByUserID(user.ID)
-	if err == nil {
-		fromEmail := extractEmail(req.From)
-		for _, acc := range accounts {
-			if strings.EqualFold(acc.Email, fromEmail) {
-				accountID = acc.ID
-				break
-			}
+	// Every field below ends up in a header. A line break in an address or
+	// threading field would let the caller inject headers — a second From
+	// among them — so those are refused; a stray one in the subject is
+	// just flattened.
+	req.Subject = strings.NewReplacer("\r", " ", "\n", " ").Replace(req.Subject)
+	for _, v := range append(append([]string{req.From, req.InReplyTo, req.References}, req.To...), req.Cc...) {
+		if strings.ContainsAny(v, "\r\n") {
+			respondError(w, http.StatusBadRequest, "header fields must not contain line breaks")
+			return
 		}
+	}
+
+	// The sender must be one of the user's own addresses, and it decides
+	// how the message leaves: relay through the external account, or direct
+	// delivery (DKIM-signed by us) for a local mailbox. Same rule as SMTP
+	// submission — see db.SenderIdentities.
+	fromEmail, err := db.ParseSingleSender(req.From)
+	if err != nil {
+		log.Printf("Desktop send from user %d: %v", user.ID, err)
+		respondError(w, http.StatusBadRequest, "invalid from address")
+		return
+	}
+	owned, err := db.SenderIdentities(s.senderIdentityStore(), user.ID)
+	if err != nil {
+		log.Printf("Desktop send from user %d: resolving identities: %v", user.ID, err)
+		respondError(w, http.StatusInternalServerError, "failed to resolve sender")
+		return
+	}
+	accountID, ok := owned[fromEmail]
+	if !ok {
+		log.Printf("Desktop send from user %d rejected: sender %s not owned", user.ID, logmask.Addr(fromEmail))
+		respondError(w, http.StatusForbidden, "sender address not owned by user")
+		return
 	}
 
 	outboxMsg := &models.OutboxMessage{

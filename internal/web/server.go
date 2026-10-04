@@ -34,7 +34,9 @@ type Server struct {
 	clientIP *clientip.Resolver
 	// authLimiter throttles failed logins (shared with IMAP/SMTP/DAV);
 	// nil disables throttling. See SetAuthLimiter.
-	authLimiter     *authlimit.Limiter
+	authLimiter *authlimit.Limiter
+	// senders overrides database for sender-ownership lookups (tests).
+	senders         db.SenderStore
 	oauthConfig     *config.OAuthConfig
 	googleOAuth     *oauth.GoogleOAuth
 	microsoftOAuth  *oauth.MicrosoftOAuth
@@ -474,6 +476,14 @@ func (s *Server) SetClientIPResolver(r *clientip.Resolver) {
 		s.clientIP = r
 	}
 	s.wireDAVAuth()
+}
+
+// senderIdentityStore returns where sender ownership is looked up.
+func (s *Server) senderIdentityStore() db.SenderStore {
+	if s.senders != nil {
+		return s.senders
+	}
+	return s.database
 }
 
 // SetAuthLimiter enables failed-login throttling for the web, desktop,
