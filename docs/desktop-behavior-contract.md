@@ -870,7 +870,7 @@ Slint наружу не отдаёт.
 ## 5а. Спам («В спам»)
 
 - Отправитель определяется **сервером** по `message_ids` письма
-  (`spamBlockRules`, handlers_desktop.go), а НЕ по `counterparts.first()`
+  (`spam.SenderRules`, `internal/service/spam/block.go`), а НЕ по `counterparts.first()`
   клиента: для BCC-рассылок (From=спамер, To=жертва) оба адреса попадают в
   «участников» диалога, и старый код блокировал первый попавшийся — часто
   адрес получателя.

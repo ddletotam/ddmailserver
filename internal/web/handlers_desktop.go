@@ -23,6 +23,7 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/notify"
 	"github.com/ddletotam/ddmailserver/internal/parser"
 	msgsvc "github.com/ddletotam/ddmailserver/internal/service/messages"
+	spamsvc "github.com/ddletotam/ddmailserver/internal/service/spam"
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
 	"github.com/gorilla/mux"
 )
@@ -572,70 +573,33 @@ func (s *Server) HandleDesktopBlacklistAndPurge(w http.ResponseWriter, r *http.R
 		respondError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	scope := strings.ToLower(strings.TrimSpace(req.Scope))
-	if scope != "domain" {
-		scope = "address"
-	}
-
-	// Resolve the REAL sender(s) from the message rows the user selected.
-	// Trusting the rows (not the client's counterpart guess) is what fixes
-	// the group/BCC-blast case: a spam blast with From=spammer, To=someone
-	// else lands both addresses in the participant set, and the old code
-	// blacklisted whichever sorted first — often the innocent To address.
-	fromAddrs, err := s.database.GetSenderAddrsByIDs(user.ID, req.MessageIDs)
-	if err != nil {
-		log.Printf("blacklist-and-purge: sender lookup failed: %v", err)
-	}
-	rules := spamBlockRules(fromAddrs, req.Address, req.Domain, scope)
-	if len(rules) == 0 {
+	// Rules from the REAL senders of the rows, rule creation and the purge
+	// (one transaction, literal sender match, delete-sync for external
+	// accounts) live in the spam service.
+	res, err := spamsvc.NewBlocker(s.database, s.messageService()).BlockAndPurge(r.Context(), user.ID, spamsvc.BlockRequest{
+		MessageIDs:      req.MessageIDs,
+		FallbackAddress: req.Address,
+		FallbackDomain:  req.Domain,
+		Scope:           req.Scope,
+	})
+	if errors.Is(err, spamsvc.ErrNoSender) {
 		respondError(w, http.StatusBadRequest, "no sender to block")
 		return
 	}
-
-	for _, br := range rules {
-		rule := &db.SpamRule{UserID: user.ID, RuleType: br.ruleType, RuleValue: br.ruleValue, Action: "spam"}
-		if err := s.database.CreateSpamRule(rule); err != nil {
-			// Duplicate rule (unique constraint) is fine — already blocked.
-			log.Printf("blacklist-and-purge: create rule (%s=%s): %v", br.ruleType, br.ruleValue, err)
-		}
-	}
-
-	// Purge, in one transaction:
-	//   - by ID the exact conversation rows (covers outgoing-from-us
-	//     threads where the sender match misses);
-	//   - by sender address/domain across the whole mailbox (historical
-	//     mail from the same source), matched literally — a domain like
-	//     "%" or "a_b.com" used to be a LIKE pattern and could widen the
-	//     purge to unrelated senders;
-	//   - external-account messages get their delete queued for the source
-	//     server: the hard DELETE used to remove them only locally.
-	sel := msgsvc.PurgeSelector{IDs: req.MessageIDs}
-	for _, br := range rules {
-		if br.ruleType == "domain" {
-			sel.SenderDomains = append(sel.SenderDomains, br.ruleValue)
-		} else {
-			sel.SenderAddresses = append(sel.SenderAddresses, br.ruleValue)
-		}
-	}
-	purged, err := s.messageService().Purge(r.Context(), user.ID, sel)
 	if err != nil {
-		log.Printf("blacklist-and-purge: purge failed: %v", err)
+		log.Printf("blacklist-and-purge: user=%d: %v", user.ID, err)
 		respondError(w, http.StatusInternalServerError, "purge failed")
 		return
 	}
-	totalDeleted := purged.Deleted
 
-	primaryType, primaryValue := "", ""
-	if len(rules) > 0 {
-		primaryType, primaryValue = rules[0].ruleType, rules[0].ruleValue
-	}
-	log.Printf("blacklist-and-purge: user=%d scope=%s rules=%d primary=%s=%s deleted=%d queued_remote=%d",
-		user.ID, scope, len(rules), primaryType, primaryValue, totalDeleted, purged.Queued)
+	primary := res.Rules[0]
+	log.Printf("blacklist-and-purge: user=%d rules=%d primary=%s=%s deleted=%d queued_remote=%d",
+		user.ID, len(res.Rules), primary.Type, primary.Value, res.Deleted, res.QueuedRemote)
 	respondJSON(w, http.StatusOK, map[string]any{
-		"deleted":    totalDeleted,
-		"rule_type":  primaryType,
-		"rule_value": primaryValue,
-		"rule_count": len(rules),
+		"deleted":    res.Deleted,
+		"rule_type":  primary.Type,
+		"rule_value": primary.Value,
+		"rule_count": len(res.Rules),
 	})
 }
 
@@ -1780,53 +1744,6 @@ func hideInlineAttachment(a *models.Attachment, bodyHTML string) bool {
 }
 
 // spamRule is a resolved blacklist entry: rule type ("address"|"domain") + value.
-type spamRule struct{ ruleType, ruleValue string }
-
-// spamBlockRules resolves the block set from the REAL senders (fromAddrs, raw
-// "Name <addr>" headers of the selected messages) under `scope`. When no
-// senders resolve (IMAP provider, stale ids) it falls back to the client's
-// hint. Order is deterministic (by value) so the reported "primary" rule and
-// tests are stable. This is the fix for grouped/BCC conversations: the sender
-// comes from the message rows, not the client's ambiguous counterpart guess.
-func spamBlockRules(fromAddrs []string, fallbackAddr, fallbackDomain, scope string) []spamRule {
-	senders := map[string]bool{}
-	domains := map[string]bool{}
-	for _, fa := range fromAddrs {
-		email := strings.ToLower(extractEmail(fa))
-		if email == "" {
-			continue
-		}
-		senders[email] = true
-		if at := strings.LastIndex(email, "@"); at >= 0 {
-			domains[email[at+1:]] = true
-		}
-	}
-	if len(senders) == 0 {
-		addr := strings.ToLower(strings.TrimSpace(fallbackAddr))
-		dom := strings.ToLower(strings.TrimSpace(fallbackDomain))
-		if addr != "" {
-			senders[addr] = true
-			if at := strings.LastIndex(addr, "@"); at >= 0 {
-				domains[addr[at+1:]] = true
-			}
-		} else if dom != "" {
-			domains[dom] = true
-		}
-	}
-	var rules []spamRule
-	if scope == "domain" {
-		for d := range domains {
-			rules = append(rules, spamRule{"domain", d})
-		}
-	} else {
-		for a := range senders {
-			rules = append(rules, spamRule{"address", a})
-		}
-	}
-	sort.Slice(rules, func(i, j int) bool { return rules[i].ruleValue < rules[j].ruleValue })
-	return rules
-}
-
 func splitAndTrim(s string) []string {
 	if s == "" {
 		return []string{}
