@@ -18,13 +18,11 @@ CREATE DATABASE mailserver OWNER mailserver;
 \q
 ```
 
-### 3. Применить миграции
+### 3. Миграции
 
-```bash
-cd c:\work\mail
-psql -U mailserver -d mailserver -f migrations/001_initial_schema.sql
-psql -U mailserver -d mailserver -f migrations/002_outbox.sql
-```
+Руками ничего применять не нужно: миграции встроены в бинарь, сервер создаёт
+и обновляет схему сам при старте (`-migrate=plan` — посмотреть план, ничего не
+меняя). Подробности — DEPLOY.md, раздел «Database migrations».
 
 ### 4. Создать конфигурацию
 

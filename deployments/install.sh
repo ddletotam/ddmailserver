@@ -16,6 +16,18 @@ DATA_DIR="/var/lib/mailserver"
 SERVICE_USER="mailserver"
 SERVICE_FILE="/etc/systemd/system/mailserver.service"
 
+# Apply the schema migrations embedded in the binary (they also run on every
+# service start; this just surfaces errors during installation).
+create_schema() {
+    echo "  Creating the database schema..."
+    if sudo -u $SERVICE_USER $INSTALL_DIR/$BINARY_NAME -config $CONFIG_DIR/config.yaml -migrate=only; then
+        echo "  ✓ Database schema is up to date"
+    else
+        echo -e "${YELLOW}  ! Schema not created now (see the error above). The server applies${NC}"
+        echo -e "${YELLOW}    migrations on start; check: journalctl -u mailserver${NC}"
+    fi
+}
+
 echo -e "${GREEN}╔══════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║  DDMailServer Installation Script       ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}"
@@ -218,16 +230,9 @@ EOF
         if [ $? -eq 0 ]; then
             echo "  ✓ Database and user created"
 
-            # Run migrations
-            echo "  Running migrations..."
-            sudo -u $PG_ADMIN psql -d $DB_NAME -f migrations/001_initial_schema.sql
-            sudo -u $PG_ADMIN psql -d $DB_NAME -f migrations/002_outbox.sql
-
-            if [ $? -eq 0 ]; then
-                echo "  ✓ Database setup complete"
-            else
-                echo -e "${YELLOW}  ! Migrations failed. You may need to run them manually.${NC}"
-            fi
+            # The schema itself is created by the server: migrations are
+            # embedded in the binary and applied at startup.
+            create_schema
         else
             echo -e "${RED}  Error creating database. Please check PostgreSQL is running.${NC}"
         fi
@@ -244,31 +249,15 @@ EOF
         echo "     CREATE DATABASE $DB_NAME OWNER $DB_USER;"
         echo "     EOF"
         echo ""
-        echo "  2. From this server, run migrations:"
+        echo "  2. Then start the service: the server creates the schema itself"
+        echo "     on first start (migrations are embedded in the binary)."
         echo ""
-        echo "     cd $(pwd)"
-        echo "     PGPASSWORD='$DB_PASS' psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/001_initial_schema.sql"
-        echo "     PGPASSWORD='$DB_PASS' psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/002_outbox.sql"
-        echo ""
-        echo "  Or if you have psql client installed:"
-        read -p "  Run migrations now? (y/n): " -n 1 -r
+        read -p "  Database already created? Create the schema now? (y/n): " -n 1 -r
         echo ""
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            if command -v psql &> /dev/null; then
-                echo "  Running migrations on remote database..."
-                PGPASSWORD="$DB_PASS" psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/001_initial_schema.sql
-                PGPASSWORD="$DB_PASS" psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/002_outbox.sql
-
-                if [ $? -eq 0 ]; then
-                    echo "  ✓ Migrations completed"
-                else
-                    echo -e "${RED}  Failed to run migrations. Check connection and credentials.${NC}"
-                fi
-            else
-                echo -e "${RED}  psql client not found. Install postgresql-client first.${NC}"
-            fi
+            create_schema
         else
-            echo "  Skipped. Run migrations manually as shown above."
+            echo "  Skipped. The schema will be created when the service starts."
         fi
     fi
 else

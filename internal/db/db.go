@@ -70,13 +70,6 @@ func (db *DB) SetEncryptionKey(key string) {
 	db.encryptionKey = key
 }
 
-// RunMigrations applies database migrations
-func (db *DB) RunMigrations() error {
-	// TODO: Implement proper migration runner
-	// For now, we'll manually run the SQL files
-	return nil
-}
-
 // BeginTx starts a transaction with context
 func (db *DB) BeginTx(ctx context.Context) (*Tx, error) {
 	tx, err := db.DB.BeginTx(ctx, nil)

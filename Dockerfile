@@ -1,4 +1,4 @@
-FROM golang:1.22-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
 
@@ -12,7 +12,8 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the application
+# Build the application (schema migrations are embedded in the binary and
+# applied by the server at startup)
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o mailserver ./cmd/mailserver
 
 # Final stage

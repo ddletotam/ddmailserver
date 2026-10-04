@@ -6,6 +6,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 SERVICE_NAME="mailserver"
+SERVICE_USER="${SERVICE_USER:-mailserver}"
+CONFIG_FILE="${CONFIG_FILE:-/etc/mailserver/config.yaml}"
 
 echo "=== DDMailServer Update Script ==="
 echo ""
@@ -22,27 +24,20 @@ cd "$PROJECT_DIR"
 echo "📥 Pulling latest changes from git..."
 git pull origin main
 
-# Check for new migrations
-echo ""
-echo "🔍 Checking for new migrations..."
-MIGRATION_FILES=$(ls -1 migrations/*.sql 2>/dev/null | wc -l)
-if [ "$MIGRATION_FILES" -gt 0 ]; then
-    echo "Found $MIGRATION_FILES migration file(s)"
-    echo "⚠️  Please run migrations manually if needed:"
-    echo "    psql -h <HOST> -U ddmail -d ddmail -f migrations/003_recovery_key.sql"
-    echo ""
-    read -p "Have you run all necessary migrations? (y/n) " -n 1 -r
-    echo ""
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "❌ Aborted. Please run migrations first."
-        exit 1
-    fi
-fi
-
 # Build
 echo ""
 echo "🔨 Building application..."
 make build
+
+# Schema migrations are embedded in the binary and applied by the server on
+# start (each in a transaction, under an advisory lock). Show what the new
+# binary is going to do; this only reads the database.
+echo ""
+echo "🔍 Schema migrations the new binary will apply on start:"
+if ! sudo -u "$SERVICE_USER" build/mailserver -config "$CONFIG_FILE" -migrate=plan; then
+    echo "❌ The new binary cannot work with this database (see above). Nothing was changed."
+    exit 1
+fi
 
 # Stop service before replacing binary
 echo ""
@@ -73,6 +68,7 @@ echo "✅ Update complete!"
 echo ""
 echo "Useful commands:"
 echo "  View logs:    sudo journalctl -u $SERVICE_NAME -f"
+echo "  Migrations:   sudo journalctl -u $SERVICE_NAME | grep migrations:"
 echo "  Check status: sudo systemctl status $SERVICE_NAME"
 echo "  Stop:         sudo systemctl stop $SERVICE_NAME"
 echo "  Start:        sudo systemctl start $SERVICE_NAME"

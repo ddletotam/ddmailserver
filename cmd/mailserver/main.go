@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,8 +28,37 @@ import (
 	smtpserver "github.com/ddletotam/ddmailserver/internal/smtp/server"
 	"github.com/ddletotam/ddmailserver/internal/web"
 	"github.com/ddletotam/ddmailserver/internal/worker"
+	"github.com/ddletotam/ddmailserver/migrations"
 	"github.com/emersion/go-message"
 )
+
+// migrateSchema applies (or, for -migrate=plan, prints) the embedded schema
+// migrations. With -migrate=off it only warns about pending ones.
+func migrateSchema(database *db.DB, mode string) error {
+	ctx := context.Background()
+	switch mode {
+	case "plan":
+		plan, err := database.PlanMigrations(ctx, migrations.FS())
+		if err != nil {
+			return err
+		}
+		fmt.Print(plan.String())
+		return nil
+	case "off":
+		plan, err := database.PlanMigrations(ctx, migrations.FS())
+		if err != nil {
+			log.Printf("Warning: -migrate=off and the schema state is unclear: %v", err)
+			return nil
+		}
+		if len(plan.Pending) > 0 {
+			log.Printf("Warning: -migrate=off with %d pending migration(s), first %s",
+				len(plan.Pending), plan.Pending[0].File)
+		}
+		return nil
+	default:
+		return database.RunMigrations(ctx, migrations.FS())
+	}
+}
 
 const banner = `
 ╔══════════════════════════════════════════╗
@@ -43,7 +73,16 @@ func main() {
 
 	// Parse command line flags
 	configPath := flag.String("config", "configs/config.yaml", "Path to configuration file")
+	migrateMode := flag.String("migrate", "auto",
+		"Schema migrations: auto (apply pending, then serve), plan (print what would be applied and exit), "+
+			"only (apply pending and exit), off (do not touch the schema)")
 	flag.Parse()
+
+	switch *migrateMode {
+	case "auto", "plan", "only", "off":
+	default:
+		log.Fatalf("Invalid -migrate=%q: want auto, plan, only or off", *migrateMode)
+	}
 
 	fmt.Print(banner)
 
@@ -82,6 +121,13 @@ func main() {
 	}
 	// Closed explicitly at the end of shutdown — see shutdown().
 	log.Printf("Database connection established")
+
+	if err := migrateSchema(database, *migrateMode); err != nil {
+		log.Fatalf("Startup aborted: %v", err)
+	}
+	if *migrateMode == "plan" || *migrateMode == "only" {
+		return
+	}
 
 	// Set encryption key for password encryption/decryption
 	database.SetEncryptionKey(cfg.Security.EncryptionKey)

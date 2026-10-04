@@ -17,7 +17,6 @@ This creates `build/mailserver-linux-amd64`
 # Using SCP
 scp -r build/mailserver-linux-amd64 user@your-server:/tmp/
 scp -r configs user@your-server:/tmp/mailserver-configs
-scp -r migrations user@your-server:/tmp/mailserver-migrations
 scp -r deployments user@your-server:/tmp/mailserver-deployments
 
 # Or clone directly on server
@@ -73,11 +72,10 @@ CREATE DATABASE mailserver OWNER mailserver;
 EOF
 
 exit
-
-# Run migrations
-sudo -u postgres psql -d mailserver -f migrations/001_initial_schema.sql
-sudo -u postgres psql -d mailserver -f migrations/002_outbox.sql
 ```
+
+The schema is created by the server itself on first start — see
+[Database migrations](#database-migrations). Nothing to run by hand.
 
 ### Step 2: Create System User
 
@@ -352,8 +350,9 @@ cd /opt/ddmailserver
 
 The `update.sh` script will:
 - Pull latest changes from git
-- Check for new migrations (prompts you to run them)
 - Rebuild the application
+- Print the schema migrations the new binary will apply (`-migrate=plan`,
+  read-only) and stop if it cannot work with this database
 - Restart the service
 - Show service status
 
@@ -363,11 +362,11 @@ The `update.sh` script will:
 cd /opt/ddmailserver
 git pull origin main
 
-# Run new migrations if any
-psql -h <HOST> -U ddmail -d ddmail -f migrations/003_recovery_key.sql
-
 # Rebuild
 make build
+
+# Optional: see which migrations the new binary will apply (read-only)
+sudo -u mailserver build/mailserver -config /etc/mailserver/config.yaml -migrate=plan
 
 # Restart service
 sudo systemctl restart mailserver
@@ -375,6 +374,60 @@ sudo systemctl restart mailserver
 # Check logs
 sudo journalctl -u mailserver -f
 ```
+
+---
+
+## Database migrations
+
+SQL migrations live in `migrations/` and are **embedded in the binary**. On
+every start the server brings the schema up to date before serving anything:
+
+1. takes a PostgreSQL advisory lock, so two instances starting at once don't
+   migrate concurrently (the second waits, then finds nothing to do);
+2. reads `schema_migrations` (version, name, checksum, applied_at,
+   execution_ms, baseline) to see what is already applied;
+3. runs every pending file in version order, each in its own transaction
+   together with its `schema_migrations` row. A failing migration is rolled
+   back, the error names the file and line, and the server exits without
+   starting — fix the migration (or the data) and start again.
+
+First start against a database without `schema_migrations`:
+
+- **empty database** (no tables) — the whole schema is created from scratch;
+- **existing schema** (production, migrated by hand with psql) — if it has
+  everything migrations up to **050** create, it is *adopted*: 001…050 are
+  recorded as applied (`baseline = true`) without running, and only later
+  migrations are executed;
+- **anything else** (tables, but not that schema) — the server refuses to
+  start and lists what is missing. Nothing is changed.
+
+The `-migrate` flag:
+
+| value  | effect |
+|--------|--------|
+| `auto` (default) | apply pending migrations, then start |
+| `plan` | print what would be applied and exit; read-only |
+| `only` | apply pending migrations and exit (installers, CI) |
+| `off`  | don't touch the schema; warn if migrations are pending |
+
+```bash
+mailserver -config /etc/mailserver/config.yaml -migrate=plan
+sudo journalctl -u mailserver | grep 'migrations:'
+psql ... -c 'SELECT version, name, applied_at, baseline FROM schema_migrations ORDER BY version'
+```
+
+### Writing a migration
+
+- File name: `NNN_snake_name.sql`, next free number (`051_…`, `052_…`).
+  A letter suffix (`020a_…`) only exists for files that once shared a number;
+  don't use it for new work.
+- Don't put `BEGIN`/`COMMIT` in the file — the runner owns the transaction.
+  For statements that cannot run in a transaction (`CREATE INDEX
+  CONCURRENTLY`), put `-- migrate:no-transaction` on its own line; such a file
+  must be safe to re-run.
+- Never edit a migration that has been deployed: the change won't reach
+  databases that already applied it (the server logs a checksum warning).
+  Write a new one.
 
 ---
 

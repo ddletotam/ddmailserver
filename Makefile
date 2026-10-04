@@ -76,7 +76,7 @@ install: build
 	@echo ""
 	@echo "Next steps:"
 	@echo "1. Edit config: sudo nano $(CONFIG_DIR)/config.yaml"
-	@echo "2. Setup database: psql -U postgres -f migrations/001_initial_schema.sql"
+	@echo "2. Create the database (empty): the server creates the schema on first start"
 	@echo "3. Start service: sudo systemctl start mailserver"
 	@echo "4. Enable on boot: sudo systemctl enable mailserver"
 

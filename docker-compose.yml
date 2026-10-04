@@ -10,7 +10,8 @@ services:
       POSTGRES_DB: mailserver
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d
+      # No migrations mounted into docker-entrypoint-initdb.d: the mailserver
+      # container creates and upgrades the schema itself on every start.
     ports:
       - "5432:5432"
     healthcheck:
