@@ -351,13 +351,13 @@ func (s *Server) HandleSaveAccount(w http.ResponseWriter, r *http.Request) {
 	account.Email = r.FormValue("email")
 	account.IMAPHost = r.FormValue("imap_host")
 	account.IMAPUsername = r.FormValue("imap_username")
-	if pwd := r.FormValue("imap_password"); pwd != "" {
+	if pwd := providerPassword(user, "imap_password", r.FormValue("imap_password")); pwd != "" {
 		account.IMAPPassword = pwd
 	}
 	account.IMAPTLS = r.FormValue("imap_tls") == "true"
 	account.SMTPHost = r.FormValue("smtp_host")
 	account.SMTPUsername = r.FormValue("smtp_username")
-	if pwd := r.FormValue("smtp_password"); pwd != "" {
+	if pwd := providerPassword(user, "smtp_password", r.FormValue("smtp_password")); pwd != "" {
 		account.SMTPPassword = pwd
 	}
 	account.SMTPTLS = r.FormValue("smtp_tls") == "true"

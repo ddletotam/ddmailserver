@@ -742,7 +742,7 @@ func (s *Server) HandleUpdateCalendarSourceWeb(w http.ResponseWriter, r *http.Re
 	if username := r.FormValue("caldav_username"); username != "" {
 		existing.CalDAVUsername = username
 	}
-	if password := r.FormValue("caldav_password"); password != "" {
+	if password := providerPassword(user, "caldav_password", r.FormValue("caldav_password")); password != "" {
 		existing.CalDAVPassword = password
 	}
 	if color := r.FormValue("color"); color != "" {

@@ -404,11 +404,11 @@ func (s *Server) HandleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		update.Email = r.FormValue("email")
 		update.IMAPHost = r.FormValue("imap_host")
 		update.IMAPUsername = r.FormValue("imap_username")
-		update.IMAPPassword = r.FormValue("imap_password")
+		update.IMAPPassword = providerPassword(s.GetUserFromContext(r.Context()), "imap_password", r.FormValue("imap_password"))
 		update.IMAPTLS = r.FormValue("imap_tls") == "true"
 		update.SMTPHost = r.FormValue("smtp_host")
 		update.SMTPUsername = r.FormValue("smtp_username")
-		update.SMTPPassword = r.FormValue("smtp_password")
+		update.SMTPPassword = providerPassword(s.GetUserFromContext(r.Context()), "smtp_password", r.FormValue("smtp_password"))
 		update.SMTPTLS = r.FormValue("smtp_tls") == "true"
 
 		// Parse ports

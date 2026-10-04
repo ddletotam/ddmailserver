@@ -255,7 +255,7 @@ func (s *Server) HandleUpdateContactSourceWeb(w http.ResponseWriter, r *http.Req
 	if username := r.FormValue("carddav_username"); username != "" {
 		existing.CardDAVUsername = username
 	}
-	if password := r.FormValue("carddav_password"); password != "" {
+	if password := providerPassword(user, "carddav_password", r.FormValue("carddav_password")); password != "" {
 		existing.CardDAVPassword = password
 	}
 

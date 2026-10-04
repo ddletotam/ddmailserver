@@ -185,13 +185,13 @@
                 <div class="row mb-3">
                     <div class="col-md-6">
                         <label class="form-label" for="imap_username">{{t "accounts.form.username"}}</label>
-                        <input type="text" id="imap_username" name="imap_username" class="form-control" required
+                        <input autocomplete="off" type="text" id="imap_username" name="imap_username" class="form-control" required
                                value="{{if .Account}}{{.Account.IMAPUsername}}{{end}}"
                                placeholder="{{t "accounts.form.username_placeholder"}}">
                     </div>
                     <div class="col-md-6">
                         <label class="form-label" for="imap_password">{{t "accounts.form.password"}}</label>
-                        <input type="password" id="imap_password" name="imap_password" class="form-control"
+                        <input autocomplete="new-password" type="password" id="imap_password" name="imap_password" class="form-control"
                                {{if not .Account}}required{{end}}
                                placeholder="{{if .Account}}{{t "accounts.form.password_placeholder_edit"}}{{else}}{{t "accounts.form.password_placeholder"}}{{end}}">
                     </div>
@@ -221,13 +221,13 @@
                 <div class="row mb-3">
                     <div class="col-md-6">
                         <label class="form-label" for="smtp_username">{{t "accounts.form.username"}}</label>
-                        <input type="text" id="smtp_username" name="smtp_username" class="form-control" required
+                        <input autocomplete="off" type="text" id="smtp_username" name="smtp_username" class="form-control" required
                                value="{{if .Account}}{{.Account.SMTPUsername}}{{end}}"
                                placeholder="{{t "accounts.form.username_placeholder"}}">
                     </div>
                     <div class="col-md-6">
                         <label class="form-label" for="smtp_password">{{t "accounts.form.password"}}</label>
-                        <input type="password" id="smtp_password" name="smtp_password" class="form-control"
+                        <input autocomplete="new-password" type="password" id="smtp_password" name="smtp_password" class="form-control"
                                {{if not .Account}}required{{end}}
                                placeholder="{{if .Account}}{{t "accounts.form.password_placeholder_edit"}}{{else}}{{t "accounts.form.password_placeholder"}}{{end}}">
                     </div>
