@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -44,15 +45,12 @@ func New(database *db.DB, prefix string) *Server {
 // effectivePrefix returns "/" for subdomain hosts (where nginx maps / → /caldav/),
 // or the configured prefix for direct access (e.g. mail.letotam.ru/caldav/)
 func (s *Server) effectivePrefix(r *http.Request) string {
-	host := r.Host
-	if h := r.Header.Get("X-Forwarded-Host"); h != "" {
+	// X-Forwarded-Host counts only from a trusted proxy.
+	host := s.clientIP.RequestHost(r)
+	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	// Strip port if present
-	if i := strings.Index(host, ":"); i != -1 {
-		host = host[:i]
-	}
-	if s.subdomainHosts[host] {
+	if s.subdomainHosts[strings.ToLower(host)] {
 		return "/"
 	}
 	return s.prefix

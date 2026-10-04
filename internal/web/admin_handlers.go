@@ -1,11 +1,9 @@
 package web
 
 import (
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/gorilla/mux"
 	"github.com/yourusername/mailserver/internal/db"
@@ -54,18 +52,11 @@ func (s *Server) HandleAdminPage(w http.ResponseWriter, r *http.Request) {
 		microsoftSettings = &db.MicrosoftOAuthSettings{}
 	}
 
-	scheme := "https"
-	host := r.Host
-	if fwdHost := r.Header.Get("X-Forwarded-Host"); fwdHost != "" {
-		host = fwdHost
-	}
-	if fwdProto := r.Header.Get("X-Forwarded-Proto"); fwdProto != "" {
-		scheme = fwdProto
-	} else if r.TLS == nil && (strings.HasPrefix(host, "localhost") || strings.HasPrefix(host, "127.0.0.1")) {
-		scheme = "http"
-	}
-	googleRedirectURI := fmt.Sprintf("%s://%s/oauth/google/callback", scheme, host)
-	microsoftRedirectURI := fmt.Sprintf("%s://%s/oauth/microsoft/callback", scheme, host)
+	// Forwarding headers count only from a trusted proxy, and the host
+	// must be one this server is known by — see publicBaseURL.
+	base := s.publicBaseURL(r)
+	googleRedirectURI := base + "/oauth/google/callback"
+	microsoftRedirectURI := base + "/oauth/microsoft/callback"
 
 	users, err := s.database.ListUsers()
 	if err != nil {

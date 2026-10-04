@@ -3,7 +3,6 @@ package web
 import (
 	"log"
 	"net/http"
-	"strings"
 
 	"github.com/yourusername/mailserver/internal/config"
 	"github.com/yourusername/mailserver/internal/db"
@@ -560,9 +559,7 @@ func (s *Server) HandleGoogleCalendarOAuthStart(w http.ResponseWriter, r *http.R
 	})
 
 	// Build redirect URI for calendar callback
-	scheme := getSchemeFromRequest(r)
-	host := getHostFromRequest(r)
-	redirectURI := scheme + "://" + host + "/oauth/google/calendar/callback"
+	redirectURI := s.publicBaseURL(r) + "/oauth/google/calendar/callback"
 
 	// Store redirect URI in cookie for callback
 	http.SetCookie(w, &http.Cookie{
@@ -703,9 +700,7 @@ func (s *Server) HandleGoogleContactsOAuthStart(w http.ResponseWriter, r *http.R
 		MaxAge: 600, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil,
 	})
 
-	scheme := getSchemeFromRequest(r)
-	host := getHostFromRequest(r)
-	redirectURI := scheme + "://" + host + "/oauth/google/contacts/callback"
+	redirectURI := s.publicBaseURL(r) + "/oauth/google/contacts/callback"
 
 	http.SetCookie(w, &http.Cookie{
 		Name: "oauth_redirect_uri", Value: redirectURI, Path: "/",
@@ -797,29 +792,4 @@ func (s *Server) HandleGoogleContactsOAuthCallback(w http.ResponseWriter, r *htt
 
 	log.Printf("Google Contacts source created for user %d", userID)
 	http.Redirect(w, r, "/contacts?success=google_contacts_added", http.StatusSeeOther)
-}
-
-// getHostFromRequest extracts the host from the request (considering X-Forwarded-Host)
-func getHostFromRequest(r *http.Request) string {
-	// Check for reverse proxy header first
-	if host := r.Header.Get("X-Forwarded-Host"); host != "" {
-		return host
-	}
-	return r.Host
-}
-
-// getSchemeFromRequest determines the scheme (http/https) from the request
-func getSchemeFromRequest(r *http.Request) string {
-	// Check for reverse proxy header
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		return proto
-	}
-	if r.TLS != nil {
-		return "https"
-	}
-	host := strings.ToLower(r.Host)
-	if strings.HasPrefix(host, "localhost") || strings.HasPrefix(host, "127.0.0.1") {
-		return "http"
-	}
-	return "https"
 }

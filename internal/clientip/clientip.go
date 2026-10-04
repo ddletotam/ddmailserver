@@ -162,6 +162,22 @@ func (r *Resolver) FromRequest(req *http.Request) string {
 	return peer.String()
 }
 
+// RequestScheme returns "https" or "http" as the client used it: the
+// X-Forwarded-Proto of a trusted proxy, else "https" for a TLS connection.
+// It returns "" when neither says, leaving the default to the caller.
+func (r *Resolver) RequestScheme(req *http.Request) string {
+	if peer, ok := parseAddr(req.RemoteAddr); ok && r.IsTrusted(peer) {
+		p := strings.ToLower(strings.TrimSpace(strings.Split(req.Header.Get("X-Forwarded-Proto"), ",")[0]))
+		if p == "http" || p == "https" {
+			return p
+		}
+	}
+	if req.TLS != nil {
+		return "https"
+	}
+	return ""
+}
+
 // RequestHost returns the host the client addressed: X-Forwarded-Host when
 // the peer is a trusted proxy and set the header, otherwise req.Host.
 func (r *Resolver) RequestHost(req *http.Request) string {

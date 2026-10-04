@@ -57,10 +57,7 @@ func (s *Server) HandleCalendarsPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get host for CalDAV URL display
-	host := r.Host
-	if fwdHost := r.Header.Get("X-Forwarded-Host"); fwdHost != "" {
-		host = fwdHost
-	}
+	host := s.publicHost(r)
 
 	data := CalendarsData{
 		PageData: PageData{

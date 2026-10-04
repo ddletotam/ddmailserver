@@ -143,3 +143,21 @@ func TestNewRejectsGarbage(t *testing.T) {
 		t.Error("expected error")
 	}
 }
+
+func TestRequestScheme(t *testing.T) {
+	r := mustResolver(t, nil)
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "203.0.113.1:1"
+	req.Header.Set("X-Forwarded-Proto", "http")
+	if got := r.RequestScheme(req); got != "" {
+		t.Errorf("untrusted peer: got %q", got)
+	}
+	req.RemoteAddr = "127.0.0.1:1"
+	if got := r.RequestScheme(req); got != "http" {
+		t.Errorf("trusted peer: got %q", got)
+	}
+	req.Header.Set("X-Forwarded-Proto", "javascript")
+	if got := r.RequestScheme(req); got != "" {
+		t.Errorf("bogus proto: got %q", got)
+	}
+}
