@@ -745,10 +745,11 @@ fn refill_body_backlog(
     // первичному ключу, но лок и prepare стоят денег, и платить их за каждую
     // из двух сотен бесед незачем.
     //
-    // Порциями по CACHE_PROBE_CHUNK, потому что лок кэша общий с UI-потоком:
-    // ящик на десять тысяч писем — это десять тысяч выборок под одним
-    // захватом, и клик по беседе (`load_message_bodies` прямо в
-    // `open_conversation`) всё это время ждал бы фоновую работу.
+    // Порциями по CACHE_PROBE_CHUNK. Лок здесь — мьютекс `Cache` движка, а не
+    // общий с UI: UI-поток открывает свой `Cache` (своё соединение, WAL), так
+    // что клик по беседе (`load_message_bodies` в `open_conversation`) этой
+    // выборки не ждёт. Порции остаются, чтобы не держать один захват на
+    // десять тысяч выборок, если `Cache` когда-нибудь станет общим.
     const CACHE_PROBE_CHUNK: usize = 500;
     let mut cached: std::collections::HashMap<String, std::collections::HashSet<(String, u32)>> =
         Default::default();
@@ -1063,7 +1064,33 @@ pub fn spawn(
                     let healed = resolve_inline_parts(&rt, provider.as_ref(), &mut cached);
                     if healed > 0 {
                         println!("engine: resolved inline parts in {healed} cached bodies");
-                        cache.save_message_bodies(&key, &cached).ok();
+                        // resave, не save: версия разбора у строки остаётся
+                        // прежней, иначе устаревшее тело спряталось бы от
+                        // перезапроса ниже.
+                        if let Err(e) = cache.resave_message_bodies(&key, &cached) {
+                            eprintln!("engine: resave healed bodies: {e}");
+                        }
+                    }
+                    // Тела, разобранные прежней версией разбора
+                    // (cache::PARSER_VERSION), — тоже промах: иначе починка
+                    // разбора до уже скачанных писем не доходит никогда. Из
+                    // показа они при этом не уходят — UI уже нарисовал их из
+                    // кэша, и без сети старое тело лучше пустого пузыря.
+                    let stale: std::collections::HashSet<(String, u32)> = cache
+                        .stale_body_refs(&key, &messages)
+                        .unwrap_or_else(|e| {
+                            eprintln!("engine: stale body probe: {e}");
+                            Vec::new()
+                        })
+                        .into_iter()
+                        .map(|m| (m.folder, m.uid))
+                        .collect();
+                    if !stale.is_empty() {
+                        println!(
+                            "engine: {} cached bodies predate parser v{} — refetching them",
+                            stale.len(),
+                            ddmail_core::cache::PARSER_VERSION
+                        );
                     }
                     // Blank cached rows don't count as "have" — refetching them
                     // is the only way a poisoned cache heals (see
@@ -1075,6 +1102,14 @@ pub fn spawn(
                         println!("engine: {blank} cached bodies are blank — refetching them");
                     }
                     let have: std::collections::HashSet<(String, u32)> = cached
+                        .iter()
+                        .filter(|b| !body_is_blank(b))
+                        .map(|b| (b.folder.clone(), b.uid))
+                        .filter(|k| !stale.contains(k))
+                        .collect();
+                    // Есть что показать и без сети: каждое недостающее —
+                    // устаревшее, но непустое тело из кэша.
+                    let shown: std::collections::HashSet<(String, u32)> = cached
                         .iter()
                         .filter(|b| !body_is_blank(b))
                         .map(|b| (b.folder.clone(), b.uid))
@@ -1112,6 +1147,21 @@ pub fn spawn(
                             let bodies =
                                 cache.load_message_bodies(&key, &messages).unwrap_or(fetched);
                             on_result(EngineResult::Messages { bodies, generation });
+                        }
+                        Err(e)
+                            if missing
+                                .iter()
+                                .all(|m| shown.contains(&(m.folder.clone(), m.uid))) =>
+                        {
+                            // Перезапрашивали только устаревшие тела, а они уже
+                            // на экране. Офлайн это штатно — тост здесь читался
+                            // бы как поломка; следующее открытие повторит.
+                            eprintln!(
+                                "engine: refetch of stale bodies failed, keeping cached: {e}"
+                            );
+                            if healed > 0 {
+                                on_result(EngineResult::Messages { bodies: cached, generation });
+                            }
                         }
                         Err(e) => on_result(EngineResult::Error(e)),
                     }

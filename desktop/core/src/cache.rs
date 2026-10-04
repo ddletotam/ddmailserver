@@ -35,254 +35,432 @@ fn collect_address_entries(body: &MessageBody) -> Vec<(String, String)> {
     out
 }
 
+/// Версия разбора тела письма, которой помечается каждая строка
+/// `message_bodies` (колонка `parser_version`).
+///
+/// В `message_bodies` лежит уже РАЗОБРАННОЕ письмо: html, текст, список
+/// вложений, адреса. Тела по (folder, uid) не перезапрашиваются, поэтому
+/// исправление разбора без этой метки до закэшированных писем не доходит
+/// никогда — та же ловушка, что была с кэшем текстур.
+///
+/// **Поднимать на единицу**, когда меняется то, ЧТО попадает в строку тела:
+/// MIME-разбор в core (`imap.rs`/`imap_provider.rs`: выбор html/text,
+/// декодирование, inline/attachment, адреса, references), cid:-подстановка
+/// в движке клиента, или серверная выдача тел (`POST /conversations/messages`)
+/// — когда её починка должна дойти до уже скачанных писем. Не поднимать ради
+/// изменений рендера (emlrender, обвязка пузыря): тело от них не меняется.
+///
+/// Что происходит после подъёма: строка с другой версией на пути ОТКРЫТИЯ
+/// диалога считается промахом и перезапрашивается; пока ответа нет (или
+/// сети нет вовсе) показывается старое тело. Фоновая догрузка устаревшие
+/// строки не трогает — иначе каждый подъём перекачивал бы весь ящик.
+/// Подробности — §4а `docs/desktop-behavior-contract.md`.
+pub const PARSER_VERSION: i64 = 1;
+
+/// Одна миграция схемы `cache.db`. Номер миграции — её позиция в
+/// [`MIGRATIONS`] плюс один; `PRAGMA user_version` = номер последней
+/// применённой. Каждая идёт в своей транзакции вместе с повышением версии:
+/// упала — откатилась целиком, версия не сдвинулась, следующий запуск
+/// попробует её снова.
+struct Migration {
+    name: &'static str,
+    apply: fn(&rusqlite::Transaction) -> rusqlite::Result<()>,
+}
+
+/// Упорядоченный список миграций. Только дописывать в конец; уже
+/// выпущенную миграцию не править — она отработала у пользователей, и
+/// правка до них не дойдёт.
+const MIGRATIONS: &[Migration] = &[
+    Migration { name: "базовая схема", apply: m001_base_schema },
+    Migration { name: "message_bodies.parser_version", apply: m002_parser_version },
+];
+
+/// Схема, которая была у кэша до появления `user_version`. Новые таблицы и
+/// колонки сюда НЕ дописываются — для них заводится следующая миграция.
+const BASE_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS conversations (
+        id TEXT PRIMARY KEY,
+        account_key TEXT NOT NULL,
+        label TEXT NOT NULL,
+        avatar_hash TEXT NOT NULL DEFAULT '',
+        counterpart_name TEXT NOT NULL DEFAULT '',
+        counterpart_addr TEXT NOT NULL DEFAULT '',
+        counterparts_json TEXT NOT NULL DEFAULT '[]',
+        is_group INTEGER NOT NULL DEFAULT 0,
+        last_date TEXT NOT NULL DEFAULT '',
+        last_date_ts INTEGER NOT NULL DEFAULT 0,
+        last_subject TEXT NOT NULL DEFAULT '',
+        unread_count INTEGER NOT NULL DEFAULT 0,
+        total_count INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS identities (
+        email TEXT NOT NULL,
+        account_key TEXT NOT NULL,
+        name TEXT NOT NULL DEFAULT '',
+        signature TEXT NOT NULL DEFAULT '',
+        is_default INTEGER NOT NULL DEFAULT 0,
+        color TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY(email, account_key)
+    );
+
+    CREATE TABLE IF NOT EXISTS avatar_cache (
+        email TEXT PRIMARY KEY,
+        png_data BLOB,
+        mime TEXT NOT NULL DEFAULT '',
+        cached_at INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS contacts (
+        account_key TEXT NOT NULL,
+        email TEXT NOT NULL,
+        name TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'auto',
+        last_seen_ts INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(account_key, email, source)
+    );
+    CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(account_key, email);
+    CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(account_key, name);
+
+    CREATE INDEX IF NOT EXISTS idx_conv_account ON conversations(account_key);
+    CREATE INDEX IF NOT EXISTS idx_conv_date ON conversations(last_date_ts);
+
+    CREATE TABLE IF NOT EXISTS conversation_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        conversation_id TEXT NOT NULL,
+        folder TEXT NOT NULL,
+        uid INTEGER NOT NULL,
+        UNIQUE(conversation_id, folder, uid)
+    );
+
+    CREATE TABLE IF NOT EXISTS message_bodies (
+        folder TEXT NOT NULL,
+        uid INTEGER NOT NULL,
+        account_key TEXT NOT NULL,
+        subject TEXT NOT NULL DEFAULT '',
+        from_header TEXT NOT NULL DEFAULT '',
+        from_addr TEXT NOT NULL DEFAULT '',
+        to_header TEXT NOT NULL DEFAULT '',
+        cc_header TEXT NOT NULL DEFAULT '',
+        date_header TEXT NOT NULL DEFAULT '',
+        date_ts INTEGER NOT NULL DEFAULT 0,
+        html TEXT,
+        text_body TEXT,
+        attachments_json TEXT NOT NULL DEFAULT '[]',
+        is_outgoing INTEGER NOT NULL DEFAULT 0,
+        message_id TEXT NOT NULL DEFAULT '',
+        in_reply_to TEXT NOT NULL DEFAULT '',
+        references_json TEXT NOT NULL DEFAULT '[]',
+        cached_at INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(folder, uid, account_key)
+    );
+
+    -- Calendar reminders, one row per alarm of an occurrence (spec
+    -- 2026-07-11). seq = cascade position: 0 is the primary alarm,
+    -- 1.. are the event's secondary alarms (each armed only when the
+    -- previous toast dies by timeout), 100 is the single user-chosen
+    -- reminder from «напомнить позже» (it replaces the cascade).
+    --
+    -- status machine:
+    --   armed     → shown      (toast on screen)
+    --   chained   → armed      (previous toast timed out)
+    --   shown     → done       (toast timed out → arm the next)
+    --   *         → cancelled  (✕ / user choice / event edited)
+    --   *         → expired    (occurrence ended while client off)
+    --
+    -- signature fingerprints (dtstart, dtend, leads, summary): any
+    -- event change → delete + reseed, per spec.
+    --
+    -- В отличие от остального кэша, решения пользователя здесь (отложить,
+    -- ✕) с сервера не восстанавливаются — поэтому кэш никогда не
+    -- пересоздаётся целиком, кроме случая битого файла (см. Cache::new).
+    CREATE TABLE IF NOT EXISTS reminders2 (
+        event_id INTEGER NOT NULL,
+        occurrence_start_ms INTEGER NOT NULL,
+        occurrence_end_ms INTEGER NOT NULL DEFAULT 0,
+        seq INTEGER NOT NULL,
+        fire_at_ms INTEGER NOT NULL,
+        lead_min INTEGER NOT NULL DEFAULT 0,
+        at_start INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'armed',
+        summary TEXT NOT NULL DEFAULT '',
+        signature TEXT NOT NULL DEFAULT '',
+        -- Чей это календарь. Нужен ровно для одного: выключение
+        -- календаря должно гасить ВСЕ его напоминания, а не только те,
+        -- чьи события сейчас лежат в загруженном окне. 0 — строка,
+        -- посеянная до появления колонки; ближайший пересев её
+        -- проставит.
+        calendar_id INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (event_id, occurrence_start_ms, seq)
+    );
+    CREATE INDEX IF NOT EXISTS idx_reminders2_due
+        ON reminders2(status, fire_at_ms);
+
+    -- Small key/value store for sync bookkeeping (delta watermarks,
+    -- last-full-sync timestamps). One row per key.
+    CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL DEFAULT ''
+    );
+";
+
+/// Колонки, которые до `user_version` доезжали `ALTER TABLE … ADD COLUMN`
+/// с заглушённой ошибкой на каждом старте. Существующая база может не иметь
+/// любой из них (смотря с какой версии клиента она жила).
+const BASE_COLUMNS: &[(&str, &str, &str)] = &[
+    ("conversation_messages", "seen", "INTEGER NOT NULL DEFAULT 1"),
+    ("conversation_messages", "message_id", "TEXT NOT NULL DEFAULT ''"),
+    ("conversations", "avatar_hash", "TEXT NOT NULL DEFAULT ''"),
+    ("conversations", "received_by", "TEXT NOT NULL DEFAULT ''"),
+    ("conversations", "last_subject", "TEXT NOT NULL DEFAULT ''"),
+    ("conversations", "counterparts_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("reminders2", "calendar_id", "INTEGER NOT NULL DEFAULT 0"),
+    ("message_bodies", "message_id", "TEXT NOT NULL DEFAULT ''"),
+    ("message_bodies", "in_reply_to", "TEXT NOT NULL DEFAULT ''"),
+    ("message_bodies", "references_json", "TEXT NOT NULL DEFAULT '[]'"),
+    // Empty for rows cached before this column; the viewer falls back to
+    // the network for those and they fill in on the next sync.
+    ("message_bodies", "raw_headers", "TEXT NOT NULL DEFAULT ''"),
+    ("avatar_cache", "mime", "TEXT NOT NULL DEFAULT ''"),
+];
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    for n in names {
+        if n? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> rusqlite::Result<()> {
+    if !has_column(conn, table, column)? {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), [])?;
+    }
+    Ok(())
+}
+
+/// Миграция 1: схема, к которой приходил прежний код. Свежая база получает
+/// её целиком; существующая (`user_version` = 0, таблицы уже есть) — только
+/// недостающие колонки, без потери данных.
+fn m001_base_schema(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(BASE_SCHEMA)?;
+    for (table, column, decl) in BASE_COLUMNS {
+        add_column_if_missing(tx, table, column, decl)?;
+    }
+    // The v1 reminders table had a broken PRIMARY KEY (event_id,
+    // occurrence) that made the second alarm row of an occurrence
+    // impossible — superseded wholesale by reminders2. Dropping it loses
+    // at most one pending snooze, once, at upgrade time.
+    tx.execute("DROP TABLE IF EXISTS event_reminders", [])?;
+    Ok(())
+}
+
+/// Миграция 2: версия разбора у каждой строки тела ([`PARSER_VERSION`]).
+/// Уже лежащие строки получают 1: они разобраны тем же кодом, что и сразу
+/// после введения версии, и массового перекачивания при обновлении клиента
+/// быть не должно.
+fn m002_parser_version(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    add_column_if_missing(tx, "message_bodies", "parser_version", "INTEGER NOT NULL DEFAULT 1")
+}
+
+/// Версия схемы, которую знает этот код.
+pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
+
+fn user_version(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.pragma_query_value(None, "user_version", |r| r.get(0))
+}
+
+/// Догнать схему до [`SCHEMA_VERSION`]. Каждая миграция — в транзакции
+/// `IMMEDIATE` вместе с повышением `user_version`; версия перечитывается уже
+/// под блокировкой, так что два соединения, открывшиеся одновременно (UI и
+/// движок), одну миграцию дважды не применят.
+fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
+    let start = user_version(conn)?;
+    if start > SCHEMA_VERSION {
+        // База от более нового клиента. Миграции только добавляют, так что
+        // старый код на ней работает; откатывать чужую схему не берёмся.
+        eprintln!(
+            "cache: схема v{start} новее известной этому клиенту v{SCHEMA_VERSION} — миграции пропущены"
+        );
+        return Ok(());
+    }
+    for (i, m) in MIGRATIONS.iter().enumerate() {
+        let target = i as i64 + 1;
+        if target <= start {
+            continue;
+        }
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if user_version(&tx)? >= target {
+            continue; // успело другое соединение
+        }
+        (m.apply)(&tx)?;
+        tx.pragma_update(None, "user_version", target)?;
+        tx.commit()?;
+        eprintln!("cache: миграция {target} «{}» применена", m.name);
+    }
+    Ok(())
+}
+
+/// Ошибка, после которой файл как база не годится: чинить нечего, можно
+/// только отложить его в сторону.
+fn is_corrupt(e: &rusqlite::Error) -> bool {
+    matches!(
+        e.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+    )
+}
+
+/// Сколько ждать чужую запись, прежде чем вернуть SQLITE_BUSY. Соединений у
+/// клиента минимум два (UI-поток и поток движка открывают `Cache` каждый
+/// себе), и без ожидания запись одного во время транзакции другого падала
+/// сразу — а падение у вызывающих чаще всего уходит в `.ok()`.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn open_conn(db_path: &std::path::Path) -> rusqlite::Result<Connection> {
+    let conn = Connection::open(db_path)?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+    Ok(conn)
+}
+
+/// Отложить битую базу в сторону (`cache.db.broken-<unix-время>`, вместе с
+/// -wal/-shm), а не удалить: напоминания в ней с сервера не восстановить, и
+/// если файл ещё можно спасти руками, он должен остаться.
+fn quarantine(db_path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let ts = chrono::Utc::now().timestamp();
+    let mut moved = db_path.as_os_str().to_owned();
+    moved.push(format!(".broken-{ts}"));
+    let moved = std::path::PathBuf::from(moved);
+    std::fs::rename(db_path, &moved).map_err(|e| format!("rename {}: {e}", db_path.display()))?;
+    for side in ["-wal", "-shm"] {
+        let mut from = db_path.as_os_str().to_owned();
+        from.push(side);
+        let from = std::path::PathBuf::from(from);
+        if from.exists() {
+            let mut to = moved.as_os_str().to_owned();
+            to.push(side);
+            if let Err(e) = std::fs::rename(&from, std::path::PathBuf::from(to)) {
+                eprintln!("cache: не удалось отложить {}: {e}", from.display());
+            }
+        }
+    }
+    Ok(moved)
+}
+
+/// Уборка на каждом старте — не схема, а данные; ошибки только в лог.
+fn startup_housekeeping(conn: &Connection) {
+    // Existing rows pre-MIME stored Gravatar PNG bytes — purge so the next
+    // lookup uses the new chain (and labels the result with a MIME). Заодно
+    // (и это поведение, на которое уже полагаются) рестарт сбрасывает
+    // отрицательный кэш аватарок: у пустой записи mime тоже пустой.
+    if let Err(e) = conn.execute("DELETE FROM avatar_cache WHERE mime = ''", []) {
+        eprintln!("cache: чистка avatar_cache: {e}");
+    }
+
+    // One-shot wipe of reminders2 when the reminder-data version lags.
+    // Bump REMINDERS_DATA_VERSION whenever a fixed bug left polluted rows
+    // that would keep firing until they naturally reseed. v2: the server
+    // used to emit every override VEVENT's VALARM on every occurrence, so
+    // occurrences carried dozens of duplicate alarms → an endless toast
+    // cascade. Clearing lets seed() rebuild from the corrected data.
+    // v3: dedup of the same meeting carried under two event_ids landed;
+    // clear the transitional mix (incl. any orphaned user-snooze row) so
+    // the cascade reseeds clean.
+    // v4: строки, посеянные до колонки `calendar_id`, лежат с нулём —
+    // такую ни выключение календаря не гасит (нечего сопоставить), ни
+    // проверка видимости в момент выстрела. Пока они живы (горизонт посева
+    // — 30 дней вперёд), скрытый календарь продолжает звонить. Стираем
+    // один раз: после этого каждая строка знает свой календарь.
+    const REMINDERS_DATA_VERSION: &str = "4";
+    let wipe = || -> rusqlite::Result<()> {
+        let rv: String = conn
+            .query_row("SELECT value FROM meta WHERE key = 'reminders_data_version'", [], |r| {
+                r.get(0)
+            })
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(String::new()),
+                e => Err(e),
+            })?;
+        if rv != REMINDERS_DATA_VERSION {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute("DELETE FROM reminders2", [])?;
+            tx.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('reminders_data_version', ?1)",
+                params![REMINDERS_DATA_VERSION],
+            )?;
+            tx.commit()?;
+        }
+        Ok(())
+    };
+    if let Err(e) = wipe() {
+        eprintln!("cache: reminders_data_version: {e}");
+    }
+}
+
 pub struct Cache {
     conn: Mutex<Connection>,
 }
 
 impl Cache {
+    /// Открыть `cache.db` в `app_dir` и догнать схему.
+    ///
+    /// Стратегия при сбое:
+    /// * файл не база / битый (`SQLITE_CORRUPT`, `SQLITE_NOTADB`) — файл
+    ///   откладывается в сторону ([`quarantine`]) и создаётся пустой кэш.
+    ///   Почта, диалоги, контакты, аватарки и identities приедут с сервера;
+    ///   теряются только напоминания, но из битого файла их и так не прочесть;
+    /// * любая другая ошибка миграции (занято, диск, права) — транзакция
+    ///   откатилась, в лог пишется, на какой версии осталась схема, и кэш
+    ///   открывается как есть: отдельные запросы к недостающим колонкам будут
+    ///   падать со своими ошибками, а следующий старт повторит миграцию.
+    ///   Удалять из-за этого базу нельзя — в ней пользовательские решения по
+    ///   напоминаниям, которых нет на сервере.
     pub fn new(app_dir: PathBuf) -> Result<Self, String> {
         std::fs::create_dir_all(&app_dir).map_err(|e| format!("mkdir: {e}"))?;
         let db_path = app_dir.join("cache.db");
-        let conn = Connection::open(&db_path).map_err(|e| format!("SQLite open: {e}"))?;
 
-        conn.execute_batch(
-            "
-            PRAGMA journal_mode=WAL;
-            PRAGMA synchronous=NORMAL;
-
-            CREATE TABLE IF NOT EXISTS conversations (
-                id TEXT PRIMARY KEY,
-                account_key TEXT NOT NULL,
-                label TEXT NOT NULL,
-                avatar_hash TEXT NOT NULL DEFAULT '',
-                counterpart_name TEXT NOT NULL DEFAULT '',
-                counterpart_addr TEXT NOT NULL DEFAULT '',
-                counterparts_json TEXT NOT NULL DEFAULT '[]',
-                is_group INTEGER NOT NULL DEFAULT 0,
-                last_date TEXT NOT NULL DEFAULT '',
-                last_date_ts INTEGER NOT NULL DEFAULT 0,
-                last_subject TEXT NOT NULL DEFAULT '',
-                unread_count INTEGER NOT NULL DEFAULT 0,
-                total_count INTEGER NOT NULL DEFAULT 0,
-                updated_at INTEGER NOT NULL DEFAULT 0
+        let open_fresh = |why: &rusqlite::Error| -> Result<Connection, String> {
+            let moved = quarantine(&db_path)?;
+            eprintln!(
+                "cache: {} повреждён ({why}) — отложен в {}, создаётся новый кэш",
+                db_path.display(),
+                moved.display()
             );
+            let mut conn = open_conn(&db_path).map_err(|e| format!("SQLite open: {e}"))?;
+            migrate(&mut conn).map_err(|e| format!("SQLite migrate: {e}"))?;
+            Ok(conn)
+        };
 
-            CREATE TABLE IF NOT EXISTS identities (
-                email TEXT NOT NULL,
-                account_key TEXT NOT NULL,
-                name TEXT NOT NULL DEFAULT '',
-                signature TEXT NOT NULL DEFAULT '',
-                is_default INTEGER NOT NULL DEFAULT 0,
-                color TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY(email, account_key)
-            );
+        let conn = match open_conn(&db_path) {
+            Ok(mut conn) => match migrate(&mut conn) {
+                Ok(()) => conn,
+                Err(e) if is_corrupt(&e) => {
+                    drop(conn);
+                    open_fresh(&e)?
+                }
+                Err(e) => {
+                    let v = user_version(&conn).unwrap_or(-1);
+                    eprintln!(
+                        "cache: миграция схемы не прошла ({e}); схема осталась v{v} из \
+                         v{SCHEMA_VERSION}, кэш открыт как есть, повтор — при следующем открытии"
+                    );
+                    conn
+                }
+            },
+            Err(e) if is_corrupt(&e) => open_fresh(&e)?,
+            Err(e) => return Err(format!("SQLite open: {e}")),
+        };
 
-            CREATE TABLE IF NOT EXISTS avatar_cache (
-                email TEXT PRIMARY KEY,
-                png_data BLOB,
-                mime TEXT NOT NULL DEFAULT '',
-                cached_at INTEGER NOT NULL DEFAULT 0
-            );
-            -- Add mime column for installs that predate it (SQLite ignores
-            -- the error if it already exists; we just don't want to write a
-            -- separate version table for one column).
-
-            CREATE TABLE IF NOT EXISTS contacts (
-                account_key TEXT NOT NULL,
-                email TEXT NOT NULL,
-                name TEXT NOT NULL DEFAULT '',
-                source TEXT NOT NULL DEFAULT 'auto',
-                last_seen_ts INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY(account_key, email, source)
-            );
-            CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(account_key, email);
-            CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(account_key, name);
-
-            -- Migrate: add avatar_hash if missing
-            -- SQLite doesn't support IF NOT EXISTS for ALTER TABLE, so we try and ignore errors
-
-            CREATE INDEX IF NOT EXISTS idx_conv_account ON conversations(account_key);
-            CREATE INDEX IF NOT EXISTS idx_conv_date ON conversations(last_date_ts);
-
-            CREATE TABLE IF NOT EXISTS conversation_messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversation_id TEXT NOT NULL,
-                folder TEXT NOT NULL,
-                uid INTEGER NOT NULL,
-                UNIQUE(conversation_id, folder, uid)
-            );
-
-            CREATE TABLE IF NOT EXISTS message_bodies (
-                folder TEXT NOT NULL,
-                uid INTEGER NOT NULL,
-                account_key TEXT NOT NULL,
-                subject TEXT NOT NULL DEFAULT '',
-                from_header TEXT NOT NULL DEFAULT '',
-                from_addr TEXT NOT NULL DEFAULT '',
-                to_header TEXT NOT NULL DEFAULT '',
-                cc_header TEXT NOT NULL DEFAULT '',
-                date_header TEXT NOT NULL DEFAULT '',
-                date_ts INTEGER NOT NULL DEFAULT 0,
-                html TEXT,
-                text_body TEXT,
-                attachments_json TEXT NOT NULL DEFAULT '[]',
-                is_outgoing INTEGER NOT NULL DEFAULT 0,
-                message_id TEXT NOT NULL DEFAULT '',
-                in_reply_to TEXT NOT NULL DEFAULT '',
-                references_json TEXT NOT NULL DEFAULT '[]',
-                cached_at INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY(folder, uid, account_key)
-            );
-
-            -- Calendar reminders.
-            --
-            -- One row per (event, occurrence). The scheduler treats it as
-            -- the source of truth so snoozes and acks survive app restarts.
-            -- Calendar reminders, one row per alarm of an occurrence (spec
-            -- 2026-07-11). seq = cascade position: 0 is the primary alarm,
-            -- 1.. are the event's secondary alarms (each armed only when the
-            -- previous toast dies by timeout), 100 is the single user-chosen
-            -- reminder from «напомнить позже» (it replaces the cascade).
-            --
-            -- status machine:
-            --   armed     → shown      (toast on screen)
-            --   chained   → armed      (previous toast timed out)
-            --   shown     → done       (toast timed out → arm the next)
-            --   *         → cancelled  (✕ / user choice / event edited)
-            --   *         → expired    (occurrence ended while client off)
-            --
-            -- signature fingerprints (dtstart, dtend, leads, summary): any
-            -- event change → delete + reseed, per spec.
-            CREATE TABLE IF NOT EXISTS reminders2 (
-                event_id INTEGER NOT NULL,
-                occurrence_start_ms INTEGER NOT NULL,
-                occurrence_end_ms INTEGER NOT NULL DEFAULT 0,
-                seq INTEGER NOT NULL,
-                fire_at_ms INTEGER NOT NULL,
-                lead_min INTEGER NOT NULL DEFAULT 0,
-                at_start INTEGER NOT NULL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'armed',
-                summary TEXT NOT NULL DEFAULT '',
-                signature TEXT NOT NULL DEFAULT '',
-                -- Чей это календарь. Нужен ровно для одного: выключение
-                -- календаря должно гасить ВСЕ его напоминания, а не только те,
-                -- чьи события сейчас лежат в загруженном окне. 0 — строка,
-                -- посеянная до появления колонки; ближайший пересев её
-                -- проставит.
-                calendar_id INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (event_id, occurrence_start_ms, seq)
-            );
-            CREATE INDEX IF NOT EXISTS idx_reminders2_due
-                ON reminders2(status, fire_at_ms);
-
-            -- Small key/value store for sync bookkeeping (delta watermarks,
-            -- last-full-sync timestamps). One row per key.
-            CREATE TABLE IF NOT EXISTS meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL DEFAULT ''
-            );
-        ",
-        )
-        .map_err(|e| format!("SQLite init: {e}"))?;
-
-        // Migrations for existing databases
-        conn.execute(
-            "ALTER TABLE conversation_messages ADD COLUMN seen INTEGER NOT NULL DEFAULT 1",
-            [],
-        )
-        .ok();
-        conn.execute(
-            "ALTER TABLE conversation_messages ADD COLUMN message_id TEXT NOT NULL DEFAULT ''",
-            [],
-        )
-        .ok();
-        conn.execute(
-            "ALTER TABLE conversations ADD COLUMN avatar_hash TEXT NOT NULL DEFAULT ''",
-            [],
-        )
-        .ok();
-        conn.execute(
-            "ALTER TABLE conversations ADD COLUMN received_by TEXT NOT NULL DEFAULT ''",
-            [],
-        )
-        .ok();
-        conn.execute(
-            "ALTER TABLE conversations ADD COLUMN last_subject TEXT NOT NULL DEFAULT ''",
-            [],
-        )
-        .ok();
-        conn.execute(
-            "ALTER TABLE conversations ADD COLUMN counterparts_json TEXT NOT NULL DEFAULT '[]'",
-            [],
-        )
-        .ok();
-        conn.execute(
-            "ALTER TABLE reminders2 ADD COLUMN calendar_id INTEGER NOT NULL DEFAULT 0",
-            [],
-        )
-        .ok();
-        conn.execute(
-            "ALTER TABLE message_bodies ADD COLUMN message_id TEXT NOT NULL DEFAULT ''",
-            [],
-        )
-        .ok();
-        conn.execute(
-            "ALTER TABLE message_bodies ADD COLUMN in_reply_to TEXT NOT NULL DEFAULT ''",
-            [],
-        )
-        .ok();
-        conn.execute(
-            "ALTER TABLE message_bodies ADD COLUMN references_json TEXT NOT NULL DEFAULT '[]'",
-            [],
-        )
-        .ok();
-        // Empty for rows cached before this column; the viewer falls back to
-        // the network for those and they fill in on the next sync.
-        conn.execute(
-            "ALTER TABLE message_bodies ADD COLUMN raw_headers TEXT NOT NULL DEFAULT ''",
-            [],
-        )
-        .ok();
-        conn.execute("ALTER TABLE avatar_cache ADD COLUMN mime TEXT NOT NULL DEFAULT ''", []).ok();
-        // Existing rows pre-MIME stored Gravatar PNG bytes — purge so the
-        // next lookup uses the new chain (and labels the result with a MIME).
-        conn.execute("DELETE FROM avatar_cache WHERE mime = ''", []).ok();
-
-        // The v1 reminders table had a broken PRIMARY KEY (event_id,
-        // occurrence) that made the second alarm row of an occurrence
-        // impossible — superseded wholesale by reminders2. Dropping it loses
-        // at most one pending snooze, once, at upgrade time.
-        conn.execute("DROP TABLE IF EXISTS event_reminders", []).ok();
-
-        // One-shot wipe of reminders2 when the reminder-data version lags.
-        // Bump REMINDERS_DATA_VERSION whenever a fixed bug left polluted rows
-        // that would keep firing until they naturally reseed. v2: the server
-        // used to emit every override VEVENT's VALARM on every occurrence, so
-        // occurrences carried dozens of duplicate alarms → an endless toast
-        // cascade. Clearing lets seed() rebuild from the corrected data.
-        // v3: dedup of the same meeting carried under two event_ids landed;
-        // clear the transitional mix (incl. any orphaned user-snooze row) so
-        // the cascade reseeds clean.
-        // v4: строки, посеянные до колонки `calendar_id`, лежат с нулём —
-        // такую ни выключение календаря не гасит (нечего сопоставить), ни
-        // проверка видимости в момент выстрела. Пока они живы (горизонт посева
-        // — 30 дней вперёд), скрытый календарь продолжает звонить. Стираем
-        // один раз: после этого каждая строка знает свой календарь.
-        const REMINDERS_DATA_VERSION: &str = "4";
-        let rv: String = conn
-            .query_row("SELECT value FROM meta WHERE key = 'reminders_data_version'", [], |r| {
-                r.get(0)
-            })
-            .unwrap_or_default();
-        if rv != REMINDERS_DATA_VERSION {
-            conn.execute("DELETE FROM reminders2", []).ok();
-            conn.execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES ('reminders_data_version', ?1)",
-                params![REMINDERS_DATA_VERSION],
-            )
-            .ok();
-        }
-
+        startup_housekeeping(&conn);
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -510,6 +688,9 @@ impl Cache {
     /// Пустая строка (`body_is_blank`) здесь считается присутствующей. Лечит
     /// такие путь открытия диалога (§4а контракта); фон их не трогает, иначе
     /// по-настоящему пустое письмо перекачивалось бы на каждом цикле синка.
+    /// Так же и строка устаревшей версии разбора ([`Self::stale_body_refs`]):
+    /// фон её не перекачивает, иначе каждый подъём [`PARSER_VERSION`]
+    /// означал бы перекачку всего ящика.
     pub fn cached_body_refs(
         &self,
         account_key: &str,
@@ -527,6 +708,33 @@ impl Cache {
                 stmt.query_row(params![mr.folder, mr.uid, account_key], |r| r.get(0));
             if hit.is_ok() {
                 out.push(mr.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Какие из `refs` лежат в кэше разобранными НЕ текущей версией
+    /// ([`PARSER_VERSION`]). Путь открытия диалога считает их промахом и
+    /// перезапрашивает; `load_message_bodies` их по-прежнему отдаёт — старое
+    /// тело лучше пустого пузыря, пока сервер не ответил (или его нет).
+    pub fn stale_body_refs(
+        &self,
+        account_key: &str,
+        refs: &[MessageRef],
+    ) -> Result<Vec<MessageRef>, String> {
+        let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT parser_version FROM message_bodies \
+                 WHERE folder = ?1 AND uid = ?2 AND account_key = ?3",
+            )
+            .map_err(|e| format!("prepare: {e}"))?;
+        let mut out = Vec::new();
+        for mr in refs {
+            match stmt.query_row(params![mr.folder, mr.uid, account_key], |r| r.get::<_, i64>(0)) {
+                Ok(v) if v != PARSER_VERSION => out.push(mr.clone()),
+                Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                Err(e) => return Err(format!("parser_version {}/{}: {e}", mr.folder, mr.uid)),
             }
         }
         Ok(out)
@@ -655,11 +863,34 @@ impl Cache {
         Ok(conversations)
     }
 
-    /// Save message bodies to cache.
+    /// Save freshly parsed message bodies to cache, stamped with the current
+    /// [`PARSER_VERSION`].
     pub fn save_message_bodies(
         &self,
         account_key: &str,
         bodies: &[MessageBody],
+    ) -> Result<(), String> {
+        self.store_bodies(account_key, bodies, Some(PARSER_VERSION))
+    }
+
+    /// Пересохранить тела, прочитанные из кэша и подправленные на месте
+    /// (cid:-подстановка движка), НЕ трогая их `parser_version`: разобраны
+    /// они прежним кодом, и пометка текущей версией спрятала бы их от
+    /// перезапроса навсегда. Строка, которой ещё нет, получает текущую.
+    pub fn resave_message_bodies(
+        &self,
+        account_key: &str,
+        bodies: &[MessageBody],
+    ) -> Result<(), String> {
+        self.store_bodies(account_key, bodies, None)
+    }
+
+    /// `version`: `Some` — проставить её, `None` — оставить ту, что у строки.
+    fn store_bodies(
+        &self,
+        account_key: &str,
+        bodies: &[MessageBody],
+        version: Option<i64>,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| format!("lock: {e}"))?;
         let now = chrono::Utc::now().timestamp();
@@ -691,9 +922,13 @@ impl Cache {
                 "INSERT OR REPLACE INTO message_bodies \
                  (folder, uid, account_key, subject, from_header, from_addr, to_header, cc_header, \
                   date_header, date_ts, html, text_body, attachments_json, is_outgoing, \
-                  message_id, in_reply_to, references_json, raw_headers, cached_at) \
+                  message_id, in_reply_to, references_json, raw_headers, cached_at, \
+                  parser_version) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, \
-                         ?16, ?17, ?18, ?19)",
+                         ?16, ?17, ?18, ?19, \
+                         COALESCE(?20, (SELECT parser_version FROM message_bodies \
+                                        WHERE folder = ?1 AND uid = ?2 AND account_key = ?3), \
+                                  ?21))",
                 params![
                     body.folder,
                     body.uid,
@@ -713,7 +948,9 @@ impl Cache {
                     body.in_reply_to,
                     refs_json,
                     body.raw_headers,
-                    now
+                    now,
+                    version,
+                    PARSER_VERSION
                 ],
             )
             .map_err(|e| format!("ins body: {e}"))?;
@@ -1459,4 +1696,299 @@ pub struct ReminderRow {
     /// Чей календарь — сканер проверяет видимость в момент выстрела, а не
     /// только при посеве. 0 = не атрибутировано (строка старой схемы).
     pub calendar_id: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Временный каталог без внешних зависимостей; удаляется на Drop.
+    struct TmpDir(PathBuf);
+
+    impl TmpDir {
+        fn new(tag: &str) -> Self {
+            static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "ddmail_cache_{tag}_{}_{n}_{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            TmpDir(dir)
+        }
+        fn db(&self) -> PathBuf {
+            self.0.join("cache.db")
+        }
+    }
+
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    fn columns(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(1)).unwrap().map(|r| r.unwrap()).collect()
+    }
+
+    fn schema_version(conn: &Connection) -> i64 {
+        conn.pragma_query_value(None, "schema_version", |r| r.get(0)).unwrap()
+    }
+
+    fn mref(folder: &str, uid: u32) -> MessageRef {
+        MessageRef { folder: folder.into(), uid, message_id: String::new(), seen: true }
+    }
+
+    fn body(folder: &str, uid: u32, text: &str) -> MessageBody {
+        MessageBody {
+            uid,
+            folder: folder.into(),
+            subject: "s".into(),
+            from: "a@test".into(),
+            from_addr: "a@test".into(),
+            to: Vec::new(),
+            cc: Vec::new(),
+            date: String::new(),
+            date_ts: 0,
+            html: None,
+            text: Some(text.into()),
+            attachments: Vec::new(),
+            is_outgoing: false,
+            message_id: format!("<{uid}@test>"),
+            in_reply_to: String::new(),
+            references: Vec::new(),
+            raw_headers: String::new(),
+        }
+    }
+
+    /// База клиента до появления `user_version`, причём старого: без всех
+    /// колонок, что доезжали `ALTER TABLE`, и с давно упразднённой таблицей
+    /// напоминаний v1.
+    fn make_legacy_db(path: &std::path::Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "
+            PRAGMA journal_mode=WAL;
+            CREATE TABLE conversations (
+                id TEXT PRIMARY KEY, account_key TEXT NOT NULL, label TEXT NOT NULL,
+                counterpart_name TEXT NOT NULL DEFAULT '', counterpart_addr TEXT NOT NULL DEFAULT '',
+                is_group INTEGER NOT NULL DEFAULT 0, last_date TEXT NOT NULL DEFAULT '',
+                last_date_ts INTEGER NOT NULL DEFAULT 0, unread_count INTEGER NOT NULL DEFAULT 0,
+                total_count INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE identities (
+                email TEXT NOT NULL, account_key TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
+                signature TEXT NOT NULL DEFAULT '', is_default INTEGER NOT NULL DEFAULT 0,
+                color TEXT NOT NULL DEFAULT '', PRIMARY KEY(email, account_key));
+            CREATE TABLE avatar_cache (
+                email TEXT PRIMARY KEY, png_data BLOB, cached_at INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE conversation_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT NOT NULL,
+                folder TEXT NOT NULL, uid INTEGER NOT NULL, UNIQUE(conversation_id, folder, uid));
+            CREATE TABLE message_bodies (
+                folder TEXT NOT NULL, uid INTEGER NOT NULL, account_key TEXT NOT NULL,
+                subject TEXT NOT NULL DEFAULT '', from_header TEXT NOT NULL DEFAULT '',
+                from_addr TEXT NOT NULL DEFAULT '', to_header TEXT NOT NULL DEFAULT '',
+                cc_header TEXT NOT NULL DEFAULT '', date_header TEXT NOT NULL DEFAULT '',
+                date_ts INTEGER NOT NULL DEFAULT 0, html TEXT, text_body TEXT,
+                attachments_json TEXT NOT NULL DEFAULT '[]', is_outgoing INTEGER NOT NULL DEFAULT 0,
+                cached_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(folder, uid, account_key));
+            CREATE TABLE reminders2 (
+                event_id INTEGER NOT NULL, occurrence_start_ms INTEGER NOT NULL,
+                occurrence_end_ms INTEGER NOT NULL DEFAULT 0, seq INTEGER NOT NULL,
+                fire_at_ms INTEGER NOT NULL, lead_min INTEGER NOT NULL DEFAULT 0,
+                at_start INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'armed',
+                summary TEXT NOT NULL DEFAULT '', signature TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (event_id, occurrence_start_ms, seq));
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '');
+            CREATE TABLE event_reminders (event_id INTEGER, occurrence INTEGER,
+                PRIMARY KEY(event_id, occurrence));
+
+            INSERT INTO conversations (id, account_key, label, last_date_ts)
+                VALUES ('c1', 'acc', 'Иван', 100);
+            INSERT INTO conversation_messages (conversation_id, folder, uid)
+                VALUES ('c1', 'INBOX', 7);
+            INSERT INTO message_bodies (folder, uid, account_key, subject, text_body)
+                VALUES ('INBOX', 7, 'acc', 'тема', 'тело письма');
+            INSERT INTO identities (email, account_key, name) VALUES ('me@test', 'acc', 'Я');
+            INSERT INTO meta (key, value) VALUES ('reminders_data_version', '4');
+            INSERT INTO meta (key, value) VALUES ('conv_full_ts:acc', '12345');
+            INSERT INTO reminders2 (event_id, occurrence_start_ms, seq, fire_at_ms, status, summary)
+                VALUES (1, 1000, 100, 900, 'armed', 'отложенное пользователем');
+            ",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn legacy_db_migrates_without_data_loss() {
+        let dir = TmpDir::new("legacy");
+        make_legacy_db(&dir.db());
+
+        let cache = Cache::new(dir.0.clone()).expect("cache");
+
+        let conn = Connection::open(dir.db()).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        for (table, column, _) in BASE_COLUMNS {
+            assert!(columns(&conn, table).iter().any(|c| c == column), "{table}.{column}");
+        }
+        assert!(columns(&conn, "message_bodies").iter().any(|c| c == "parser_version"));
+        let old_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'event_reminders'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_table, 0);
+
+        // Данные на месте и читаются штатным кодом.
+        let convs = cache.load_conversations("acc").unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].label, "Иван");
+        assert_eq!(convs[0].messages.len(), 1);
+        assert!(convs[0].messages[0].seen, "seen по умолчанию 1");
+        let bodies = cache.load_message_bodies("acc", &[mref("INBOX", 7)]).unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0].text.as_deref(), Some("тело письма"));
+        assert_eq!(cache.load_identities("acc").unwrap().len(), 1);
+        assert_eq!(cache.get_meta("conv_full_ts:acc").as_deref(), Some("12345"));
+        // Напоминание (не восстановимое с сервера) пережило миграцию.
+        let due = cache.due_reminders(i64::MAX).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].summary, "отложенное пользователем");
+        assert_eq!(due[0].calendar_id, 0);
+        // Строки, лежавшие до версии разбора, перезапрашивать не нужно.
+        assert!(cache.stale_body_refs("acc", &[mref("INBOX", 7)]).unwrap().is_empty());
+    }
+
+    /// База, где часть колонок уже добавлена прежним кодом (`ALTER … .ok()`),
+    /// а часть — нет: миграция 1 обязана пройти без «duplicate column».
+    #[test]
+    fn partially_altered_legacy_db_migrates() {
+        let dir = TmpDir::new("partial");
+        make_legacy_db(&dir.db());
+        {
+            let conn = Connection::open(dir.db()).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE conversations ADD COLUMN avatar_hash TEXT NOT NULL DEFAULT 'h';
+                 ALTER TABLE avatar_cache ADD COLUMN mime TEXT NOT NULL DEFAULT '';",
+            )
+            .unwrap();
+        }
+        let cache = Cache::new(dir.0.clone()).expect("cache");
+        let convs = cache.load_conversations("acc").unwrap();
+        assert_eq!(convs[0].avatar_hash, "h");
+        let conn = Connection::open(dir.db()).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn fresh_db_gets_full_schema() {
+        let dir = TmpDir::new("fresh");
+        let cache = Cache::new(dir.0.clone()).expect("cache");
+        cache.save_message_bodies("acc", &[body("INBOX", 1, "t")]).unwrap();
+        let conn = Connection::open(dir.db()).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        for (table, column, _) in BASE_COLUMNS {
+            assert!(columns(&conn, table).iter().any(|c| c == column), "{table}.{column}");
+        }
+        assert!(columns(&conn, "message_bodies").iter().any(|c| c == "parser_version"));
+    }
+
+    /// Повторный старт схему не трогает: `schema_version` SQLite растёт от
+    /// любого DDL, в том числе от «пустого» ALTER.
+    #[test]
+    fn reopen_is_noop() {
+        let dir = TmpDir::new("reopen");
+        drop(Cache::new(dir.0.clone()).expect("cache"));
+        let before = schema_version(&Connection::open(dir.db()).unwrap());
+        drop(Cache::new(dir.0.clone()).expect("cache"));
+        drop(Cache::new(dir.0.clone()).expect("cache"));
+        let conn = Connection::open(dir.db()).unwrap();
+        assert_eq!(schema_version(&conn), before);
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+    }
+
+    /// База от более нового клиента открывается и не «откатывается».
+    #[test]
+    fn newer_schema_is_left_alone() {
+        let dir = TmpDir::new("newer");
+        drop(Cache::new(dir.0.clone()).expect("cache"));
+        Connection::open(dir.db())
+            .unwrap()
+            .pragma_update(None, "user_version", SCHEMA_VERSION + 5)
+            .unwrap();
+        let cache = Cache::new(dir.0.clone()).expect("cache");
+        cache.set_meta("k", "v").unwrap();
+        let conn = Connection::open(dir.db()).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION + 5);
+    }
+
+    /// Миграция, упавшая на середине, не оставляет полусделанной схемы и не
+    /// двигает версию.
+    #[test]
+    fn failed_migration_rolls_back() {
+        let dir = TmpDir::new("rollback");
+        make_legacy_db(&dir.db());
+        let mut conn = Connection::open(dir.db()).unwrap();
+        let tx = conn.transaction().unwrap();
+        let r = (|| -> rusqlite::Result<()> {
+            m001_base_schema(&tx)?;
+            tx.execute("SELECT * FROM no_such_table", [])?;
+            Ok(())
+        })();
+        assert!(r.is_err());
+        drop(tx); // rollback
+        assert_eq!(user_version(&conn).unwrap(), 0);
+        assert!(!columns(&conn, "conversations").iter().any(|c| c == "received_by"));
+    }
+
+    #[test]
+    fn corrupt_file_is_quarantined_not_deleted() {
+        let dir = TmpDir::new("corrupt");
+        std::fs::write(dir.db(), vec![0x5au8; 8192]).unwrap();
+        let cache = Cache::new(dir.0.clone()).expect("cache over a garbage file");
+        cache.set_meta("k", "v").unwrap();
+        let broken: Vec<_> = std::fs::read_dir(&dir.0)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("cache.db.broken-"))
+            .collect();
+        assert_eq!(broken.len(), 1);
+        assert_eq!(std::fs::read(broken[0].path()).unwrap(), vec![0x5au8; 8192]);
+    }
+
+    #[test]
+    fn parser_version_marks_stale_rows() {
+        let dir = TmpDir::new("parser");
+        let cache = Cache::new(dir.0.clone()).expect("cache");
+        let refs = [mref("INBOX", 1), mref("INBOX", 2), mref("INBOX", 3)];
+        cache.save_message_bodies("acc", &[body("INBOX", 1, "a"), body("INBOX", 2, "b")]).unwrap();
+        assert!(cache.stale_body_refs("acc", &refs).unwrap().is_empty(), "свежие и отсутствующие");
+
+        // Строка, разобранная прежней версией.
+        Connection::open(dir.db())
+            .unwrap()
+            .execute(
+                "UPDATE message_bodies SET parser_version = ?1 WHERE uid = 2",
+                [PARSER_VERSION - 1],
+            )
+            .unwrap();
+        let stale = cache.stale_body_refs("acc", &refs).unwrap();
+        assert_eq!(stale.iter().map(|m| m.uid).collect::<Vec<_>>(), vec![2]);
+        // Устаревшее тело по-прежнему читается — офлайн показывать есть что.
+        assert_eq!(cache.load_message_bodies("acc", &refs).unwrap().len(), 2);
+
+        // Пересохранение после cid:-подстановки версию не поднимает…
+        cache.resave_message_bodies("acc", &[body("INBOX", 2, "b2")]).unwrap();
+        assert_eq!(cache.stale_body_refs("acc", &refs).unwrap().len(), 1);
+        // …а новая строка через него получает текущую.
+        cache.resave_message_bodies("acc", &[body("INBOX", 3, "c")]).unwrap();
+        assert_eq!(cache.stale_body_refs("acc", &refs).unwrap().len(), 1);
+        // Перезапрос с сервера — поднимает.
+        cache.save_message_bodies("acc", &[body("INBOX", 2, "b3")]).unwrap();
+        assert!(cache.stale_body_refs("acc", &refs).unwrap().is_empty());
+    }
 }
