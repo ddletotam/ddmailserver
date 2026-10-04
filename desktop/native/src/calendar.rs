@@ -699,3 +699,395 @@ pub(crate) fn apply_calendar_defaults(ui: &MainWindow) {
     ui.set_calendars(slint::ModelRc::new(slint::VecModel::from(Vec::<CalendarItem>::new())));
     ui.set_events(slint::ModelRc::new(slint::VecModel::from(Vec::<EventBlock>::new())));
 }
+
+/// Direct manipulation on the week grid: double-click to create, drag to
+/// move, drag an edge to resize.
+pub(crate) fn wire_grid_editing(ui: &MainWindow, shared: &Rc<Shared>) {
+    // Double-click on empty grid space → create form prefilled with that
+    // day/time. x/y are viewport-content px; view_w is the viewport width.
+    let ui_weak_gc = ui.as_weak();
+    let sh_gc = shared.clone();
+    // Manual double-click detection (the Flickable eats TouchArea::double-clicked):
+    // (last_ms, last_x, last_y). A create fires only on the second click within
+    // 450 ms and ~12 px of the first.
+    let gc_last = std::cell::Cell::new((0i64, 0f32, 0f32));
+    ui.on_grid_create_at(move |x, y, view_w| {
+        let Some(ui) = ui_weak_gc.upgrade() else { return };
+        let now = chrono::Local::now().timestamp_millis();
+        let (last_ms, last_x, last_y) = gc_last.get();
+        let is_double =
+            now - last_ms < 450 && (x - last_x).abs() < 12.0 && (y - last_y).abs() < 12.0;
+        if !is_double {
+            // First click — arm and wait for the second.
+            gc_last.set((now, x, y));
+            return;
+        }
+        gc_last.set((0, 0.0, 0.0)); // consume, so a triple-click doesn't re-fire
+        const GUTTER: f32 = 48.0;
+        if x < GUTTER {
+            return; // clicked in the time-label gutter
+        }
+        let day_count = ui.get_day_count();
+        if day_count <= 0 {
+            return;
+        }
+        let col_w = (view_w - GUTTER) / day_count as f32;
+        if col_w <= 0.0 {
+            return;
+        }
+        let day = ((x - GUTTER) / col_w).floor() as i64;
+        if day < 0 || day >= day_count as i64 {
+            return;
+        }
+        // y px → hour-of-day, then snap the start to the nearest 15 minutes.
+        let hour_height = ui.get_hour_height();
+        let hour_start = ui.get_hour_start();
+        let minutes = hour_start as f32 * 60.0 + (y / hour_height) * 60.0;
+        let snapped = ((minutes / 15.0).round() as i64) * 15;
+        let day_ms: i64 = 24 * 60 * 60 * 1000;
+        let (week_start_ms, _) = week_range_ms(sh_gc.calendar_week_start_days.get(), day_count);
+        let start_ms = week_start_ms + day * day_ms + snapped * 60_000;
+        open_create_form_at(&ui, &sh_gc, start_ms);
+    });
+
+    // Drag-to-move a block to a new day/time (writable calendars only — the
+    // block's TouchArea won't even start a drag otherwise). The ghost's final
+    // top-left (grid px) → nearest day column + 15-min-snapped start; duration
+    // and all other fields are preserved.
+    let ui_weak_gm = ui.as_weak();
+    let sh_gm = shared.clone();
+    ui.on_grid_event_moved(move |id, orig_x, _orig_y, new_x, new_y| {
+        let Some(ui) = ui_weak_gm.upgrade() else { return };
+        const GUTTER: f32 = 48.0;
+        let day_count = ui.get_day_count();
+        let col_w = ui.get_col_width();
+        if day_count <= 0 || col_w <= 0.0 {
+            return;
+        }
+        let hour_height = ui.get_hour_height();
+        let hour_start = ui.get_hour_start();
+        let day_ms: i64 = 24 * 60 * 60 * 1000;
+        let (week_start_ms, _) = week_range_ms(sh_gm.calendar_week_start_days.get(), day_count);
+
+        // Block x = GUTTER + (day + lane_xf)*col_w + 2px, lane_xf ∈ [0,1) for
+        // overlap lanes — floor recovers the day column. round() broke every
+        // block in lane xf >= 0.5: the lookup jumped to the NEXT day, the
+        // cal_occ probe missed, and the drag silently did nothing.
+        let px_to_day = |x: f32| -> i64 {
+            (((x - GUTTER - 2.0) / col_w).floor() as i64).clamp(0, day_count as i64 - 1)
+        };
+        let px_to_min = |y: f32| -> i64 {
+            let minutes = hour_start as f32 * 60.0 + (y / hour_height) * 60.0;
+            ((minutes / 15.0).round().max(0.0) as i64) * 15
+        };
+
+        let orig_day = px_to_day(orig_x);
+        let new_day = px_to_day(new_x);
+        let new_start = week_start_ms + new_day * day_ms + px_to_min(new_y) * 60_000;
+
+        // Exact instance grabbed (gives recurrence_id + duration + whether the
+        // event recurs). Keyed (event_id, original day column).
+        let (occ_start, occ_end, recurring) =
+            match sh_gm.cal_occ.borrow().get(&(id, orig_day as i32)).copied() {
+                Some(v) => v,
+                None => {
+                    eprintln!(
+                        "[cal] move: no occurrence for id={id} day={orig_day} — drop ignored"
+                    );
+                    return;
+                }
+            };
+        if new_start == occ_start {
+            return; // dropped back where it was
+        }
+        let new_end = new_start + (occ_end - occ_start).max(0);
+
+        // Preserve the event's display fields.
+        let (summary, description, location, all_day) = {
+            let events = sh_gm.calendar_events.borrow();
+            match events.iter().find(|e| e.id as i32 == id) {
+                Some(e) => {
+                    (e.summary.clone(), e.description.clone(), e.location.clone(), e.all_day)
+                }
+                None => return,
+            }
+        };
+
+        let mut body = serde_json::json!({
+            "summary": summary,
+            "description": description,
+            "location": location,
+            "all_day": all_day,
+            "dtstart": new_start,
+            "dtend": new_end,
+        });
+        if recurring {
+            // Move just THIS occurrence — an "all" dtstart shift keeps BYDAY's
+            // weekday, so only scope=single (an override) actually re-days it.
+            body["scope"] = "single".into();
+            body["recurrence_id"] = occ_start.into();
+            // No optimistic redraw: the override can't be reflected by local
+            // RRULE expansion; the refetch after PatchEvent shows it.
+        } else {
+            body["scope"] = "all".into();
+            // Optimistic shift so the block lands immediately; refetch reconciles.
+            {
+                let mut events = sh_gm.calendar_events.borrow_mut();
+                if let Some(e) = events.iter_mut().find(|e| e.id as i32 == id) {
+                    if e.dtend.is_some() {
+                        e.dtend = Some(new_end);
+                    }
+                    e.dtstart = new_start;
+                }
+            }
+            apply_calendar_view(&ui, &sh_gm);
+        }
+
+        if let Some(c) = sh_gm.cache.as_ref() {
+            let _ = c.purge_event_reminders(id as i64);
+        }
+        let ak = sh_gm.event_accounts.borrow().get(&(id as i64)).cloned().unwrap_or_default();
+        if let Some(etx) = sh_gm.engine_tx.borrow().as_ref() {
+            let _ = etx.send(engine::EngineCmd::PatchEvent {
+                event_id: id as i64,
+                body,
+                account_key: ak,
+            });
+        }
+    });
+
+    // Resize a block by its top/bottom edge (writable only). Day is unchanged
+    // (taken from the original x); new start = top edge, new end = bottom edge.
+    let ui_weak_gr = ui.as_weak();
+    let sh_gr = shared.clone();
+    ui.on_grid_event_resized(move |id, orig_x, orig_y, new_top_y, new_bottom_y| {
+        let _ = orig_y;
+        let Some(ui) = ui_weak_gr.upgrade() else { return };
+        const GUTTER: f32 = 48.0;
+        let day_count = ui.get_day_count();
+        let col_w = ui.get_col_width();
+        if day_count <= 0 || col_w <= 0.0 {
+            return;
+        }
+        let hour_height = ui.get_hour_height();
+        let hour_start = ui.get_hour_start();
+        let day_ms: i64 = 24 * 60 * 60 * 1000;
+        let (week_start_ms, _) = week_range_ms(sh_gr.calendar_week_start_days.get(), day_count);
+        // floor, not round: orig_x carries the overlap-lane fraction (xf) —
+        // see px_to_day in the move handler above.
+        let day = (((orig_x - GUTTER - 2.0) / col_w).floor() as i64).clamp(0, day_count as i64 - 1);
+        let to_min = |y: f32| -> i64 {
+            let m = hour_start as f32 * 60.0 + (y / hour_height) * 60.0;
+            ((m / 15.0).round().max(0.0) as i64) * 15
+        };
+        let new_start = week_start_ms + day * day_ms + to_min(new_top_y) * 60_000;
+        let mut new_end = week_start_ms + day * day_ms + to_min(new_bottom_y) * 60_000;
+        if new_end <= new_start {
+            new_end = new_start + 15 * 60_000;
+        }
+
+        let (occ_start, occ_end, recurring) =
+            match sh_gr.cal_occ.borrow().get(&(id, day as i32)).copied() {
+                Some(v) => v,
+                None => {
+                    eprintln!("[cal] resize: no occurrence for id={id} day={day} — ignored");
+                    return;
+                }
+            };
+        if new_start == occ_start && new_end == occ_end {
+            return; // no change
+        }
+        let (summary, description, location, all_day) = {
+            let events = sh_gr.calendar_events.borrow();
+            match events.iter().find(|e| e.id as i32 == id) {
+                Some(e) => {
+                    (e.summary.clone(), e.description.clone(), e.location.clone(), e.all_day)
+                }
+                None => return,
+            }
+        };
+        let mut body = serde_json::json!({
+            "summary": summary,
+            "description": description,
+            "location": location,
+            "all_day": all_day,
+            "dtstart": new_start,
+            "dtend": new_end,
+        });
+        if recurring {
+            body["scope"] = "single".into();
+            body["recurrence_id"] = occ_start.into();
+        } else {
+            body["scope"] = "all".into();
+            {
+                let mut events = sh_gr.calendar_events.borrow_mut();
+                if let Some(e) = events.iter_mut().find(|e| e.id as i32 == id) {
+                    e.dtstart = new_start;
+                    e.dtend = Some(new_end);
+                }
+            }
+            apply_calendar_view(&ui, &sh_gr);
+        }
+        if let Some(c) = sh_gr.cache.as_ref() {
+            let _ = c.purge_event_reminders(id as i64);
+        }
+        let ak = sh_gr.event_accounts.borrow().get(&(id as i64)).cloned().unwrap_or_default();
+        if let Some(etx) = sh_gr.engine_tx.borrow().as_ref() {
+            let _ = etx.send(engine::EngineCmd::PatchEvent {
+                event_id: id as i64,
+                body,
+                account_key: ak,
+            });
+        }
+    });
+}
+
+/// Colour picked in the per-calendar palette popup.
+pub(crate) fn wire_calendar_color(ui: &MainWindow, shared: &Rc<Shared>) {
+    // Colour picked in the per-calendar palette popup.
+    let ui_weak_cc = ui.as_weak();
+    let sh_cc = shared.clone();
+    ui.on_calendar_set_color(move |cal_id, palette_idx| {
+        let Some(ui) = ui_weak_cc.upgrade() else { return };
+        if let Some(hex_color) = CAL_PALETTE.get(palette_idx as usize) {
+            sh_cc.calendar_colors.borrow_mut().insert(cal_id as i64, (*hex_color).to_string());
+            apply_calendar_view(&ui, &sh_cc);
+            save_calendar_settings(&ui, &sh_cc);
+        }
+    });
+}
+
+/// Calendar navigation and view options: week prev/next/today, grid
+/// resize and zoom, work hours, calendar visibility, notification sound.
+pub(crate) fn wire_calendar_nav(ui: &MainWindow, shared: &Rc<Shared>) {
+    // If we start straight in calendar mode (e.g. saved state), kick
+    // off the same fetch. (Not yet persisted, but trivial when it is.)
+
+    let nav = |delta_days: i64| {
+        let ui_weak = ui.as_weak();
+        let sh = shared.clone();
+        move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let new_start = if delta_days == 0 {
+                week_start_days_today()
+            } else {
+                sh.calendar_week_start_days.get() + delta_days
+            };
+            sh.calendar_week_start_days.set(new_start);
+            sh.week_follows_today.set(new_start == week_start_days_today());
+            apply_calendar_view(&ui, &sh);
+            refetch_calendar_events(&ui, &sh);
+        }
+    };
+    ui.on_calendar_prev(nav(-7));
+    ui.on_calendar_next(nav(7));
+    ui.on_calendar_today(nav(0));
+
+    // Grid body size mirror: layout depends on the on-screen canvas, so
+    // recompute whenever it changes (and once on init — `changed` doesn't
+    // fire for the first layout pass).
+    let ui_weak_gr = ui.as_weak();
+    let sh_gr = shared.clone();
+    ui.on_grid_area_resized(move |w, h| {
+        let Some(ui) = ui_weak_gr.upgrade() else { return };
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let changed = (sh_gr.grid_canvas_w.get() - w).abs() > 0.5
+            || (sh_gr.grid_canvas_h.get() - h).abs() > 0.5;
+        sh_gr.grid_canvas_w.set(w);
+        sh_gr.grid_canvas_h.set(h);
+        if changed {
+            apply_calendar_view(&ui, &sh_gr);
+        }
+    });
+    // Ctrl-wheel = zoom hours; Ctrl-Alt-wheel = zoom day width. Manual zoom
+    // wins over autofit (the layout then scrolls). delta>0 = zoom in.
+    let ui_weak_zh = ui.as_weak();
+    let sh_zh = shared.clone();
+    ui.on_calendar_zoom_hours(move |delta| {
+        let Some(ui) = ui_weak_zh.upgrade() else { return };
+        // A manual zoom overrides any queued programmatic scroll.
+        sh_zh.pending_cal_scroll.set(None);
+        let canvas_h = sh_zh.grid_canvas_h.get().max(MIN_HOUR_H);
+        let cur = if sh_zh.manual_hour_h.get() > 0.0 {
+            sh_zh.manual_hour_h.get()
+        } else {
+            ui.get_hour_height()
+        };
+        let factor = if delta > 0.0 { 1.1 } else { 1.0 / 1.1 };
+        // Zooming out при упоре в пол returns to autofit (manual = 0): the
+        // grid collapses back to the work-hours band. Without this escape
+        // hatch a single ctrl-wheel pinned the layout to the full 0–24
+        // scroll forever — every launch then opened on the night hours.
+        if delta < 0.0 && cur <= MIN_HOUR_H + 0.5 {
+            sh_zh.manual_hour_h.set(0.0);
+            apply_calendar_view(&ui, &sh_zh);
+            save_calendar_settings(&ui, &sh_zh);
+            return;
+        }
+        let next = (cur * factor).clamp(MIN_HOUR_H, canvas_h);
+        sh_zh.manual_hour_h.set(next);
+        apply_calendar_view(&ui, &sh_zh);
+        save_calendar_settings(&ui, &sh_zh);
+    });
+    let ui_weak_zd = ui.as_weak();
+    let sh_zd = shared.clone();
+    ui.on_calendar_zoom_days(move |delta| {
+        let Some(ui) = ui_weak_zd.upgrade() else { return };
+        let avail = (sh_zd.grid_canvas_w.get() - GUTTER_W).max(MIN_COL_W);
+        let cur = if sh_zd.manual_col_w.get() > 0.0 {
+            sh_zd.manual_col_w.get()
+        } else {
+            ui.get_col_width()
+        };
+        let factor = if delta > 0.0 { 1.1 } else { 1.0 / 1.1 };
+        // Same escape hatch as the hour zoom: bottoming out returns to
+        // autofit column widths.
+        if delta < 0.0 && cur <= MIN_COL_W + 0.5 {
+            sh_zd.manual_col_w.set(0.0);
+            apply_calendar_view(&ui, &sh_zd);
+            save_calendar_settings(&ui, &sh_zd);
+            return;
+        }
+        let next = (cur * factor).clamp(MIN_COL_W, avail);
+        sh_zd.manual_col_w.set(next);
+        apply_calendar_view(&ui, &sh_zd);
+        save_calendar_settings(&ui, &sh_zd);
+    });
+    // Working-day start/end from the settings «Календарь» tab.
+    let ui_weak_ws = ui.as_weak();
+    let sh_ws = shared.clone();
+    ui.on_set_work_hours(move |start, end| {
+        let Some(ui) = ui_weak_ws.upgrade() else { return };
+        let s = start.clamp(0, 23);
+        let e = end.clamp(s + 1, 24);
+        sh_ws.work_start.set(s);
+        sh_ws.work_end.set(e);
+        ui.set_work_start(s);
+        ui.set_work_end(e);
+        apply_calendar_view(&ui, &sh_ws);
+        save_calendar_settings(&ui, &sh_ws);
+    });
+    let ui_weak_vis = ui.as_weak();
+    let sh_vis = shared.clone();
+    ui.on_calendar_toggle_visibility(move |cal_id| {
+        if let Some(ui) = ui_weak_vis.upgrade() {
+            let id = cal_id as i64;
+            let cur = *sh_vis.calendar_visible.borrow().get(&id).unwrap_or(&true);
+            sh_vis.calendar_visible.borrow_mut().insert(id, !cur);
+            apply_reminder_visibility(&sh_vis, id, !cur);
+            apply_calendar_view(&ui, &sh_vis);
+            save_calendar_settings(&ui, &sh_vis);
+        }
+    });
+    // Notification-sound toggle (burger menu) — persisted immediately.
+    let ui_weak_snd = ui.as_weak();
+    let sh_snd = shared.clone();
+    ui.on_toggle_notify_sound(move || {
+        if let Some(ui) = ui_weak_snd.upgrade() {
+            ui.set_notify_sound_on(!ui.get_notify_sound_on());
+            save_calendar_settings(&ui, &sh_snd);
+        }
+    });
+}

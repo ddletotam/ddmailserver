@@ -469,3 +469,294 @@ pub(crate) fn nudge_sidebar_scroll(ui_weak: slint::Weak<MainWindow>, row_y: f32,
 pub(crate) fn model_index(sh: &Shared, idx: usize) -> usize {
     if sh.pending_compose.borrow().is_some() { idx + 1 } else { idx }
 }
+
+/// Conversation list callbacks: select, merge / unmerge, rename, keyboard
+/// navigation, delete and spam (with their confirmations).
+pub(crate) fn wire_sidebar(ui: &MainWindow, shared: &Rc<Shared>) {
+    let ui_weak2 = ui.as_weak();
+    let sh_sel = shared.clone();
+    ui.on_select(move |idx| {
+        let Some(ui) = ui_weak2.upgrade() else { return };
+        let model_idx = idx as usize;
+        // While in transient-compose mode the first row is the synthetic
+        // "new chat" — clicking it is a no-op (we're already there).
+        let pending = sh_sel.pending_compose.borrow().is_some();
+        if pending && model_idx == 0 {
+            return;
+        }
+        // Real-conversation rows: when a transient row is present we
+        // need to subtract one to map model index → displays index.
+        let real_idx = if pending { model_idx - 1 } else { model_idx };
+        // Picking any real conversation leaves transient-compose mode AND
+        // drops any staged explicit-reply target — both are tied to the
+        // previous context.
+        let was_pending = sh_sel.pending_compose.borrow_mut().take().is_some();
+        exit_reply_mode(&sh_sel, &ui);
+        apply_active_header(&ui, &sh_sel, real_idx);
+        if was_pending {
+            refresh_sidebar(&sh_sel, &ui);
+        }
+        // Highlight the real row at its post-refresh model index.
+        ui.set_selected(real_idx as i32);
+        // Re-grab the window-level key sink so Delete works right after a
+        // click (typing in the composer moves focus there as usual).
+        ui.invoke_grab_key_focus();
+        open_conversation(&ui, &sh_sel, real_idx);
+    });
+
+    // ── Объединение диалогов (правый клик по строке сайдбара) ──
+    // «Объединить с открытым диалогом»: кликнутая строка вливается в группу
+    // открытого; открытый остаётся первичным (его имя/аватар/identity).
+    let ui_weak_cm = ui.as_weak();
+    let sh_cm = shared.clone();
+    ui.on_conv_merge(move |model_idx| {
+        let Some(ui) = ui_weak_cm.upgrade() else { return };
+        if sh_cm.pending_compose.borrow().is_some() {
+            return; // transient compose: индексы сдвинуты, открытого диалога нет
+        }
+        let src_idx = model_idx as usize;
+        let dst_idx = sh_cm.current.get();
+        if src_idx == dst_idx {
+            return;
+        }
+        let resolved = {
+            let convs = sh_cm.convs.borrow();
+            match (convs.get(dst_idx), convs.get(src_idx)) {
+                (Some(dst), Some(src)) => Some((
+                    conv_merge_key(&sh_cm.key, dst),
+                    conv_merge_key(&sh_cm.key, src),
+                    dst.id.clone(),
+                )),
+                _ => None,
+            }
+        };
+        let Some((dst_key, src_key, dst_id)) = resolved else { return };
+        // Refs сообщений склейки ходят в движок под ОДНИМ account_key —
+        // диалоги разных подключений склеить нельзя.
+        if dst_key.account != src_key.account {
+            toast_window::show(
+                2, // amber
+                0,
+                "Объединение недоступно",
+                "Диалоги из разных подключений объединить нельзя.",
+                false,
+                600,
+                || {},
+                || {},
+                || {},
+            );
+            return;
+        }
+        {
+            let mut m = sh_cm.merges.borrow_mut();
+            let target = m.members_of(&dst_key);
+            let source = m.members_of(&src_key);
+            m.merge(target, source);
+            merges::save(&m);
+        }
+        println!("merge: {} + {} (primary {})", dst_key.id, src_key.id, dst_id);
+        // Открытый диалог получил новые сообщения — перечитываем его.
+        rebuild_merged_view(&ui, &sh_cm, Some(dst_id), true);
+    });
+
+    // «Разъединить диалоги»: группа удаляется, члены возвращаются в сайдбар
+    // отдельными строками. Выделение остаётся на первичном (тот же id).
+    let ui_weak_um = ui.as_weak();
+    let sh_um = shared.clone();
+    ui.on_conv_unmerge(move |model_idx| {
+        let Some(ui) = ui_weak_um.upgrade() else { return };
+        if sh_um.pending_compose.borrow().is_some() {
+            return;
+        }
+        let idx = model_idx as usize;
+        let resolved = {
+            let convs = sh_um.convs.borrow();
+            match convs.get(idx) {
+                Some(c) if c.merged => Some((conv_merge_key(&sh_um.key, c), c.id.clone())),
+                _ => None,
+            }
+        };
+        let Some((key, id)) = resolved else { return };
+        {
+            let mut m = sh_um.merges.borrow_mut();
+            m.unmerge(&key);
+            merges::save(&m);
+        }
+        println!("unmerge: {}", key.id);
+        // Если распустили ОТКРЫТУЮ склейку — перечитать панель (в ней
+        // останется только первичный); чужую — не дёргать открытый диалог.
+        let was_open = idx == sh_um.current.get();
+        let keep_id = if was_open {
+            Some(id)
+        } else {
+            sh_um.convs.borrow().get(sh_um.current.get()).map(|c| c.id.clone())
+        };
+        rebuild_merged_view(&ui, &sh_um, keep_id, was_open);
+    });
+
+    // Переименование открытого диалога (двойной клик по имени в шапке).
+    // Пишется в merges.json рядом со склейками и меняет только имя в
+    // клиенте: письма, кэш и сервер его не видят. Пустое — снять имя.
+    let ui_weak_rn = ui.as_weak();
+    let sh_rn = shared.clone();
+    ui.on_rename_conversation(move |name| {
+        let Some(ui) = ui_weak_rn.upgrade() else { return };
+        if sh_rn.pending_compose.borrow().is_some() {
+            return; // нового письма ещё нет в списке — переименовывать нечего
+        }
+        let resolved = {
+            let convs = sh_rn.convs.borrow();
+            convs.get(sh_rn.current.get()).map(|c| (conv_merge_key(&sh_rn.key, c), c.id.clone()))
+        };
+        let Some((key, id)) = resolved else { return };
+        {
+            let mut m = sh_rn.merges.borrow_mut();
+            if m.name_of(&key).unwrap_or("") == name.trim() {
+                return; // ничего не поменялось — ни записи, ни плашки
+            }
+            m.rename(key.clone(), &name);
+            merges::save(&m);
+        }
+        println!("rename: {} -> {:?}", key.id, name.trim());
+        // Тела не меняются — панель не перечитываем, только сайдбар и шапку.
+        rebuild_merged_view(&ui, &sh_rn, Some(id), false);
+        flash_confirm(&ui, "✓ Переименовано");
+    });
+
+    // ↑/↓ over the conversation list: select + open the neighbour and keep
+    // its row visible. Pairs with Delete for sweeping unwanted dialogs.
+    let ui_weak_nav = ui.as_weak();
+    let sh_nav = shared.clone();
+    ui.on_nav_conversation(move |delta| {
+        let Some(ui) = ui_weak_nav.upgrade() else { return };
+        if sh_nav.pending_compose.borrow().is_some() {
+            return;
+        }
+        let len = sh_nav.convs.borrow().len() as i32;
+        if len == 0 {
+            return;
+        }
+        let cur = sh_nav.current.get() as i32;
+        let new = (cur + delta).clamp(0, len - 1);
+        if new == cur {
+            return;
+        }
+        exit_reply_mode(&sh_nav, &ui);
+        ui.set_selected(new);
+        apply_active_header(&ui, &sh_nav, new as usize);
+        open_conversation(&ui, &sh_nav, new as usize);
+        ui.set_sidebar_row_y(new as f32 * 64.0);
+        ui.set_sidebar_scroll_seq(ui.get_sidebar_scroll_seq() + 1);
+    });
+
+    // Delete key → confirm modal → delete the whole conversation (every
+    // message incl. the user's own replies from Sent). The server handler
+    // soft-deletes locally AND queues flag-sync deleted=true, so the worker
+    // pushes STORE \Deleted + UID EXPUNGE to the source IMAP server.
+    let ui_weak_delc = ui.as_weak();
+    let sh_delc = shared.clone();
+    ui.on_delete_conversation(move || {
+        let Some(ui) = ui_weak_delc.upgrade() else { return };
+        if sh_delc.pending_compose.borrow().is_some() {
+            return; // transient compose has no conversation to delete
+        }
+        let convs = sh_delc.convs.borrow();
+        let Some(c) = convs.get(sh_delc.current.get()) else { return };
+        sh_delc.confirm_mode.set(1);
+        ui.set_confirm_is_spam(false);
+        ui.set_confirm_delete_title("Удалить диалог?".into());
+        ui.set_confirm_delete_text(
+            format!(
+                "«{}» — сообщений: {}. Все письма диалога, включая ваши ответы, \
+                 будут удалены и на сервере.",
+                c.label,
+                c.messages.len()
+            )
+            .into(),
+        );
+        ui.set_confirm_delete_visible(true);
+    });
+
+    // «Спам» in the chat header: blacklist the counterpart's domain and
+    // purge every message from them (Tauri-era behaviour), confirmed
+    // through the same modal as conversation deletion.
+    let ui_weak_spam = ui.as_weak();
+    let sh_spam = shared.clone();
+    ui.on_spam_conversation(move || {
+        let Some(ui) = ui_weak_spam.upgrade() else { return };
+        if sh_spam.pending_compose.borrow().is_some() {
+            return;
+        }
+        let convs = sh_spam.convs.borrow();
+        let Some(c) = convs.get(sh_spam.current.get()) else { return };
+        // A conversation must have at least one counterpart to be spam-worthy,
+        // but we DON'T trust which one is the sender — for BCC-blasts the
+        // participant set mixes From and To. The server resolves the real
+        // sender from the message ids; here we only gate on non-emptiness.
+        if c.counterparts.iter().all(|cp| cp.addr.is_empty()) {
+            return;
+        }
+        sh_spam.confirm_mode.set(2);
+        ui.set_confirm_is_spam(true);
+        ui.set_confirm_delete_title("В спам?".into());
+        ui.set_confirm_delete_text(
+            "Удалить письма этого диалога и заблокировать отправителя. \
+             «Домен» останавливает спам с меняющихся адресов одного домена."
+                .into(),
+        );
+        ui.set_confirm_delete_visible(true);
+    });
+    let ui_weak_delk = ui.as_weak();
+    let sh_delk = shared.clone();
+    ui.on_delete_conversation_confirmed(move || {
+        let Some(ui) = ui_weak_delk.upgrade() else { return };
+        let cur = sh_delk.current.get();
+        sh_delk.confirm_mode.set(0);
+        let (conv_id, refs) = {
+            let convs = sh_delk.convs.borrow();
+            let Some(c) = convs.get(cur) else { return };
+            (c.id.clone(), c.messages.clone())
+        };
+        if let Some(etx) = sh_delk.engine_tx.borrow().as_ref() {
+            println!("delete conversation {conv_id} ({} messages)", refs.len());
+            let _ = etx.send(engine::EngineCmd::Delete {
+                messages: refs,
+                account_key: sh_delk.cur_account_key.borrow().clone(),
+            });
+        }
+        optimistic_remove_conversation(&ui, &sh_delk, cur, &conv_id);
+    });
+
+    // Spam: blacklist + purge. `scope` ("address"|"domain") comes from which
+    // button the user pressed. We send the conversation's message ids so the
+    // SERVER resolves the real sender (the client can't tell From from To in a
+    // grouped/BCC conversation); `fallback_addr` is only a hint for sources
+    // that resolve no ids. On success a «✓ …» plashka names what was blocked.
+    let ui_weak_spamc = ui.as_weak();
+    let sh_spamc = shared.clone();
+    ui.on_spam_confirmed(move |scope| {
+        let Some(ui) = ui_weak_spamc.upgrade() else { return };
+        let cur = sh_spamc.current.get();
+        sh_spamc.confirm_mode.set(0);
+        let (conv_id, refs, fallback_addr) = {
+            let convs = sh_spamc.convs.borrow();
+            let Some(c) = convs.get(cur) else { return };
+            (
+                c.id.clone(),
+                c.messages.clone(),
+                c.counterparts.first().map(|cp| cp.addr.to_lowercase()).unwrap_or_default(),
+            )
+        };
+        let ids: Vec<i64> = refs.iter().map(|m| m.uid as i64).collect();
+        if let Some(etx) = sh_spamc.engine_tx.borrow().as_ref() {
+            println!("spam purge scope={scope} ({} rows)", ids.len());
+            let _ = etx.send(engine::EngineCmd::BlacklistAndPurge {
+                scope: scope.to_string(),
+                fallback_addr,
+                message_ids: ids,
+                account_key: sh_spamc.cur_account_key.borrow().clone(),
+            });
+        }
+        optimistic_remove_conversation(&ui, &sh_spamc, cur, &conv_id);
+    });
+}

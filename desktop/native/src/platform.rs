@@ -421,3 +421,91 @@ pub(crate) fn pick_save_path(ui: &MainWindow, filename: &str) -> Option<std::pat
     eprintln!("save: no native file picker found (install kdialog or zenity)");
     None
 }
+
+/// Tray icon with its «Открыть»/«Выход» menu, the first sync of its unread
+/// dot, and the window icon once the native window exists.
+pub(crate) fn setup_tray_and_icon(ui: &MainWindow, shared: &Rc<Shared>) {
+    #[cfg(windows)]
+    {
+        let ui_open = ui.as_weak();
+        let tray = tray::setup(
+            move || {
+                println!("tray: open requested");
+                if let Some(ui) = ui_open.upgrade() {
+                    raise_window(&ui);
+                }
+                // Точку НЕ гасим: она отражает факт непрочитанного и гаснет
+                // сама, когда всё прочитано (tray_sync_dot по дельте).
+            },
+            || slint::quit_event_loop().unwrap(),
+        );
+        TRAY.with(|t| *t.borrow_mut() = tray);
+    }
+
+    // System tray (Linux / ksni): same behaviour, but callbacks arrive on the
+    // ksni service thread, so each one marshals its UI work back to the Slint
+    // event loop via invoke_from_event_loop.
+    #[cfg(target_os = "linux")]
+    {
+        let ui_open = ui.as_weak();
+        let tray = tray::setup(
+            move || {
+                println!("tray: open requested");
+                let ui_open = ui_open.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_open.upgrade() {
+                        raise_window(&ui);
+                    }
+                    // Точку НЕ гасим: она отражает факт непрочитанного и
+                    // гаснет сама, когда всё прочитано (tray_sync_dot).
+                });
+            },
+            || {
+                let _ = slint::invoke_from_event_loop(|| {
+                    let _ = slint::quit_event_loop();
+                });
+            },
+        );
+        TRAY.with(|t| *t.borrow_mut() = tray);
+    }
+
+    // Первичная синхронизация точки: диалоги из кэша уже загружены, и письма,
+    // пришедшие пока клиент был выключен, должны зажечь точку сразу — не
+    // дожидаясь первой дельты движка (та её всё равно пере-подтвердит).
+    #[cfg(any(windows, target_os = "linux"))]
+    tray_sync_dot(&shared);
+
+    // Set the window icon once the native window is realized (the HWND / X11
+    // window doesn't exist yet here). Slint/winit doesn't pick up the exe's
+    // embedded .ico (Windows) and sets no _NET_WM_ICON (X11), so the title
+    // bar + taskbar would otherwise show the toolkit's default glyph. The
+    // native handle appears some time after the loop starts (later on X11
+    // than on Windows), so retry on a short ticker until it sticks.
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        let icon_weak = ui.as_weak();
+        let icon_timer = slint::Timer::default();
+        let mut tries = 0u32;
+        icon_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(100),
+            move || {
+                tries += 1;
+                let done = icon_weak.upgrade().map(|ui| set_window_icon(&ui)).unwrap_or(true);
+                if done || tries >= 50 {
+                    // Defer the stop+drop out of the timer's own dispatch —
+                    // never drop a Timer from inside its own callback (same
+                    // rule as the toast windows).
+                    let _ = slint::invoke_from_event_loop(|| {
+                        ICON_TIMER.with(|t| {
+                            if let Some(t) = t.borrow_mut().take() {
+                                t.stop();
+                            }
+                        });
+                    });
+                }
+            },
+        );
+        ICON_TIMER.with(|t| *t.borrow_mut() = Some(icon_timer));
+    }
+}

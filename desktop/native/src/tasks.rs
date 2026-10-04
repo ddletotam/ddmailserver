@@ -113,3 +113,27 @@ pub(crate) fn task_rows(list: &[ddmail_core::types::DesktopTask]) -> Vec<TaskRow
         })
         .collect()
 }
+
+/// Task list callbacks: refresh and toggling a task done.
+pub(crate) fn wire_tasks(ui: &MainWindow, shared: &Rc<Shared>) {
+    // Tasks: manual refresh, and the "show completed" toggle (which changes
+    // what the server is asked for, so it has to re-fetch rather than filter
+    // locally).
+    let ui_weak_tr = ui.as_weak();
+    let sh_tr = shared.clone();
+    ui.on_tasks_refresh(move || {
+        if let Some(ui) = ui_weak_tr.upgrade() {
+            fetch_tasks(&ui, &sh_tr);
+        }
+    });
+
+    // Tick a task off. The row is updated straight away and the server is told
+    // in the background: waiting for a CalDAV round-trip before the checkbox
+    // moves makes the list feel broken.
+    let ui_weak_tt = ui.as_weak();
+    let sh_tt = shared.clone();
+    ui.on_task_toggle(move |id| {
+        let Some(ui) = ui_weak_tt.upgrade() else { return };
+        toggle_task(&ui, &sh_tt, id as i64);
+    });
+}

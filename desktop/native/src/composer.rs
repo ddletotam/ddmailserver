@@ -838,3 +838,594 @@ pub(crate) fn schedule_post_send_refetch(attempt: usize) {
         }
     });
 }
+
+/// Composer attachments (file picker, remove) and the rich-text field
+/// (resize, keys, pointer).
+pub(crate) fn wire_composer_input(ui: &MainWindow, shared: &Rc<Shared>) {
+    // ── Composer attachments ──
+    //
+    // The attach button opens the native file picker (blocking — the OS
+    // dialog is modal, so the event loop has nothing to do meanwhile) and
+    // appends the chosen paths to the staged set. `on_send` snapshots that
+    // set into each outgoing message and clears it afterwards.
+    let ui_weak_att = ui.as_weak();
+    let sh_att = shared.clone();
+    ui.on_attach_files(move || {
+        let Some(u) = ui_weak_att.upgrade() else { return };
+        let paths = pick_attachment_files(&u);
+        if paths.is_empty() {
+            return;
+        }
+        sh_att.compose_attachments.borrow_mut().extend(paths);
+        refresh_attachment_chips(&u, &sh_att);
+    });
+    let ui_weak_rm = ui.as_weak();
+    let sh_rm = shared.clone();
+    ui.on_remove_attachment(move |idx| {
+        {
+            let mut atts = sh_rm.compose_attachments.borrow_mut();
+            let i = idx as usize;
+            if i < atts.len() {
+                atts.remove(i);
+            }
+        }
+        if let Some(u) = ui_weak_rm.upgrade() {
+            refresh_attachment_chips(&u, &sh_rm);
+        }
+    });
+
+    // ── Rich-text композер ──
+    //
+    // Slint отдаёт сюда ширину колонки, клавиши и мышь; обратно уезжают
+    // битмап и геометрия каретки (rich_refresh). Модель — sh.rich.
+    let ui_weak_rtw = ui.as_weak();
+    let sh_rtw = shared.clone();
+    ui.on_rt_resize(move |w| {
+        let Some(u) = ui_weak_rtw.upgrade() else { return };
+        // Ширина скачет на каждом кадре ресайза — перевёрстываем только на
+        // реальном изменении (сравнение в логических px с допуском ½ px).
+        if (sh_rtw.rich_width.get() - w).abs() < 0.5 {
+            return;
+        }
+        sh_rtw.rich_width.set(w);
+        rich_refresh(&u, &sh_rtw);
+    });
+    let ui_weak_rtk = ui.as_weak();
+    let sh_rtk = shared.clone();
+    ui.on_rt_key(move |text, ctrl, shift, alt| {
+        let Some(u) = ui_weak_rtk.upgrade() else { return false };
+        rich_key(&u, &sh_rtk, text.as_str(), ctrl, shift, alt)
+    });
+    let ui_weak_rtp = ui.as_weak();
+    let sh_rtp = shared.clone();
+    ui.on_rt_pointer(move |x, y, kind| {
+        let Some(u) = ui_weak_rtp.upgrade() else { return };
+        let pos = {
+            let slot = sh_rtp.rich_renderer.borrow();
+            let Some(r) = slot.as_ref() else { return };
+            r.pos_at(x, y)
+        };
+        match kind {
+            // Нажатие ставит каретку и начинает протяжку; Shift+клик тянет
+            // выделение от прежнего якоря (как в любом текстовом поле).
+            0 => {
+                sh_rtp.rich_dragging.set(true);
+                sh_rtp.rich.borrow_mut().set_caret(pos, false);
+            }
+            1 => {
+                if !sh_rtp.rich_dragging.get() {
+                    return;
+                }
+                sh_rtp.rich.borrow_mut().set_caret(pos, true);
+            }
+            2 => sh_rtp.rich_dragging.set(false),
+            _ => sh_rtp.rich.borrow_mut().select_word_at(pos),
+        }
+        rich_refresh(&u, &sh_rtp);
+    });
+}
+
+/// Sending: the «wrong sender address» dialog and `on_send` itself
+/// (contract §1, §2).
+pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
+    // Composer → three branches depending on staged intent:
+    //   1. Transient compose target (search dropdown).
+    //   2. Explicit reply to a specific bubble (quote ribbon).
+    //   3. Implicit reply to the currently open conversation.
+    // ---- «Отвечаешь не с того адреса»: решения по задержанной отправке ----
+    {
+        let weak = ui.as_weak();
+        let sh = shared.clone();
+        ui.on_from_mismatch_pick(move |index| {
+            let Some(ui) = weak.upgrade() else { return };
+            let email = sh.composer_identities.borrow().get(index.max(0) as usize).cloned();
+            if let Some(email) = email {
+                // Закрепляем как ручной выбор — иначе дельта-refetch собьёт
+                // индекс пикера обратно, и уйдёт снова не то.
+                *sh.picked_identity.borrow_mut() = Some(email.clone());
+                aim_composer_identity(&ui, &sh, &email);
+                // Письмо уедет в диалог своего набора адресов. Переходим туда
+                // только если попросили галочкой и адрес действительно другой.
+                let switching = ui.get_from_mismatch_switch()
+                    && ui.get_from_mismatch_index() != ui.get_from_mismatch_expected_index();
+                *sh.pending_switch.borrow_mut() =
+                    if switching { target_conversation_id(&ui, &sh, &email) } else { None };
+            }
+            let text = sh.held_send.borrow().clone().unwrap_or_default();
+            ui.invoke_send(text.into());
+        });
+    }
+    {
+        let sh = shared.clone();
+        ui.on_from_mismatch_cancel(move || {
+            // Возвращать текст не нужно: композер чистится только на
+            // успешной ветке отправки (clear_overrides), документ на месте.
+            // Снимаем и задержанную отправку, и ожидание перехода.
+            sh.held_send.borrow_mut().take();
+            sh.pending_switch.borrow_mut().take();
+        });
+    }
+
+    let ui_weak_send = ui.as_weak();
+    let sh_send = shared.clone();
+    ui.on_send(move |text| {
+        let text = text.to_string();
+        // Тело письма — rich-документ композера; `text` (plain-зеркало) идёт
+        // в text/plain-часть и в заглушку optimistic send. Пустой текст ещё
+        // не значит «нечего отправлять»: письмо из одной картинки — валидное.
+        let (rich_html, rich_images) = {
+            let ed = sh_send.rich.borrow();
+            // Вложения спрашиваем отдельно: `ed.is_empty()` знает только
+            // документ редактора — абзацы и inline-картинки, — а прикреплённые
+            // файлы лежат в `compose_attachments`. Без этой проверки письмо из
+            // одного вложения без единого слова не отправлялось, и кнопка при
+            // этом молчала: обработчик выходил здесь же, до всякой обратной
+            // связи.
+            let has_attachments = !sh_send.compose_attachments.borrow().is_empty();
+            if ed.is_empty() && text.trim().is_empty() && !has_attachments {
+                eprintln!("send: нечего отправлять — ни текста, ни картинок, ни вложений");
+                return;
+            }
+            (ed.html(), ed.images())
+        };
+        let inline_atts: Vec<ddmail_core::types::OutgoingAttachment> = rich_images
+            .iter()
+            .map(|img| ddmail_core::types::OutgoingAttachment {
+                filename: format!("{}.png", img.cid.split('@').next().unwrap_or("image")),
+                mime_type: img.mime.clone(),
+                content: img.bytes.as_ref().clone(),
+                content_id: Some(img.cid.clone()),
+            })
+            .collect();
+        // Отправка, возвращённая диалогом «не тот адрес», проверку уже прошла.
+        let resumed = sh_send.held_send.borrow_mut().take().is_some();
+        if !resumed {
+            if let Some(ui) = ui_weak_send.upgrade() {
+                if let Some((expected, current)) = from_mismatch(&ui, &sh_send) {
+                    *sh_send.held_send.borrow_mut() = Some(text.clone());
+                    // Список для дропдауна + предвыбор на адресе диалога:
+                    // правильный вариант уже выбран, подтвердить — один клик.
+                    let addresses = sh_send.composer_identities.borrow().clone();
+                    let picked = addresses.iter().position(|e| *e == expected).unwrap_or(0);
+                    ui.set_from_mismatch_options(ModelRc::new(VecModel::from(
+                        addresses.iter().map(|e| slint::SharedString::from(e.as_str())).collect::<Vec<_>>(),
+                    )));
+                    ui.set_from_mismatch_index(picked as i32);
+                    ui.set_from_mismatch_expected_index(picked as i32);
+                    // Галочка каждый раз с нуля: переход — осознанный выбор,
+                    // а не залипшая настройка.
+                    ui.set_from_mismatch_switch(false);
+                    ui.set_from_mismatch_expected(expected.into());
+                    ui.set_from_mismatch_current(current.into());
+                    ui.set_from_mismatch_visible(true);
+                    return;
+                }
+            }
+        }
+        // Graceful guard: if this thread belongs to a connection that was
+        // since removed, the send has nowhere to go — say so plainly instead
+        // of misrouting to another account.
+        {
+            let ak = sh_send.cur_account_key.borrow().clone();
+            let alive = ak.is_empty() || sh_send.account_keys.borrow().iter().any(|k| *k == ak);
+            if !alive {
+                toast_window::show(
+                    2,
+                    0,
+                    "Отправка недоступна",
+                    "Это письмо из подключения, которое было удалено. Добавьте подключение заново, чтобы отправлять с этого адреса.",
+                    false,
+                    600,
+                    || {},
+                    || {},
+                    || {},
+                );
+                return;
+            }
+        }
+        // Read chevron-panel overrides up front. Non-empty subject
+        // override wins over the per-branch auto-derivation; cc is
+        // parsed once and passed through to the engine in every
+        // branch.
+        let ui_now = ui_weak_send.upgrade();
+        let subject_override = ui_now
+            .as_ref()
+            .map(|u| u.get_composer_subject().to_string().trim().to_string())
+            .unwrap_or_default();
+        let cc: Vec<String> = ui_now
+            .as_ref()
+            .map(|u| u.get_composer_cc().to_string())
+            .unwrap_or_default()
+            .split(|c: char| c == ',' || c == ';')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        // Explicit «Кому» override — same contract as the subject override:
+        // a filled field is the user's explicit order and beats EVERY
+        // auto-derivation, reply-all included. Ignoring it while showing an
+        // editable field once sent a reply to 18 people instead of one.
+        let to_override: Vec<String> = ui_now
+            .as_ref()
+            .map(|u| u.get_composer_to().to_string())
+            .unwrap_or_default()
+            .split(|c: char| c == ',' || c == ';')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        // Sending identity: закреплённый ручной выбор (picked_identity) имеет
+        // приоритет над индексом пикера — индекс могла сбить дельта-refetch
+        // между выбором и отправкой (баг «выбрал dd, ушло info»). Без явного
+        // выбора — резолвим по индексу через Shared-список (Slint-модель
+        // только для отрисовки). None до синка identities → движок подставит
+        // адрес аккаунта.
+        let from_identity: Option<String> = sh_send
+            .picked_identity
+            .borrow()
+            .clone()
+            .or_else(|| {
+                ui_now.as_ref().and_then(|u| {
+                    let idx = u.get_composer_identity_index();
+                    sh_send
+                        .composer_identities
+                        .borrow()
+                        .get(idx.max(0) as usize)
+                        .cloned()
+                })
+            });
+        // Staged attachment paths for this send, snapshotted up front so the
+        // per-branch Send commands all carry the same list.
+        let attachments: Vec<String> = sh_send
+            .compose_attachments
+            .borrow()
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        // After a successful staging the override fields + attachments reset
+        // so the next message starts blank again. Keeps the chevron panel
+        // from silently inheriting last message's headers.
+        let clear_overrides = || {
+            sh_send.compose_attachments.borrow_mut().clear();
+            if let Some(u) = ui_weak_send.upgrade() {
+                u.set_composer_subject("".into());
+                u.set_composer_cc("".into());
+                u.set_composer_to("".into());
+                // Тело чистим здесь, а не в Slint при клике: до этой точки
+                // ветка могла отказаться отправлять (нет адресата, мёртвое
+                // подключение) — набранное тогда обязано остаться на месте.
+                rich_clear(&u, &sh_send);
+                refresh_attachment_chips(&u, &sh_send);
+            }
+        };
+
+        // Branch 0: forward — explicit recipients from the «Кому» field;
+        // the typed text is the covering note, the original's text goes
+        // below it after a separator, attachments re-attach engine-side.
+        // Клон берётся ОТДЕЛЬНЫМ стейтментом, а не в скрутинии `if let`:
+        // временное значение из скрутинии живёт до конца блока, поэтому `Ref`
+        // пережил бы `exit_reply_mode` в конце ветки, а тот пишет в эту же
+        // ячейку. Именно так клиент и умирал сразу после отправки —
+        // «RefCell already borrowed», main.rs:1063. То же и в двух ветках ниже.
+        let forwarded = sh_send.pending_forward.borrow().clone();
+        if let Some(orig) = forwarded {
+            let to = to_override.clone();
+            if to.is_empty() {
+                eprintln!("forward: адресат не указан — заполните «Кому»");
+                if let Some(u) = ui_now.as_ref() {
+                    u.set_composer_expanded(true);
+                    u.set_focus_to_seq(u.get_focus_to_seq() + 1);
+                }
+                return;
+            }
+            // enter_forward_mode pre-filled composer-subject with «Fwd: …»,
+            // so the override carries it; fall back defensively anyway.
+            let subject = if !subject_override.is_empty() {
+                subject_override.clone()
+            } else {
+                format!("Fwd: {}", orig.subject)
+            };
+            let from_line = if orig.from.is_empty() {
+                orig.from_addr.clone()
+            } else {
+                orig.from.clone()
+            };
+            let orig_text = orig.text.clone().unwrap_or_default();
+            let body_text = format!(
+                "{text}\n\n---------- Пересланное сообщение ----------\n\
+                 От: {from_line}\nДата: {}\nТема: {}\n\n{orig_text}",
+                orig.date, orig.subject
+            );
+            // HTML-версия: набранная сопроводиловка (со стилями) + тот же
+            // блок пересылки, экранированный как обычный текст.
+            let body_html = format!(
+                "{rich_html}<br><div>---------- Пересланное сообщение ----------</div>\
+                 <div>От: {}</div><div>Дата: {}</div><div>Тема: {}</div><br><div>{}</div>",
+                html_escape_plain(&from_line),
+                html_escape_plain(&orig.date),
+                html_escape_plain(&orig.subject),
+                html_escape_plain(&orig_text).replace('\n', "<br>")
+            );
+            if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
+                println!("forwarding {}/{} to {to:?}", orig.folder, orig.uid);
+                let _ = etx.send(engine::EngineCmd::Send {
+                    to,
+                    cc: cc.clone(),
+                    subject,
+                    body: body_text,
+                    html: body_html,
+                    inline: inline_atts.clone(),
+                    in_reply_to: None,
+                    references: None,
+                    from: from_identity.clone(),
+                    attachments: attachments.clone(),
+                    forward_attachments: Some(MessageRef {
+                        folder: orig.folder.clone(),
+                        uid: orig.uid,
+                        message_id: orig.message_id.clone(),
+                        seen: true,
+                    }),
+                    account_key: sh_send.cur_account_key.borrow().clone(),
+                });
+                clear_overrides();
+                if let Some(u) = ui_now.as_ref() {
+                    exit_reply_mode(&sh_send, u);
+                    u.set_composer_expanded(false);
+                }
+            } else {
+                eprintln!("send: no live engine (set DDMAIL_* env)");
+            }
+            return;
+        }
+        // Branch 1: transient compose target set via the search dropdown.
+        let compose_target = sh_send.pending_compose.borrow().clone();
+        if let Some(target) = compose_target {
+            let subject = if !subject_override.is_empty() {
+                subject_override.clone()
+            } else {
+                "Новое сообщение".to_string()
+            };
+            if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
+                println!("sending new message to {target}");
+                let to = if to_override.is_empty() { vec![target] } else { to_override.clone() };
+                let hdr = StubHeaders { subject: subject.clone(), to: to.clone(), cc: cc.clone() };
+                let _ = etx.send(engine::EngineCmd::Send {
+                    to,
+                    cc: cc.clone(),
+                    subject,
+                    body: text.clone(),
+                    html: rich_html.clone(),
+                    inline: inline_atts.clone(),
+                    in_reply_to: None,
+                    references: None,
+                    from: from_identity.clone(),
+                    attachments: attachments.clone(),
+                    forward_attachments: None,
+                    account_key: sh_send.cur_account_key.borrow().clone(),
+                });
+                clear_overrides();
+                // Optimistic bubble in the (empty) compose pane; no
+                // conversation exists yet, so the stub carries no conv id.
+                append_send_stub(
+                    &sh_send,
+                    &text,
+                    Some(stub_html(&rich_html, &rich_images)),
+                    stub_attachments(&attachments),
+                    &from_identity.clone().unwrap_or_else(|| sh_send.key.clone()),
+                    hdr,
+                    "",
+                );
+            } else {
+                eprintln!("send: no live engine (set DDMAIL_* env)");
+            }
+            return;
+        }
+        // Branch 2: explicit reply via quote ribbon.
+        let quoted_reply = sh_send.pending_reply.borrow().clone();
+        if let Some(reply_body) = quoted_reply {
+            // Reply-all in groups: the current convs entry tells us
+            // group-ness; in 1:1 conversations the counterpart is the
+            // sender anyway. The recipients are the source's from + to
+            // + cc minus our identities (mirrored from svelte's
+            // ChatView.svelte:478-501).
+            let our_lc: std::collections::HashSet<String> =
+                std::iter::once(sh_send.key.to_lowercase()).collect();
+            let extract_addr = |raw: &str| -> String {
+                let lt = raw.find('<');
+                let gt = lt.and_then(|i| raw[i..].find('>').map(|j| i + j));
+                if let (Some(i), Some(j)) = (lt, gt) {
+                    raw[i + 1..j].trim().to_lowercase()
+                } else {
+                    raw.trim().to_lowercase()
+                }
+            };
+            let mut to: Vec<String> = Vec::new();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut push = |a: String| {
+                if a.is_empty() || our_lc.contains(&a) || !seen.insert(a.clone()) {
+                    return;
+                }
+                to.push(a);
+            };
+            push(reply_body.from_addr.to_lowercase());
+            let is_group = sh_send
+                .convs
+                .borrow()
+                .get(sh_send.current.get())
+                .map(|c| c.is_group)
+                .unwrap_or(false);
+            if is_group {
+                for a in reply_body.to.iter().chain(reply_body.cc.iter()) {
+                    push(extract_addr(a));
+                }
+            }
+            // Explicit «Кому» beats the reply-all derivation entirely.
+            let to = if to_override.is_empty() { to } else { to_override.clone() };
+            if to.is_empty() {
+                eprintln!("reply: no recipient resolved");
+                return;
+            }
+            let subject = if !subject_override.is_empty() {
+                subject_override.clone()
+            } else if reply_body.subject.to_lowercase().starts_with("re:") {
+                reply_body.subject.clone()
+            } else {
+                format!("Re: {}", reply_body.subject)
+            };
+            let in_reply_to = (!reply_body.message_id.is_empty())
+                .then(|| reply_body.message_id.clone());
+            let mut refs = reply_body.references.clone();
+            if !reply_body.message_id.is_empty() {
+                refs.push(reply_body.message_id.clone());
+            }
+            let references = (!refs.is_empty()).then(|| refs.join(" "));
+            if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
+                println!("sending explicit reply to {to:?}");
+                let hdr = StubHeaders { subject: subject.clone(), to: to.clone(), cc: cc.clone() };
+                let _ = etx.send(engine::EngineCmd::Send {
+                    to, cc: cc.clone(), subject, body: text.clone(),
+                    html: rich_html.clone(), inline: inline_atts.clone(),
+                    in_reply_to, references,
+                    from: from_identity.clone(),
+                    attachments: attachments.clone(),
+                    forward_attachments: None,
+                    account_key: sh_send.cur_account_key.borrow().clone(),
+                });
+                clear_overrides();
+                let conv_id = sh_send
+                    .convs
+                    .borrow()
+                    .get(sh_send.current.get())
+                    .map(|c| c.id.clone())
+                    .unwrap_or_default();
+                append_send_stub(
+                    &sh_send,
+                    &text,
+                    Some(stub_html(&rich_html, &rich_images)),
+                    stub_attachments(&attachments),
+                    &from_identity.clone().unwrap_or_else(|| sh_send.key.clone()),
+                    hdr,
+                    &conv_id,
+                );
+            } else {
+                eprintln!("send: no live engine (set DDMAIL_* env)");
+            }
+            // Quote ribbon goes away once the message is staged for send.
+            if let Some(ui) = ui_weak_send.upgrade() {
+                exit_reply_mode(&sh_send, &ui);
+            }
+            return;
+        }
+        // Branch 3: implicit reply within the currently selected conversation.
+        let convs = sh_send.convs.borrow();
+        let Some(c) = convs.get(sh_send.current.get()) else { return };
+        let to: Vec<String> = if !to_override.is_empty() {
+            // Explicit «Кому» beats the conversation's counterparts.
+            to_override.clone()
+        } else {
+            c.counterparts
+                .iter()
+                .map(|cp| cp.addr.clone())
+                .filter(|a| !a.is_empty())
+                .collect()
+        };
+        if to.is_empty() {
+            eprintln!("send: no recipient for this conversation");
+            return;
+        }
+        // Subject mirrors the *last incoming* message per the spec — that's
+        // the one the user is replying to, even if our own outgoing came
+        // after it. Bodies of the open conversation are already in memory;
+        // fall back to conversation last_subject when there are none.
+        let cached = sh_send.current_bodies.borrow();
+        let last_incoming = cached.iter().rev().find(|b| !b.is_outgoing);
+        let base_subject = last_incoming
+            .map(|b| b.subject.clone())
+            .unwrap_or_else(|| c.last_subject.clone());
+        let subject = if !subject_override.is_empty() {
+            subject_override.clone()
+        } else if base_subject.to_lowercase().starts_with("re:") {
+            base_subject
+        } else {
+            format!("Re: {base_subject}")
+        };
+        // Threading headers from the same last-incoming we used for the subject.
+        let (in_reply_to, references) = last_incoming
+            .or_else(|| cached.last())
+            .map(|b| {
+                let irt = (!b.message_id.is_empty()).then(|| b.message_id.clone());
+                let mut refs = b.references.clone();
+                if !b.message_id.is_empty() {
+                    refs.push(b.message_id.clone());
+                }
+                let refs = (!refs.is_empty()).then(|| refs.join(" "));
+                (irt, refs)
+            })
+            .unwrap_or((None, None));
+        // Release the convs/current_bodies borrows before the stub append —
+        // it re-borrows current_bodies mutably.
+        let conv_id = c.id.clone();
+        drop(cached);
+        drop(convs);
+        if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
+            println!("sending reply to {to:?}");
+            // Described before the list is handed to the engine — the stub
+            // shows the same chips as the message going out.
+            let stub_atts = stub_attachments(&attachments);
+            let hdr = StubHeaders { subject: subject.clone(), to: to.clone(), cc: cc.clone() };
+            let _ = etx.send(engine::EngineCmd::Send {
+                to, cc, subject, body: text.clone(),
+                html: rich_html.clone(), inline: inline_atts.clone(),
+                in_reply_to, references,
+                from: from_identity.clone(),
+                attachments,
+                forward_attachments: None,
+                account_key: sh_send.cur_account_key.borrow().clone(),
+            });
+            clear_overrides();
+            append_send_stub(
+                &sh_send,
+                &text,
+                Some(stub_html(&rich_html, &rich_images)),
+                stub_atts,
+                &from_identity.clone().unwrap_or_else(|| sh_send.key.clone()),
+                hdr,
+                &conv_id,
+            );
+        } else {
+            eprintln!("send: no live engine (set DDMAIL_* env)");
+        }
+    });
+}
+
+/// Explicit sender choice in the composer's identity dropdown.
+pub(crate) fn wire_identity_pick(ui: &MainWindow, shared: &Rc<Shared>) {
+    // Явный выбор отправителя из дропдауна — закрепляем email, чтобы он
+    // пережил дельта-refresh и авто-наведение (см. picked_identity).
+    let sh_ip = shared.clone();
+    ui.on_identity_picked(move |ii| {
+        let email = sh_ip.composer_identities.borrow().get(ii.max(0) as usize).cloned();
+        if let Some(email) = email {
+            println!("identity picked: {email}");
+            *sh_ip.picked_identity.borrow_mut() = Some(email);
+        }
+    });
+}

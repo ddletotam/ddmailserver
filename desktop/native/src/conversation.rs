@@ -338,3 +338,364 @@ pub(crate) fn nudge_chat_scroll(ui_weak: slint::Weak<MainWindow>, target: f32, d
         ui.set_chat_scroll_seq(ui.get_chat_scroll_seq() + 1);
     });
 }
+
+/// Switching between mail, calendar, address book and tasks — with the
+/// mail panel's scroll position saved and restored around it (contract §4).
+pub(crate) fn wire_view_switch(ui: &MainWindow, shared: &Rc<Shared>) {
+    // ── Calendar callbacks ──
+    //
+    // Switching into the calendar view triggers the initial fetch of
+    // both calendars + this-week events. Navigation buttons (prev /
+    // today / next) and the workdays/non-work-hours toggles all push
+    // the week-start forward/backward and re-fetch.
+    let ui_weak_view = ui.as_weak();
+    let sh_view = shared.clone();
+    ui.on_view_changed(move |mode| {
+        if let Some(ui) = ui_weak_view.upgrade() {
+            if mode == 0 {
+                // Возврат в почту. Панель почты условная, поэтому ListView
+                // здесь СВЕЖИЙ и стоит в начале — вернуть скролл туда, где
+                // его оставили, обязаны мы.
+                //
+                // Снимок ОДНОРАЗОВЫЙ: «Почта» при уже открытой почте зовёт
+                // этот же обработчик, но панель не пересоздаётся, и
+                // восстановление дёрнуло бы вид на старую позицию без
+                // причины. Нечего восстанавливать → не трогаем вообще: на
+                // первом входе анкор ставит сам open_conversation.
+                //
+                // Флаг ставим напрямую, а не бампом chat-scroll-seq: мост
+                // (`changed x`) живёт внутри той же условной панели, и при её
+                // пересоздании новое значение seq — начальное, а не
+                // изменение, так что `changed` не сработает. Применит скролл
+                // сам ListView на первом реальном layout (`viewport-height` /
+                // `height`), как это уже сделано для сетки календаря.
+                // Пока нас не было, в открытый диалог пришло письмо —
+                // возвращать позицию, на которой ушли, значит спрятать его
+                // под сгибом (а точнее — не показать вовсе: панели не
+                // существовало, и в переписку письмо не дорисовывалось).
+                // Открываем диалог заново: анкор встанет на первое
+                // непрочитанное, то есть на него.
+                let saved = sh_view.chat_vp_y.replace(-1.0);
+                if sh_view.missed_mail.replace(false) {
+                    let idx = sh_view.current.get();
+                    apply_active_header(&ui, &sh_view, idx);
+                    open_conversation(&ui, &sh_view, idx);
+                } else if saved >= 0.0 {
+                    ui.set_chat_scroll_y(saved);
+                    ui.set_chat_scroll_pending(true);
+                    // Одного флага мало: при создании панели с уже готовой
+                    // геометрией пропадают ОБА триггера — bump seq был до
+                    // появления моста, а первая раскладка не «изменение»
+                    // свойства, так что ни один `changed` не срабатывает и
+                    // переписка остаётся в начале. Тот же приём, что у сетки
+                    // календаря (`scroll_calendar_to_hour`): доложить
+                    // bump'ом после того, как панель уже существует.
+                    nudge_chat_scroll(ui.as_weak(), saved, 120);
+                    // Вторая попытка — на случай, когда к 120 мс раскладка
+                    // ещё не настоящая (длинная переписка, рендер догоняет).
+                    // Обе проверяют, доехал ли вид, и молчат, если да.
+                    nudge_chat_scroll(ui.as_weak(), saved, 400);
+                }
+            } else {
+                // Уходим из почты — снять позицию ДО того, как панель
+                // уничтожится. chat-vp-y отрицательный (offset вверх).
+                sh_view.chat_vp_y.set((-ui.get_chat_vp_y()).max(0.0));
+            }
+            if mode == 1 {
+                // Land the viewport on the working day, not on 00:00 —
+                // consumed by apply_calendar_view once the layout is real.
+                sh_view.pending_cal_scroll.set(Some(sh_view.work_start.get() as f32));
+                apply_calendar_view(&ui, &sh_view);
+                if let Some(etx) = sh_view.engine_tx.borrow().as_ref() {
+                    let _ = etx.send(engine::EngineCmd::FetchCalendars);
+                }
+                refetch_calendar_events(&ui, &sh_view);
+            } else if mode == 2 {
+                // Enter the address book: load the full book (empty query).
+                ui.set_contacts_query("".into());
+                fetch_contacts(&sh_view, "");
+            } else if mode == 3 {
+                fetch_tasks(&ui, &sh_view);
+            }
+        }
+    });
+}
+
+/// The bubble context menu: reply / forward / source / headers / text-HTML
+/// view / media permissions, and cancelling a staged reply.
+pub(crate) fn wire_message_actions(ui: &MainWindow, shared: &Rc<Shared>) {
+    // Context-menu actions on a message row.
+    let ui_weak_act = ui.as_weak();
+    let sh_act = shared.clone();
+    ui.on_msg_action(move |row, action| {
+        let row = row as usize;
+        let action = action.to_string();
+        let msg = sh_act.current_msgs.borrow().get(row).cloned();
+        let Some(msg) = msg else { return };
+        // Toggle per-sender media/scripts allowance. Cache-aware: bumps
+        // policy_gen so the body_cache misses for entries rendered
+        // under the old policy, and re-fires SetConversation so the
+        // bubbles repaint immediately.
+        // «Медиа…» menu: every item toggles one policy switch, persists it
+        // immediately, and repaints (the policy generation is part of the
+        // texture cache key, so the re-render is guaranteed to miss).
+        if action.starts_with("media-") {
+            let body_opt = sh_act.current_bodies.borrow().get(row).cloned();
+            let Some(b) = body_opt else { return };
+            let sender = b.from_addr.clone();
+            let (media_host, script_host) =
+                sanitize::first_external_hosts(b.html.as_deref().unwrap_or(""));
+            {
+                let mut p = sh_act.policy.borrow_mut();
+                match action.as_str() {
+                    "media-allow-all" => p.allow_all = !p.allow_all,
+                    "media-scripts-all" => p.allow_all_scripts = !p.allow_all_scripts,
+                    "media-scripts-sender" => {
+                        p.toggle_scripts(&sender);
+                    }
+                    "media-scripts-host" => {
+                        if script_host.is_empty() {
+                            return;
+                        }
+                        p.toggle_script_host(&script_host);
+                    }
+                    "media-images-all" => p.allow_all_media = !p.allow_all_media,
+                    "media-images-sender" => {
+                        p.toggle_media(&sender);
+                    }
+                    "media-images-host" => {
+                        if media_host.is_empty() {
+                            return;
+                        }
+                        p.toggle_media_host(&media_host);
+                    }
+                    other => {
+                        println!("media action {other} — not wired");
+                        return;
+                    }
+                }
+                println!("[policy] {action} (sender={sender}, img={media_host}, js={script_host})");
+                // Bump the persisted generation BEFORE saving: the texture
+                // cache key must change atomically with the policy.
+                p.generation += 1;
+                let gen_now = p.generation;
+                policy::save(&p);
+                sh_act.policy_gen.set(gen_now);
+            }
+            if let Some(ui) = ui_weak_act.upgrade() {
+                sync_media_globals(&ui, &sh_act.policy.borrow());
+            }
+            // Repaint the in-memory bodies under the new policy — no SQLite
+            // reload and no network refetch for a permission toggle.
+            let bodies = sh_act.current_bodies.borrow().clone();
+            send_render_job(&sh_act, bodies, None);
+            return;
+        }
+
+        // Reply doesn't need the live engine — we just stage the bubble's
+        // body into the quote ribbon and let the next Send pick up the
+        // subject + threading headers.
+        if action == "reply" {
+            let body_opt = sh_act.current_bodies.borrow().get(row).cloned();
+            let Some(body) = body_opt else {
+                eprintln!("reply: body not in memory for {msg:?}");
+                return;
+            };
+            if let Some(ui) = ui_weak_act.upgrade() {
+                enter_reply_mode(&sh_act, &ui, body);
+            }
+            return;
+        }
+        // Forward: prefill the composer with the quoted original + a "Fwd:"
+        // subject, then let the user pick a recipient via search (same path
+        // as any new message). Attachments aren't carried yet — noted inline.
+        if action == "forward" {
+            let body_opt = sh_act.current_bodies.borrow().get(row).cloned();
+            let Some(body) = body_opt else {
+                eprintln!("forward: body not in memory for {msg:?}");
+                return;
+            };
+            if let Some(ui) = ui_weak_act.upgrade() {
+                enter_forward_mode(&sh_act, &ui, body);
+            }
+            return;
+        }
+        // «Копировать текст» — the whole message's plain-text part.
+        if action == "copy" {
+            let body_opt = sh_act.current_bodies.borrow().get(row).cloned();
+            let Some(body) = body_opt else { return };
+            let text = body
+                .text
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| "(письмо без текстовой версии)".to_string());
+            println!("copy message text: {} chars", text.len());
+            clipboard_set(&text);
+            return;
+        }
+        // «Показать → Заголовки / Исходник сообщения» — fetch the raw
+        // RFC-822 source; the result handler opens the viewer with the
+        // requested slice.
+        if action == "show-headers" || action == "show-source" {
+            // Headers come out of the cache when they are there: the sync
+            // already had the whole message in hand and kept the wire header
+            // block, so asking the server again would be a login and a
+            // multi-megabyte download for thirty lines.
+            if action == "show-headers" {
+                let cached = sh_act
+                    .current_bodies
+                    .borrow()
+                    .get(row)
+                    .map(|b| b.raw_headers.clone())
+                    .filter(|h| !h.is_empty());
+                if let Some(raw) = cached {
+                    if let Some(ui) = ui_weak_act.upgrade() {
+                        show_headers(&ui, msg.uid, &raw);
+                    }
+                    return;
+                }
+            }
+            sh_act.pending_source_view.set(if action == "show-headers" { 1 } else { 2 });
+            if let Some(etx) = sh_act.engine_tx.borrow().as_ref() {
+                let _ = etx.send(engine::EngineCmd::FetchSource {
+                    folder: msg.folder.clone(),
+                    uid: msg.uid,
+                    account_key: sh_act.cur_account_key.borrow().clone(),
+                    headers_only: action == "show-headers",
+                });
+            }
+            return;
+        }
+        // «Исходник тела» — the HTML part is already in memory.
+        if action == "show-body-source" {
+            let body_opt = sh_act.current_bodies.borrow().get(row).cloned();
+            let Some(body) = body_opt else { return };
+            if let Some(ui) = ui_weak_act.upgrade() {
+                set_source_text(
+                    &ui,
+                    &sh_act,
+                    format!("Исходник тела — {}", body.subject),
+                    body.html.unwrap_or_default(),
+                );
+            }
+            return;
+        }
+        // Per-message text/HTML view toggle. The render-mode is part of the
+        // texture cache key, so this is a guaranteed re-render of that row.
+        if action == "view-text" || action == "view-html" {
+            let key = (msg.folder.clone(), msg.uid);
+            {
+                let mut ov = sh_act.body_view_text.borrow_mut();
+                if action == "view-text" {
+                    ov.insert(key);
+                } else {
+                    ov.remove(&key);
+                }
+            }
+            let bodies = sh_act.current_bodies.borrow().clone();
+            send_render_job(&sh_act, bodies, None);
+            return;
+        }
+        // Everything else (delete / read / unread) goes through the engine.
+        let Some(etx) = sh_act.engine_tx.borrow().clone() else {
+            eprintln!("msg-action: no live engine");
+            return;
+        };
+        match action.as_str() {
+            "delete" => {
+                let _ = etx.send(engine::EngineCmd::Delete {
+                    messages: vec![msg],
+                    account_key: sh_act.cur_account_key.borrow().clone(),
+                });
+            }
+            "read" => {
+                let _ = etx.send(engine::EngineCmd::SetFlags {
+                    messages: vec![msg],
+                    flags: "\\Seen".into(),
+                    add: true,
+                    account_key: sh_act.cur_account_key.borrow().clone(),
+                });
+            }
+            "unread" => {
+                let _ = etx.send(engine::EngineCmd::SetFlags {
+                    messages: vec![msg],
+                    flags: "\\Seen".into(),
+                    add: false,
+                    account_key: sh_act.cur_account_key.borrow().clone(),
+                });
+            }
+            other => println!("msg-action {other} (not wired yet)"),
+        }
+    });
+
+    // × on the reply ribbon — drop the staged reply target without sending.
+    let ui_weak_rc = ui.as_weak();
+    let sh_rc = shared.clone();
+    ui.on_reply_ribbon_cancel(move || {
+        if let Some(ui) = ui_weak_rc.upgrade() {
+            exit_reply_mode(&sh_rc, &ui);
+        }
+    });
+}
+
+/// Chat column width and display scale → re-render at the new geometry.
+/// Returns the width watcher, which must live as long as the window.
+pub(crate) fn wire_viewport(ui: &MainWindow, shared: &Rc<Shared>) -> slint::Timer {
+    // Resize = pure relayout: re-render the in-memory bodies at the new
+    // width after the drag settles. No SQLite, no network — the contents
+    // didn't change, only the pixels. Debounce coalesces the drag stream;
+    // the render seq additionally kills any still-queued older job.
+    let sh_rs = shared.clone();
+    let resize_debounce = Rc::new(slint::Timer::default());
+    ui.on_viewport_resized(move |w| {
+        let neww = w as u32;
+        // Sub-minimum widths are layout transients (chat pane hidden in
+        // calendar mode, first frame) — rendering at them would be junk.
+        if neww < 240 || neww == sh_rs.width.get() {
+            return;
+        }
+        sh_rs.width.set(neww);
+        let sh2 = sh_rs.clone();
+        resize_debounce.start(
+            slint::TimerMode::SingleShot,
+            std::time::Duration::from_millis(150),
+            move || {
+                let bodies = sh2.current_bodies.borrow().clone();
+                if !bodies.is_empty() {
+                    send_render_job(&sh2, bodies, None);
+                }
+            },
+        );
+    });
+
+    // Slint's `changed width` does NOT fire for the initial layout pass, so
+    // after a restart the render width silently stayed at DEFAULT_WIDTH and
+    // every bubble stretched to the real (wider) column. This watcher feeds
+    // the actual chat-column width through the same resize path — covering
+    // the first frame and any future missed events. It also tracks the
+    // window scale factor: a DPI change re-renders so the bitmap comes out
+    // at the display's real scale (crisp bubbles after a monitor move).
+    let ui_weak_ww = ui.as_weak();
+    let sh_ww = shared.clone();
+    let width_watcher = slint::Timer::default();
+    width_watcher.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(500),
+        move || {
+            if let Some(ui) = ui_weak_ww.upgrade() {
+                let sf = ui.window().scale_factor();
+                if sf.is_finite() && sf > 0.0 && (sf - sh_ww.render_scale.get()).abs() > 0.01 {
+                    sh_ww.render_scale.set(sf);
+                    let bodies = sh_ww.current_bodies.borrow().clone();
+                    if !bodies.is_empty() {
+                        send_render_job(&sh_ww, bodies, None);
+                    }
+                }
+                let w = ui.get_chat_width();
+                if w > 0.0 {
+                    ui.invoke_viewport_resized(w);
+                }
+            }
+        },
+    );
+    width_watcher
+}

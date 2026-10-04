@@ -248,3 +248,88 @@ mod line_bounds_tests {
         assert_eq!(line_bounds(&runs, 2), (2, 2));
     }
 }
+
+/// Mouse text selection over bubbles and copying it.
+pub(crate) fn wire_bubble_selection(ui: &MainWindow, shared: &Rc<Shared>) {
+    // ── Mouse text selection over bubbles ──
+    let ui_weak_ss = ui.as_weak();
+    let sh_ss = shared.clone();
+    ui.on_sel_start(move |row, x, y| {
+        let Some(ui) = ui_weak_ss.upgrade() else { return };
+        // Серия кликов: второй выделяет слово, третий — строку. Считаем сами,
+        // у Slint нет ни двойного, ни тройного события. Порог 4px гасит дрожь
+        // руки, но не даёт склеить клики по разным словам.
+        let now = Instant::now();
+        let (prow, px, py) = sh_ss.sel_click_pos.get();
+        let same_spot = prow == row && (px - x).abs() < 4.0 && (py - y).abs() < 4.0;
+        let quick = sh_ss
+            .sel_click_at
+            .get()
+            .is_some_and(|t| now.duration_since(t) < Duration::from_millis(450));
+        let streak = if same_spot && quick { sh_ss.sel_click_streak.get() + 1 } else { 1 };
+        sh_ss.sel_click_streak.set(streak);
+        sh_ss.sel_click_at.set(Some(now));
+        sh_ss.sel_click_pos.set((row, x, y));
+
+        sh_ss.sel_dragging.set(false);
+        sh_ss.sel_moved.set(false);
+        sh_ss.sel_row.set(-1);
+        if let Some(runs) = sh_ss.row_text_runs.borrow().get(row as usize) {
+            if let Some(i) = nearest_run(runs, x, y) {
+                sh_ss.sel_row.set(row);
+                let (anchor, head) = match streak {
+                    1 => (i, i),
+                    // Прогон и есть слово, так что двойной клик — это ровно он.
+                    2 => (i, i),
+                    _ => line_bounds(runs, i),
+                };
+                sh_ss.sel_anchor.set(anchor);
+                sh_ss.sel_head.set(head);
+                sh_ss.sel_dragging.set(true);
+                if streak >= 2 {
+                    // Выделение уже состоялось: пусть держится после отпускания
+                    // (иначе `sel_end` сочтёт это кликом) и не открывает ссылку,
+                    // если кликнули по ней.
+                    sh_ss.sel_moved.set(true);
+                    sh_ss.sel_suppress_click.set(true);
+                }
+            }
+        }
+        // Clear any previous highlight; Ctrl+C must reach the key sink.
+        refresh_selection_rects(&ui, &sh_ss);
+        ui.invoke_grab_key_focus();
+    });
+    let ui_weak_sm = ui.as_weak();
+    let sh_sm = shared.clone();
+    ui.on_sel_move(move |row, x, y| {
+        if !sh_sm.sel_dragging.get() || sh_sm.sel_row.get() != row {
+            return;
+        }
+        let Some(ui) = ui_weak_sm.upgrade() else { return };
+        let head =
+            sh_sm.row_text_runs.borrow().get(row as usize).and_then(|runs| nearest_run(runs, x, y));
+        if let Some(i) = head {
+            if !sh_sm.sel_moved.get() && i == sh_sm.sel_anchor.get() {
+                return; // not an actual drag yet
+            }
+            sh_sm.sel_moved.set(true);
+            sh_sm.sel_head.set(i);
+            refresh_selection_rects(&ui, &sh_sm);
+        }
+    });
+    let sh_se = shared.clone();
+    ui.on_sel_end(move || {
+        sh_se.sel_dragging.set(false);
+        if sh_se.sel_moved.get() {
+            // The release also fires `clicked` — it must not open a link.
+            sh_se.sel_suppress_click.set(true);
+        }
+    });
+    let sh_cs = shared.clone();
+    ui.on_copy_selection(move || {
+        if let Some(text) = selection_text(&sh_cs) {
+            println!("copy selection: {} chars", text.len());
+            clipboard_set(&text);
+        }
+    });
+}

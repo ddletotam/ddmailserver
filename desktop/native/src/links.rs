@@ -585,3 +585,163 @@ pub(crate) fn open_saved_file(path: &str) {
         }
     });
 }
+
+/// Links and attachment chips inside bubbles: click, hover cursor, and the
+/// context-menu entries (open / copy / open with… / open or save attachment).
+pub(crate) fn wire_bubble_links(ui: &MainWindow, shared: &Rc<Shared>) {
+    // Link click — resolved right here against the UI-thread copy of the
+    // link rects (the same ones the hover cursor reads), not through the
+    // render worker: a click must not wait behind a conversation's layout.
+    let ui_weak_hit = ui.as_weak();
+    let sh_hit = shared.clone();
+    ui.on_hit_test(move |row, x, y| {
+        // A click that ends a drag-selection is not a link click.
+        if sh_hit.sel_suppress_click.replace(false) {
+            return;
+        }
+        let hit = sh_hit
+            .row_links
+            .borrow()
+            .get(row as usize)
+            .and_then(|links| links.iter().find(|l| l.contains(x, y)))
+            .map(|l| l.href.clone());
+        match hit {
+            // Resolved URLs (incl. internal ddmail-attach:* schemes) go to
+            // handle_link from the event loop, as before — not from inside
+            // the pointer callback.
+            Some(url) => {
+                let _ = ui_weak_hit
+                    .upgrade_in_event_loop(move |ui| handle_link(&ui, url, LinkOrigin::Html));
+            }
+            None => println!("click row {row} @({x:.0},{y:.0}) — no link"),
+        }
+    });
+
+    // Pointer-cursor hover query — pure point-in-rect against the UI-thread
+    // copy of the link rects, re-evaluated by the binding on every move.
+    let sh_hover = shared.clone();
+    ui.on_hover_link(move |row, x, y| {
+        sh_hover
+            .row_links
+            .borrow()
+            .get(row as usize)
+            .map(|links| links.iter().any(|l| l.contains(x, y)))
+            .unwrap_or(false)
+    });
+
+    // ── Вложения: контекст правого клика ──
+    // Перед показом меню пузыря Slint зовёт probe: если под курсором чип
+    // вложения (ddmail-attach:-ссылка), меню получает пункты
+    // «Открыть/Сохранить»; цель откладывается в sh.ctx_attach.
+    let ui_weak_probe = ui.as_weak();
+    let sh_probe = shared.clone();
+    ui.on_ctx_menu_probe(move |row, x, y| {
+        let Some(ui) = ui_weak_probe.upgrade() else { return };
+        let href = sh_probe
+            .row_links
+            .borrow()
+            .get(row as usize)
+            .and_then(|links| links.iter().find(|l| l.contains(x, y)).map(|l| l.href.clone()));
+        let att = href.as_deref().and_then(|u| u.strip_prefix("ddmail-attach:")).and_then(|rest| {
+            let p: Vec<&str> = rest.splitn(4, '|').collect();
+            if p.len() == 4 {
+                if let (Ok(uid), Ok(index)) = (p[1].parse::<u32>(), p[2].parse::<usize>()) {
+                    // folder/filename percent-кодированы (att_url_encode) —
+                    // в меню и в диалог сохранения идёт человеческое имя.
+                    return Some((att_url_decode(p[0]), uid, index, att_url_decode(p[3])));
+                }
+            }
+            None
+        });
+        ui.set_ctx_attach_name(att.as_ref().map(|a| a.3.clone()).unwrap_or_default().into());
+        // Внешняя ссылка под курсором. `ddmail-attach:` сюда не попадает — это
+        // вложение, у него свои пункты выше; всё остальное отдаёт
+        // `click_target`, он же достраивает схему голому хосту и отсеивает
+        // схемы не из белого списка. Origin::Html — «Копировать ссылку» обязано
+        // дать ту же строку, что откроет «Открыть ссылку», байт в байт.
+        let link = href
+            .as_deref()
+            .filter(|u| !u.starts_with("ddmail-attach:"))
+            .and_then(|u| click_target(u, LinkOrigin::Html));
+        ui.set_ctx_link_url(link.clone().unwrap_or_default().into());
+        *sh_probe.ctx_link.borrow_mut() = link;
+        *sh_probe.ctx_attach.borrow_mut() = att;
+    });
+
+    // «Открыть ссылку» / «Копировать ссылку» / «Открыть с помощью…».
+    let sh_ol = shared.clone();
+    ui.on_open_link(move || {
+        if let Some(url) = sh_ol.ctx_link.borrow().clone() {
+            println!("ctx open link -> {url}");
+            open_external(&url);
+        }
+    });
+    let sh_cl = shared.clone();
+    ui.on_copy_link(move || {
+        if let Some(url) = sh_cl.ctx_link.borrow().clone() {
+            clipboard_set(&url);
+        }
+    });
+    // Клик по адресу в шапке диалога: адрес — в буфер, подтверждение плашкой.
+    let ui_weak_ca = ui.as_weak();
+    ui.on_copy_address(move |addr| {
+        if addr.is_empty() {
+            return;
+        }
+        clipboard_set(&addr);
+        if let Some(ui) = ui_weak_ca.upgrade() {
+            flash_confirm(&ui, &format!("✓ Скопировано: {addr}"));
+        }
+    });
+    let sh_lw = shared.clone();
+    ui.on_open_link_with(move |idx| {
+        let Some(url) = sh_lw.ctx_link.borrow().clone() else { return };
+        // Индекс приходит из того же списка, которым заполнено подменю, но
+        // проверяем: модель и обработчик живут в разных потоках событий.
+        if let Some((name, desktop)) = sh_lw.link_apps.get(idx.max(0) as usize) {
+            println!("ctx open link with {name} -> {url}");
+            open_with_app(desktop, &url);
+        }
+    });
+
+    // «Открыть …» — тот же путь, что левый клик по чипу: Downloads + запуск.
+    let sh_oa = shared.clone();
+    ui.on_open_attachment(move || {
+        let Some((folder, uid, index, filename)) = sh_oa.ctx_attach.borrow().clone() else {
+            return;
+        };
+        if let Some(etx) = sh_oa.engine_tx.borrow().as_ref() {
+            let _ = etx.send(engine::EngineCmd::DownloadAttachment {
+                folder,
+                uid,
+                index,
+                filename,
+                account_key: sh_oa.cur_account_key.borrow().clone(),
+                save_to: None,
+            });
+        }
+    });
+
+    // «Сохранить … как…» — системный диалог сохранения; файл пишется по
+    // выбранному пути и НЕ открывается (подтверждение — плашка «✓ Сохранено»).
+    let ui_weak_sa = ui.as_weak();
+    let sh_sa = shared.clone();
+    ui.on_save_attachment(move || {
+        let Some(ui) = ui_weak_sa.upgrade() else { return };
+        let Some((folder, uid, index, filename)) = sh_sa.ctx_attach.borrow().clone() else {
+            return;
+        };
+        let Some(path) = pick_save_path(&ui, &filename) else { return };
+        if let Some(etx) = sh_sa.engine_tx.borrow().as_ref() {
+            println!("save attachment: {filename} -> {}", path.display());
+            let _ = etx.send(engine::EngineCmd::DownloadAttachment {
+                folder,
+                uid,
+                index,
+                filename,
+                account_key: sh_sa.cur_account_key.borrow().clone(),
+                save_to: Some(path.to_string_lossy().into_owned()),
+            });
+        }
+    });
+}

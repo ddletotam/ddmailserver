@@ -74,3 +74,114 @@ pub(crate) fn address_book_rows(list: &[ddmail_core::types::DesktopContact]) -> 
         })
         .collect()
 }
+
+/// Address-book callbacks: search, open a conversation with a contact,
+/// the contact editor (add / edit / save / delete).
+pub(crate) fn wire_address_book(ui: &MainWindow, shared: &Rc<Shared>) {
+    // Address-book search box: fire the lookup on every edit (engine answers
+    // are guarded by the echoed query, so stale results are dropped).
+    let sh_cs = shared.clone();
+    ui.on_contacts_search(move |q| {
+        fetch_contacts(&sh_cs, q.as_str());
+    });
+
+    // Click a contact row → jump to a compose addressed to them.
+    let ui_weak_ca = ui.as_weak();
+    ui.on_contact_activated(move |email| {
+        let Some(ui) = ui_weak_ca.upgrade() else { return };
+        if email.is_empty() {
+            return;
+        }
+        ui.set_view_mode(0);
+        ui.invoke_search_compose_new(email);
+    });
+
+    // Contact editor: open blank (create).
+    let ui_weak_cadd = ui.as_weak();
+    let sh_cadd = shared.clone();
+    ui.on_contact_add(move || {
+        let Some(ui) = ui_weak_cadd.upgrade() else { return };
+        sh_cadd.editing_contact_id.set(0);
+        sh_cadd.editing_contact_account.borrow_mut().clear();
+        // Populate the account picker (labels + parallel keys).
+        {
+            let accounts = engine::AccountConfig::load_all();
+            let labels: Vec<slint::SharedString> = accounts
+                .iter()
+                .map(|a| if a.email.is_empty() { a.account_key() } else { a.email.clone() }.into())
+                .collect();
+            *sh_cadd.ce_account_keys.borrow_mut() =
+                accounts.iter().map(|a| a.account_key()).collect();
+            ui.set_ce_accounts(ModelRc::new(VecModel::from(labels)));
+            ui.set_ce_account_idx(0);
+        }
+        ui.set_ce_is_edit(false);
+        ui.set_ce_name("".into());
+        ui.set_ce_email("".into());
+        ui.set_ce_phone("".into());
+        ui.set_ce_org("".into());
+        ui.set_contact_editor_open(true);
+    });
+
+    // Contact editor: open populated for a row (edit).
+    let ui_weak_ced = ui.as_weak();
+    let sh_ced = shared.clone();
+    ui.on_contact_edit(move |idx| {
+        let Some(ui) = ui_weak_ced.upgrade() else { return };
+        let book = sh_ced.address_book.borrow();
+        let Some(c) = book.get(idx.max(0) as usize) else { return };
+        sh_ced.editing_contact_id.set(c.id);
+        *sh_ced.editing_contact_account.borrow_mut() = c.account_key.clone();
+        ui.set_ce_is_edit(true);
+        ui.set_ce_name(c.full_name.clone().into());
+        ui.set_ce_email(c.emails.first().cloned().unwrap_or_default().into());
+        ui.set_ce_phone(c.phones.first().cloned().unwrap_or_default().into());
+        ui.set_ce_org(c.organization.clone().into());
+        ui.set_contact_editor_open(true);
+    });
+
+    let ui_weak_ccancel = ui.as_weak();
+    ui.on_contact_editor_cancel(move || {
+        if let Some(ui) = ui_weak_ccancel.upgrade() {
+            ui.set_contact_editor_open(false);
+        }
+    });
+
+    // Save: create or update, then close and refresh the book.
+    let ui_weak_csave = ui.as_weak();
+    let sh_csave = shared.clone();
+    ui.on_contact_save(move || {
+        let Some(ui) = ui_weak_csave.upgrade() else { return };
+        let body = contact_body_from_ui(&ui);
+        let Some(etx) = sh_csave.engine_tx.borrow().clone() else { return };
+        let id = sh_csave.editing_contact_id.get();
+        let ak = if id == 0 {
+            // Create → the account chosen in the picker.
+            let idx = ui.get_ce_account_idx().max(0) as usize;
+            sh_csave.ce_account_keys.borrow().get(idx).cloned().unwrap_or_default()
+        } else {
+            sh_csave.editing_contact_account.borrow().clone()
+        };
+        if id == 0 {
+            let _ = etx.send(engine::EngineCmd::CreateContact { body, account_key: ak });
+        } else {
+            let _ = etx.send(engine::EngineCmd::UpdateContact { id, body, account_key: ak });
+        }
+        ui.set_contact_editor_open(false);
+    });
+
+    // Delete the contact being edited.
+    let ui_weak_cdel = ui.as_weak();
+    let sh_cdel = shared.clone();
+    ui.on_contact_delete(move || {
+        let Some(ui) = ui_weak_cdel.upgrade() else { return };
+        let id = sh_cdel.editing_contact_id.get();
+        if id != 0 {
+            let ak = sh_cdel.editing_contact_account.borrow().clone();
+            if let Some(etx) = sh_cdel.engine_tx.borrow().as_ref() {
+                let _ = etx.send(engine::EngineCmd::DeleteContact { id, account_key: ak });
+            }
+        }
+        ui.set_contact_editor_open(false);
+    });
+}

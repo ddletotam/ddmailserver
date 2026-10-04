@@ -233,3 +233,176 @@ pub(crate) fn fetch_reminder_window(sh: &Shared) {
         });
     }
 }
+
+/// Start the two reminder timers: the due-reminder scan that raises toasts,
+/// and the refresh of the upcoming-events window. Returned, because a
+/// dropped `Timer` stops — the caller keeps them for the loop's lifetime.
+/// Both reach `Shared` through `SHARED` on each tick.
+pub(crate) fn start_reminder_timers(ui: &MainWindow) -> (slint::Timer, slint::Timer) {
+    // Calendar reminders: a UI-thread timer scans the persisted reminder
+    // table every interval and toasts whatever just came due. Runs on the
+    // Slint event loop, which keeps ticking while hidden to tray — so we
+    // don't need the background Tokio task the old build relied on. Bound
+    // to a name (not bare `_`) so it lives for the loop's lifetime.
+    let _reminder_timer = slint::Timer::default();
+    _reminder_timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_secs(reminders::SCAN_INTERVAL_SECS),
+        || {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let due = SHARED.with(|s| {
+                let borrow = s.borrow();
+                let Some(sh) = borrow.as_ref() else { return Vec::new() };
+                let Some(c) = sh.cache.as_ref() else { return Vec::new() };
+                // Видимость календаря проверяется здесь, в момент выстрела, а
+                // не только при посеве и на переключателе: строка могла
+                // взвестись до выключения и не попасть под purge (событие вне
+                // загруженного окна, переезд между календарями). Строка
+                // остаётся взведённой — включат календарь, зазвонит сама.
+                let vis = sh.calendar_visible.borrow();
+                let events = sh.calendar_events.borrow();
+                let hidden = |row: &ddmail_core::cache::ReminderRow| -> bool {
+                    let cal = if row.calendar_id != 0 {
+                        row.calendar_id
+                    } else {
+                        // Строка старой схемы: календарь берём из снимка.
+                        events
+                            .iter()
+                            .find(|e| e.id == row.event_id)
+                            .map(|e| e.calendar_id)
+                            .unwrap_or(0)
+                    };
+                    cal != 0 && !*vis.get(&cal).unwrap_or(&true)
+                };
+                reminders::scan(c, now_ms, &hidden)
+            });
+            for t in due {
+                // One toast per event on screen at a time (dedup a burst).
+                if toast_window::has_for_event(t.row.event_id) {
+                    continue;
+                }
+                let title = reminders::title_for(&t);
+                let body = reminders::body_for(&t, now_ms);
+                let eid = t.row.event_id;
+                let occ = t.row.occurrence_start_ms;
+                let seq = t.row.seq;
+                let summary = t.row.summary.clone();
+
+                match t.mode {
+                    reminders::ToastMode::AtStart | reminders::ToastMode::AlreadyRunning => {
+                        // ✕ = close only; body = open card + close. No snooze,
+                        // no cascade advance (this is the terminal alarm).
+                        let s_body = summary.clone();
+                        let id = toast_window::show(
+                            toast_window::KIND_STARTED,
+                            eid,
+                            &title,
+                            &body,
+                            false,
+                            reminders::AT_START_TIMEOUT_SECS,
+                            move || reminder_dispatch("cancel-occ", eid, occ, seq, String::new()),
+                            move || reminder_dispatch("open-close", eid, occ, seq, s_body.clone()),
+                            || {},
+                        );
+                        // Timeout = silent expiry; still retire the row so the
+                        // cascade can't resurrect it.
+                        toast_window::set_on_timeout(id, move || {
+                            reminder_dispatch("timeout", eid, occ, seq, String::new())
+                        });
+                    }
+                    reminders::ToastMode::Soon => {
+                        // ✕ = kill the whole cascade of this occurrence.
+                        // Body = open card, STOP the timer (toast stays).
+                        // «Напомнить позже» = snooze dialog (pauses timer).
+                        // Timeout = advance the cascade to the next alarm.
+                        let s_body = summary.clone();
+                        let s_act = summary.clone();
+                        let id = toast_window::show(
+                            toast_window::KIND_SOON,
+                            eid,
+                            &title,
+                            &body,
+                            true,
+                            reminders::SOON_TIMEOUT_SECS,
+                            move || reminder_dispatch("cancel-occ", eid, occ, seq, String::new()),
+                            move || reminder_dispatch("open-stay", eid, occ, seq, s_body.clone()),
+                            move || {
+                                reminder_dispatch("snooze-window", eid, occ, seq, s_act.clone())
+                            },
+                        );
+                        toast_window::set_on_timeout(id, move || {
+                            reminder_dispatch("timeout", eid, occ, seq, String::new())
+                        });
+                    }
+                }
+            }
+        },
+    );
+
+    // Окно посева напоминаний — отдельно от сетки и привязано к `now`.
+    // Пересчитывается на каждом тике, поэтому перекат суток (и недели) лечится
+    // сам: раньше посев жил только на фетчах отображаемой недели, и клиент,
+    // проживший выходные, всю следующую неделю тянул прошлую и молчал.
+    // Тем же тиком сетка подтягивается за сегодняшним днём, если пользователь
+    // её сам не увёл на другую неделю.
+    let ui_weak_rw = ui.as_weak();
+    let _reminder_window_timer = slint::Timer::default();
+    _reminder_window_timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_secs(REMINDER_WINDOW_REFRESH_SECS),
+        move || {
+            let Some(ui) = ui_weak_rw.upgrade() else { return };
+            SHARED.with(|s| {
+                let borrow = s.borrow();
+                let Some(sh) = borrow.as_ref() else { return };
+                fetch_reminder_window(sh);
+                let today = week_start_days_today();
+                if sh.week_follows_today.get() && sh.calendar_week_start_days.get() != today {
+                    println!("[cal] перекат недели: сетка идёт за сегодня → {today}");
+                    sh.calendar_week_start_days.set(today);
+                    apply_calendar_view(&ui, sh);
+                    refetch_calendar_events(&ui, sh);
+                }
+            });
+        },
+    );
+    (_reminder_timer, _reminder_window_timer)
+}
+
+/// The snooze dialog of a reminder toast: a choice, or dismissing it.
+pub(crate) fn wire_snooze(ui: &MainWindow, shared: &Rc<Shared>) {
+    // Snooze modal choice → commit through the same action machine the
+    // toast buttons use ("snz:5" … "snz:atstart").
+    let sh_snz = shared.clone();
+    ui.on_snooze_choice(move |choice| {
+        let (eid, occ, occ_end, toast_id, summary) = sh_snz.snooze_ctx.borrow().clone();
+        if eid != 0 {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let at_start = choice == "atstart";
+            let fire_at =
+                if at_start { occ } else { now_ms + choice.parse::<i64>().unwrap_or(5) * 60_000 };
+            // User made a choice: cascade → one reminder; toast closes
+            // immediately and silently (no cascade-advancing timeout).
+            if let Some(c) = sh_snz.cache.as_ref() {
+                if let Err(e) =
+                    c.user_choice_reminder(eid, occ, occ_end, fire_at, at_start, &summary)
+                {
+                    eprintln!("reminders: user choice failed for {eid}: {e}");
+                }
+            }
+            toast_window::stop_timer(toast_id); // disarm the timeout hook
+            toast_window::close(toast_id);
+        }
+        sh_snz.snooze_ctx.replace((0, 0, 0, 0, String::new()));
+    });
+    // Snooze dialog dismissed WITHOUT a choice: the toast behaves as if the
+    // button was never pressed — resume its paused countdown.
+    let sh_snc = shared.clone();
+    ui.on_snooze_cancel(move || {
+        let (_, _, _, toast_id, _) = sh_snc.snooze_ctx.borrow().clone();
+        if toast_id != 0 {
+            toast_window::resume_timer(toast_id);
+        }
+        sh_snc.snooze_ctx.replace((0, 0, 0, 0, String::new()));
+    });
+}

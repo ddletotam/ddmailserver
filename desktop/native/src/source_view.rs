@@ -103,3 +103,88 @@ pub(crate) fn parse_headers(raw: &str) -> Vec<(String, String)> {
     }
     out
 }
+
+/// Source viewer modal: «Копировать всё» and mouse selection over its bitmap.
+pub(crate) fn wire_source_view(ui: &MainWindow, shared: &Rc<Shared>) {
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_source_view_copy(move || {
+            use slint::Model;
+            let Some(ui) = ui_weak.upgrade() else { return };
+            if ui.get_source_view_is_headers() {
+                let mut out = String::new();
+                for h in ui.get_source_view_headers().iter() {
+                    out.push_str(h.name.as_str());
+                    out.push_str(": ");
+                    out.push_str(h.value.as_str());
+                    out.push('\n');
+                }
+                clipboard_set(&out);
+            } else {
+                // Full, untruncated source — not the capped slice in the widget.
+                SHARED.with(|s| {
+                    if let Some(sh) = s.borrow().as_ref() {
+                        clipboard_set(&sh.source_view_full.borrow());
+                    }
+                });
+            }
+        });
+    }
+
+    // ── Mouse text selection over the rendered source bitmap (modal) ──
+    {
+        let ui_weak = ui.as_weak();
+        let sh1 = shared.clone();
+        ui.on_src_sel_start(move |x, y| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            sh1.src_sel_dragging.set(false);
+            sh1.src_sel_moved.set(false);
+            {
+                let runs = sh1.src_runs.borrow();
+                if let Some(i) = nearest_run(&runs, x, y) {
+                    sh1.src_sel_anchor.set(i);
+                    sh1.src_sel_head.set(i);
+                    sh1.src_sel_dragging.set(true);
+                }
+            }
+            ui.set_source_selection_rects(ModelRc::new(VecModel::from(Vec::<SelRect>::new())));
+            // Keep the key sink focused so Ctrl+C lands in kb's modal branch.
+            ui.invoke_grab_key_focus();
+        });
+        let ui_weak2 = ui.as_weak();
+        let sh2 = shared.clone();
+        ui.on_src_sel_move(move |x, y| {
+            if !sh2.src_sel_dragging.get() {
+                return;
+            }
+            let Some(ui) = ui_weak2.upgrade() else { return };
+            let runs = sh2.src_runs.borrow();
+            if let Some(i) = nearest_run(&runs, x, y) {
+                if !sh2.src_sel_moved.get() && i == sh2.src_sel_anchor.get() {
+                    return; // not an actual drag yet
+                }
+                sh2.src_sel_moved.set(true);
+                sh2.src_sel_head.set(i);
+                let rects =
+                    selection_rects_for(&runs, sh2.src_sel_anchor.get(), sh2.src_sel_head.get());
+                ui.set_source_selection_rects(ModelRc::new(VecModel::from(rects)));
+            }
+        });
+        let sh3 = shared.clone();
+        ui.on_src_sel_end(move || {
+            sh3.src_sel_dragging.set(false);
+        });
+        let sh4 = shared.clone();
+        ui.on_src_copy_selection(move || {
+            let runs = sh4.src_runs.borrow();
+            if sh4.src_sel_moved.get() {
+                if let Some(t) =
+                    selection_text_for(&runs, sh4.src_sel_anchor.get(), sh4.src_sel_head.get())
+                {
+                    println!("copy source selection: {} chars", t.len());
+                    clipboard_set(&t);
+                }
+            }
+        });
+    }
+}

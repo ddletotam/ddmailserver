@@ -517,3 +517,123 @@ pub(crate) fn account_mode(a: &engine::AccountConfig) -> &'static str {
         "IMAP/SMTP"
     }
 }
+
+/// Settings modal and connections: add / edit / re-login / delete a
+/// connection, open settings, the global media switches.
+pub(crate) fn wire_settings(ui: &MainWindow, shared: &Rc<Shared>) {
+    // Settings modal: populate the read-only connection section from the
+    // live config (env first, then on-disk profile) and show it.
+    let ui_weak_set = ui.as_weak();
+    let sh_set = shared.clone();
+    // Empty-state CTA → open the add-connection modal.
+    let ui_weak_afc = ui.as_weak();
+    ui.on_add_first_connection(move || {
+        open_add_connection(ui_weak_afc.clone(), None);
+    });
+
+    // Settings → Подключения: add / edit / delete.
+    let ui_weak_addc = ui.as_weak();
+    ui.on_add_connection(move || {
+        open_add_connection(ui_weak_addc.clone(), None);
+    });
+    let ui_weak_editc = ui.as_weak();
+    let sh_editc = shared.clone();
+    ui.on_edit_connection(move |idx| {
+        let key = sh_editc.settings_conn_keys.borrow().get(idx.max(0) as usize).cloned();
+        let Some(key) = key else { return };
+        let cfg = engine::AccountConfig::load_all().into_iter().find(|a| a.account_key() == key);
+        open_add_connection(ui_weak_editc.clone(), cfg);
+    });
+    // Плашка «сессия истекла» и строка под индикатором связи: тот же вход,
+    // что «Изменить», но по индексу списка учёток (он существует с первого
+    // события связи, тогда как список настроек наполняется только при
+    // открытии модалки).
+    let ui_weak_relog = ui.as_weak();
+    let sh_relog = shared.clone();
+    ui.on_relogin(move |idx| {
+        let key = sh_relog.conn_dot_keys.borrow().get(idx.max(0) as usize).cloned();
+        let Some(key) = key else { return };
+        let cfg = engine::AccountConfig::load_all().into_iter().find(|a| a.account_key() == key);
+        open_add_connection(ui_weak_relog.clone(), cfg);
+    });
+
+    let ui_weak_delc = ui.as_weak();
+    let sh_delc = shared.clone();
+    ui.on_delete_connection(move |idx| {
+        let Some(ui) = ui_weak_delc.upgrade() else { return };
+        let key = sh_delc.settings_conn_keys.borrow().get(idx.max(0) as usize).cloned();
+        let Some(key) = key else { return };
+        engine::AccountConfig::remove_account(&key);
+        rebuild_engine(&ui, &sh_delc);
+        refresh_connections(&ui, &sh_delc);
+    });
+
+    ui.on_open_settings(move || {
+        let Some(ui) = ui_weak_set.upgrade() else { return };
+        let cfg = engine::AccountConfig::load_all().into_iter().next();
+        match &cfg {
+            Some(c) => {
+                let account = if c.email.is_empty() {
+                    format!("{}@{}", c.username, c.host)
+                } else {
+                    c.email.clone()
+                };
+                ui.set_conn_account(account.into());
+                ui.set_conn_mode("Онлайн — IMAP/SMTP".into());
+                ui.set_conn_imap(
+                    format!(
+                        "{}:{} · {}",
+                        c.host,
+                        c.port,
+                        if c.use_tls { "TLS" } else { "без TLS" }
+                    )
+                    .into(),
+                );
+                ui.set_conn_smtp(format!("{}:{}", c.smtp_host, c.smtp_port).into());
+                ui.set_conn_native(c.native_url.clone().unwrap_or_default().into());
+            }
+            None => {
+                ui.set_conn_account(sh_set.key.clone().into());
+                ui.set_conn_mode("Только локальный кэш (IMAP не настроен)".into());
+                ui.set_conn_imap("".into());
+                ui.set_conn_smtp("".into());
+                ui.set_conn_native("".into());
+            }
+        }
+        refresh_connections(&ui, &sh_set);
+        ui.set_settings_tab(0);
+        ui.set_settings_visible(true);
+    });
+    // Global media-policy toggles from the settings «Контент» tab. Same
+    // effect as the per-message «Медиа…» allow-alls, minus the row context,
+    // so no body is needed.
+    let ui_weak_mg = ui.as_weak();
+    let sh_mg = shared.clone();
+    ui.on_set_media_global(move |which| {
+        let gen_now = {
+            let mut p = sh_mg.policy.borrow_mut();
+            match which.as_str() {
+                "allow-all" => p.allow_all = !p.allow_all,
+                "scripts-all" => p.allow_all_scripts = !p.allow_all_scripts,
+                "images-all" => p.allow_all_media = !p.allow_all_media,
+                other => {
+                    println!("media global {other} — not wired");
+                    return;
+                }
+            }
+            // Generation must change atomically with the policy so the
+            // texture cache key invalidates exactly the affected rows.
+            p.generation += 1;
+            let g = p.generation;
+            policy::save(&p);
+            g
+        };
+        sh_mg.policy_gen.set(gen_now);
+        if let Some(ui) = ui_weak_mg.upgrade() {
+            sync_media_globals(&ui, &sh_mg.policy.borrow());
+        }
+        // Repaint the open conversation under the new policy — no refetch.
+        let bodies = sh_mg.current_bodies.borrow().clone();
+        send_render_job(&sh_mg, bodies, None);
+    });
+}

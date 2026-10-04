@@ -395,3 +395,178 @@ mod conv_search_tests {
         );
     }
 }
+
+/// The search dropdown: typing, clearing, and picking a contact, a
+/// conversation, a message or «Написать …».
+pub(crate) fn wire_search(ui: &MainWindow, shared: &Rc<Shared>) {
+    // ── Search-as-compose dropdown wiring ──
+    //
+    // Each keystroke fires `search-typed` → we cache the latest query on
+    // Shared, kick the engine for both contacts+messages in one call, and
+    // immediately update the "Написать xxx@yyy" compose-row from the
+    // client-side email regex. Debouncing is unnecessary here: the
+    // engine result is keyed by the query string and the UI drops stale
+    // answers in `handle_engine_result`.
+    let ui_weak_st = ui.as_weak();
+    let sh_typed = shared.clone();
+    ui.on_search_typed(move |query| {
+        let q = query.to_string();
+        let trimmed = q.trim().to_string();
+        *sh_typed.search_query_inflight.borrow_mut() = trimmed.clone();
+        // Compose-row visibility is local to the UI thread — no engine
+        // round-trip needed.
+        if let Some(ui) = ui_weak_st.upgrade() {
+            ui.set_search_compose_email(parse_email_like(&trimmed).unwrap_or_default().into());
+            ui.set_search_loading(true);
+            // Answer instantly from client-side state (address book + sidebar
+            // counterparts) so contacts appear on the first keystroke — the
+            // engine result below only augments this with cache + messages.
+            if !trimmed.is_empty() {
+                let q_lc = trimmed.to_lowercase();
+                // Диалоги — целиком локально и только здесь: ответ движка
+                // (ниже) их не касается, он приносит контакты кэша и письма.
+                let subjects = sh_typed
+                    .cache
+                    .as_ref()
+                    .and_then(|c| {
+                        c.body_subjects().map_err(|e| eprintln!("search subjects: {e}")).ok()
+                    })
+                    .unwrap_or_default();
+                let hits =
+                    local_search_convs(&sh_typed.convs.borrow(), &subjects, &sh_typed.key, &q_lc);
+                let local = local_search_contacts(
+                    &sh_typed.address_book.borrow(),
+                    &conv_hit_addrs(&hits),
+                    &q_lc,
+                );
+                let c_items = contact_items(&local);
+                ui.set_search_convs(ModelRc::new(VecModel::from(conv_hit_items(&hits))));
+                *sh_typed.search_convs.borrow_mut() = hits;
+                *sh_typed.search_contacts.borrow_mut() = local;
+                ui.set_search_contacts(ModelRc::new(VecModel::from(c_items)));
+            }
+        }
+        if let Some(etx) = sh_typed.engine_tx.borrow().as_ref() {
+            let _ = etx.send(engine::EngineCmd::SearchDropdown { query: trimmed, limit: 12 });
+        }
+    });
+
+    let ui_weak_sc = ui.as_weak();
+    let sh_clr = shared.clone();
+    ui.on_search_cleared(move || {
+        *sh_clr.search_query_inflight.borrow_mut() = String::new();
+        sh_clr.search_contacts.borrow_mut().clear();
+        sh_clr.search_messages.borrow_mut().clear();
+        sh_clr.search_convs.borrow_mut().clear();
+        if let Some(ui) = ui_weak_sc.upgrade() {
+            ui.set_search_convs(ModelRc::new(VecModel::from(Vec::<ConvHitItem>::new())));
+            ui.set_search_contacts(ModelRc::new(VecModel::from(Vec::<ContactItem>::new())));
+            ui.set_search_messages(ModelRc::new(VecModel::from(Vec::<MessageHit>::new())));
+            ui.set_search_compose_email("".into());
+            ui.set_search_loading(false);
+        }
+    });
+
+    let ui_weak_cn = ui.as_weak();
+    let sh_cn = shared.clone();
+    ui.on_search_compose_new(move |email| {
+        let Some(ui) = ui_weak_cn.upgrade() else { return };
+        enter_compose_mode(&sh_cn, &ui, email.as_str());
+    });
+
+    let ui_weak_sel_c = ui.as_weak();
+    let sh_sel_c = shared.clone();
+    ui.on_search_select_contact(move |idx| {
+        let i = idx as usize;
+        let contact = sh_sel_c.search_contacts.borrow().get(i).cloned();
+        let Some(contact) = contact else { return };
+        // Find any conversation with this counterpart; prefer the most recent.
+        let convs = sh_sel_c.convs.borrow();
+        let target_lc = contact.email.to_lowercase();
+        let best = convs
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.counterparts
+                    .first()
+                    .map(|cp| cp.addr.to_lowercase() == target_lc)
+                    .unwrap_or(false)
+            })
+            .max_by_key(|(_, c)| c.last_date_ts);
+        if let Some((conv_idx, _)) = best {
+            drop(convs);
+            let _ = sh_sel_c.search_query_inflight.borrow_mut().clear();
+            if let Some(ui) = ui_weak_sel_c.upgrade() {
+                ui.set_search_open(false);
+                ui.set_search_query("".into());
+                ui.set_selected(conv_idx as i32);
+                apply_active_header(&ui, &sh_sel_c, conv_idx);
+                open_conversation(&ui, &sh_sel_c, conv_idx);
+            }
+        } else {
+            // No existing conv with this counterpart → enter transient
+            // compose mode pointed at this contact's email.
+            drop(convs);
+            if let Some(ui) = ui_weak_sel_c.upgrade() {
+                enter_compose_mode(&sh_sel_c, &ui, &contact.email);
+            }
+        }
+    });
+
+    // Строка секции «Диалоги»: открыть диалог. Ищем по ключу — список мог
+    // перестроиться дельтой, пока выпадашка была открыта.
+    let ui_weak_sel_d = ui.as_weak();
+    let sh_sel_d = shared.clone();
+    ui.on_search_select_conv(move |idx| {
+        let Some(hit) = sh_sel_d.search_convs.borrow().get(idx as usize).cloned() else { return };
+        let conv_idx = sh_sel_d
+            .convs
+            .borrow()
+            .iter()
+            .position(|c| c.id == hit.id && eff_account(&sh_sel_d.key, c) == hit.account);
+        let Some(ui) = ui_weak_sel_d.upgrade() else { return };
+        ui.set_search_open(false);
+        let Some(conv_idx) = conv_idx else {
+            println!("search-select-conv: {} is gone from the list", hit.id);
+            return;
+        };
+        sh_sel_d.search_query_inflight.borrow_mut().clear();
+        ui.set_search_query("".into());
+        ui.set_selected(conv_idx as i32);
+        apply_active_header(&ui, &sh_sel_d, conv_idx);
+        open_conversation(&ui, &sh_sel_d, conv_idx);
+        ui.set_sidebar_row_y(conv_idx as f32 * 64.0);
+        ui.set_sidebar_scroll_seq(ui.get_sidebar_scroll_seq() + 1);
+    });
+
+    let ui_weak_sel_m = ui.as_weak();
+    let sh_sel_m = shared.clone();
+    ui.on_search_select_message(move |idx| {
+        let i = idx as usize;
+        let env = sh_sel_m.search_messages.borrow().get(i).cloned();
+        let Some(env) = env else { return };
+        // The conversation that owns this message is the one whose
+        // messages list contains the (folder, uid) pair.
+        let convs = sh_sel_m.convs.borrow();
+        let conv_idx = convs
+            .iter()
+            .position(|c| c.messages.iter().any(|m| m.folder == env.folder && m.uid == env.uid));
+        if let Some(conv_idx) = conv_idx {
+            drop(convs);
+            if let Some(ui) = ui_weak_sel_m.upgrade() {
+                ui.set_search_open(false);
+                ui.set_search_query("".into());
+                ui.set_selected(conv_idx as i32);
+                apply_active_header(&ui, &sh_sel_m, conv_idx);
+                open_conversation(&ui, &sh_sel_m, conv_idx);
+            }
+        } else {
+            // Message is on the server but not in any local conversation —
+            // out of scope for v1 of the dropdown.
+            println!("search-select-message: no local conv contains {}/{}", env.folder, env.uid);
+            if let Some(ui) = ui_weak_sel_m.upgrade() {
+                ui.set_search_open(false);
+            }
+        }
+    });
+}

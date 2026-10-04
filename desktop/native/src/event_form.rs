@@ -369,3 +369,258 @@ pub(crate) fn save_edit_form(ui: &MainWindow, sh: &Shared) {
     sh.pending_event_save.set(true);
     ui.set_edit_busy(true);
 }
+
+/// Event form callbacks: edit from the card, save, cancel, open its URL.
+pub(crate) fn wire_edit_form(ui: &MainWindow, shared: &Rc<Shared>) {
+    let ui_weak_ee = ui.as_weak();
+    let sh_ee = shared.clone();
+    ui.on_detail_edit(move || {
+        let Some(ui) = ui_weak_ee.upgrade() else { return };
+        let id = ui.get_detail_event_id();
+        let events = sh_ee.calendar_events.borrow();
+        if let Some(ev) = events.iter().find(|e| e.id as i32 == id) {
+            ui.set_detail_visible(false);
+            open_edit_form(&ui, &sh_ee, ev);
+        }
+    });
+    let ui_weak_es = ui.as_weak();
+    let sh_es = shared.clone();
+    ui.on_edit_save(move || {
+        if let Some(ui) = ui_weak_es.upgrade() {
+            save_edit_form(&ui, &sh_es);
+        }
+    });
+    let ui_weak_ec = ui.as_weak();
+    ui.on_edit_cancel(move || {
+        if let Some(ui) = ui_weak_ec.upgrade() {
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    sh.pending_event_save.set(false);
+                }
+            });
+            ui.set_edit_busy(false);
+            ui.set_edit_error("".into());
+            ui.set_edit_visible(false);
+        }
+    });
+    ui.on_edit_open_url(move |url| {
+        // Поля правки события — тот же плоский текст, что и в карточке
+        // просмотра, и тот же белый список схем.
+        match click_target(url.as_str(), LinkOrigin::Text) {
+            Some(target) => open_external(&target),
+            None => eprintln!("edit open url: нечего открывать — {url}"),
+        }
+    });
+}
+
+/// Event card callbacks: open it, follow its links, RSVP, delete, and «new
+/// event».
+pub(crate) fn wire_event_card(ui: &MainWindow, shared: &Rc<Shared>) {
+    // Event click → populate + show the detail popup (Phase B, read-only).
+    let ui_weak_ev = ui.as_weak();
+    let sh_ev = shared.clone();
+    ui.on_event_clicked(move |id| {
+        use chrono::{Datelike, Local, TimeZone, Timelike};
+        let Some(ui) = ui_weak_ev.upgrade() else { return };
+        let events = sh_ev.calendar_events.borrow();
+        let Some(ev) = events.iter().find(|e| e.id as i32 == id) else { return };
+
+        // Humanized date: «чт, 12 декабря · 14:30 – 15:30» — a bare digit
+        // train («12.12 14:30») read as a hyperlink-ish blur.
+        const WD: [&str; 7] = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
+        const MON: [&str; 12] = [
+            "января",
+            "февраля",
+            "марта",
+            "апреля",
+            "мая",
+            "июня",
+            "июля",
+            "августа",
+            "сентября",
+            "октября",
+            "ноября",
+            "декабря",
+        ];
+        let date_of = |ms: i64| {
+            Local
+                .timestamp_millis_opt(ms)
+                .single()
+                .map(|d| {
+                    format!(
+                        "{}, {} {}",
+                        WD[d.weekday().num_days_from_monday() as usize],
+                        d.day(),
+                        MON[(d.month() - 1) as usize]
+                    )
+                })
+                .unwrap_or_default()
+        };
+        let tm = |ms: i64| {
+            Local
+                .timestamp_millis_opt(ms)
+                .single()
+                .map(|d| format!("{:02}:{:02}", d.hour(), d.minute()))
+                .unwrap_or_default()
+        };
+        let when = if ev.all_day {
+            format!("{} · весь день", date_of(ev.dtstart))
+        } else if let Some(end) = ev.dtend {
+            format!("{} · {} – {}", date_of(ev.dtstart), tm(ev.dtstart), tm(end))
+        } else {
+            format!("{} · {}", date_of(ev.dtstart), tm(ev.dtstart))
+        };
+
+        let organizer = match (ev.organizer_name.is_empty(), ev.organizer_email.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => ev.organizer_email.clone(),
+            (false, true) => ev.organizer_name.clone(),
+            (false, false) => format!("{} <{}>", ev.organizer_name, ev.organizer_email),
+        };
+        // Attendees table: localized status + colour per row; also resolve
+        // MY participation so the pressed RSVP button is obvious.
+        let status_of = |ps: &str| -> (&'static str, &'static str) {
+            match ps.to_uppercase().as_str() {
+                "ACCEPTED" => ("Принял", "#27ae60"),
+                "DECLINED" => ("Отклонил", "#eb5757"),
+                "TENTATIVE" => ("Возможно", "#f2994a"),
+                _ => ("Не ответил", "#8b95a1"),
+            }
+        };
+        let att_rows: Vec<AttRow> = ev
+            .attendees
+            .iter()
+            .map(|a| {
+                let n = if a.name.is_empty() { a.email.clone() } else { a.name.clone() };
+                let (st, col) = status_of(&a.partstat);
+                AttRow { name: n.into(), status: st.into(), color: hex(col) }
+            })
+            .collect();
+        let my_partstat = {
+            let idents = sh_ev.identity_colors.borrow();
+            let me_key = sh_ev.key.to_lowercase();
+            ev.attendees
+                .iter()
+                .find(|a| {
+                    let lc = a.email.to_lowercase();
+                    lc == me_key || idents.contains_key(&lc)
+                })
+                .map(|a| a.partstat.to_uppercase())
+                .unwrap_or_default()
+        };
+
+        ui.set_detail_title(
+            if ev.summary.is_empty() {
+                "(без названия)".into()
+            } else {
+                ev.summary.clone()
+            }
+            .into(),
+        );
+        ui.set_detail_when(when.into());
+        ui.set_detail_location(ev.location.clone().into());
+        ui.set_detail_organizer(organizer.into());
+        ui.set_detail_attendee_rows(ModelRc::new(VecModel::from(att_rows)));
+        ui.set_detail_my_partstat(my_partstat.into());
+        ui.set_detail_description(ev.description.clone().into());
+        // Status/recurrence/reminder digest — same shape as the edit form.
+        let mut meta: Vec<String> = Vec::new();
+        match ev.status.to_uppercase().as_str() {
+            "CANCELLED" => meta.push("Отменено".to_string()),
+            "TENTATIVE" => meta.push("Предварительно".to_string()),
+            _ => {}
+        }
+        if !ev.rrule.is_empty() {
+            meta.push(humanize_rrule(&ev.rrule));
+        }
+        if ev.alarm_lead_min > 0 {
+            meta.push(format!("Напоминание за {}", humanize_lead(ev.alarm_lead_min)));
+        }
+        ui.set_detail_meta(meta.join(" · ").into());
+        // Every non-default VEVENT property the server extracted.
+        let extras: Vec<EventExtraItem> = ev
+            .extras
+            .iter()
+            .map(|x| {
+                let (label, value) = extra_label(&x.name, &x.value);
+                // Голый хост тоже ссылка (CONFERENCE/X-…-CONFERENCE часто без
+                // схемы) — схему достраивает handle_link на клике; признак и
+                // клик считает одна функция (см. карточку правки).
+                let is_link = click_target(&value, LinkOrigin::Text).is_some();
+                EventExtraItem { label: label.into(), value: value.into(), is_link }
+            })
+            .collect();
+        // Сравнивать с найденными в тексте ссылками надо по нормализованному
+        // виду: в extras лежит голый хост, а extract_urls отдаёт его со схемой.
+        let extra_urls: std::collections::HashSet<String> =
+            extras.iter().filter(|x| x.is_link).filter_map(|x| link_target(&x.value)).collect();
+        ui.set_detail_extras(ModelRc::new(VecModel::from(extras)));
+        // Meeting links live as plain text in location/description more
+        // often than not — surface every URL as a clickable row, minus the
+        // ones already shown as first-class extras (CONFERENCE/URL).
+        let links: Vec<slint::SharedString> =
+            extract_urls(&[ev.location.as_str(), ev.description.as_str()])
+                .into_iter()
+                .filter(|u| !extra_urls.contains(u))
+                .map(Into::into)
+                .collect();
+        ui.set_detail_links(ModelRc::new(VecModel::from(links)));
+        ui.set_detail_event_id(ev.id as i32);
+        ui.set_detail_visible(true);
+    });
+    let ui_weak_dol = ui.as_weak();
+    ui.on_detail_open_link(move |url| {
+        if let Some(ui) = ui_weak_dol.upgrade() {
+            // Свойства события — плоский текст: и схему достроить, и хвостовую
+            // пунктуацию срезать.
+            handle_link(&ui, url.to_string(), LinkOrigin::Text);
+        }
+    });
+    let ui_weak_dc = ui.as_weak();
+    ui.on_detail_close(move || {
+        if let Some(ui) = ui_weak_dc.upgrade() {
+            ui.set_detail_visible(false);
+        }
+    });
+    // RSVP from the detail popup → set PARTSTAT on the server, then refresh.
+    let sh_rsvp = shared.clone();
+    ui.on_rsvp(move |id, partstat| {
+        if let Some(etx) = sh_rsvp.engine_tx.borrow().as_ref() {
+            println!("rsvp event {id} -> {partstat}");
+            let ak = sh_rsvp.event_accounts.borrow().get(&(id as i64)).cloned().unwrap_or_default();
+            let _ = etx.send(engine::EngineCmd::Rsvp {
+                event_id: id as i64,
+                partstat: partstat.to_string(),
+                account_key: ak,
+            });
+        }
+    });
+
+    // Delete event from the detail popup.
+    let ui_weak_del = ui.as_weak();
+    let sh_del = shared.clone();
+    ui.on_detail_delete(move || {
+        let Some(ui) = ui_weak_del.upgrade() else { return };
+        let id = ui.get_detail_event_id() as i64;
+        // Delete wipes the event's reminders too (and the toast, if showing).
+        if let Some(c) = sh_del.cache.as_ref() {
+            let _ = c.purge_event_reminders(id);
+        }
+        toast_window::close_for_event(id);
+        let ak = sh_del.event_accounts.borrow().get(&id).cloned().unwrap_or_default();
+        if let Some(etx) = sh_del.engine_tx.borrow().as_ref() {
+            println!("delete event {id}");
+            let _ = etx.send(engine::EngineCmd::DeleteEvent { event_id: id, account_key: ak });
+        }
+        ui.set_detail_visible(false);
+    });
+
+    // Create / edit event form.
+    let ui_weak_new = ui.as_weak();
+    let sh_new = shared.clone();
+    ui.on_new_event(move || {
+        if let Some(ui) = ui_weak_new.upgrade() {
+            open_create_form(&ui, &sh_new);
+        }
+    });
+}
