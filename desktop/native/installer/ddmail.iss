@@ -10,7 +10,11 @@
 ; браузерного рантайма в поставке не требуется.
 
 #define AppName "ddmail"
-#define AppVersion "0.1.12"
+; Версию передаёт build-install.ps1 из Cargo.toml (/DAppVersion=...); значение
+; ниже — только для ручного запуска ISCC и должно совпадать с Cargo.toml.
+#ifndef AppVersion
+  #define AppVersion "0.1.12"
+#endif
 #define AppPublisher "letotam.ru"
 #define AppURL "https://mail.letotam.ru"
 #define AppExe "ddmail-native.exe"
