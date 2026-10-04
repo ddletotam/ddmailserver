@@ -13,6 +13,7 @@ import (
 
 	imapclient "github.com/ddletotam/ddmailserver/internal/imap/client"
 	"github.com/ddletotam/ddmailserver/internal/models"
+	msgsvc "github.com/ddletotam/ddmailserver/internal/service/messages"
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
 	"github.com/gorilla/mux"
 )
@@ -687,11 +688,13 @@ func (s *Server) HandleMessagePage(w http.ResponseWriter, r *http.Request) {
 		message.BodyHTML = replaceCIDURLs(message.BodyHTML, message.ID)
 	}
 
-	// Mark as read
-	message.Seen = true
-	if err := s.database.UpdateMessage(message); err != nil {
+	// Mark as read — through the same path as IMAP and the desktop API, so
+	// an external account's source server learns it too (the old direct
+	// UPDATE never queued the upstream sync).
+	if _, err := s.messageService().SetFlags(r.Context(), user.ID, message.ID, msgsvc.FlagUpdate{Seen: msgsvc.Bool(true)}); err != nil {
 		log.Printf("Failed to mark message %d as read: %v", id, err)
 	}
+	message.Seen = true
 
 	data := MessageData{
 		PageData: PageData{

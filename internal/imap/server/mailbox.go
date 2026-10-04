@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/notify"
 	"github.com/ddletotam/ddmailserver/internal/parser"
 	"github.com/ddletotam/ddmailserver/internal/search"
+	msgsvc "github.com/ddletotam/ddmailserver/internal/service/messages"
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
 	"github.com/emersion/go-imap"
 )
@@ -566,6 +568,37 @@ func (m *Mailbox) storeAppended(flags []string, date time.Time, data []byte) (ui
 	return nextUID, false, nil
 }
 
+// messageService returns the shared message service; a Mailbox built without
+// a backend (tests) gets one over its own database handle.
+func (m *Mailbox) messageService() *msgsvc.Service {
+	if m.backend != nil && m.backend.messages != nil {
+		return m.backend.messages
+	}
+	return msgsvc.NewWithDB(m.database)
+}
+
+// imapFlagUpdate translates a STORE into a flag update. FLAGS (SetFlags)
+// replaces \Seen \Flagged \Answered \Deleted — unlisted ones are cleared —
+// while +FLAGS/-FLAGS touch only the listed ones. \Draft and keywords are not
+// stored through IMAP (never were); they are ignored here.
+func imapFlagUpdate(operation imap.FlagsOp, flags []string) msgsvc.FlagUpdate {
+	var update msgsvc.FlagUpdate
+	if operation == imap.SetFlags {
+		f := msgsvc.Bool(false)
+		update = msgsvc.FlagUpdate{Seen: f, Flagged: f, Answered: f, Deleted: f}
+	}
+	value := operation != imap.RemoveFlags
+	for _, flag := range flags {
+		switch flag {
+		case imap.SeenFlag, imap.FlaggedFlag, imap.AnsweredFlag, imap.DeletedFlag:
+			if u, ok := msgsvc.FlagUpdateFor(flag, value); ok {
+				update = update.Merge(u)
+			}
+		}
+	}
+	return update
+}
+
 // UpdateMessagesFlags updates message flags
 func (m *Mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, operation imap.FlagsOp, flags []string) error {
 	log.Printf("UpdateMessagesFlags called: mailbox=%s, uid=%v, seqSet=%v, operation=%v, flags=%v",
@@ -576,6 +609,8 @@ func (m *Mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, operation i
 	if err != nil {
 		return err
 	}
+
+	update := imapFlagUpdate(operation, flags)
 
 	// Update matching messages
 	updatedAny := false
@@ -589,78 +624,25 @@ func (m *Mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, operation i
 			continue
 		}
 
-		// SetFlags replaces all flags, AddFlags/RemoveFlags modify existing
-		var seen, flagged, answered, deleted bool
-		if operation == imap.SetFlags {
-			seen, flagged, answered, deleted = false, false, false, false
-		} else {
-			seen = msg.Seen
-			flagged = msg.Flagged
-			answered = msg.Answered
-			deleted = msg.Deleted
-		}
-
-		for _, flag := range flags {
-			switch flag {
-			case imap.SeenFlag:
-				if operation == imap.RemoveFlags {
-					seen = false
-				} else {
-					seen = true
-				}
-			case imap.FlaggedFlag:
-				if operation == imap.RemoveFlags {
-					flagged = false
-				} else {
-					flagged = true
-				}
-			case imap.AnsweredFlag:
-				if operation == imap.RemoveFlags {
-					answered = false
-				} else {
-					answered = true
-				}
-			case imap.DeletedFlag:
-				if operation == imap.RemoveFlags {
-					deleted = false
-				} else {
-					deleted = true
-				}
-			}
-		}
-
-		err := m.database.UpdateMessageFlags(msg.ID, seen, flagged, answered, deleted)
+		// One path for every flag change (IMAP, desktop API, web): the
+		// service writes the flags and, for an external-account message,
+		// queues the new state for the source server — in one transaction.
+		res, err := m.messageService().SetFlags(context.Background(), m.user.userID, msg.ID, update)
 		if err != nil {
 			log.Printf("Failed to update flags for message %d: %v", msg.ID, err)
-		} else {
-			updatedAny = true
-			log.Printf("Updated flags for message %d: seen=%v, flagged=%v, answered=%v, deleted=%v",
-				msg.ID, seen, flagged, answered, deleted)
+			continue
+		}
+		updatedAny = true
+		after := res.After
+		log.Printf("Updated flags for message %d: seen=%v, flagged=%v, answered=%v, deleted=%v",
+			msg.ID, after.Seen, after.Flagged, after.Answered, after.Deleted)
 
-			// Push untagged FETCH (FLAGS) so other sessions — and the
-			// non-silent originator — see the change (go-imap suppresses
-			// its own FETCH responses when a backend Updates channel exists).
-			if m.backend != nil {
-				m.backend.notifyFlags(m.user.username, m.name, uint32(seqNum+1), msg.UID,
-					flagList(seen, flagged, answered, deleted))
-			}
-
-			// Queue for reverse sync to external IMAP server (if applicable)
-			// Only queue if message has remote UID (external account, not local
-			// delivery) AND the STORE actually moved something: clients re-assert
-			// \Seen on an already-read message routinely (Thunderbird does it on
-			// every open). Such a row costs a pointless remote STORE, and — since
-			// a pending row now freezes the flag columns against the upstream
-			// pull — it would also keep a genuine remote-side change (marked
-			// unread in another client of the SOURCE account) waiting for the
-			// next push cycle.
-			flagsMoved := seen != msg.Seen || flagged != msg.Flagged ||
-				answered != msg.Answered || deleted != msg.Deleted
-			if flagsMoved && msg.AccountID > 0 && msg.RemoteUID > 0 {
-				if err := m.database.QueueFlagSync(msg.ID, msg.AccountID, msg.RemoteFolder, msg.RemoteUID, seen, flagged, answered, deleted); err != nil {
-					log.Printf("Failed to queue flag sync for message %d: %v", msg.ID, err)
-				}
-			}
+		// Push untagged FETCH (FLAGS) so other sessions — and the
+		// non-silent originator — see the change (go-imap suppresses
+		// its own FETCH responses when a backend Updates channel exists).
+		if m.backend != nil {
+			m.backend.notifyFlags(m.user.username, m.name, uint32(seqNum+1), msg.UID,
+				flagList(after.Seen, after.Flagged, after.Answered, after.Deleted))
 		}
 	}
 

@@ -16,12 +16,16 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/notify"
 	"github.com/ddletotam/ddmailserver/internal/oauth"
 	"github.com/ddletotam/ddmailserver/internal/search"
+	msgsvc "github.com/ddletotam/ddmailserver/internal/service/messages"
 	"github.com/gorilla/mux"
 )
 
 // Server represents the web server
 type Server struct {
-	database        *db.DB
+	database *db.DB
+	// messages owns message mutations (flags, delete, purge) and the
+	// upstream sync they imply — shared with the IMAP server.
+	messages        *msgsvc.Service
 	jwtSecret       string
 	router          *mux.Router
 	addr            string
@@ -70,6 +74,7 @@ func New(database *db.DB, jwtSecret string, host string, port int, locale string
 	s := &Server{
 		clientIP:        clientip.Default(),
 		database:        database,
+		messages:        msgsvc.NewWithDB(database),
 		jwtSecret:       jwtSecret,
 		router:          mux.NewRouter(),
 		addr:            addr,

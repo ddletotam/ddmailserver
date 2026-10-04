@@ -17,6 +17,10 @@ import (
 //   - retry/backoff state resets, so a fresh local change is attempted
 //     immediately instead of inheriting the previous failure's backoff.
 func (db *DB) QueueFlagSync(messageID, accountID int64, remoteFolder string, remoteUID uint32, seen, flagged, answered, deleted bool) error {
+	return queueFlagSync(db, messageID, accountID, remoteFolder, remoteUID, seen, flagged, answered, deleted)
+}
+
+func queueFlagSync(q querier, messageID, accountID int64, remoteFolder string, remoteUID uint32, seen, flagged, answered, deleted bool) error {
 	query := `
 		INSERT INTO flag_sync_queue (message_id, account_id, remote_folder, remote_uid, seen, flagged, answered, deleted, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -31,7 +35,7 @@ func (db *DB) QueueFlagSync(messageID, accountID int64, remoteFolder string, rem
 			next_attempt_at = 0
 	`
 
-	_, err := db.Exec(query, messageID, accountID, remoteFolder, remoteUID, seen, flagged, answered, deleted, timeutil.Now())
+	_, err := q.Exec(query, messageID, accountID, remoteFolder, remoteUID, seen, flagged, answered, deleted, timeutil.Now())
 	if err != nil {
 		return fmt.Errorf("failed to queue flag sync: %w", err)
 	}

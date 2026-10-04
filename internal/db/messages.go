@@ -232,46 +232,8 @@ func (db *DB) GetMessageByID(id int64) (*models.Message, error) {
 	return msg, nil
 }
 
-// UpdateMessageFlags updates message flags
-func (db *DB) UpdateMessageFlags(id int64, seen, flagged, answered, deleted bool) error {
-	query := `
-		UPDATE messages
-		SET seen = $1, flagged = $2, answered = $3, deleted = $4, updated_at = $5
-		WHERE id = $6
-	`
-
-	_, err := db.Exec(query, seen, flagged, answered, deleted, timeutil.Now(), id)
-	if err != nil {
-		return fmt.Errorf("failed to update message flags: %w", err)
-	}
-
-	return nil
-}
-
-// UpdateMessageFlag sets a single flag on a message.
-func (db *DB) UpdateMessageFlag(id int64, flag string, value bool) error {
-	query := fmt.Sprintf(`UPDATE messages SET %s = $1, updated_at = $2 WHERE id = $3`, flag)
-	_, err := db.Exec(query, value, timeutil.Now(), id)
-	return err
-}
-
-// UpdateMessage updates a message
-func (db *DB) UpdateMessage(msg *models.Message) error {
-	msg.UpdatedAt = timeutil.Now()
-
-	query := `
-		UPDATE messages SET
-			seen = $1, flagged = $2, answered = $3, draft = $4, deleted = $5, updated_at = $6
-		WHERE id = $7
-	`
-
-	_, err := db.Exec(query, msg.Seen, msg.Flagged, msg.Answered, msg.Draft, msg.Deleted, msg.UpdatedAt, msg.ID)
-	if err != nil {
-		return fmt.Errorf("failed to update message: %w", err)
-	}
-
-	return nil
-}
+// Flag changes go through internal/service/messages (Tx.SetMessageFlags):
+// it is the one place that also queues the upstream sync.
 
 // UpdateMessageAttachmentCount updates the attachment count for a message
 func (db *DB) UpdateMessageAttachmentCount(id int64, count int) error {
@@ -735,6 +697,10 @@ func (db *DB) GetNextUIDForFolder(folderID int64) (uint32, error) {
 
 // SoftDeleteMessage marks a message as soft deleted (moves to vault)
 func (db *DB) SoftDeleteMessage(id int64) error {
+	return softDeleteMessage(db, id)
+}
+
+func softDeleteMessage(q querier, id int64) error {
 	now := timeutil.Now()
 	query := `
 		UPDATE messages
@@ -742,7 +708,7 @@ func (db *DB) SoftDeleteMessage(id int64) error {
 		WHERE id = $2
 	`
 
-	_, err := db.Exec(query, now, id)
+	_, err := q.Exec(query, now, id)
 	if err != nil {
 		return fmt.Errorf("failed to soft delete message: %w", err)
 	}

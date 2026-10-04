@@ -10,13 +10,17 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/notify"
 	"github.com/ddletotam/ddmailserver/internal/search"
+	msgsvc "github.com/ddletotam/ddmailserver/internal/service/messages"
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/backend"
 )
 
 // Backend implements IMAP backend with BackendUpdater support for IDLE
 type Backend struct {
-	database      *db.DB
+	database *db.DB
+	// messages is the single path for flag changes (and the upstream sync
+	// they imply), shared with the desktop API and the web UI.
+	messages      *msgsvc.Service
 	hub           *notify.Hub
 	updates       chan backend.Update
 	searchIndexer *search.Indexer
@@ -29,6 +33,7 @@ type Backend struct {
 func NewBackend(database *db.DB) *Backend {
 	return &Backend{
 		database:  database,
+		messages:  msgsvc.NewWithDB(database),
 		updates:   make(chan backend.Update, 100),
 		bodyCache: newBodyCache(),
 	}
@@ -38,6 +43,7 @@ func NewBackend(database *db.DB) *Backend {
 func NewBackendWithHub(database *db.DB, hub *notify.Hub) *Backend {
 	b := &Backend{
 		database:  database,
+		messages:  msgsvc.NewWithDB(database),
 		hub:       hub,
 		updates:   make(chan backend.Update, 100),
 		bodyCache: newBodyCache(),

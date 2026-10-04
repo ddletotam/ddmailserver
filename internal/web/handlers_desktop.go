@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/notify"
 	"github.com/ddletotam/ddmailserver/internal/parser"
+	msgsvc "github.com/ddletotam/ddmailserver/internal/service/messages"
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
 	"github.com/gorilla/mux"
 	"github.com/lib/pq"
@@ -403,69 +405,40 @@ func (s *Server) HandleDesktopSetFlags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Unknown flag names (keywords) were always a silent no-op here.
+	update, known := msgsvc.FlagUpdateFor(req.Flags, req.Add)
+
 	anyVisibleChange := false
 	changedFolder := ""
+	failed := 0
 	for _, ref := range req.Messages {
+		if !known {
+			break
+		}
 		msg := s.resolveMsgRef(user.ID, ref.MessageID, ref.UID)
 		if msg == nil {
 			continue
 		}
 
-		// Compute the post-update flag state up-front so we can queue
-		// the remote sync with the right snapshot. StoreFlags on the
-		// upstream is SET (replace-all), not ADD/REMOVE, so we have to
-		// pass the full state — not just the bit that changed.
-		newSeen, newFlagged, newAnswered := msg.Seen, msg.Flagged, msg.Answered
-		propagate := false
-		switch req.Flags {
-		case "\\Seen":
-			s.database.UpdateMessageFlag(msg.ID, "seen", req.Add)
-			newSeen = req.Add
-			propagate = true
-		case "\\Flagged":
-			s.database.UpdateMessageFlag(msg.ID, "flagged", req.Add)
-			newFlagged = req.Add
-			propagate = true
-		case "\\Answered":
-			s.database.UpdateMessageFlag(msg.ID, "answered", req.Add)
-			newAnswered = req.Add
-			propagate = true
-		case "\\Deleted":
-			// Explicit \Deleted via this endpoint is rare (the dedicated
-			// /messages/delete handler is the normal path and proxies
-			// the delete via DeleteMessageRemote). Keep the local DB
-			// update for behavioural parity but don't queue here — the
-			// dedicated handler is the single-source-of-truth for the
-			// delete-on-remote dance.
-			s.database.UpdateMessageFlag(msg.ID, "deleted", req.Add)
-		case "\\Draft":
-			s.database.UpdateMessageFlag(msg.ID, "draft", req.Add)
+		// Same path as IMAP STORE: the service writes the flag and queues
+		// the full post-update state for an external account's source
+		// server, atomically; a no-op re-assert writes and queues nothing.
+		res, err := s.messageService().SetFlags(r.Context(), user.ID, msg.ID, update)
+		if err != nil {
+			if errors.Is(err, msgsvc.ErrNotFound) {
+				continue
+			}
+			log.Printf("desktop set-flags: msg %d: %v", msg.ID, err)
+			failed++
+			continue
 		}
 
-		// Did this call actually move the flag? Only seen/flagged/answered are
-		// user-visible unread-state changes worth a push; \Deleted and \Draft
-		// ride their own flows.
-		flagsMoved := (req.Flags == "\\Seen" && msg.Seen != req.Add) ||
-			(req.Flags == "\\Flagged" && msg.Flagged != req.Add) ||
-			(req.Flags == "\\Answered" && msg.Answered != req.Add)
-
-		if propagate && flagsMoved {
+		// Only seen/flagged/answered are user-visible unread-state changes
+		// worth a push; \Deleted and \Draft ride their own flows.
+		if res.VisibleChanged() {
 			anyVisibleChange = true
 			if changedFolder == "" {
 				changedFolder = ref.Folder
-			}
-		}
-
-		// A no-op re-assert (the client marks an already-read message read
-		// again) must not enter the queue: it costs a pointless remote STORE,
-		// and a pending row now freezes the flag columns against the upstream
-		// pull, so it would also delay a genuine remote-side change.
-		if propagate && flagsMoved && msg.AccountID > 0 && msg.RemoteUID > 0 {
-			if err := s.database.QueueFlagSync(
-				msg.ID, msg.AccountID, msg.RemoteFolder, msg.RemoteUID,
-				newSeen, newFlagged, newAnswered, false,
-			); err != nil {
-				log.Printf("desktop set-flags: queue flag sync failed for msg %d: %v", msg.ID, err)
 			}
 		}
 	}
@@ -481,7 +454,23 @@ func (s *Server) HandleDesktopSetFlags(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// A failed write used to be swallowed and reported as "ok": the client
+	// showed the new state, the server never stored it. Every message is
+	// still attempted (the update is idempotent, a retry is safe).
+	if failed > 0 {
+		respondError(w, http.StatusInternalServerError, "set flags failed")
+		return
+	}
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// messageService returns the shared message service; a Server built without
+// New (tests) gets one over its own database handle.
+func (s *Server) messageService() *msgsvc.Service {
+	if s.messages != nil {
+		return s.messages
+	}
+	return msgsvc.NewWithDB(s.database)
 }
 
 // HandleDesktopMarkSpamByDomain implements the sidebar's "Spam by domain"
