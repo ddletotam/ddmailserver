@@ -206,6 +206,14 @@
                 </div>
                 {{end}}
 
+                {{with .AuthFailure}}
+                <div class="alert alert-danger mt-2 mb-0 py-1 px-2 small">
+                    <i class="ti ti-lock-exclamation me-1"></i><strong>{{t "auth_rejected.title"}}</strong>
+                    {{t "auth_rejected.since"}} {{fmtTime .Since "02 Jan 15:04"}}, {{t "auth_rejected.next"}} {{fmtTime .NextAttemptAt "02 Jan 15:04"}}.
+                    {{t "auth_rejected.action"}}
+                    <div class="text-muted text-truncate" title="{{.LastError}}">{{.LastError}}</div>
+                </div>
+                {{end}}
                 {{if .LastError}}
                 <div class="alert alert-danger mt-2 mb-0 py-1 px-2 small">
                     {{.LastError}}

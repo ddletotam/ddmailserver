@@ -254,6 +254,9 @@ func (s *Server) HandleGetAccounts(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, "failed to get accounts")
 		return
 	}
+	if err := s.database.AttachAccountAuthFailures(userID, accounts); err != nil {
+		log.Printf("Failed to get auth failures: %v", err)
+	}
 
 	respondJSON(w, http.StatusOK, accounts)
 }
@@ -456,6 +459,7 @@ func (s *Server) HandleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("Account updated: %s", account.Email)
+	s.credentialsChanged()
 
 	respondJSON(w, http.StatusOK, account)
 }

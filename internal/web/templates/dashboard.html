@@ -1,4 +1,15 @@
 {{define "content"}}
+{{if .AuthFailureCount}}
+<div class="alert alert-danger mb-4">
+    <div class="d-flex align-items-center">
+        <i class="ti ti-lock-exclamation me-2 fs-2"></i>
+        <div>
+            <h4 class="alert-title">{{t "auth_rejected.dashboard_title"}}</h4>
+            <div class="text-muted">{{t "auth_rejected.dashboard_text"}} {{.AuthFailureCount}}. <a href="/accounts" class="alert-link">{{t "auth_rejected.check"}}</a></div>
+        </div>
+    </div>
+</div>
+{{end}}
 {{if .ErrorAccountCount}}
 <div class="alert alert-danger mb-4">
     <div class="d-flex align-items-center">

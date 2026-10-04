@@ -196,6 +196,7 @@ func (s *Server) HandleUpdateCalendarSource(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "Failed to update calendar source", http.StatusInternalServerError)
 		return
 	}
+	s.credentialsChanged()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(existing)

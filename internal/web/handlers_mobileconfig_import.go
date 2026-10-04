@@ -293,6 +293,9 @@ func (s *Server) HandleImportMobileconfig(w http.ResponseWriter, r *http.Request
 
 	log.Printf("mobileconfig import: user %d — account %s (id %d), calendar source %d, contact source %d",
 		userID, result.AccountAction, result.AccountID, result.CalendarSourceID, result.ContactSourceID)
+	// A replaced account had its login pause lifted with the new
+	// credentials; sync now rather than at the next tick.
+	s.credentialsChanged()
 
 	// Tell any connected desktop client that its account set just changed.
 	// Identities are cached there and refreshed only on a full sync, so

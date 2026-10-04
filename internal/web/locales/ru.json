@@ -460,5 +460,12 @@
   "settings.app_password_revoke": "Отозвать",
   "settings.app_password_revoked": "отозван",
   "settings.app_password_revoke_confirm": "Отозвать этот пароль? Устройства, которые им пользуются, перестанут подключаться.",
-  "settings.app_passwords_empty": "Паролей приложений пока нет."
+  "settings.app_passwords_empty": "Паролей приложений пока нет.",
+  "auth_rejected.title": "Пароль не принят провайдером",
+  "auth_rejected.since": "с",
+  "auth_rejected.next": "следующая попытка в",
+  "auth_rejected.action": "Обновите пароль — сервер сразу попробует снова.",
+  "auth_rejected.dashboard_title": "Провайдеры не принимают пароль",
+  "auth_rejected.dashboard_text": "Вход приостановлен до обновления пароля. Затронуто аккаунтов и источников:",
+  "auth_rejected.check": "Проверить аккаунты"
 }

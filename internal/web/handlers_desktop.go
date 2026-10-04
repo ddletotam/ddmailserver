@@ -730,11 +730,16 @@ func (s *Server) HandleDesktopIdentities(w http.ResponseWriter, r *http.Request)
 		// each event.
 		CanCreateEvents   bool `json:"can_create_events"`
 		CanCreateContacts bool `json:"can_create_contacts"`
+		// Credentials of this identity's account or sources that the
+		// provider rejects, with the login pause (contract §5д-тер).
+		// Absent when everything logs in fine.
+		AuthFailures []models.AuthFailureView `json:"auth_failures,omitempty"`
 	}
 
 	// Writable-identity sets (best-effort: on error, capabilities stay false).
 	calWritable, _ := s.database.WritableCalendarIdentities(user.ID)
 	contactWritable, _ := s.database.WritableContactIdentities(user.ID)
+	authFailures := s.identityAuthFailures(user.ID)
 	mkIdentity := func(email, name string, isDefault bool) Identity {
 		return Identity{
 			Email:             email,
@@ -742,6 +747,7 @@ func (s *Server) HandleDesktopIdentities(w http.ResponseWriter, r *http.Request)
 			IsDefault:         isDefault,
 			CanCreateEvents:   calWritable[email],
 			CanCreateContacts: contactWritable[email],
+			AuthFailures:      authFailures[strings.ToLower(email)],
 		}
 	}
 
@@ -778,6 +784,53 @@ func (s *Server) HandleDesktopIdentities(w http.ResponseWriter, r *http.Request)
 	}
 
 	respondJSON(w, http.StatusOK, identities)
+}
+
+// identityAuthFailures groups the user's rejected credentials by identity
+// address (lowercased): an account's IMAP/SMTP under its address and every
+// alias (they send through the same SMTP login), a calendar or contact source
+// under its identity_email. Best-effort: on error nothing is reported.
+func (s *Server) identityAuthFailures(userID int64) map[string][]models.AuthFailureView {
+	out := make(map[string][]models.AuthFailureView)
+	states, err := s.database.GetAuthBackoffsByUser(userID)
+	if err != nil {
+		log.Printf("desktop identities: auth failures: %v", err)
+		return out
+	}
+	if len(states) == 0 {
+		return out
+	}
+	add := func(email string, st *models.AuthBackoff) {
+		if email = strings.ToLower(strings.TrimSpace(email)); email != "" {
+			out[email] = append(out[email], st.View())
+		}
+	}
+	for _, st := range states {
+		switch st.SubjectKind {
+		case models.AuthSubjectIMAP, models.AuthSubjectSMTP:
+			acc, err := s.database.GetAccountByID(st.SubjectID)
+			if err != nil || acc.UserID != userID {
+				continue
+			}
+			add(acc.Email, st)
+			for _, alias := range acc.GetAliases() {
+				add(alias, st)
+			}
+		case models.AuthSubjectCalDAV:
+			src, err := s.database.GetCalendarSourceByID(st.SubjectID)
+			if err != nil || src == nil || src.UserID != userID {
+				continue
+			}
+			add(src.IdentityEmail, st)
+		case models.AuthSubjectCardDAV:
+			src, err := s.database.GetContactSourceByID(st.SubjectID)
+			if err != nil || src == nil || src.UserID != userID {
+				continue
+			}
+			add(src.IdentityEmail, st)
+		}
+	}
+	return out
 }
 
 // ── Send ──

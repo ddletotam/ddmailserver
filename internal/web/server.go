@@ -52,6 +52,9 @@ type Server struct {
 	// triggerOutbox asks the scheduler to send queued mail immediately instead
 	// of waiting for its next tick. Optional; see SetOutboxTrigger.
 	triggerOutbox func()
+	// triggerCycle asks the scheduler for one scheduling pass now. Optional;
+	// see SetCycleTrigger.
+	triggerCycle func()
 
 	// publicEndpoints is what device profiles tell clients to connect to —
 	// the internet-facing hostname and ports, which are not the ports this
@@ -460,6 +463,23 @@ func (s *Server) SetNotifyHub(hub *notify.Hub) {
 // nil just means the message goes out on the next tick, as before.
 func (s *Server) SetOutboxTrigger(trigger func()) {
 	s.triggerOutbox = trigger
+}
+
+// SetCycleTrigger wires the scheduler's «run a pass now» hook.
+//
+// Editing an account or a source lifts its login pause (the provider rejected
+// the old credentials, see package authfail); with this the new credentials
+// are tried within seconds instead of at the next tick. Optional.
+func (s *Server) SetCycleTrigger(trigger func()) {
+	s.triggerCycle = trigger
+}
+
+// credentialsChanged is called after the user saved an account or source:
+// the DB layer has already lifted its login pause; run the sync pass now.
+func (s *Server) credentialsChanged() {
+	if s.triggerCycle != nil {
+		s.triggerCycle()
+	}
 }
 
 // kickOutbox asks the scheduler to send queued mail now, if a trigger is wired.

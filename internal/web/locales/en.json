@@ -460,5 +460,12 @@
   "settings.app_password_revoke": "Revoke",
   "settings.app_password_revoked": "revoked",
   "settings.app_password_revoke_confirm": "Revoke this password? Any device using it will stop connecting.",
-  "settings.app_passwords_empty": "No application passwords yet."
+  "settings.app_passwords_empty": "No application passwords yet.",
+  "auth_rejected.title": "Password not accepted by the provider",
+  "auth_rejected.since": "since",
+  "auth_rejected.next": "next attempt at",
+  "auth_rejected.action": "Update the password — the server will try again right away.",
+  "auth_rejected.dashboard_title": "Passwords rejected by providers",
+  "auth_rejected.dashboard_text": "Logins are paused until the password is updated. Affected accounts and sources:",
+  "auth_rejected.check": "Check accounts"
 }

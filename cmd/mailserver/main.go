@@ -389,6 +389,9 @@ func main() {
 	// waits for the next scheduler cycle, delaying every send by up to one
 	// interval.
 	webSrv.SetOutboxTrigger(scheduler.TriggerOutbox)
+	// Saving an account or source lifts its login pause (rejected
+	// credentials); this hook tries the new ones right away.
+	webSrv.SetCycleTrigger(scheduler.TriggerCycle)
 	if searchIndexer != nil {
 		webSrv.SetSearchIndexer(searchIndexer)
 	}

@@ -54,6 +54,9 @@ type DashboardData struct {
 	UnreadCount       int
 	CalendarCount     int
 	ErrorAccountCount int
+	// AuthFailureCount: accounts/sources whose credentials the provider
+	// rejects (auth_backoff rows).
+	AuthFailureCount int
 }
 
 type AccountsData struct {
@@ -213,6 +216,12 @@ func (s *Server) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 			errorCount++
 		}
 	}
+	// Credentials the providers reject: louder than a sync error — it will
+	// not heal by itself, and logins are paused until the user acts.
+	authFailures, err := s.database.GetAuthBackoffsByUser(user.ID)
+	if err != nil {
+		log.Printf("Failed to get auth failures: %v", err)
+	}
 
 	data := DashboardData{
 		PageData: PageData{
@@ -224,6 +233,7 @@ func (s *Server) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 		UnreadCount:       unreadCount,
 		CalendarCount:     len(calendars),
 		ErrorAccountCount: errorCount,
+		AuthFailureCount:  len(authFailures),
 	}
 
 	s.renderTemplate(w, "dashboard.html", data)
@@ -263,6 +273,9 @@ func (s *Server) HandleAccountsList(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Error getting accounts: %v", err)
 		http.Error(w, "Error loading accounts", http.StatusInternalServerError)
 		return
+	}
+	if err := s.database.AttachAccountAuthFailures(user.ID, accounts); err != nil {
+		log.Printf("Error getting auth failures: %v", err)
 	}
 
 	data := AccountsData{
@@ -428,9 +441,11 @@ func (s *Server) HandleSaveAccount(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Account saved: %s for user %d", account.Email, user.ID)
 
-	// Clear sync errors on edit — credentials may have changed
+	// Clear sync errors on edit — credentials may have changed. The login
+	// pause after rejected credentials was lifted by UpdateAccount; try now.
 	if account.ID > 0 {
 		_ = s.database.ClearAccountSyncError(account.ID)
+		s.credentialsChanged()
 	}
 
 	// Redirect to accounts page
@@ -503,6 +518,9 @@ func (s *Server) HandleSyncAccountWeb(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	task := imapclient.NewSyncTask(account, s.database)
+	// The user clicked: one login even if the account is paused after
+	// rejected credentials (the outcome updates the pause as usual).
+	task.SetManual(true)
 	syncErr := task.Execute(ctx)
 
 	w.Header().Set("Content-Type", "text/html")
@@ -541,12 +559,18 @@ func (s *Server) HandleToggleAccountWeb(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Failed to update account", http.StatusInternalServerError)
 		return
 	}
+	if account.Enabled {
+		s.credentialsChanged()
+	}
 
 	// Return updated list via HTMX
 	accounts, err := s.database.GetAccountsByUserID(user.ID)
 	if err != nil {
 		http.Error(w, "Failed to load accounts", http.StatusInternalServerError)
 		return
+	}
+	if err := s.database.AttachAccountAuthFailures(user.ID, accounts); err != nil {
+		log.Printf("Error getting auth failures: %v", err)
 	}
 
 	data := AccountsData{Accounts: accounts}

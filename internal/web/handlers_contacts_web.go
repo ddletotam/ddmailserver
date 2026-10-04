@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	carddavclient "github.com/ddletotam/ddmailserver/internal/carddav/client"
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/oauth"
@@ -88,6 +89,9 @@ func (s *Server) HandleContactSourcesList(w http.ResponseWriter, r *http.Request
 		log.Printf("Failed to get contact sources: %v", err)
 		http.Error(w, "Failed to load sources", http.StatusInternalServerError)
 		return
+	}
+	if err := s.database.AttachContactSourceAuthFailures(user.ID, sources); err != nil {
+		log.Printf("Failed to get auth failures: %v", err)
 	}
 
 	data := ContactSourcesListData{
@@ -264,6 +268,7 @@ func (s *Server) HandleUpdateContactSourceWeb(w http.ResponseWriter, r *http.Req
 		http.Error(w, "Failed to update source", http.StatusInternalServerError)
 		return
 	}
+	s.credentialsChanged()
 
 	s.HandleContactSourcesList(w, r)
 }
@@ -380,7 +385,7 @@ func (s *Server) refreshContactOAuthTokensIfNeeded(source *models.ContactSource)
 
 	// Need refresh token
 	if source.OAuthRefreshToken == "" {
-		return fmt.Errorf("no refresh token available, please re-authenticate")
+		return authfail.Mark(fmt.Errorf("no refresh token available, please re-authenticate"))
 	}
 
 	log.Printf("Refreshing OAuth token for contact source %s (expires: %v)", source.Name, source.OAuthTokenExpiry)

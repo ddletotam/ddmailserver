@@ -17,7 +17,7 @@ var wsUpgrader = websocket.Upgrader{
 
 // WSEvent is the JSON frame sent to the client over WebSocket.
 type WSEvent struct {
-	Type       string `json:"type"`                  // "new_message", "flags_changed", "expunge", "calendar_updated", "identities_changed"
+	Type       string `json:"type"`                  // "new_message", "flags_changed", "expunge", "calendar_updated", "identities_changed", "auth_failed"
 	UserID     int64  `json:"user_id"`               // For filtering
 	Folder     string `json:"folder,omitempty"`      // Mailbox name (mail events)
 	Count      uint32 `json:"count,omitempty"`       // Message count for EXISTS (mail events)
@@ -27,6 +27,13 @@ type WSEvent struct {
 	Subject   string `json:"subject,omitempty"`
 	MessageID int64  `json:"message_id,omitempty"` // = the client's native-mode uid
 	NewCount  int    `json:"new_count,omitempty"`
+	// auth_failed: whose credentials the provider rejects and until when
+	// the server pauses logging in (contract §5д-тер).
+	Identity      string `json:"identity,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Service       string `json:"service,omitempty"`
+	Since         int64  `json:"since,omitempty"`
+	NextAttemptAt int64  `json:"next_attempt_at,omitempty"`
 }
 
 // HandleDesktopWebSocket upgrades to WebSocket and streams push events.
@@ -102,6 +109,12 @@ func (s *Server) HandleDesktopWebSocket(w http.ResponseWriter, r *http.Request) 
 				Subject:    event.Subject,
 				MessageID:  event.MessageID,
 				NewCount:   event.NewCount,
+
+				Identity:      event.Identity,
+				Name:          event.SubjectName,
+				Service:       event.Service,
+				Since:         event.Since,
+				NextAttemptAt: event.NextAttemptAt,
 			}
 			data, _ := json.Marshal(wsEvent)
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))

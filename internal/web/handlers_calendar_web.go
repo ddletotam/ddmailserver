@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/authfail"
 	caldavutil "github.com/ddletotam/ddmailserver/internal/caldav"
 	caldavclient "github.com/ddletotam/ddmailserver/internal/caldav/client"
 	"github.com/ddletotam/ddmailserver/internal/caldav/importer"
@@ -84,6 +85,9 @@ func (s *Server) HandleCalendarSourcesList(w http.ResponseWriter, r *http.Reques
 		log.Printf("Failed to get calendar sources: %v", err)
 		http.Error(w, "Failed to load sources", http.StatusInternalServerError)
 		return
+	}
+	if err := s.database.AttachCalendarSourceAuthFailures(user.ID, sources); err != nil {
+		log.Printf("Failed to get auth failures: %v", err)
 	}
 
 	data := CalendarSourcesListData{
@@ -408,7 +412,7 @@ func (s *Server) refreshOAuthTokensIfNeeded(source *models.CalendarSource) error
 
 	// Need refresh token
 	if source.OAuthRefreshToken == "" {
-		return fmt.Errorf("no refresh token available, please re-authenticate")
+		return authfail.Mark(fmt.Errorf("no refresh token available, please re-authenticate"))
 	}
 
 	log.Printf("Refreshing OAuth token for %s (expires: %v)", source.Name, source.OAuthTokenExpiry)
@@ -768,6 +772,7 @@ func (s *Server) HandleUpdateCalendarSourceWeb(w http.ResponseWriter, r *http.Re
 		http.Error(w, "Failed to update source", http.StatusInternalServerError)
 		return
 	}
+	s.credentialsChanged()
 
 	// Return updated sources list
 	s.HandleCalendarSourcesList(w, r)
