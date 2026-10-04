@@ -12,6 +12,7 @@ import (
 
 	"github.com/emersion/go-message"
 	"github.com/yourusername/mailserver/internal/caldav/importer"
+	"github.com/yourusername/mailserver/internal/clientip"
 	"github.com/yourusername/mailserver/internal/config"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/dkimsign"
@@ -57,6 +58,12 @@ func main() {
 	}
 
 	log.Printf("Configuration loaded successfully")
+
+	// Which proxies' X-Forwarded-* headers to believe (default: loopback).
+	clientIPResolver, err := clientip.New(cfg.Security.TrustedProxies)
+	if err != nil {
+		log.Fatalf("Invalid security.trusted_proxies: %v", err)
+	}
 
 	// Connect to database
 	log.Printf("Connecting to database at %s:%d", cfg.Database.Host, cfg.Database.Port)
@@ -312,6 +319,7 @@ func main() {
 	log.Printf("Initializing web server...")
 	webSrv := web.New(database, cfg.Security.JWTSecret, cfg.Server.WebHost, cfg.Server.WebPort, cfg.Server.Locale, &cfg.OAuth)
 	webSrv.SetSyncIntervalSec(cfg.Sync.Interval)
+	webSrv.SetClientIPResolver(clientIPResolver)
 	webSrv.SetNotifyHub(notifyHub)
 	// What device profiles tell clients to connect to. Not the listen ports:
 	// this deployment binds 10993/10465 behind a firewall redirect from

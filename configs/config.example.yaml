@@ -34,6 +34,11 @@ security:
   tls_cert: ""
   tls_key: ""
 
+  # Proxies whose X-Forwarded-For / X-Real-IP / X-Forwarded-Host headers are
+  # trusted (IPs or CIDRs). Omit to trust loopback only (nginx on this host);
+  # an explicit empty list [] trusts nobody.
+  # trusted_proxies: ["127.0.0.0/8", "::1/128"]
+
 # Sync settings
 sync:
   # How often to check for new emails (in seconds)

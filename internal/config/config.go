@@ -130,6 +130,11 @@ type SecurityConfig struct {
 	EncryptionKey string `yaml:"encryption_key"`
 	TLSCert       string `yaml:"tls_cert"`
 	TLSKey        string `yaml:"tls_key"`
+
+	// TrustedProxies lists IPs/CIDRs whose X-Forwarded-For, X-Real-IP and
+	// X-Forwarded-Host headers are believed. Unset means loopback only
+	// (nginx on the same host); an explicit empty list trusts nobody.
+	TrustedProxies []string `yaml:"trusted_proxies"`
 }
 
 type SyncConfig struct {

@@ -10,6 +10,7 @@ import (
 	"github.com/gorilla/mux"
 	caldavserver "github.com/yourusername/mailserver/internal/caldav/server"
 	carddavserver "github.com/yourusername/mailserver/internal/carddav/server"
+	"github.com/yourusername/mailserver/internal/clientip"
 	"github.com/yourusername/mailserver/internal/config"
 	"github.com/yourusername/mailserver/internal/db"
 	"github.com/yourusername/mailserver/internal/notify"
@@ -27,6 +28,9 @@ type Server struct {
 	i18n            *I18n        // default i18n (for backward compatibility)
 	i18nManager     *I18nManager // manages all locales
 	authRateLimiter *RateLimiter
+	// clientIP decides which forwarding headers to believe. Defaults to
+	// trusting loopback only; see SetClientIPResolver.
+	clientIP        *clientip.Resolver
 	oauthConfig     *config.OAuthConfig
 	googleOAuth     *oauth.GoogleOAuth
 	microsoftOAuth  *oauth.MicrosoftOAuth
@@ -58,6 +62,7 @@ func New(database *db.DB, jwtSecret string, host string, port int, locale string
 	}
 
 	s := &Server{
+		clientIP:        clientip.Default(),
 		database:        database,
 		jwtSecret:       jwtSecret,
 		router:          mux.NewRouter(),
@@ -456,6 +461,14 @@ func (s *Server) kickOutbox() {
 // SetSyncIntervalSec sets the sync interval for display in the UI
 func (s *Server) SetSyncIntervalSec(sec int) {
 	s.syncIntervalSec = sec
+}
+
+// SetClientIPResolver sets which proxies' forwarding headers are believed
+// when determining the client address and the requested host.
+func (s *Server) SetClientIPResolver(r *clientip.Resolver) {
+	if r != nil {
+		s.clientIP = r
+	}
 }
 
 // SetPublicEndpoints wires the internet-facing hostname and ports used when

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -157,32 +158,12 @@ func (s *Server) CORSMiddleware(next http.Handler) http.Handler {
 		origin := r.Header.Get("Origin")
 
 		if origin != "" {
-			isAllowed := false
-
-			// Get the actual host (check X-Forwarded-Host for reverse proxy setups)
-			host := r.Header.Get("X-Forwarded-Host")
-			if host == "" {
-				host = r.Host
-			}
-
-			// Check localhost for development
-			if strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1") {
-				isAllowed = true
-			}
-
-			// Check if origin's host EQUALS the actual host (handles reverse
-			// proxy). Substring matching is not enough: with Allow-Credentials
-			// it would accept e.g. https://mail.example.com.evil.com.
-			hostWithoutPort := strings.Split(host, ":")[0]
-			if originURL, err := url.Parse(origin); err == nil && originURL.Hostname() == hostWithoutPort {
-				isAllowed = true
-			}
-
-			if isAllowed {
+			w.Header().Add("Vary", "Origin")
+			if s.isAllowedOrigin(r, origin) {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Access-Control-Allow-Credentials", "true")
 			} else {
-				log.Printf("CORS rejected origin: %s (host: %s, x-forwarded: %s)", origin, r.Host, r.Header.Get("X-Forwarded-Host"))
+				log.Printf("CORS rejected origin: %s (host: %s, x-forwarded: %s, peer: %s)", origin, r.Host, r.Header.Get("X-Forwarded-Host"), r.RemoteAddr)
 				http.Error(w, "CORS origin not allowed", http.StatusForbidden)
 				return
 			}
@@ -208,6 +189,37 @@ func (s *Server) CORSMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isAllowedOrigin reports whether a credentialed cross-origin request from
+// origin may be served: either a local development origin, or one whose host
+// is exactly the host the client addressed. Prefix or substring matching is
+// not enough — with Allow-Credentials it would accept e.g.
+// http://localhost.evil.com or https://mail.example.com.evil.com.
+func (s *Server) isAllowedOrigin(r *http.Request, origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return false
+	}
+	originHost := strings.ToLower(u.Hostname())
+
+	switch originHost {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+
+	// X-Forwarded-Host only counts when it came from a trusted proxy.
+	host := hostWithoutPort(s.clientIP.RequestHost(r))
+	return host != "" && originHost == strings.ToLower(host)
+}
+
+// hostWithoutPort strips an optional port from a Host header value,
+// handling bracketed IPv6 literals.
+func hostWithoutPort(hostport string) string {
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		return h
+	}
+	return strings.Trim(hostport, "[]")
 }
 
 // LoggingMiddleware logs all requests
