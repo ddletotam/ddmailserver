@@ -123,16 +123,57 @@ func (a *Analyzer) AnalyzeWithDisabledChecks(msg *ParsedMessage, senderIP, fromD
 // SpamCheckCategories is the canonical list of named check categories the
 // analyzer accumulates score into. Each name is what UIs and DB rows use:
 // keep this in sync with `disabledChecks` keys + weight columns.
+//
+// The last three are opt-in (DefaultCategoryWeight = 0): heuristics ported
+// from the former second engine of the web "why spam" page. They never
+// scored deliveries, so switching them on is the user's call (weight > 0).
 var SpamCheckCategories = []string{
 	"chain", "spf", "rbl", "dkim", "headers", "content",
 	"attachments", "links", "embedded", "sender", "emojis",
+	"subject_heuristics", "sender_heuristics", "link_heuristics",
+}
+
+// DefaultCategoryWeight is the weight of a category the user has not set:
+// 1.0 for the stock categories, 0 (off) for the opt-in heuristics.
+func DefaultCategoryWeight(name string) float64 {
+	switch name {
+	case "subject_heuristics", "sender_heuristics", "link_heuristics":
+		return 0
+	}
+	return 1.0
+}
+
+// ruleHits collects the rules of one category that fired, in order.
+type ruleHits []ruleHit
+
+type ruleHit struct {
+	score  float64
+	reason string
+}
+
+func (h *ruleHits) add(score float64, reason string) {
+	*h = append(*h, ruleHit{score: score, reason: reason})
+}
+
+// total is the category's raw score — summed in firing order, exactly as the
+// category functions accumulated it before findings existed.
+func (h ruleHits) total() float64 {
+	var s float64
+	for _, x := range h {
+		s += x.score
+	}
+	return s
 }
 
 // AnalyzeWithUserConfig is the full-power variant: in addition to disabled
 // checks (binary off/on), it applies a per-category weight multiplier. A
 // weight of 0 means "skip this category entirely" (no score, no reasons),
 // 1.0 keeps stock behaviour, anything in between or above scales the
-// category's contribution. Missing keys default to 1.0.
+// category's contribution. Missing keys default to DefaultCategoryWeight.
+//
+// Besides SpamScore/SpamStatus/SpamReasons it fills SpamFindings — the same
+// rules with their category and weighted score — so an explanation of the
+// verdict is built from this very analysis, not from a second engine.
 func (a *Analyzer) AnalyzeWithUserConfig(msg *ParsedMessage, senderIP, fromDomain string, disabledChecks map[string]bool, weights map[string]float64) {
 	if !a.config.Enabled {
 		msg.SpamStatus = SpamStatusClean
@@ -141,6 +182,7 @@ func (a *Analyzer) AnalyzeWithUserConfig(msg *ParsedMessage, senderIP, fromDomai
 
 	var totalScore float64
 	var reasons []string
+	var findings []SpamFinding
 
 	// Fallback: derive sender IP from Received headers when caller didn't pass one.
 	// This makes IMAP-synced messages get the same checks as MX-delivered ones.
@@ -160,7 +202,7 @@ func (a *Analyzer) AnalyzeWithUserConfig(msg *ParsedMessage, senderIP, fromDomai
 		msg.AuthResults.SenderIP = senderIP
 	}
 
-	apply := func(name string, score float64, catReasons []string) {
+	apply := func(name string, hits ruleHits) {
 		if disabledChecks[name] {
 			return
 		}
@@ -168,94 +210,101 @@ func (a *Analyzer) AnalyzeWithUserConfig(msg *ParsedMessage, senderIP, fromDomai
 		if w == 0 {
 			return
 		}
-		totalScore += score * w
-		reasons = append(reasons, catReasons...)
+		totalScore += hits.total() * w
+		for _, h := range hits {
+			reasons = append(reasons, h.reason)
+			findings = append(findings, SpamFinding{Check: name, Score: h.score * w, Reason: h.reason})
+		}
 	}
 
 	// Analyze the Received chain itself (missing headers, time anomalies, suspicious MTA names)
-	chainScore, chainReasons := a.analyzeReceivedChain(msg)
-	apply("chain", chainScore, chainReasons)
+	apply("chain", a.analyzeReceivedChain(msg))
 
 	// Check SPF (if sender IP provided and not disabled)
 	if a.spfChecker != nil && senderIP != "" && fromDomain != "" && !IsPrivateIP(senderIP) && !disabledChecks["spf"] && categoryWeight(weights, "spf") > 0 {
-		score, spfReasons := a.analyzeSPF(senderIP, fromDomain, msg)
-		apply("spf", score, spfReasons)
+		apply("spf", a.analyzeSPF(senderIP, fromDomain, msg))
 	}
 
 	// Check RBL (if sender IP provided and not disabled)
 	if a.rblChecker != nil && senderIP != "" && !IsPrivateIP(senderIP) && !disabledChecks["rbl"] && categoryWeight(weights, "rbl") > 0 {
-		score, rblReasons := a.analyzeRBL(senderIP, msg)
-		apply("rbl", score, rblReasons)
+		apply("rbl", a.analyzeRBL(senderIP, msg))
 	}
 
 	// Check DKIM (if raw message data available and not disabled)
 	if a.dkimChecker != nil && len(msg.RawData) > 0 && !disabledChecks["dkim"] && categoryWeight(weights, "dkim") > 0 {
-		score, dkimReasons := a.analyzeDKIM(msg)
-		apply("dkim", score, dkimReasons)
+		apply("dkim", a.analyzeDKIM(msg))
 	}
 
 	// Check headers
 	if a.config.CheckHeaders {
-		score, headerReasons := a.analyzeHeaders(msg)
-		apply("headers", score, headerReasons)
+		apply("headers", a.analyzeHeaders(msg))
 	}
 
 	// Check content
 	if a.config.CheckContent && categoryWeight(weights, "content") > 0 {
-		score, contentReasons := a.analyzeContent(msg, disabledChecks)
-		apply("content", score, contentReasons)
+		apply("content", a.analyzeContent(msg, disabledChecks))
 	}
 
 	// Check attachments
 	if a.config.CheckAttachments {
-		score, attachReasons := a.analyzeAttachments(msg)
-		apply("attachments", score, attachReasons)
+		apply("attachments", a.analyzeAttachments(msg))
 	}
 
 	// Check links
 	if a.config.CheckLinks && categoryWeight(weights, "links") > 0 {
-		score, linkReasons := a.analyzeLinks(msg, disabledChecks)
-		apply("links", score, linkReasons)
+		apply("links", a.analyzeLinks(msg, disabledChecks))
 	}
 
 	// Check embedded messages
 	if len(msg.EmbeddedMessages) > 0 {
-		apply("embedded", 2.0, []string{"contains embedded message (message/rfc822)"})
+		apply("embedded", ruleHits{{score: 2.0, reason: "contains embedded message (message/rfc822)"}})
 	}
 
 	// Check for brand impersonation and scam sender names
 	if msg.From != nil {
-		score, senderReasons := a.analyzeSenderBrand(msg)
-		apply("sender", score, senderReasons)
+		apply("sender", a.analyzeSenderBrand(msg))
 	}
 
 	// Check for emojis in subject (common spam indicator)
-	emojiScore, emojiReasons := a.analyzeEmojis(msg)
-	apply("emojis", emojiScore, emojiReasons)
+	apply("emojis", a.analyzeEmojis(msg))
+
+	// Opt-in heuristics (default weight 0 — see DefaultCategoryWeight).
+	if categoryWeight(weights, "subject_heuristics") > 0 {
+		apply("subject_heuristics", a.analyzeSubjectHeuristics(msg))
+	}
+	if msg.From != nil && categoryWeight(weights, "sender_heuristics") > 0 {
+		apply("sender_heuristics", a.analyzeSenderHeuristics(msg))
+	}
+	if categoryWeight(weights, "link_heuristics") > 0 {
+		apply("link_heuristics", a.analyzeLinkHeuristics(msg))
+	}
 
 	// Set final score and status
 	msg.SpamScore = totalScore
 	msg.SpamReasons = reasons
+	msg.SpamFindings = findings
+	msg.SpamStatus = a.Verdict(totalScore)
+}
 
-	if totalScore >= a.config.SpamThreshold {
-		msg.SpamStatus = SpamStatusSpam
-	} else if totalScore >= a.config.SuspiciousThreshold {
-		msg.SpamStatus = SpamStatusSuspicious
-	} else {
-		msg.SpamStatus = SpamStatusClean
+// Verdict maps a score to a status with this analyzer's thresholds.
+func (a *Analyzer) Verdict(score float64) SpamStatus {
+	switch {
+	case score >= a.config.SpamThreshold:
+		return SpamStatusSpam
+	case score >= a.config.SuspiciousThreshold:
+		return SpamStatusSuspicious
+	default:
+		return SpamStatusClean
 	}
 }
 
 // categoryWeight returns the per-category multiplier. Nil map or missing key
-// → 1.0 (stock behaviour). A negative value is clamped to 0 so the analyzer
-// never accidentally subtracts from the score.
+// → DefaultCategoryWeight (stock behaviour). A negative value is clamped to 0
+// so the analyzer never accidentally subtracts from the score.
 func categoryWeight(weights map[string]float64, name string) float64 {
-	if weights == nil {
-		return 1.0
-	}
 	w, ok := weights[name]
 	if !ok {
-		return 1.0
+		return DefaultCategoryWeight(name)
 	}
 	if w < 0 {
 		return 0
@@ -264,95 +313,83 @@ func categoryWeight(weights map[string]float64, name string) float64 {
 }
 
 // analyzeSPF performs SPF check
-func (a *Analyzer) analyzeSPF(senderIP, fromDomain string, msg *ParsedMessage) (float64, []string) {
-	var score float64
-	var reasons []string
+func (a *Analyzer) analyzeSPF(senderIP, fromDomain string, msg *ParsedMessage) ruleHits {
+	var hits ruleHits
 
 	result, detail := a.spfChecker.CheckSPF(senderIP, fromDomain)
 	msg.AuthResults.SPF = result
 
 	switch result {
 	case AuthResultFail:
-		score += 3.0
-		reasons = append(reasons, "SPF fail: "+detail)
+		hits.add(3.0, "SPF fail: "+detail)
 	case AuthResultSoftfail:
-		score += 1.5
-		reasons = append(reasons, "SPF softfail: "+detail)
+		hits.add(1.5, "SPF softfail: "+detail)
 	case AuthResultNeutral:
 		// No score change for neutral
 	case AuthResultPass:
 		// Good - could reduce score in future
 	}
 
-	return score, reasons
+	return hits
 }
 
 // analyzeRBL performs RBL check
-func (a *Analyzer) analyzeRBL(senderIP string, msg *ParsedMessage) (float64, []string) {
-	var reasons []string
+func (a *Analyzer) analyzeRBL(senderIP string, msg *ParsedMessage) ruleHits {
+	var hits ruleHits
 
-	score, results := a.rblChecker.CheckIP(senderIP)
-
-	if len(results) > 0 {
-		for _, r := range results {
-			reasons = append(reasons, "RBL listed: "+r.ListName)
-		}
+	// CheckIP's score is the sum of the listed results' weights, in order.
+	_, results := a.rblChecker.CheckIP(senderIP)
+	for _, r := range results {
+		hits.add(r.Weight, "RBL listed: "+r.ListName)
 	}
 
-	return score, reasons
+	return hits
 }
 
 // analyzeDKIM performs DKIM verification
-func (a *Analyzer) analyzeDKIM(msg *ParsedMessage) (float64, []string) {
-	var score float64
-	var reasons []string
+func (a *Analyzer) analyzeDKIM(msg *ParsedMessage) ruleHits {
+	var hits ruleHits
 
 	result, detail := a.dkimChecker.CheckDKIM(msg.RawData)
 	msg.AuthResults.DKIM = result
 
 	switch result {
 	case AuthResultFail:
-		score += 2.0
-		reasons = append(reasons, "DKIM fail: "+detail)
+		hits.add(2.0, "DKIM fail: "+detail)
 	case AuthResultPass:
 		// Good - could reduce score in future
 	}
 
-	return score, reasons
+	return hits
 }
 
 // analyzeHeaders checks for suspicious header patterns
-func (a *Analyzer) analyzeHeaders(msg *ParsedMessage) (float64, []string) {
-	var score float64
-	var reasons []string
+func (a *Analyzer) analyzeHeaders(msg *ParsedMessage) ruleHits {
+	var hits ruleHits
 
 	// Check if From != Reply-To (potential phishing)
 	if msg.From != nil && msg.ReplyTo != nil {
 		fromDomain := extractDomain(msg.From.Address)
 		replyToDomain := extractDomain(msg.ReplyTo.Address)
 		if fromDomain != "" && replyToDomain != "" && fromDomain != replyToDomain {
-			score += 1.5
-			reasons = append(reasons, "From domain differs from Reply-To domain")
+			hits.add(1.5, "From domain differs from Reply-To domain")
 		}
 	}
 
 	// Check for missing Message-ID
 	if msg.MessageID == "" {
-		score += 0.5
-		reasons = append(reasons, "missing Message-ID header")
+		hits.add(0.5, "missing Message-ID header")
 	}
 
 	// Check for missing Date
 	if msg.Date.IsZero() {
-		score += 0.5
-		reasons = append(reasons, "missing Date header")
+		hits.add(0.5, "missing Date header")
 	}
 
 	// Check for too many Received headers (many hops)
 	receivedHeaders := msg.RawHeaders["Received"]
 	if len(receivedHeaders) > 10 {
-		score += 1.0
-		reasons = append(reasons, "excessive mail hops (>10 Received headers)")
+		hits.add(1.0, "excessive mail hops (>10 Received headers)")
 	}
 
 	// Check for suspicious X-Mailer or User-Agent
@@ -367,20 +404,18 @@ func (a *Analyzer) analyzeHeaders(msg *ParsedMessage) (float64, []string) {
 		suspiciousMailers := []string{"phpmailer", "swiftmailer", "mass mail"}
 		for _, sm := range suspiciousMailers {
 			if strings.Contains(mailer, sm) {
-				score += 0.5
-				reasons = append(reasons, "suspicious mail client: "+sm)
+				hits.add(0.5, "suspicious mail client: "+sm)
 				break
 			}
 		}
 	}
 
-	return score, reasons
+	return hits
 }
 
 // analyzeContent checks for spam words and patterns in content
-func (a *Analyzer) analyzeContent(msg *ParsedMessage, disabledChecks map[string]bool) (float64, []string) {
-	var score float64
-	var reasons []string
+func (a *Analyzer) analyzeContent(msg *ParsedMessage, disabledChecks map[string]bool) ruleHits {
+	var hits ruleHits
 
 	// Combine subject, body and HTML body for analysis
 	htmlText := ""
@@ -396,9 +431,8 @@ func (a *Analyzer) analyzeContent(msg *ParsedMessage, disabledChecks map[string]
 			continue
 		}
 		if strings.Contains(content, strings.ToLower(word)) {
-			score += 0.5
-			reasons = append(reasons, "spam word: "+word)
-			if score >= 3.0 {
+			hits.add(0.5, "spam word: "+word)
+			if hits.total() >= 3.0 {
 				// Cap content spam word score
 				break
 			}
@@ -414,15 +448,13 @@ func (a *Analyzer) analyzeContent(msg *ParsedMessage, disabledChecks map[string]
 			}
 		}
 		if float64(upperCount)/float64(len(msg.Subject)) > 0.5 {
-			score += 1.0
-			reasons = append(reasons, "excessive caps in subject")
+			hits.add(1.0, "excessive caps in subject")
 		}
 	}
 
 	// Check for HTML-only message (no plain text)
 	if msg.BodyHTML != "" && msg.Body == "" {
-		score += 0.5
-		reasons = append(reasons, "HTML-only message (no plain text)")
+		hits.add(0.5, "HTML-only message (no plain text)")
 	}
 
 	// Check for mostly images in HTML (image-to-text ratio)
@@ -430,45 +462,39 @@ func (a *Analyzer) analyzeContent(msg *ParsedMessage, disabledChecks map[string]
 		imgCount := strings.Count(strings.ToLower(msg.BodyHTML), "<img")
 		textLen := len(stripHTML(msg.BodyHTML))
 		if imgCount > 3 && textLen < 100 {
-			score += 2.0
-			reasons = append(reasons, "mostly images, little text")
+			hits.add(2.0, "mostly images, little text")
 		}
 	}
 
-	return score, reasons
+	return hits
 }
 
 // analyzeAttachments checks for dangerous attachments
-func (a *Analyzer) analyzeAttachments(msg *ParsedMessage) (float64, []string) {
-	var score float64
-	var reasons []string
+func (a *Analyzer) analyzeAttachments(msg *ParsedMessage) ruleHits {
+	var hits ruleHits
 
 	for _, att := range msg.Attachments {
 		if att.IsDangerous {
-			score += 5.0
-			reasons = append(reasons, "dangerous attachment: "+att.Filename)
+			hits.add(5.0, "dangerous attachment: "+att.Filename)
 		}
 
 		// Check for double extensions
 		if hasDoubleExtension(att.Filename) {
-			score += 4.0
-			reasons = append(reasons, "double extension: "+att.Filename)
+			hits.add(4.0, "double extension: "+att.Filename)
 		}
 
 		// Check for very large attachments (>25MB)
 		if att.Size > 25*1024*1024 {
-			score += 1.0
-			reasons = append(reasons, "large attachment: "+att.Filename)
+			hits.add(1.0, "large attachment: "+att.Filename)
 		}
 	}
 
-	return score, reasons
+	return hits
 }
 
 // analyzeLinks checks for suspicious URLs
-func (a *Analyzer) analyzeLinks(msg *ParsedMessage, disabledChecks map[string]bool) (float64, []string) {
-	var score float64
-	var reasons []string
+func (a *Analyzer) analyzeLinks(msg *ParsedMessage, disabledChecks map[string]bool) ruleHits {
+	var hits ruleHits
 
 	// Extract URLs from body and HTML
 	urls := extractURLs(msg.Body + " " + msg.BodyHTML)
@@ -497,24 +523,21 @@ func (a *Analyzer) analyzeLinks(msg *ParsedMessage, disabledChecks map[string]bo
 
 		// Check for suspicious patterns (typosquatting)
 		if isSuspiciousDomain(host) {
-			score += 3.0
-			reasons = append(reasons, "suspicious domain: "+host)
+			hits.add(3.0, "suspicious domain: "+host)
 		}
 	}
 
 	// Too many links
 	if len(urls) > 10 {
-		score += 1.0
-		reasons = append(reasons, "excessive links (>10)")
+		hits.add(1.0, "excessive links (>10)")
 	}
 
 	// URL shorteners
 	if shortenerCount > 0 {
-		score += float64(shortenerCount) * 0.5
-		reasons = append(reasons, "contains URL shortener(s)")
+		hits.add(float64(shortenerCount)*0.5, "contains URL shortener(s)")
 	}
 
-	return score, reasons
+	return hits
 }
 
 // GetSpamReasonsJSON returns spam reasons as JSON string
@@ -637,12 +660,11 @@ var knownBrands = map[string][]string{
 }
 
 // analyzeSenderBrand checks for brand impersonation and scam sender names
-func (a *Analyzer) analyzeSenderBrand(msg *ParsedMessage) (float64, []string) {
-	var score float64
-	var reasons []string
+func (a *Analyzer) analyzeSenderBrand(msg *ParsedMessage) ruleHits {
+	var hits ruleHits
 
 	if msg.From == nil {
-		return 0, nil
+		return nil
 	}
 
 	fromName := strings.ToLower(msg.From.Name)
@@ -660,8 +682,7 @@ func (a *Analyzer) analyzeSenderBrand(msg *ParsedMessage) (float64, []string) {
 				}
 			}
 			if !isLegit {
-				score += 5.0
-				reasons = append(reasons, "brand impersonation: \""+msg.From.Name+"\" from "+fromDomain)
+				hits.add(5.0, "brand impersonation: \""+msg.From.Name+"\" from "+fromDomain)
 				break
 			}
 		}
@@ -680,8 +701,7 @@ func (a *Analyzer) analyzeSenderBrand(msg *ParsedMessage) (float64, []string) {
 		if strings.Contains(fromName, pattern) {
 			for _, keyword := range scamNameKeywords {
 				if strings.Contains(fromName, keyword) {
-					score += 3.0
-					reasons = append(reasons, "scam-like sender: \""+msg.From.Name+"\"")
+					hits.add(3.0, "scam-like sender: \""+msg.From.Name+"\"")
 					break
 				}
 			}
@@ -689,13 +709,12 @@ func (a *Analyzer) analyzeSenderBrand(msg *ParsedMessage) (float64, []string) {
 		}
 	}
 
-	return score, reasons
+	return hits
 }
 
 // analyzeEmojis checks for emojis in subject (common spam indicator)
-func (a *Analyzer) analyzeEmojis(msg *ParsedMessage) (float64, []string) {
-	var score float64
-	var reasons []string
+func (a *Analyzer) analyzeEmojis(msg *ParsedMessage) ruleHits {
+	var hits ruleHits
 
 	emojiCount := 0
 	for _, r := range msg.Subject {
@@ -710,37 +729,35 @@ func (a *Analyzer) analyzeEmojis(msg *ParsedMessage) (float64, []string) {
 	}
 
 	if emojiCount > 0 {
-		score = float64(emojiCount) * 0.5
+		score := float64(emojiCount) * 0.5
 		if score > 2.0 {
 			score = 2.0
 		}
-		reasons = append(reasons, "emojis in subject")
+		hits.add(score, "emojis in subject")
 	}
 
-	return score, reasons
+	return hits
 }
 
 // analyzeReceivedChain scrutinizes the Received header chain for red flags.
 // Self-verifying — does not trust any provider's Authentication-Results.
-func (a *Analyzer) analyzeReceivedChain(msg *ParsedMessage) (float64, []string) {
-	var score float64
-	var reasons []string
+func (a *Analyzer) analyzeReceivedChain(msg *ParsedMessage) ruleHits {
+	var hits ruleHits
 
 	if msg.RawHeaders == nil {
-		return 0, nil
+		return nil
 	}
 
 	hops := ParseReceivedChain(msg.RawHeaders)
 
 	// 1. No Received headers at all — extremely suspicious for any real email
 	if len(hops) == 0 {
-		return 4.0, []string{"no Received headers"}
+		return ruleHits{{score: 4.0, reason: "no Received headers"}}
 	}
 
 	// 2. Single Received hop — usually means message was injected directly without traversing the network
 	if len(hops) == 1 {
-		score += 1.5
-		reasons = append(reasons, "only one Received hop")
+		hits.add(1.5, "only one Received hop")
 	}
 
 	// 3. Time progression: hops should be ordered newest→oldest, dates monotonically decreasing
@@ -752,8 +769,7 @@ func (a *Analyzer) analyzeReceivedChain(msg *ParsedMessage) (float64, []string) 
 		if i > 0 && !lastDate.IsZero() {
 			// h is older than lastDate (or equal). It must NOT be after lastDate by more than a few minutes.
 			if h.Date.After(lastDate.Add(5 * time.Minute)) {
-				score += 1.5
-				reasons = append(reasons, "Received chain timestamps inconsistent")
+				hits.add(1.5, "Received chain timestamps inconsistent")
 				break
 			}
 		}
@@ -766,23 +782,20 @@ func (a *Analyzer) analyzeReceivedChain(msg *ParsedMessage) (float64, []string) 
 		// HELO claims a name that looks nothing like its PTR
 		if origin.From != "" && origin.FromPTR != "" {
 			if !heloMatchesPTR(origin.From, origin.FromPTR) {
-				score += 1.0
-				reasons = append(reasons, "HELO doesn't match reverse DNS")
+				hits.add(1.0, "HELO doesn't match reverse DNS")
 			}
 		}
 		// PTR is "unknown" or absent on a public IP
 		if origin.FromPTR == "" || strings.EqualFold(origin.FromPTR, "unknown") {
-			score += 0.5
-			reasons = append(reasons, "no reverse DNS for sending IP")
+			hits.add(0.5, "no reverse DNS for sending IP")
 		}
 		// Suspicious MTA name (auth-XXXX-N.foo.bar pattern, random subdomains)
 		if isSuspiciousMTAName(origin.From) {
-			score += 2.0
-			reasons = append(reasons, "suspicious sending MTA name: "+origin.From)
+			hits.add(2.0, "suspicious sending MTA name: "+origin.From)
 		}
 	}
 
-	return score, reasons
+	return hits
 }
 
 // heloMatchesPTR returns true if the HELO hostname and PTR hostname share

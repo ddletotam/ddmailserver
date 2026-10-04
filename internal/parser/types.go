@@ -15,6 +15,17 @@ const (
 	SpamStatusQuarantine SpamStatus = "quarantine"
 )
 
+// SpamFinding is one analyzer rule that fired.
+type SpamFinding struct {
+	// Check is the category the rule belongs to (SpamCheckCategories) — the
+	// unit users disable and weight.
+	Check string
+	// Score is the rule's contribution to SpamScore, user weight applied.
+	Score float64
+	// Reason is the text stored in spam_reasons.
+	Reason string
+}
+
 // AuthResult represents the result of an email authentication check
 type AuthResult string
 
@@ -78,6 +89,9 @@ type ParsedMessage struct {
 	SpamScore   float64
 	SpamReasons []string
 	SpamStatus  SpamStatus
+	// SpamFindings is SpamReasons with each rule's category and weighted
+	// score — what an explanation of the verdict is built from.
+	SpamFindings []SpamFinding
 
 	// Authentication (for MX)
 	AuthResults *AuthResults

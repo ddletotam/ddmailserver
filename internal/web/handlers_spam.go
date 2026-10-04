@@ -13,6 +13,7 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/notify"
+	"github.com/ddletotam/ddmailserver/internal/parser"
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
 	"github.com/gorilla/mux"
 )
@@ -535,26 +536,24 @@ func (s *Server) HandleSpamSettingsPage(w http.ResponseWriter, r *http.Request) 
 		if w, ok := weights[name]; ok {
 			return w
 		}
-		return 1.0
+		return parser.DefaultCategoryWeight(name)
 	}
 
-	// One row per analyzer category (parser.SpamCheckCategories). Two extra
-	// fine-grained toggles (url_shortener, spam_word:xxx) live under content/
-	// links and are exposed only via the per-check disable flow, not weights.
-	availableChecks := []SpamCheck{
-		{Name: "chain", Description: i18n.T("spam.check.chain"), Enabled: !disabledMap["chain"], Weight: weightOr("chain")},
-		{Name: "spf", Description: i18n.T("spam.check.spf"), Enabled: !disabledMap["spf"], Weight: weightOr("spf")},
-		{Name: "dkim", Description: i18n.T("spam.check.dkim"), Enabled: !disabledMap["dkim"], Weight: weightOr("dkim")},
-		{Name: "rbl", Description: i18n.T("spam.check.rbl"), Enabled: !disabledMap["rbl"], Weight: weightOr("rbl")},
-		{Name: "headers", Description: i18n.T("spam.check.headers"), Enabled: !disabledMap["headers"], Weight: weightOr("headers")},
-		{Name: "content", Description: i18n.T("spam.check.content"), Enabled: !disabledMap["content"], Weight: weightOr("content")},
-		{Name: "attachments", Description: i18n.T("spam.check.attachments"), Enabled: !disabledMap["attachments"], Weight: weightOr("attachments")},
-		{Name: "links", Description: i18n.T("spam.check.links"), Enabled: !disabledMap["links"], Weight: weightOr("links")},
-		{Name: "embedded", Description: i18n.T("spam.check.embedded"), Enabled: !disabledMap["embedded"], Weight: weightOr("embedded")},
-		{Name: "sender", Description: i18n.T("spam.check.sender"), Enabled: !disabledMap["sender"], Weight: weightOr("sender")},
-		{Name: "emojis", Description: i18n.T("spam.check.emojis"), Enabled: !disabledMap["emojis"], Weight: weightOr("emojis")},
-		{Name: "url_shortener", Description: i18n.T("spam.check.url_shortener"), Enabled: !disabledMap["url_shortener"], Weight: 1.0},
+	// One row per analyzer category, straight from parser.SpamCheckCategories
+	// so a new category cannot be scored by the analyzer yet missing here.
+	// The fine-grained url_shortener toggle lives under links and is exposed
+	// only via the per-check disable flow, not weights.
+	var availableChecks []SpamCheck
+	for _, name := range parser.SpamCheckCategories {
+		availableChecks = append(availableChecks, SpamCheck{
+			Name: name, Description: i18n.T("spam.check." + name),
+			Enabled: !disabledMap[name], Weight: weightOr(name),
+		})
 	}
+	availableChecks = append(availableChecks, SpamCheck{
+		Name: "url_shortener", Description: i18n.T("spam.check.url_shortener"),
+		Enabled: !disabledMap["url_shortener"], Weight: 1.0,
+	})
 
 	data := SpamSettingsData{
 		PageData: PageData{
@@ -619,11 +618,13 @@ func (s *Server) HandleToggleSpamCheck(w http.ResponseWriter, r *http.Request) {
 // (parser.SpamCheckCategories) and the two fine-grained sub-toggles that
 // `disabledChecks` keys also use.
 func validCheckName(name string) bool {
-	switch name {
-	case "chain", "spf", "dkim", "rbl", "headers", "content",
-		"attachments", "links", "embedded", "sender", "emojis",
-		"url_shortener":
+	if name == "url_shortener" {
 		return true
+	}
+	for _, c := range parser.SpamCheckCategories {
+		if name == c {
+			return true
+		}
 	}
 	return false
 }
