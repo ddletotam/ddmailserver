@@ -39,6 +39,8 @@ struct Strips {
     re_base: Regex,
     re_meta_refresh: Regex,
     re_mso_conditional: Regex,
+    re_mso_revealed_open: Regex,
+    re_mso_revealed_close: Regex,
     re_on_handler_quoted: Regex,
     re_on_handler_unquoted: Regex,
 }
@@ -58,9 +60,17 @@ fn strips() -> &'static Strips {
         .unwrap(),
         // Outlook conditional comments wrap whole alternative trees of
         // MS-only markup (VML buttons, fixed-width ghost tables). Drop the
-        // whole block.
+        // whole block — a browser sees it as one comment and hides it too.
         re_mso_conditional: Regex::new(r"(?is)<!--\s*\[if\s+[^\]]*\]>.*?<!\s*\[endif\]\s*-->")
             .unwrap(),
+        // The "downlevel-revealed" form is the opposite: `<!--[if !mso]><!-->`
+        // and `<!--<![endif]-->` are two self-closed comments, and what lies
+        // between is the mail for every client *except* Outlook. Only the
+        // markers go, and before the block pass, which would otherwise
+        // swallow the content up to the closer (Steam and Gosuslugi lost
+        // whole sections that way).
+        re_mso_revealed_open: Regex::new(r"(?is)<!--\s*\[if\s+[^\]]*\]>\s*<!--(?:\s*--)?>").unwrap(),
+        re_mso_revealed_close: Regex::new(r"(?is)<!--\s*<!\s*\[endif\]\s*-->").unwrap(),
         // Inline event handlers — non-functional anyway since we don't
         // run JS, but parsing them slows the layout and occasionally
         // confuses the attribute scanner.
@@ -80,6 +90,8 @@ pub fn sanitize_email_html_for(input: &str, policy: &Policy, sender: &str) -> St
     let s = strips();
     let scripts_ok = policy.scripts_allowed(sender);
     let mut out = input.to_string();
+    out = s.re_mso_revealed_open.replace_all(&out, "").into_owned();
+    out = s.re_mso_revealed_close.replace_all(&out, "").into_owned();
     out = s.re_mso_conditional.replace_all(&out, "").into_owned();
     if !scripts_ok {
         let re_src = script_src_re();
@@ -305,6 +317,21 @@ pub fn block_external(input: &str, policy: &Policy, sender: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `[if !mso]` content is the mail everyone but Outlook sees; the
+    /// Outlook-only block next to it still goes.
+    #[test]
+    fn non_outlook_content_survives_outlook_blocks_go() {
+        let html = r#"<p>до</p><!--[if mso]><table><tr><td>VML-кнопка</td></tr></table><![endif]-->
+            <!--[if !mso]><!--><a href="https://x.example">Кнопка</a><!--<![endif]-->
+            <!--[if !mso]><!-- --><b>ещё</b><!--<![endif]--><p>после</p>"#;
+        let out = sanitize_email_html_for(html, &Policy::default(), "");
+        assert!(out.contains("Кнопка</a>"), "{out}");
+        assert!(out.contains("<b>ещё</b>"), "{out}");
+        assert!(!out.contains("VML-кнопка"), "{out}");
+        assert!(out.contains("до") && out.contains("после"), "{out}");
+        assert!(!out.contains("[if") && !out.contains("endif"), "{out}");
+    }
 
     #[test]
     fn unquoted_src_is_blocked_and_offered_in_the_menu() {
