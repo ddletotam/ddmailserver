@@ -3391,6 +3391,12 @@ export component MainWindow inherits Window {
                     height: parent.height;
                     viewport-width: max(parent.width, gb.content-w);
                     viewport-height: max(parent.height, gb.content-h);
+                    // Драг-флик выключен. Иначе Flickable забирает себе любой
+                    // жест, ушедший дальше 8px за первые 500 мс по оси, где
+                    // есть прокрутка (по вертикали сетка прокручивается всегда):
+                    // грип получал Exit вместо отпускания, ресайз пропадал, а
+                    // сетка вместо него уезжала. Колесо работает и так.
+                    interactive: false;
                     changed viewport-x => { root.grid-vp-x = self.viewport-x; }
                     changed viewport-y => { root.grid-vp-y = self.viewport-y; }
                     // The pane is conditional (view-mode == 1): a scroll asked
