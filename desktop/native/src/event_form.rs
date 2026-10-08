@@ -403,11 +403,13 @@ pub(crate) fn wire_edit_form(ui: &MainWindow, shared: &Rc<Shared>) {
             ui.set_edit_visible(false);
         }
     });
+    let ui_weak_eou = ui.as_weak();
     ui.on_edit_open_url(move |url| {
         // Поля правки события — тот же плоский текст, что и в карточке
         // просмотра, и тот же белый список схем.
+        let Some(ui) = ui_weak_eou.upgrade() else { return };
         match click_target(url.as_str(), LinkOrigin::Text) {
-            Some(target) => open_external(&target),
+            Some(target) => open_link_target(&ui, &target),
             None => eprintln!("edit open url: нечего открывать — {url}"),
         }
     });

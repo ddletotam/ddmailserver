@@ -1492,6 +1492,7 @@ dependencies = [
  "cosmic-text",
  "ddmail-core",
  "emlrender",
+ "getrandom 0.3.4",
  "image",
  "keyring",
  "ksni",

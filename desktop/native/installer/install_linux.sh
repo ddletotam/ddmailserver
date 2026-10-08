@@ -31,5 +31,19 @@ install -Dm644 assets/ddmail.desktop "$DATA/applications/ddmail.desktop"
 update-desktop-database "$DATA/applications" 2>/dev/null || true
 gtk-update-icon-cache -f "$DATA/icons/hicolor" 2>/dev/null || true
 
+# mailto: the desktop entry declares x-scheme-handler/mailto, which makes ddmail
+# a candidate. Become the default only when nobody is — an existing choice
+# (Thunderbird, say) is the user's, same as on Windows where we can't override.
+if command -v xdg-mime >/dev/null; then
+    current="$(xdg-mime query default x-scheme-handler/mailto 2>/dev/null || true)"
+    if [[ -z "$current" || "$current" == "ddmail.desktop" ]]; then
+        xdg-mime default ddmail.desktop x-scheme-handler/mailto
+        echo "mailto: ddmail is the default handler"
+    else
+        echo "mailto: default handler is $current; to switch to ddmail run"
+        echo "  xdg-mime default ddmail.desktop x-scheme-handler/mailto"
+    fi
+fi
+
 echo "installed: $HOME/.local/bin/ddmail-native"
 echo "desktop entry: $DATA/applications/ddmail.desktop"

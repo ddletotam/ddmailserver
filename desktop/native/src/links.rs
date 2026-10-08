@@ -390,10 +390,10 @@ mod click_target_tests {
 }
 
 /// Handle a clicked link from a bubble (UI thread). Internal `ddmail-attach:`
-/// links trigger an attachment download via the engine; everything else opens
-/// in the system browser. `origin` решает, можно ли ссылку нормализовать —
+/// links trigger an attachment download via the engine; `mailto:` opens our own
+/// composer; everything else opens in the system browser. `origin` решает, можно ли ссылку нормализовать —
 /// см. `click_target`.
-pub(crate) fn handle_link(_ui: &MainWindow, url: String, origin: LinkOrigin) {
+pub(crate) fn handle_link(ui: &MainWindow, url: String, origin: LinkOrigin) {
     if let Some(rest) = url.strip_prefix("ddmail-attach:") {
         // folder|uid|index|filename (folder/filename percent-кодированы)
         let parts: Vec<&str> = rest.splitn(4, '|').collect();
@@ -431,8 +431,33 @@ pub(crate) fn handle_link(_ui: &MainWindow, url: String, origin: LinkOrigin) {
     // None — это не ссылка либо схема не из белого списка: открывать «как
     // есть» на всякий случай нельзя, ровно от этого белый список и защищает.
     match click_target(&url, origin) {
-        Some(target) => open_external(&target),
+        Some(target) => open_link_target(ui, &target),
         None => eprintln!("link click: нечего открывать — {url}"),
+    }
+}
+
+/// Открыть ссылку, уже прошедшую `click_target`: `mailto:` — в свой композер,
+/// остальное — системному обработчику. Отдавать `mailto:` системе значило бы
+/// звать Outlook или вторую копию себя.
+pub(crate) fn open_link_target(ui: &MainWindow, target: &str) {
+    if let Some(m) = mailto::parse(target) {
+        SHARED.with(|s| {
+            if let Some(sh) = s.borrow().as_ref() {
+                open_mailto(sh, ui, &m);
+            }
+        });
+        return;
+    }
+    open_external(target);
+}
+
+/// Запрос второго запуска (UI-поток): поднять окно и, если пришла ссылка,
+/// открыть по ней письмо.
+pub(crate) fn handle_instance_request(ui: &MainWindow, req: instance::Request) {
+    raise_window(ui);
+    if let instance::Request::Mailto(url) = req {
+        println!("mailto from launch -> {url}");
+        open_link_target(ui, &url);
     }
 }
 
@@ -670,10 +695,14 @@ pub(crate) fn wire_bubble_links(ui: &MainWindow, shared: &Rc<Shared>) {
 
     // «Открыть ссылку» / «Копировать ссылку» / «Открыть с помощью…».
     let sh_ol = shared.clone();
+    let ui_weak_ol = ui.as_weak();
     ui.on_open_link(move || {
-        if let Some(url) = sh_ol.ctx_link.borrow().clone() {
+        // Клон отдельным стейтментом: `open_mailto` идёт в `SHARED`, и `Ref` на
+        // ctx_link не должен дожить до него.
+        let url = sh_ol.ctx_link.borrow().clone();
+        if let (Some(url), Some(ui)) = (url, ui_weak_ol.upgrade()) {
             println!("ctx open link -> {url}");
-            open_external(&url);
+            open_link_target(&ui, &url);
         }
     });
     let sh_cl = shared.clone();

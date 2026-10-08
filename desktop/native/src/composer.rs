@@ -346,6 +346,44 @@ pub(crate) fn enter_compose_mode(sh: &Shared, ui: &MainWindow, email: &str) {
     ui.invoke_focus_composer();
 }
 
+/// Новое письмо по `mailto:`-ссылке — из клика в письме или от системы, когда
+/// ddmail назначен почтовой программой (см. `instance`). Тот же compose-режим,
+/// что и из поиска, плюс поля из ссылки.
+///
+/// Беседа-цель — первый адрес; остальные едут явным «Кому», которое по
+/// контракту §1 побеждает цель. «Кому», копию и тему ссылка задаёт целиком,
+/// включая пустые: хвосты от прошлого письма в новом не нужны. Тело — только
+/// если оно есть в ссылке, иначе набранное остаётся (как при переходе из
+/// поиска).
+pub(crate) fn open_mailto(sh: &Shared, ui: &MainWindow, m: &mailto::Mailto) {
+    let target = m.to.first().cloned().unwrap_or_default();
+    enter_compose_mode(sh, ui, &target);
+    if target.is_empty() {
+        ui.set_active_name("Новое письмо".into());
+    }
+    let extra_to = if m.to.len() > 1 { m.to.join(", ") } else { String::new() };
+    ui.set_composer_to(extra_to.into());
+    ui.set_composer_cc(m.cc.join(", ").into());
+    ui.set_composer_subject(m.subject.clone().into());
+    if !m.body.is_empty() {
+        rich_set_text(ui, sh, &m.body);
+    }
+    if !m.bcc.is_empty() {
+        // Скрытой копии в композере нет. Переложить её в «Копию» нельзя —
+        // это раскрыло бы адресатов, которых автор ссылки прятал.
+        eprintln!("mailto: скрытая копия не поддерживается, пропущено адресов: {}", m.bcc.len());
+    }
+    // Панель адресатов раскрываем, когда в ней есть что показать — иначе тема
+    // и копия из ссылки ушли бы незаметно.
+    ui.set_composer_expanded(
+        target.is_empty() || m.to.len() > 1 || !m.cc.is_empty() || !m.subject.is_empty(),
+    );
+    if target.is_empty() {
+        ui.set_focus_to_seq(ui.get_focus_to_seq() + 1);
+    }
+    refresh_composer_hints(ui, sh);
+}
+
 /// Mirror the staged attachment basenames into the composer's chip model.
 /// Активность кнопки «Отправить»: есть что отправлять, если непуст редактор
 /// ИЛИ приложен файл.
@@ -1206,8 +1244,20 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
                 "Новое сообщение".to_string()
             };
             if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
-                println!("sending new message to {target}");
-                let to = if to_override.is_empty() { vec![target] } else { to_override.clone() };
+                let to = if !to_override.is_empty() {
+                    to_override.clone()
+                } else if !target.is_empty() {
+                    vec![target]
+                } else {
+                    // `mailto:` без адреса: адресата должен вписать человек.
+                    eprintln!("send: адресат не указан — заполните «Кому»");
+                    if let Some(u) = ui_now.as_ref() {
+                        u.set_composer_expanded(true);
+                        u.set_focus_to_seq(u.get_focus_to_seq() + 1);
+                    }
+                    return;
+                };
+                println!("sending new message to {}", to.join(", "));
                 let hdr = StubHeaders { subject: subject.clone(), to: to.clone(), cc: cc.clone() };
                 let _ = etx.send(engine::EngineCmd::Send {
                     to,

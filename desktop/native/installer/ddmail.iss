@@ -51,6 +51,9 @@ WizardStyle=modern
 ;    applications using one of our files». Отсюда taskkill в InitializeSetup.
 ; `RestartApplications=no` — поднимать приложение обратно должен [Run], а не
 ; Restart Manager (он вернул бы старый процесс до подмены файлов).
+; Регистрация обработчиком mailto: (секция [Registry]) — пусть Проводник
+; перечитает ассоциации сразу, а не после перелогина.
+ChangesAssociations=yes
 CloseApplications=force
 CloseApplicationsFilter=*.exe
 RestartApplications=no
@@ -71,6 +74,37 @@ Name: "{userprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
 Name: "{userdesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
 
 [Registry]
+; ── Почтовая программа: обработчик mailto: ──
+; Windows 10/11 не даёт программе назначить себя по умолчанию: выбор хранится
+; в UserChoice под хэшем, который пишет только сам Проводник. Программа лишь
+; заявляет, что умеет mailto (Capabilities + RegisteredApplications), — после
+; этого ddmail есть в «Приложениях по умолчанию» и в диалоге «Чем открыть»,
+; а выбирает пользователь (галочка в [Run] открывает нужную страницу).
+; Всё в HKCU: установка per-user, без UAC.
+;
+; ProgID: что запускать. "%1" в кавычках — ссылка с пробелами и & приходит
+; одним аргументом, его разбирает instance::request_from_args.
+Root: HKCU; Subkey: "Software\Classes\ddmail.mailto"; ValueType: string; ValueName: ""; \
+    ValueData: "ddmail: письмо по ссылке mailto"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\ddmail.mailto"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\ddmail.mailto\DefaultIcon"; ValueType: string; ValueName: ""; \
+    ValueData: """{app}\{#AppExe}"",0"
+Root: HKCU; Subkey: "Software\Classes\ddmail.mailto\shell\open\command"; ValueType: string; ValueName: ""; \
+    ValueData: """{app}\{#AppExe}"" ""%1"""
+; Capabilities: под каким именем ddmail виден в «Приложениях по умолчанию».
+Root: HKCU; Subkey: "Software\{#AppName}"; Flags: uninsdeletekeyifempty
+Root: HKCU; Subkey: "Software\{#AppName}\Capabilities"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\{#AppName}\Capabilities"; ValueType: string; ValueName: "ApplicationName"; \
+    ValueData: "{#AppName}"
+Root: HKCU; Subkey: "Software\{#AppName}\Capabilities"; ValueType: string; ValueName: "ApplicationDescription"; \
+    ValueData: "Почта как мессенджер"
+Root: HKCU; Subkey: "Software\{#AppName}\Capabilities"; ValueType: string; ValueName: "ApplicationIcon"; \
+    ValueData: """{app}\{#AppExe}"",0"
+Root: HKCU; Subkey: "Software\{#AppName}\Capabilities\URLAssociations"; ValueType: string; ValueName: "mailto"; \
+    ValueData: "ddmail.mailto"
+Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "{#AppName}"; \
+    ValueData: "Software\{#AppName}\Capabilities"; Flags: uninsdeletevalue
+
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
     ValueType: string; ValueName: "{#AppName}"; ValueData: """{app}\{#AppExe}"""; \
     Flags: uninsdeletevalue; Tasks: autostart
@@ -78,6 +112,13 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; \
     Flags: nowait postinstall skipifsilent
+; Назначить себя за пользователя нельзя (см. [Registry]) — открываем страницу
+; ddmail в «Приложениях по умолчанию», где mailto переключается одним кликом.
+; Windows 10 параметр registeredAppUser не понимает и открывает общую страницу
+; «Приложения по умолчанию» — там тот же выбор в пункте «Электронная почта».
+Filename: "ms-settings:defaultapps?registeredAppUser={#AppName}"; \
+    Description: "Сделать ddmail почтовой программой по умолчанию"; \
+    Flags: shellexec nowait postinstall skipifsilent unchecked
 ; Тихая установка (/SILENT — обновление из скрипта) поднимает приложение сама:
 ; галочки «Запустить» там никто не увидит, а обновление без перезапуска
 ; оставляет пользователя на старом процессе.

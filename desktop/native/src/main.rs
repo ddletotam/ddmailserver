@@ -12,8 +12,10 @@ slint::include_modules!();
 mod account_store;
 mod calendar_settings;
 mod engine;
+mod instance;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod keylayout;
+mod mailto;
 mod merges;
 mod notify;
 mod policy;
@@ -140,12 +142,17 @@ fn main() {
         engine::AccountConfig::forget_all_secrets();
         return;
     }
-    // Single-instance guard: a second launch exits instead of opening a
-    // duplicate window. (Focusing the existing window needs IPC — TODO.)
+    // Запуск с `mailto:`-ссылкой — так система зовёт почтовую программу по
+    // умолчанию (реестр: `"%1"`, `.desktop`: `%u`).
+    let launch_request = instance::request_from_args(std::env::args().skip(1));
+    // Single-instance guard: a second launch hands its request (raise the
+    // window / open the mailto link) to the running one and exits.
     let _instance = single_instance::SingleInstance::new("ddmail-native-single").ok();
     if let Some(inst) = &_instance {
         if !inst.is_single() {
-            eprintln!("ddmail is already running");
+            if !instance::send(&launch_request) {
+                eprintln!("ddmail is already running, но передать ему запрос не удалось");
+            }
             return;
         }
     }
@@ -609,6 +616,30 @@ fn main() {
 
     // System tray: left-click / «Открыть» re-shows the window, «Выход» quits.
     setup_tray_and_icon(&ui, &shared);
+
+    // Приёмник запросов вторых запусков. Поднимается только теперь, когда
+    // `SHARED` и `UI_WEAK` на месте: раньше пришедшую ссылку некуда было бы
+    // открыть. Вторая копия, стартовавшая в этом окне, подождёт (`instance::send`
+    // повторяет попытки).
+    {
+        let weak = ui.as_weak();
+        if let Err(e) = instance::serve(move |req| {
+            let _ = weak.upgrade_in_event_loop(move |ui| handle_instance_request(&ui, req));
+        }) {
+            eprintln!("instance: приёмник не поднят ({e}) — вторые запуски ничего не передадут");
+        }
+    }
+    // Холодный старт по ссылке: открываем письмо первым же тиком цикла, после
+    // стартового выбора диалога, — иначе тот перебил бы compose-режим.
+    if let instance::Request::Mailto(url) = launch_request {
+        let weak = ui.as_weak();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                println!("mailto from launch -> {url}");
+                open_link_target(&ui, &url);
+            }
+        });
+    }
 
     // Show the window, then run the loop in "stay alive past the last window"
     // mode: closing the window via its ✕ returns CloseRequestResponse::HideWindow
