@@ -76,6 +76,11 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     }
                     *sh.convs.borrow_mut() = merged;
                     *sh.displays.borrow_mut() = displays;
+                    // Строки выше выставлены напрямую, мимо refresh_sidebar, —
+                    // счётчики табов пересчитываем сами. Без этого непрочитанное
+                    // из дельты доезжало до табов только при следующем
+                    // переключении папки (а из инбокса по табам не кликают).
+                    refresh_folder_tabs(sh, ui);
                     // Диалог, созданный отправкой с другого адреса, мог
                     // приехать именно сейчас — тогда переходим в него, и
                     // восстанавливать выделение по старому id уже незачем.
@@ -1099,6 +1104,23 @@ pub(crate) fn handle_new_mail(
     tray_set_dot(true);
     if ui.get_notify_sound_on() {
         toast::beep();
+    }
+
+    // Табы считаются по полному виду (raw_convs), а не по видимому списку, —
+    // прибавку зеркалим туда же. Иначе счётчик таба ждал бы дельты, а письмо
+    // в диалог невыбранной папки (его нет в sh.convs) не прибавлялось вовсе.
+    if !from_addr.is_empty() {
+        if let Some(r) = sh
+            .raw_convs
+            .borrow_mut()
+            .iter_mut()
+            .find(|c| c.counterparts.iter().any(|cp| cp.addr.eq_ignore_ascii_case(&from_addr)))
+        {
+            r.unread_count += new_count.max(1);
+        }
+        if conv_idx.is_none() {
+            refresh_folder_tabs(sh, ui);
+        }
     }
 
     // Optimistic badge bump (data updates even when the calendar view
