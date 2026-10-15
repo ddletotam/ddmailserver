@@ -3482,6 +3482,7 @@ export component MainWindow inherits Window {
                         // unreliable for a full-area child of a Flickable.
                         pointer-event(pe) => {
                             if (pe.kind == PointerEventKind.down && pe.button == PointerEventButton.left) {
+                                root.cal-dragging = false;
                                 root.grid-create-at(self.mouse-x, self.mouse-y, gridflick.viewport-width);
                             }
                         }
@@ -3519,6 +3520,12 @@ export component MainWindow inherits Window {
                                 if (!root.cal-dragging) { root.event-clicked(ev.id); }
                             }
                             pointer-event(pe) => {
+                                // Сброс флага драга — на ЛЮБОЕ нажатие. Иначе после
+                                // ресайза/переноса клик по событию только для чтения
+                                // (ниже return) глотался: clicked видел cal-dragging.
+                                if (pe.kind == PointerEventKind.down && pe.button == PointerEventButton.left) {
+                                    root.cal-dragging = false;
+                                }
                                 if (!ev.writable || pe.button != PointerEventButton.left) { return; }
                                 if (pe.kind == PointerEventKind.down) {
                                     root.cal-drag-id = ev.id;
