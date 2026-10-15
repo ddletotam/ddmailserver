@@ -1653,27 +1653,30 @@ export component MainWindow inherits Window {
                         }
                         ftabs-row := HorizontalLayout {
                             height: ftabs-fl.height;
-                            padding-left: 10px;
-                            padding-right: 10px;
-                            padding-top: 5px;
-                            padding-bottom: 5px;
-                            spacing: 4px;
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            spacing: 0px;
                             alignment: start;
+                            // Табы — текст с подчёркиванием выбранного (как в
+                            // Telegram), без плашек. Подчёркивание и индикатор
+                            // сброса — дети с явной геометрией через `visible`,
+                            // а не `if`: условный ребёнок вошёл бы в размеры
+                            // таба (см. Timer ниже про «Recursion detected»).
+                            //
                             // Возврат в инбокс. Виден, только пока выбрана
                             // папка: без выбора инбокс и так на экране, а
                             // «снять выбор повторным кликом» не угадать.
                             if root.active-folder != "": Rectangle {
-                                border-radius: 14px;
-                                background: fib.has-hover ? #e8ecf1 : #f0f2f5;
+                                background: fib.has-hover ? #f2f4f7 : transparent;
                                 HorizontalLayout {
                                     padding-left: 10px;
-                                    padding-right: root.inbox-unread > 0 ? 6px : 11px;
+                                    padding-right: 10px;
                                     spacing: 5px;
                                     Text {
                                         text: "← Входящие";
                                         font-size: 13px;
                                         font-weight: 600;
-                                        color: #2b3640;
+                                        color: fib.has-hover ? #2b3640 : #6b7480;
                                         vertical-alignment: center;
                                     }
                                     if root.inbox-unread > 0: VerticalLayout {
@@ -1682,7 +1685,7 @@ export component MainWindow inherits Window {
                                             width: max(18px, fibu.preferred-width + 10px);
                                             height: 18px;
                                             border-radius: 9px;
-                                            background: #10b981;
+                                            background: #aab3be;
                                             fibu := Text {
                                                 width: parent.width;
                                                 height: parent.height;
@@ -1725,10 +1728,18 @@ export component MainWindow inherits Window {
                                         if (parent.drop-here) { root.ftab-drop = ti; }
                                     }
                                 }
-                                border-radius: 14px;
-                                background: self.active ? #10b981
-                                    : (fta.has-hover ? #e8ecf1 : #f0f2f5);
+                                background: fta.has-hover && !self.active ? #f2f4f7 : transparent;
                                 opacity: (root.ftab-dragging && root.ftab-drag == ti) ? 0.5 : 1.0;
+                                // Подчёркивание выбранного таба.
+                                Rectangle {
+                                    visible: parent.active;
+                                    x: 8px;
+                                    y: 35px;
+                                    width: parent.width - 16px;
+                                    height: 3px;
+                                    border-radius: 1.5px;
+                                    background: #10b981;
+                                }
                                 // Куда встанет тащимый таб. Не `if` и с размером
                                 // в px, а не от родителя: drop-here зависит от x
                                 // таба, x считает раскладка, а условный ребёнок
@@ -1736,15 +1747,15 @@ export component MainWindow inherits Window {
                                 // клиент паникой «Recursion detected» на старте.
                                 Rectangle {
                                     visible: parent.drop-here && root.ftab-drag != ti;
-                                    x: root.ftab-drag > ti ? -3px : parent.width + 1px;
-                                    y: 2px;
+                                    x: root.ftab-drag > ti ? 0px : parent.width - 2px;
+                                    y: 8px;
                                     width: 2px;
-                                    height: 24px;
+                                    height: 22px;
                                     background: #10b981;
                                 }
                                 HorizontalLayout {
-                                    padding-left: 11px;
-                                    padding-right: t.unread > 0 ? 6px : 11px;
+                                    padding-left: 10px;
+                                    padding-right: 10px;
                                     spacing: 5px;
                                     if t.icon != "": Text {
                                         text: t.icon;
@@ -1755,21 +1766,23 @@ export component MainWindow inherits Window {
                                         text: t.name == "" ? "Без названия" : t.name;
                                         font-size: 13px;
                                         font-weight: 600;
-                                        color: active ? white : #2b3640;
+                                        color: active ? #10b981 : (fta.has-hover ? #2b3640 : #6b7480);
                                         vertical-alignment: center;
                                     }
+                                    // Счётчик: зелёный у выбранного, серый у
+                                    // остальных — как в Telegram.
                                     if t.unread > 0: VerticalLayout {
                                         alignment: center;
                                         Rectangle {
                                             width: max(18px, ftu.preferred-width + 10px);
                                             height: 18px;
                                             border-radius: 9px;
-                                            background: active ? white : #10b981;
+                                            background: active ? #10b981 : #aab3be;
                                             ftu := Text {
                                                 width: parent.width;
                                                 height: parent.height;
                                                 text: t.unread;
-                                                color: active ? #10b981 : white;
+                                                color: white;
                                                 font-size: 11px;
                                                 font-weight: 700;
                                                 horizontal-alignment: center;
