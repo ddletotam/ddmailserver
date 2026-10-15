@@ -102,17 +102,16 @@ pub(crate) fn target_conversation_id(ui: &MainWindow, sh: &Shared, chosen: &str)
 /// диалогу уже нельзя, иначе оно тут же вернёт нас обратно.
 pub(crate) fn try_pending_switch(ui: &MainWindow, sh: &Shared) -> bool {
     let Some(target) = sh.compose.pending_switch.borrow().clone() else { return false };
-    let idx = {
-        let convs = sh.convs.borrow();
-        convs.iter().position(|c| c.id == target).or_else(|| {
-            let key = merges::MergeKey {
-                account: sh.accounts.cur_account_key.borrow().clone(),
-                id: target.clone(),
-            };
-            let primary = sh.merges.borrow().members_of(&key).first().cloned()?;
-            convs.iter().position(|c| c.id == primary.id)
-        })
+    let primary = {
+        let key = merges::MergeKey {
+            account: sh.accounts.cur_account_key.borrow().clone(),
+            id: target.clone(),
+        };
+        sh.merges.borrow().members_of(&key).first().map(|k| k.id.clone())
     };
+    // Диалог может лежать в другой папке — тогда переходим и в неё.
+    let idx = folders_ui::reveal(ui, sh, |c| c.id == target)
+        .or_else(|| folders_ui::reveal(ui, sh, |c| Some(&c.id) == primary.as_ref()));
     let Some(idx) = idx else { return false };
     *sh.compose.pending_switch.borrow_mut() = None;
     sh.current.set(idx);

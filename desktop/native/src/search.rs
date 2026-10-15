@@ -432,8 +432,10 @@ pub(crate) fn wire_search(ui: &MainWindow, shared: &Rc<Shared>) {
                         c.body_subjects().map_err(|e| eprintln!("search subjects: {e}")).ok()
                     })
                     .unwrap_or_default();
+                // По всем диалогам, а не по выбранной папке: поиск папок не
+                // знает, найденное в другой папке открывается переходом в неё.
                 let hits =
-                    local_search_convs(&sh_typed.convs.borrow(), &subjects, &sh_typed.key, &q_lc);
+                    local_search_convs(&full_view(&sh_typed), &subjects, &sh_typed.key, &q_lc);
                 let local = local_search_contacts(
                     &sh_typed.contacts.address_book.borrow(),
                     &conv_hit_addrs(&hits),
@@ -481,32 +483,38 @@ pub(crate) fn wire_search(ui: &MainWindow, shared: &Rc<Shared>) {
         let contact = sh_sel_c.search.search_contacts.borrow().get(i).cloned();
         let Some(contact) = contact else { return };
         // Find any conversation with this counterpart; prefer the most recent.
-        let convs = sh_sel_c.convs.borrow();
+        // Среди всех диалогов — он может лежать в другой папке.
         let target_lc = contact.email.to_lowercase();
-        let best = convs
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| {
+        let best = full_view(&sh_sel_c)
+            .into_iter()
+            .filter(|c| {
                 c.counterparts
                     .first()
                     .map(|cp| cp.addr.to_lowercase() == target_lc)
                     .unwrap_or(false)
             })
-            .max_by_key(|(_, c)| c.last_date_ts);
-        if let Some((conv_idx, _)) = best {
-            drop(convs);
+            .max_by_key(|c| c.last_date_ts)
+            .map(|c| (c.id.clone(), eff_account(&sh_sel_c.key, &c)));
+        if let Some((id, account)) = best {
             let _ = sh_sel_c.search.search_query_inflight.borrow_mut().clear();
             if let Some(ui) = ui_weak_sel_c.upgrade() {
                 ui.set_search_open(false);
                 ui.set_search_query("".into());
+                let key = sh_sel_c.key.clone();
+                let Some(conv_idx) = folders_ui::reveal(&ui, &sh_sel_c, |c| {
+                    c.id == id && eff_account(&key, c) == account
+                }) else {
+                    return;
+                };
                 ui.set_selected(conv_idx as i32);
                 apply_active_header(&ui, &sh_sel_c, conv_idx);
                 open_conversation(&ui, &sh_sel_c, conv_idx);
+                ui.set_sidebar_row_y(conv_idx as f32 * 64.0);
+                ui.set_sidebar_scroll_seq(ui.get_sidebar_scroll_seq() + 1);
             }
         } else {
             // No existing conv with this counterpart → enter transient
             // compose mode pointed at this contact's email.
-            drop(convs);
             if let Some(ui) = ui_weak_sel_c.upgrade() {
                 enter_compose_mode(&sh_sel_c, &ui, &contact.email);
             }
@@ -521,12 +529,11 @@ pub(crate) fn wire_search(ui: &MainWindow, shared: &Rc<Shared>) {
         let Some(hit) = sh_sel_d.search.search_convs.borrow().get(idx as usize).cloned() else {
             return;
         };
-        let conv_idx = sh_sel_d
-            .convs
-            .borrow()
-            .iter()
-            .position(|c| c.id == hit.id && eff_account(&sh_sel_d.key, c) == hit.account);
         let Some(ui) = ui_weak_sel_d.upgrade() else { return };
+        let key = sh_sel_d.key.clone();
+        let conv_idx = folders_ui::reveal(&ui, &sh_sel_d, |c| {
+            c.id == hit.id && eff_account(&key, c) == hit.account
+        });
         ui.set_search_open(false);
         let Some(conv_idx) = conv_idx else {
             println!("search-select-conv: {} is gone from the list", hit.id);
@@ -549,26 +556,23 @@ pub(crate) fn wire_search(ui: &MainWindow, shared: &Rc<Shared>) {
         let Some(env) = env else { return };
         // The conversation that owns this message is the one whose
         // messages list contains the (folder, uid) pair.
-        let convs = sh_sel_m.convs.borrow();
-        let conv_idx = convs
-            .iter()
-            .position(|c| c.messages.iter().any(|m| m.folder == env.folder && m.uid == env.uid));
+        let Some(ui) = ui_weak_sel_m.upgrade() else { return };
+        let conv_idx = folders_ui::reveal(&ui, &sh_sel_m, |c| {
+            c.messages.iter().any(|m| m.folder == env.folder && m.uid == env.uid)
+        });
         if let Some(conv_idx) = conv_idx {
-            drop(convs);
-            if let Some(ui) = ui_weak_sel_m.upgrade() {
-                ui.set_search_open(false);
-                ui.set_search_query("".into());
-                ui.set_selected(conv_idx as i32);
-                apply_active_header(&ui, &sh_sel_m, conv_idx);
-                open_conversation(&ui, &sh_sel_m, conv_idx);
-            }
+            ui.set_search_open(false);
+            ui.set_search_query("".into());
+            ui.set_selected(conv_idx as i32);
+            apply_active_header(&ui, &sh_sel_m, conv_idx);
+            open_conversation(&ui, &sh_sel_m, conv_idx);
+            ui.set_sidebar_row_y(conv_idx as f32 * 64.0);
+            ui.set_sidebar_scroll_seq(ui.get_sidebar_scroll_seq() + 1);
         } else {
             // Message is on the server but not in any local conversation —
             // out of scope for v1 of the dropdown.
             println!("search-select-message: no local conv contains {}/{}", env.folder, env.uid);
-            if let Some(ui) = ui_weak_sel_m.upgrade() {
-                ui.set_search_open(false);
-            }
+            ui.set_search_open(false);
         }
     });
 }

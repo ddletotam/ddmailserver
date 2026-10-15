@@ -47,6 +47,8 @@ mod composer;
 mod conversation;
 mod engine_events;
 mod event_form;
+mod folders;
+mod folders_ui;
 mod links;
 mod platform;
 mod reminder_ui;
@@ -324,9 +326,22 @@ fn main() {
     };
     // Стартовый сайдбар показывает уже склеенный вид (merges.json применён
     // к сырому списку из кэша); сырой список уходит в raw_convs.
-    let startup_merged = match &account {
+    let startup_full = match &account {
         Some((_, k, convs)) => apply_merges(convs, &loaded_merges, k),
         None => Vec::new(),
+    };
+    // Папки: последний известный документ лежит локально, так что табы и
+    // отфильтрованный список видны сразу, до ответа движка.
+    let loaded_folders = folders::load();
+    let startup_merged = match &account {
+        Some((_, k, _)) => sidebar::visible_view(
+            startup_full,
+            &loaded_folders.doc,
+            cal_set.folders_enabled,
+            &cal_set.active_folder,
+            k,
+        ),
+        None => startup_full,
     };
     let displays = if startup_merged.is_empty() {
         synthetic_displays()
@@ -377,6 +392,13 @@ fn main() {
         convs: RefCell::new(startup_merged),
         raw_convs: RefCell::new(init_convs),
         merges: RefCell::new(loaded_merges),
+        folders: RefCell::new(loaded_folders),
+        folders_on: Cell::new(cal_set.folders_enabled),
+        active_folder: RefCell::new(cal_set.active_folder.clone()),
+        folders_dirty: Cell::new(false),
+        folders_inflight: Cell::new(false),
+        folders_error: RefCell::new(String::new()),
+        folders_save_timer: slint::Timer::default(),
         ctx_attach: RefCell::new(None),
         displays: RefCell::new(displays.clone()),
         avatars: RefCell::new(HashMap::new()),
@@ -589,6 +611,7 @@ fn main() {
     // Timers come back to this frame rather than being parked: a dropped
     // `Timer` stops, so they must live as long as the event loop.
     wire_sidebar(&ui, &shared);
+    folders_ui::wire_folders(&ui, &shared);
     let _width_watcher = wire_viewport(&ui, &shared);
     wire_bubble_links(&ui, &shared);
     wire_identity_pick(&ui, &shared);

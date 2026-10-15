@@ -335,6 +335,70 @@ pub(crate) fn mark_raw_seen(sh: &Shared, conv_key: &merges::MergeKey, conv_merge
     }
 }
 
+/// Полный склеенный вид — все диалоги, без фильтра папок. Дёшев (склейка
+/// по сырому списку), поэтому не кэшируется: так он никогда не отстаёт от
+/// optimistic-правок, которые зеркалятся в `raw_convs` (`mark_raw_seen`).
+pub(crate) fn full_view(sh: &Shared) -> Vec<Conversation> {
+    apply_merges(&sh.raw_convs.borrow(), &sh.merges.borrow(), &sh.key)
+}
+
+/// Папки работают: включены и заведена хоть одна. Иначе список как без них.
+pub(crate) fn folders_active(doc: &folders::FoldersDoc, on: bool) -> bool {
+    on && !doc.folders.is_empty()
+}
+
+/// Часть склеенного вида, которую показывает сайдбар: диалоги выбранной
+/// папки, а без выбранной — инбокс (всё, что ни в одну папку не попало).
+/// Выбранный id, которого больше нет (папку удалили), — тоже инбокс.
+pub(crate) fn visible_view(
+    full: Vec<Conversation>,
+    doc: &folders::FoldersDoc,
+    on: bool,
+    active_id: &str,
+    fallback: &str,
+) -> Vec<Conversation> {
+    if !folders_active(doc, on) {
+        return full;
+    }
+    folders::filter(doc, &full, fallback, doc.index_of(active_id))
+}
+
+/// `visible_view` по текущему состоянию.
+pub(crate) fn current_view(sh: &Shared, full: Vec<Conversation>) -> Vec<Conversation> {
+    let st = sh.folders.borrow();
+    visible_view(full, &st.doc, sh.folders_on.get(), &sh.active_folder.borrow(), &sh.key)
+}
+
+/// Табы над списком: названия, иконки, счётчики непрочитанных диалогов.
+pub(crate) fn refresh_folder_tabs(sh: &Shared, ui: &MainWindow) {
+    let st = sh.folders.borrow();
+    let on = folders_active(&st.doc, sh.folders_on.get());
+    ui.set_folders_shown(on);
+    if !on {
+        ui.set_folder_tabs(ModelRc::new(VecModel::from(Vec::<FolderTab>::new())));
+        ui.set_active_folder("".into());
+        return;
+    }
+    let (counts, inbox) = folders::unread_counts(&st.doc, &full_view(sh), &sh.key);
+    ui.set_inbox_unread(inbox as i32);
+    let tabs: Vec<FolderTab> = st
+        .doc
+        .folders
+        .iter()
+        .zip(counts)
+        .map(|(f, n)| FolderTab {
+            id: f.id.as_str().into(),
+            name: f.name.as_str().into(),
+            icon: f.icon.as_str().into(),
+            unread: n as i32,
+        })
+        .collect();
+    ui.set_folder_tabs(ModelRc::new(VecModel::from(tabs)));
+    let active = sh.active_folder.borrow();
+    let active = if st.doc.index_of(&active).is_some() { active.as_str() } else { "" };
+    ui.set_active_folder(active.into());
+}
+
 /// Пересобрать склеенный вид из raw_convs (после merge/unmerge), обновить
 /// сайдбар и заново найти диалог `select_id`. `reopen` — перечитать его
 /// содержимое (набор сообщений изменился); false — только поправить индекс
@@ -345,7 +409,7 @@ pub(crate) fn rebuild_merged_view(
     select_id: Option<String>,
     reopen: bool,
 ) {
-    let merged = apply_merges(&sh.raw_convs.borrow(), &sh.merges.borrow(), &sh.key);
+    let merged = current_view(sh, full_view(sh));
     let displays = displays_from(&merged, &sh.identity_colors.borrow());
     *sh.convs.borrow_mut() = merged;
     *sh.displays.borrow_mut() = displays;
@@ -450,6 +514,7 @@ pub(crate) fn refresh_sidebar(sh: &Shared, ui: &MainWindow) {
     if pending.is_some() {
         ui.set_selected(0);
     }
+    refresh_folder_tabs(sh, ui);
 }
 
 /// То же для сайдбара: строка выбранного диалога должна быть видна, а её

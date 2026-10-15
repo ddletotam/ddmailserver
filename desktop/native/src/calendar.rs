@@ -159,6 +159,8 @@ pub(crate) fn save_calendar_settings(ui: &MainWindow, sh: &Shared) {
         manual_hour_height: sh.cal.manual_hour_h.get(),
         manual_col_width: sh.cal.manual_col_w.get(),
         last_conversation: sh.last_conv_id.borrow().clone(),
+        folders_enabled: sh.folders_on.get(),
+        active_folder: sh.active_folder.borrow().clone(),
     });
 }
 

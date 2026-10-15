@@ -42,6 +42,11 @@ const (
 	// NextAttemptAt say which and until when; the same data stays available
 	// in /api/desktop/identities (auth_failures) until the credentials work.
 	EventAuthFailed EventType = "auth_failed"
+
+	// EventDialogFoldersChanged — the user's desktop dialog-folders document
+	// was saved. Other stations refetch it so the tabs stay the same
+	// everywhere without a restart.
+	EventDialogFoldersChanged EventType = "dialog_folders_changed"
 )
 
 // Event represents a notification about a user-visible change.

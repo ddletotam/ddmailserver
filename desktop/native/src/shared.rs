@@ -17,6 +17,22 @@ pub(crate) struct Shared {
     pub(crate) raw_convs: RefCell<Vec<Conversation>>,
     /// Пользовательские объединения диалогов; персистятся в merges.json.
     pub(crate) merges: RefCell<merges::Merges>,
+    /// Папки диалогов (табы): документ, где он хранится, и его версия.
+    /// `convs` — уже отфильтрованный по выбранной папке вид, полный
+    /// склеенный — `sidebar::full_view`.
+    pub(crate) folders: RefCell<folders::Stored>,
+    /// Табы показываются (локальный выключатель, calendar.json).
+    pub(crate) folders_on: Cell<bool>,
+    /// Выбранный таб; пусто — инбокс (ничего не выбрано).
+    pub(crate) active_folder: RefCell<String>,
+    /// Документ правился, на сервер ещё не ушёл (дебаунс правок в настройках).
+    pub(crate) folders_dirty: Cell<bool>,
+    /// Запись папок ушла на сервер, ответа ещё нет.
+    pub(crate) folders_inflight: Cell<bool>,
+    /// Последняя ошибка чтения/записи папок на сервере; пусто — всё дошло.
+    pub(crate) folders_error: RefCell<String>,
+    /// Таймер отложенной записи папок.
+    pub(crate) folders_save_timer: slint::Timer,
     /// Вложение под правым кликом (folder, uid, index, filename) — цель
     /// пунктов «Открыть/Сохранить вложение» контекстного меню пузыря.
     pub(crate) ctx_attach: RefCell<Option<(String, u32, usize, String)>>,

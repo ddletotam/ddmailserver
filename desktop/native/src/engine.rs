@@ -21,8 +21,8 @@ use ddmail_core::provider::MailProvider;
 use ddmail_core::session::SessionPool;
 use ddmail_core::types::{
     CHANGE_KIND_DELETE, Contact, Conversation, DesktopCalendar, DesktopCalendarEvent,
-    DesktopContact, DesktopTask, MessageBody, MessageEnvelope, MessageRef, OutgoingAttachment,
-    OutgoingMessage,
+    DesktopContact, DesktopTask, DialogFoldersSave, MessageBody, MessageEnvelope, MessageRef,
+    OutgoingAttachment, OutgoingMessage,
 };
 
 /// Версия схемы id диалогов (`imap::conversation_id`). Кэш помнит, под какой
@@ -283,6 +283,16 @@ fn resolve_our_addrs(cache: &Cache, cfg: &AccountConfig) -> Vec<String> {
 
 /// Commands the UI sends to the engine thread.
 pub enum EngineCmd {
+    /// Прочитать папки диалогов с первого подключения, которое их хранит
+    /// (нативный сервер). Никто не хранит — ответ `store: None`.
+    FetchDialogFolders,
+    /// Записать папки на сервер подключения `account_key` поверх версии
+    /// `base_version`.
+    SaveDialogFolders {
+        account_key: String,
+        doc: serde_json::Value,
+        base_version: i64,
+    },
     FetchConversations {
         limit: u32,
     },
@@ -558,6 +568,27 @@ pub enum EngineResult {
     },
     /// Spam blacklist-and-purge failed — surfaced to the user (toast).
     SpamFailed(String),
+    /// Папки диалогов. `store` — ключ подключения, которое их хранит;
+    /// `None` — ни одно не хранит, папки живут в локальном файле.
+    DialogFolders {
+        store: Option<String>,
+        version: i64,
+        doc: Option<serde_json::Value>,
+    },
+    /// Итог записи папок: `conflict` — сервер держит чужую, более новую
+    /// версию (`version`/`doc` — она).
+    DialogFoldersSaved {
+        version: i64,
+        conflict: Option<Option<serde_json::Value>>,
+    },
+    /// Запись папок не удалась (сеть, сервер) — правка осталась локально.
+    DialogFoldersFailed(String),
+    /// Подключение `store` хранит папки, но прочитать их не вышло (сервер
+    /// без эндпоинта, сеть). Хранилище — всё равно оно.
+    DialogFoldersUnavailable {
+        store: String,
+        error: String,
+    },
     Error(String),
 }
 
@@ -1627,6 +1658,60 @@ pub fn spawn(
                         // Distinct from the generic Error: the UI toasts this
                         // so a failed send is never silently swallowed.
                         Err(e) => on_result(EngineResult::SendFailed(e)),
+                    }
+                }
+                EngineCmd::FetchDialogFolders => {
+                    let mut answered = false;
+                    for conn in &conns {
+                        match rt.block_on(conn.provider.fetch_dialog_folders()) {
+                            Ok(Some(d)) => {
+                                on_result(EngineResult::DialogFolders {
+                                    store: Some(conn.key.clone()),
+                                    version: d.version,
+                                    doc: d.doc,
+                                });
+                                answered = true;
+                                break;
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                // Хранящее подключение не ответило — не
+                                // «папок нет» и не «подключения нет»: UI
+                                // остаётся на кэше и говорит, почему.
+                                eprintln!("dialog folders [{}]: {e}", conn.key);
+                                on_result(EngineResult::DialogFoldersUnavailable {
+                                    store: conn.key.clone(),
+                                    error: e,
+                                });
+                                answered = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !answered {
+                        on_result(EngineResult::DialogFolders {
+                            store: None,
+                            version: 0,
+                            doc: None,
+                        });
+                    }
+                }
+                EngineCmd::SaveDialogFolders { account_key, doc, base_version } => {
+                    let conn = route(&conns, &account_key);
+                    match rt.block_on(conn.provider.save_dialog_folders(&doc, base_version)) {
+                        Ok(DialogFoldersSave::Saved(version)) => {
+                            on_result(EngineResult::DialogFoldersSaved { version, conflict: None })
+                        }
+                        Ok(DialogFoldersSave::Conflict(cur)) => {
+                            on_result(EngineResult::DialogFoldersSaved {
+                                version: cur.version,
+                                conflict: Some(cur.doc),
+                            })
+                        }
+                        Err(e) => {
+                            eprintln!("save dialog folders [{}]: {e}", conn.key);
+                            on_result(EngineResult::DialogFoldersFailed(e));
+                        }
                     }
                 }
                 EngineCmd::StartWatching => {

@@ -55,6 +55,8 @@ pub enum EngineEvent {
     /// while the client was running stayed invisible — no sidebar tint, no
     /// from-picker entry, no calendar — until the next restart.
     IdentitiesChanged,
+    /// Папки диалогов сохранены (с этой или другой станции) — перечитать.
+    DialogFoldersChanged,
     /// The session token was refreshed (native provider); persist it.
     TokenRefreshed { account_id: String, token: String },
 }

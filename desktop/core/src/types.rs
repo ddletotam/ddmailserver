@@ -473,3 +473,20 @@ pub struct DesktopEventExtra {
     pub name: String,
     pub value: String,
 }
+
+/// Документ папок диалогов в том виде, в каком его хранит сервер
+/// (`GET/PUT /api/desktop/v1/dialog-folders`). Сервер его не толкует —
+/// разбирает клиент. `doc == None` — пользователь папок ещё не сохранял.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DialogFoldersDoc {
+    pub version: i64,
+    #[serde(default)]
+    pub doc: Option<serde_json::Value>,
+}
+
+/// Итог записи папок: новая версия или конфликт с тем, что лежит сейчас.
+#[derive(Debug, Clone)]
+pub enum DialogFoldersSave {
+    Saved(i64),
+    Conflict(DialogFoldersDoc),
+}

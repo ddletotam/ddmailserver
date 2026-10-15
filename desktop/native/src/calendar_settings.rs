@@ -40,6 +40,14 @@ pub struct CalendarSettings {
     /// списке. Пусто / диалог исчез → первый с закэшированными телами.
     #[serde(default)]
     pub last_conversation: String,
+    /// Папки диалогов показываются (табы над списком). Выключатель
+    /// локальный: сами папки на сервере, а прятать их можно на одной станции.
+    #[serde(default = "default_true")]
+    pub folders_enabled: bool,
+    /// Выбранный таб (`folders::Folder::id`); пусто — ни один, то есть
+    /// инбокс: всё, что не попало в папки.
+    #[serde(default)]
+    pub active_folder: String,
 }
 
 /// `Default` — руками, а не `derive`: у derive'а это нули и `false`, тогда
@@ -58,6 +66,8 @@ impl Default for CalendarSettings {
             manual_hour_height: 0.0,
             manual_col_width: 0.0,
             last_conversation: String::new(),
+            folders_enabled: default_true(),
+            active_folder: String::new(),
         }
     }
 }

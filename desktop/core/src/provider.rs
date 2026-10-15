@@ -260,6 +260,23 @@ pub trait MailProvider: Send + Sync {
         Err("Deleting contacts requires a CardDAV URL or a DDMail server.".into())
     }
 
+    /// Папки диалогов, сохранённые на сервере. `Ok(None)` — провайдер их не
+    /// хранит (IMAP напрямую): клиент держит папки в локальном файле.
+    async fn fetch_dialog_folders(&self) -> Result<Option<DialogFoldersDoc>, String> {
+        Ok(None)
+    }
+
+    /// Записать папки поверх версии `base_version` (0 — на сервере ещё
+    /// ничего нет). Чужая правка между чтением и записью — `Conflict` с тем,
+    /// что лежит сейчас.
+    async fn save_dialog_folders(
+        &self,
+        _doc: &serde_json::Value,
+        _base_version: i64,
+    ) -> Result<DialogFoldersSave, String> {
+        Err("Dialog folders are stored only on a DDMail server.".into())
+    }
+
     /// Provider type identifier.
     fn provider_type(&self) -> &'static str;
 }

@@ -36,10 +36,19 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         list
                     };
                     *sh.raw_convs.borrow_mut() = raw.clone();
-                    let merged = apply_merges(&raw, &sh.merges.borrow(), &sh.key);
+                    let full = apply_merges(&raw, &sh.merges.borrow(), &sh.key);
+                    let full_len = full.len();
+                    // Аватары нужны всем диалогам, а не только видимой папке:
+                    // переключение таба не должно показывать серые кружки.
+                    let avatar_emails: Vec<String> = full
+                        .iter()
+                        .filter_map(|c| c.counterparts.first().map(|cp| cp.addr.clone()))
+                        .collect();
+                    let merged = current_view(sh, full);
                     println!(
-                        "engine: {} conversations, {} after merges (delta={})",
+                        "engine: {} conversations, {} after merges, {} in view (delta={})",
                         raw.len(),
+                        full_len,
                         merged.len(),
                         if partial { "merge" } else { "full" }
                     );
@@ -56,14 +65,12 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     // Request avatars for unique counterpart emails not yet cached.
                     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
                         let mut seen = std::collections::HashSet::new();
-                        for d in &displays {
-                            if d.email.is_empty() || sh.avatars.borrow().contains_key(&d.email) {
+                        for email in avatar_emails {
+                            if email.is_empty() || sh.avatars.borrow().contains_key(&email) {
                                 continue;
                             }
-                            if seen.insert(d.email.clone()) {
-                                let _ = etx.send(engine::EngineCmd::FetchAvatar {
-                                    email: d.email.clone(),
-                                });
+                            if seen.insert(email.clone()) {
+                                let _ = etx.send(engine::EngineCmd::FetchAvatar { email });
                             }
                         }
                     }
@@ -138,7 +145,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     // instead of leaving the user on the stub pane.
                     let redirect = sh.compose.compose_sent_target.borrow().clone();
                     if let Some(addr) = redirect {
-                        let idx = sh.convs.borrow().iter().position(|c| {
+                        let idx = folders_ui::reveal(ui, sh, |c| {
                             c.counterparts.iter().any(|cp| cp.addr.eq_ignore_ascii_case(&addr))
                         });
                         if let Some(idx) = idx {
@@ -440,6 +447,17 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         }
                     });
                 }
+                EngineEvent::DialogFoldersChanged => {
+                    // Сохранили с этой или другой станции. Эхо своей записи
+                    // `on_fetched` отсеет по версии.
+                    SHARED.with(|s| {
+                        if let Some(sh) = s.borrow().as_ref() {
+                            if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                                let _ = etx.send(engine::EngineCmd::FetchDialogFolders);
+                            }
+                        }
+                    });
+                }
                 EngineEvent::IdentitiesChanged => {
                     println!(
                         "engine event: identities changed — refreshing accounts, calendars, contacts"
@@ -625,6 +643,35 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             slint::Timer::single_shot(std::time::Duration::from_millis(2200), move || {
                 if let Some(u) = uiw.upgrade() {
                     u.set_send_confirm_visible(false);
+                }
+            });
+        }
+        engine::EngineResult::DialogFolders { store, version, doc } => {
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    folders_ui::on_fetched(ui, sh, store, version, doc);
+                }
+            });
+        }
+        engine::EngineResult::DialogFoldersSaved { version, conflict } => {
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    folders_ui::on_saved(ui, sh, version, conflict);
+                }
+            });
+        }
+        engine::EngineResult::DialogFoldersFailed(e) => {
+            eprintln!("engine: dialog folders save failed: {e}");
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    folders_ui::on_save_failed(ui, sh, e);
+                }
+            });
+        }
+        engine::EngineResult::DialogFoldersUnavailable { store, error } => {
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    folders_ui::on_unavailable(ui, sh, store, error);
                 }
             });
         }
@@ -1119,20 +1166,17 @@ pub(crate) fn open_message_from_toast(
     if uid > 0 {
         *sh.pending_open_ref.borrow_mut() = Some((folder.to_string(), uid));
     }
-    let idx = {
-        let convs = sh.convs.borrow();
-        convs.iter().position(|c| uid > 0 && c.messages.iter().any(|m| m.uid == uid)).or_else(
-            || {
-                if addr.is_empty() {
-                    None
-                } else {
-                    convs.iter().position(|c| {
-                        c.counterparts.iter().any(|cp| cp.addr.eq_ignore_ascii_case(addr))
-                    })
-                }
-            },
-        )
-    };
+    // Диалог может лежать в другой папке — `reveal` переключит на неё.
+    let idx = folders_ui::reveal(ui, sh, |c| uid > 0 && c.messages.iter().any(|m| m.uid == uid))
+        .or_else(|| {
+            if addr.is_empty() {
+                None
+            } else {
+                folders_ui::reveal(ui, sh, |c| {
+                    c.counterparts.iter().any(|cp| cp.addr.eq_ignore_ascii_case(addr))
+                })
+            }
+        });
     // Переключение вида из Rust: колбэк `view-changed` при этом НЕ зовётся
     // (его дёргает только меню), так что ни снимка позиции, ни его
     // восстановления здесь нет — диалог открывается со своим анкором.

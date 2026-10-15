@@ -232,6 +232,8 @@ func (s *Server) setupRoutes() {
 	desktopAuthAPI.HandleFunc("/spam/mark-domain", s.HandleDesktopMarkSpamByDomain).Methods("POST")
 	desktopAuthAPI.HandleFunc("/spam/blacklist-and-purge", s.HandleDesktopBlacklistAndPurge).Methods("POST")
 	desktopAuthAPI.HandleFunc("/identities", s.HandleDesktopIdentities).Methods("GET")
+	desktopAuthAPI.HandleFunc("/dialog-folders", s.HandleDesktopDialogFolders).Methods("GET")
+	desktopAuthAPI.HandleFunc("/dialog-folders", s.HandleDesktopDialogFoldersSave).Methods("PUT")
 	desktopAuthAPI.HandleFunc("/send", s.HandleDesktopSend).Methods("POST")
 	desktopAuthAPI.HandleFunc("/calendars", s.HandleDesktopCalendars).Methods("GET")
 	desktopAuthAPI.HandleFunc("/calendar-events", s.HandleDesktopCalendarEvents).Methods("GET")

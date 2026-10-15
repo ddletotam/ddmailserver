@@ -100,6 +100,28 @@ struct ConvItem {
     is-merged: bool,
 }
 
+// Таб папки диалогов над списком бесед (folders_ui.rs).
+struct FolderTab {
+    id: string,
+    name: string,
+    icon: string,
+    // Диалогов с непрочитанным в папке; 0 — без счётчика.
+    unread: int,
+}
+
+// Строка раздела настроек «Папки». identities/domains — списком через
+// запятую; kind: 0 все · 1 только 1:1 · 2 только группы; manual — сколько
+// диалогов положено в папку руками.
+struct FolderEdit {
+    id: string,
+    name: string,
+    icon: string,
+    identities: string,
+    domains: string,
+    kind: int,
+    manual: int,
+}
+
 // One attendee row of the event-detail table: display name + localized
 // participation status with its colour.
 struct AttRow {
@@ -1143,6 +1165,30 @@ export component MainWindow inherits Window {
     // разобрать склейку обратно.
     callback conv-merge(int);
     callback conv-unmerge(int);
+    // ── Папки диалогов (табы) ──
+    in property <bool> folders-shown: false;
+    in property <[FolderTab]> folder-tabs;
+    in-out property <string> active-folder: "";
+    // Непрочитанных диалогов в инбоксе — счётчик на чипе «Входящие».
+    in property <int> inbox-unread: 0;
+    in property <[FolderEdit]> folder-edits;
+    in property <bool> folders-on: true;
+    // Где живут папки, если не на сервере, — подпись в настройках; пусто — всё
+    // в порядке.
+    in property <string> folders-store-note: "";
+    callback folder-tab-clicked(string);
+    callback folder-tab-moved(int, int);
+    callback folders-toggle();
+    callback folder-add();
+    callback folder-delete(string);
+    callback folder-edit(string, string, string);
+    callback conv-to-folder(int, string);
+    // Перетаскивание таба: индекс тащимого, курсор в координатах полосы,
+    // индекс таба под курсором.
+    property <int> ftab-drag: -1;
+    property <bool> ftab-dragging: false;
+    property <length> ftab-drag-x: 0;
+    property <int> ftab-drop: -1;
     callback hit-test(int, length, length);
     // Hover query for the pointer cursor: true when (x, y) inside row
     // `idx` sits on a link rect. Pure — it's evaluated from a binding.
@@ -1294,7 +1340,7 @@ export component MainWindow inherits Window {
     callback snooze-cancel();       // dialog dismissed WITHOUT a choice → resume the toast timer
     // ── Settings modal ──
     in-out property <bool> settings-visible: false;
-    in-out property <int> settings-tab: 0; // 0 Уведомления · 1 Контент · 2 Подключение · 3 Аккаунты
+    in-out property <int> settings-tab: 0; // 0 Уведомления · 1 Контент · 2 Календарь · 3 Подключения · 4 Аккаунты · 5 Папки
     callback open-settings();
     // Connections list (Settings → Подключения) + CRUD callbacks.
     in property <[ConnRow]> connections;
@@ -1577,6 +1623,212 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
+                // ── Папки диалогов: табы между поиском и списком (§4 «Папки
+                // диалогов»). Не выбран ни один таб — инбокс: всё, что в
+                // папки не попало; повторный клик по выбранному снимает выбор.
+                // Таб тащится мышью — порядок табов это и приоритет правил.
+                if root.folders-shown: Rectangle {
+                    height: 38px;
+                    // Колесо крутит полосу вбок: вертикальной прокрутки у неё
+                    // нет, а мышь без горизонтального колеса — норма.
+                    function scroll-by(d: length) {
+                        ftabs-fl.viewport-x = max(min(0px, ftabs-fl.viewport-x + d),
+                            min(0px, ftabs-fl.width - ftabs-fl.viewport-width));
+                    }
+                    ftabs-fl := Flickable {
+                        width: parent.width;
+                        height: parent.height;
+                        viewport-width: max(self.width, ftabs-row.preferred-width);
+                        viewport-height: self.height;
+                        // Драг-флик выключен по той же причине, что у сетки
+                        // календаря (§5и): он съел бы перетаскивание таба.
+                        interactive: false;
+                        TouchArea {
+                            width: ftabs-fl.viewport-width;
+                            height: ftabs-fl.height;
+                            scroll-event(se) => {
+                                scroll-by(se.delta-x + se.delta-y);
+                                return accept;
+                            }
+                        }
+                        ftabs-row := HorizontalLayout {
+                            height: ftabs-fl.height;
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            padding-top: 5px;
+                            padding-bottom: 5px;
+                            spacing: 4px;
+                            alignment: start;
+                            // Возврат в инбокс. Виден, только пока выбрана
+                            // папка: без выбора инбокс и так на экране, а
+                            // «снять выбор повторным кликом» не угадать.
+                            if root.active-folder != "": Rectangle {
+                                border-radius: 14px;
+                                background: fib.has-hover ? #e8ecf1 : #f0f2f5;
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: root.inbox-unread > 0 ? 6px : 11px;
+                                    spacing: 5px;
+                                    Text {
+                                        text: "← Входящие";
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        color: #2b3640;
+                                        vertical-alignment: center;
+                                    }
+                                    if root.inbox-unread > 0: VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            width: max(18px, fibu.preferred-width + 10px);
+                                            height: 18px;
+                                            border-radius: 9px;
+                                            background: #10b981;
+                                            fibu := Text {
+                                                width: parent.width;
+                                                height: parent.height;
+                                                text: root.inbox-unread;
+                                                color: white;
+                                                font-size: 11px;
+                                                font-weight: 700;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+                                fib := TouchArea {
+                                    clicked => { root.folder-tab-clicked(root.active-folder); }
+                                    scroll-event(se) => {
+                                        scroll-by(se.delta-x + se.delta-y);
+                                        return accept;
+                                    }
+                                }
+                            }
+                            for t[ti] in root.folder-tabs: Rectangle {
+                                property <bool> active: root.active-folder == t.id;
+                                property <bool> drop-here: root.ftab-drag >= 0 && root.ftab-dragging
+                                    && root.ftab-drag-x >= self.x
+                                    && root.ftab-drag-x < self.x + self.width;
+                                // Таб под курсором — по таймеру, а не `changed
+                                // drop-here`. Отслеживание изменений инициализи-
+                                // руется при создании таба, а создаёт его
+                                // раскладка полосы; drop-here читает x таба (Slint
+                                // вычисляет его заранее, `&&` не спасает) — x
+                                // считает та же раскладка: цикл и паника
+                                // «Recursion detected» на старте. Таймер читает
+                                // геометрию уже в цикле событий и тикает только
+                                // во время перетаскивания.
+                                Timer {
+                                    interval: 30ms;
+                                    running: root.ftab-dragging && root.ftab-drag >= 0;
+                                    triggered => {
+                                        if (parent.drop-here) { root.ftab-drop = ti; }
+                                    }
+                                }
+                                border-radius: 14px;
+                                background: self.active ? #10b981
+                                    : (fta.has-hover ? #e8ecf1 : #f0f2f5);
+                                opacity: (root.ftab-dragging && root.ftab-drag == ti) ? 0.5 : 1.0;
+                                // Куда встанет тащимый таб. Не `if` и с размером
+                                // в px, а не от родителя: drop-here зависит от x
+                                // таба, x считает раскладка, а условный ребёнок
+                                // входит в размеры таба — цикл, и Slint роняет
+                                // клиент паникой «Recursion detected» на старте.
+                                Rectangle {
+                                    visible: parent.drop-here && root.ftab-drag != ti;
+                                    x: root.ftab-drag > ti ? -3px : parent.width + 1px;
+                                    y: 2px;
+                                    width: 2px;
+                                    height: 24px;
+                                    background: #10b981;
+                                }
+                                HorizontalLayout {
+                                    padding-left: 11px;
+                                    padding-right: t.unread > 0 ? 6px : 11px;
+                                    spacing: 5px;
+                                    if t.icon != "": Text {
+                                        text: t.icon;
+                                        font-size: 13px;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: t.name == "" ? "Без названия" : t.name;
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        color: active ? white : #2b3640;
+                                        vertical-alignment: center;
+                                    }
+                                    if t.unread > 0: VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            width: max(18px, ftu.preferred-width + 10px);
+                                            height: 18px;
+                                            border-radius: 9px;
+                                            background: active ? white : #10b981;
+                                            ftu := Text {
+                                                width: parent.width;
+                                                height: parent.height;
+                                                text: t.unread;
+                                                color: active ? #10b981 : white;
+                                                font-size: 11px;
+                                                font-weight: 700;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+                                fta := TouchArea {
+                                    clicked => {
+                                        if (!root.ftab-dragging) { root.folder-tab-clicked(t.id); }
+                                    }
+                                    pointer-event(pe) => {
+                                        // Флаг драга живёт до следующего нажатия
+                                        // (clicked приходит после отпускания) и
+                                        // сбрасывается на любом нажатии.
+                                        if (pe.kind == PointerEventKind.down) {
+                                            root.ftab-dragging = false;
+                                        }
+                                        if (pe.button == PointerEventButton.right
+                                            && pe.kind == PointerEventKind.down) {
+                                            root.settings-tab = 5;
+                                            root.settings-visible = true;
+                                            return;
+                                        }
+                                        if (pe.button != PointerEventButton.left) { return; }
+                                        if (pe.kind == PointerEventKind.down) {
+                                            root.ftab-drag = ti;
+                                            root.ftab-drop = ti;
+                                        } else if (pe.kind == PointerEventKind.up) {
+                                            if (root.ftab-dragging && root.ftab-drag == ti
+                                                && root.ftab-drop >= 0 && root.ftab-drop != ti) {
+                                                root.folder-tab-moved(ti, root.ftab-drop);
+                                            }
+                                            root.ftab-drag = -1;
+                                        }
+                                    }
+                                    moved => {
+                                        if (root.ftab-drag == ti) {
+                                            if (Math.abs(self.mouse-x - self.pressed-x) > 6px) {
+                                                root.ftab-dragging = true;
+                                            }
+                                            root.ftab-drag-x = parent.x + self.mouse-x;
+                                        }
+                                    }
+                                    scroll-event(se) => {
+                                        scroll-by(se.delta-x + se.delta-y);
+                                        return accept;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        y: parent.height - 1px;
+                        height: 1px;
+                        background: #eef1f5;
+                    }
+                }
                 // Обёртка нужна только под полосу прокрутки: в VerticalLayout
                 // сиблинг стал бы ещё одной строкой раскладки, а полоса должна
                 // лежать поверх списка. Внутри Rectangle дети позиционируются
@@ -1617,6 +1869,18 @@ export component MainWindow inherits Window {
                                 if conv.is-merged: MenuItem {
                                     title: "Разъединить диалоги";
                                     activated => { root.conv-unmerge(idx); }
+                                }
+                                if root.folders-shown: Menu {
+                                    title: "В папку";
+                                    for f in root.folder-tabs: MenuItem {
+                                        title: f.icon == "" ? f.name : f.icon + " " + f.name;
+                                        enabled: f.id != root.active-folder;
+                                        activated => { root.conv-to-folder(idx, f.id); }
+                                    }
+                                }
+                                if root.folders-shown && root.active-folder != "": MenuItem {
+                                    title: "Убрать из папки";
+                                    activated => { root.conv-to-folder(idx, ""); }
                                 }
                             }
                             Rectangle { }
@@ -5336,6 +5600,7 @@ export component MainWindow inherits Window {
                                 { ico: "📅", label: "Календарь" },
                                 { ico: "🔌", label: "Подключение" },
                                 { ico: "👤", label: "Аккаунты" },
+                                { ico: "🗂", label: "Папки" },
                             ]: Rectangle {
                                 height: 38px;
                                 border-radius: 9px;
@@ -5586,6 +5851,154 @@ export component MainWindow inherits Window {
                                                 background: cd.has-hover ? #ffe1e1 : transparent;
                                                 border-radius: 7px;
                                                 Text { text: "Удалить"; font-size: 12px; color: #d64545; }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ===== Папки диалогов =====
+                            // Правки применяются сразу и уходят на сервер с
+                            // дебаунсом (folders_ui::commit). Текстовые поля
+                            // модель не перечитывают — иначе пересоздание
+                            // строки на каждую букву срывало бы фокус.
+                            if root.settings-tab == 5: VerticalLayout {
+                                spacing: 8px;
+                                HorizontalLayout {
+                                    Text {
+                                        text: "Папки диалогов";
+                                        font-size: 16px; font-weight: 700; color: #0f1419;
+                                        horizontal-stretch: 1; vertical-alignment: center;
+                                    }
+                                    fadd := TouchArea {
+                                        width: 150px; height: 34px;
+                                        clicked => { root.folder-add(); }
+                                        Rectangle {
+                                            background: fadd.has-hover ? #4f7df5 : #3a6df0;
+                                            border-radius: 8px;
+                                            Text { text: "+ Новая папка"; color: white; font-size: 13px; font-weight: 600; }
+                                        }
+                                    }
+                                }
+                                Text {
+                                    text: "Табы над списком диалогов. Диалог лежит в одной папке: положенный руками (правый клик по диалогу → «В папку») — там, иначе в первой по порядку табов, чьи правила подходят. Не попавшие никуда — во «Входящих»: это когда ни один таб не выбран. Порядок табов меняется перетаскиванием.";
+                                    font-size: 12px; color: #8b95a1; wrap: word-wrap;
+                                }
+                                SettingRow {
+                                    title: "Показывать папки";
+                                    subtitle: "Только на этой станции; сами папки общие";
+                                    Toggle {
+                                        on: root.folders-on;
+                                        toggled => { root.folders-toggle(); }
+                                    }
+                                }
+                                if root.folders-store-note != "": Text {
+                                    text: root.folders-store-note;
+                                    font-size: 12px; color: #b7791f; wrap: word-wrap;
+                                }
+                                for f[fi] in root.folder-edits: Rectangle {
+                                    border-radius: 10px;
+                                    background: #f7f8fa;
+                                    border-width: 1px; border-color: #eef1f5;
+                                    VerticalLayout {
+                                        padding: 12px;
+                                        spacing: 6px;
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            KLineEdit {
+                                                width: 56px;
+                                                text: f.icon;
+                                                placeholder-text: "📁";
+                                                edited(t) => { root.folder-edit(f.id, "icon", t); }
+                                            }
+                                            KLineEdit {
+                                                horizontal-stretch: 1;
+                                                text: f.name;
+                                                placeholder-text: "Название";
+                                                edited(t) => { root.folder-edit(f.id, "name", t); }
+                                            }
+                                            fdel := TouchArea {
+                                                width: 68px;
+                                                clicked => { root.folder-delete(f.id); }
+                                                Rectangle {
+                                                    background: fdel.has-hover ? #ffe1e1 : transparent;
+                                                    border-radius: 7px;
+                                                    Text { text: "Удалить"; font-size: 12px; color: #d64545; }
+                                                }
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                width: 110px;
+                                                text: "Получено на";
+                                                font-size: 13px; color: #2b3640;
+                                                vertical-alignment: center;
+                                            }
+                                            KLineEdit {
+                                                horizontal-stretch: 1;
+                                                text: f.identities;
+                                                placeholder-text: "свои адреса через запятую";
+                                                edited(t) => { root.folder-edit(f.id, "identities", t); }
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                width: 110px;
+                                                text: "Домены";
+                                                font-size: 13px; color: #2b3640;
+                                                vertical-alignment: center;
+                                            }
+                                            KLineEdit {
+                                                horizontal-stretch: 1;
+                                                text: f.domains;
+                                                placeholder-text: "домены собеседников, напр. acme.com";
+                                                edited(t) => { root.folder-edit(f.id, "domains", t); }
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            alignment: start;
+                                            Text {
+                                                width: 110px;
+                                                text: "Диалоги";
+                                                font-size: 13px; color: #2b3640;
+                                                vertical-alignment: center;
+                                            }
+                                            for opt[oi] in ["все", "только 1:1", "только группы"]: Rectangle {
+                                                width: fk-t.preferred-width + 20px;
+                                                height: 28px;
+                                                border-radius: 14px;
+                                                background: f.kind == oi ? #10b981 : (fk.has-hover ? #e8ecf1 : #eef1f5);
+                                                fk := TouchArea {
+                                                    clicked => { root.folder-edit(f.id, "kind", "\{oi}"); }
+                                                }
+                                                fk-t := Text {
+                                                    text: opt;
+                                                    font-size: 12px;
+                                                    color: f.kind == oi ? white : #2b3640;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                        if f.manual > 0: HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                text: "Положено руками: " + f.manual;
+                                                font-size: 12px; color: #6b7480;
+                                                vertical-alignment: center;
+                                                horizontal-stretch: 1;
+                                            }
+                                            fclr := TouchArea {
+                                                width: 150px;
+                                                clicked => { root.folder-edit(f.id, "clear-manual", ""); }
+                                                Rectangle {
+                                                    background: fclr.has-hover ? #eef1f5 : transparent;
+                                                    border-radius: 7px;
+                                                    Text { text: "Сбросить ручное"; font-size: 12px; color: #2b3640; }
+                                                }
                                             }
                                         }
                                     }

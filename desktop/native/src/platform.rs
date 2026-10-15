@@ -284,7 +284,8 @@ pub(crate) fn tray_set_dot(on: bool) {
 /// (открытие диалога, дельты движка) и один раз после создания трея —
 /// чтобы письма, пришедшие пока клиент был выключен, зажигали точку.
 pub(crate) fn tray_sync_dot(sh: &Shared) {
-    tray_set_dot(sh.convs.borrow().iter().any(|c| c.unread_count > 0));
+    // По всем диалогам: непрочитанное в невыбранной папке — тоже непрочитанное.
+    tray_set_dot(full_view(sh).iter().any(|c| c.unread_count > 0));
 }
 
 /// Minimal stdout logger: ddmail-core (NativeProvider, engine) reports

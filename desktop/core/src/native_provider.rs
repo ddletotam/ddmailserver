@@ -724,6 +724,8 @@ impl MailProvider for NativeProvider {
                                             // (profile import). Cached
                                             // identities are now stale.
                                             notifier(EngineEvent::IdentitiesChanged);
+                                        } else if event_type == "dialog_folders_changed" {
+                                            notifier(EngineEvent::DialogFoldersChanged);
                                         } else if event_type == "expunge" {
                                             // Messages deleted elsewhere (another
                                             // client, spam purge). Tell the engine
@@ -813,6 +815,34 @@ impl MailProvider for NativeProvider {
         });
 
         Ok(())
+    }
+
+    async fn fetch_dialog_folders(&self) -> Result<Option<DialogFoldersDoc>, String> {
+        self.get("/dialog-folders").await.map(Some)
+    }
+
+    async fn save_dialog_folders(
+        &self,
+        doc: &serde_json::Value,
+        base_version: i64,
+    ) -> Result<DialogFoldersSave, String> {
+        let url = self.api_url("/dialog-folders");
+        let body = serde_json::json!({ "base_version": base_version, "doc": doc });
+        let resp =
+            self.send_authed(|http, token| http.put(&url).bearer_auth(token).json(&body)).await?;
+        let status = resp.status();
+        if status == StatusCode::CONFLICT {
+            let cur: DialogFoldersDoc =
+                resp.json().await.map_err(|e| format!("JSON decode /dialog-folders: {e}"))?;
+            return Ok(DialogFoldersSave::Conflict(cur));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("HTTP {status}: {body}"));
+        }
+        let saved: DialogFoldersDoc =
+            resp.json().await.map_err(|e| format!("JSON decode /dialog-folders: {e}"))?;
+        Ok(DialogFoldersSave::Saved(saved.version))
     }
 
     fn provider_type(&self) -> &'static str {
