@@ -211,6 +211,18 @@ pub struct Style {
     /// thing as where its text sits. HTML maps this attribute to auto margins;
     /// letting it reach `align` instead would centre every cell's text too.
     pub box_align: Option<Align>,
+    /// The alignment came from `<center>` or an `align` attribute, not from
+    /// CSS `text-align`. Browsers map those to `-webkit-center`/`-webkit-right`,
+    /// which also slide block children narrower than the line — the way a
+    /// `max-width` wrapper lands in the middle when broken markup drops it
+    /// straight into `<center>`. Plain `text-align: center` moves only text.
+    pub align_legacy: bool,
+    /// The element's own CSS `vertical-align: top|bottom` — where an
+    /// inline-level box sits on its line. Not inherited and not fed by the
+    /// `valign` attribute (that is `valign`, for cells): two `inline-block`
+    /// columns of different heights side by side with `vertical-align: top`
+    /// is how mail builds a footer menu.
+    pub inline_valign: Option<VAlign>,
 }
 
 impl Style {
@@ -253,6 +265,8 @@ impl Style {
             max_width: None,
             hidden: false,
             box_align: None,
+            align_legacy: false,
+            inline_valign: None,
         }
     }
 
@@ -261,6 +275,7 @@ impl Style {
         Self {
             display: Display::Inline,
             box_align: None,
+            inline_valign: None,
             background: None,
             background_image: None,
             bg_size: BgSize::Auto,
@@ -328,6 +343,18 @@ impl Resolver {
                 self.apply_decls(&self.sheet.rules[n as usize].decls, important, &mut s, parent);
             }
             self.apply_decls(&inline, important, &mut s, parent);
+        }
+        // A legacy-aligned parent places its block children (see
+        // `align_legacy`); explicit auto margins and `<table align>` win.
+        let block_level = matches!(s.display, Display::Block | Display::Table | Display::ListItem);
+        if block_level
+            && parent.align_legacy
+            && matches!(parent.align, Align::Center | Align::Right)
+            && s.box_align.is_none()
+            && !s.margin_auto_left
+            && !s.margin_auto_right
+        {
+            s.box_align = Some(parent.align);
         }
         s
     }
@@ -444,18 +471,24 @@ impl Resolver {
             }
             "text-align" => {
                 s.align = match lower.as_str() {
-                    "center" => Align::Center,
-                    "right" | "end" => Align::Right,
+                    "center" | "-webkit-center" => Align::Center,
+                    "right" | "end" | "-webkit-right" => Align::Right,
                     "justify" => Align::Justify,
                     _ => Align::Left,
-                }
+                };
+                s.align_legacy = lower.starts_with("-webkit-");
             }
             "vertical-align" => {
                 s.valign = match lower.as_str() {
                     "top" => VAlign::Top,
                     "bottom" => VAlign::Bottom,
                     _ => VAlign::Middle,
-                }
+                };
+                s.inline_valign = match lower.as_str() {
+                    "top" => Some(VAlign::Top),
+                    "bottom" => Some(VAlign::Bottom),
+                    _ => None,
+                };
             }
             "line-height" => {
                 // Unitless line-height is a multiplier, not a length.
@@ -776,7 +809,10 @@ fn apply_tag_defaults(t: &str, s: &mut Style, scale: f32) {
             s.border_width.left = 3.0 * scale;
             s.border_color = Rgba::rgb(0xcc, 0xcc, 0xcc);
         }
-        "center" => s.align = Align::Center,
+        "center" => {
+            s.align = Align::Center;
+            s.align_legacy = true;
+        }
         "hr" => {
             s.margin = Edges { top: em * 0.5, bottom: em * 0.5, ..Default::default() };
             s.border_width.top = 1.0 * scale;
@@ -816,6 +852,7 @@ fn apply_presentational(node: &Handle, t: &str, s: &mut Style, scale: f32) {
                 s.box_align = Some(align);
             } else {
                 s.align = align;
+                s.align_legacy = true;
             }
         }
     }

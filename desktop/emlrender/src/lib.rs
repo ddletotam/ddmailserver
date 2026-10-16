@@ -787,4 +787,45 @@ mod tests {
             assert_eq!(r.width_px, 200);
         }
     }
+
+    fn run_x(r: &Rendered, needle: &str) -> f32 {
+        r.runs.iter().find(|t| t.text.contains(needle)).map_or(-1.0, |t| t.x)
+    }
+
+    fn run_y(r: &Rendered, needle: &str) -> f32 {
+        r.runs.iter().find(|t| t.text.contains(needle)).map_or(-1.0, |t| t.y)
+    }
+
+    /// `<center>` slides a narrower block into the middle, as browsers do
+    /// (`-webkit-center`). Broken mail markup drops its `max-width` wrapper
+    /// straight into `<center>`, and the body then hugged the left edge under
+    /// a centred header. CSS `text-align: center` moves only the text.
+    #[test]
+    fn center_tag_centres_narrow_blocks() {
+        let html = "<center><div style=\"max-width:200px;text-align:left\">Заказ</div></center>";
+        let x = run_x(&render(html, &opts(600)), "Заказ");
+        assert!((x - 200.0).abs() < 2.0, "block inside <center> at x={x}, expected 200");
+
+        let html = "<div align=\"center\"><div style=\"max-width:200px;text-align:left\">Заказ</div></div>";
+        let x = run_x(&render(html, &opts(600)), "Заказ");
+        assert!((x - 200.0).abs() < 2.0, "block inside align=center at x={x}, expected 200");
+
+        let html = "<div style=\"text-align:center\"><div style=\"max-width:200px;text-align:left\">Заказ</div></div>";
+        let x = run_x(&render(html, &opts(600)), "Заказ");
+        assert!(x < 2.0, "CSS text-align moved the block itself to x={x}");
+    }
+
+    /// `vertical-align: top` lines inline-block columns of different heights
+    /// up at the top — a footer menu of two-link columns where one link wraps.
+    #[test]
+    fn inline_blocks_honour_vertical_align_top() {
+        let col = "display:inline-block;vertical-align:top;width:100px;font-size:14px";
+        let html = format!(
+            "<div style=\"font-size:0\"><div style=\"{col}\">Один</div>             <div style=\"{col}\">Два<br>три<br>четыре</div></div>"
+        );
+        let r = render(&html, &opts(400));
+        let (a, b) = (run_y(&r, "Один"), run_y(&r, "Два"));
+        assert!(a >= 0.0 && b >= 0.0, "both columns must render");
+        assert!((a - b).abs() < 2.0, "tops differ: {a} vs {b}");
+    }
 }

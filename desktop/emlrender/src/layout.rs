@@ -15,7 +15,9 @@ use markup5ever_rcdom::Handle;
 
 use crate::dom::{attr, children, is_dropped, tag, text as node_text};
 use crate::image::{self, Bitmap};
-use crate::style::{Align, BgImage, BgPos, BgSize, Display, Edges, Len, Resolver, Rgba, Style};
+use crate::style::{
+    Align, BgImage, BgPos, BgSize, Display, Edges, Len, Resolver, Rgba, Style, VAlign,
+};
 use crate::text::{self, Span, TextEngine};
 
 pub enum Cmd {
@@ -140,6 +142,8 @@ struct InlineObject {
     cmds: Range<usize>,
     w: f32,
     h: f32,
+    /// `vertical-align` on the line; `None` centres it, as before.
+    valign: Option<VAlign>,
 }
 
 /// A decoded, sized image, ready to be placed.
@@ -244,7 +248,12 @@ impl Ctx<'_> {
         let slide = match (style.margin_auto_left, style.margin_auto_right) {
             (true, true) => free / 2.0,
             (true, false) => free,
-            _ => 0.0,
+            // `<center>` / `align` on the parent (see `Style::align_legacy`).
+            _ => match style.box_align {
+                Some(Align::Center) => free / 2.0,
+                Some(Align::Right) => free,
+                _ => 0.0,
+            },
         };
         let box_x = x + m.left + slide;
         let box_y = y + m.top;
@@ -763,23 +772,25 @@ impl Ctx<'_> {
         // neighbour, which is exactly what overlapping attachment chips were.
         // So every fragment is collected and the **widest** one wins: that is
         // the slot the object really got.
-        let mut slots: Vec<Option<(f32, f32, f32)>> = vec![None; objects.len()];
+        // (x0, x1, line top, line height) of the slot.
+        let mut slots: Vec<Option<(f32, f32, f32, f32)>> = vec![None; objects.len()];
         for run in buffer.layout_runs() {
             // Glyphs of one reservation are contiguous; a different index, or
             // the end of the run, closes the group.
             let mut group: Option<(usize, f32, f32)> = None;
-            let centre = run.line_top + run.line_height / 2.0;
-            let mut close = |group: Option<(usize, f32, f32)>,
-                             slots: &mut Vec<Option<(f32, f32, f32)>>| {
-                let Some((index, x0, x1)) = group else { return };
-                if index >= slots.len() {
-                    return;
-                }
-                let wider = slots[index].is_none_or(|(sx0, sx1, _)| sx1 - sx0 < x1 - x0);
-                if wider {
-                    slots[index] = Some((x0, x1, centre));
-                }
-            };
+            let (top, line_h) = (run.line_top, run.line_height);
+            let mut close =
+                |group: Option<(usize, f32, f32)>,
+                 slots: &mut Vec<Option<(f32, f32, f32, f32)>>| {
+                    let Some((index, x0, x1)) = group else { return };
+                    if index >= slots.len() {
+                        return;
+                    }
+                    let wider = slots[index].is_none_or(|(sx0, sx1, _, _)| sx1 - sx0 < x1 - x0);
+                    if wider {
+                        slots[index] = Some((x0, x1, top, line_h));
+                    }
+                };
             for glyph in run.glyphs {
                 let obj = spans.get(glyph.metadata).and_then(|s| s.object);
                 match (&mut group, obj) {
@@ -799,11 +810,16 @@ impl Ctx<'_> {
         // that cannot happen while `objects` is borrowed.
         let mut moves: Vec<(Range<usize>, f32, f32)> = Vec::new();
         for (object, slot) in objects.iter().zip(slots) {
-            let Some((x0, _, centre)) = slot else { continue };
+            let Some((x0, _, top, line_h)) = slot else { continue };
             // Left-aligned in its reservation, after the author's left margin;
             // the rounding slack lands on the right, where a gap between
             // inline things belongs.
-            moves.push((object.cmds.clone(), x + x0 + object.lead, y + centre - object.h / 2.0));
+            let oy = match object.valign {
+                Some(VAlign::Top) => top,
+                Some(VAlign::Bottom) => top + line_h - object.h,
+                _ => top + line_h / 2.0 - object.h / 2.0,
+            };
+            moves.push((object.cmds.clone(), x + x0 + object.lead, y + oy));
         }
         for (cmds, px, py) in moves {
             self.translate(cmds, px, py);
@@ -975,7 +991,7 @@ impl Ctx<'_> {
         let count = ((w / nbsp).ceil() as usize).clamp(1, MAX_NBSP as usize);
         span.text = std::iter::repeat_n(text::NBSP, count).collect();
         span.object = Some(self.objects.len());
-        self.objects.push(InlineObject { cmds, w, h, lead });
+        self.objects.push(InlineObject { cmds, w, h, lead, valign: style.inline_valign });
         out.push(span);
     }
 
