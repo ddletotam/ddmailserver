@@ -1,0 +1,1079 @@
+// Модалка настроек. Вынесена из app.slint целиком: у неё свой набор
+// примитивов (группа, строка, переключатель, степпер), которые больше нигде
+// не нужны, и её можно отрисовать отдельно от главного окна.
+//
+// Каждая настройка применяется и сохраняется в момент изменения — кнопок
+// «Сохранить»/«Отменить» нет намеренно (контракт §5г).
+
+import { ScrollView } from "std-widgets.slint";
+import { KLineEdit } from "keys.slint";
+
+// One connection row in Settings → Подключения.
+export struct ConnRow {
+    title: string,      // account email / name
+    subtitle: string,   // server + mode, либо «сессия истекла» (см. needs-login)
+    // Токен мёртв, форма входа ждёт пароля: строка подписывается красным,
+    // а «Изменить» становится «Войти».
+    needs-login: bool,
+}
+
+// Calendar list row (sidebar of the calendar view and Settings → Календарь).
+export struct CalendarItem {
+    id: int,
+    name: string,
+    color: color,
+    visible: bool,
+}
+
+// Строка раздела настроек «Папки». identities/domains — списком через
+// запятую; kind: 0 все · 1 только 1:1 · 2 только группы; manual — сколько
+// диалогов положено в папку руками.
+export struct FolderEdit {
+    id: string,
+    name: string,
+    icon: string,
+    identities: string,
+    domains: string,
+    kind: int,
+    manual: int,
+}
+
+// Lucide-style stroked glyph on a 24×24 viewbox. Emoji не годятся: на
+// Windows они цветные, на Linux — что найдётся в шрифтах, и в одном ряду
+// получаются разного размера и стиля.
+component Icon inherits Path {
+    in property <brush> tint: #6b7480;
+    width: 16px;
+    height: 16px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: root.tint;
+    stroke-width: 1.7px;
+    fill: transparent;
+}
+
+// iOS-style pill switch. `on` drives the look; `toggled` fires on click —
+// the parent owns the state.
+component Toggle inherits Rectangle {
+    in property <bool> on: false;
+    in property <bool> enabled: true;
+    callback toggled();
+    width: 36px;
+    height: 20px;
+    border-radius: 10px;
+    background: root.on ? #10b981 : (ta.has-hover && root.enabled ? #bcc4ce : #cfd6de);
+    animate background { duration: 120ms; }
+    opacity: root.enabled ? 1.0 : 0.45;
+    Rectangle {
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: white;
+        y: 2px;
+        x: root.on ? parent.width - self.width - 2px : 2px;
+        animate x { duration: 120ms; easing: ease-out; }
+        drop-shadow-blur: 2px;
+        drop-shadow-offset-y: 1px;
+        drop-shadow-color: #00000033;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.toggled(); }
+    }
+}
+
+// Small button. kind: 0 — обычная (рамка), 1 — основная (акцент),
+// 2 — опасная (красная).
+component Btn inherits Rectangle {
+    in property <string> text;
+    in property <int> kind: 0;
+    callback clicked();
+    width: label.preferred-width + 24px;
+    height: 30px;
+    border-radius: 7px;
+    border-width: root.kind == 0 ? 1px : 0px;
+    border-color: #d9dfe6;
+    background: root.kind == 1 ? (ta.has-hover ? #059669 : #10b981)
+        : root.kind == 2 ? (ta.has-hover ? #c03535 : #d64545)
+        : (ta.has-hover ? #f3f5f8 : white);
+    label := Text {
+        text: root.text;
+        font-size: 13px;
+        font-weight: 600;
+        color: root.kind == 0 ? #2b3640 : white;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Square icon-only button (close, delete).
+component IconBtn inherits Rectangle {
+    in property <string> glyph;
+    in property <brush> tint: #6b7480;
+    in property <brush> hover-tint: #0f1419;
+    in property <brush> hover-bg: #eef1f5;
+    callback clicked();
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    background: ta.has-hover ? root.hover-bg : transparent;
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        commands: root.glyph;
+        tint: ta.has-hover ? root.hover-tint : root.tint;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Uppercase caption above a group.
+component Caption inherits Text {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: #8b95a1;
+}
+
+// Muted explanatory line under a group.
+component Note inherits Text {
+    font-size: 12px;
+    color: #8b95a1;
+    wrap: word-wrap;
+}
+
+// Bordered card holding a stack of rows.
+component Group inherits Rectangle {
+    background: white;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: #e3e8ee;
+    clip: true;
+    VerticalLayout {
+        @children
+    }
+}
+
+// Hairline between rows of a group, inset to the row text.
+component Divider inherits Rectangle {
+    height: 1px;
+    Rectangle {
+        x: 14px;
+        width: parent.width - 14px;
+        background: #edf0f4;
+    }
+}
+
+// One labelled line: title (+ optional badge) and subtitle on the left, an
+// arbitrary control slotted on the right via `@children`.
+component SettingRow inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <string> badge;
+    in property <bool> dimmed: false;
+    height: root.subtitle == "" ? 46px : 58px;
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 16px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 3px;
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Text {
+                    text: root.title;
+                    font-size: 13.5px;
+                    font-weight: 600;
+                    color: root.dimmed ? #8b95a1 : #0f1419;
+                    vertical-alignment: center;
+                }
+                if root.badge != "": Rectangle {
+                    height: 18px;
+                    width: badge-t.preferred-width + 12px;
+                    y: 1px;
+                    border-radius: 9px;
+                    background: #fdecec;
+                    badge-t := Text {
+                        text: root.badge;
+                        font-size: 10.5px;
+                        font-weight: 700;
+                        color: #c03535;
+                    }
+                }
+            }
+            if root.subtitle != "": Text {
+                text: root.subtitle;
+                font-size: 12px;
+                color: #6b7480;
+                overflow: elide;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            @children
+        }
+    }
+}
+
+// Hour field: «− 08:00 +». Хранит не значение, а только просьбу сдвинуть —
+// границы (начало < конец) держит Rust в `set-work-hours`.
+component HourStepper inherits Rectangle {
+    in property <int> value;
+    in property <bool> can-dec: true;
+    in property <bool> can-inc: true;
+    callback step(int);
+    width: 112px;
+    height: 32px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #d9dfe6;
+    background: white;
+    HorizontalLayout {
+        padding: 2px;
+        Rectangle {
+            width: 28px;
+            border-radius: 6px;
+            background: dec.has-hover && root.can-dec ? #eef1f5 : transparent;
+            Icon {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 14px;
+                height: 14px;
+                commands: "M 5 12 L 19 12";
+                tint: root.can-dec ? #2b3640 : #c9d0d8;
+            }
+            dec := TouchArea {
+                enabled: root.can-dec;
+                clicked => { root.step(-1); }
+            }
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: (root.value < 10 ? "0" : "") + root.value + ":00";
+            font-size: 13.5px;
+            font-weight: 600;
+            color: #0f1419;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        Rectangle {
+            width: 28px;
+            border-radius: 6px;
+            background: inc.has-hover && root.can-inc ? #eef1f5 : transparent;
+            Icon {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 14px;
+                height: 14px;
+                commands: "M 12 5 L 12 19 M 5 12 L 19 12";
+                tint: root.can-inc ? #2b3640 : #c9d0d8;
+            }
+            inc := TouchArea {
+                enabled: root.can-inc;
+                clicked => { root.step(1); }
+            }
+        }
+    }
+}
+
+struct NavTab {
+    icon: string,
+    label: string,
+    title: string,
+    lead: string,
+}
+
+export component SettingsDialog inherits Rectangle {
+    // 0 Уведомления · 1 Внешний контент · 2 Календарь · 3 Подключения · 4 Папки
+    in-out property <int> tab: 0;
+
+    in property <bool> notify-sound-on;
+    in property <bool> media-allow-all-on;
+    in property <bool> media-all-images-on;
+    in property <int> work-start;
+    in property <int> work-end;
+    in property <[CalendarItem]> calendars;
+    in property <[color]> cal-palette;
+    in property <[ConnRow]> connections;
+    in property <[FolderEdit]> folder-edits;
+    in property <bool> folders-on;
+    in property <string> folders-store-note;
+
+    callback close();
+    callback toggle-notify-sound();
+    callback set-media-global(string);
+    callback set-work-hours(int, int);
+    callback calendar-toggle-visibility(int);
+    callback calendar-set-color(int, int);
+    callback add-connection();
+    callback edit-connection(int);
+    callback delete-connection(int);
+    callback folders-toggle();
+    callback folder-add();
+    callback folder-delete(string);
+    // (id, поле, значение): поля name/icon/identities/domains/kind/clear-manual.
+    callback folder-edit(string, string, string);
+
+    // Палитра цвета календаря раскрывается прямо под его строкой. Общий
+    // попап календаря (`color-picker-cal`) здесь не годится: он живёт в
+    // главном окне ниже модалки по z-порядку и открывался под ней, невидимым.
+    property <int> palette-cal: -1;
+    // Удаление подключения — с подтверждением в самой строке: раньше одна
+    // красная надпись удаляла учётку сразу, без возврата.
+    property <int> confirm-del: -1;
+    // То же для папки (id): папки общие для всех станций, и вместе с папкой
+    // пропадают положенные в неё руками диалоги.
+    property <string> confirm-folder: "";
+
+    property <[NavTab]> tabs: [
+        {
+            icon: "M 6 8 A 6 6 0 0 1 18 8 C 18 15 21 17 21 17 L 3 17 C 3 17 6 15 6 8 M 10.3 21 A 1.94 1.94 0 0 0 13.7 21",
+            label: "Уведомления",
+            title: "Уведомления",
+            lead: "Как клиент сообщает о новых письмах.",
+        },
+        {
+            icon: "M 5 3 L 19 3 A 2 2 0 0 1 21 5 L 21 19 A 2 2 0 0 1 19 21 L 5 21 A 2 2 0 0 1 3 19 L 3 5 A 2 2 0 0 1 5 3 Z M 7 9 A 2 2 0 1 0 11 9 A 2 2 0 1 0 7 9 M 21 15 L 17.9 11.9 A 2 2 0 0 0 15.1 11.9 L 6 21",
+            label: "Внешний контент",
+            title: "Внешний контент",
+            lead: "Что письма могут загружать из интернета. Исключение для отправителя или сайта — в меню «Медиа…» у письма.",
+        },
+        {
+            icon: "M 5 4 L 19 4 A 2 2 0 0 1 21 6 L 21 20 A 2 2 0 0 1 19 22 L 5 22 A 2 2 0 0 1 3 20 L 3 6 A 2 2 0 0 1 5 4 Z M 16 2 L 16 6 M 8 2 L 8 6 M 3 10 L 21 10",
+            label: "Календарь",
+            title: "Календарь",
+            lead: "Рабочие часы недельной сетки и какие календари на ней видны.",
+        },
+        {
+            icon: "M 12 22 L 12 17 M 9 8 L 9 2 M 15 8 L 15 2 M 6 8 L 18 8 L 18 13 A 4 4 0 0 1 14 17 L 10 17 A 4 4 0 0 1 6 13 Z",
+            label: "Подключения",
+            title: "Подключения",
+            lead: "Почтовые серверы, с которыми работает клиент.",
+        },
+        {
+            icon: "M 20 20 A 2 2 0 0 0 22 18 L 22 8 A 2 2 0 0 0 20 6 L 12.1 6 A 2 2 0 0 1 10.4 5.1 L 9.6 3.9 A 2 2 0 0 0 7.9 3 L 4 3 A 2 2 0 0 0 2 5 L 2 18 A 2 2 0 0 0 4 20 Z",
+            label: "Папки",
+            title: "Папки диалогов",
+            lead: "Табы над списком диалогов. Порядок табов меняется перетаскиванием.",
+        },
+    ];
+
+    changed tab => {
+        root.palette-cal = -1;
+        root.confirm-del = -1;
+        root.confirm-folder = "";
+    }
+
+    background: #0f141966;
+
+    // Backdrop: click outside the card closes the modal.
+    TouchArea {
+        clicked => { root.close(); }
+    }
+
+    FocusScope {
+        init => { self.focus(); }
+        // Esc снимает сперва то, что раскрыто внутри, и только потом
+        // закрывает саму модалку.
+        key-pressed(ev) => {
+            if (ev.text != Key.Escape) {
+                return reject;
+            }
+            if (root.palette-cal >= 0) {
+                root.palette-cal = -1;
+            } else if (root.confirm-del >= 0) {
+                root.confirm-del = -1;
+            } else if (root.confirm-folder != "") {
+                root.confirm-folder = "";
+            } else {
+                root.close();
+            }
+            accept
+        }
+
+        card := Rectangle {
+            width: min(760px, root.width - 64px);
+            height: min(560px, root.height - 64px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: white;
+            border-radius: 14px;
+            drop-shadow-blur: 32px;
+            drop-shadow-offset-y: 8px;
+            drop-shadow-color: #0f141940;
+            clip: true;
+            TouchArea {} // keep clicks inside from closing
+
+            HorizontalLayout {
+                // ── Left rail: sections ──
+                Rectangle {
+                    width: 212px;
+                    background: #f6f7f9;
+                    Rectangle {
+                        x: parent.width - 1px;
+                        width: 1px;
+                        background: #e9edf1;
+                    }
+                    VerticalLayout {
+                        padding: 12px;
+                        padding-top: 20px;
+                        spacing: 2px;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-bottom: 14px;
+                            Text {
+                                text: "Настройки";
+                                font-size: 16px;
+                                font-weight: 700;
+                                color: #0f1419;
+                            }
+                        }
+                        for t[i] in root.tabs: Rectangle {
+                            height: 34px;
+                            border-radius: 8px;
+                            background: root.tab == i ? #e3f5ec : (nav-ta.has-hover ? #eceff3 : transparent);
+                            nav-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.tab = i; }
+                            }
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                spacing: 10px;
+                                alignment: start;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Icon {
+                                        commands: t.icon;
+                                        tint: root.tab == i ? #059669 : #6b7480;
+                                    }
+                                }
+                                Text {
+                                    text: t.label;
+                                    font-size: 13.5px;
+                                    font-weight: root.tab == i ? 600 : 500;
+                                    color: root.tab == i ? #065f46 : #2b3640;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        Rectangle { vertical-stretch: 1; }
+                        // Без этой подписи отсутствие кнопок читается как
+                        // «мои правки никуда не ушли».
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 6px;
+                            spacing: 6px;
+                            VerticalLayout {
+                                alignment: center;
+                                Icon {
+                                    width: 13px;
+                                    height: 13px;
+                                    stroke-width: 2px;
+                                    commands: "M 20 6 L 9 17 L 4 12";
+                                    tint: #10b981;
+                                }
+                            }
+                            Text {
+                                text: "Всё сохраняется сразу";
+                                font-size: 11.5px;
+                                color: #8b95a1;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // ── Right pane: active section ──
+                pane := VerticalLayout {
+                    horizontal-stretch: 1;
+
+                    // Header: section title + lead, close on the right.
+                    HorizontalLayout {
+                        padding-left: 28px;
+                        padding-right: 14px;
+                        padding-top: 14px;
+                        padding-bottom: 14px;
+                        spacing: 12px;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            padding-top: 8px;
+                            spacing: 4px;
+                            Text {
+                                text: root.tabs[root.tab].title;
+                                font-size: 18px;
+                                font-weight: 700;
+                                color: #0f1419;
+                            }
+                            Text {
+                                text: root.tabs[root.tab].lead;
+                                font-size: 12.5px;
+                                color: #6b7480;
+                                wrap: word-wrap;
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: start;
+                            IconBtn {
+                                glyph: "M 18 6 L 6 18 M 6 6 L 18 18";
+                                clicked => { root.close(); }
+                            }
+                        }
+                    }
+
+                    // Sections scroll: «Календарь» рисует по строке на
+                    // календарь, и десяток их выше модалки. Ширина
+                    // содержимого прибита к панели, чтобы абзацы с wrap
+                    // считались по известной ширине и не было
+                    // горизонтального скроллбара.
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            width: pane.width - 12px;
+                            padding-left: 22px;
+                            padding-right: 16px;
+                            padding-top: 6px;
+                            padding-bottom: 24px;
+                            // Лишняя высота вьюпорта уходит вниз, а не
+                            // растаскивает подписи и группы.
+                            alignment: start;
+
+                            // ===== Уведомления =====
+                            if root.tab == 0: VerticalLayout {
+                                alignment: start;
+                                spacing: 8px;
+                                Caption { text: "НОВЫЕ ПИСЬМА"; }
+                                Group {
+                                    SettingRow {
+                                        title: "Звуковой сигнал";
+                                        subtitle: "Короткий звук, когда письмо пришло не в открытый диалог";
+                                        Toggle {
+                                            on: root.notify-sound-on;
+                                            toggled => { root.toggle-notify-sound(); }
+                                        }
+                                    }
+                                }
+                                Note {
+                                    text: "Всплывающие уведомления, счётчики непрочитанного и метка в трее работают всегда.";
+                                }
+                            }
+
+                            // ===== Внешний контент (media policy) =====
+                            if root.tab == 1: VerticalLayout {
+                                alignment: start;
+                                spacing: 8px;
+                                Caption { text: "ВО ВСЕХ ПИСЬМАХ"; }
+                                Group {
+                                    SettingRow {
+                                        title: "Разрешить всё";
+                                        subtitle: "Картинки и прочий внешний контент — без спроса";
+                                        Toggle {
+                                            on: root.media-allow-all-on;
+                                            toggled => { root.set-media-global("allow-all"); }
+                                        }
+                                    }
+                                    Divider {}
+                                    SettingRow {
+                                        title: "Изображения";
+                                        dimmed: root.media-allow-all-on;
+                                        subtitle: root.media-allow-all-on
+                                            ? "Включены вместе с «Разрешить всё»"
+                                            : "Загружать внешние картинки";
+                                        Toggle {
+                                            enabled: !root.media-allow-all-on;
+                                            on: root.media-all-images-on || root.media-allow-all-on;
+                                            toggled => { root.set-media-global("images-all"); }
+                                        }
+                                    }
+                                }
+                                Note {
+                                    text: "Внешняя картинка сообщает отправителю, что письмо открыто, и раскрывает ваш IP-адрес.";
+                                }
+                            }
+
+                            // ===== Календарь =====
+                            if root.tab == 2: VerticalLayout {
+                                alignment: start;
+                                spacing: 8px;
+                                Caption { text: "РАБОЧИЙ ДЕНЬ"; }
+                                Group {
+                                    SettingRow {
+                                        title: "Рабочие часы";
+                                        subtitle: "Остальное время затенено";
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            alignment: end;
+                                            HourStepper {
+                                                value: root.work-start;
+                                                can-dec: root.work-start > 0;
+                                                can-inc: root.work-start < root.work-end - 1;
+                                                step(d) => { root.set-work-hours(root.work-start + d, root.work-end); }
+                                            }
+                                            Text {
+                                                text: "—";
+                                                color: #8b95a1;
+                                                vertical-alignment: center;
+                                            }
+                                            HourStepper {
+                                                value: root.work-end;
+                                                can-dec: root.work-end > root.work-start + 1;
+                                                can-inc: root.work-end < 24;
+                                                step(d) => { root.set-work-hours(root.work-start, root.work-end + d); }
+                                            }
+                                        }
+                                    }
+                                }
+                                Note {
+                                    text: "Когда сутки целиком не помещаются, на экране держится рабочее окно.";
+                                }
+
+                                Rectangle { height: 14px; }
+                                Caption { text: "КАЛЕНДАРИ"; }
+                                Group {
+                                    if root.calendars.length == 0: SettingRow {
+                                        title: "Календарей пока нет";
+                                        subtitle: "Они появятся после первой синхронизации";
+                                        dimmed: true;
+                                    }
+                                    for c[ci] in root.calendars: VerticalLayout {
+                                        if ci > 0: Divider {}
+                                        Rectangle {
+                                            height: 46px;
+                                            HorizontalLayout {
+                                                padding-left: 10px;
+                                                padding-right: 14px;
+                                                spacing: 10px;
+                                                // Swatch = colour chooser.
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    Rectangle {
+                                                        width: 28px;
+                                                        height: 28px;
+                                                        border-radius: 7px;
+                                                        background: sw-ta.has-hover || root.palette-cal == c.id ? #eef1f5 : transparent;
+                                                        Rectangle {
+                                                            width: 14px;
+                                                            height: 14px;
+                                                            border-radius: 4px;
+                                                            background: c.color;
+                                                            opacity: c.visible ? 1.0 : 0.45;
+                                                        }
+                                                        sw-ta := TouchArea {
+                                                            mouse-cursor: pointer;
+                                                            clicked => {
+                                                                root.palette-cal = root.palette-cal == c.id ? -1 : c.id;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Text {
+                                                    horizontal-stretch: 1;
+                                                    text: c.name;
+                                                    font-size: 13.5px;
+                                                    color: c.visible ? #0f1419 : #8b95a1;
+                                                    vertical-alignment: center;
+                                                    overflow: elide;
+                                                }
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    Toggle {
+                                                        on: c.visible;
+                                                        toggled => { root.calendar-toggle-visibility(c.id); }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if root.palette-cal == c.id: Rectangle {
+                                            height: 42px;
+                                            background: #f7f8fa;
+                                            HorizontalLayout {
+                                                padding-left: 48px;
+                                                spacing: 6px;
+                                                alignment: start;
+                                                for col[pi] in root.cal-palette: VerticalLayout {
+                                                    alignment: center;
+                                                    Rectangle {
+                                                        width: 24px;
+                                                        height: 24px;
+                                                        border-radius: 12px;
+                                                        border-width: 2px;
+                                                        border-color: col == c.color ? #0f1419 : (pal-ta.has-hover ? #ffffff : transparent);
+                                                        background: col;
+                                                        pal-ta := TouchArea {
+                                                            mouse-cursor: pointer;
+                                                            clicked => {
+                                                                root.calendar-set-color(c.id, pi);
+                                                                root.palette-cal = -1;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Note {
+                                    text: "Скрытый календарь продолжает синхронизироваться, но не показывается в сетке и не напоминает о событиях. Цвет меняется кликом по квадрату.";
+                                }
+                            }
+
+                            // ===== Подключения =====
+                            if root.tab == 3: VerticalLayout {
+                                alignment: start;
+                                spacing: 8px;
+                                Caption { text: "УЧЁТНЫЕ ЗАПИСИ"; }
+                                Group {
+                                    for c[i] in root.connections: VerticalLayout {
+                                        if i > 0: Divider {}
+                                        Rectangle {
+                                            height: 60px;
+                                            background: root.confirm-del == i ? #fff6f6 : transparent;
+                                            HorizontalLayout {
+                                                padding-left: 14px;
+                                                padding-right: 10px;
+                                                spacing: 12px;
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    Rectangle {
+                                                        width: 32px;
+                                                        height: 32px;
+                                                        border-radius: 16px;
+                                                        background: c.needs-login ? #fdecec : #e3f5ec;
+                                                        Icon {
+                                                            x: (parent.width - self.width) / 2;
+                                                            y: (parent.height - self.height) / 2;
+                                                            commands: "M 4 4 L 20 4 A 2 2 0 0 1 22 6 L 22 18 A 2 2 0 0 1 20 20 L 4 20 A 2 2 0 0 1 2 18 L 2 6 A 2 2 0 0 1 4 4 Z M 22 7 L 13.03 12.7 A 1.94 1.94 0 0 1 10.97 12.7 L 2 7";
+                                                            tint: c.needs-login ? #d64545 : #059669;
+                                                        }
+                                                    }
+                                                }
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    horizontal-stretch: 1;
+                                                    spacing: 3px;
+                                                    Text {
+                                                        text: c.title;
+                                                        font-size: 13.5px;
+                                                        font-weight: 600;
+                                                        color: #0f1419;
+                                                        overflow: elide;
+                                                    }
+                                                    Text {
+                                                        text: root.confirm-del == i ? "Удалить только из клиента?" : c.subtitle;
+                                                        font-size: 12px;
+                                                        color: root.confirm-del == i || c.needs-login ? #c03535 : #6b7480;
+                                                        overflow: elide;
+                                                    }
+                                                }
+                                                if root.confirm-del == i: HorizontalLayout {
+                                                    spacing: 6px;
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Btn {
+                                                            text: "Отмена";
+                                                            clicked => { root.confirm-del = -1; }
+                                                        }
+                                                    }
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Btn {
+                                                            text: "Удалить";
+                                                            kind: 2;
+                                                            clicked => {
+                                                                root.confirm-del = -1;
+                                                                root.delete-connection(i);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                if root.confirm-del != i: HorizontalLayout {
+                                                    spacing: 4px;
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Btn {
+                                                            text: c.needs-login ? "Войти" : "Изменить";
+                                                            kind: c.needs-login ? 1 : 0;
+                                                            clicked => { root.edit-connection(i); }
+                                                        }
+                                                    }
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        IconBtn {
+                                                            glyph: "M 3 6 L 21 6 M 19 6 L 19 20 A 2 2 0 0 1 17 22 L 7 22 A 2 2 0 0 1 5 20 L 5 6 M 8 6 L 8 4 A 2 2 0 0 1 10 2 L 14 2 A 2 2 0 0 1 16 4 L 16 6";
+                                                            tint: #8b95a1;
+                                                            hover-tint: #d64545;
+                                                            hover-bg: #fdecec;
+                                                            clicked => { root.confirm-del = i; }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if root.connections.length > 0: Divider {}
+                                    // «Добавить» — последней строкой списка: туда,
+                                    // где появится новая запись.
+                                    Rectangle {
+                                        height: 46px;
+                                        background: add-ta.has-hover ? #f3faf6 : transparent;
+                                        HorizontalLayout {
+                                            padding-left: 14px;
+                                            spacing: 12px;
+                                            alignment: start;
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Rectangle {
+                                                    width: 32px;
+                                                    height: 32px;
+                                                    border-radius: 16px;
+                                                    border-width: 1px;
+                                                    border-color: #bfe8d3;
+                                                    Icon {
+                                                        x: (parent.width - self.width) / 2;
+                                                        y: (parent.height - self.height) / 2;
+                                                        width: 14px;
+                                                        height: 14px;
+                                                        stroke-width: 2px;
+                                                        commands: "M 12 5 L 12 19 M 5 12 L 19 12";
+                                                        tint: #059669;
+                                                    }
+                                                }
+                                            }
+                                            Text {
+                                                text: root.connections.length == 0
+                                                    ? "Добавить первое подключение"
+                                                    : "Добавить подключение";
+                                                font-size: 13.5px;
+                                                font-weight: 600;
+                                                color: #059669;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        add-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.add-connection(); }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ===== Папки диалогов =====
+                            // Правки применяются сразу и уходят на сервер с
+                            // дебаунсом (folders_ui::commit). Текстовые поля
+                            // модель не перечитывают — иначе пересоздание
+                            // строки на каждую букву срывало бы фокус.
+                            if root.tab == 4: VerticalLayout {
+                                alignment: start;
+                                spacing: 8px;
+                                Caption { text: "НА ЭТОЙ СТАНЦИИ"; }
+                                Group {
+                                    SettingRow {
+                                        title: "Показывать папки";
+                                        subtitle: "Выключатель локальный, сами папки общие для всех станций";
+                                        Toggle {
+                                            on: root.folders-on;
+                                            toggled => { root.folders-toggle(); }
+                                        }
+                                    }
+                                }
+                                if root.folders-store-note != "": Note {
+                                    text: root.folders-store-note;
+                                    color: #b7791f;
+                                }
+
+                                Rectangle { height: 14px; }
+                                Caption { text: "ПАПКИ"; }
+                                for f in root.folder-edits: Group {
+                                    // Название: иконка + имя + корзина.
+                                    Rectangle {
+                                        height: 52px;
+                                        background: root.confirm-folder == f.id ? #fff6f6 : transparent;
+                                        HorizontalLayout {
+                                            padding-left: 14px;
+                                            padding-right: 10px;
+                                            spacing: 8px;
+                                            if root.confirm-folder != f.id: VerticalLayout {
+                                                alignment: center;
+                                                KLineEdit {
+                                                    width: 56px;
+                                                    text: f.icon;
+                                                    placeholder-text: "📁";
+                                                    edited(t) => { root.folder-edit(f.id, "icon", t); }
+                                                }
+                                            }
+                                            if root.confirm-folder != f.id: VerticalLayout {
+                                                alignment: center;
+                                                horizontal-stretch: 1;
+                                                KLineEdit {
+                                                    text: f.name;
+                                                    placeholder-text: "Название";
+                                                    edited(t) => { root.folder-edit(f.id, "name", t); }
+                                                }
+                                            }
+                                            if root.confirm-folder != f.id: VerticalLayout {
+                                                alignment: center;
+                                                IconBtn {
+                                                    glyph: "M 3 6 L 21 6 M 19 6 L 19 20 A 2 2 0 0 1 17 22 L 7 22 A 2 2 0 0 1 5 20 L 5 6 M 8 6 L 8 4 A 2 2 0 0 1 10 2 L 14 2 A 2 2 0 0 1 16 4 L 16 6";
+                                                    tint: #8b95a1;
+                                                    hover-tint: #d64545;
+                                                    hover-bg: #fdecec;
+                                                    clicked => { root.confirm-folder = f.id; }
+                                                }
+                                            }
+                                            if root.confirm-folder == f.id: Text {
+                                                horizontal-stretch: 1;
+                                                text: "Удалить папку «" + (f.name == "" ? "без названия" : f.name) + "» на всех станциях?";
+                                                font-size: 13px;
+                                                color: #c03535;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                            }
+                                            if root.confirm-folder == f.id: VerticalLayout {
+                                                alignment: center;
+                                                Btn {
+                                                    text: "Отмена";
+                                                    clicked => { root.confirm-folder = ""; }
+                                                }
+                                            }
+                                            if root.confirm-folder == f.id: VerticalLayout {
+                                                alignment: center;
+                                                Btn {
+                                                    text: "Удалить";
+                                                    kind: 2;
+                                                    clicked => {
+                                                        root.confirm-folder = "";
+                                                        root.folder-delete(f.id);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Divider {}
+                                    SettingRow {
+                                        title: "Получено на";
+                                        subtitle: "Свои адреса через запятую";
+                                        KLineEdit {
+                                            width: 240px;
+                                            text: f.identities;
+                                            placeholder-text: "напр. me@acme.com";
+                                            edited(t) => { root.folder-edit(f.id, "identities", t); }
+                                        }
+                                    }
+                                    Divider {}
+                                    SettingRow {
+                                        title: "Домены";
+                                        subtitle: "Собеседника; acme.com ловит и mail.acme.com";
+                                        KLineEdit {
+                                            width: 240px;
+                                            text: f.domains;
+                                            placeholder-text: "напр. acme.com";
+                                            edited(t) => { root.folder-edit(f.id, "domains", t); }
+                                        }
+                                    }
+                                    Divider {}
+                                    SettingRow {
+                                        title: "Диалоги";
+                                        // Сегментированный выбор вида диалога.
+                                        Rectangle {
+                                            width: seg.preferred-width + 4px;
+                                            height: 30px;
+                                            border-radius: 8px;
+                                            background: #eef1f5;
+                                            seg := HorizontalLayout {
+                                                padding: 2px;
+                                                spacing: 2px;
+                                                for opt[oi] in ["все", "только 1:1", "только группы"]: Rectangle {
+                                                    width: fk-t.preferred-width + 20px;
+                                                    border-radius: 6px;
+                                                    background: f.kind == oi ? white : (fk.has-hover ? #e3e8ee : transparent);
+                                                    drop-shadow-blur: f.kind == oi ? 2px : 0px;
+                                                    drop-shadow-color: #0000001f;
+                                                    fk-t := Text {
+                                                        text: opt;
+                                                        font-size: 12.5px;
+                                                        font-weight: f.kind == oi ? 600 : 500;
+                                                        color: f.kind == oi ? #065f46 : #2b3640;
+                                                        horizontal-alignment: center;
+                                                        vertical-alignment: center;
+                                                    }
+                                                    fk := TouchArea {
+                                                        mouse-cursor: pointer;
+                                                        clicked => { root.folder-edit(f.id, "kind", "\{oi}"); }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if f.manual > 0: Divider {}
+                                    if f.manual > 0: SettingRow {
+                                        title: "Положено руками: " + f.manual;
+                                        subtitle: "Эти диалоги лежат здесь независимо от правил";
+                                        Btn {
+                                            text: "Сбросить";
+                                            clicked => { root.folder-edit(f.id, "clear-manual", ""); }
+                                        }
+                                    }
+                                }
+                                // «Новая папка» — отдельной строкой-карточкой
+                                // под списком, как «Добавить подключение».
+                                Group {
+                                    Rectangle {
+                                        height: 46px;
+                                        background: fadd-ta.has-hover ? #f3faf6 : transparent;
+                                        HorizontalLayout {
+                                            padding-left: 14px;
+                                            spacing: 12px;
+                                            alignment: start;
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Rectangle {
+                                                    width: 32px;
+                                                    height: 32px;
+                                                    border-radius: 16px;
+                                                    border-width: 1px;
+                                                    border-color: #bfe8d3;
+                                                    Icon {
+                                                        x: (parent.width - self.width) / 2;
+                                                        y: (parent.height - self.height) / 2;
+                                                        width: 14px;
+                                                        height: 14px;
+                                                        stroke-width: 2px;
+                                                        commands: "M 12 5 L 12 19 M 5 12 L 19 12";
+                                                        tint: #059669;
+                                                    }
+                                                }
+                                            }
+                                            Text {
+                                                text: root.folder-edits.length == 0 ? "Создать первую папку" : "Новая папка";
+                                                font-size: 13.5px;
+                                                font-weight: 600;
+                                                color: #059669;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        fadd-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.folder-add(); }
+                                        }
+                                    }
+                                }
+                                Note {
+                                    text: "Диалог лежит ровно в одной папке: положенный руками (правый клик по диалогу → «В папку») — там, иначе в первой по порядку табов, чьи правила подходят. Между правилами — «и», внутри списка — «или»; папка без правил набирается только руками. Не попавшие никуда — во «Входящих»: это когда ни один таб не выбран.";
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

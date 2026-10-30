@@ -1,4 +1,7 @@
-import { ListView, LineEdit, ComboBox, CheckBox, Button, SpinBox, ScrollView, TextEdit, Palette } from "std-widgets.slint";
+import { ListView, LineEdit, ComboBox, CheckBox, Button, ScrollView, TextEdit, Palette } from "std-widgets.slint";
+import { SettingsDialog, ConnRow, CalendarItem, FolderEdit } from "settings.slint";
+import { KTextInput, KLineEdit, Shortcuts } from "keys.slint";
+export { Shortcuts }
 
 // Live-dropdown rows. We keep contacts and messages as separate models
 // so the Slint side can render them in their own sections — see
@@ -25,15 +28,6 @@ struct MessageHit {
     from: string,
     subject: string,
     date: string,
-}
-
-// One connection row in Settings → Подключения.
-struct ConnRow {
-    title: string,      // account email / name
-    subtitle: string,   // server + mode, либо «сессия истекла» (см. needs-login)
-    // Токен мёртв, форма входа ждёт пароля: строка подписывается красным,
-    // иначе «сессия истекла» читается как обычная строка про сервер.
-    needs-login: bool,
 }
 
 // One row of the connection-light dropdown: an account and whether it is
@@ -109,19 +103,6 @@ struct FolderTab {
     unread: int,
 }
 
-// Строка раздела настроек «Папки». identities/domains — списком через
-// запятую; kind: 0 все · 1 только 1:1 · 2 только группы; manual — сколько
-// диалогов положено в папку руками.
-struct FolderEdit {
-    id: string,
-    name: string,
-    icon: string,
-    identities: string,
-    domains: string,
-    kind: int,
-    manual: int,
-}
-
 // One attendee row of the event-detail table: display name + localized
 // participation status with its colour.
 struct AttRow {
@@ -166,14 +147,6 @@ struct RowItem {
     // Склеенный диалог, своё письмо: кому ушло («Кому: …» / «Копия: …»),
     // показывается подсказкой при наведении. Пусто — подсказки нет.
     recipients: string,
-}
-
-// Calendar list row in the calendar-mode sidebar.
-struct CalendarItem {
-    id: int,
-    name: string,
-    color: color,
-    visible: bool,
 }
 
 // One event block on the week grid. (day-col, top, h, color, title, time)
@@ -241,80 +214,8 @@ struct EventExtraItem {
     is-link: bool,
 }
 
-// Раскладко-независимые Ctrl+C/X/V/A.
-//
-// Slint сопоставляет клавиатурные шорткаты по СИМВОЛУ события
-// (i-slint-core/input.rs: `match key_event.text { "c" => Copy, ... }`), а
-// winit кладёт в `text` символ ТЕКУЩЕЙ раскладки. Под ЙЦУКЕН приходят
-// «с»/«ч»/«м»/«ф» — ни один шорткат не матчится, и буфер обмена молча
-// перестаёт работать во всех полях ввода (карточка события, композер,
-// поиск, логин). Физических кодов клавиш Slint наружу не отдаёт, поэтому
-// классифицируем событие сами — по кириллическим буквам тех же клавиш.
-//
-// Латиницу не перехватываем: там штатный путь Slint работает.
-
-// TextInput с починенными шорткатами (см. global Kb). Все поля ввода в
-// приложении — это он, а не голый TextInput.
-//
-// Собственные шорткаты поля (Enter=отправить, Esc, стрелки) вешаются на
-// `extra-key-pressed`: `key-pressed` уже занят и вызывает его последним,
-// после clipboard-шорткатов. Без хука биндинг на месте использования
-// перекрыл бы наш обработчик и починка потерялась бы молча.
-component KTextInput inherits TextInput {
-    callback extra-key-pressed(event: KeyEvent) -> EventResult;
-    // Ctrl зажат, Alt нет, Shift нет: AltGr представляется как Ctrl+Alt, а
-    // Ctrl+Shift — это другой набор шорткатов.
-    property <bool> held: false;
-    key-pressed(ev) => {
-        self.held = ev.modifiers.control && !ev.modifiers.alt && !ev.modifiers.shift;
-        if (Shortcuts.action(ev.text, self.held) == 1) { self.copy(); return accept; }
-        if (Shortcuts.action(ev.text, self.held) == 4) { self.select-all(); return accept; }
-        // Мутирующие — только в редактируемом поле (штатный путь Slint
-        // проверяет read-only так же).
-        if (!self.read-only && Shortcuts.action(ev.text, self.held) == 3) { self.cut(); return accept; }
-        if (!self.read-only && Shortcuts.action(ev.text, self.held) == 2) { self.paste(); return accept; }
-        return self.extra-key-pressed(ev);
-    }
-}
-
-// То же для std-widget LineEdit (настройки/логин/контакты) — у него
-// шорткаты ломаются по той же причине.
-component KLineEdit inherits LineEdit {
-    property <bool> held: false;
-    key-pressed(ev) => {
-        self.held = ev.modifiers.control && !ev.modifiers.alt && !ev.modifiers.shift;
-        if (Shortcuts.action(ev.text, self.held) == 1) { self.copy(); return accept; }
-        if (Shortcuts.action(ev.text, self.held) == 4) { self.select-all(); return accept; }
-        if (!self.read-only && Shortcuts.action(ev.text, self.held) == 3) { self.cut(); return accept; }
-        if (!self.read-only && Shortcuts.action(ev.text, self.held) == 2) { self.paste(); return accept; }
-        return reject;
-    }
-}
-
 // A horizontal dashed hairline — Slint has no stroke-dash, so we tile fixed
 // dash segments. `count` (period 24px) comes from Rust, sized to the grid.
-// Which editing action a key press means, decided in Rust against the
-// *current* keyboard layout.
-//
-// Slint cannot answer this: its own shortcut matcher compares `event.text`
-// with the latin letters "c"/"x"/"v"/"a" (i-slint-core/input.rs), so on any
-// non-latin layout neither the built-in handling nor anything written in
-// `.slint` fires. The character is all we get — so Rust asks the OS which
-// physical key produces that character right now, and answers by key.
-//
-// 0 none, 1 copy, 2 paste, 3 cut, 4 select-all.
-export global Shortcuts {
-    // `held` must be "Ctrl is down and Alt is not". It is a parameter rather
-    // than something the caller is trusted to check first, because forgetting
-    // it turns every letter into a shortcut — plain "a" selected all and "x"
-    // cut the selection.
-    //
-    // Alt is excluded because AltGr reports itself as Ctrl+Alt on Windows, and
-    // on layouts that put characters there, typing would fire shortcuts.
-    callback action(string, bool) -> int;
-}
-
-
 component DashLine inherits Rectangle {
     in property <int> count: 0;
     in property <color> seg-color: #cfd6df;
@@ -396,66 +297,6 @@ component ListScrollBar inherits Rectangle {
                         * (root.span / (root.track - root.thumb-h)))));
             }
         }
-    }
-}
-
-// iOS-style pill switch used across the settings modal. `on` drives the
-// look; `toggled` fires on click — the parent owns the state.
-component Toggle inherits Rectangle {
-    in property <bool> on: false;
-    in property <bool> enabled: true;
-    callback toggled();
-    width: 42px;
-    height: 24px;
-    border-radius: 12px;
-    background: !root.enabled ? #e6ecf2 : (root.on ? #10b981 : #c7cdd6);
-    animate background { duration: 120ms; }
-    opacity: root.enabled ? 1.0 : 0.5;
-    Rectangle {
-        width: 18px;
-        height: 18px;
-        border-radius: 9px;
-        background: white;
-        y: 3px;
-        x: root.on ? parent.width - self.width - 3px : 3px;
-        animate x { duration: 120ms; easing: ease-out; }
-        drop-shadow-blur: 3px;
-        drop-shadow-color: #00000033;
-    }
-    ta := TouchArea {
-        enabled: root.enabled;
-        clicked => { root.toggled(); }
-    }
-}
-
-// One labelled settings line: title + optional subtitle on the left, an
-// arbitrary control slotted on the right via `@children`.
-component SettingRow inherits Rectangle {
-    in property <string> title;
-    in property <string> subtitle;
-    height: subtitle == "" ? 48px : 60px;
-    HorizontalLayout {
-        padding-left: 4px;
-        padding-right: 4px;
-        spacing: 12px;
-        VerticalLayout {
-            horizontal-stretch: 1;
-            alignment: center;
-            spacing: 2px;
-            Text {
-                text: root.title;
-                font-size: 14px;
-                font-weight: 600;
-                color: #0f1419;
-            }
-            if root.subtitle != "": Text {
-                text: root.subtitle;
-                font-size: 12px;
-                color: #6b7480;
-                wrap: word-wrap;
-            }
-        }
-        @children
     }
 }
 
@@ -1340,19 +1181,13 @@ export component MainWindow inherits Window {
     callback snooze-cancel();       // dialog dismissed WITHOUT a choice → resume the toast timer
     // ── Settings modal ──
     in-out property <bool> settings-visible: false;
-    in-out property <int> settings-tab: 0; // 0 Уведомления · 1 Контент · 2 Календарь · 3 Подключения · 4 Аккаунты · 5 Папки
+    in-out property <int> settings-tab: 0; // 0 Уведомления · 1 Внешний контент · 2 Календарь · 3 Подключения · 4 Папки
     callback open-settings();
     // Connections list (Settings → Подключения) + CRUD callbacks.
     in property <[ConnRow]> connections;
     callback add-connection();
     callback edit-connection(int);
     callback delete-connection(int);
-    // (legacy single-connection read-only props, still referenced elsewhere)
-    in property <string> conn-account: "";
-    in property <string> conn-mode: "";
-    in property <string> conn-imap: "";
-    in property <string> conn-smtp: "";
-    in property <string> conn-native: "";
     // Global media policy (mirrors the per-message «Медиа…» allow-alls).
     callback set-media-global(string); // "allow-all" / "images-all"
     // ── Event hover tooltip (Tauri-era «HH:MM–HH:MM — summary») ──
@@ -1804,7 +1639,7 @@ export component MainWindow inherits Window {
                                         }
                                         if (pe.button == PointerEventButton.right
                                             && pe.kind == PointerEventKind.down) {
-                                            root.settings-tab = 5;
+                                            root.settings-tab = 4;
                                             root.settings-visible = true;
                                             return;
                                         }
@@ -5570,504 +5405,36 @@ export component MainWindow inherits Window {
     }
 
     // ---------- Settings modal ----------
-    if root.settings-visible: TouchArea {
-        clicked => { root.settings-visible = false; kb.focus(); }
-        FocusScope {
-            init => { self.focus(); }
-            key-pressed(ev) => {
-                if (ev.text == Key.Escape) {
-                    root.settings-visible = false;
-                    kb.focus();
-                    return accept;
-                }
-                reject
-            }
-        Rectangle {
-            background: #00000066;
-            Rectangle {
-                width: min(720px, root.width - 80px);
-                height: min(520px, root.height - 80px);
-                background: white;
-                border-radius: 16px;
-                drop-shadow-blur: 28px;
-                drop-shadow-color: #00000044;
-                clip: true;
-                TouchArea {} // keep clicks inside from closing
-                HorizontalLayout {
-                    // ── Left rail: section tabs ──
-                    Rectangle {
-                        width: 196px;
-                        background: #f7f8fa;
-                        VerticalLayout {
-                            padding: 14px;
-                            spacing: 4px;
-                            Text {
-                                text: "Настройки";
-                                font-size: 18px; font-weight: 800; color: #0f1419;
-                                horizontal-alignment: left;
-                            }
-                            Rectangle { height: 8px; }
-                            for tab[i] in [
-                                { ico: "🔔", label: "Уведомления" },
-                                { ico: "🖼", label: "Контент" },
-                                { ico: "📅", label: "Календарь" },
-                                { ico: "🔌", label: "Подключение" },
-                                { ico: "👤", label: "Аккаунты" },
-                                { ico: "🗂", label: "Папки" },
-                            ]: Rectangle {
-                                height: 38px;
-                                border-radius: 9px;
-                                background: root.settings-tab == i
-                                    ? #e8f0fe
-                                    : (st-row.has-hover ? #eef1f5 : transparent);
-                                st-row := TouchArea {
-                                    clicked => { root.settings-tab = i; }
-                                }
-                                HorizontalLayout {
-                                    padding-left: 12px; spacing: 10px; alignment: start;
-                                    Text { text: tab.ico; font-size: 15px; vertical-alignment: center; }
-                                    Text {
-                                        text: tab.label;
-                                        font-size: 14px;
-                                        font-weight: root.settings-tab == i ? 700 : 500;
-                                        color: root.settings-tab == i ? #059669 : #2b3640;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // ── Right pane: active section ──
-                    pane := Rectangle {
-                        horizontal-stretch: 1;
-                        VerticalLayout {
-                            padding: 22px;
-                            spacing: 6px;
-
-                            // close (✕) in the top-right
-                            Rectangle {
-                                height: 0px;
-                                Rectangle {
-                                    x: parent.width - 26px; y: -4px;
-                                    width: 26px; height: 26px; border-radius: 13px;
-                                    background: sx.has-hover ? #f0f2f5 : transparent;
-                                    Path {
-                                        x: 8px; y: 8px; width: 10px; height: 10px;
-                                        viewbox-width: 10; viewbox-height: 10;
-                                        stroke: #6b7480; stroke-width: 2px;
-                                        MoveTo { x: 1; y: 1; } LineTo { x: 9; y: 9; }
-                                        MoveTo { x: 9; y: 1; } LineTo { x: 1; y: 9; }
-                                    }
-                                    sx := TouchArea {
-                                        clicked => { root.settings-visible = false; kb.focus(); }
-                                    }
-                                }
-                            }
-
-                            // The sections scroll. Some are taller than the
-                            // modal — «Календарь» lists one row per calendar,
-                            // and ten of them do not fit — and the parent has
-                            // clip: true, so before this the overflow was
-                            // simply cut off with no way to reach it.
-                            //
-                            // The content width is pinned to the pane instead of
-                            // being derived from the ScrollView, so wrapped
-                            // paragraphs lay out against a known width and no
-                            // horizontal scrollbar appears.
-                            ScrollView {
-                            vertical-stretch: 1;
-                            VerticalLayout {
-                            width: pane.width - 44px;
-                            spacing: 6px;
-
-                            // ===== Уведомления =====
-                            if root.settings-tab == 0: VerticalLayout {
-                                spacing: 4px;
-                                Text {
-                                    text: "Уведомления";
-                                    font-size: 16px; font-weight: 700; color: #0f1419;
-                                }
-                                Rectangle { height: 6px; }
-                                SettingRow {
-                                    title: "Звук нового письма";
-                                    subtitle: "Короткий сигнал, когда диалог не открыт";
-                                    Toggle {
-                                        on: root.notify-sound-on;
-                                        toggled => { root.toggle-notify-sound(); }
-                                    }
-                                }
-                                Rectangle { height: 1px; background: #eef1f5; }
-                                Text {
-                                    text: "Тосты, счётчики непрочитанного и точка в трее включены всегда — отдельных переключателей пока нет.";
-                                    font-size: 12px; color: #8b95a1; wrap: word-wrap;
-                                }
-                            }
-
-                            // ===== Контент (media policy) =====
-                            if root.settings-tab == 1: VerticalLayout {
-                                spacing: 4px;
-                                Text {
-                                    text: "Внешний контент по умолчанию";
-                                    font-size: 16px; font-weight: 700; color: #0f1419;
-                                }
-                                Text {
-                                    text: "Глобальные правила. Точечные исключения для отправителя или хоста — в меню «Медиа…» на конкретном письме.";
-                                    font-size: 12px; color: #8b95a1; wrap: word-wrap;
-                                }
-                                Rectangle { height: 8px; }
-                                SettingRow {
-                                    title: "Разрешить весь внешний контент";
-                                    subtitle: "Картинки и скрипты грузятся без спроса";
-                                    Toggle {
-                                        on: root.media-allow-all-on;
-                                        toggled => { root.set-media-global("allow-all"); }
-                                    }
-                                }
-                                Rectangle { height: 1px; background: #eef1f5; }
-                                SettingRow {
-                                    title: "Загружать изображения";
-                                    subtitle: "Внешние картинки во всех письмах";
-                                    Toggle {
-                                        enabled: !root.media-allow-all-on;
-                                        on: root.media-all-images-on || root.media-allow-all-on;
-                                        toggled => { root.set-media-global("images-all"); }
-                                    }
-                                }
-                            }
-
-                            // ===== Подключение =====
-                            // ===== Календарь =====
-                            if root.settings-tab == 2: VerticalLayout {
-                                spacing: 4px;
-                                Text {
-                                    text: "Рабочий день";
-                                    font-size: 16px; font-weight: 700; color: #0f1419;
-                                }
-                                Text {
-                                    text: "Часы вне этого окна затеняются; когда все 24 часа не помещаются, видимым держится именно оно (плюс симметричный запас, если влезает).";
-                                    font-size: 12px; color: #8b95a1; wrap: word-wrap;
-                                }
-                                Rectangle { height: 8px; }
-                                SettingRow {
-                                    title: "Начало";
-                                    SpinBox {
-                                        width: 110px;
-                                        minimum: 0; maximum: 23;
-                                        value: root.work-start;
-                                        edited(v) => { root.set-work-hours(v, root.work-end); }
-                                    }
-                                }
-                                Rectangle { height: 1px; background: #eef1f5; }
-                                SettingRow {
-                                    title: "Конец";
-                                    SpinBox {
-                                        width: 110px;
-                                        minimum: 1; maximum: 24;
-                                        value: root.work-end;
-                                        edited(v) => { root.set-work-hours(root.work-start, v); }
-                                    }
-                                }
-
-                                Rectangle { height: 16px; }
-                                Text {
-                                    text: "Календари";
-                                    font-size: 16px; font-weight: 700; color: #0f1419;
-                                }
-                                Text {
-                                    text: "Название — показать/скрыть; цветной квадрат — сменить цвет.";
-                                    font-size: 12px; color: #8b95a1; wrap: word-wrap;
-                                }
-                                Rectangle { height: 6px; }
-                                for c[ci] in root.calendars: Rectangle {
-                                    height: 38px;
-                                    border-radius: 8px;
-                                    background: setcal-ta.has-hover ? #f5f6f8 : transparent;
-                                    setcal-ta := TouchArea { clicked => { root.calendar-toggle-visibility(c.id); } }
-                                    HorizontalLayout {
-                                        padding-left: 10px; padding-right: 10px; spacing: 10px; alignment: start;
-                                        Rectangle {
-                                            width: 16px; height: 16px; y: (parent.height - self.height) / 2;
-                                            border-radius: 4px;
-                                            background: c.visible ? c.color : transparent;
-                                            border-color: c.color; border-width: c.visible ? 0px : 1.5px;
-                                            scp := TouchArea { clicked => { root.color-picker-cal = c.id; } }
-                                        }
-                                        Text {
-                                            horizontal-stretch: 1;
-                                            text: c.name;
-                                            font-size: 14px;
-                                            color: c.visible ? #0f1419 : #8b95a1;
-                                            vertical-alignment: center; overflow: elide;
-                                        }
-                                        Text {
-                                            text: c.visible ? "показан" : "скрыт";
-                                            font-size: 12px; color: #8b95a1;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-                            }
-
-                            // ===== Подключения =====
-                            if root.settings-tab == 3: VerticalLayout {
-                                spacing: 8px;
-                                HorizontalLayout {
-                                    Text {
-                                        text: "Подключения";
-                                        font-size: 16px; font-weight: 700; color: #0f1419;
-                                        horizontal-stretch: 1; vertical-alignment: center;
-                                    }
-                                    acbtn := TouchArea {
-                                        width: 130px; height: 34px;
-                                        clicked => { root.add-connection(); }
-                                        Rectangle {
-                                            background: acbtn.has-hover ? #4f7df5 : #3a6df0;
-                                            border-radius: 8px;
-                                            Text { text: "+ Добавить"; color: white; font-size: 13px; font-weight: 600; }
-                                        }
-                                    }
-                                }
-                                if root.connections.length == 0: Text {
-                                    text: "Нет подключений. Нажмите «Добавить».";
-                                    font-size: 13px; color: #8b95a1;
-                                }
-                                for c[i] in root.connections: Rectangle {
-                                    height: 58px;
-                                    border-radius: 10px;
-                                    background: #f7f8fa;
-                                    border-width: 1px; border-color: #eef1f5;
-                                    HorizontalLayout {
-                                        padding-left: 14px; padding-right: 10px; spacing: 8px;
-                                        VerticalLayout {
-                                            alignment: center; horizontal-stretch: 1; spacing: 2px;
-                                            Text { text: c.title; font-size: 14px; font-weight: 600; color: #0f1419; overflow: elide; }
-                                            Text {
-                                                text: c.subtitle;
-                                                font-size: 12px;
-                                                color: c.needs-login ? #d64545 : #6b7480;
-                                                overflow: elide;
-                                            }
-                                        }
-                                        ce := TouchArea {
-                                            width: 74px;
-                                            clicked => { root.edit-connection(i); }
-                                            Rectangle {
-                                                background: ce.has-hover ? #eef1f5 : transparent;
-                                                border-radius: 7px;
-                                                Text { text: "Изменить"; font-size: 12px; color: #2b3640; }
-                                            }
-                                        }
-                                        cd := TouchArea {
-                                            width: 68px;
-                                            clicked => { root.delete-connection(i); }
-                                            Rectangle {
-                                                background: cd.has-hover ? #ffe1e1 : transparent;
-                                                border-radius: 7px;
-                                                Text { text: "Удалить"; font-size: 12px; color: #d64545; }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // ===== Папки диалогов =====
-                            // Правки применяются сразу и уходят на сервер с
-                            // дебаунсом (folders_ui::commit). Текстовые поля
-                            // модель не перечитывают — иначе пересоздание
-                            // строки на каждую букву срывало бы фокус.
-                            if root.settings-tab == 5: VerticalLayout {
-                                spacing: 8px;
-                                HorizontalLayout {
-                                    Text {
-                                        text: "Папки диалогов";
-                                        font-size: 16px; font-weight: 700; color: #0f1419;
-                                        horizontal-stretch: 1; vertical-alignment: center;
-                                    }
-                                    fadd := TouchArea {
-                                        width: 150px; height: 34px;
-                                        clicked => { root.folder-add(); }
-                                        Rectangle {
-                                            background: fadd.has-hover ? #4f7df5 : #3a6df0;
-                                            border-radius: 8px;
-                                            Text { text: "+ Новая папка"; color: white; font-size: 13px; font-weight: 600; }
-                                        }
-                                    }
-                                }
-                                Text {
-                                    text: "Табы над списком диалогов. Диалог лежит в одной папке: положенный руками (правый клик по диалогу → «В папку») — там, иначе в первой по порядку табов, чьи правила подходят. Не попавшие никуда — во «Входящих»: это когда ни один таб не выбран. Порядок табов меняется перетаскиванием.";
-                                    font-size: 12px; color: #8b95a1; wrap: word-wrap;
-                                }
-                                SettingRow {
-                                    title: "Показывать папки";
-                                    subtitle: "Только на этой станции; сами папки общие";
-                                    Toggle {
-                                        on: root.folders-on;
-                                        toggled => { root.folders-toggle(); }
-                                    }
-                                }
-                                if root.folders-store-note != "": Text {
-                                    text: root.folders-store-note;
-                                    font-size: 12px; color: #b7791f; wrap: word-wrap;
-                                }
-                                for f[fi] in root.folder-edits: Rectangle {
-                                    border-radius: 10px;
-                                    background: #f7f8fa;
-                                    border-width: 1px; border-color: #eef1f5;
-                                    VerticalLayout {
-                                        padding: 12px;
-                                        spacing: 6px;
-                                        HorizontalLayout {
-                                            spacing: 8px;
-                                            KLineEdit {
-                                                width: 56px;
-                                                text: f.icon;
-                                                placeholder-text: "📁";
-                                                edited(t) => { root.folder-edit(f.id, "icon", t); }
-                                            }
-                                            KLineEdit {
-                                                horizontal-stretch: 1;
-                                                text: f.name;
-                                                placeholder-text: "Название";
-                                                edited(t) => { root.folder-edit(f.id, "name", t); }
-                                            }
-                                            fdel := TouchArea {
-                                                width: 68px;
-                                                clicked => { root.folder-delete(f.id); }
-                                                Rectangle {
-                                                    background: fdel.has-hover ? #ffe1e1 : transparent;
-                                                    border-radius: 7px;
-                                                    Text { text: "Удалить"; font-size: 12px; color: #d64545; }
-                                                }
-                                            }
-                                        }
-                                        HorizontalLayout {
-                                            spacing: 8px;
-                                            Text {
-                                                width: 110px;
-                                                text: "Получено на";
-                                                font-size: 13px; color: #2b3640;
-                                                vertical-alignment: center;
-                                            }
-                                            KLineEdit {
-                                                horizontal-stretch: 1;
-                                                text: f.identities;
-                                                placeholder-text: "свои адреса через запятую";
-                                                edited(t) => { root.folder-edit(f.id, "identities", t); }
-                                            }
-                                        }
-                                        HorizontalLayout {
-                                            spacing: 8px;
-                                            Text {
-                                                width: 110px;
-                                                text: "Домены";
-                                                font-size: 13px; color: #2b3640;
-                                                vertical-alignment: center;
-                                            }
-                                            KLineEdit {
-                                                horizontal-stretch: 1;
-                                                text: f.domains;
-                                                placeholder-text: "домены собеседников, напр. acme.com";
-                                                edited(t) => { root.folder-edit(f.id, "domains", t); }
-                                            }
-                                        }
-                                        HorizontalLayout {
-                                            spacing: 6px;
-                                            alignment: start;
-                                            Text {
-                                                width: 110px;
-                                                text: "Диалоги";
-                                                font-size: 13px; color: #2b3640;
-                                                vertical-alignment: center;
-                                            }
-                                            for opt[oi] in ["все", "только 1:1", "только группы"]: Rectangle {
-                                                width: fk-t.preferred-width + 20px;
-                                                height: 28px;
-                                                border-radius: 14px;
-                                                background: f.kind == oi ? #10b981 : (fk.has-hover ? #e8ecf1 : #eef1f5);
-                                                fk := TouchArea {
-                                                    clicked => { root.folder-edit(f.id, "kind", "\{oi}"); }
-                                                }
-                                                fk-t := Text {
-                                                    text: opt;
-                                                    font-size: 12px;
-                                                    color: f.kind == oi ? white : #2b3640;
-                                                    horizontal-alignment: center;
-                                                    vertical-alignment: center;
-                                                }
-                                            }
-                                        }
-                                        if f.manual > 0: HorizontalLayout {
-                                            spacing: 8px;
-                                            Text {
-                                                text: "Положено руками: " + f.manual;
-                                                font-size: 12px; color: #6b7480;
-                                                vertical-alignment: center;
-                                                horizontal-stretch: 1;
-                                            }
-                                            fclr := TouchArea {
-                                                width: 150px;
-                                                clicked => { root.folder-edit(f.id, "clear-manual", ""); }
-                                                Rectangle {
-                                                    background: fclr.has-hover ? #eef1f5 : transparent;
-                                                    border-radius: 7px;
-                                                    Text { text: "Сбросить ручное"; font-size: 12px; color: #2b3640; }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // ===== Аккаунты =====
-                            if root.settings-tab == 4: VerticalLayout {
-                                spacing: 10px;
-                                Text {
-                                    text: "Аккаунты";
-                                    font-size: 16px; font-weight: 700; color: #0f1419;
-                                }
-                                Rectangle {
-                                    height: 96px;
-                                    border-radius: 12px;
-                                    background: #f7f8fa;
-                                    border-width: 1px; border-color: #eef1f5;
-                                    VerticalLayout {
-                                        alignment: center; spacing: 4px;
-                                        Text {
-                                            text: "Управление аккаунтами скоро";
-                                            font-size: 14px; font-weight: 600; color: #2b3640;
-                                            horizontal-alignment: center;
-                                        }
-                                        Text {
-                                            text: "Добавление почтовых ящиков, выбор активного, подключение внешних IMAP/SMTP.";
-                                            font-size: 12px; color: #8b95a1; wrap: word-wrap;
-                                            horizontal-alignment: center;
-                                        }
-                                    }
-                                }
-                            }
-
-                            Rectangle { vertical-stretch: 1; }
-                            }
-                            }
-
-                            // Pinned under the scroller: every setting here is
-                            // applied and persisted the moment it is changed, so
-                            // there is no Save and nothing to cancel. Without
-                            // saying so the absence of buttons reads as «my
-                            // changes went nowhere».
-                            Text {
-                                text: "Изменения применяются сразу — кнопки «Сохранить» здесь нет.";
-                                font-size: 11px;
-                                color: #8b95a1;
-                                horizontal-alignment: left;
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
-                }
-            }
+    // Сама модалка — `SettingsDialog` в settings.slint; здесь только проводка.
+    if root.settings-visible: SettingsDialog {
+        tab <=> root.settings-tab;
+        notify-sound-on: root.notify-sound-on;
+        media-allow-all-on: root.media-allow-all-on;
+        media-all-images-on: root.media-all-images-on;
+        work-start: root.work-start;
+        work-end: root.work-end;
+        calendars: root.calendars;
+        cal-palette: root.cal-palette;
+        connections: root.connections;
+        folder-edits: root.folder-edits;
+        folders-on: root.folders-on;
+        folders-store-note: root.folders-store-note;
+        close => {
+            root.settings-visible = false;
+            kb.focus();
         }
-        }
+        toggle-notify-sound => { root.toggle-notify-sound(); }
+        set-media-global(which) => { root.set-media-global(which); }
+        set-work-hours(s, e) => { root.set-work-hours(s, e); }
+        calendar-toggle-visibility(id) => { root.calendar-toggle-visibility(id); }
+        calendar-set-color(id, idx) => { root.calendar-set-color(id, idx); }
+        add-connection => { root.add-connection(); }
+        edit-connection(i) => { root.edit-connection(i); }
+        delete-connection(i) => { root.delete-connection(i); }
+        folders-toggle => { root.folders-toggle(); }
+        folder-add => { root.folder-add(); }
+        folder-delete(id) => { root.folder-delete(id); }
+        folder-edit(id, field, value) => { root.folder-edit(id, field, value); }
     }
 
     // ── «Сессия истекла» ──

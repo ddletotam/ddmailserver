@@ -405,9 +405,9 @@ pub(crate) fn refresh_connections(ui: &MainWindow, shared: &Rc<Shared>) {
         let title = if a.email.is_empty() { key.clone() } else { a.email.clone() };
         let needs_login = reauth.iter().any(|k| *k == key);
         let subtitle = if needs_login {
-            // Кнопка «Изменить» рядом открывает форму входа с подставленным
-            // сервером и логином — строка говорит, что от неё нужно.
-            "сессия истекла — «Изменить» и ввести пароль".to_string()
+            // Кнопка рядом на этой строке — «Войти»: открывает форму входа с
+            // подставленным сервером и логином.
+            "сессия истекла — нужен пароль".to_string()
         } else {
             format!("{} · {}", a.host, account_mode(a))
         };
@@ -522,8 +522,7 @@ pub(crate) fn account_mode(a: &engine::AccountConfig) -> &'static str {
 /// Settings modal and connections: add / edit / re-login / delete a
 /// connection, open settings, the global media switches.
 pub(crate) fn wire_settings(ui: &MainWindow, shared: &Rc<Shared>) {
-    // Settings modal: populate the read-only connection section from the
-    // live config (env first, then on-disk profile) and show it.
+    // Settings modal: refresh the connections list and open on the first tab.
     let ui_weak_set = ui.as_weak();
     let sh_set = shared.clone();
     // Empty-state CTA → open the add-connection modal.
@@ -571,41 +570,11 @@ pub(crate) fn wire_settings(ui: &MainWindow, shared: &Rc<Shared>) {
 
     ui.on_open_settings(move || {
         let Some(ui) = ui_weak_set.upgrade() else { return };
-        let cfg = engine::AccountConfig::load_all().into_iter().next();
-        match &cfg {
-            Some(c) => {
-                let account = if c.email.is_empty() {
-                    format!("{}@{}", c.username, c.host)
-                } else {
-                    c.email.clone()
-                };
-                ui.set_conn_account(account.into());
-                ui.set_conn_mode("Онлайн — IMAP/SMTP".into());
-                ui.set_conn_imap(
-                    format!(
-                        "{}:{} · {}",
-                        c.host,
-                        c.port,
-                        if c.use_tls { "TLS" } else { "без TLS" }
-                    )
-                    .into(),
-                );
-                ui.set_conn_smtp(format!("{}:{}", c.smtp_host, c.smtp_port).into());
-                ui.set_conn_native(c.native_url.clone().unwrap_or_default().into());
-            }
-            None => {
-                ui.set_conn_account(sh_set.key.clone().into());
-                ui.set_conn_mode("Только локальный кэш (IMAP не настроен)".into());
-                ui.set_conn_imap("".into());
-                ui.set_conn_smtp("".into());
-                ui.set_conn_native("".into());
-            }
-        }
         refresh_connections(&ui, &sh_set);
         ui.set_settings_tab(0);
         ui.set_settings_visible(true);
     });
-    // Global media-policy toggles from the settings «Контент» tab. Same
+    // Global media-policy toggles from the settings «Внешний контент» tab. Same
     // effect as the per-message «Медиа…» allow-alls, minus the row context,
     // so no body is needed.
     let ui_weak_mg = ui.as_weak();
