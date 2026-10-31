@@ -293,7 +293,7 @@ pub(crate) fn optimistic_remove_conversation(
         }
         let displays = displays_from(&convs, &sh.identity_colors.borrow());
         let items = sidebar_items(&displays, &sh.avatars.borrow(), &sh.conv_avatars.borrow());
-        ui.set_conversations(ModelRc::new(VecModel::from(items)));
+        set_conv_items(ui, items);
         *sh.displays.borrow_mut() = displays;
     }
     let len = sh.convs.borrow().len();
@@ -443,6 +443,42 @@ pub(crate) fn avatar_for(sh: &Shared, d: &Disp) -> Option<Image> {
         .or_else(|| sh.avatars.borrow().get(&d.email).cloned())
 }
 
+/// Отдать строки списку диалогов. Число строк то же — правим строки на
+/// месте (`set_row_data`, и только изменившиеся), а не меняем модель
+/// целиком: замена модели пересоздаёт строки ListView, и контекстное меню,
+/// открытое на старой строке, теряло клик — «Объединить» срабатывало через
+/// раз, пока на старте пачками ехали аватарки и дельты списка.
+pub(crate) fn set_conv_items(ui: &MainWindow, items: Vec<ConvItem>) {
+    use slint::Model as _;
+    let model = ui.get_conversations();
+    if let Some(vm) = model.as_any().downcast_ref::<VecModel<ConvItem>>() {
+        if vm.row_count() == items.len() {
+            for (i, it) in items.into_iter().enumerate() {
+                if vm.row_data(i).as_ref() != Some(&it) {
+                    vm.set_row_data(i, it);
+                }
+            }
+            return;
+        }
+    }
+    ui.set_conversations(ModelRc::new(VecModel::from(items)));
+}
+
+/// Строка (индекс в `sh.convs`), на которой открыли контекстное меню: по id,
+/// запомненному при правом клике, — номер строки к моменту выбора пункта мог
+/// уже указывать на другой диалог. Нет id — по номеру, как раньше.
+pub(crate) fn ctx_conv_index(ui: &MainWindow, sh: &Shared, model_idx: i32) -> Option<usize> {
+    let id = ui.get_ctx_conv_id();
+    if !id.is_empty() {
+        return sh.convs.borrow().iter().position(|c| c.id == id.as_str());
+    }
+    if sh.compose.pending_compose.borrow().is_some() {
+        (model_idx as usize).checked_sub(1)
+    } else {
+        Some(model_idx as usize)
+    }
+}
+
 pub(crate) fn sidebar_items(
     displays: &[Disp],
     avatars: &HashMap<String, Image>,
@@ -453,6 +489,7 @@ pub(crate) fn sidebar_items(
         .map(|d| {
             let avatar = custom.get(&d.id).or_else(|| avatars.get(&d.email)).cloned();
             ConvItem {
+                id: d.id.clone().into(),
                 name: d.name.clone().into(),
                 preview: d.preview.clone().into(),
                 initials: d.initials.clone().into(),
@@ -479,6 +516,7 @@ pub(crate) fn sidebar_items(
 pub(crate) fn pending_compose_item(target: &str) -> ConvItem {
     let initials = target.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
     ConvItem {
+        id: "".into(),
         name: target.to_string().into(),
         preview: "Новое сообщение".into(),
         initials: initials.into(),
@@ -527,7 +565,7 @@ pub(crate) fn refresh_sidebar(sh: &Shared, ui: &MainWindow) {
         items.push(pending_compose_item(target));
     }
     items.extend(sidebar_items(&displays, &avatars, &sh.conv_avatars.borrow()));
-    ui.set_conversations(ModelRc::new(VecModel::from(items)));
+    set_conv_items(ui, items);
     if pending.is_some() {
         ui.set_selected(0);
     }
@@ -593,10 +631,14 @@ pub(crate) fn wire_sidebar(ui: &MainWindow, shared: &Rc<Shared>) {
     let sh_cm = shared.clone();
     ui.on_conv_merge(move |model_idx| {
         let Some(ui) = ui_weak_cm.upgrade() else { return };
+        println!("merge: requested row {model_idx} into open {}", sh_cm.current.get());
         if sh_cm.compose.pending_compose.borrow().is_some() {
             return; // transient compose: индексы сдвинуты, открытого диалога нет
         }
-        let src_idx = model_idx as usize;
+        let Some(src_idx) = ctx_conv_index(&ui, &sh_cm, model_idx) else {
+            println!("merge: диалог под меню исчез из списка — пропуск");
+            return;
+        };
         let dst_idx = sh_cm.current.get();
         if src_idx == dst_idx {
             return;
@@ -650,7 +692,7 @@ pub(crate) fn wire_sidebar(ui: &MainWindow, shared: &Rc<Shared>) {
         if sh_um.compose.pending_compose.borrow().is_some() {
             return;
         }
-        let idx = model_idx as usize;
+        let Some(idx) = ctx_conv_index(&ui, &sh_um, model_idx) else { return };
         let resolved = {
             let convs = sh_um.convs.borrow();
             match convs.get(idx) {

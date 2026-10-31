@@ -77,6 +77,9 @@ struct TaskRow {
 }
 
 struct ConvItem {
+    // id диалога: контекстное меню действует по нему, а не по номеру строки
+    // (строки обновляются на месте и могут смениться под открытым меню).
+    id: string,
     name: string,
     preview: string,
     initials: string,
@@ -1015,6 +1018,8 @@ export component MainWindow inherits Window {
     // по строке при другом ОТКРЫТОМ диалоге (склеить с ним); unmerge —
     // разобрать склейку обратно.
     callback conv-merge(int);
+    // Диалог под последним правым кликом (ConvItem.id).
+    in-out property <string> ctx-conv-id: "";
     callback conv-unmerge(int);
     // ── Папки диалогов (табы) ──
     in property <bool> folders-shown: false;
@@ -1850,6 +1855,7 @@ export component MainWindow inherits Window {
                             pointer-event(e) => {
                                 if (e.button == PointerEventButton.right
                                     && e.kind == PointerEventKind.down) {
+                                    root.ctx-conv-id = conv.id;
                                     conv-cm.show({ x: self.mouse-x, y: self.mouse-y });
                                 }
                             }

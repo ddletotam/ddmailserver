@@ -68,7 +68,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     let displays = displays_from(&merged, &sh.identity_colors.borrow());
                     let items =
                         sidebar_items(&displays, &sh.avatars.borrow(), &sh.conv_avatars.borrow());
-                    ui.set_conversations(ModelRc::new(VecModel::from(items)));
+                    set_conv_items(ui, items);
                     // Request avatars for unique counterpart emails not yet cached.
                     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
                         let mut seen = std::collections::HashSet::new();
@@ -206,7 +206,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         &sh.avatars.borrow(),
                         &sh.conv_avatars.borrow(),
                     );
-                    ui.set_conversations(ModelRc::new(VecModel::from(items)));
+                    set_conv_items(ui, items);
                 }
             });
         }

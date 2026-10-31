@@ -510,11 +510,7 @@ pub(crate) fn wire_folders(ui: &MainWindow, shared: &Rc<Shared>) {
     let sh = shared.clone();
     ui.on_conv_to_folder(move |idx, id| {
         let Some(ui) = uiw.upgrade() else { return };
-        let real = if sh.compose.pending_compose.borrow().is_some() {
-            (idx as usize).checked_sub(1)
-        } else {
-            Some(idx as usize)
-        };
+        let real = ctx_conv_index(&ui, &sh, idx);
         let Some(c) = real.and_then(|i| sh.convs.borrow().get(i).cloned()) else { return };
         let target = sh.folders.borrow().doc.index_of(&id);
         commit(&ui, &sh, true, |doc| doc.assign(&c, &sh.key, target));
