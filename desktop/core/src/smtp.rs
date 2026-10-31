@@ -75,31 +75,53 @@ pub(crate) async fn send_message_auth(
 
     let email = email_builder.multipart(mp).map_err(|e| format!("Build email: {e}"))?;
 
-    let creds = Credentials::new(username.to_string(), password.to_string());
-
-    let mailer = if use_tls {
-        let mut b = AsyncSmtpTransport::<Tokio1Executor>::relay(host)
-            .map_err(|e| format!("SMTP relay: {e}"))?
-            .port(port)
-            .credentials(creds);
-        if xoauth2 {
-            b = b.authentication(vec![Mechanism::Xoauth2]);
-        }
-        b.build()
-    } else {
-        let mut b = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
-            .map_err(|e| format!("SMTP starttls: {e}"))?
-            .port(port)
-            .credentials(creds);
-        if xoauth2 {
-            b = b.authentication(vec![Mechanism::Xoauth2]);
-        }
-        b.build()
-    };
+    let mailer = build_transport(host, port, username, password, use_tls, xoauth2)?;
 
     let response = mailer.send(email).await.map_err(|e| format!("Send failed: {e}"))?;
 
     Ok(format!("Sent: {:?}", response.code()))
+}
+
+/// SMTP transport for an account. `use_tls` means implicit TLS (465) —
+/// except on 587, 25 and 2525, which only speak STARTTLS: implicit TLS there
+/// hangs on the handshake instead of failing.
+fn build_transport(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    use_tls: bool,
+    xoauth2: bool,
+) -> Result<AsyncSmtpTransport<Tokio1Executor>, String> {
+    let creds = Credentials::new(username.to_string(), password.to_string());
+    let builder = if use_tls && !matches!(port, 587 | 25 | 2525) {
+        AsyncSmtpTransport::<Tokio1Executor>::relay(host).map_err(|e| format!("SMTP relay: {e}"))?
+    } else {
+        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
+            .map_err(|e| format!("SMTP starttls: {e}"))?
+    };
+    let mut b = builder.port(port).credentials(creds);
+    if xoauth2 {
+        b = b.authentication(vec![Mechanism::Xoauth2]);
+    }
+    Ok(b.build())
+}
+
+/// Connect and log in to SMTP without sending anything — the add-connection
+/// form checks the credentials before saving the account.
+pub async fn test_login(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    use_tls: bool,
+) -> Result<(), String> {
+    let mailer = build_transport(host, port, username, password, use_tls, false)?;
+    match mailer.test_connection().await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("сервер не ответил".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Convenience wrapper over `send_message_impl`.

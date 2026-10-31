@@ -220,7 +220,7 @@ pub(crate) fn on_unavailable(ui: &MainWindow, sh: &Shared, account: String, erro
         }
     }
     *sh.folders_error.borrow_mut() = error;
-    refresh_folder_settings(ui, sh);
+    refresh_folder_note(ui, sh);
 }
 
 /// Ответ на запись.
@@ -275,7 +275,7 @@ pub(crate) fn on_save_failed(ui: &MainWindow, sh: &Shared, error: String) {
     sh.folders_inflight.set(false);
     sh.folders_dirty.set(true);
     *sh.folders_error.borrow_mut() = error;
-    refresh_folder_settings(ui, sh);
+    refresh_folder_note(ui, sh);
     schedule_save(sh, SAVE_RETRY);
 }
 
@@ -283,7 +283,7 @@ pub(crate) fn on_save_failed(ui: &MainWindow, sh: &Shared, error: String) {
 fn store_note(st: &folders::Stored, error: &str) -> String {
     match &st.store {
         Store::Local => {
-            "Нет подключения к серверу DDMail — папки хранятся только на этой станции.".into()
+            "Нет подключения к серверу ddmail — папки хранятся только на этой станции.".into()
         }
         Store::Server { .. } if !error.is_empty() => {
             let error: String = error.chars().take(120).collect();
@@ -296,11 +296,54 @@ fn store_note(st: &folders::Stored, error: &str) -> String {
     }
 }
 
+/// Иконка папки — до четырёх символов, но не разрезая эмодзи: склейка через
+/// ZWJ (👨‍👩‍👧), модификаторы (вариации, оттенок кожи, keycap 1️⃣, теги
+/// флагов регионов) идут вместе со своим символом, флаг страны — пара
+/// региональных букв (🇷🇺). Иначе от семьи оставался один папа и висячий ZWJ.
+fn clip_icon(text: &str) -> String {
+    const ZWJ: char = '\u{200D}';
+    let joins = |c: char| {
+        c == ZWJ
+            || c == '\u{20E3}'
+            || ('\u{FE00}'..='\u{FE0F}').contains(&c)
+            || ('\u{1F3FB}'..='\u{1F3FF}').contains(&c)
+            || ('\u{E0020}'..='\u{E007F}').contains(&c)
+    };
+    let regional = |c: char| ('\u{1F1E6}'..='\u{1F1FF}').contains(&c);
+    let mut out = String::new();
+    let mut units = 0;
+    let mut prev_zwj = false;
+    // Нечётная региональная буква ждёт пару — вторая её не начинает.
+    let mut open_flag = false;
+    for c in text.chars() {
+        let second_of_flag = regional(c) && open_flag;
+        if !joins(c) && !prev_zwj && !second_of_flag {
+            if units == 4 {
+                break;
+            }
+            units += 1;
+        }
+        out.push(c);
+        prev_zwj = c == ZWJ;
+        open_flag = regional(c) && !second_of_flag;
+    }
+    out
+}
+
 fn split_list(text: &str) -> Vec<String> {
     text.split([',', ';', ' ', '\n'])
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// Только подпись о хранилище. Ошибки сохранения идут сюда, а не в
+/// `refresh_folder_settings`: новая модель пересоздаёт все строки раздела, и
+/// поле, в котором как раз печатают, теряло фокус — при лежащем сервере
+/// каждые 30 с, на каждом повторе.
+fn refresh_folder_note(ui: &MainWindow, sh: &Shared) {
+    let st = sh.folders.borrow();
+    ui.set_folders_store_note(store_note(&st, &sh.folders_error.borrow()).into());
 }
 
 /// Раздел настроек «Папки»: строка на папку.
@@ -401,7 +444,7 @@ pub(crate) fn wire_folders(ui: &MainWindow, shared: &Rc<Shared>) {
             let f = &mut doc.folders[i];
             match field.as_str() {
                 "name" => f.name = value.trim().to_string(),
-                "icon" => f.icon = value.trim().chars().take(4).collect(),
+                "icon" => f.icon = clip_icon(value.trim()),
                 "identities" => f.rules.identities = split_list(&value),
                 "domains" => f.rules.domains = split_list(&value),
                 "kind" => {
@@ -434,4 +477,22 @@ pub(crate) fn wire_folders(ui: &MainWindow, shared: &Rc<Shared>) {
         let target = sh.folders.borrow().doc.index_of(&id);
         commit(&ui, &sh, true, |doc| doc.assign(&c, &sh.key, target));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clip_icon;
+
+    #[test]
+    fn icon_keeps_four_symbols_without_splitting_emoji() {
+        assert_eq!(clip_icon("abcdef"), "abcd");
+        // Семья через ZWJ — один символ, не режется посередине.
+        let family = "👨\u{200D}👩\u{200D}👧";
+        assert_eq!(clip_icon(&format!("{family}xyzw")), format!("{family}xyz"));
+        // Оттенок кожи и вариация держатся за свой символ.
+        assert_eq!(clip_icon("👍🏽❤\u{FE0F}ab c"), "👍🏽❤\u{FE0F}ab");
+        // Флаг — пара региональных букв, keycap держится за цифру.
+        assert_eq!(clip_icon("abc🇷🇺🇰🇿"), "abc🇷🇺");
+        assert_eq!(clip_icon("1\u{FE0F}\u{20E3}xyzw"), "1\u{FE0F}\u{20E3}xyz");
+    }
 }

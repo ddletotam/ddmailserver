@@ -582,6 +582,38 @@ pub fn remove_in(dir: &Path, account_key: &str, store: &dyn SecretStore) {
     forget_secrets(account_key, store);
 }
 
+/// Записать `cfg` на место учётки `old_key` (правка в форме подключения).
+/// Ключ — `username@host`, и правка логина или IMAP-хоста его меняет: простое
+/// «добавить с заменой по ключу» оставляло старую запись рядом с новой, и
+/// мёртвая копия продолжала краснить индикатор. Место в списке сохраняется —
+/// от порядка зависят индексы строк и «первая нативная учётка» (папки).
+/// Секреты старого ключа стираются, если ключ сменился.
+///
+/// Отказ, а не молчаливое решение, в двух случаях: правка совпала по ключу с
+/// другой учёткой (её бы удалило) и учётку удалили, пока шла правка (она бы
+/// вернулась в конец списка).
+pub fn replace_in(
+    dir: &Path,
+    old_key: &str,
+    cfg: &AccountConfig,
+    store: &dyn SecretStore,
+) -> Result<(), String> {
+    let new_key = cfg.account_key();
+    let mut all = load_all_in(dir, store);
+    let Some(i) = all.iter().position(|a| a.account_key() == old_key) else {
+        return Err("Подключение удалили, пока шла правка, — добавьте его заново.".into());
+    };
+    if new_key != old_key && all.iter().any(|a| a.account_key() == new_key) {
+        return Err("Такое подключение уже есть — правьте его.".into());
+    }
+    all[i] = cfg.clone();
+    save_all_in(dir, &all, store);
+    if old_key != new_key {
+        forget_secrets(old_key, store);
+    }
+    Ok(())
+}
+
 fn forget_secrets(account_key: &str, store: &dyn SecretStore) {
     for kind in SecretKind::ALL {
         if let Err(e) = store.delete(&secret_id(account_key, kind)) {
@@ -924,6 +956,50 @@ pub(crate) mod tests {
         let m = store.map.lock().unwrap();
         assert!(!m.keys().any(|k| k.starts_with(&native_cfg().account_key())));
         assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    fn replace_with_new_key_keeps_place_and_drops_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemStore::default();
+        save_all_in(dir.path(), &all_cfgs(), &store);
+        let old_key = imap_cfg().account_key();
+        let edited = AccountConfig { host: "mail.changed.example".into(), ..imap_cfg() };
+        assert_ne!(edited.account_key(), old_key);
+        replace_in(dir.path(), &old_key, &edited, &store).unwrap();
+        let got = load_all_in(dir.path(), &store);
+        assert_eq!(got.len(), 3);
+        // На том же месте, старой записи нет, её секреты стёрты.
+        same(&got[0], &edited);
+        assert!(!got.iter().any(|a| a.account_key() == old_key));
+        assert!(!store.map.lock().unwrap().keys().any(|k| k.starts_with(&old_key)));
+    }
+
+    #[test]
+    fn replace_with_same_key_keeps_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemStore::default();
+        save_all_in(dir.path(), &all_cfgs(), &store);
+        let edited = AccountConfig { smtp_host: "smtp.other.example".into(), ..native_cfg() };
+        replace_in(dir.path(), &native_cfg().account_key(), &edited, &store).unwrap();
+        let got = load_all_in(dir.path(), &store);
+        assert_eq!(got.len(), 3);
+        same(&got[1], &edited);
+    }
+
+    #[test]
+    fn replace_refuses_collision_and_vanished_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemStore::default();
+        save_all_in(dir.path(), &all_cfgs(), &store);
+        // Правка совпала по ключу с другой учёткой — та не должна пропасть.
+        let clash = AccountConfig { email: "x@example.org".into(), ..native_cfg() };
+        assert!(replace_in(dir.path(), &imap_cfg().account_key(), &clash, &store).is_err());
+        assert_eq!(load_all_in(dir.path(), &store).len(), 3);
+        // Учётки уже нет — не воскрешаем.
+        remove_in(dir.path(), &imap_cfg().account_key(), &store);
+        assert!(replace_in(dir.path(), &imap_cfg().account_key(), &imap_cfg(), &store).is_err());
+        assert_eq!(load_all_in(dir.path(), &store).len(), 2);
     }
 
     #[test]

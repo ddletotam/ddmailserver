@@ -379,8 +379,11 @@ pub(crate) struct AccountsState {
     /// карте «нужен вход» тут же затиралось бы на «нет связи». Снимается
     /// только удачным коннектом, ротацией токена или пересборкой движка.
     pub(crate) reauth: RefCell<Vec<String>>,
-    /// Keeps the add/edit-connection modal alive while it's open.
-    pub(crate) add_conn_window: RefCell<Option<LoginWindow>>,
+    /// Keeps the add/edit-connection window alive while it's open, with its
+    /// generation: a background login check reports back only to the window
+    /// that started it, not to one opened after it.
+    pub(crate) add_conn_window: RefCell<Option<(u64, LoginWindow)>>,
+    pub(crate) add_conn_seq: Cell<u64>,
     /// account_keys parallel to the settings connections list (for edit/delete
     /// by row index).
     pub(crate) settings_conn_keys: RefCell<Vec<String>>,

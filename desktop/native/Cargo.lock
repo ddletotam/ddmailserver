@@ -1484,7 +1484,7 @@ dependencies = [
 
 [[package]]
 name = "ddmail-native"
-version = "0.1.13"
+version = "0.1.17"
 dependencies = [
  "arboard",
  "base64 0.22.1",

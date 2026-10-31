@@ -15,6 +15,7 @@ mod engine;
 mod instance;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod keylayout;
+mod mail_presets;
 mod mailto;
 mod merges;
 mod notify;
@@ -507,6 +508,7 @@ fn main() {
             conn_dot_keys: RefCell::new(Vec::new()),
             reauth: RefCell::new(Vec::new()),
             add_conn_window: RefCell::new(None),
+            add_conn_seq: Cell::new(0),
             settings_conn_keys: RefCell::new(Vec::new()),
         },
     });

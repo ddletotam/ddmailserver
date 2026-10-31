@@ -135,6 +135,15 @@ impl AccountConfig {
         });
     }
 
+    /// Save an edited connection in place of `old_key` (see `store::replace_in`).
+    pub fn replace_account(old_key: &str, cfg: &AccountConfig) -> Result<(), String> {
+        let Some(dir) = store::config_dir() else {
+            return Err("Не найден каталог настроек клиента.".into());
+        };
+        let _g = store::lock(&dir);
+        store::replace_in(&dir, old_key, cfg, store::os_store())
+    }
+
     /// Remove a connection by account_key from accounts.json, and its secrets
     /// from the keyring.
     pub fn remove_account(account_key: &str) {

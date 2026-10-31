@@ -1,0 +1,524 @@
+// Окно «Подключение почты»: добавить, изменить или заново войти в учётку.
+// Отдельное окно ОС, а не модалка главного: открывается и из пустого
+// состояния, и из настроек, и с плашки «сессия истекла». Внешне — тот же
+// набор примитивов, что модалка настроек (kit.slint).
+//
+// Логика целиком в Rust (accounts.rs, open_add_connection): серверы по
+// домену подставляет `email-edited`, вход по IMAP и SMTP проверяется до
+// сохранения учётки.
+
+import { ScrollView, Palette } from "std-widgets.slint";
+import { KLineEdit } from "keys.slint";
+import { Btn, Caption, Note, Group, Divider, SettingRow } from "kit.slint";
+
+// Подпись слева, поле ввода справа — строка формы внутри Group.
+component FieldRow inherits Rectangle {
+    in property <string> label;
+    height: 48px;
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 10px;
+        spacing: 12px;
+        Text {
+            width: 72px;
+            text: root.label;
+            font-size: 13px;
+            color: #2b3640;
+            vertical-alignment: center;
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            @children
+        }
+    }
+}
+
+export component LoginWindow inherits Window {
+    // Палитра std-widgets прибита к светлой, потому что вся вёрстка здесь
+    // светлая жёстко: белые карточки, светлый фон, тёмный текст. Сами
+    // виджеты палитру выбирают по системе, и на тёмной схеме их передний план
+    // становится белым — на белой карточке это значит «ничего не видно».
+    // Воспроизводится на голом Xvfb со slint 1.16.1 — это не тема KDE.
+    init => { Palette.color-scheme = ColorScheme.light; }
+    title: "ddmail — " + root.heading;
+    // Размер предпочтительный, не жёсткий: на FullHD с масштабом 150% (по
+    // умолчанию у Windows на ноутбуках) 680px с рамкой и панелью задач не
+    // помещались, кнопки уходили за край, а растянуть окно было нельзя.
+    // Форма скроллится, кнопки закреплены — окно можно сжать.
+    preferred-width: 520px;
+    preferred-height: 680px;
+    min-width: 440px;
+    min-height: 420px;
+    background: #f6f7f9;
+
+    // «Новое подключение» / «Изменить подключение» — ставит Rust.
+    in property <string> heading: "Новое подключение";
+
+    // 0 = сервер ddmail (native, вход → JWT); 1 = любой ящик IMAP/SMTP
+    // (+ необязательные CalDAV/CardDAV).
+    in-out property <int> mode: 0;
+
+    // Правка существующей учётки: вид (ddmail / IMAP) не меняется — это была
+    // бы уже другая учётка. Переключатель скрыт.
+    in property <bool> kind-locked: false;
+    // Учётка Google OAuth: пароля нет, остаётся только войти заново.
+    in property <bool> oauth-only: false;
+    // Куда поставить фокус при открытии: "password" — в пароль (правка,
+    // повторный вход), иначе в первое поле. Без фокуса Esc и Enter не
+    // работали, пока не кликнешь в поле.
+    in-out property <string> focus-field: "";
+    // Фокус ещё не поставлен (сбрасывается при смене вида учётки).
+    in-out property <bool> focus-pending: true;
+
+    // Native.
+    in-out property <string> server-url: "https://mail.letotam.ru";
+    in-out property <string> username: "";
+    // Пароль общий для обоих видов, логины раздельные: логин ddmail,
+    // переехав на вкладку IMAP, прятался там в свёрнутых серверах и молча
+    // ломал вход.
+    in-out property <string> password: "";
+    // IMAP/SMTP.
+    in-out property <string> imap-username: "";
+    in-out property <string> email: "";
+    in-out property <string> imap-host: "";
+    in-out property <string> imap-port: "993";
+    in-out property <string> smtp-host: "";
+    in-out property <string> smtp-port: "465";
+    in-out property <string> caldav-url: "";
+    in-out property <string> carddav-url: "";
+
+    // Серверы правили руками — Rust больше не подставляет их по email.
+    in-out property <bool> servers-touched: false;
+    // Поля серверов раскрыты; свёрнуты — видна одна строка-сводка.
+    in-out property <bool> servers-open: false;
+    // Серверы взяты из таблицы известных служб (иначе угаданы по домену).
+    in property <bool> servers-known: false;
+    in property <string> provider-name: "";
+    // Подсказка про пароль приложения для известной службы.
+    in property <string> password-hint: "";
+
+    in property <string> error: "";
+    in property <bool> busy: false;
+    in property <string> busy-text: "Подключаем…";
+    // Google sign-in is offered only when client creds are present on this
+    // machine (google_oauth.json).
+    in property <bool> google-available: false;
+
+    callback submit();
+    callback cancel();
+    callback google-login();
+    callback email-edited(string);
+
+    FocusScope {
+        // Сам не остановка в цикле Tab — только ловит то, что поля отдают
+        // наверх. Фокус берёт при открытии как запасной: поле, которому он
+        // положен (focus-field), забирает его своим таймером следом.
+        focus-on-tab-navigation: false;
+        init => { self.focus(); }
+        // Esc из любого поля — «Отмена»: поля Esc не обрабатывают и
+        // отдают событие наверх. Enter вне полей — «Подключить».
+        key-pressed(ev) => {
+            if (ev.text == Key.Escape) {
+                root.cancel();
+                return accept;
+            }
+            if (ev.text == Key.Return) {
+                root.submit();
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            // ── Шапка: заголовок, пояснение, выбор вида учётки ──
+            VerticalLayout {
+                vertical-stretch: 0;
+                padding-left: 24px;
+                padding-right: 24px;
+                padding-top: 22px;
+                padding-bottom: 14px;
+                spacing: 4px;
+                Text {
+                    text: root.heading;
+                    font-size: 18px;
+                    font-weight: 700;
+                    color: #0f1419;
+                }
+                Text {
+                    text: root.oauth-only
+                        ? "Учётка Google входит через браузер, пароль ей не нужен."
+                        : root.mode == 0
+                        ? "Вход на свой сервер ddmail: почта, календарь и контакты придут оттуда."
+                        : "Любой почтовый ящик с доступом по IMAP и SMTP.";
+                    font-size: 12.5px;
+                    color: #6b7480;
+                    wrap: word-wrap;
+                }
+                if !root.kind-locked: Rectangle { height: 10px; }
+                if !root.kind-locked: Rectangle {
+                    height: 34px;
+                    border-radius: 8px;
+                    background: #e9edf1;
+                    HorizontalLayout {
+                        padding: 3px;
+                        spacing: 3px;
+                        for opt[oi] in ["Сервер ddmail", "Другой ящик (IMAP)"]: Rectangle {
+                            horizontal-stretch: 1;
+                            border-radius: 6px;
+                            background: root.mode == oi ? white : (seg-ta.has-hover ? #dfe4ea : transparent);
+                            drop-shadow-blur: root.mode == oi ? 2px : 0px;
+                            drop-shadow-color: #0000001f;
+                            Text {
+                                text: opt;
+                                font-size: 13px;
+                                font-weight: root.mode == oi ? 600 : 500;
+                                color: root.mode == oi ? #065f46 : #2b3640;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            seg-ta := TouchArea {
+                                enabled: !root.busy;
+                                mouse-cursor: pointer;
+                                // Фокус сбрасывается здесь, а не в `changed mode`:
+                                // тот срабатывает отложенно и при prefill
+                                // (Rust ставит mode 1 и focus-field "password")
+                                // затирал фокус-в-пароль — набор уходил в email.
+                                clicked => {
+                                    root.mode = oi;
+                                    root.focus-field = "";
+                                    root.focus-pending = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Поля ──
+            // Форма IMAP выше окна, поэтому скроллится; кнопки внизу
+            // закреплены и видны всегда. Ширина содержимого прибита к окну,
+            // как в настройках: иначе абзацы с wrap и горизонтальный
+            // скроллбар.
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    width: root.width - 12px;
+                    // Вьюпорт ScrollView сдвинут на ~6px: с этими отступами
+                    // карточки встают ровно под переключатель в шапке.
+                    padding-left: 18px;
+                    padding-right: 18px;
+                    padding-top: 4px;
+                    padding-bottom: 18px;
+                    alignment: start;
+
+                    // ===== Сервер ddmail =====
+                    if root.mode == 0: VerticalLayout {
+                        alignment: start;
+                        spacing: 8px;
+                        Caption { text: "СЕРВЕР"; }
+                        Group {
+                            FieldRow {
+                                label: "Адрес";
+                                KLineEdit {
+                                    text <=> root.server-url;
+                                    enabled: !root.busy;
+                                    placeholder-text: "https://mail.example.com";
+                                    accepted => { root.submit(); }
+                                }
+                            }
+                            Divider {}
+                            FieldRow {
+                                label: "Логин";
+                                native-login-field := KLineEdit {
+                                    text <=> root.username;
+                                    enabled: !root.busy;
+                                    accepted => { root.submit(); }
+                                }
+                                // Фокус — таймером, а не из init: focus() во время
+                                // построения условного блока даёт «Recursion detected».
+                                Timer {
+                                    interval: 1ms;
+                                    running: root.focus-pending && root.focus-field != "password";
+                                    triggered => {
+                                        root.focus-pending = false;
+                                        native-login-field.focus();
+                                    }
+                                }
+                            }
+                            Divider {}
+                            FieldRow {
+                                label: "Пароль";
+                                native-password-field := KLineEdit {
+                                    text <=> root.password;
+                                    input-type: InputType.password;
+                                    enabled: !root.busy;
+                                    accepted => { root.submit(); }
+                                }
+                                // Фокус — таймером, а не из init: focus() во время
+                                // построения условного блока даёт «Recursion detected».
+                                Timer {
+                                    interval: 1ms;
+                                    running: root.focus-pending && root.focus-field == "password";
+                                    triggered => {
+                                        root.focus-pending = false;
+                                        native-password-field.focus();
+                                        native-password-field.select-all();
+                                    }
+                                }
+                            }
+                        }
+                        Note {
+                            text: "Пароль не сохраняется: клиент получает от сервера токен сессии.";
+                        }
+                    }
+
+                    // ===== Другой ящик (IMAP/SMTP) =====
+                    if root.mode == 1: VerticalLayout {
+                        alignment: start;
+                        spacing: 8px;
+
+                        if root.google-available || root.oauth-only: VerticalLayout {
+                            spacing: 8px;
+                            Caption { text: "GMAIL"; }
+                            Group {
+                                // Учётка Google: только строка-сводка, вход —
+                                // основной кнопкой внизу (вторая такая же
+                                // кнопка в строке была бы дублем).
+                                if root.oauth-only: SettingRow {
+                                    title: root.email;
+                                    subtitle: "Учётка Google";
+                                }
+                                if !root.oauth-only: SettingRow {
+                                    title: "Вход через Google";
+                                    subtitle: "Без пароля приложения — в браузере";
+                                    Btn {
+                                        text: "Войти через Google";
+                                        enabled: !root.busy;
+                                        clicked => { root.google-login(); }
+                                    }
+                                }
+                            }
+                            if root.oauth-only && !root.google-available: Note {
+                                text: "На этой станции нет google_oauth.json — войти через Google отсюда нельзя.";
+                            }
+                            Rectangle { height: 6px; }
+                        }
+                    }
+
+                    if root.mode == 1 && !root.oauth-only: VerticalLayout {
+                        alignment: start;
+                        spacing: 8px;
+
+                        Caption { text: "УЧЁТНАЯ ЗАПИСЬ"; }
+                        Group {
+                            FieldRow {
+                                label: "Email";
+                                email-field := KLineEdit {
+                                    text <=> root.email;
+                                    enabled: !root.busy;
+                                    placeholder-text: "you@example.com";
+                                    edited(t) => { root.email-edited(t); }
+                                    accepted => { root.submit(); }
+                                }
+                                // Фокус — таймером, а не из init: focus() во время
+                                // построения условного блока даёт «Recursion detected».
+                                Timer {
+                                    interval: 1ms;
+                                    running: root.focus-pending && root.focus-field != "password";
+                                    triggered => {
+                                        root.focus-pending = false;
+                                        email-field.focus();
+                                    }
+                                }
+                            }
+                            Divider {}
+                            FieldRow {
+                                label: "Пароль";
+                                imap-password-field := KLineEdit {
+                                    text <=> root.password;
+                                    input-type: InputType.password;
+                                    enabled: !root.busy;
+                                    accepted => { root.submit(); }
+                                }
+                                // Фокус — таймером, а не из init: focus() во время
+                                // построения условного блока даёт «Recursion detected».
+                                Timer {
+                                    interval: 1ms;
+                                    running: root.focus-pending && root.focus-field == "password";
+                                    triggered => {
+                                        root.focus-pending = false;
+                                        imap-password-field.focus();
+                                        // Старый пароль выделен: набор заменяет его, а не дописывается.
+                                        imap-password-field.select-all();
+                                    }
+                                }
+                            }
+                        }
+                        if root.password-hint != "": Note {
+                            text: root.password-hint;
+                        }
+
+                        Rectangle { height: 6px; }
+                        Caption { text: "СЕРВЕРЫ"; }
+                        Group {
+                            if !root.servers-open: SettingRow {
+                                dimmed: root.imap-host == "";
+                                title: root.imap-host == ""
+                                    ? "Подставятся по email"
+                                    : "IMAP " + root.imap-host;
+                                subtitle: root.imap-host == ""
+                                    ? "Для известных служб — автоматически"
+                                    : "SMTP " + root.smtp-host + (root.servers-known
+                                        ? " · настройки " + root.provider-name
+                                        : " · угаданы по домену, проверьте");
+                                Btn {
+                                    text: "Изменить";
+                                    enabled: !root.busy;
+                                    clicked => { root.servers-open = true; }
+                                }
+                            }
+                            if root.servers-open: VerticalLayout {
+                                FieldRow {
+                                    label: "IMAP";
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        KLineEdit {
+                                            horizontal-stretch: 1;
+                                            text <=> root.imap-host;
+                                            enabled: !root.busy;
+                                            accepted => { root.submit(); }
+                                            placeholder-text: "imap.example.com";
+                                            edited => { root.servers-touched = true; }
+                                        }
+                                        KLineEdit {
+                                            width: 72px;
+                                            text <=> root.imap-port;
+                                            enabled: !root.busy;
+                                            accepted => { root.submit(); }
+                                            placeholder-text: "993";
+                                            edited => { root.servers-touched = true; }
+                                        }
+                                    }
+                                }
+                                Divider {}
+                                FieldRow {
+                                    label: "SMTP";
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        KLineEdit {
+                                            horizontal-stretch: 1;
+                                            text <=> root.smtp-host;
+                                            enabled: !root.busy;
+                                            accepted => { root.submit(); }
+                                            placeholder-text: "smtp.example.com";
+                                            edited => { root.servers-touched = true; }
+                                        }
+                                        KLineEdit {
+                                            width: 72px;
+                                            text <=> root.smtp-port;
+                                            enabled: !root.busy;
+                                            accepted => { root.submit(); }
+                                            placeholder-text: "465";
+                                            edited => { root.servers-touched = true; }
+                                        }
+                                    }
+                                }
+                                Divider {}
+                                FieldRow {
+                                    label: "Логин";
+                                    KLineEdit {
+                                        text <=> root.imap-username;
+                                        enabled: !root.busy;
+                                        placeholder-text: "как email";
+                                        accepted => { root.submit(); }
+                                    }
+                                }
+                            }
+                        }
+                        if root.servers-open: Note {
+                            text: "Шифрование SSL/TLS; на SMTP-портах 587, 25 и 2525 — STARTTLS. Логин пустой — входим по email.";
+                        }
+
+                        Rectangle { height: 6px; }
+                        Caption { text: "КАЛЕНДАРЬ И КОНТАКТЫ"; }
+                        Group {
+                            FieldRow {
+                                label: "CalDAV";
+                                KLineEdit {
+                                    text <=> root.caldav-url;
+                                    enabled: !root.busy;
+                                    accepted => { root.submit(); }
+                                    placeholder-text: "https://…/calendars/…/";
+                                }
+                            }
+                            Divider {}
+                            FieldRow {
+                                label: "CardDAV";
+                                KLineEdit {
+                                    text <=> root.carddav-url;
+                                    enabled: !root.busy;
+                                    accepted => { root.submit(); }
+                                    placeholder-text: "https://…/addressbooks/…/";
+                                }
+                            }
+                        }
+                        Note {
+                            text: "Необязательно: адреса коллекций, если почтовая служба их даёт.";
+                        }
+                    }
+                }
+            }
+
+            // ── Низ: ошибка и кнопки ──
+            Rectangle {
+                vertical-stretch: 0;
+                background: white;
+                Rectangle {
+                    y: 0;
+                    height: 1px;
+                    background: #e3e8ee;
+                }
+                VerticalLayout {
+                    padding-left: 24px;
+                    padding-right: 24px;
+                    padding-top: 14px;
+                    padding-bottom: 14px;
+                    spacing: 10px;
+                    // Ошибка целиком, с переносом: обрезанная на полуслове
+                    // «Connection error: …» ничего не объясняла.
+                    if root.error != "": Rectangle {
+                        border-radius: 8px;
+                        background: #fdecec;
+                        VerticalLayout {
+                            padding: 10px;
+                            Text {
+                                text: root.error;
+                                font-size: 12.5px;
+                                color: #c03535;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: end;
+                        Btn {
+                            text: "Отмена";
+                            clicked => { root.cancel(); }
+                        }
+                        Btn {
+                            kind: 1;
+                            min-w: 150px;
+                            enabled: !root.busy && (!root.oauth-only || root.google-available);
+                            text: root.busy ? root.busy-text
+                                : root.oauth-only ? "Войти через Google"
+                                : root.mode == 0 ? "Войти" : "Подключить";
+                            clicked => { root.submit(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

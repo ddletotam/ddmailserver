@@ -422,6 +422,26 @@ pub(crate) async fn connect_plain(
     client.login(username, password).await.map_err(|e| crate::session::friendly_login_error(e.0))
 }
 
+/// Только вход и выход — проверка учётных данных для формы подключения.
+/// `connect` для этого не годится: после логина он обходит STATUS'ом каждую
+/// папку, и на ящике с сотнями меток проверка упиралась в таймаут формы.
+pub async fn check_login(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    use_tls: bool,
+) -> Result<(), String> {
+    if use_tls {
+        let mut s = connect_tls(host, port, username, password).await?;
+        s.logout().await.ok();
+    } else {
+        let mut s = connect_plain(host, port, username, password).await?;
+        s.logout().await.ok();
+    }
+    Ok(())
+}
+
 // ── Commands ──
 
 pub async fn connect(

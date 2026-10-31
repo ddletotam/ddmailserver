@@ -1,0 +1,185 @@
+// Общие примитивы светлых диалогов: модалка настроек (settings.slint) и
+// окно подключения почты (login.slint). Один набор — чтобы два окна, которые
+// пользователь видит подряд («Настройки → Подключения → Добавить»), не
+// выглядели как два разных приложения.
+
+// Lucide-style stroked glyph on a 24×24 viewbox. Emoji не годятся: на
+// Windows они цветные, на Linux — что найдётся в шрифтах, и в одном ряду
+// получаются разного размера и стиля.
+export component Icon inherits Path {
+    in property <brush> tint: #6b7480;
+    width: 16px;
+    height: 16px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: root.tint;
+    stroke-width: 1.7px;
+    fill: transparent;
+}
+
+// iOS-style pill switch. `on` drives the look; `toggled` fires on click —
+// the parent owns the state.
+export component Toggle inherits Rectangle {
+    in property <bool> on: false;
+    in property <bool> enabled: true;
+    callback toggled();
+    width: 36px;
+    height: 20px;
+    border-radius: 10px;
+    background: root.on ? #10b981 : (ta.has-hover && root.enabled ? #bcc4ce : #cfd6de);
+    animate background { duration: 120ms; }
+    opacity: root.enabled ? 1.0 : 0.45;
+    Rectangle {
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: white;
+        y: 2px;
+        x: root.on ? parent.width - self.width - 2px : 2px;
+        animate x { duration: 120ms; easing: ease-out; }
+        drop-shadow-blur: 2px;
+        drop-shadow-offset-y: 1px;
+        drop-shadow-color: #00000033;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.toggled(); }
+    }
+}
+
+// Small button. kind: 0 — обычная (рамка), 1 — основная (акцент),
+// 2 — опасная (красная).
+export component Btn inherits Rectangle {
+    in property <string> text;
+    in property <int> kind: 0;
+    in property <bool> enabled: true;
+    // Нижняя граница ширины: подпись основной кнопки меняется на время
+    // проверки («Подключить» → «Проверяем вход…»), и без неё кнопка прыгала.
+    in property <length> min-w: 0px;
+    callback clicked();
+    width: max(root.min-w, label.preferred-width + 24px);
+    opacity: root.enabled ? 1.0 : 0.55;
+    height: 30px;
+    border-radius: 7px;
+    border-width: root.kind == 0 ? 1px : 0px;
+    border-color: #d9dfe6;
+    // Акцент темнее зелёного переключателя: белый текст на #10b981 давал
+    // контраст около 2,5:1.
+    background: root.kind == 1 ? (ta.has-hover ? #065f46 : #047857)
+        : root.kind == 2 ? (ta.has-hover ? #c03535 : #d64545)
+        : (ta.has-hover ? #f3f5f8 : white);
+    label := Text {
+        text: root.text;
+        font-size: 13px;
+        font-weight: 600;
+        color: root.kind == 0 ? #2b3640 : white;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Square icon-only button (close, delete).
+export component IconBtn inherits Rectangle {
+    in property <string> glyph;
+    in property <brush> tint: #6b7480;
+    in property <brush> hover-tint: #0f1419;
+    in property <brush> hover-bg: #eef1f5;
+    callback clicked();
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    background: ta.has-hover ? root.hover-bg : transparent;
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        commands: root.glyph;
+        tint: ta.has-hover ? root.hover-tint : root.tint;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Uppercase caption above a group.
+export component Caption inherits Text {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: #6b7480;
+}
+
+// Muted explanatory line under a group.
+// Цвет темнее подписей-«пустышек»: здесь бывает нужное (подсказка про
+// пароль приложения), а #8b95a1 на светлом фоне читался с трудом.
+export component Note inherits Text {
+    font-size: 12px;
+    color: #5f6873;
+    wrap: word-wrap;
+}
+
+// Bordered card holding a stack of rows.
+export component Group inherits Rectangle {
+    background: white;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: #e3e8ee;
+    clip: true;
+    VerticalLayout {
+        @children
+    }
+}
+
+// Hairline between rows of a group, inset to the row text.
+export component Divider inherits Rectangle {
+    height: 1px;
+    Rectangle {
+        x: 14px;
+        width: parent.width - 14px;
+        background: #edf0f4;
+    }
+}
+
+// One labelled line: title and subtitle on the left, an arbitrary control
+// slotted on the right via `@children`. Both lines elide: a long title (имя
+// сервера корпоративного домена) иначе распирал строку, и вся форма
+// уезжала вправо под горизонтальный скролл.
+export component SettingRow inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> dimmed: false;
+    height: root.subtitle == "" ? 46px : 58px;
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 16px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 3px;
+            Text {
+                text: root.title;
+                font-size: 13.5px;
+                font-weight: 600;
+                color: root.dimmed ? #8b95a1 : #0f1419;
+                overflow: elide;
+            }
+            if root.subtitle != "": Text {
+                text: root.subtitle;
+                font-size: 12px;
+                color: #6b7480;
+                overflow: elide;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            @children
+        }
+    }
+}

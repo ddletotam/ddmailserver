@@ -49,7 +49,17 @@ pub(crate) fn open_account() -> Option<(Arc<Cache>, String, Vec<Conversation>)> 
         return None;
     }
     let cache = open_cache()?;
-    let key = cache.account_keys().ok()?.into_iter().next()?;
+    // Ключ основной (первой) учётки, а не первый попавшийся в кэше:
+    // `SELECT DISTINCT` отдаёт ключи в порядке индекса, и с внешней
+    // учёткой «denis…@imap.mail.ru» вставал впереди «lucky@mail.letotam.ru».
+    // Айдентики живут под ключом основной — с чужим ключом их карта
+    // пустела, и все строки списка становились серыми.
+    let cached = cache.account_keys().ok()?;
+    let key = engine::AccountConfig::load_all()
+        .first()
+        .map(|a| a.account_key())
+        .filter(|k| cached.contains(k))
+        .or_else(|| cached.into_iter().next())?;
     let convs = cache.load_conversations(&key).ok()?;
     if convs.is_empty() {
         return None;
@@ -110,15 +120,32 @@ pub(crate) fn host_from_url(url: &str) -> String {
     s.split(['/', ':']).next().unwrap_or(s).to_string()
 }
 
-/// Close the add-connection modal and rebuild the engine from the updated
-/// accounts.json. Safe to call from any thread — it hops to the UI loop.
-pub(crate) fn finish_add_connection(main_weak: slint::Weak<MainWindow>) {
+/// Close the add-connection window `generation` — and only it: a window opened after
+/// it must survive a late close of the old one. Deferred to the event loop,
+/// since this runs from the window's own callbacks and the handle must not be
+/// dropped inside them.
+fn close_add_connection(generation: u64) {
     let _ = slint::invoke_from_event_loop(move || {
         SHARED.with(|s| {
             if let Some(sh) = s.borrow().as_ref() {
-                if let Some(lw) = sh.accounts.add_conn_window.borrow_mut().take() {
-                    let _ = lw.hide();
+                let mut slot = sh.accounts.add_conn_window.borrow_mut();
+                if slot.as_ref().is_some_and(|(g, _)| *g == generation) {
+                    if let Some((_, lw)) = slot.take() {
+                        let _ = lw.hide();
+                    }
                 }
+            }
+        });
+    });
+}
+
+/// Close the add-connection window and rebuild the engine from the updated
+/// accounts.json. Safe to call from any thread — it hops to the UI loop.
+pub(crate) fn finish_add_connection(main_weak: slint::Weak<MainWindow>, generation: u64) {
+    close_add_connection(generation);
+    let _ = slint::invoke_from_event_loop(move || {
+        SHARED.with(|s| {
+            if let Some(sh) = s.borrow().as_ref() {
                 if let Some(m) = main_weak.upgrade() {
                     rebuild_engine(&m, sh);
                     refresh_connections(&m, sh);
@@ -128,85 +155,200 @@ pub(crate) fn finish_add_connection(main_weak: slint::Weak<MainWindow>) {
     });
 }
 
-/// Open the add-connection modal from the running app. Native (server/login/
+/// Open the add-connection window from the running app. Native (server/login/
 /// pass → JWT), standalone IMAP/SMTP (+optional CalDAV/CardDAV), or Google
-/// OAuth. On success the connection is APPENDED to accounts.json (never
-/// clobbering the others) and the engine rebuilds. The window is retained in
-/// Shared while open.
+/// OAuth. A new connection is APPENDED to accounts.json (never clobbering the
+/// others); an edited one is written in place of the original, even when the
+/// edit changed its key. The engine rebuilds after. The window is retained in
+/// Shared while open (contract §5г-бис).
+///
+/// Nothing is saved until the login actually worked: a standalone account is
+/// checked over IMAP and SMTP first. Before that, a mistyped password went
+/// straight into accounts.json and surfaced later as «сессия истекла».
 pub(crate) fn open_add_connection(
     main_weak: slint::Weak<MainWindow>,
     prefill: Option<engine::AccountConfig>,
 ) {
+    // Одно окно на всё приложение. Идёт проверка — поднимаем его: вторая
+    // форма поверх первой означала гонку, в которой сохранялась не та учётка
+    // и «Отмена» закрывала чужое окно. Не идёт — старое уступает новому
+    // (например, «Войти» с плашки для другой учётки).
+    let mut generation = 0;
+    let raised = SHARED.with(|s| {
+        let s = s.borrow();
+        let Some(sh) = s.as_ref() else { return false };
+        let mut slot = sh.accounts.add_conn_window.borrow_mut();
+        if let Some((_, lw)) = slot.as_ref().filter(|(_, lw)| lw.get_busy()) {
+            // Вывести окно вперёд и дать фокус Slint не умеет; хотя бы
+            // развернуть, если свёрнуто.
+            lw.window().set_minimized(false);
+            let _ = lw.show();
+            return true;
+        }
+        if let Some((_, old)) = slot.take() {
+            let _ = old.hide();
+        }
+        generation = sh.accounts.add_conn_seq.get() + 1;
+        sh.accounts.add_conn_seq.set(generation);
+        false
+    });
+    if raised {
+        return;
+    }
     let Ok(lw) = LoginWindow::new() else { return };
+    // Shortcuts — глобал на компонент: у отдельного окна свой экземпляр, и
+    // без этого Ctrl+V под ЙЦУКЕН здесь не вставлял — а вставляют сюда как
+    // раз 16-символьный пароль приложения.
+    lw.global::<Shortcuts>().on_action(|text, held| shortcut_action(text.as_str(), held));
 
-    // Editing: pre-fill the form. (Native passwords/tokens aren't stored, so
-    // the user re-enters the password to re-authenticate; a changed host/login
-    // creates a new key — same host/login replaces in place.)
+    // Куда сохранять: новая учётка (None) или на место прежней. Повторный
+    // вход (сессия истекла, учётка Google) обязан вернуть ту же учётку:
+    // выбрал в браузере другой аккаунт Google или вошёл на сервер другим
+    // логином — прежняя молча подменилась бы, а её секреты стёрлись.
+    let mut target: Option<SaveTarget> = None;
     if let Some(c) = &prefill {
+        let key = c.account_key();
+        let needs_login = SHARED.with(|s| {
+            s.borrow().as_ref().is_some_and(|sh| sh.accounts.reauth.borrow().contains(&key))
+        });
+        target = Some(SaveTarget {
+            key: key.clone(),
+            same_account: needs_login || c.oauth_refresh_token.is_some(),
+        });
+        lw.set_heading(
+            if needs_login {
+                "Вход в учётную запись"
+            } else {
+                "Изменить подключение"
+            }
+            .into(),
+        );
+        // Вид учётки при правке не меняют: это была бы другая учётка.
+        lw.set_kind_locked(true);
+        // Пароль не хранится (native) или его и пришли поменять.
+        lw.set_focus_field("password".into());
         if c.native_url.is_some() {
             lw.set_mode(0);
             lw.set_server_url(c.native_url.clone().unwrap_or_default().into());
             lw.set_username(c.username.clone().into());
+        } else if c.oauth_refresh_token.is_some() {
+            // Google OAuth: пароля нет, править нечего — только войти заново.
+            // Парольная форма сохранила бы учётку без токена, и CalDAV Google
+            // по паролю уже не работал бы.
+            lw.set_mode(1);
+            lw.set_oauth_only(true);
+            lw.set_email(c.email.clone().into());
         } else {
             lw.set_mode(1);
             lw.set_email(c.email.clone().into());
             lw.set_imap_host(c.host.clone().into());
             lw.set_imap_port(c.port.to_string().into());
-            lw.set_username(c.username.clone().into());
+            lw.set_smtp_host(c.smtp_host.clone().into());
+            lw.set_smtp_port(c.smtp_port.to_string().into());
+            // Логин, совпадающий с email, не показываем: пустое поле и
+            // значит «как email».
+            if c.username != c.email {
+                lw.set_imap_username(c.username.clone().into());
+            }
             lw.set_password(c.password.clone().into());
             lw.set_carddav_url(c.carddav_url.clone().unwrap_or_default().into());
             lw.set_caldav_url(c.caldav_url.clone().unwrap_or_default().into());
+            // Сохранённые серверы — это решение пользователя, а не догадка:
+            // показываем их и по email больше не перезаписываем.
+            lw.set_servers_touched(true);
+            lw.set_servers_open(true);
+            if let Some(g) = mail_presets::guess(&c.email) {
+                lw.set_password_hint(g.password_hint.into());
+            }
         }
     }
 
+    // Email → серверы и подсказка про пароль, пока серверы не правили руками.
+    let weak = lw.as_weak();
+    lw.on_email_edited(move |email| {
+        let Some(lw) = weak.upgrade() else { return };
+        let guess = mail_presets::guess(&email);
+        lw.set_password_hint(guess.as_ref().map(|g| g.password_hint).unwrap_or("").into());
+        if lw.get_servers_touched() {
+            return;
+        }
+        match guess {
+            Some(g) => {
+                lw.set_imap_host(g.imap_host.into());
+                lw.set_imap_port(g.imap_port.to_string().into());
+                lw.set_smtp_host(g.smtp_host.into());
+                lw.set_smtp_port(g.smtp_port.to_string().into());
+                lw.set_servers_known(g.provider.is_some());
+                lw.set_provider_name(g.provider.unwrap_or("").into());
+            }
+            None => {
+                lw.set_imap_host("".into());
+                lw.set_smtp_host("".into());
+                lw.set_servers_known(false);
+            }
+        }
+    });
+
+    // «Отмена», Esc и крестик окна — одно и то же. Window gone from Shared ⇒
+    // a check still running in the background finds nothing to report to and
+    // saves nothing (see `save_if_open`).
+    lw.on_cancel(move || close_add_connection(generation));
+    lw.window().on_close_requested(move || {
+        close_add_connection(generation);
+        slint::CloseRequestResponse::HideWindow
+    });
+
     let weak = lw.as_weak();
     let mw_submit = main_weak.clone();
+    let key_submit = target.clone();
     lw.on_submit(move || {
         let Some(lw) = weak.upgrade() else { return };
         if lw.get_busy() {
             return;
         }
-        let username = lw.get_username().trim().to_string();
+        if lw.get_oauth_only() {
+            // Enter из окна идёт сюда мимо выключенной кнопки.
+            if lw.get_google_available() {
+                lw.invoke_google_login();
+            }
+            return;
+        }
         let password = lw.get_password().to_string();
 
-        // ── Standalone IMAP/SMTP: persist directly, no server login. ──
+        // ── Standalone IMAP/SMTP: check the login, then persist. ──
         if lw.get_mode() == 1 {
-            let email = lw.get_email().trim().to_string();
-            let host = lw.get_imap_host().trim().to_string();
-            if email.is_empty() || host.is_empty() || username.is_empty() || password.is_empty() {
-                lw.set_error("Заполните email, IMAP-сервер, логин и пароль".into());
-                return;
-            }
-            let port: u16 = lw.get_imap_port().trim().parse().unwrap_or(993);
-            let opt = |s: String| {
-                let t = s.trim().to_string();
-                if t.is_empty() { None } else { Some(t) }
+            let cfg = match standalone_config(&lw, password) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    // Ошибка в серверах — раскрыть их, иначе исправлять негде.
+                    if e.contains("IMAP") || e.contains("SMTP") || e.contains("Логин") {
+                        lw.set_servers_open(true);
+                    }
+                    lw.set_error(e.into());
+                    return;
+                }
             };
-            let cfg = engine::AccountConfig {
-                host: host.clone(),
-                port,
-                username,
-                password,
-                use_tls: true,
-                email,
-                smtp_host: host,
-                smtp_port: 465,
-                native_url: None,
-                native_token: None,
-                carddav_url: opt(lw.get_carddav_url().to_string()),
-                caldav_url: opt(lw.get_caldav_url().to_string()),
-                oauth_refresh_token: None,
-            };
-            engine::AccountConfig::add_account(&cfg);
-            finish_add_connection(mw_submit.clone());
+            lw.set_error("".into());
+            lw.set_busy(true);
+            lw.set_busy_text("Проверяем вход…".into());
+            let weak = lw.as_weak();
+            let mw = mw_submit.clone();
+            let key = key_submit.clone();
+            std::thread::spawn(move || {
+                let result = tokio::runtime::Runtime::new()
+                    .map_err(|e| format!("tokio: {e}"))
+                    .and_then(|rt| rt.block_on(check_standalone(&cfg)));
+                save_if_open(weak, mw, generation, key, result.map(|()| cfg));
+            });
             return;
         }
 
         // ── Native (our server): try username+password → JWT. On failure the
-        // user can switch to the "Другой (IMAP)" tab (the manual fallback). ──
+        // user can switch to the «Другой ящик (IMAP)» tab (the manual fallback). ──
+        let username = lw.get_username().trim().to_string();
         let server = lw.get_server_url().trim().trim_end_matches('/').to_string();
         if server.is_empty() || username.is_empty() || password.is_empty() {
-            lw.set_error("Заполните все поля".into());
+            lw.set_error("Заполните адрес сервера, логин и пароль.".into());
             return;
         }
         let server = if server.starts_with("http://") || server.starts_with("https://") {
@@ -214,59 +356,66 @@ pub(crate) fn open_add_connection(
         } else {
             format!("https://{server}")
         };
+        if let Err(e) = require_https(&server, "Адрес сервера") {
+            lw.set_error(e.into());
+            return;
+        }
         lw.set_error("".into());
         lw.set_busy(true);
+        lw.set_busy_text("Входим…".into());
 
         let weak = lw.as_weak();
         let mw = mw_submit.clone();
+        let key = key_submit.clone();
         std::thread::spawn(move || {
             let result =
                 tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}")).and_then(|rt| {
                     rt.block_on(ddmail_core::auth::login(&server, &username, &password))
                 });
-            match result {
-                Ok(login) => {
-                    let cfg = engine::AccountConfig {
-                        host: host_from_url(&server),
-                        port: 993,
-                        username: login.username.clone(),
-                        password: String::new(),
-                        use_tls: true,
-                        email: login.email.clone(),
-                        smtp_host: host_from_url(&server),
-                        smtp_port: 465,
-                        native_url: Some(server.clone()),
-                        native_token: Some(login.token.clone()),
-                        carddav_url: None,
-                        caldav_url: None,
-                        oauth_refresh_token: None,
-                    };
-                    engine::AccountConfig::add_account(&cfg);
-                    finish_add_connection(mw);
-                }
-                Err(e) => {
-                    // Fallback hint: connect failed → offer the manual IMAP form.
-                    let _ = weak.upgrade_in_event_loop(move |lw| {
-                        lw.set_busy(false);
-                        lw.set_error(format!("{e} — попробуйте вкладку «Другой (IMAP)»").into());
-                    });
-                }
-            }
+            let result = result
+                .map(|login| engine::AccountConfig {
+                    host: host_from_url(&server),
+                    port: 993,
+                    username: login.username.clone(),
+                    password: String::new(),
+                    use_tls: true,
+                    email: login.email.clone(),
+                    smtp_host: host_from_url(&server),
+                    smtp_port: 465,
+                    native_url: Some(server.clone()),
+                    native_token: Some(login.token.clone()),
+                    carddav_url: None,
+                    caldav_url: None,
+                    oauth_refresh_token: None,
+                })
+                .map_err(|e| {
+                    // Неверный пароль — сервер точно ddmail, совет про
+                    // другую вкладку только сбил бы с толку.
+                    if e == "Неверный логин или пароль" {
+                        e
+                    } else {
+                        format!("{e}. Если это не сервер ddmail — вкладка «Другой ящик (IMAP)».")
+                    }
+                });
+            save_if_open(weak, mw, generation, key, result);
         });
     });
 
     lw.set_google_available(ddmail_core::oauth::load_client_creds().is_some());
     let gweak = lw.as_weak();
     let mw_google = main_weak.clone();
+    let key_google = target.clone();
     lw.on_google_login(move || {
         let Some(lw) = gweak.upgrade() else { return };
-        if lw.get_busy() {
+        if lw.get_busy() || !lw.get_google_available() {
             return;
         }
         lw.set_error("".into());
         lw.set_busy(true);
+        lw.set_busy_text("Ждём браузер…".into());
         let weak = lw.as_weak();
         let mw = mw_google.clone();
+        let key = key_google.clone();
         std::thread::spawn(move || {
             let result =
                 tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}")).and_then(|rt| {
@@ -284,44 +433,234 @@ pub(crate) fn open_add_connection(
                         Ok::<_, String>((tokens, email))
                     })
                 });
-            match result {
-                Ok((tokens, email)) => {
-                    let cfg = engine::AccountConfig {
-                        host: "imap.gmail.com".into(),
-                        port: 993,
-                        username: email.clone(),
-                        password: String::new(),
-                        use_tls: true,
-                        email: email.clone(),
-                        smtp_host: "smtp.gmail.com".into(),
-                        smtp_port: 465,
-                        native_url: None,
-                        native_token: None,
-                        carddav_url: Some("https://www.googleapis.com/.well-known/carddav".into()),
-                        caldav_url: Some(format!(
-                            "https://apidata.googleusercontent.com/caldav/v2/{email}/events"
-                        )),
-                        oauth_refresh_token: Some(tokens.refresh_token),
-                    };
-                    engine::AccountConfig::add_account(&cfg);
-                    finish_add_connection(mw);
-                }
-                Err(e) => {
-                    let _ = weak.upgrade_in_event_loop(move |lw| {
-                        lw.set_busy(false);
-                        lw.set_error(e.into());
-                    });
-                }
-            }
+            let result = result.map(|(tokens, email)| engine::AccountConfig {
+                host: "imap.gmail.com".into(),
+                port: 993,
+                username: email.clone(),
+                password: String::new(),
+                use_tls: true,
+                email: email.clone(),
+                smtp_host: "smtp.gmail.com".into(),
+                smtp_port: 465,
+                native_url: None,
+                native_token: None,
+                carddav_url: Some("https://www.googleapis.com/.well-known/carddav".into()),
+                caldav_url: Some(format!(
+                    "https://apidata.googleusercontent.com/caldav/v2/{email}/events"
+                )),
+                oauth_refresh_token: Some(tokens.refresh_token),
+            });
+            save_if_open(weak, mw, generation, key, result);
         });
     });
 
     let _ = lw.show();
     SHARED.with(|s| {
         if let Some(sh) = s.borrow().as_ref() {
-            *sh.accounts.add_conn_window.borrow_mut() = Some(lw);
+            *sh.accounts.add_conn_window.borrow_mut() = Some((generation, lw));
         }
     });
+}
+
+/// Пароль по `http://` уходит открытым текстом: и вход на сервер ddmail, и
+/// Basic-авторизация CalDAV/CardDAV. Исключение — своя машина.
+fn require_https(url: &str, what: &str) -> Result<(), String> {
+    let Some(rest) = url.strip_prefix("http://") else { return Ok(()) };
+    let host = rest.split(['/', ':']).next().unwrap_or("");
+    if matches!(host, "localhost" | "127.0.0.1" | "[::1]") {
+        return Ok(());
+    }
+    Err(format!("{what}: нужен https:// — по http:// пароль ушёл бы открытым текстом."))
+}
+
+/// Standalone account from the form, or what is wrong with the form.
+fn standalone_config(lw: &LoginWindow, password: String) -> Result<engine::AccountConfig, String> {
+    let email = lw.get_email().trim().to_string();
+    if !email.contains('@') {
+        return Err("Введите email.".into());
+    }
+    if password.is_empty() {
+        return Err("Введите пароль.".into());
+    }
+    let host = lw.get_imap_host().trim().to_string();
+    let smtp_host = lw.get_smtp_host().trim().to_string();
+    if host.is_empty() || smtp_host.is_empty() {
+        return Err("Укажите серверы IMAP и SMTP.".into());
+    }
+    // Опечатка в порту — ошибка, а не молчаливые 993: так учётка уезжала
+    // на чужой порт и «не подключалась» без объяснений.
+    let port = |s: slint::SharedString, what: &str| {
+        s.trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|p| *p > 0)
+            .ok_or(format!("Порт {what} — число от 1 до 65535."))
+    };
+    let imap_port = port(lw.get_imap_port(), "IMAP")?;
+    let smtp_port = port(lw.get_smtp_port(), "SMTP")?;
+    let username = lw.get_imap_username().trim().to_string();
+    let opt = |s: slint::SharedString| {
+        let t = s.trim().to_string();
+        if t.is_empty() { None } else { Some(t) }
+    };
+    let caldav_url = opt(lw.get_caldav_url());
+    let carddav_url = opt(lw.get_carddav_url());
+    for (url, what) in [(&caldav_url, "CalDAV"), (&carddav_url, "CardDAV")] {
+        if let Some(u) = url {
+            require_https(u, what)?;
+        }
+    }
+    Ok(engine::AccountConfig {
+        host,
+        port: imap_port,
+        username: if username.is_empty() { email.clone() } else { username },
+        password,
+        use_tls: true,
+        email,
+        smtp_host,
+        smtp_port,
+        native_url: None,
+        native_token: None,
+        carddav_url,
+        caldav_url,
+        oauth_refresh_token: None,
+    })
+}
+
+/// Ошибки IMAP/SMTP приходят из библиотек по-английски; самые частые —
+/// по-русски, чтобы не было «IMAP … — Invalid username or password» посреди
+/// русской фразы. Остальное как есть: там важны подробности.
+fn ru_login_error(e: String) -> String {
+    let lower = e.to_ascii_lowercase();
+    if lower.contains("invalid username or password")
+        || lower.contains("authentication failed")
+        || lower.contains("authentication credentials invalid")
+        || lower.contains("(535)")
+    {
+        return "неверный логин или пароль".into();
+    }
+    if let Some(rest) = e.strip_prefix("TCP: ") {
+        return format!("нет соединения ({rest})");
+    }
+    e
+}
+
+/// Log in over IMAP, then SMTP. Each failure names the server it came from:
+/// «неверный пароль» from SMTP after IMAP succeeded means a different thing
+/// (a separate SMTP password, or SMTP disabled) than from IMAP.
+async fn check_standalone(cfg: &engine::AccountConfig) -> Result<(), String> {
+    let timeout = std::time::Duration::from_secs(25);
+    let imap = ddmail_core::imap::check_login(
+        &cfg.host,
+        cfg.port,
+        &cfg.username,
+        &cfg.password,
+        cfg.use_tls,
+    );
+    match tokio::time::timeout(timeout, imap).await {
+        Err(_) => return Err(format!("IMAP {}:{} не отвечает.", cfg.host, cfg.port)),
+        Ok(Err(e)) => {
+            return Err(format!("IMAP {}:{} — {}", cfg.host, cfg.port, ru_login_error(e)));
+        }
+        Ok(Ok(())) => {}
+    }
+    let smtp = ddmail_core::smtp::test_login(
+        &cfg.smtp_host,
+        cfg.smtp_port,
+        &cfg.username,
+        &cfg.password,
+        cfg.use_tls,
+    );
+    match tokio::time::timeout(timeout, smtp).await {
+        Err(_) => Err(format!("SMTP {}:{} не отвечает.", cfg.smtp_host, cfg.smtp_port)),
+        Ok(Err(e)) => Err(format!(
+            "Вход по IMAP прошёл, но SMTP {}:{} — {}",
+            cfg.smtp_host,
+            cfg.smtp_port,
+            ru_login_error(e)
+        )),
+        Ok(Ok(())) => Ok(()),
+    }
+}
+
+/// Where an edited account goes: in place of `key`. `same_account` — повторный
+/// вход: результат обязан быть той же учёткой (тот же ключ).
+#[derive(Clone)]
+struct SaveTarget {
+    key: String,
+    same_account: bool,
+}
+
+/// Back on the UI thread: save the account and close, or show the error —
+/// but only while window `generation` is still the open one. Cancelled mid-check (or
+/// replaced by a newer window) ⇒ nothing is saved. An edited account is
+/// written in place of `target.key`.
+fn save_if_open(
+    weak: slint::Weak<LoginWindow>,
+    mw: slint::Weak<MainWindow>,
+    generation: u64,
+    target: Option<SaveTarget>,
+    result: Result<engine::AccountConfig, String>,
+) {
+    let _ = slint::invoke_from_event_loop(move || {
+        let open = SHARED.with(|s| {
+            s.borrow().as_ref().is_some_and(|sh| {
+                sh.accounts.add_conn_window.borrow().as_ref().is_some_and(|(g, _)| *g == generation)
+            })
+        });
+        let Some(lw) = weak.upgrade() else { return };
+        if !open {
+            return;
+        }
+        let saved = result.and_then(|cfg| match &target {
+            Some(t) if t.same_account && cfg.account_key() != t.key => Err(format!(
+                "Вы вошли как {} — это другая учётка. Войдите в ту же или добавьте эту \
+                 через «Добавить подключение».",
+                if cfg.email.is_empty() { cfg.account_key() } else { cfg.email.clone() }
+            )),
+            Some(t) => engine::AccountConfig::replace_account(&t.key, &cfg),
+            None => {
+                engine::AccountConfig::add_account(&cfg);
+                Ok(())
+            }
+        });
+        match saved {
+            Ok(()) => finish_add_connection(mw, generation),
+            Err(e) => {
+                lw.set_busy(false);
+                lw.set_error(e.into());
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod form_tests {
+    use super::{require_https, ru_login_error};
+
+    #[test]
+    fn http_is_refused_except_loopback() {
+        assert!(require_https("https://mail.example.ru", "x").is_ok());
+        assert!(require_https("http://mail.example.ru/dav", "x").is_err());
+        assert!(require_https("http://localhost:8080/", "x").is_ok());
+        assert!(require_https("http://127.0.0.1/", "x").is_ok());
+    }
+
+    #[test]
+    fn common_login_errors_are_russian() {
+        assert_eq!(
+            ru_login_error("Invalid username or password".into()),
+            "неверный логин или пароль"
+        );
+        assert_eq!(
+            ru_login_error(
+                "permanent error (535): 5.7.8 Authentication credentials invalid".into()
+            ),
+            "неверный логин или пароль"
+        );
+        assert_eq!(ru_login_error("TCP: refused".into()), "нет соединения (refused)");
+        assert_eq!(ru_login_error("TLS: bad cert".into()), "TLS: bad cert");
+    }
 }
 
 /// (Re)spawn the mail engine from the current `accounts.json`. Tears down any
@@ -395,7 +734,7 @@ pub(crate) fn rebuild_engine(ui: &MainWindow, shared: &Rc<Shared>) {
 
 /// Rebuild the Settings → Подключения list from accounts.json, keeping a
 /// parallel key list for edit/delete-by-index.
-pub(crate) fn refresh_connections(ui: &MainWindow, shared: &Rc<Shared>) {
+pub(crate) fn refresh_connections(ui: &MainWindow, shared: &Shared) {
     let accounts = engine::AccountConfig::load_all();
     let mut rows: Vec<ConnRow> = Vec::with_capacity(accounts.len());
     let mut keys: Vec<String> = Vec::with_capacity(accounts.len());
@@ -415,8 +754,17 @@ pub(crate) fn refresh_connections(ui: &MainWindow, shared: &Rc<Shared>) {
         keys.push(key);
     }
     drop(reauth);
+    // Тот же список — модель не трогаем: новая модель сбрасывала бы
+    // подтверждение удаления (`changed connections`), а при открытой модалке
+    // сюда приходит каждое событие связи.
+    let current = ui.get_connections();
+    use slint::Model as _;
+    let same = current.row_count() == rows.len()
+        && rows.iter().enumerate().all(|(i, r)| current.row_data(i).as_ref() == Some(r));
     *shared.accounts.settings_conn_keys.borrow_mut() = keys;
-    ui.set_connections(ModelRc::new(VecModel::from(rows)));
+    if !same {
+        ui.set_connections(ModelRc::new(VecModel::from(rows)));
+    }
 }
 
 /// Учесть новое состояние аккаунта в списке «ждут пароля».
@@ -468,7 +816,7 @@ pub(crate) fn apply_conn_status(ui: &MainWindow, sh: &Shared) {
             let title = if a.email.is_empty() { key.clone() } else { a.email.clone() };
             let needs_login = reauth.iter().any(|k| *k == key);
             let subtitle = if needs_login {
-                "сессия истекла — войти заново".to_string()
+                "сессия истекла — нужен пароль".to_string()
             } else {
                 format!("{} · {}", a.host, account_mode(a))
             };
@@ -506,12 +854,17 @@ pub(crate) fn apply_conn_status(ui: &MainWindow, sh: &Shared) {
             ui.set_reauth_note("".into());
         }
     }
+    // Открытые настройки показывают «сессия истекла» сразу, а не после
+    // повторного открытия.
+    if ui.get_settings_visible() {
+        refresh_connections(ui, sh);
+    }
 }
 
 /// Как учётка ходит на сервер — подпись для строки в списках подключений.
 pub(crate) fn account_mode(a: &engine::AccountConfig) -> &'static str {
     if a.native_url.is_some() {
-        "наш сервер"
+        "сервер ddmail"
     } else if a.oauth_refresh_token.is_some() {
         "Google OAuth"
     } else {
@@ -566,6 +919,18 @@ pub(crate) fn wire_settings(ui: &MainWindow, shared: &Rc<Shared>) {
         engine::AccountConfig::remove_account(&key);
         rebuild_engine(&ui, &sh_delc);
         refresh_connections(&ui, &sh_delc);
+    });
+
+    // Настройки открываются не только шестерёнкой: строка в списке индикатора
+    // связи и правый клик по табу папки ставят `settings-visible` прямо в
+    // Slint. Список подключений обновляется на любое открытие — иначе там
+    // висело «Добавить первое подключение» при живых учётках, а «Изменить»
+    // молча ничего не находило.
+    let ui_weak_shown = ui.as_weak();
+    let sh_shown = shared.clone();
+    ui.on_settings_shown(move || {
+        let Some(ui) = ui_weak_shown.upgrade() else { return };
+        refresh_connections(&ui, &sh_shown);
     });
 
     ui.on_open_settings(move || {

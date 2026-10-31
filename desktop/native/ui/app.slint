@@ -2,6 +2,7 @@ import { ListView, LineEdit, ComboBox, CheckBox, Button, ScrollView, TextEdit, P
 import { SettingsDialog, ConnRow, CalendarItem, FolderEdit } from "settings.slint";
 import { KTextInput, KLineEdit, Shortcuts } from "keys.slint";
 export { Shortcuts }
+export { LoginWindow } from "login.slint";
 
 // Live-dropdown rows. We keep contacts and messages as separate models
 // so the Slint side can render them in their own sections — see
@@ -766,7 +767,7 @@ export component MainWindow inherits Window {
     // currently rebuilding (after a connection change / at startup)?
     in property <bool> has-connections: false;
     in property <bool> engine-reloading: false;
-    // Empty-state CTA → open settings to add the first connection.
+    // Empty-state CTA → open the add-connection window.
     callback add-first-connection();
 
     // ── Сессия истекла ──
@@ -1183,6 +1184,14 @@ export component MainWindow inherits Window {
     in-out property <bool> settings-visible: false;
     in-out property <int> settings-tab: 0; // 0 Уведомления · 1 Внешний контент · 2 Календарь · 3 Подключения · 4 Папки
     callback open-settings();
+    // Любое открытие модалки (шестерёнка, индикатор связи, таб папки) —
+    // Rust обновляет список подключений.
+    callback settings-shown();
+    changed settings-visible => {
+        if (self.settings-visible) {
+            self.settings-shown();
+        }
+    }
     // Connections list (Settings → Подключения) + CRUD callbacks.
     in property <[ConnRow]> connections;
     callback add-connection();
@@ -5492,7 +5501,8 @@ export component MainWindow inherits Window {
                 height: 34px;
                 clicked => { root.relogin(root.reauth-index); }
                 Rectangle {
-                    background: rlg.has-hover ? #4f7df5 : #3a6df0;
+                    // Акцент — как основные кнопки окон настроек и подключения.
+                    background: rlg.has-hover ? #047857 : #059669;
                     border-radius: 8px;
                     Text {
                         text: "Войти";
@@ -5507,9 +5517,11 @@ export component MainWindow inherits Window {
 
     // Connection light: green = every account connected, yellow = some down,
     // red = none. Clicking it opens the per-account list; a row goes to
-    // Settings → Подключение, or straight to the login form when that
-    // account's session is what's broken.
+    // Settings → Подключения, or straight to the login form when that
+    // account's session is what's broken. Hidden under the settings modal:
+    // declared after it, it would otherwise sit clickable above the backdrop.
     Rectangle {
+        visible: !root.settings-visible;
         width: 12px;
         height: 12px;
         border-radius: 6px;
@@ -5757,182 +5769,6 @@ export component ToastWindow inherits Window {
             width: (root.width - 8px) * (1.0 - root.progress);
             background: root.kind == 2 ? #ffab00 : #3a6df0;
             border-radius: 2px;
-        }
-    }
-}
-
-// First-run login: shown instead of the main window when no account is
-// configured. Rust does the actual HTTP round-trip (submit → busy → either
-// error text or the window is hidden and startup continues).
-export component LoginWindow inherits Window {
-    // Палитра std-widgets прибита к светлой, потому что вся вёрстка здесь
-    // светлая жёстко: белые карточки, #e9eef5 под ними, тёмный текст. Сами
-    // виджеты палитру выбирают по системе, и на тёмной схеме их передний план
-    // становится белым — на белой карточке это значит «ничего не видно».
-    // Наблюдалось так: в диалоге «Адрес отправителя не совпадает» пустая рамка
-    // вместо ComboBox, пустая коробка вместо кнопки «Отмена» и совсем
-    // невидимый CheckBox, при том что соседние наши `Text` рисовались. Свои
-    // элементы ничего не наследуют, поэтому лечится одной строкой на окно.
-    // Воспроизводится на голом Xvfb со slint 1.16.1 — это не тема KDE.
-    init => { Palette.color-scheme = ColorScheme.light; }
-    title: "ddmail — вход";
-    width: 440px;
-    height: 700px;
-    background: #1b1e23;
-
-    // 0 = DDMail (our server, native); 1 = standalone (any IMAP + optional
-    // CalDAV/CardDAV).
-    in-out property <int> mode: 0;
-
-    // Native mode.
-    in-out property <string> server-url: "https://mail.letotam.ru";
-    // Shared.
-    in-out property <string> username: "";
-    in-out property <string> password: "";
-    // Standalone mode.
-    in-out property <string> email: "";
-    in-out property <string> imap-host: "";
-    in-out property <string> imap-port: "993";
-    in-out property <string> caldav-url: "";
-    in-out property <string> carddav-url: "";
-
-    in property <string> error: "";
-    in property <bool> busy: false;
-    // Google sign-in is offered only when client creds are present on this
-    // machine (google_oauth.json).
-    in property <bool> google-available: false;
-
-    callback submit();
-    callback google-login();
-
-    VerticalLayout {
-        padding: 28px;
-        spacing: 8px;
-
-        Text {
-            text: "ddmail";
-            font-size: 26px; font-weight: 800; color: #ffffff;
-            horizontal-alignment: center;
-        }
-        Text {
-            text: "Подключение почты";
-            font-size: 13px; color: #aeb6c2;
-            horizontal-alignment: center;
-        }
-        Rectangle { height: 6px; }
-
-        // Account-type toggle.
-        HorizontalLayout {
-            spacing: 0px;
-            height: 38px;
-            tab-native := TouchArea {
-                clicked => { root.mode = 0; }
-                Rectangle {
-                    background: root.mode == 0 ? #3a6df0 : #23262b;
-                    border-top-left-radius: 8px; border-bottom-left-radius: 8px;
-                    Text { text: "Наш сервер"; color: root.mode == 0 ? #ffffff : #aeb6c2; font-size: 13px; font-weight: 600; }
-                }
-            }
-            tab-standalone := TouchArea {
-                clicked => { root.mode = 1; }
-                Rectangle {
-                    background: root.mode == 1 ? #3a6df0 : #23262b;
-                    border-top-right-radius: 8px; border-bottom-right-radius: 8px;
-                    Text { text: "Другой (IMAP)"; color: root.mode == 1 ? #ffffff : #aeb6c2; font-size: 13px; font-weight: 600; }
-                }
-            }
-        }
-        Rectangle { height: 4px; }
-
-        // Fields scroll (the standalone form is taller than the window) while
-        // the buttons below stay pinned and always reachable.
-        ScrollView {
-            vertical-stretch: 1;
-            VerticalLayout {
-                spacing: 8px;
-
-                // ── Native fields ──
-                if root.mode == 0: Text { text: "Сервер"; font-size: 12px; color: #aeb6c2; }
-                if root.mode == 0: KLineEdit {
-                    text <=> root.server-url; font-size: 14px; enabled: !root.busy;
-                }
-
-                // ── Standalone fields ──
-                if root.mode == 1: Text { text: "Email"; font-size: 12px; color: #aeb6c2; }
-                if root.mode == 1: KLineEdit {
-                    text <=> root.email; font-size: 14px; enabled: !root.busy;
-                    placeholder-text: "you@example.com";
-                }
-                if root.mode == 1: Text { text: "IMAP-сервер"; font-size: 12px; color: #aeb6c2; }
-                if root.mode == 1: KLineEdit {
-                    text <=> root.imap-host; font-size: 14px; enabled: !root.busy;
-                    placeholder-text: "imap.example.com";
-                }
-                if root.mode == 1: Text { text: "IMAP-порт"; font-size: 12px; color: #aeb6c2; }
-                if root.mode == 1: KLineEdit {
-                    text <=> root.imap-port; font-size: 14px; enabled: !root.busy;
-                }
-
-                // ── Shared credentials ──
-                Text { text: "Логин"; font-size: 12px; color: #aeb6c2; }
-                KLineEdit {
-                    text <=> root.username; font-size: 14px; enabled: !root.busy;
-                }
-                Text { text: "Пароль"; font-size: 12px; color: #aeb6c2; }
-                pass-edit := KLineEdit {
-                    text <=> root.password; font-size: 14px;
-                    input-type: InputType.password; enabled: !root.busy;
-                    accepted => { root.submit(); }
-                }
-
-                // ── Optional standalone calendar/contacts ──
-                if root.mode == 1: Text { text: "CalDAV URL (необязательно)"; font-size: 12px; color: #aeb6c2; }
-                if root.mode == 1: KLineEdit {
-                    text <=> root.caldav-url; font-size: 14px; enabled: !root.busy;
-                    placeholder-text: "https://…/calendars/…/";
-                }
-                if root.mode == 1: Text { text: "CardDAV URL (необязательно)"; font-size: 12px; color: #aeb6c2; }
-                if root.mode == 1: KLineEdit {
-                    text <=> root.carddav-url; font-size: 14px; enabled: !root.busy;
-                    placeholder-text: "https://…/addressbooks/…/";
-                }
-            }
-        }
-
-        Text {
-            text: root.error;
-            font-size: 12px; color: #ff6b6b; height: 18px; overflow: elide;
-        }
-
-        submit-ta := TouchArea {
-            height: 42px;
-            enabled: !root.busy;
-            clicked => { root.submit(); }
-            Rectangle {
-                background: root.busy ? #2c3e66 : (submit-ta.has-hover ? #4f7df5 : #3a6df0);
-                border-radius: 8px;
-                Text {
-                    text: root.busy ? "Подключаем…" : (root.mode == 0 ? "Войти" : "Подключить");
-                    color: #ffffff; font-size: 15px; font-weight: 700;
-                }
-            }
-        }
-
-        // Google sign-in (standalone OAuth). Shown when creds are configured.
-        if root.google-available: gbtn := TouchArea {
-            height: 40px;
-            enabled: !root.busy;
-            clicked => { root.google-login(); }
-            Rectangle {
-                background: gbtn.has-hover ? #2a2e35 : #23262b;
-                border-radius: 8px;
-                border-width: 1px;
-                border-color: #3a3f47;
-                Text {
-                    text: "Войти через Google";
-                    color: #e8eaed; font-size: 14px; font-weight: 600;
-                }
-            }
         }
     }
 }

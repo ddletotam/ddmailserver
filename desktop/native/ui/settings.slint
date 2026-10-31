@@ -1,12 +1,13 @@
-// Модалка настроек. Вынесена из app.slint целиком: у неё свой набор
-// примитивов (группа, строка, переключатель, степпер), которые больше нигде
-// не нужны, и её можно отрисовать отдельно от главного окна.
+// Модалка настроек. Вынесена из app.slint целиком, её можно отрисовать
+// отдельно от главного окна. Примитивы (группа, строка, переключатель) —
+// общие с окном подключения, в kit.slint.
 //
 // Каждая настройка применяется и сохраняется в момент изменения — кнопок
 // «Сохранить»/«Отменить» нет намеренно (контракт §5г).
 
 import { ScrollView } from "std-widgets.slint";
 import { KLineEdit } from "keys.slint";
+import { Icon, Toggle, Btn, IconBtn, Caption, Note, Group, Divider, SettingRow } from "kit.slint";
 
 // One connection row in Settings → Подключения.
 export struct ConnRow {
@@ -38,193 +39,6 @@ export struct FolderEdit {
     manual: int,
 }
 
-// Lucide-style stroked glyph on a 24×24 viewbox. Emoji не годятся: на
-// Windows они цветные, на Linux — что найдётся в шрифтах, и в одном ряду
-// получаются разного размера и стиля.
-component Icon inherits Path {
-    in property <brush> tint: #6b7480;
-    width: 16px;
-    height: 16px;
-    viewbox-width: 24;
-    viewbox-height: 24;
-    stroke: root.tint;
-    stroke-width: 1.7px;
-    fill: transparent;
-}
-
-// iOS-style pill switch. `on` drives the look; `toggled` fires on click —
-// the parent owns the state.
-component Toggle inherits Rectangle {
-    in property <bool> on: false;
-    in property <bool> enabled: true;
-    callback toggled();
-    width: 36px;
-    height: 20px;
-    border-radius: 10px;
-    background: root.on ? #10b981 : (ta.has-hover && root.enabled ? #bcc4ce : #cfd6de);
-    animate background { duration: 120ms; }
-    opacity: root.enabled ? 1.0 : 0.45;
-    Rectangle {
-        width: 16px;
-        height: 16px;
-        border-radius: 8px;
-        background: white;
-        y: 2px;
-        x: root.on ? parent.width - self.width - 2px : 2px;
-        animate x { duration: 120ms; easing: ease-out; }
-        drop-shadow-blur: 2px;
-        drop-shadow-offset-y: 1px;
-        drop-shadow-color: #00000033;
-    }
-    ta := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: root.enabled ? pointer : default;
-        clicked => { root.toggled(); }
-    }
-}
-
-// Small button. kind: 0 — обычная (рамка), 1 — основная (акцент),
-// 2 — опасная (красная).
-component Btn inherits Rectangle {
-    in property <string> text;
-    in property <int> kind: 0;
-    callback clicked();
-    width: label.preferred-width + 24px;
-    height: 30px;
-    border-radius: 7px;
-    border-width: root.kind == 0 ? 1px : 0px;
-    border-color: #d9dfe6;
-    background: root.kind == 1 ? (ta.has-hover ? #059669 : #10b981)
-        : root.kind == 2 ? (ta.has-hover ? #c03535 : #d64545)
-        : (ta.has-hover ? #f3f5f8 : white);
-    label := Text {
-        text: root.text;
-        font-size: 13px;
-        font-weight: 600;
-        color: root.kind == 0 ? #2b3640 : white;
-        vertical-alignment: center;
-        horizontal-alignment: center;
-    }
-    ta := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
-    }
-}
-
-// Square icon-only button (close, delete).
-component IconBtn inherits Rectangle {
-    in property <string> glyph;
-    in property <brush> tint: #6b7480;
-    in property <brush> hover-tint: #0f1419;
-    in property <brush> hover-bg: #eef1f5;
-    callback clicked();
-    width: 28px;
-    height: 28px;
-    border-radius: 7px;
-    background: ta.has-hover ? root.hover-bg : transparent;
-    Icon {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        commands: root.glyph;
-        tint: ta.has-hover ? root.hover-tint : root.tint;
-    }
-    ta := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
-    }
-}
-
-// Uppercase caption above a group.
-component Caption inherits Text {
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.5px;
-    color: #8b95a1;
-}
-
-// Muted explanatory line under a group.
-component Note inherits Text {
-    font-size: 12px;
-    color: #8b95a1;
-    wrap: word-wrap;
-}
-
-// Bordered card holding a stack of rows.
-component Group inherits Rectangle {
-    background: white;
-    border-radius: 10px;
-    border-width: 1px;
-    border-color: #e3e8ee;
-    clip: true;
-    VerticalLayout {
-        @children
-    }
-}
-
-// Hairline between rows of a group, inset to the row text.
-component Divider inherits Rectangle {
-    height: 1px;
-    Rectangle {
-        x: 14px;
-        width: parent.width - 14px;
-        background: #edf0f4;
-    }
-}
-
-// One labelled line: title (+ optional badge) and subtitle on the left, an
-// arbitrary control slotted on the right via `@children`.
-component SettingRow inherits Rectangle {
-    in property <string> title;
-    in property <string> subtitle;
-    in property <string> badge;
-    in property <bool> dimmed: false;
-    height: root.subtitle == "" ? 46px : 58px;
-    HorizontalLayout {
-        padding-left: 14px;
-        padding-right: 14px;
-        spacing: 16px;
-        VerticalLayout {
-            horizontal-stretch: 1;
-            alignment: center;
-            spacing: 3px;
-            HorizontalLayout {
-                spacing: 8px;
-                alignment: start;
-                Text {
-                    text: root.title;
-                    font-size: 13.5px;
-                    font-weight: 600;
-                    color: root.dimmed ? #8b95a1 : #0f1419;
-                    vertical-alignment: center;
-                }
-                if root.badge != "": Rectangle {
-                    height: 18px;
-                    width: badge-t.preferred-width + 12px;
-                    y: 1px;
-                    border-radius: 9px;
-                    background: #fdecec;
-                    badge-t := Text {
-                        text: root.badge;
-                        font-size: 10.5px;
-                        font-weight: 700;
-                        color: #c03535;
-                    }
-                }
-            }
-            if root.subtitle != "": Text {
-                text: root.subtitle;
-                font-size: 12px;
-                color: #6b7480;
-                overflow: elide;
-            }
-        }
-        VerticalLayout {
-            alignment: center;
-            @children
-        }
-    }
-}
-
 // Hour field: «− 08:00 +». Хранит не значение, а только просьбу сдвинуть —
 // границы (начало < конец) держит Rust в `set-work-hours`.
 component HourStepper inherits Rectangle {
@@ -254,6 +68,7 @@ component HourStepper inherits Rectangle {
             }
             dec := TouchArea {
                 enabled: root.can-dec;
+                mouse-cursor: root.can-dec ? pointer : default;
                 clicked => { root.step(-1); }
             }
         }
@@ -280,6 +95,7 @@ component HourStepper inherits Rectangle {
             }
             inc := TouchArea {
                 enabled: root.can-inc;
+                mouse-cursor: root.can-inc ? pointer : default;
                 clicked => { root.step(1); }
             }
         }
@@ -368,6 +184,12 @@ export component SettingsDialog inherits Rectangle {
         },
     ];
 
+    // Список пересобран (удаление, правка, статус связи) — подтверждение
+    // привязано к номеру строки и иначе «переехало» бы на соседнюю учётку.
+    changed connections => {
+        root.confirm-del = -1;
+    }
+
     changed tab => {
         root.palette-cal = -1;
         root.confirm-del = -1;
@@ -386,6 +208,12 @@ export component SettingsDialog inherits Rectangle {
         // Esc снимает сперва то, что раскрыто внутри, и только потом
         // закрывает саму модалку.
         key-pressed(ev) => {
+            // Tab дальше модалки не пускаем: следующим в цепочке фокуса
+            // стояли поля главного окна под затемнением — набор уходил в
+            // поиск, а Esc после этого модалку уже не закрывал.
+            if (ev.text == Key.Tab || ev.text == Key.Backtab) {
+                return accept;
+            }
             if (ev.text != Key.Escape) {
                 return reject;
             }
@@ -514,11 +342,16 @@ export component SettingsDialog inherits Rectangle {
                                 font-weight: 700;
                                 color: #0f1419;
                             }
+                            // Высота на две строки у всех разделов: у
+                            // одних пояснение в строку, у других в две, и
+                            // содержимое прыгало при смене вкладки.
                             Text {
+                                height: 34px;
                                 text: root.tabs[root.tab].lead;
                                 font-size: 12.5px;
                                 color: #6b7480;
                                 wrap: word-wrap;
+                                vertical-alignment: top;
                             }
                         }
                         VerticalLayout {
@@ -596,7 +429,7 @@ export component SettingsDialog inherits Rectangle {
                                     }
                                 }
                                 Note {
-                                    text: "Внешняя картинка сообщает отправителю, что письмо открыто, и раскрывает ваш IP-адрес.";
+                                    text: "Внешняя картинка сообщает отправителю, что письмо открыто, и раскрывает ваш IP‑адрес.";
                                 }
                             }
 
@@ -887,7 +720,8 @@ export component SettingsDialog inherits Rectangle {
                                 }
                                 if root.folders-store-note != "": Note {
                                     text: root.folders-store-note;
-                                    color: #b7791f;
+                                    // Тёмный янтарь: #b7791f на белом давал ~3,6:1.
+                                    color: #8a5a0b;
                                 }
 
                                 Rectangle { height: 14px; }
@@ -971,7 +805,7 @@ export component SettingsDialog inherits Rectangle {
                                     Divider {}
                                     SettingRow {
                                         title: "Домены";
-                                        subtitle: "Собеседника; acme.com ловит и mail.acme.com";
+                                        subtitle: "Собеседника, вместе с поддоменами";
                                         KLineEdit {
                                             width: 240px;
                                             text: f.domains;

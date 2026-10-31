@@ -106,10 +106,31 @@ fn open_browser(url: &str) -> Result<(), String> {
     crate::shellopen::open_url(url).map_err(|e| format!("open browser: {e}"))
 }
 
-/// Block on the loopback listener for the redirect, extract `code`, and reply
+/// Сколько ждать возврата из браузера. Без предела закрытая вкладка вешала
+/// форму подключения на «Ждём браузер…» навсегда, а поток и порт на
+/// loopback жили до конца процесса.
+const BROWSER_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Wait on the loopback listener for the redirect, extract `code`, and reply
 /// with a small page so the browser tab is dismissable.
 fn wait_for_code(listener: &TcpListener) -> Result<String, String> {
-    let (mut stream, _) = listener.accept().map_err(|e| format!("accept: {e}"))?;
+    listener.set_nonblocking(true).map_err(|e| format!("listener: {e}"))?;
+    let deadline = std::time::Instant::now() + BROWSER_WAIT;
+    let mut stream = loop {
+        match listener.accept() {
+            Ok((s, _)) => break s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    return Err("браузер не вернул ответ за 5 минут — попробуйте ещё раз".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(e) => return Err(format!("accept: {e}")),
+        }
+    };
+    // Принятый сокет на Windows наследует неблокирующий режим слушателя.
+    stream.set_nonblocking(false).map_err(|e| format!("stream: {e}"))?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
     let mut buf = [0u8; 2048];
     let n = stream.read(&mut buf).map_err(|e| format!("read: {e}"))?;
     let req = String::from_utf8_lossy(&buf[..n]);
