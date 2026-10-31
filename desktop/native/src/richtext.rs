@@ -194,6 +194,16 @@ impl Editor {
 
     /// Редактор с уже набранным plain-текстом (восстановление черновика после
     /// неудачной отправки).
+    /// Редактор над готовым документом (подпись группы); каретка в конце.
+    pub fn from_doc(doc: Doc) -> Self {
+        let mut ed = Editor { doc, ..Editor::default() };
+        if ed.doc.blocks.is_empty() {
+            ed.doc = Doc::default();
+        }
+        ed.move_caret(Motion::DocEnd, false);
+        ed
+    }
+
     pub fn from_text(text: &str) -> Self {
         let mut ed = Editor::new();
         if !text.is_empty() {

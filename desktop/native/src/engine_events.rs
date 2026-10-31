@@ -55,10 +55,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     // Identities may have been (re)synced alongside the
                     // conversations — refresh the row-tint map and the
                     // composer from-picker from cache.
-                    if let Some(cache) = &sh.cache {
-                        *sh.identity_colors.borrow_mut() = identity_color_map(cache, &sh.key);
-                        refresh_composer_identities(ui, sh);
-                    }
+                    identities_ui::rebuild(ui, sh);
                     let displays = displays_from(&merged, &sh.identity_colors.borrow());
                     let items = sidebar_items(&displays, &sh.avatars.borrow());
                     ui.set_conversations(ModelRc::new(VecModel::from(items)));
@@ -463,6 +460,15 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                         }
                     });
                 }
+                EngineEvent::IdentityGroupsChanged => {
+                    SHARED.with(|s| {
+                        if let Some(sh) = s.borrow().as_ref() {
+                            if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                                let _ = etx.send(engine::EngineCmd::FetchIdentityGroups);
+                            }
+                        }
+                    });
+                }
                 EngineEvent::IdentitiesChanged => {
                     println!(
                         "engine event: identities changed — refreshing accounts, calendars, contacts"
@@ -677,6 +683,35 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
                     folders_ui::on_unavailable(ui, sh, store, error);
+                }
+            });
+        }
+        engine::EngineResult::IdentityGroups { store, version, doc } => {
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    identities_ui::on_fetched(ui, sh, store, version, doc);
+                }
+            });
+        }
+        engine::EngineResult::IdentityGroupsSaved { version, conflict } => {
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    identities_ui::on_saved(ui, sh, version, conflict);
+                }
+            });
+        }
+        engine::EngineResult::IdentityGroupsFailed(e) => {
+            eprintln!("engine: identity groups save failed: {e}");
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    identities_ui::on_save_failed(ui, sh, e);
+                }
+            });
+        }
+        engine::EngineResult::IdentityGroupsUnavailable { store, error } => {
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    identities_ui::on_unavailable(ui, sh, store, error);
                 }
             });
         }

@@ -234,6 +234,8 @@ func (s *Server) setupRoutes() {
 	desktopAuthAPI.HandleFunc("/identities", s.HandleDesktopIdentities).Methods("GET")
 	desktopAuthAPI.HandleFunc("/dialog-folders", s.HandleDesktopDialogFolders).Methods("GET")
 	desktopAuthAPI.HandleFunc("/dialog-folders", s.HandleDesktopDialogFoldersSave).Methods("PUT")
+	desktopAuthAPI.HandleFunc("/identity-groups", s.HandleDesktopIdentityGroups).Methods("GET")
+	desktopAuthAPI.HandleFunc("/identity-groups", s.HandleDesktopIdentityGroupsSave).Methods("PUT")
 	desktopAuthAPI.HandleFunc("/send", s.HandleDesktopSend).Methods("POST")
 	desktopAuthAPI.HandleFunc("/calendars", s.HandleDesktopCalendars).Methods("GET")
 	desktopAuthAPI.HandleFunc("/calendar-events", s.HandleDesktopCalendarEvents).Methods("GET")

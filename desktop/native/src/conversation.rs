@@ -48,9 +48,13 @@ pub(crate) fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
     // новая беседа по умолчанию отвечает со своей received_by identity, и
     // aim ниже её проставляет. Пользователь снова может переопределить.
     sh.compose.picked_identity.borrow_mut().take();
-    // Replies default to the identity that received this conversation; the
-    // from-picker shows it and the user can still override before sending.
-    aim_composer_identity(ui, sh, &c.received_by);
+    // Ответ — с адреса-отправителя группы той айдентики, что получила
+    // беседу (контракт §1в); выпадашка показывает его, пользователь может
+    // переопределить до отправки.
+    let reply_from = sh.idents.stored.borrow().doc.reply_sender(&c.received_by);
+    if let Some(from) = reply_from {
+        aim_composer_identity(ui, sh, &from);
+    }
     ui.set_identity_menu_open(false);
 
     // The right pane clears IMMEDIATELY: stale bubbles from the previous

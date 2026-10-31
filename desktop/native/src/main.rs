@@ -50,6 +50,8 @@ mod engine_events;
 mod event_form;
 mod folders;
 mod folders_ui;
+mod identities;
+mod identities_ui;
 mod links;
 mod platform;
 mod reminder_ui;
@@ -321,10 +323,16 @@ fn main() {
             println!("merges: id диалогов переведены на схему «набор адресов»");
         }
     }
-    let startup_ident_colors = match &account {
-        Some((c, k, _)) => identity_color_map(c, k),
-        None => HashMap::new(),
-    };
+    // Айдентики: последний документ групп + адреса всех учёток из кэша.
+    // Цвета строк видны сразу, до ответа движка.
+    let mut ident_stored = identities::load();
+    let (ident_sources, ident_owners) =
+        identities_ui::collect_sources(account.as_ref().map(|(c, _, _)| c.as_ref()));
+    let ident_merged = ident_stored.doc.merge_sources(&ident_sources);
+    if ident_merged {
+        identities::save(&ident_stored);
+    }
+    let startup_ident_colors = ident_stored.doc.color_map();
     // Стартовый сайдбар показывает уже склеенный вид (merges.json применён
     // к сырому списку из кэша); сырой список уходит в raw_convs.
     let startup_full = match &account {
@@ -442,6 +450,7 @@ fn main() {
             compose_sent_target: RefCell::new(None),
             compose_attachments: RefCell::new(Vec::new()),
             rich: RefCell::new(richtext::Editor::new()),
+            sig_parked: RefCell::new(None),
             rich_renderer: RefCell::new(None),
             rich_width: Cell::new(0.0),
             rich_dragging: Cell::new(false),
@@ -511,6 +520,7 @@ fn main() {
             add_conn_seq: Cell::new(0),
             settings_conn_keys: RefCell::new(Vec::new()),
         },
+        idents: identities_ui::IdentState::new(ident_stored, ident_owners),
     });
     SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
     // Подменю «Открыть с помощью…»: список фиксируется на старте (см.
@@ -522,9 +532,16 @@ fn main() {
         ui.set_ctx_link_apps(ModelRc::new(VecModel::from(names)));
     }
     sync_media_globals(&ui, &shared.policy.borrow());
-    // Seed the composer from-picker from cached identities; refreshed again
+    // Seed the composer from-picker from the identity groups; refreshed again
     // whenever the engine resyncs identities.
+    // Новые адреса уйдут на сервер вместе с ответом FetchIdentityGroups
+    // (on_fetched сливает серверный документ с локальным).
+    shared.idents.dirty.set(ident_merged);
+    ui.set_ident_palette(ModelRc::new(VecModel::from(
+        IDENT_PASTEL.iter().map(|c| parse_hex_color(c)).collect::<Vec<_>>(),
+    )));
     refresh_composer_identities(&ui, &shared);
+    identities_ui::refresh_settings(&ui, &shared);
 
     // Seed the persisted per-calendar maps (visibility deny-list + colour
     // overrides) now that Shared exists.
@@ -617,6 +634,7 @@ fn main() {
     let _width_watcher = wire_viewport(&ui, &shared);
     wire_bubble_links(&ui, &shared);
     wire_identity_pick(&ui, &shared);
+    identities_ui::wire(&ui, &shared);
     wire_bubble_selection(&ui, &shared);
     wire_send(&ui, &shared);
     wire_composer_input(&ui, &shared);

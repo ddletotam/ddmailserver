@@ -84,22 +84,15 @@ pub(crate) const IDENT_VIVID: [&str; 24] = [
 /// «Ugly gray» for conversations received by an unknown alias.
 pub(crate) const IDENT_UNKNOWN: &str = "#d5d5d0";
 
-/// email(lowercase) → row tint for every known identity.
-pub(crate) fn identity_color_map(cache: &Cache, key: &str) -> HashMap<String, String> {
-    cache
-        .load_identities(key)
-        .unwrap_or_default()
-        .into_iter()
-        .enumerate()
-        .map(|(i, id)| {
-            let color = if id.color.trim().is_empty() {
-                IDENT_PASTEL[i % IDENT_PASTEL.len()].to_string()
-            } else {
-                id.color
-            };
-            (id.email.to_lowercase(), color)
-        })
-        .collect()
+/// Цвет строки по адресу получателя; `user+tag@` без своей записи берёт
+/// цвет `user@`.
+pub(crate) fn ident_color_of(ident_colors: &HashMap<String, String>, addr: &str) -> String {
+    let lc = addr.trim().to_lowercase();
+    ident_colors
+        .get(&lc)
+        .or_else(|| crate::identities::base_of_tagged(&lc).and_then(|b| ident_colors.get(&b)))
+        .cloned()
+        .unwrap_or_else(|| IDENT_UNKNOWN.to_string())
 }
 
 pub(crate) fn conv_name(c: &Conversation) -> String {
@@ -122,10 +115,7 @@ pub(crate) fn displays_from(
         .enumerate()
         .map(|(i, c)| {
             let name = conv_name(c);
-            let ident_color = ident_colors
-                .get(&c.received_by.to_lowercase())
-                .cloned()
-                .unwrap_or_else(|| IDENT_UNKNOWN.to_string());
+            let ident_color = ident_color_of(ident_colors, &c.received_by);
             Disp {
                 initials: initials(&name),
                 name,

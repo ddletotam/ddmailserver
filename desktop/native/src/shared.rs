@@ -85,8 +85,9 @@ pub(crate) struct Shared {
     /// shows only a capped slice — see SOURCE_VIEW_MAX). «Копировать всё» reads
     /// this so the clipboard always gets the complete source.
     pub(crate) source_view_full: RefCell<String>,
-    /// email(lowercase) → пастельный цвет айдентики (подкраска строк
-    /// сайдбара по received_by). Обновляется при каждом списке диалогов.
+    /// email(lowercase) → пастельный цвет группы айдентики (подкраска строк
+    /// сайдбара по received_by) — по ВСЕМ учёткам. Строится из документа
+    /// групп (`identities_ui::apply`).
     pub(crate) identity_colors: RefCell<HashMap<String, String>>,
     /// UI-thread copy of the per-row link rects (CSS px, bubble-relative) —
     /// the only copy: the hover cursor, the link click (`on_hit_test`) and
@@ -131,6 +132,8 @@ pub(crate) struct Shared {
     pub(crate) cal: CalendarState,
     pub(crate) contacts: AddressBookState,
     pub(crate) accounts: AccountsState,
+    /// Айдентики: группы, владельцы адресов, синхронизация (identities_ui).
+    pub(crate) idents: identities_ui::IdentState,
 }
 
 thread_local! {
@@ -209,6 +212,8 @@ pub(crate) struct ComposeState {
     /// Rich-text документ композера — источник истины для тела письма
     /// (Slint-свойство `composer-text` лишь его plain-зеркало).
     pub(crate) rich: RefCell<richtext::Editor>,
+    /// Письмо, отложенное на время правки подписи группы в композере.
+    pub(crate) sig_parked: RefCell<Option<richtext::Editor>>,
     /// Вёрстка/растеризация композера. Ленивая: сборка `FontSystem` читает
     /// системные шрифты (сотни мс), а композер нужен не в первую секунду.
     pub(crate) rich_renderer: RefCell<Option<richtext_render::Renderer>>,

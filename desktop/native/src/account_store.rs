@@ -565,6 +565,17 @@ pub fn load_all_in(dir: &Path, store: &dyn SecretStore) -> Vec<AccountConfig> {
     accounts
 }
 
+/// (ключ, email, логин) каждой учётки — без похода в хранилище секретов:
+/// айдентики пересобираются на каждый список бесед, а чтение keyring —
+/// системный вызов на каждую учётку.
+pub fn addresses_in(dir: &Path) -> Vec<(String, String, String)> {
+    let Some(records) = read_records(&dir.join(ACCOUNTS_FILE)) else { return Vec::new() };
+    records
+        .iter()
+        .map(|r| (r.account_key(), r.email.clone().unwrap_or_default(), r.username.clone()))
+        .collect()
+}
+
 /// Перезаписать `accounts.json` набором. Вызывать под [`lock`].
 pub fn save_all_in(dir: &Path, accounts: &[AccountConfig], store: &dyn SecretStore) {
     let records: Vec<StoredAccount> =

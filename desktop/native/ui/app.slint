@@ -1,5 +1,5 @@
 import { ListView, LineEdit, ComboBox, CheckBox, Button, ScrollView, TextEdit, Palette } from "std-widgets.slint";
-import { SettingsDialog, ConnRow, CalendarItem, FolderEdit } from "settings.slint";
+import { SettingsDialog, ConnRow, CalendarItem, FolderEdit, IdentRow } from "settings.slint";
 import { KTextInput, KLineEdit, Shortcuts } from "keys.slint";
 export { Shortcuts }
 export { LoginWindow } from "login.slint";
@@ -197,6 +197,9 @@ struct IdentityItem {
     label: string,
     email: string,
     tint: color,
+    // «Не предлагать»: строки в выпадашке нет, кроме случая, когда адрес
+    // уже выбран (он отправитель группы) — тогда видно, что выбрано.
+    hidden: bool,
 }
 
 // One attendee row in the event card's read-only block. `dot` encodes the
@@ -737,6 +740,9 @@ export component MainWindow inherits Window {
     // receiving identity on open, and reads it back at send time.
     in property <[IdentityItem]> composer-identities;
     in-out property <int> composer-identity-index: 0;
+    // Сколько строк видно в выпадашке (скрытые адреса не считаются, кроме
+    // выбранного). Считает Rust при каждой смене выбора.
+    in property <int> identity-menu-rows: 0;
     in-out property <bool> identity-menu-open: false;
     // Явный выбор отправителя в дропдауне. Rust закрепляет его (побеждает
     // авто-наведение на identity беседы И переустановку при дельта-refetch)
@@ -1182,7 +1188,28 @@ export component MainWindow inherits Window {
     callback snooze-cancel();       // dialog dismissed WITHOUT a choice → resume the toast timer
     // ── Settings modal ──
     in-out property <bool> settings-visible: false;
-    in-out property <int> settings-tab: 0; // 0 Уведомления · 1 Внешний контент · 2 Календарь · 3 Подключения · 4 Папки
+    in-out property <int> settings-tab: 0; // 0 Уведомления · 1 Внешний контент · 2 Календарь · 3 Подключения · 4 Папки · 5 Айдентики
+    // Settings → Айдентики (identities_ui).
+    in property <[IdentRow]> ident-rows;
+    in property <[string]> ident-group-names;
+    in property <[string]> ident-group-ids;
+    in property <[color]> ident-palette;
+    in property <string> ident-store-note;
+    callback ident-rename(string, string);
+    callback ident-color(string, int);
+    callback ident-set-default(string);
+    callback ident-set-sender(string);
+    callback ident-toggle-hidden(string);
+    callback ident-shift(string, int);
+    callback ident-shift-group(string, int);
+    callback ident-move(string, string);
+    callback ident-edit-signature(string);
+    // Подпись группы правится в самом композере: плашка сверху, кнопка
+    // отправки становится «сохранить», Enter переносит строку.
+    in property <bool> signature-editing: false;
+    in property <string> signature-edit-title;
+    callback signature-save();
+    callback signature-cancel();
     callback open-settings();
     // Любое открытие модалки (шестерёнка, индикатор связи, таб папки) —
     // Rust обновляет список подключений.
@@ -2928,7 +2955,7 @@ export component MainWindow inherits Window {
                     // From-picker — the identity the next message goes out as.
                     // Coloured dot mirrors the sidebar tint; click opens the
                     // list (rendered as a floating panel above the composer).
-                    if root.composer-identities.length > 1: Rectangle {
+                    if root.identity-menu-rows > 1 && !root.signature-editing: Rectangle {
                         width: 42px;
                         height: 42px;
                         border-radius: 21px;
@@ -3155,7 +3182,7 @@ export component MainWindow inherits Window {
                             x: 16px;
                             width: parent.width - 32px;
                             height: parent.height;
-                            text: "Написать сообщение…";
+                            text: root.signature-editing ? "Подпись…" : "Написать сообщение…";
                             color: #8b95a1;
                             vertical-alignment: center;
                         }
@@ -3168,7 +3195,7 @@ export component MainWindow inherits Window {
                         Text {
                             width: parent.width;
                             height: parent.height;
-                            text: "→";
+                            text: root.signature-editing ? "✓" : "→";
                             color: white;
                             font-size: 20px;
                             horizontal-alignment: center;
@@ -3180,7 +3207,11 @@ export component MainWindow inherits Window {
                                 // документ (стиль, картинки) читает Rust в
                                 // on_send. Очистка — тоже там, только на
                                 // успешной ветке.
-                                if (root.rt-can-send) { root.send(root.composer-text); }
+                                if (root.signature-editing) {
+                                    root.signature-save();
+                                } else if (root.rt-can-send) {
+                                    root.send(root.composer-text);
+                                }
                             }
                         }
                     }
@@ -3205,6 +3236,69 @@ export component MainWindow inherits Window {
                             stroke: #6b7480;
                             stroke-width: 2px;
                             fill: transparent;
+                        }
+                    }
+                }
+                // Правка подписи группы: плашка над композером. Набранное
+                // письмо отложено и вернётся после «Сохранить»/«Отмена».
+                if root.signature-editing: Rectangle {
+                    x: 12px;
+                    y: -50px;
+                    width: parent.width - 24px;
+                    height: 42px;
+                    background: #fff8e6;
+                    border-radius: 10px;
+                    border-width: 1px;
+                    border-color: #f1dfb0;
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 6px;
+                        spacing: 6px;
+                        Text {
+                            horizontal-stretch: 1;
+                            text: "Подпись группы «" + root.signature-edit-title + "» — Enter переносит строку";
+                            font-size: 13px;
+                            color: #5a3d06;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Rectangle {
+                            width: sig-cancel-l.preferred-width + 24px;
+                            height: 30px;
+                            y: 6px;
+                            border-radius: 7px;
+                            background: sig-cancel-ta.has-hover ? #f6ead0 : transparent;
+                            sig-cancel-l := Text {
+                                text: "Отмена";
+                                font-size: 13px;
+                                font-weight: 600;
+                                color: #5a3d06;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            sig-cancel-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.signature-cancel(); }
+                            }
+                        }
+                        Rectangle {
+                            width: sig-save-l.preferred-width + 24px;
+                            height: 30px;
+                            y: 6px;
+                            border-radius: 7px;
+                            background: sig-save-ta.has-hover ? #065f46 : #047857;
+                            sig-save-l := Text {
+                                text: "Сохранить";
+                                font-size: 13px;
+                                font-weight: 600;
+                                color: white;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            sig-save-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.signature-save(); }
+                            }
                         }
                     }
                 }
@@ -3237,7 +3331,7 @@ export component MainWindow inherits Window {
                     x: 12px;
                     y: -self.height - 6px;
                     width: 340px;
-                    height: root.composer-identities.length * 36px + 8px;
+                    height: root.identity-menu-rows * 36px + 8px;
                     background: white;
                     border-radius: 10px;
                     border-width: 1px;
@@ -3248,7 +3342,8 @@ export component MainWindow inherits Window {
                     VerticalLayout {
                         padding: 4px;
                         for ident[ii] in root.composer-identities: Rectangle {
-                            height: 36px;
+                            visible: !ident.hidden || ii == root.composer-identity-index;
+                            height: self.visible ? 36px : 0px;
                             border-radius: 8px;
                             background: idrow-ta.has-hover ? #f0f4fa : transparent;
                             idrow-ta := TouchArea {
@@ -5428,6 +5523,11 @@ export component MainWindow inherits Window {
         folder-edits: root.folder-edits;
         folders-on: root.folders-on;
         folders-store-note: root.folders-store-note;
+        ident-rows: root.ident-rows;
+        ident-group-names: root.ident-group-names;
+        ident-group-ids: root.ident-group-ids;
+        ident-palette: root.ident-palette;
+        ident-store-note: root.ident-store-note;
         close => {
             root.settings-visible = false;
             kb.focus();
@@ -5444,6 +5544,15 @@ export component MainWindow inherits Window {
         folder-add => { root.folder-add(); }
         folder-delete(id) => { root.folder-delete(id); }
         folder-edit(id, field, value) => { root.folder-edit(id, field, value); }
+        ident-rename(g, n) => { root.ident-rename(g, n); }
+        ident-color(g, i) => { root.ident-color(g, i); }
+        ident-set-default(g) => { root.ident-set-default(g); }
+        ident-set-sender(e) => { root.ident-set-sender(e); }
+        ident-toggle-hidden(e) => { root.ident-toggle-hidden(e); }
+        ident-shift(e, d) => { root.ident-shift(e, d); }
+        ident-shift-group(g, d) => { root.ident-shift-group(g, d); }
+        ident-move(e, g) => { root.ident-move(e, g); }
+        ident-edit-signature(g) => { root.ident-edit-signature(g); }
     }
 
     // ── «Сессия истекла» ──

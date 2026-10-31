@@ -57,6 +57,8 @@ pub enum EngineEvent {
     IdentitiesChanged,
     /// Папки диалогов сохранены (с этой или другой станции) — перечитать.
     DialogFoldersChanged,
+    /// Группы айдентик сохранены (с этой или другой станции) — перечитать.
+    IdentityGroupsChanged,
     /// The session token was refreshed (native provider); persist it.
     TokenRefreshed { account_id: String, token: String },
 }

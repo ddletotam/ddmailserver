@@ -277,6 +277,22 @@ pub trait MailProvider: Send + Sync {
         Err("Dialog folders are stored only on a DDMail server.".into())
     }
 
+    /// Группы айдентик (имя, цвет, подпись, порядок), сохранённые на сервере.
+    /// `Ok(None)` — провайдер их не хранит. Сервер без эндпоинта (старая
+    /// версия) отвечает ошибкой — это тоже «не поддерживает».
+    async fn fetch_identity_groups(&self) -> Result<Option<DialogFoldersDoc>, String> {
+        Ok(None)
+    }
+
+    /// Записать группы поверх версии `base_version`, как папки диалогов.
+    async fn save_identity_groups(
+        &self,
+        _doc: &serde_json::Value,
+        _base_version: i64,
+    ) -> Result<DialogFoldersSave, String> {
+        Err("Identity groups are stored only on a DDMail server.".into())
+    }
+
     /// Provider type identifier.
     fn provider_type(&self) -> &'static str;
 }

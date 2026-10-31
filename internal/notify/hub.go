@@ -47,6 +47,11 @@ const (
 	// was saved. Other stations refetch it so the tabs stay the same
 	// everywhere without a restart.
 	EventDialogFoldersChanged EventType = "dialog_folders_changed"
+
+	// EventIdentityGroupsChanged — the user's desktop identity-groups document
+	// was saved. Other stations refetch it so names, colours and signatures
+	// stay the same everywhere without a restart.
+	EventIdentityGroupsChanged EventType = "identity_groups_changed"
 )
 
 // Event represents a notification about a user-visible change.

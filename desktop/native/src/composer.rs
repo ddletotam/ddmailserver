@@ -5,12 +5,12 @@
 use super::*;
 
 /// (Re)fill the composer from-picker: the Slint model for drawing and the
-/// parallel email list in Shared for send-time resolution. Keeps the current
+/// parallel email list in Shared for send-time resolution. Порядок — группы
+/// айдентик и адреса внутри них (вкладка «Айдентики»); скрытые адреса в
+/// модели есть, но строка видна, только пока адрес выбран. Keeps the current
 /// selection if its email survives the refresh; otherwise re-aims at the
-/// default identity (falling back to the primary account email).
+/// sender of the default group.
 pub(crate) fn refresh_composer_identities(ui: &MainWindow, sh: &Shared) {
-    let Some(cache) = &sh.cache else { return };
-    let idents = cache.load_identities(&sh.key).unwrap_or_default();
     // Явно выбранный отправитель закреплён — он выигрывает у восстановления
     // по индексу (иначе дельта-refetch, прилетающая каждые пару секунд, сбивала
     // выбор обратно на дефолтную identity: ровно этот баг «выбрал dd, ушло
@@ -20,42 +20,38 @@ pub(crate) fn refresh_composer_identities(ui: &MainWindow, sh: &Shared) {
         let idx = ui.get_composer_identity_index();
         list.get(idx.max(0) as usize).cloned()
     });
-    let mut items: Vec<IdentityItem> = Vec::with_capacity(idents.len());
-    let mut emails: Vec<String> = Vec::with_capacity(idents.len());
-    let mut selected: i32 = -1;
-    let mut default_idx: i32 = 0;
-    for (i, id) in idents.iter().enumerate() {
-        // From-picker dot: use the VIVID palette for a palette-fallback
-        // identity (a 12px pastel dot reads as white). A server-provided
-        // colour is the user's own choice — keep it verbatim.
-        let color = if id.color.trim().is_empty() {
-            IDENT_VIVID[i % IDENT_VIVID.len()]
-        } else {
-            id.color.as_str()
-        };
-        let label = if id.name.trim().is_empty() {
-            id.email.clone()
-        } else {
-            format!("{} <{}>", id.name.trim(), id.email)
-        };
-        items.push(IdentityItem {
-            label: label.into(),
-            email: id.email.clone().into(),
-            tint: parse_hex_color(color),
-        });
-        emails.push(id.email.to_lowercase());
-        if id.is_default {
-            default_idx = i as i32;
+    let (items, emails, default_email) = {
+        let st = sh.idents.stored.borrow();
+        let doc = &st.doc;
+        let mut items: Vec<IdentityItem> = Vec::new();
+        let mut emails: Vec<String> = Vec::new();
+        for (gi, g) in doc.groups.iter().enumerate() {
+            // Точка — насыщенная пара пастели группы: 12px пастели не видно.
+            let tint = parse_hex_color(&identities::vivid(&identities::group_color(g, gi)));
+            for a in &g.addresses {
+                let label = if g.name.trim().is_empty() {
+                    a.email.clone()
+                } else {
+                    format!("{} <{}>", g.name.trim(), a.email)
+                };
+                items.push(IdentityItem {
+                    label: label.into(),
+                    email: a.email.clone().into(),
+                    tint,
+                    hidden: a.hidden,
+                });
+                emails.push(a.email.clone());
+            }
         }
-        if Some(&id.email.to_lowercase()) == prev_email.as_ref() {
-            selected = i as i32;
-        }
-    }
-    // No identities synced yet — the picker hides (length < 2), sends fall
-    // back to the account email engine-side.
+        (items, emails, doc.new_mail_sender())
+    };
+    let selected = prev_email.as_ref().and_then(|p| emails.iter().position(|e| e == p));
+    let default_idx = default_email.and_then(|d| emails.iter().position(|e| *e == d)).unwrap_or(0);
+    // No identities yet — the picker hides, sends fall back to the account
+    // email engine-side.
     ui.set_composer_identities(ModelRc::new(VecModel::from(items)));
-    ui.set_composer_identity_index(if selected >= 0 { selected } else { default_idx });
     *sh.compose.composer_identities.borrow_mut() = emails;
+    identities_ui::set_picker_index(ui, sh, selected.unwrap_or(default_idx) as i32);
 }
 
 /// id диалога, которому будет принадлежать письмо, отправленное с адреса
@@ -142,11 +138,19 @@ pub(crate) fn from_mismatch(ui: &MainWindow, sh: &Shared) -> Option<(String, Str
             sh.compose.composer_identities.borrow().get(idx.max(0) as usize).cloned()
         })?
         .to_lowercase();
-    let expected = sh.convs.borrow().get(sh.current.get())?.received_by.to_lowercase();
-    if expected.is_empty() || expected == current {
+    let received = sh.convs.borrow().get(sh.current.get())?.received_by.to_lowercase();
+    if received.is_empty() {
         return None;
     }
-    if !sh.compose.composer_identities.borrow().iter().any(|e| *e == expected) {
+    // Ответ с любого адреса группы получателя — не ошибка: группа и есть
+    // «один человек с несколькими адресами». Ожидаемый — её отправитель.
+    let st = sh.idents.stored.borrow();
+    let group = st.doc.group_of(&received)?;
+    if group.addresses.iter().any(|a| a.email == current) {
+        return None;
+    }
+    let expected = group.sender().to_string();
+    if expected.is_empty() || expected == current {
         return None;
     }
     Some((expected, current))
@@ -159,8 +163,9 @@ pub(crate) fn aim_composer_identity(ui: &MainWindow, sh: &Shared, email: &str) {
         return;
     }
     let lc = email.to_lowercase();
-    if let Some(i) = sh.compose.composer_identities.borrow().iter().position(|e| *e == lc) {
-        ui.set_composer_identity_index(i as i32);
+    let pos = sh.compose.composer_identities.borrow().iter().position(|e| *e == lc);
+    if let Some(i) = pos {
+        identities_ui::set_picker_index(ui, sh, i as i32);
     }
 }
 
@@ -197,6 +202,7 @@ pub(crate) fn refresh_composer_hints(ui: &MainWindow, sh: &Shared) {
     // Explicit reply via the quote ribbon: sender + (in groups) the
     // source's To/Cc, minus our own identity — same as the send branch.
     if let Some(body) = sh.compose.pending_reply.borrow().as_ref() {
+        let st = sh.idents.stored.borrow();
         let our = sh.key.to_lowercase();
         let extract_addr = |raw: &str| -> String {
             let lt = raw.find('<');
@@ -209,7 +215,7 @@ pub(crate) fn refresh_composer_hints(ui: &MainWindow, sh: &Shared) {
         };
         let mut to: Vec<String> = Vec::new();
         let mut push = |a: String| {
-            if !a.is_empty() && a != our && !to.contains(&a) {
+            if !a.is_empty() && a != our && !st.doc.is_mine(&a) && !to.contains(&a) {
                 to.push(a);
             }
         };
@@ -318,6 +324,10 @@ pub(crate) fn enter_compose_mode(sh: &Shared, ui: &MainWindow, email: &str) {
     // предыдущей беседы/письма; для нового письма действует дефолтная
     // identity, пока пользователь не выберет другую в дропдауне.
     sh.compose.picked_identity.borrow_mut().take();
+    let default_from = sh.idents.stored.borrow().doc.new_mail_sender();
+    if let Some(from) = default_from {
+        aim_composer_identity(ui, sh, &from);
+    }
     // Any staged explicit-reply target is invalidated by jumping into
     // a fresh compose: the new conversation has no bubble to quote.
     exit_reply_mode(sh, ui);
@@ -615,7 +625,7 @@ pub(crate) fn rich_key(
     }
 
     if is(Key::Return) {
-        if shift {
+        if shift || sh.idents.sig_edit.borrow().is_some() {
             sh.compose.rich.borrow_mut().split_block();
             rich_refresh(ui, sh);
         } else {
@@ -1008,6 +1018,9 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
     let ui_weak_send = ui.as_weak();
     let sh_send = shared.clone();
     ui.on_send(move |text| {
+        if sh_send.idents.sig_edit.borrow().is_some() {
+            return;
+        }
         let text = text.to_string();
         // Тело письма — rich-документ композера; `text` (plain-зеркало) идёт
         // в text/plain-часть и в заглушку optimistic send. Пустой текст ещё
@@ -1061,11 +1074,59 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
                 }
             }
         }
+        // Отправитель — до всех веток: от него зависят и учётка, через
+        // которую письмо уйдёт, и подпись. Закреплённый ручной выбор
+        // (picked_identity) важнее индекса пикера — индекс могла сбить
+        // дельта-refetch между выбором и отправкой (баг «выбрал dd, ушло
+        // info»). None до появления айдентик → движок подставит адрес учётки.
+        let from_identity: Option<String> = sh_send.compose.picked_identity.borrow().clone().or_else(|| {
+            ui_weak_send.upgrade().and_then(|u| {
+                let idx = u.get_composer_identity_index();
+                sh_send.compose.composer_identities.borrow().get(idx.max(0) as usize).cloned()
+            })
+        });
+        // Учётка — та, которой принадлежит адрес отправителя (группа может
+        // собрать адреса разных учёток); адрес учётки беседы — она сама.
+        let conv_account = sh_send.accounts.cur_account_key.borrow().clone();
+        let send_account = match &from_identity {
+            Some(from) => match identities_ui::owner_for(&sh_send, from, &conv_account) {
+                Some(k) => k,
+                None => {
+                    toast_window::show(
+                        2,
+                        0,
+                        "Не через что отправить",
+                        &format!(
+                            "Адрес {from} не принадлежит ни одной подключённой учётке. Выберите другой адрес в «От кого» или подключите учётку заново."
+                        ),
+                        false,
+                        600,
+                        || {},
+                        || {},
+                        || {},
+                    );
+                    return;
+                }
+            },
+            None => conv_account.clone(),
+        };
+        // Подпись группы отправителя — в конец тела, своей обёрткой.
+        let (rich_html, text, inline_atts) = match from_identity
+            .as_deref()
+            .and_then(|f| identities_ui::signature_for(&sh_send, f))
+        {
+            Some((sig_html, sig_text, sig_atts)) => {
+                let mut atts = inline_atts;
+                atts.extend(sig_atts);
+                (format!("{rich_html}{sig_html}"), format!("{text}{sig_text}"), atts)
+            }
+            None => (rich_html, text, inline_atts),
+        };
         // Graceful guard: if this thread belongs to a connection that was
         // since removed, the send has nowhere to go — say so plainly instead
         // of misrouting to another account.
         {
-            let ak = sh_send.accounts.cur_account_key.borrow().clone();
+            let ak = send_account.clone();
             let alive = ak.is_empty() || sh_send.accounts.account_keys.borrow().iter().any(|k| *k == ak);
             if !alive {
                 toast_window::show(
@@ -1111,26 +1172,6 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        // Sending identity: закреплённый ручной выбор (picked_identity) имеет
-        // приоритет над индексом пикера — индекс могла сбить дельта-refetch
-        // между выбором и отправкой (баг «выбрал dd, ушло info»). Без явного
-        // выбора — резолвим по индексу через Shared-список (Slint-модель
-        // только для отрисовки). None до синка identities → движок подставит
-        // адрес аккаунта.
-        let from_identity: Option<String> = sh_send
-            .compose.picked_identity
-            .borrow()
-            .clone()
-            .or_else(|| {
-                ui_now.as_ref().and_then(|u| {
-                    let idx = u.get_composer_identity_index();
-                    sh_send
-                        .compose.composer_identities
-                        .borrow()
-                        .get(idx.max(0) as usize)
-                        .cloned()
-                })
-            });
         // Staged attachment paths for this send, snapshotted up front so the
         // per-branch Send commands all carry the same list.
         let attachments: Vec<String> = sh_send
@@ -1222,7 +1263,7 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
                         message_id: orig.message_id.clone(),
                         seen: true,
                     }),
-                    account_key: sh_send.accounts.cur_account_key.borrow().clone(),
+                    account_key: send_account.clone(),
                 });
                 clear_overrides();
                 if let Some(u) = ui_now.as_ref() {
@@ -1270,7 +1311,7 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
                     from: from_identity.clone(),
                     attachments: attachments.clone(),
                     forward_attachments: None,
-                    account_key: sh_send.accounts.cur_account_key.borrow().clone(),
+                    account_key: send_account.clone(),
                 });
                 clear_overrides();
                 // Optimistic bubble in the (empty) compose pane; no
@@ -1297,8 +1338,13 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
             // sender anyway. The recipients are the source's from + to
             // + cc minus our identities (mirrored from svelte's
             // ChatView.svelte:478-501).
-            let our_lc: std::collections::HashSet<String> =
+            // Свои — все адреса айдентик (и ключ учётки, как раньше), иначе
+            // «ответить всем» слал копию самому себе на другой адрес.
+            let mut our_lc: std::collections::HashSet<String> =
                 std::iter::once(sh_send.key.to_lowercase()).collect();
+            for g in &sh_send.idents.stored.borrow().doc.groups {
+                our_lc.extend(g.addresses.iter().map(|a| a.email.clone()));
+            }
             let extract_addr = |raw: &str| -> String {
                 let lt = raw.find('<');
                 let gt = lt.and_then(|i| raw[i..].find('>').map(|j| i + j));
@@ -1358,7 +1404,7 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
                     from: from_identity.clone(),
                     attachments: attachments.clone(),
                     forward_attachments: None,
-                    account_key: sh_send.accounts.cur_account_key.borrow().clone(),
+                    account_key: send_account.clone(),
                 });
                 clear_overrides();
                 let conv_id = sh_send
@@ -1449,7 +1495,7 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
                 from: from_identity.clone(),
                 attachments,
                 forward_attachments: None,
-                account_key: sh_send.accounts.cur_account_key.borrow().clone(),
+                account_key: send_account.clone(),
             });
             clear_overrides();
             append_send_stub(
@@ -1472,11 +1518,15 @@ pub(crate) fn wire_identity_pick(ui: &MainWindow, shared: &Rc<Shared>) {
     // Явный выбор отправителя из дропдауна — закрепляем email, чтобы он
     // пережил дельта-refresh и авто-наведение (см. picked_identity).
     let sh_ip = shared.clone();
+    let w_ip = ui.as_weak();
     ui.on_identity_picked(move |ii| {
         let email = sh_ip.compose.composer_identities.borrow().get(ii.max(0) as usize).cloned();
         if let Some(email) = email {
             println!("identity picked: {email}");
             *sh_ip.compose.picked_identity.borrow_mut() = Some(email);
+        }
+        if let Some(ui) = w_ip.upgrade() {
+            identities_ui::sync_picker_rows(&ui, &sh_ip);
         }
     });
 }

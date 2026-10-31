@@ -726,6 +726,7 @@ pub(crate) fn rebuild_engine(ui: &MainWindow, shared: &Rc<Shared>) {
         let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
         let _ = etx.send(engine::EngineCmd::StartWatching);
         let _ = etx.send(engine::EngineCmd::FetchDialogFolders);
+        let _ = etx.send(engine::EngineCmd::FetchIdentityGroups);
     } else {
         ui.set_engine_reloading(false);
     }

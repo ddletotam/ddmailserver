@@ -726,6 +726,8 @@ impl MailProvider for NativeProvider {
                                             notifier(EngineEvent::IdentitiesChanged);
                                         } else if event_type == "dialog_folders_changed" {
                                             notifier(EngineEvent::DialogFoldersChanged);
+                                        } else if event_type == "identity_groups_changed" {
+                                            notifier(EngineEvent::IdentityGroupsChanged);
                                         } else if event_type == "expunge" {
                                             // Messages deleted elsewhere (another
                                             // client, spam purge). Tell the engine
@@ -826,14 +828,43 @@ impl MailProvider for NativeProvider {
         doc: &serde_json::Value,
         base_version: i64,
     ) -> Result<DialogFoldersSave, String> {
-        let url = self.api_url("/dialog-folders");
+        self.save_versioned_doc("/dialog-folders", doc, base_version).await
+    }
+
+    async fn fetch_identity_groups(&self) -> Result<Option<DialogFoldersDoc>, String> {
+        self.get("/identity-groups").await.map(Some)
+    }
+
+    async fn save_identity_groups(
+        &self,
+        doc: &serde_json::Value,
+        base_version: i64,
+    ) -> Result<DialogFoldersSave, String> {
+        self.save_versioned_doc("/identity-groups", doc, base_version).await
+    }
+
+    fn provider_type(&self) -> &'static str {
+        "native"
+    }
+}
+
+impl NativeProvider {
+    /// PUT документа с оптимистичной версией (папки диалогов, группы
+    /// айдентик): 409 — на сервере уже чужая правка, она и возвращается.
+    async fn save_versioned_doc(
+        &self,
+        path: &str,
+        doc: &serde_json::Value,
+        base_version: i64,
+    ) -> Result<DialogFoldersSave, String> {
+        let url = self.api_url(path);
         let body = serde_json::json!({ "base_version": base_version, "doc": doc });
         let resp =
             self.send_authed(|http, token| http.put(&url).bearer_auth(token).json(&body)).await?;
         let status = resp.status();
         if status == StatusCode::CONFLICT {
             let cur: DialogFoldersDoc =
-                resp.json().await.map_err(|e| format!("JSON decode /dialog-folders: {e}"))?;
+                resp.json().await.map_err(|e| format!("JSON decode {path}: {e}"))?;
             return Ok(DialogFoldersSave::Conflict(cur));
         }
         if !status.is_success() {
@@ -841,11 +872,7 @@ impl MailProvider for NativeProvider {
             return Err(format!("HTTP {status}: {body}"));
         }
         let saved: DialogFoldersDoc =
-            resp.json().await.map_err(|e| format!("JSON decode /dialog-folders: {e}"))?;
+            resp.json().await.map_err(|e| format!("JSON decode {path}: {e}"))?;
         Ok(DialogFoldersSave::Saved(saved.version))
-    }
-
-    fn provider_type(&self) -> &'static str {
-        "native"
     }
 }

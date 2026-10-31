@@ -302,6 +302,14 @@ pub enum EngineCmd {
         doc: serde_json::Value,
         base_version: i64,
     },
+    /// Прочитать группы айдентик с первого подключения, которое их хранит.
+    /// Тот же протокол, что у папок диалогов.
+    FetchIdentityGroups,
+    SaveIdentityGroups {
+        account_key: String,
+        doc: serde_json::Value,
+        base_version: i64,
+    },
     FetchConversations {
         limit: u32,
     },
@@ -595,6 +603,21 @@ pub enum EngineResult {
     /// Подключение `store` хранит папки, но прочитать их не вышло (сервер
     /// без эндпоинта, сеть). Хранилище — всё равно оно.
     DialogFoldersUnavailable {
+        store: String,
+        error: String,
+    },
+    /// Группы айдентик — те же четыре ответа, что у папок.
+    IdentityGroups {
+        store: Option<String>,
+        version: i64,
+        doc: Option<serde_json::Value>,
+    },
+    IdentityGroupsSaved {
+        version: i64,
+        conflict: Option<Option<serde_json::Value>>,
+    },
+    IdentityGroupsFailed(String),
+    IdentityGroupsUnavailable {
         store: String,
         error: String,
     },
@@ -1720,6 +1743,57 @@ pub fn spawn(
                         Err(e) => {
                             eprintln!("save dialog folders [{}]: {e}", conn.key);
                             on_result(EngineResult::DialogFoldersFailed(e));
+                        }
+                    }
+                }
+                EngineCmd::FetchIdentityGroups => {
+                    let mut answered = false;
+                    for conn in &conns {
+                        match rt.block_on(conn.provider.fetch_identity_groups()) {
+                            Ok(Some(d)) => {
+                                on_result(EngineResult::IdentityGroups {
+                                    store: Some(conn.key.clone()),
+                                    version: d.version,
+                                    doc: d.doc,
+                                });
+                                answered = true;
+                                break;
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                eprintln!("identity groups [{}]: {e}", conn.key);
+                                on_result(EngineResult::IdentityGroupsUnavailable {
+                                    store: conn.key.clone(),
+                                    error: e,
+                                });
+                                answered = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !answered {
+                        on_result(EngineResult::IdentityGroups {
+                            store: None,
+                            version: 0,
+                            doc: None,
+                        });
+                    }
+                }
+                EngineCmd::SaveIdentityGroups { account_key, doc, base_version } => {
+                    let conn = route(&conns, &account_key);
+                    match rt.block_on(conn.provider.save_identity_groups(&doc, base_version)) {
+                        Ok(DialogFoldersSave::Saved(version)) => {
+                            on_result(EngineResult::IdentityGroupsSaved { version, conflict: None })
+                        }
+                        Ok(DialogFoldersSave::Conflict(cur)) => {
+                            on_result(EngineResult::IdentityGroupsSaved {
+                                version: cur.version,
+                                conflict: Some(cur.doc),
+                            })
+                        }
+                        Err(e) => {
+                            eprintln!("save identity groups [{}]: {e}", conn.key);
+                            on_result(EngineResult::IdentityGroupsFailed(e));
                         }
                     }
                 }
