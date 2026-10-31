@@ -370,6 +370,7 @@ pub(crate) fn refresh_folder_tabs(sh: &Shared, ui: &MainWindow) {
     ui.set_folders_shown(on);
     if !on {
         ui.set_folder_tabs(ModelRc::new(VecModel::from(Vec::<FolderTab>::new())));
+        ui.set_folder_targets(ModelRc::new(VecModel::from(Vec::<FolderTab>::new())));
         ui.set_active_folder("".into());
         return;
     }
@@ -380,12 +381,11 @@ pub(crate) fn refresh_folder_tabs(sh: &Shared, ui: &MainWindow) {
     // пропал бы из полосы, оставив непонятный список.
     let show_hidden = sh.show_hidden_folders.get();
     let active_id = sh.active_folder.borrow().clone();
-    let tabs: Vec<FolderTab> = st
+    let all: Vec<FolderTab> = st
         .doc
         .folders
         .iter()
         .zip(counts)
-        .filter(|(f, _)| !f.hidden || show_hidden || f.id == active_id)
         .map(|(f, n)| FolderTab {
             id: f.id.as_str().into(),
             name: f.name.as_str().into(),
@@ -394,7 +394,13 @@ pub(crate) fn refresh_folder_tabs(sh: &Shared, ui: &MainWindow) {
             hidden: f.hidden,
         })
         .collect();
+    let tabs: Vec<FolderTab> = all
+        .iter()
+        .filter(|t| !t.hidden || show_hidden || t.id == active_id.as_str())
+        .cloned()
+        .collect();
     ui.set_folder_tabs(ModelRc::new(VecModel::from(tabs)));
+    ui.set_folder_targets(ModelRc::new(VecModel::from(all)));
     ui.set_hidden_folders(st.doc.folders.iter().filter(|f| f.hidden).count() as i32);
     ui.set_show_hidden_folders(show_hidden);
     let active = sh.active_folder.borrow();

@@ -1024,6 +1024,9 @@ export component MainWindow inherits Window {
     // ── Папки диалогов (табы) ──
     in property <bool> folders-shown: false;
     in property <[FolderTab]> folder-tabs;
+    // Все папки, включая скрытые, — для «В папку» в меню диалога: скрытую
+    // папку в полосе не видно, но положить в неё диалог можно.
+    in property <[FolderTab]> folder-targets;
     in-out property <string> active-folder: "";
     // Непрочитанных диалогов в инбоксе — счётчик на чипе «Входящие».
     in property <int> inbox-unread: 0;
@@ -1834,7 +1837,7 @@ export component MainWindow inherits Window {
                                 }
                                 if root.folders-shown: Menu {
                                     title: "В папку";
-                                    for f in root.folder-tabs: MenuItem {
+                                    for f in root.folder-targets: MenuItem {
                                         title: f.icon == "" ? f.name : f.icon + " " + f.name;
                                         enabled: f.id != root.active-folder;
                                         activated => { root.conv-to-folder(idx, f.id); }
