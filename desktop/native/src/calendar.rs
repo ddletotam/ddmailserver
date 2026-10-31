@@ -154,6 +154,7 @@ pub(crate) fn save_calendar_settings(ui: &MainWindow, sh: &Shared) {
         hidden,
         colors: sh.cal.calendar_colors.borrow().clone(),
         notify_sound: ui.get_notify_sound_on(),
+        badge_hidden: ui.get_badge_hidden_on(),
         work_start_hour: sh.cal.work_start.get(),
         work_end_hour: sh.cal.work_end.get(),
         manual_hour_height: sh.cal.manual_hour_h.get(),
@@ -1092,6 +1093,15 @@ pub(crate) fn wire_calendar_nav(ui: &MainWindow, shared: &Rc<Shared>) {
         if let Some(ui) = ui_weak_snd.upgrade() {
             ui.set_notify_sound_on(!ui.get_notify_sound_on());
             save_calendar_settings(&ui, &sh_snd);
+        }
+    });
+    let ui_weak_bh = ui.as_weak();
+    let sh_bh = shared.clone();
+    ui.on_toggle_badge_hidden(move || {
+        if let Some(ui) = ui_weak_bh.upgrade() {
+            ui.set_badge_hidden_on(!ui.get_badge_hidden_on());
+            save_calendar_settings(&ui, &sh_bh);
+            tray_sync_dot(&sh_bh);
         }
     });
 }

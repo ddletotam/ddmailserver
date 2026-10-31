@@ -48,6 +48,10 @@ pub struct CalendarSettings {
     /// инбокс: всё, что не попало в папки.
     #[serde(default)]
     pub active_folder: String,
+    /// Точка «есть непрочитанное» в трее учитывает и скрытые папки.
+    /// По умолчанию нет: скрытое — значит «не беспокоить».
+    #[serde(default)]
+    pub badge_hidden: bool,
 }
 
 /// `Default` — руками, а не `derive`: у derive'а это нули и `false`, тогда
@@ -68,6 +72,7 @@ impl Default for CalendarSettings {
             last_conversation: String::new(),
             folders_enabled: default_true(),
             active_folder: String::new(),
+            badge_hidden: false,
         }
     }
 }

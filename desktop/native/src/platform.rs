@@ -285,7 +285,15 @@ pub(crate) fn tray_set_dot(on: bool) {
 /// чтобы письма, пришедшие пока клиент был выключен, зажигали точку.
 pub(crate) fn tray_sync_dot(sh: &Shared) {
     // По всем диалогам: непрочитанное в невыбранной папке — тоже непрочитанное.
-    tray_set_dot(full_view(sh).iter().any(|c| c.unread_count > 0));
+    // Скрытые папки — только если так включено в «Уведомлениях».
+    let with_hidden =
+        UI_WEAK.get().and_then(|w| w.upgrade()).is_some_and(|ui| ui.get_badge_hidden_on());
+    let doc = sh.folders.borrow();
+    tray_set_dot(full_view(sh).iter().any(|c| {
+        c.unread_count > 0
+            && (with_hidden
+                || !doc.doc.folder_of(c, &sh.key).is_some_and(|i| doc.doc.folders[i].hidden))
+    }));
 }
 
 /// Minimal stdout logger: ddmail-core (NativeProvider, engine) reports

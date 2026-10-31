@@ -375,19 +375,28 @@ pub(crate) fn refresh_folder_tabs(sh: &Shared, ui: &MainWindow) {
     }
     let (counts, inbox) = folders::unread_counts(&st.doc, &full_view(sh), &sh.key);
     ui.set_inbox_unread(inbox as i32);
+    // Скрытая папка видна, только пока включено «Показать скрытые» или в неё
+    // привели (поиск, тост, переход после отправки) — иначе выбранный таб
+    // пропал бы из полосы, оставив непонятный список.
+    let show_hidden = sh.show_hidden_folders.get();
+    let active_id = sh.active_folder.borrow().clone();
     let tabs: Vec<FolderTab> = st
         .doc
         .folders
         .iter()
         .zip(counts)
+        .filter(|(f, _)| !f.hidden || show_hidden || f.id == active_id)
         .map(|(f, n)| FolderTab {
             id: f.id.as_str().into(),
             name: f.name.as_str().into(),
             icon: f.icon.as_str().into(),
             unread: n as i32,
+            hidden: f.hidden,
         })
         .collect();
     ui.set_folder_tabs(ModelRc::new(VecModel::from(tabs)));
+    ui.set_hidden_folders(st.doc.folders.iter().filter(|f| f.hidden).count() as i32);
+    ui.set_show_hidden_folders(show_hidden);
     let active = sh.active_folder.borrow();
     let active = if st.doc.index_of(&active).is_some() { active.as_str() } else { "" };
     ui.set_active_folder(active.into());

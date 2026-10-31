@@ -22,7 +22,15 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     // Дельта-мерж идёт по СЫРОМУ списку (до склеек): дельта
                     // приносит исходные диалоги, а склеенный вид собирается
                     // заново из результата.
-                    let raw: Vec<Conversation> = if partial {
+                    // Сообщения прошлого списка: «новое» для папок с
+                    // «письма сразу прочитаны» — то, чего здесь не было.
+                    let known: HashSet<(String, u32)> = sh
+                        .raw_convs
+                        .borrow()
+                        .iter()
+                        .flat_map(|c| c.messages.iter().map(|m| (m.folder.clone(), m.uid)))
+                        .collect();
+                    let mut raw: Vec<Conversation> = if partial {
                         let mut all = sh.raw_convs.borrow().clone();
                         for nc in list.drain(..) {
                             match all.iter_mut().find(|c| c.id == nc.id) {
@@ -35,6 +43,7 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     } else {
                         list
                     };
+                    folders_ui::auto_read_new(sh, &known, &mut raw);
                     *sh.raw_convs.borrow_mut() = raw.clone();
                     let full = apply_merges(&raw, &sh.merges.borrow(), &sh.key);
                     let full_len = full.len();
@@ -1045,6 +1054,16 @@ pub(crate) fn handle_new_mail(
     {
         return;
     }
+    // Папки: «письма сразу прочитаны» — письмо ни о чём не сигналит, флаг
+    // поставит обработка списка (auto_read_new); скрытая — без звука и тоста,
+    // точка в трее — только если так включено.
+    let (auto_read, in_hidden) = folders_ui::new_mail_policy(sh, &from_addr);
+    if auto_read {
+        if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+            let _ = etx.send(engine::EngineCmd::FetchConversations { limit: CONV_FETCH_LIMIT });
+        }
+        return;
+    }
     let conv_idx = if from_addr.is_empty() {
         None
     } else {
@@ -1141,8 +1160,10 @@ pub(crate) fn handle_new_mail(
     }
 
     // Not looking at that dialog: tray dot + sound.
-    tray_set_dot(true);
-    if ui.get_notify_sound_on() {
+    if !in_hidden || ui.get_badge_hidden_on() {
+        tray_set_dot(true);
+    }
+    if ui.get_notify_sound_on() && !in_hidden {
         toast::beep();
     }
 
@@ -1181,7 +1202,7 @@ pub(crate) fn handle_new_mail(
     // window is hidden (tray), OR the calendar view is up (mail sidebar not
     // visible). When the mail view is open and visible, the sidebar flash +
     // unread bump above is the notification — no toast.
-    if !visible || !in_mail_view {
+    if (!visible || !in_mail_view) && !in_hidden {
         // Spec #1: a batch collapses to a single «N новых» toast; a lone
         // message shows sender + subject.
         let (title, body) = if new_count > 1 {

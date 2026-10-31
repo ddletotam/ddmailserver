@@ -25,6 +25,8 @@ pub(crate) struct Shared {
     pub(crate) folders_on: Cell<bool>,
     /// Выбранный таб; пусто — инбокс (ничего не выбрано).
     pub(crate) active_folder: RefCell<String>,
+    /// «Показать скрытые» из меню полосы табов — на сессию, не сохраняется.
+    pub(crate) show_hidden_folders: Cell<bool>,
     /// Документ правился, на сервер ещё не ушёл (дебаунс правок в настройках).
     pub(crate) folders_dirty: Cell<bool>,
     /// Запись папок ушла на сервер, ответа ещё нет.

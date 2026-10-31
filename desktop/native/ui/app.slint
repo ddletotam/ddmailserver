@@ -103,6 +103,8 @@ struct FolderTab {
     icon: string,
     // Диалогов с непрочитанным в папке; 0 — без счётчика.
     unread: int,
+    // Папка «не показывать в списке» (видна по «Показать скрытые»).
+    hidden: bool,
 }
 
 // One attendee row of the event-detail table: display name + localized
@@ -1032,6 +1034,14 @@ export component MainWindow inherits Window {
     callback folder-delete(string);
     callback folder-edit(string, string, string);
     callback conv-to-folder(int, string);
+    // Меню полосы табов (правый клик): папка под курсором ("" — мимо табов).
+    property <string> ftab-menu-id: "";
+    property <string> ftab-menu-name: "";
+    in property <int> hidden-folders: 0;
+    in property <bool> show-hidden-folders: false;
+    callback folder-add-open();
+    callback toggle-show-hidden-folders();
+    callback folder-mark-read(string);
     // Перетаскивание таба: индекс тащимого, курсор в координатах полосы,
     // индекс таба под курсором.
     property <int> ftab-drag: -1;
@@ -1189,6 +1199,9 @@ export component MainWindow inherits Window {
     in-out property <length> chat-content-h: 0;
     // New-mail sound toggle (persisted client-side).
     in-out property <bool> notify-sound-on: true;
+    // Метка в трее учитывает скрытые папки (calendar.json).
+    in-out property <bool> badge-hidden-on: false;
+    callback toggle-badge-hidden();
     callback toggle-notify-sound();
     // Snooze picker for calendar-reminder toasts («Напомнить позже»).
     in-out property <bool> snooze-visible: false;
@@ -1519,6 +1532,45 @@ export component MainWindow inherits Window {
                         ftabs-fl.viewport-x = max(min(0px, ftabs-fl.viewport-x + d),
                             min(0px, ftabs-fl.width - ftabs-fl.viewport-width));
                     }
+                    // Правый клик по полосе: папка под курсором (если есть) —
+                    // «Все прочитаны», «Настроить…», «Удалить»; всегда —
+                    // «Новая папка» и «Показать скрытые». Удаление — через
+                    // подменю: подтверждения «нажми ещё раз» у меню нет.
+                    ftab-cm := ContextMenuArea {
+                        width: 100%;
+                        height: 100%;
+                        Menu {
+                            if root.ftab-menu-id != "": MenuItem {
+                                title: "Все прочитаны";
+                                activated => { root.folder-mark-read(root.ftab-menu-id); }
+                            }
+                            if root.ftab-menu-id != "": MenuItem {
+                                title: "Настроить…";
+                                activated => {
+                                    root.settings-tab = 4;
+                                    root.settings-visible = true;
+                                }
+                            }
+                            if root.ftab-menu-id != "": Menu {
+                                title: "Удалить";
+                                MenuItem {
+                                    title: "Удалить «" + root.ftab-menu-name + "» — диалоги вернутся во «Входящие»";
+                                    activated => { root.folder-delete(root.ftab-menu-id); }
+                                }
+                            }
+                            MenuItem {
+                                title: "Новая папка";
+                                activated => { root.folder-add-open(); }
+                            }
+                            if root.hidden-folders > 0: MenuItem {
+                                title: root.show-hidden-folders
+                                    ? "Не показывать скрытые"
+                                    : "Показать скрытые (" + root.hidden-folders + ")";
+                                activated => { root.toggle-show-hidden-folders(); }
+                            }
+                        }
+                        Rectangle { }
+                    }
                     ftabs-fl := Flickable {
                         width: parent.width;
                         height: parent.height;
@@ -1533,6 +1585,12 @@ export component MainWindow inherits Window {
                             scroll-event(se) => {
                                 scroll-by(se.delta-x + se.delta-y);
                                 return accept;
+                            }
+                            pointer-event(pe) => {
+                                if (pe.button == PointerEventButton.right && pe.kind == PointerEventKind.down) {
+                                    root.ftab-menu-id = "";
+                                    ftab-cm.show({ x: self.mouse-x + ftabs-fl.viewport-x, y: self.mouse-y });
+                                }
                             }
                         }
                         ftabs-row := HorizontalLayout {
@@ -1613,7 +1671,8 @@ export component MainWindow inherits Window {
                                     }
                                 }
                                 background: fta.has-hover && !self.active ? #f2f4f7 : transparent;
-                                opacity: (root.ftab-dragging && root.ftab-drag == ti) ? 0.5 : 1.0;
+                                // Скрытая папка, показанная по «Показать скрытые», — бледнее.
+                                opacity: (root.ftab-dragging && root.ftab-drag == ti) ? 0.5 : (t.hidden ? 0.55 : 1.0);
                                 // Подчёркивание выбранного таба.
                                 Rectangle {
                                     visible: parent.active;
@@ -1688,8 +1747,9 @@ export component MainWindow inherits Window {
                                         }
                                         if (pe.button == PointerEventButton.right
                                             && pe.kind == PointerEventKind.down) {
-                                            root.settings-tab = 4;
-                                            root.settings-visible = true;
+                                            root.ftab-menu-id = t.id;
+                                            root.ftab-menu-name = t.name == "" ? "Без названия" : t.name;
+                                            ftab-cm.show({ x: parent.x + self.mouse-x + ftabs-fl.viewport-x, y: self.mouse-y });
                                             return;
                                         }
                                         if (pe.button != PointerEventButton.left) { return; }
@@ -5635,6 +5695,7 @@ export component MainWindow inherits Window {
     if root.settings-visible: SettingsDialog {
         tab <=> root.settings-tab;
         notify-sound-on: root.notify-sound-on;
+        badge-hidden-on: root.badge-hidden-on;
         media-allow-all-on: root.media-allow-all-on;
         media-all-images-on: root.media-all-images-on;
         work-start: root.work-start;
@@ -5655,6 +5716,7 @@ export component MainWindow inherits Window {
             kb.focus();
         }
         toggle-notify-sound => { root.toggle-notify-sound(); }
+        toggle-badge-hidden => { root.toggle-badge-hidden(); }
         set-media-global(which) => { root.set-media-global(which); }
         set-work-hours(s, e) => { root.set-work-hours(s, e); }
         calendar-toggle-visibility(id) => { root.calendar-toggle-visibility(id); }

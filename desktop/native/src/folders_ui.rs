@@ -113,6 +113,8 @@ pub(crate) fn commit(
     }
     sh.folders_dirty.set(true);
     reapply_view(ui, sh);
+    // Скрытие папки меняет, что считает метка в трее.
+    tray_sync_dot(sh);
     if refresh_settings {
         refresh_folder_settings(ui, sh);
     }
@@ -365,6 +367,8 @@ pub(crate) fn refresh_folder_settings(ui: &MainWindow, sh: &Shared) {
                 Kind::Group => 2,
             },
             manual: f.include.len() as i32,
+            hidden: f.hidden,
+            auto_read: f.auto_read,
         })
         .collect();
     ui.set_folder_edits(ModelRc::new(VecModel::from(rows)));
@@ -389,9 +393,20 @@ pub(crate) fn wire_folders(ui: &MainWindow, shared: &Rc<Shared>) {
     let sh = shared.clone();
     ui.on_folder_tab_moved(move |from, to| {
         let Some(ui) = uiw.upgrade() else { return };
-        let (from, to) = (from as usize, to as usize);
-        let len = sh.folders.borrow().doc.folders.len();
-        if from >= len || to >= len || from == to {
+        // Номера — в полосе табов, где скрытых папок может не быть; в
+        // документе переставляем по id.
+        let tabs = ui.get_folder_tabs();
+        let id_at =
+            |i: i32| slint::Model::row_data(&tabs, i.max(0) as usize).map(|t| t.id.to_string());
+        let (Some(from_id), Some(to_id)) = (id_at(from), id_at(to)) else { return };
+        let (from, to) = {
+            let doc = &sh.folders.borrow().doc;
+            match (doc.index_of(&from_id), doc.index_of(&to_id)) {
+                (Some(a), Some(b)) => (a, b),
+                _ => return,
+            }
+        };
+        if from == to {
             return;
         }
         commit(&ui, &sh, true, |doc| {
@@ -426,6 +441,31 @@ pub(crate) fn wire_folders(ui: &MainWindow, shared: &Rc<Shared>) {
         });
     });
 
+    // Меню полосы табов: новая папка (и сразу в настройки — назвать её),
+    // показать скрытые, «все прочитаны».
+    let uiw = ui.as_weak();
+    let sh = shared.clone();
+    ui.on_folder_add_open(move || {
+        let Some(ui) = uiw.upgrade() else { return };
+        ui.invoke_folder_add();
+        ui.set_settings_tab(4);
+        ui.set_settings_visible(true);
+        let _ = &sh;
+    });
+    let uiw = ui.as_weak();
+    let sh = shared.clone();
+    ui.on_toggle_show_hidden_folders(move || {
+        let Some(ui) = uiw.upgrade() else { return };
+        sh.show_hidden_folders.set(!sh.show_hidden_folders.get());
+        refresh_folder_tabs(&sh, &ui);
+    });
+    let uiw = ui.as_weak();
+    let sh = shared.clone();
+    ui.on_folder_mark_read(move |id| {
+        let Some(ui) = uiw.upgrade() else { return };
+        mark_folder_read(&ui, &sh, &id);
+    });
+
     let uiw = ui.as_weak();
     let sh = shared.clone();
     ui.on_folder_delete(move |id| {
@@ -439,7 +479,7 @@ pub(crate) fn wire_folders(ui: &MainWindow, shared: &Rc<Shared>) {
         let Some(ui) = uiw.upgrade() else { return };
         let Some(i) = sh.folders.borrow().doc.index_of(&id) else { return };
         let value = value.to_string();
-        let structural = matches!(field.as_str(), "kind" | "clear-manual");
+        let structural = matches!(field.as_str(), "kind" | "clear-manual" | "hidden" | "auto-read");
         commit(&ui, &sh, structural, |doc| {
             let f = &mut doc.folders[i];
             match field.as_str() {
@@ -458,6 +498,8 @@ pub(crate) fn wire_folders(ui: &MainWindow, shared: &Rc<Shared>) {
                     f.include.clear();
                     f.exclude.clear();
                 }
+                "hidden" => f.hidden = value == "1",
+                "auto-read" => f.auto_read = value == "1",
                 _ => {}
             }
         });
@@ -495,4 +537,136 @@ mod tests {
         assert_eq!(clip_icon("abc🇷🇺🇰🇿"), "abc🇷🇺");
         assert_eq!(clip_icon("1\u{FE0F}\u{20E3}xyzw"), "1\u{FE0F}\u{20E3}xyz");
     }
+}
+
+/// Папка (её индекс в документе) диалога из сырого списка.
+fn folder_index(sh: &Shared, c: &Conversation) -> Option<usize> {
+    sh.folders.borrow().doc.folder_of(c, &sh.key)
+}
+
+/// Пометить прочитанными сообщения `refs` диалогов на сервере — по учётке
+/// каждого диалога.
+fn push_seen(sh: &Shared, by_account: HashMap<String, Vec<MessageRef>>) {
+    let Some(etx) = sh.engine_tx.borrow().clone() else { return };
+    for (account_key, messages) in by_account {
+        if messages.is_empty() {
+            continue;
+        }
+        let _ = etx.send(engine::EngineCmd::SetFlags {
+            messages,
+            flags: "\\Seen".into(),
+            add: true,
+            account_key,
+        });
+    }
+}
+
+/// «Все прочитаны» из меню таба: всё непрочитанное в диалогах папки —
+/// прочитано, локально сразу и на сервере.
+fn mark_folder_read(ui: &MainWindow, sh: &Shared, id: &str) {
+    let Some(target) = sh.folders.borrow().doc.index_of(id) else { return };
+    let mut by_account: HashMap<String, Vec<MessageRef>> = HashMap::new();
+    {
+        let doc = sh.folders.borrow();
+        let mut raw = sh.raw_convs.borrow_mut();
+        for c in raw.iter_mut().filter(|c| c.unread_count > 0) {
+            if doc.doc.folder_of(c, &sh.key) != Some(target) {
+                continue;
+            }
+            let account = eff_account(&sh.key, c);
+            for m in c.messages.iter_mut().filter(|m| !m.seen) {
+                m.seen = true;
+                by_account
+                    .entry(account.clone())
+                    .or_default()
+                    .push(MessageRef { seen: false, ..m.clone() });
+            }
+            c.unread_count = 0;
+        }
+    }
+    let n: usize = by_account.values().map(Vec::len).sum();
+    push_seen(sh, by_account);
+    println!("folder {id}: marked {n} messages read");
+    reapply_view(ui, sh);
+    tray_sync_dot(sh);
+}
+
+/// «Письма сразу прочитаны»: новые непрочитанные сообщения диалогов таких
+/// папок — прочитаны. «Новые» — те, которых не было в прошлом списке
+/// (`known`); на самом первом списке (`known` пуст) не трогаем ничего, иначе
+/// включение флага гасило бы и давно лежавшее непрочитанное.
+pub(crate) fn auto_read_new(sh: &Shared, known: &HashSet<(String, u32)>, raw: &mut [Conversation]) {
+    if known.is_empty() {
+        return;
+    }
+    let doc = sh.folders.borrow();
+    if !doc.doc.folders.iter().any(|f| f.auto_read) {
+        return;
+    }
+    let mut by_account: HashMap<String, Vec<MessageRef>> = HashMap::new();
+    for c in raw.iter_mut().filter(|c| c.unread_count > 0) {
+        let Some(fi) = doc.doc.folder_of(c, &sh.key) else { continue };
+        if !doc.doc.folders[fi].auto_read {
+            continue;
+        }
+        let account = eff_account(&sh.key, c);
+        let mut marked = 0u32;
+        for m in c.messages.iter_mut().filter(|m| !m.seen) {
+            if known.contains(&(m.folder.clone(), m.uid)) {
+                continue;
+            }
+            m.seen = true;
+            marked += 1;
+            by_account
+                .entry(account.clone())
+                .or_default()
+                .push(MessageRef { seen: false, ..m.clone() });
+        }
+        c.unread_count = c.unread_count.saturating_sub(marked);
+    }
+    drop(doc);
+    if !by_account.is_empty() {
+        println!("auto-read: {} new messages", by_account.values().map(Vec::len).sum::<usize>());
+        push_seen(sh, by_account);
+    }
+}
+
+/// Что делать с новым письмом в диалоге `c` (или в ещё не известном диалоге
+/// с собеседником `from_addr`): (сразу прочитать, папка скрытая).
+pub(crate) fn new_mail_policy(sh: &Shared, from_addr: &str) -> (bool, bool) {
+    let probe = sh
+        .raw_convs
+        .borrow()
+        .iter()
+        .find(|c| c.counterparts.iter().any(|cp| cp.addr.eq_ignore_ascii_case(from_addr)))
+        .cloned()
+        .or_else(|| {
+            // Новый собеседник: диалога ещё нет, но правила по домену его
+            // уже ловят.
+            (!from_addr.is_empty()).then(|| Conversation {
+                id: String::new(),
+                label: String::new(),
+                avatar_hash: String::new(),
+                received_by: String::new(),
+                counterparts: vec![ddmail_core::types::ContactInfo {
+                    name: String::new(),
+                    addr: from_addr.to_lowercase(),
+                }],
+                is_group: false,
+                last_date: String::new(),
+                last_date_ts: 0,
+                last_subject: String::new(),
+                unread_count: 0,
+                total_count: 0,
+                messages: Vec::new(),
+                draft: None,
+                account_key: String::new(),
+                merged: false,
+            })
+        });
+    let Some(c) = probe else { return (false, false) };
+    let Some(fi) = folder_index(sh, &c) else { return (false, false) };
+    let doc = sh.folders.borrow();
+    let f = &doc.doc.folders[fi];
+    (f.auto_read, f.hidden)
 }

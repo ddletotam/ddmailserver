@@ -37,6 +37,9 @@ export struct FolderEdit {
     domains: string,
     kind: int,
     manual: int,
+    // «Не показывать в списке» и «Письма сразу прочитаны».
+    hidden: bool,
+    auto-read: bool,
 }
 
 // Строка вкладки «Айдентики»: kind 0 — группа (имя, цвет, подпись,
@@ -137,6 +140,7 @@ export component SettingsDialog inherits Rectangle {
     in-out property <int> tab: 0;
 
     in property <bool> notify-sound-on;
+    in property <bool> badge-hidden-on;
     in property <bool> media-allow-all-on;
     in property <bool> media-all-images-on;
     in property <int> work-start;
@@ -159,6 +163,7 @@ export component SettingsDialog inherits Rectangle {
 
     callback close();
     callback toggle-notify-sound();
+    callback toggle-badge-hidden();
     callback set-media-global(string);
     callback set-work-hours(int, int);
     callback calendar-toggle-visibility(int);
@@ -450,9 +455,18 @@ export component SettingsDialog inherits Rectangle {
                                             toggled => { root.toggle-notify-sound(); }
                                         }
                                     }
+                                    Divider {}
+                                    SettingRow {
+                                        title: "Счётчик новых учитывает скрытые папки";
+                                        subtitle: "Метка в трее загорается и от писем в папках «не показывать в списке»";
+                                        Toggle {
+                                            on: root.badge-hidden-on;
+                                            toggled => { root.toggle-badge-hidden(); }
+                                        }
+                                    }
                                 }
                                 Note {
-                                    text: "Всплывающие уведомления, счётчики непрочитанного и метка в трее работают всегда.";
+                                    text: "Всплывающие уведомления, счётчики непрочитанного и метка в трее работают всегда — кроме скрытых папок: их письма приходят молча.";
                                 }
                             }
 
@@ -901,6 +915,24 @@ export component SettingsDialog inherits Rectangle {
                                                     }
                                                 }
                                             }
+                                        }
+                                    }
+                                    Divider {}
+                                    SettingRow {
+                                        title: "Не показывать в списке";
+                                        subtitle: "Таба нет, письма без уведомлений; вернуть — правый клик по табам → «Показать скрытые»";
+                                        Toggle {
+                                            on: f.hidden;
+                                            toggled => { root.folder-edit(f.id, "hidden", f.hidden ? "0" : "1"); }
+                                        }
+                                    }
+                                    Divider {}
+                                    SettingRow {
+                                        title: "Письма сразу прочитаны";
+                                        subtitle: "Новые письма её диалогов помечаются прочитанными, уже лежащие — нет";
+                                        Toggle {
+                                            on: f.auto-read;
+                                            toggled => { root.folder-edit(f.id, "auto-read", f.auto-read ? "0" : "1"); }
                                         }
                                     }
                                     if f.manual > 0: Divider {}

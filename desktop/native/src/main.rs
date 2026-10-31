@@ -211,6 +211,7 @@ fn main() {
     // per-calendar maps are seeded into Shared below).
     let cal_set = calendar_settings::load();
     ui.set_notify_sound_on(cal_set.notify_sound);
+    ui.set_badge_hidden_on(cal_set.badge_hidden);
     ui.set_work_start(cal_set.work_start_hour.clamp(0, 23));
     ui.set_work_end(cal_set.work_end_hour.clamp(1, 24));
     // Palette for the colour-picker popup, mirroring CAL_PALETTE.
@@ -411,6 +412,7 @@ fn main() {
         folders: RefCell::new(loaded_folders),
         folders_on: Cell::new(cal_set.folders_enabled),
         active_folder: RefCell::new(cal_set.active_folder.clone()),
+        show_hidden_folders: Cell::new(false),
         folders_dirty: Cell::new(false),
         folders_inflight: Cell::new(false),
         folders_error: RefCell::new(String::new()),
