@@ -538,7 +538,7 @@ fn main() {
     // (on_fetched сливает серверный документ с локальным).
     shared.idents.dirty.set(ident_merged);
     ui.set_ident_palette(ModelRc::new(VecModel::from(
-        IDENT_PASTEL.iter().map(|c| parse_hex_color(c)).collect::<Vec<_>>(),
+        IDENT_VIVID.iter().map(|c| parse_hex_color(c)).collect::<Vec<_>>(),
     )));
     refresh_composer_identities(&ui, &shared);
     identities_ui::refresh_settings(&ui, &shared);

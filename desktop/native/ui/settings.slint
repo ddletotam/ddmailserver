@@ -149,6 +149,9 @@ export component SettingsDialog inherits Rectangle {
     // Группы для «Перенести в группу» — подпись и id, параллельно.
     in property <[string]> ident-group-names;
     in property <[string]> ident-group-ids;
+    // Насыщенные пары пастели (IDENT_VIVID): бледную заливку строки на
+    // светлом фоне палитры не различить. Выбор — по индексу, Rust берёт
+    // пастель с тем же номером.
     in property <[color]> ident-palette;
     in property <string> ident-store-note;
 
@@ -1070,17 +1073,29 @@ export component SettingsDialog inherits Rectangle {
                                                 padding-top: 6px;
                                                 padding-bottom: 6px;
                                                 spacing: 4px;
+                                                // Без spacing: скрытая половина палитры
+                                                // (ширина 0) иначе копила отступы и
+                                                // сдвигала ряд. Зазор — внутри ячейки.
                                                 HorizontalLayout {
-                                                    spacing: 4px;
                                                     alignment: start;
                                                     for col[pi] in root.ident-palette: Rectangle {
                                                         visible: pi < 12;
-                                                        width: self.visible ? 22px : 0px;
-                                                        height: 22px;
-                                                        border-radius: 11px;
-                                                        border-width: 2px;
-                                                        border-color: col == r.color ? #0f1419 : (ip1-ta.has-hover ? #8b95a1 : #e3e8ee);
-                                                        background: col;
+                                                        width: self.visible ? 28px : 0px;
+                                                        height: 24px;
+                                                        Rectangle {
+                                                            x: 2px;
+                                                            width: 24px;
+                                                            height: 24px;
+                                                            border-radius: 12px;
+                                                            border-width: col == r.dot ? 2px : 0px;
+                                                            border-color: #0f1419;
+                                                            Rectangle {
+                                                                width: col == r.dot ? 16px : (ip1-ta.has-hover ? 22px : 20px);
+                                                                height: self.width;
+                                                                border-radius: self.width / 2;
+                                                                background: col;
+                                                            }
+                                                        }
                                                         ip1-ta := TouchArea {
                                                             mouse-cursor: pointer;
                                                             clicked => {
@@ -1090,17 +1105,29 @@ export component SettingsDialog inherits Rectangle {
                                                         }
                                                     }
                                                 }
+                                                // Без spacing: скрытая половина палитры
+                                                // (ширина 0) иначе копила отступы и
+                                                // сдвигала ряд. Зазор — внутри ячейки.
                                                 HorizontalLayout {
-                                                    spacing: 4px;
                                                     alignment: start;
                                                     for col[pi] in root.ident-palette: Rectangle {
                                                         visible: pi >= 12;
-                                                        width: self.visible ? 22px : 0px;
-                                                        height: 22px;
-                                                        border-radius: 11px;
-                                                        border-width: 2px;
-                                                        border-color: col == r.color ? #0f1419 : (ip2-ta.has-hover ? #8b95a1 : #e3e8ee);
-                                                        background: col;
+                                                        width: self.visible ? 28px : 0px;
+                                                        height: 24px;
+                                                        Rectangle {
+                                                            x: 2px;
+                                                            width: 24px;
+                                                            height: 24px;
+                                                            border-radius: 12px;
+                                                            border-width: col == r.dot ? 2px : 0px;
+                                                            border-color: #0f1419;
+                                                            Rectangle {
+                                                                width: col == r.dot ? 16px : (ip2-ta.has-hover ? 22px : 20px);
+                                                                height: self.width;
+                                                                border-radius: self.width / 2;
+                                                                background: col;
+                                                            }
+                                                        }
                                                         ip2-ta := TouchArea {
                                                             mouse-cursor: pointer;
                                                             clicked => {
