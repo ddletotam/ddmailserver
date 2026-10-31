@@ -45,6 +45,7 @@ mod address_book;
 mod bubble_html;
 mod calendar;
 mod composer;
+mod conv_avatar;
 mod conversation;
 mod engine_events;
 mod event_form;
@@ -358,7 +359,13 @@ fn main() {
         displays_from(&startup_merged, &startup_ident_colors)
     };
 
-    ui.set_conversations(ModelRc::new(VecModel::from(sidebar_items(&displays, &HashMap::new()))));
+    // Свои аватарки диалогов — сразу, до ответа движка.
+    let startup_conv_avatars = conv_avatar::load_all(&loaded_merges);
+    ui.set_conversations(ModelRc::new(VecModel::from(sidebar_items(
+        &displays,
+        &HashMap::new(),
+        &startup_conv_avatars,
+    ))));
     if let Some(d0) = displays.first() {
         ui.set_active_name(d0.name.clone().into());
         ui.set_active_initials(d0.initials.clone().into());
@@ -411,6 +418,7 @@ fn main() {
         ctx_attach: RefCell::new(None),
         displays: RefCell::new(displays.clone()),
         avatars: RefCell::new(HashMap::new()),
+        conv_avatars: RefCell::new(startup_conv_avatars),
         current_msgs: RefCell::new(Vec::new()),
         current_bodies: RefCell::new(Vec::new()),
         open_gen: Cell::new(0),

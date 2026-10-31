@@ -1484,7 +1484,7 @@ dependencies = [
 
 [[package]]
 name = "ddmail-native"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -1500,6 +1500,7 @@ dependencies = [
  "notify-rust",
  "raw-window-handle",
  "regex",
+ "reqwest",
  "resvg 0.44.0",
  "rfd",
  "serde",

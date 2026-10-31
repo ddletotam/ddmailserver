@@ -211,8 +211,9 @@ pub(crate) fn apply_active_header(ui: &MainWindow, sh: &Shared, idx: usize) {
         ui.set_active_color(slint::Brush::SolidColor(hex(&d.color)));
         // Та же аватарка, что в строке списка — из того же кэша по тому же
         // ключу; инициалы остаются запасным вариантом.
-        let avatar = sh.avatars.borrow().get(&d.email).cloned();
+        let avatar = avatar_for(sh, d);
         ui.set_active_has_avatar(avatar.is_some());
+        ui.set_avatar_custom(sh.conv_avatars.borrow().contains_key(&d.id));
         ui.set_active_avatar(avatar.unwrap_or_default());
         ui.set_active_ident_color(if d.ident_color.is_empty() {
             slint::Brush::SolidColor(hex("#ffffff"))

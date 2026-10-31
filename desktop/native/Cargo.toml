@@ -2,7 +2,7 @@
 name = "ddmail-native"
 # Kept in sync with installer/ddmail.iss AppVersion — bump both together
 # (docs/desktop-behavior-contract.md §7).
-version = "0.1.21"
+version = "0.1.22"
 edition = "2024"
 
 [[bin]]
@@ -34,6 +34,9 @@ winresource = "0.1"
 slint = { version = "1.13", features = ["raw-window-handle-06"] }
 # Inline images of an optimistic-send stub travel as data: URIs (stub_html).
 base64 = "0.22"
+# Своя аватарка диалога по ссылке (conv_avatar). Уже в дереве через
+# emlrender/core — новых крейтов не тянет.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
 
 # The one and only body-render path on both platforms — there is no browser
 # engine in this build and no flag that brings one back.

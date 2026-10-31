@@ -57,7 +57,8 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     // composer from-picker from cache.
                     identities_ui::rebuild(ui, sh);
                     let displays = displays_from(&merged, &sh.identity_colors.borrow());
-                    let items = sidebar_items(&displays, &sh.avatars.borrow());
+                    let items =
+                        sidebar_items(&displays, &sh.avatars.borrow(), &sh.conv_avatars.borrow());
                     ui.set_conversations(ModelRc::new(VecModel::from(items)));
                     // Request avatars for unique counterpart emails not yet cached.
                     if let Some(etx) = sh.engine_tx.borrow().as_ref() {
@@ -191,7 +192,11 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
             SHARED.with(|s| {
                 if let Some(sh) = s.borrow().as_ref() {
                     sh.avatars.borrow_mut().insert(email, img);
-                    let items = sidebar_items(&sh.displays.borrow(), &sh.avatars.borrow());
+                    let items = sidebar_items(
+                        &sh.displays.borrow(),
+                        &sh.avatars.borrow(),
+                        &sh.conv_avatars.borrow(),
+                    );
                     ui.set_conversations(ModelRc::new(VecModel::from(items)));
                 }
             });

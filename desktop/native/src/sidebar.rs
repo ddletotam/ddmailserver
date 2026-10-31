@@ -45,6 +45,8 @@ pub(crate) fn initials(name: &str) -> String {
 
 #[derive(Clone)]
 pub(crate) struct Disp {
+    /// id диалога (склейки — её первичного): по нему ищется своя аватарка.
+    pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) initials: String,
     pub(crate) color: String,
@@ -117,6 +119,7 @@ pub(crate) fn displays_from(
             let name = conv_name(c);
             let ident_color = ident_color_of(ident_colors, &c.received_by);
             Disp {
+                id: c.id.clone(),
                 initials: initials(&name),
                 name,
                 color: PALETTE[i % PALETTE.len()].to_string(),
@@ -257,6 +260,7 @@ pub(crate) fn merge_groups(
 pub(crate) fn synthetic_displays() -> Vec<Disp> {
     (0..25)
         .map(|i| Disp {
+            id: String::new(),
             name: NAMES[i].to_string(),
             initials: initials(NAMES[i]),
             color: PALETTE[i % PALETTE.len()].to_string(),
@@ -288,7 +292,7 @@ pub(crate) fn optimistic_remove_conversation(
             convs.remove(cur);
         }
         let displays = displays_from(&convs, &sh.identity_colors.borrow());
-        let items = sidebar_items(&displays, &sh.avatars.borrow());
+        let items = sidebar_items(&displays, &sh.avatars.borrow(), &sh.conv_avatars.borrow());
         ui.set_conversations(ModelRc::new(VecModel::from(items)));
         *sh.displays.borrow_mut() = displays;
     }
@@ -420,11 +424,25 @@ pub(crate) fn rebuild_merged_view(
 }
 
 /// Rebuild the sidebar ConvItem list from displays + the avatar map.
-pub(crate) fn sidebar_items(displays: &[Disp], avatars: &HashMap<String, Image>) -> Vec<ConvItem> {
+/// Аватарка строки: своя (двойной клик в шапке) важнее найденной по
+/// адресу собеседника.
+pub(crate) fn avatar_for(sh: &Shared, d: &Disp) -> Option<Image> {
+    sh.conv_avatars
+        .borrow()
+        .get(&d.id)
+        .cloned()
+        .or_else(|| sh.avatars.borrow().get(&d.email).cloned())
+}
+
+pub(crate) fn sidebar_items(
+    displays: &[Disp],
+    avatars: &HashMap<String, Image>,
+    custom: &HashMap<String, Image>,
+) -> Vec<ConvItem> {
     displays
         .iter()
         .map(|d| {
-            let avatar = avatars.get(&d.email).cloned();
+            let avatar = custom.get(&d.id).or_else(|| avatars.get(&d.email)).cloned();
             ConvItem {
                 name: d.name.clone().into(),
                 preview: d.preview.clone().into(),
@@ -499,7 +517,7 @@ pub(crate) fn refresh_sidebar(sh: &Shared, ui: &MainWindow) {
     if let Some(target) = pending.as_ref() {
         items.push(pending_compose_item(target));
     }
-    items.extend(sidebar_items(&displays, &avatars));
+    items.extend(sidebar_items(&displays, &avatars, &sh.conv_avatars.borrow()));
     ui.set_conversations(ModelRc::new(VecModel::from(items)));
     if pending.is_some() {
         ui.set_selected(0);
@@ -678,6 +696,8 @@ pub(crate) fn wire_sidebar(ui: &MainWindow, shared: &Rc<Shared>) {
         flash_confirm(&ui, "✓ Переименовано");
     });
 
+    wire_conv_avatar(ui, shared);
+
     // ↑/↓ over the conversation list: select + open the neighbour and keep
     // its row visible. Pairs with Delete for sweeping unwanted dialogs.
     let ui_weak_nav = ui.as_weak();
@@ -813,5 +833,128 @@ pub(crate) fn wire_sidebar(ui: &MainWindow, shared: &Rc<Shared>) {
             });
         }
         optimistic_remove_conversation(&ui, &sh_spamc, cur, &conv_id);
+    });
+}
+
+/// Ключ открытого диалога для своей аватарки — тот же, что у переименования.
+fn current_conv_key(sh: &Shared) -> Option<merges::MergeKey> {
+    if sh.compose.pending_compose.borrow().is_some() {
+        return None; // нового письма ещё нет в списке
+    }
+    sh.convs.borrow().get(sh.current.get()).map(|c| conv_merge_key(&sh.key, c))
+}
+
+/// Картинка проверена и нормализована (или нет) — применить к диалогу `key`.
+fn finish_conv_avatar(
+    ui: &MainWindow,
+    sh: &Shared,
+    key: merges::MergeKey,
+    result: Result<Vec<u8>, String>,
+) {
+    ui.set_avatar_busy(false);
+    let png = match result {
+        Ok(png) => png,
+        Err(e) => {
+            ui.set_avatar_error(e.into());
+            return;
+        }
+    };
+    let (file, img) = match conv_avatar::store(&key, &png).map(|f| (f, conv_avatar::to_image(&png)))
+    {
+        Ok((f, Some(img))) => (f, img),
+        Ok((_, None)) => {
+            ui.set_avatar_error("Не удалось показать картинку.".into());
+            return;
+        }
+        Err(e) => {
+            ui.set_avatar_error(e.into());
+            return;
+        }
+    };
+    {
+        let mut m = sh.merges.borrow_mut();
+        m.set_avatar(key.clone(), Some(file));
+        merges::save(&m);
+    }
+    sh.conv_avatars.borrow_mut().insert(key.id.clone(), img);
+    println!("conv avatar: {} set", key.id);
+    ui.set_avatar_open(false);
+    rebuild_merged_view(ui, sh, Some(key.id.clone()), false);
+    apply_active_header(ui, sh, sh.current.get());
+    flash_confirm(ui, "✓ Аватарка сохранена");
+}
+
+/// Двойной клик по аватарке в шапке: файл, ссылка, сброс (conv_avatar).
+/// Чтение, скачивание и декодирование — в фоне: ссылка может думать 20 с,
+/// а UI-поток не должен.
+fn wire_conv_avatar(ui: &MainWindow, shared: &Rc<Shared>) {
+    let run = |ui: &MainWindow,
+               key: merges::MergeKey,
+               job: Box<dyn FnOnce() -> Result<Vec<u8>, String> + Send>| {
+        ui.set_avatar_busy(true);
+        ui.set_avatar_error("".into());
+        let weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = job().and_then(|bytes| conv_avatar::normalize(&bytes));
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                SHARED.with(|s| {
+                    if let Some(sh) = s.borrow().as_ref() {
+                        finish_conv_avatar(&ui, sh, key, result);
+                    }
+                });
+            });
+        });
+    };
+
+    let weak = ui.as_weak();
+    let sh = shared.clone();
+    ui.on_avatar_pick_file(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let Some(key) = current_conv_key(&sh) else { return };
+        let Some(path) = pick_attachment_files(&ui).into_iter().next() else { return };
+        run(
+            &ui,
+            key,
+            Box::new(move || {
+                let meta = std::fs::metadata(&path)
+                    .map_err(|e| format!("Не удалось открыть файл: {e}"))?;
+                if meta.len() as usize > conv_avatar::MAX_BYTES {
+                    return Err("Слишком большой файл — можно до 10 МБ.".into());
+                }
+                std::fs::read(&path).map_err(|e| format!("Не удалось прочитать файл: {e}"))
+            }),
+        );
+    });
+
+    let weak = ui.as_weak();
+    let sh = shared.clone();
+    ui.on_avatar_load_url(move |url| {
+        let Some(ui) = weak.upgrade() else { return };
+        let Some(key) = current_conv_key(&sh) else { return };
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            return;
+        }
+        run(&ui, key, Box::new(move || conv_avatar::fetch_url(&url)));
+    });
+
+    let weak = ui.as_weak();
+    let sh = shared.clone();
+    ui.on_avatar_reset(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let Some(key) = current_conv_key(&sh) else { return };
+        {
+            let mut m = sh.merges.borrow_mut();
+            if let Some(file) = m.avatar_of(&key).map(str::to_string) {
+                conv_avatar::remove_file(&file);
+            }
+            m.set_avatar(key.clone(), None);
+            merges::save(&m);
+        }
+        sh.conv_avatars.borrow_mut().remove(&key.id);
+        ui.set_avatar_open(false);
+        rebuild_merged_view(&ui, &sh, Some(key.id.clone()), false);
+        apply_active_header(&ui, &sh, sh.current.get());
+        flash_confirm(&ui, "✓ Аватарка по собеседнику");
     });
 }

@@ -1,6 +1,7 @@
 import { ListView, LineEdit, ComboBox, CheckBox, Button, ScrollView, TextEdit, Palette } from "std-widgets.slint";
 import { SettingsDialog, ConnRow, CalendarItem, FolderEdit, IdentRow } from "settings.slint";
 import { KTextInput, KLineEdit, Shortcuts } from "keys.slint";
+import { Btn, IconBtn } from "kit.slint";
 export { Shortcuts }
 export { LoginWindow } from "login.slint";
 
@@ -1129,6 +1130,17 @@ export component MainWindow inherits Window {
     // Инлайн-переименование диалога в шапке (двойной клик по имени).
     in-out property <bool> rename-open: false;
     in-out property <string> rename-text: "";
+    // Своя аватарка диалога (двойной клик по аватарке в шапке): из файла
+    // или по ссылке. Проверка и сохранение — conv_avatar.rs.
+    in-out property <bool> avatar-open: false;
+    in-out property <string> avatar-url: "";
+    in property <bool> avatar-busy: false;
+    in-out property <string> avatar-error: "";
+    // У открытого диалога своя аватарка — есть что сбросить.
+    in property <bool> avatar-custom: false;
+    callback avatar-pick-file();
+    callback avatar-load-url(string);
+    callback avatar-reset();
     callback rename-conversation(string);
     // Клик по адресу в шапке — скопировать его в буфер обмена.
     callback copy-address(string);
@@ -2145,6 +2157,13 @@ export component MainWindow inherits Window {
                             source: root.active-avatar;
                             image-fit: cover;
                         }
+                        TouchArea {
+                            double-clicked => {
+                                root.avatar-error = "";
+                                root.avatar-url = "";
+                                root.avatar-open = true;
+                            }
+                        }
                     }
                     VerticalLayout {
                         alignment: center;
@@ -2283,6 +2302,105 @@ export component MainWindow inherits Window {
                         changed has-focus => {
                             if (!self.has-focus) {
                                 root.rename-open = false;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Панель своей аватарки — поверх переписки, под шапкой.
+            if root.avatar-open: Rectangle {
+                height: 0px;
+                // Следующий сосед (переписка) иначе рисовался бы поверх.
+                z: 10;
+                FocusScope {
+                    x: 12px;
+                    y: 4px;
+                    width: min(420px, parent.width - 24px);
+                    height: av-card.height;
+                    key-pressed(ev) => {
+                        if (ev.text == Key.Escape) {
+                            root.avatar-open = false;
+                            kb.focus();
+                            return accept;
+                        }
+                        reject
+                    }
+                    av-card := Rectangle {
+                        width: parent.width;
+                        height: av-col.preferred-height;
+                        background: white;
+                        border-radius: 12px;
+                        border-width: 1px;
+                        border-color: #e3e8ee;
+                        drop-shadow-blur: 18px;
+                        drop-shadow-offset-y: 4px;
+                        drop-shadow-color: #0f141933;
+                        TouchArea {}
+                        av-col := VerticalLayout {
+                            padding: 14px;
+                            spacing: 10px;
+                            HorizontalLayout {
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: "Аватарка диалога";
+                                    font-size: 14px;
+                                    font-weight: 700;
+                                    color: #0f1419;
+                                    vertical-alignment: center;
+                                }
+                                IconBtn {
+                                    glyph: "M 18 6 L 6 18 M 6 6 L 18 18";
+                                    clicked => {
+                                        root.avatar-open = false;
+                                        kb.focus();
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                Btn {
+                                    text: "Выбрать файл…";
+                                    enabled: !root.avatar-busy;
+                                    clicked => { root.avatar-pick-file(); }
+                                }
+                                if root.avatar-custom: Btn {
+                                    text: "Вернуть обычную";
+                                    enabled: !root.avatar-busy;
+                                    clicked => { root.avatar-reset(); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                KLineEdit {
+                                    horizontal-stretch: 1;
+                                    text <=> root.avatar-url;
+                                    placeholder-text: "или ссылка: https://…/photo.jpg";
+                                    enabled: !root.avatar-busy;
+                                    accepted => {
+                                        if (root.avatar-url != "") { root.avatar-load-url(root.avatar-url); }
+                                    }
+                                }
+                                Btn {
+                                    text: root.avatar-busy ? "Загружаем…" : "Загрузить";
+                                    kind: 1;
+                                    min-w: 110px;
+                                    enabled: !root.avatar-busy && root.avatar-url != "";
+                                    clicked => { root.avatar-load-url(root.avatar-url); }
+                                }
+                            }
+                            if root.avatar-error != "": Text {
+                                text: root.avatar-error;
+                                font-size: 12.5px;
+                                color: #c03535;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: "PNG, JPEG, GIF, WebP, BMP или ICO, до 10 МБ; обрежется до квадрата. Видна только в этом клиенте, как и своё имя диалога.";
+                                font-size: 12px;
+                                color: #5f6873;
+                                wrap: word-wrap;
                             }
                         }
                     }

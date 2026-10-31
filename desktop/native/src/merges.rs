@@ -29,6 +29,14 @@ pub struct ConvName {
     pub name: String,
 }
 
+/// Своя аватарка диалога (двойной клик по аватарке в шапке). Как и имя —
+/// только в клиенте; `file` — PNG в папке `avatars/` рядом (conv_avatar).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConvAvatar {
+    pub key: MergeKey,
+    pub file: String,
+}
+
 #[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Merges {
@@ -36,6 +44,8 @@ pub struct Merges {
     /// Переименования. Ключ — сырой диалог; у склейки это её первичный
     /// (голова группы), тот же, чьё имя склейка и так показывает.
     pub names: Vec<ConvName>,
+    /// Свои аватарки, ключ — как у переименования.
+    pub avatars: Vec<ConvAvatar>,
 }
 
 impl Merges {
@@ -51,6 +61,18 @@ impl Merges {
         self.names.retain(|n| n.key != key);
         if !name.is_empty() {
             self.names.push(ConvName { key, name: name.to_string() });
+        }
+    }
+
+    pub fn avatar_of(&self, key: &MergeKey) -> Option<&str> {
+        self.avatars.iter().find(|a| &a.key == key).map(|a| a.file.as_str())
+    }
+
+    /// Задать файл своей аватарки; `None` — вернуть аватарку по собеседнику.
+    pub fn set_avatar(&mut self, key: MergeKey, file: Option<String>) {
+        self.avatars.retain(|a| a.key != key);
+        if let Some(file) = file {
+            self.avatars.push(ConvAvatar { key, file });
         }
     }
 
@@ -96,7 +118,8 @@ impl Merges {
         let is_mine = |a: &str| mine.iter().any(|m| m == a);
         let mut changed = false;
         let named = self.names.iter_mut().map(|n| &mut n.key);
-        for key in self.groups.iter_mut().flatten().chain(named) {
+        let pictured = self.avatars.iter_mut().map(|a| &mut a.key);
+        for key in self.groups.iter_mut().flatten().chain(named).chain(pictured) {
             let Some((left, right)) = key.id.split_once('|') else { continue };
             let (left, right) = (left.to_lowercase(), right.to_lowercase());
             if right.contains(':') || right.contains(',') {

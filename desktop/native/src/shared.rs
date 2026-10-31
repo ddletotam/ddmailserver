@@ -38,6 +38,8 @@ pub(crate) struct Shared {
     pub(crate) ctx_attach: RefCell<Option<(String, u32, usize, String)>>,
     pub(crate) displays: RefCell<Vec<Disp>>,
     pub(crate) avatars: RefCell<HashMap<String, Image>>,
+    /// Свои аватарки диалогов: id диалога → картинка (conv_avatar).
+    pub(crate) conv_avatars: RefCell<HashMap<String, Image>>,
     /// Message refs for the currently rendered rows (row index → message).
     pub(crate) current_msgs: RefCell<Vec<MessageRef>>,
     /// Bodies of the open conversation, kept in memory (parallel to
