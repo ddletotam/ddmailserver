@@ -71,6 +71,11 @@ pub struct Group {
     pub addresses: Vec<Address>,
     /// Подпись; пусто — без подписи.
     pub signature: Vec<SigBlock>,
+    /// «Отвечать только на свои адреса»: адреса группы годятся в отправители
+    /// только для нового письма и для ответа/пересылки письма, пришедшего на
+    /// адрес этой же группы. Чтобы не ответить с рабочего адреса на письмо,
+    /// пришедшее на личный.
+    pub strict: bool,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -175,12 +180,36 @@ impl IdentityDoc {
 
     /// С какого адреса отвечать на письмо, пришедшее на `received_by`:
     /// отправитель его группы. Адрес не мой — отправитель группы по
-    /// умолчанию.
+    /// умолчанию, а если она строгая (`strict`) — первой нестрогой. Нет и
+    /// такой — `None`: адрес выбирают руками.
     pub fn reply_sender(&self, received_by: &str) -> Option<String> {
         self.group_of(received_by)
-            .or_else(|| self.default_group())
+            .or_else(|| self.default_group().filter(|g| !g.strict))
+            .or_else(|| self.groups.iter().find(|g| !g.strict))
             .map(|g| g.sender().to_string())
             .filter(|s| !s.is_empty())
+    }
+
+    /// Можно ли писать с `from` в контексте письма, пришедшего на `context`
+    /// (`None` — новое письмо). Нестрогая группа и чужой адрес — всегда;
+    /// строгая — только новое письмо или письмо, пришедшее на её же адрес.
+    pub fn allowed(&self, from: &str, context: Option<&str>) -> bool {
+        let Some((gi, _)) = self.locate(from) else { return true };
+        let g = &self.groups[gi];
+        if !g.strict {
+            return true;
+        }
+        match context {
+            None => true,
+            Some(r) => self.locate(r).is_some_and(|(ri, _)| ri == gi),
+        }
+    }
+
+    /// Предлагать ли адрес в «От кого»: не скрыт и разрешён в контексте.
+    pub fn offered(&self, from: &str, context: Option<&str>) -> bool {
+        let hidden =
+            self.locate(from).map(|(gi, ai)| self.groups[gi].addresses[ai].hidden).unwrap_or(false);
+        !hidden && self.allowed(from, context)
     }
 
     /// Отправитель нового письма.
@@ -590,6 +619,39 @@ mod tests {
         d.merge_sources(&[src("user+shop@x.ru")]);
         let (gi, _) = d.locate("user+shop@x.ru").unwrap();
         assert_eq!(d.groups[gi].addresses[0].email, "user+shop@x.ru");
+    }
+
+    #[test]
+    fn strict_group_answers_only_its_own_mail() {
+        let mut d = doc_of(&["lucky@i2lab.ru", "d.danilin@small.kz", "dd@small.kz"]);
+        let work = d.groups[1].id.clone();
+        d.move_address("dd@small.kz", Some(&work));
+        d.group_mut(&work).unwrap().strict = true;
+        // Письмо на личный адрес: рабочий нельзя.
+        assert!(!d.allowed("d.danilin@small.kz", Some("lucky@i2lab.ru")));
+        assert!(!d.offered("d.danilin@small.kz", Some("lucky@i2lab.ru")));
+        // Письмо на рабочий (любой адрес группы) и новое письмо — можно.
+        assert!(d.allowed("d.danilin@small.kz", Some("dd@small.kz")));
+        assert!(d.allowed("d.danilin@small.kz", None));
+        // Письмо на чужой адрес (рассылка) — тоже нельзя.
+        assert!(!d.allowed("d.danilin@small.kz", Some("list@lists.example.org")));
+        // Нестрогая группа годится всюду.
+        assert!(d.allowed("lucky@i2lab.ru", Some("dd@small.kz")));
+    }
+
+    #[test]
+    fn unknown_recipient_skips_strict_default_group() {
+        let mut d = doc_of(&["d.danilin@small.kz", "lucky@i2lab.ru"]);
+        let work = d.groups[0].id.clone();
+        d.default_group = work.clone();
+        d.group_mut(&work).unwrap().strict = true;
+        assert_eq!(d.reply_sender("list@lists.example.org").as_deref(), Some("lucky@i2lab.ru"));
+        // Новое письмо со строгой группы по умолчанию — можно.
+        assert_eq!(d.new_mail_sender().as_deref(), Some("d.danilin@small.kz"));
+        // Все группы строгие — отправителя нет, выбирают руками.
+        let other = d.groups[1].id.clone();
+        d.group_mut(&other).unwrap().strict = true;
+        assert_eq!(d.reply_sender("list@lists.example.org"), None);
     }
 
     #[test]

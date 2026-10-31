@@ -51,10 +51,7 @@ pub(crate) fn open_conversation(ui: &MainWindow, sh: &Shared, idx: usize) {
     // Ответ — с адреса-отправителя группы той айдентики, что получила
     // беседу (контракт §1в); выпадашка показывает его, пользователь может
     // переопределить до отправки.
-    let reply_from = sh.idents.stored.borrow().doc.reply_sender(&c.received_by);
-    if let Some(from) = reply_from {
-        aim_composer_identity(ui, sh, &from);
-    }
+    identities_ui::aim_for_context(ui, sh);
     ui.set_identity_menu_open(false);
 
     // The right pane clears IMMEDIATELY: stale bubbles from the previous

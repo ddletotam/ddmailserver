@@ -347,21 +347,45 @@ pub(crate) fn set_picker_index(ui: &MainWindow, sh: &Shared, index: i32) {
 
 pub(crate) fn sync_picker_rows(ui: &MainWindow, sh: &Shared) {
     let index = ui.get_composer_identity_index();
+    let context = send_context(sh);
     let st = sh.idents.stored.borrow();
     let emails = sh.compose.composer_identities.borrow();
     let rows = emails
         .iter()
         .enumerate()
-        .filter(|(i, e)| {
-            *i as i32 == index
-                || !st
-                    .doc
-                    .locate(e)
-                    .map(|(gi, ai)| st.doc.groups[gi].addresses[ai].hidden)
-                    .unwrap_or(false)
-        })
+        .filter(|(i, e)| *i as i32 == index || st.doc.offered(e, context.as_deref()))
         .count();
     ui.set_identity_menu_rows(rows as i32);
+}
+
+/// Контекст отправки для строгих групп (§1в): адрес, на который пришло
+/// письмо открытой беседы (ответ и пересылка — оба отсюда); `None` — новое
+/// письмо. Пустой `received_by` — «не мой адрес», строгим группам нельзя.
+pub(crate) fn send_context(sh: &Shared) -> Option<String> {
+    if sh.compose.pending_compose.borrow().is_some() {
+        return None;
+    }
+    sh.convs.borrow().get(sh.current.get()).map(|c| c.received_by.to_lowercase())
+}
+
+/// Сменился контекст (открыли беседу, начали новое письмо): пересобрать
+/// выпадашку под него и выбрать отправителя по правилу §1в. Подходящего
+/// нет (все группы строгие и письмо не их) — ничего не выбрано, отправка
+/// ждёт ручного выбора.
+pub(crate) fn aim_for_context(ui: &MainWindow, sh: &Shared) {
+    refresh_composer_identities(ui, sh);
+    let context = send_context(sh);
+    let target = {
+        let doc = &sh.idents.stored.borrow().doc;
+        match &context {
+            None => doc.new_mail_sender(),
+            Some(r) => doc.reply_sender(r),
+        }
+    };
+    match target {
+        Some(t) => aim_composer_identity(ui, sh, &t),
+        None => set_picker_index(ui, sh, -1),
+    }
 }
 
 // ---- Вкладка настроек ----
@@ -388,6 +412,7 @@ pub(crate) fn refresh_settings(ui: &MainWindow, sh: &Shared) {
             is_sender: false,
             hidden: false,
             has_signature: g.has_signature(),
+            strict: g.strict,
             orphan: false,
             first: gi == 0,
             last: gi + 1 == doc.groups.len(),
@@ -406,6 +431,7 @@ pub(crate) fn refresh_settings(ui: &MainWindow, sh: &Shared) {
                 is_sender: a.email == sender,
                 hidden: a.hidden,
                 has_signature: false,
+                strict: g.strict,
                 orphan: !owners.contains_key(&a.email),
                 first: ai == 0,
                 last: ai + 1 == g.addresses.len(),
@@ -495,6 +521,16 @@ pub(crate) fn wire(ui: &MainWindow, shared: &Rc<Shared>) {
                 return false;
             }
             d.default_group = group.to_string();
+            true
+        });
+    });
+    let w = ui.as_weak();
+    let sh = shared.clone();
+    ui.on_ident_toggle_strict(move |group| {
+        let Some(ui) = w.upgrade() else { return };
+        commit(&ui, &sh, true, |d| {
+            let Some(g) = d.group_mut(&group) else { return false };
+            g.strict = !g.strict;
             true
         });
     });
