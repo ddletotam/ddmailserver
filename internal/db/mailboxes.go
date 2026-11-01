@@ -2,11 +2,16 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
+
+// ErrMailboxNotFound is returned by the mailbox lookups when the mailbox does
+// not exist, distinct from a database failure (550 vs 451 at RCPT).
+var ErrMailboxNotFound = errors.New("mailbox not found")
 
 // CreateMailbox creates a new mailbox
 func (db *DB) CreateMailbox(mailbox *models.Mailbox) error {
@@ -54,7 +59,7 @@ func (db *DB) GetMailboxByID(id int64) (*models.Mailbox, error) {
 	)
 
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("mailbox not found")
+		return nil, ErrMailboxNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get mailbox: %w", err)
@@ -81,7 +86,7 @@ func (db *DB) GetMailbox(domainID int64, localPart string) (*models.Mailbox, err
 	)
 
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("mailbox not found")
+		return nil, ErrMailboxNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get mailbox: %w", err)

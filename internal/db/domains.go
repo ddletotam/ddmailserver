@@ -2,11 +2,17 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
+
+// ErrDomainNotFound is returned by the domain lookups when no such domain is
+// configured — as opposed to a database failure, which callers must not
+// mistake for "not ours" (outbound routing decides local vs MX on it).
+var ErrDomainNotFound = errors.New("domain not found")
 
 // CreateDomain creates a new domain
 func (db *DB) CreateDomain(domain *models.Domain) error {
@@ -52,7 +58,7 @@ func (db *DB) GetDomainByID(id int64) (*models.Domain, error) {
 	)
 
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("domain not found")
+		return nil, ErrDomainNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get domain: %w", err)
@@ -78,7 +84,7 @@ func (db *DB) GetDomainByName(domainName string) (*models.Domain, error) {
 	)
 
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("domain not found")
+		return nil, ErrDomainNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get domain: %w", err)

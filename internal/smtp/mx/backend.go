@@ -1,12 +1,15 @@
 package mx
 
 import (
+	"fmt"
 	"log"
 	"strings"
 
+	"github.com/ddletotam/ddmailserver/internal/calendar"
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/notify"
 	"github.com/ddletotam/ddmailserver/internal/parser"
+	"github.com/ddletotam/ddmailserver/internal/smtp/localdelivery"
 	"github.com/emersion/go-smtp"
 )
 
@@ -66,12 +69,9 @@ func (b *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	senderIP := extractIPFromAddr(remoteAddr)
 
 	return &Session{
-		database:            b.database,
-		hub:                 b.hub,
-		conn:                c,
-		analyzer:            b.analyzer,
-		senderIP:            senderIP,
-		calendarSyncTrigger: b.calendarSyncTrigger,
+		directory: b.database,
+		deliverer: localdelivery.New(b.database, b.hub, b.analyzer, b.calendarSyncTrigger, ITIPHandler(b.database)),
+		senderIP:  senderIP,
 	}, nil
 }
 
@@ -89,4 +89,25 @@ func extractIPFromAddr(addr string) string {
 		return addr[:idx]
 	}
 	return addr
+}
+
+// ITIPHandler returns the iTIP hook for local delivery: calendar messages
+// (REQUEST/CANCEL/REPLY/COUNTER as .ics) are applied to the calendar and the
+// mail copy is dropped, so they don't surface in the conversation list.
+// Local delivery has no account_id (=0), so routing falls to the recipient
+// address: a source that authenticates as it, or a local calendar. If
+// neither exists the invite is left as mail rather than filed into an
+// arbitrary calendar.
+func ITIPHandler(database *db.DB) localdelivery.ITIPFunc {
+	return func(parsed *parser.ParsedMessage, msgID, userID int64, recipient string) (bool, error) {
+		handler := calendar.NewIncomingHandler(database)
+		processed, err := handler.ProcessAndDispatch(parsed, userID, 0, []string{recipient})
+		if err != nil || !processed {
+			return false, err
+		}
+		if err := database.HardDeleteMessage(msgID); err != nil {
+			return false, fmt.Errorf("drop iTIP-consumed message %d: %w", msgID, err)
+		}
+		return true, nil
+	}
 }
