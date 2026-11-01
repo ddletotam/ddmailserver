@@ -13,6 +13,7 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/logmask"
 	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/smtp/localdelivery"
 	"github.com/emersion/go-message/mail"
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
@@ -23,12 +24,14 @@ type Session struct {
 	database    *db.DB
 	authLimiter *authlimit.Limiter
 	// senders overrides database for sender-ownership lookups (tests).
-	senders  db.SenderStore
-	conn     *smtp.Conn
-	username string
-	userID   int64
-	from     string
-	to       []string
+	senders db.SenderStore
+	// directory overrides database for local recipient lookups (tests).
+	directory localdelivery.Directory
+	conn      *smtp.Conn
+	username  string
+	userID    int64
+	from      string
+	to        []string
 	// accountID is how the accepted MAIL FROM will be sent: >0 relays
 	// through that external account, 0 delivers directly (local mailbox).
 	accountID int64
@@ -132,7 +135,53 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 	if s.userID == 0 {
 		return smtp.ErrAuthRequired
 	}
+	if err := s.checkLocalRecipient(to); err != nil {
+		return err
+	}
 	s.to = append(s.to, to)
+	return nil
+}
+
+// checkLocalRecipient refuses, right at RCPT, an address on one of our own
+// domains that cannot take mail — by the same rules and with the same reply
+// the MX gives an outside sender (550 5.1.1 for a missing mailbox). The
+// client shows the error at once, instead of the message being queued and
+// bounced later. Addresses on other domains are not checked here.
+func (s *Session) checkLocalRecipient(to string) error {
+	dir := s.recipientDirectory()
+	if dir == nil {
+		return nil
+	}
+	_, err := localdelivery.Lookup(dir, s.extractEmail(to))
+	if err == nil || errors.Is(err, localdelivery.ErrNotLocal) {
+		return nil
+	}
+	var reject *localdelivery.RejectError
+	if errors.As(err, &reject) {
+		log.Printf("SMTP: rejecting local recipient %s: %s", logmask.Addr(to), reject.Message)
+		return &smtp.SMTPError{
+			Code:         reject.Code,
+			EnhancedCode: smtp.EnhancedCode{reject.Enhanced[0], reject.Enhanced[1], reject.Enhanced[2]},
+			Message:      reject.Message,
+		}
+	}
+	log.Printf("SMTP: recipient lookup for %s failed: %v", logmask.Addr(to), err)
+	return &smtp.SMTPError{
+		Code:         451,
+		EnhancedCode: smtp.EnhancedCode{4, 3, 0},
+		Message:      "Temporary failure looking up recipient, try again later",
+	}
+}
+
+// recipientDirectory returns where local recipients are looked up, nil if
+// nowhere (a session built without a database).
+func (s *Session) recipientDirectory() localdelivery.Directory {
+	if s.directory != nil {
+		return s.directory
+	}
+	if s.database != nil {
+		return s.database
+	}
 	return nil
 }
 
