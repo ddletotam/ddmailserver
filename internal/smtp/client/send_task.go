@@ -173,8 +173,10 @@ func (t *SendTask) Execute(ctx context.Context) error {
 			retries = t.outboxMessage.Retries + 1
 		}
 
-		// Check if we should mark as failed
-		if retries >= maxRetries {
+		// Give up now on a permanent refusal (5xx after AUTH, e.g. "555
+		// syntax error" or "550 message blocked"): five more attempts over
+		// 17 hours would get the same answer.
+		if retries >= maxRetries || IsPermanent(err) {
 			log.Printf("Message %d exceeded max retries, marking as failed", t.outboxMessage.ID)
 			if err := t.database.UpdateOutboxMessageStatus(t.outboxMessage.ID, "failed", err.Error()); err != nil {
 				log.Printf("Failed to mark message as failed: %v", err)
