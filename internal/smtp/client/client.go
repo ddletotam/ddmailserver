@@ -245,52 +245,89 @@ func (c *Client) sendTLS(addr string, auth smtp.Auth, from string, to []string, 
 	return client.Quit()
 }
 
-// SendDirect sends email directly via MX lookup (for local domain senders)
+// SendDirect sends email directly via MX lookup (for local domain senders).
+// It returns the first failure; SendDirectEach says which recipient got what.
 func SendDirect(from string, to []string, message []byte, hostname string) error {
+	results := SendDirectEach(from, to, message, hostname)
+	for _, rcpt := range envelopeAddresses(to) {
+		if err := results[rcpt]; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// lookupMX is net.LookupMX, replaceable in tests.
+var lookupMX = net.LookupMX
+
+// SendDirectEach delivers to every recipient domain via its MX and returns the
+// outcome per recipient addr-spec (nil = accepted). Every domain is attempted,
+// even after one fails, so one unreachable domain does not hold back the rest
+// and the caller can bounce exactly the recipients that failed.
+func SendDirectEach(from string, to []string, message []byte, hostname string) map[string]error {
 	// As in Send: the envelope takes addr-specs only. Here a stray display name
 	// also breaks the domain grouping below, since splitting "Имя <u@host>" on
 	// "@" yields "host>" and the MX lookup goes looking for that.
 	from = envelopeAddress(from)
 	to = envelopeAddresses(to)
 
+	results := make(map[string]error, len(to))
+
 	// Group recipients by domain
 	byDomain := make(map[string][]string)
 	for _, rcpt := range to {
 		parts := strings.SplitN(rcpt, "@", 2)
-		if len(parts) != 2 {
+		if len(parts) != 2 || parts[1] == "" {
+			results[rcpt] = fmt.Errorf("invalid recipient address %s", logmask.Addr(rcpt))
 			continue
 		}
 		byDomain[parts[1]] = append(byDomain[parts[1]], rcpt)
 	}
 
 	for domain, rcpts := range byDomain {
-		// MX lookup
-		mxRecords, err := net.LookupMX(domain)
-		if err != nil || len(mxRecords) == 0 {
-			// Fallback to A record
-			mxRecords = []*net.MX{{Host: domain, Pref: 10}}
-		}
-
-		// Try each MX in priority order
-		var lastErr error
-		for _, mx := range mxRecords {
-			host := strings.TrimSuffix(mx.Host, ".")
-			addr := fmt.Sprintf("%s:25", host)
-			log.Printf("Direct delivery to %s via MX %s", domain, addr)
-
-			lastErr = sendDirectToHost(addr, hostname, from, rcpts, message)
-			if lastErr == nil {
-				log.Printf("Direct delivery to %s successful via %s", domain, host)
-				break
-			}
-			log.Printf("Direct delivery to %s via %s failed: %v", domain, host, lastErr)
-		}
-		if lastErr != nil {
-			return fmt.Errorf("failed to deliver to %s: %w", domain, lastErr)
+		err := sendDirectDomain(domain, from, rcpts, message, hostname)
+		for _, rcpt := range rcpts {
+			results[rcpt] = err
 		}
 	}
 
-	return nil
+	return results
+}
+
+// sendDirectDomain delivers to the recipients of one domain, trying its MX
+// hosts in priority order.
+func sendDirectDomain(domain, from string, rcpts []string, message []byte, hostname string) error {
+	mxRecords, err := lookupMX(domain)
+	if err != nil || len(mxRecords) == 0 {
+		// Fallback to A record (RFC 5321 §5.1, implicit MX)
+		mxRecords = []*net.MX{{Host: domain, Pref: 10}}
+	}
+	if len(mxRecords) == 1 && strings.TrimSuffix(mxRecords[0].Host, ".") == "" {
+		return fmt.Errorf("failed to deliver to %s: %w", domain, errNullMX)
+	}
+
+	var lastErr error
+	for _, mx := range mxRecords {
+		host := strings.TrimSuffix(mx.Host, ".")
+		if host == "" {
+			continue
+		}
+		addr := fmt.Sprintf("%s:25", host)
+		log.Printf("Direct delivery to %s via MX %s", domain, addr)
+
+		lastErr = sendDirectToHost(addr, hostname, from, rcpts, message)
+		if lastErr == nil {
+			log.Printf("Direct delivery to %s successful via %s", domain, host)
+			return nil
+		}
+		log.Printf("Direct delivery to %s via %s failed: %v", domain, host, lastErr)
+		if IsPermanent(lastErr) {
+			// A 5xx from an MX of the domain is the domain's answer; the
+			// next MX would say the same.
+			break
+		}
+	}
+	return fmt.Errorf("failed to deliver to %s: %w", domain, lastErr)
 }
 
 // errStartTLS marks a failed STARTTLS handshake. The TCP session is dead

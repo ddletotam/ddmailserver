@@ -17,6 +17,8 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/oauth"
 	"github.com/ddletotam/ddmailserver/internal/parser"
 	smtpclient "github.com/ddletotam/ddmailserver/internal/smtp/client"
+	"github.com/ddletotam/ddmailserver/internal/smtp/localdelivery"
+	smtpmx "github.com/ddletotam/ddmailserver/internal/smtp/mx"
 	taskpkg "github.com/ddletotam/ddmailserver/internal/task"
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
@@ -38,17 +40,20 @@ type SchedulerDeps struct {
 
 // Scheduler schedules periodic tasks for mail synchronization
 type Scheduler struct {
-	pool                     *Pool
-	database                 *db.DB
-	interval                 time.Duration
-	ctx                      context.Context
-	cancel                   context.CancelFunc
-	googleOAuth              *oauth.GoogleOAuth
-	microsoftOAuth           *oauth.MicrosoftOAuth
-	notifyHub                *notify.Hub
-	hostname                 string
-	analyzer                 *parser.Analyzer
-	dkimSigner               *dkimsign.Signer
+	pool           *Pool
+	database       *db.DB
+	interval       time.Duration
+	ctx            context.Context
+	cancel         context.CancelFunc
+	googleOAuth    *oauth.GoogleOAuth
+	microsoftOAuth *oauth.MicrosoftOAuth
+	notifyHub      *notify.Hub
+	hostname       string
+	analyzer       *parser.Analyzer
+	dkimSigner     *dkimsign.Signer
+	// localDelivery puts mail for our own domains straight into the
+	// recipient's mailbox instead of dialling our own MX through NAT.
+	localDelivery            *localdelivery.Deliverer
 	spamCleanupLastRun       time.Time
 	accountLogCleanupLastRun time.Time
 	vaultCleanupLastRun      time.Time
@@ -78,7 +83,7 @@ func NewScheduler(deps SchedulerDeps) *Scheduler {
 		panic("worker.NewScheduler: IntervalSeconds must be > 0")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Scheduler{
+	s := &Scheduler{
 		pool:           deps.Pool,
 		database:       deps.Database,
 		interval:       time.Duration(deps.IntervalSeconds) * time.Second,
@@ -93,6 +98,9 @@ func NewScheduler(deps SchedulerDeps) *Scheduler {
 		outboxKick:     make(chan struct{}, 1),
 		cycleKick:      make(chan struct{}, 1),
 	}
+	s.localDelivery = localdelivery.New(deps.Database, deps.NotifyHub, deps.Analyzer,
+		s.TriggerCalendarSyncForUser, smtpmx.ITIPHandler(deps.Database))
+	return s
 }
 
 // TriggerCycle runs one scheduling pass now instead of at the next tick.
@@ -484,6 +492,7 @@ func (s *Scheduler) scheduleSMTPSend() {
 			// Direct delivery for local domain senders
 			direct := smtpclient.NewDirectSendTask(msg, s.database, s.getHostname(), s.dkimSigner)
 			direct.SetSentNotifyFunc(notifySent)
+			direct.SetLocalDeliverer(s.localDelivery)
 			sendTask = direct
 		} else {
 			// Relay through external SMTP account
