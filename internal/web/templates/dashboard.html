@@ -65,6 +65,67 @@
     </div>
 </div>
 
+{{with .Connect}}
+<!-- Connection settings: what a phone / mail app / desktop client needs -->
+<div class="row row-deck row-cards mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title"><i class="ti ti-plug-connected me-2"></i>{{t "dashboard.connect_title"}}</h3>
+            </div>
+            <div class="card-body">
+                <p class="text-muted">{{t "dashboard.connect_hint"}}</p>
+                <div class="datagrid mb-3">
+                    <div class="datagrid-item">
+                        <div class="datagrid-title">{{t "dashboard.connect_login"}}</div>
+                        <div class="datagrid-content"><code class="js-copy" role="button" title="{{t "dashboard.copy"}}">{{.Username}}</code></div>
+                    </div>
+                    <div class="datagrid-item">
+                        <div class="datagrid-title">Email</div>
+                        <div class="datagrid-content"><code class="js-copy" role="button" title="{{t "dashboard.copy"}}">{{.Email}}</code></div>
+                    </div>
+                    <div class="datagrid-item">
+                        <div class="datagrid-title">{{t "dashboard.connect_imap"}}</div>
+                        <div class="datagrid-content"><code class="js-copy" role="button" title="{{t "dashboard.copy"}}">{{.Host}}</code> : {{.IMAPPort}}, {{t "dashboard.connect_ssl"}}</div>
+                    </div>
+                    <div class="datagrid-item">
+                        <div class="datagrid-title">{{t "dashboard.connect_smtp"}}</div>
+                        <div class="datagrid-content"><code class="js-copy" role="button" title="{{t "dashboard.copy"}}">{{.Host}}</code> : {{.SMTPPort}}, {{t "dashboard.connect_ssl"}}<div class="text-muted small">{{t "dashboard.connect_smtp_auth"}}</div></div>
+                    </div>
+                    <div class="datagrid-item">
+                        <div class="datagrid-title">{{t "dashboard.connect_caldav"}}</div>
+                        <div class="datagrid-content"><code class="js-copy" role="button" title="{{t "dashboard.copy"}}">https://{{.Host}}{{if ne .HTTPSPort 443}}:{{.HTTPSPort}}{{end}}/caldav/</code></div>
+                    </div>
+                    <div class="datagrid-item">
+                        <div class="datagrid-title">{{t "dashboard.connect_carddav"}}</div>
+                        <div class="datagrid-content"><code class="js-copy" role="button" title="{{t "dashboard.copy"}}">https://{{.Host}}{{if ne .HTTPSPort 443}}:{{.HTTPSPort}}{{end}}/carddav/</code></div>
+                    </div>
+                </div>
+                <ul class="text-muted mb-3 ps-3">
+                    <li>{{t "dashboard.connect_password_hint"}}</li>
+                    <li>{{t "dashboard.connect_desktop"}} <code class="js-copy" role="button" title="{{t "dashboard.copy"}}">https://{{.Host}}{{if ne .HTTPSPort 443}}:{{.HTTPSPort}}{{end}}</code></li>
+                    <li>{{t "dashboard.connect_android"}}</li>
+                    <li>{{t "dashboard.connect_iphone"}}</li>
+                </ul>
+                <a href="/settings" class="btn btn-outline-primary me-2"><i class="ti ti-device-mobile me-2"></i>{{t "dashboard.connect_profile"}}</a>
+                <a href="/settings" class="btn btn-outline-secondary"><i class="ti ti-key me-2"></i>{{t "dashboard.connect_app_password"}}</a>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+document.querySelectorAll('.js-copy').forEach(function (el) {
+    el.addEventListener('click', function () {
+        if (!navigator.clipboard) { return; }
+        navigator.clipboard.writeText(el.textContent.trim()).then(function () {
+            el.classList.add('text-success');
+            setTimeout(function () { el.classList.remove('text-success'); }, 800);
+        }).catch(function () {});
+    });
+});
+</script>
+{{end}}
+
 <!-- Quick actions -->
 <div class="row row-deck row-cards mb-4">
     <div class="col-12">

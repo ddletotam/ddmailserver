@@ -57,6 +57,20 @@ type DashboardData struct {
 	// AuthFailureCount: accounts/sources whose credentials the provider
 	// rejects (auth_backoff rows).
 	AuthFailureCount int
+	// Connect: what a phone or desktop client needs to reach this server.
+	// Nil when no public hostname is configured — better no card than one
+	// pointing at "".
+	Connect *ConnectInfo
+}
+
+// ConnectInfo is the client-facing connection settings shown on the dashboard.
+type ConnectInfo struct {
+	Host      string
+	IMAPPort  int
+	SMTPPort  int
+	HTTPSPort int
+	Username  string
+	Email     string
 }
 
 type AccountsData struct {
@@ -234,9 +248,32 @@ func (s *Server) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 		CalendarCount:     len(calendars),
 		ErrorAccountCount: errorCount,
 		AuthFailureCount:  len(authFailures),
+		Connect:           s.connectInfo(user),
 	}
 
 	s.renderTemplate(w, "dashboard.html", data)
+}
+
+// connectInfo builds the dashboard's connection card from the public
+// endpoints — the same source the .mobileconfig export uses, so the two
+// never disagree.
+func (s *Server) connectInfo(user *models.User) *ConnectInfo {
+	p := s.publicEndpoints
+	if p.Hostname == "" {
+		return nil
+	}
+	email := user.Email
+	if email == "" {
+		email = user.Username + "@" + p.Hostname
+	}
+	return &ConnectInfo{
+		Host:      p.Hostname,
+		IMAPPort:  p.IMAPPort,
+		SMTPPort:  p.SMTPPort,
+		HTTPSPort: p.HTTPSPort,
+		Username:  user.Username,
+		Email:     email,
+	}
 }
 
 // HandleAccountsPage shows the accounts management page
