@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -36,16 +37,31 @@ type WSEvent struct {
 	NextAttemptAt int64  `json:"next_attempt_at,omitempty"`
 }
 
+// wsToken returns the JWT of a WebSocket handshake. Native clients (desktop
+// tungstenite, Android OkHttp) can set headers on the handshake, so the
+// Authorization header comes first: a token in the query string ends up in
+// proxy access logs. The ?token= query is kept for clients that still send it
+// (and for browsers, whose WebSocket API cannot set headers).
+func wsToken(r *http.Request) string {
+	if h := r.Header.Get("Authorization"); h != "" {
+		if parts := strings.SplitN(h, " ", 2); len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+			if t := strings.TrimSpace(parts[1]); t != "" {
+				return t
+			}
+		}
+	}
+	return r.URL.Query().Get("token")
+}
+
 // HandleDesktopWebSocket upgrades to WebSocket and streams push events.
-// Auth: JWT passed as ?token= query parameter (WebSocket can't send headers).
+// Auth: JWT in the Authorization header (preferred) or the ?token= query.
 func (s *Server) HandleDesktopWebSocket(w http.ResponseWriter, r *http.Request) {
 	if s.notifyHub == nil {
 		http.Error(w, "push not available", http.StatusServiceUnavailable)
 		return
 	}
 
-	// Authenticate via query param (WebSocket clients can't set Authorization header)
-	tokenStr := r.URL.Query().Get("token")
+	tokenStr := wsToken(r)
 	if tokenStr == "" {
 		http.Error(w, "missing token", http.StatusUnauthorized)
 		return
