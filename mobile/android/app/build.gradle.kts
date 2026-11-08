@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -27,8 +29,27 @@ android {
         create("gms") { dimension = "push" }
     }
 
+    // Ключ подписи — вне git, в каталоге секретов станции (контракт §7):
+    // ~/.config/ddmail-android/ или %APPDATA%\ddmail-android\. Нет его —
+    // release собирается неподписанным (на телефон такой не поставить).
+    val secrets = System.getenv("APPDATA")?.let { File(it, "ddmail-android") }
+        ?: File(System.getProperty("user.home"), ".config/ddmail-android")
+    val keyProps = File(secrets, "keystore.properties")
+    signingConfigs {
+        if (keyProps.exists()) {
+            val p = Properties().apply { keyProps.inputStream().use { load(it) } }
+            create("release") {
+                storeFile = File(secrets, p.getProperty("storeFile"))
+                storePassword = p.getProperty("storePassword")
+                keyAlias = p.getProperty("keyAlias")
+                keyPassword = p.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfigs.findByName("release")?.let { signingConfig = it }
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
