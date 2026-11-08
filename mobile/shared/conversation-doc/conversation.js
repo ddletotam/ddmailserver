@@ -14,7 +14,7 @@
 'use strict';
 
 /** Сменилась нормализация — поднять: клиенты пересчитают закэшированное. */
-const NORMALIZER_VERSION = 1;
+const NORMALIZER_VERSION = 2;
 
 const native = (() => {
   if (window.ddmNative) {
@@ -209,7 +209,9 @@ function collapseQuotes(body) {
   const walker = doc.createTreeWalker(body, NodeFilter.SHOW_TEXT);
   for (let t = walker.nextNode(); t; t = walker.nextNode()) {
     const text = t.nodeValue.trim();
-    if (!text || !QUOTE_MARKERS.some((re) => re.test(text))) continue;
+    if (!text) continue;
+    const marker = QUOTE_MARKERS.some((re) => re.test(text)) || isBareSeparator(t, text);
+    if (!marker) continue;
     if (t.parentNode.closest && t.parentNode.closest('details.ddm-quote')) continue;
     const block = topBlock(body, t);
     if (!block) break;
@@ -220,6 +222,22 @@ function collapseQuotes(body) {
     for (const n of nodes) d.appendChild(n);
     break;
   }
+}
+
+/**
+ * Разделитель из одних дефисов (Mail.ru, Яндекс, часть Outlook) — цитата,
+ * только если сразу за ним идут заголовки пересылаемого письма: иначе это
+ * просто черта в оформлении.
+ */
+const HEADER_AFTER = /^(Кому|От|Тема|Дата|Отправлено|Копия|From|To|Subject|Date|Sent|Cc)\s*:/im;
+
+function isBareSeparator(node, text) {
+  if (!/^[-_—=]{8,}$/.test(text)) return false;
+  let after = '';
+  const walker = node.ownerDocument.createTreeWalker(node.ownerDocument.body, NodeFilter.SHOW_TEXT);
+  walker.currentNode = node;
+  for (let n = walker.nextNode(); n && after.length < 300; n = walker.nextNode()) after += n.nodeValue + '\n';
+  return HEADER_AFTER.test(after.trim().split('\n').slice(0, 3).join('\n'));
 }
 
 function escapeHtml(s) {
