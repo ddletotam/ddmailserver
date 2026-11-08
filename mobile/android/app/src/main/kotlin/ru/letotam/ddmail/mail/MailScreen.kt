@@ -47,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -139,6 +140,10 @@ fun MailScreen(
                 vm.conversation.openAttachment(uid, index, vm.conversation.attachmentName(uid, index))
             override fun loadPart(uid: Long, cid: String) = vm.conversation.part(uid, cid)
             override fun onBubbleMenu(uid: Long) = vm.showBubbleMenu(uid)
+            override fun onAttachmentMenu(uid: Long, index: Int) {
+                vm.attachmentMenu.value = uid to index
+            }
+            override fun onAllowSender(uid: Long) = vm.conversation.allowSender(uid)
         }
         onDispose { web.host = null }
     }
@@ -148,6 +153,7 @@ fun MailScreen(
 
     ComposeSheetDialog(vm.compose)
     BubbleMenu(vm)
+    AttachmentMenu(vm)
     val app = context.applicationContext as DdmailApp
     ru.letotam.ddmail.settings.PrefetchQuestion(app.settings)
     var settingsOpen by remember { mutableStateOf(false) }
@@ -168,8 +174,11 @@ fun MailScreen(
     // открыта, прячем всё, кроме строки ввода, иначе композера не видно.
     val ime = WindowInsets.isImeVisible
     Column(modifier.fillMaxSize().imePadding()) {
-        if (!ime) {
-            TopBar(session, status, syncing, onSettings = { settingsOpen = true }, onLogout = onLogout)
+        val q by vm.query.collectAsState()
+        // Поле поиска видно и с открытой клавиатурой — в него и печатают.
+        if (q != null) SearchBar(q!!, onChange = { vm.query.value = it }, onClose = { vm.query.value = null })
+        else if (!ime) {
+            TopBar(session, status, syncing, onSearch = { vm.query.value = "" }, onSettings = { settingsOpen = true }, onLogout = onLogout)
             if (status == SessionStatus.Dead) DeadSessionBanner(onRelogin)
         }
         if (wide) {
@@ -187,7 +196,7 @@ fun MailScreen(
 }
 
 @Composable
-private fun TopBar(session: Session, status: SessionStatus, syncing: Boolean, onSettings: () -> Unit, onLogout: () -> Unit) {
+private fun TopBar(session: Session, status: SessionStatus, syncing: Boolean, onSearch: () -> Unit, onSettings: () -> Unit, onLogout: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 2.dp),
@@ -209,6 +218,7 @@ private fun TopBar(session: Session, status: SessionStatus, syncing: Boolean, on
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        TextButton(onClick = onSearch) { Text("🔍", fontSize = 18.sp) }
         Box {
             TextButton(onClick = { menu = true }) { Text("⋮", fontSize = 22.sp) }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -295,6 +305,24 @@ private fun DeleteDialog(vm: MailViewModel, close: () -> Unit) {
     )
 }
 
+/** Поиск по диалогам: поле вместо шапки; результаты — вместо списка папки. */
+@Composable
+private fun SearchBar(q: String, onChange: (String) -> Unit, onClose: () -> Unit) {
+    val focus = remember { androidx.compose.ui.focus.FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    BackHandler(onBack = onClose)
+    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        TextButton(onClick = onClose) { Text("←", fontSize = 20.sp) }
+        androidx.compose.material3.OutlinedTextField(
+            value = q,
+            onValueChange = onChange,
+            placeholder = { Text("Имя, адрес или тема") },
+            singleLine = true,
+            modifier = Modifier.weight(1f).focusRequester(focus),
+        )
+    }
+}
+
 /** Несмываемая плашка (контракт §2): кэш виден, но почта не обновляется. */
 @Composable
 private fun DeadSessionBanner(onRelogin: () -> Unit) {
@@ -322,10 +350,12 @@ private fun ListPane(
         // На время выбора панель действий заменяет полосу табов (§5).
         if (picked.isEmpty()) FolderTabs(s, vm::selectFolder) else SelectionBar(picked.size, vm, onMove, onDelete)
         HorizontalDivider()
-        PullToRefreshBox(isRefreshing = syncing, onRefresh = vm::sync, modifier = Modifier.fillMaxSize()) {
+        // Крутится только по жесту: фоновые синки показывает строка под заголовком.
+        val pulling by vm.pulling.collectAsState()
+        PullToRefreshBox(isRefreshing = pulling, onRefresh = vm::pullRefresh, modifier = Modifier.fillMaxSize()) {
             if (s.loaded && s.conversations.isEmpty() && !syncing) {
                 Text(
-                    stringResource(if (s.active == null) R.string.list_empty_inbox else R.string.list_empty_folder),
+                    if (vm.query.value != null) "Ничего не нашлось." else stringResource(if (s.active == null) R.string.list_empty_inbox else R.string.list_empty_folder),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(24.dp),
                 )
@@ -335,6 +365,7 @@ private fun ListPane(
                     val inPick = c.id in picked
                     ConversationRow(
                         c,
+                        avatars = vm.avatars,
                         selected = c.id == selectedId && picked.isEmpty(),
                         picked = inPick,
                         onClick = { if (picked.isNotEmpty()) vm.togglePick(c.id) else vm.open(c.id) },
@@ -418,7 +449,7 @@ private fun Tab(title: String, unread: Int, selected: Boolean, onClick: () -> Un
 /** Строгий двухстрочный формат (§4 десктопа): имя / тема последнего письма. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ConversationRow(c: Conversation, selected: Boolean, picked: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
+private fun ConversationRow(c: Conversation, avatars: Avatars, selected: Boolean, picked: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
     val unread = c.unreadCount > 0
     Row(
         Modifier
@@ -439,7 +470,7 @@ private fun ConversationRow(c: Conversation, selected: Boolean, picked: Boolean,
                 Text("✓", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
             }
         } else {
-            Avatar(c)
+            Avatar(c, avatars)
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
@@ -484,7 +515,17 @@ private fun ConversationRow(c: Conversation, selected: Boolean, picked: Boolean,
 
 /** Пока без серверных аватарок — инициалы на цвете, стабильном для диалога. */
 @Composable
-private fun Avatar(c: Conversation) {
+private fun Avatar(c: Conversation, avatars: Avatars) {
+    val email = c.counterparts.firstOrNull()?.addr.orEmpty()
+    val image by androidx.compose.runtime.produceState(avatars.cached(email), email) { value = avatars.get(email) }
+    image?.let {
+        androidx.compose.foundation.Image(
+            it, contentDescription = null,
+            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+            modifier = Modifier.size(44.dp).clip(CircleShape),
+        )
+        return
+    }
     val name = c.label.ifBlank { c.counterparts.firstOrNull()?.addr.orEmpty() }
     val initials = name.split(' ', '.', '@', '_', '-')
         .filter { it.isNotBlank() }
@@ -533,6 +574,37 @@ private fun ConversationPane(c: Conversation?, web: ConversationWeb, vm: MailVie
         HorizontalDivider()
         ComposerBar(vm.compose, c)
     }
+}
+
+/** Долгое нажатие на вложение: открыть или сохранить в «Загрузки». */
+@Composable
+private fun AttachmentMenu(vm: MailViewModel) {
+    val m by vm.attachmentMenu.collectAsState()
+    val (uid, index) = m ?: return
+    val close = { vm.attachmentMenu.value = null }
+    val name = vm.conversation.attachmentName(uid, index) ?: "Вложение"
+    AlertDialog(
+        onDismissRequest = close,
+        title = { Text(name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        text = {
+            Column {
+                listOf(
+                    "Открыть" to { vm.conversation.openAttachment(uid, index, name) },
+                    "Сохранить в «Загрузки»" to { vm.conversation.saveAttachment(uid, index) { msg -> vm.notice.value = msg } },
+                ).forEach { (title, action) ->
+                    Text(
+                        title,
+                        modifier = Modifier.fillMaxWidth().clickable {
+                            action()
+                            close()
+                        }.padding(vertical = 14.dp),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = close) { Text("Отмена") } },
+    )
 }
 
 /** Долгое нажатие на пузырь: ответить именно на это письмо, переслать, копировать. */

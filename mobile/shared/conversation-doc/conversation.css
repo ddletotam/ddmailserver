@@ -47,3 +47,5 @@ body {
   background: none; border: 0; padding: 0; font: inherit; font-size: 12.5px;
 }
 .ddm-pending .ddm-bubble { opacity: .75; }
+.ddm-imgbar { display: flex; gap: 14px; flex-wrap: wrap; }
+.ddm-imgbar[hidden] { display: none; }

@@ -35,6 +35,7 @@ import java.io.File
  */
 class ConversationController(
     private val app: Context,
+    private val settings: ru.letotam.ddmail.settings.AppSettings,
     private val engine: SyncEngine,
     private val scope: CoroutineScope,
     private val onAuthDead: () -> Unit,
@@ -71,6 +72,7 @@ class ConversationController(
             lock.withLock {
                 pages = c.messages.sortedByDescending { it.uid }
                 loaded = minOf(PAGE, pages.size)
+                senders = settings.imageSenders()
                 val bodies = load(pages.take(loaded))
                 // Первое непрочитанное — к нему и прокрутить (как у десктопа).
                 val firstUnseen = pages.take(loaded).filter { !it.seen }.minByOrNull { it.uid }?.uid
@@ -148,6 +150,48 @@ class ConversationController(
         }
     }
 
+    private var senders: Set<String> = emptySet()
+
+    /** «Всегда показывать картинки от отправителя» этого письма. */
+    fun allowSender(uid: Long) {
+        val addr = body(uid)?.fromAddr?.takeIf { it.isNotBlank() } ?: return
+        senders = senders + addr.lowercase()
+        scope.launch { settings.allowImagesFrom(addr) }
+    }
+
+    /**
+     * Сохранить вложение в «Загрузки» (MediaStore — на Android 10+ без
+     * разрешений). Возвращает имя файла или текст ошибки через [onDone].
+     */
+    fun saveAttachment(uid: Long, index: Int, onDone: (String) -> Unit) {
+        val name = safeName(names[uid to index] ?: "attachment-$index")
+        scope.launch {
+            val bin = try {
+                engine.attachment(uid, index)
+            } catch (e: ApiException) {
+                if (e is ApiException.Unauthorized) onAuthDead()
+                onDone("Не удалось скачать «$name».")
+                return@launch
+            }
+            val ok = withContext(Dispatchers.IO) {
+                runCatching {
+                    val values = android.content.ContentValues().apply {
+                        put(android.provider.MediaStore.Downloads.DISPLAY_NAME, name)
+                        put(android.provider.MediaStore.Downloads.MIME_TYPE, bin.contentType.substringBefore(';').trim().ifEmpty { "application/octet-stream" })
+                        put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
+                    }
+                    val cr = app.contentResolver
+                    val uri = cr.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("insert")
+                    cr.openOutputStream(uri)?.use { it.write(bin.bytes) } ?: error("open")
+                    values.clear()
+                    values.put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
+                    cr.update(uri, values, null, null)
+                }.isSuccess
+            }
+            onDone(if (ok) "Сохранено в «Загрузки»: $name" else "Не удалось сохранить «$name».")
+        }
+    }
+
     /** Имя вложения по uid/индексу — из уже показанных тел. */
     fun attachmentName(uid: Long, index: Int): String? = names[uid to index]
 
@@ -169,6 +213,7 @@ class ConversationController(
                     put("outgoing", JsonPrimitive(b.isOutgoing))
                     put("fromName", JsonPrimitive(b.from))
                     put("fromAddr", JsonPrimitive(b.fromAddr))
+                    put("imagesAllowed", JsonPrimitive(b.fromAddr.lowercase() in senders))
                     put("dateTs", JsonPrimitive(b.dateTs))
                     b.html?.takeIf { it.isNotBlank() }?.let { put("html", JsonPrimitive(it)) }
                     b.text?.let { put("text", JsonPrimitive(it)) }

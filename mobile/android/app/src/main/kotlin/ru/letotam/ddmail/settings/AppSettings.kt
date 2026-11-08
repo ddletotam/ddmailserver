@@ -22,6 +22,14 @@ class AppSettings(private val context: Context) {
     private val prefetchKey = stringPreferencesKey("prefetch")
     private val notifyKey = booleanPreferencesKey("notifications")
     private val notifiedKey = longPreferencesKey("notified_max_uid")
+    private val imageSendersKey = androidx.datastore.preferences.core.stringSetPreferencesKey("image_senders")
+
+    /** Отправители, чьи внешние картинки показываем сразу. */
+    suspend fun imageSenders(): Set<String> = context.settingsStore.data.first()[imageSendersKey].orEmpty()
+
+    suspend fun allowImagesFrom(addr: String) = context.settingsStore.edit {
+        it[imageSendersKey] = it[imageSendersKey].orEmpty() + addr.trim().lowercase()
+    }
 
     /** `null` — ещё не спрашивали: после первого входа спросить. */
     val prefetch: Flow<Prefetch?> = context.settingsStore.data.map { p ->

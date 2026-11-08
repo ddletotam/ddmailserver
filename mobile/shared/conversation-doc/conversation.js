@@ -8,7 +8,9 @@
 //                       ddm.stub(Stub), ddm.unstub(key)  — optimistic send
 //   Stub  = { key, html, text, attachments: [{filename, size}] }
 // Документ → нативный:  ready(), openLink(url), requestOlder(),
-//   openAttachment(uid, index), bubbleMenu(uid)
+//   openAttachment(uid, index), attachmentMenu(uid, index), bubbleMenu(uid),
+//   allowSender(uid)
+//   Msg.imagesAllowed — картинки этого отправителя разрешены всегда.
 'use strict';
 
 /** Сменилась нормализация — поднять: клиенты пересчитают закэшированное. */
@@ -325,10 +327,13 @@ function fill(entry) {
   }
   shadow.appendChild(root);
   entry.root = root;
-  entry.imagesBtn.hidden = !(remoteCount > 0 && !entry.imagesAllowed);
-  if (!entry.imagesBtn.hidden) entry.imagesBtn.textContent = `Показать картинки (${remoteCount})`;
+  entry.imagesBox.hidden = !(remoteCount > 0 && !entry.imagesAllowed);
+  if (!entry.imagesBox.hidden) entry.imagesBtn.textContent = `Показать картинки (${remoteCount})`;
   link.addEventListener('load', () => fit(entry));
-  root.querySelectorAll('img').forEach((img) => img.addEventListener('load', () => fit(entry)));
+  root.querySelectorAll('img').forEach((img) => img.addEventListener('load', () => {
+    fit(entry);
+    keepAnchor();
+  }));
   if (entry.host.isConnected) fit(entry);
 }
 
@@ -336,6 +341,33 @@ function fill(entry) {
  * Письмо шире пузыря — масштабируем целиком (`zoom`), а не раскладываем в
  * столбик: в линеаризованной таблице цифры теряют связь со столбцами (§8).
  */
+/**
+ * Удержание позиции: письмо перерисовалось (картинки разрешили) и выросло —
+ * то, на что смотрели, не должно уехать. Якорь — низ пузыря, на кнопке
+ * которого нажали; держим его несколько секунд, пока грузятся картинки.
+ */
+let anchor = null;
+
+function holdAnchor(row) {
+  anchor = { row, bottom: row.getBoundingClientRect().bottom, until: Date.now() + 15000 };
+}
+
+function keepAnchor() {
+  if (!anchor || Date.now() > anchor.until || !anchor.row.isConnected) {
+    anchor = null;
+    return;
+  }
+  const now = anchor.row.getBoundingClientRect().bottom;
+  scroller.scrollTop += now - anchor.bottom;
+}
+
+function allowImages(entry) {
+  holdAnchor(entry.row);
+  entry.imagesAllowed = true;
+  fill(entry);
+  keepAnchor();
+}
+
 function fit(entry) {
   const { root, host } = entry;
   if (!root) return;
@@ -367,10 +399,16 @@ function makeRow(msg) {
   const shadow = host.attachShadow({ mode: 'closed' });
   wireClicks(shadow);
 
+  const imagesBox = document.createElement('div');
+  imagesBox.className = 'ddm-imgbar';
+  imagesBox.hidden = true;
   const imagesBtn = document.createElement('button');
   imagesBtn.className = 'ddm-images';
-  imagesBtn.hidden = true;
-  b.appendChild(imagesBtn);
+  const alwaysBtn = document.createElement('button');
+  alwaysBtn.className = 'ddm-images';
+  alwaysBtn.textContent = 'Всегда от ' + (msg.fromAddr || 'отправителя');
+  imagesBox.append(imagesBtn, alwaysBtn);
+  b.appendChild(imagesBox);
 
   if (msg.attachments && msg.attachments.length) {
     const box = document.createElement('div');
@@ -384,6 +422,12 @@ function makeRow(msg) {
       size.textContent = formatSize(a.size || 0);
       chip.append('📎', name, size);
       chip.addEventListener('click', () => native('openAttachment', msg.uid, a.index));
+      // Долгое нажатие на чип — «Открыть» / «Сохранить в Загрузки».
+      chip.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        native('attachmentMenu', msg.uid, a.index);
+      });
       box.appendChild(chip);
     }
     b.appendChild(box);
@@ -400,11 +444,15 @@ function makeRow(msg) {
     native('bubbleMenu', msg.uid);
   });
 
-  const entry = { msg, host, shadow, root: null, imagesAllowed: false, imagesBtn };
-  // Разрешение картинок — на это письмо и до закрытия беседы.
-  imagesBtn.addEventListener('click', () => {
-    entry.imagesAllowed = true;
-    fill(entry);
+  const entry = { msg, host, shadow, root: null, imagesAllowed: !!msg.imagesAllowed, imagesBtn, imagesBox, row };
+  // «Показать» — на это письмо до закрытия беседы; «Всегда» — запоминает
+  // нативный код для отправителя (политика по отправителю, как у десктопа).
+  imagesBtn.addEventListener('click', () => allowImages(entry));
+  alwaysBtn.addEventListener('click', () => {
+    native('allowSender', msg.uid);
+    for (const e of bubbles.values()) {
+      if (e.msg.fromAddr && e.msg.fromAddr === msg.fromAddr && !e.imagesAllowed) allowImages(e);
+    }
   });
   bubbles.set(msg.uid, entry);
   fill(entry);

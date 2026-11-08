@@ -51,16 +51,23 @@ class MailViewModel(
     private val onStatus: (SessionStatus) -> Unit,
 ) : ViewModel() {
     private val activeId = MutableStateFlow<String?>(null)
+
+    /** Строка поиска; `null` — поиск закрыт. */
+    val query = MutableStateFlow<String?>(null)
     val syncing = MutableStateFlow(false)
 
     /** Открытая беседа — по id, не по позиции: список меняется дельтами. */
     val selected = MutableStateFlow<String?>(null)
 
-    val conversation = ConversationController(app, engine, viewModelScope) { onStatus(SessionStatus.Dead) }
+    val conversation = ConversationController(app, app.settings, engine, viewModelScope) { onStatus(SessionStatus.Dead) }
+
+    /** Вложение, на котором открыто меню (uid письма, индекс). */
+    val attachmentMenu = MutableStateFlow<Pair<Long, Int>?>(null)
 
     val compose = ComposeController(app, engine, conversation, viewModelScope, ::sync) { onStatus(SessionStatus.Dead) }
 
     val live = LiveUpdates(engine, viewModelScope, ::sync)
+    val avatars = Avatars(app, engine)
 
     /** Письмо, на котором открыто меню пузыря. */
     val bubbleMenu = MutableStateFlow<MessageBody?>(null)
@@ -75,7 +82,7 @@ class MailViewModel(
     private var lastConv: String? = null
 
     val state: StateFlow<MailState> =
-        combine(engine.conversations, engine.folders, activeId) { convs, doc, id -> build(convs, doc, id) }
+        combine(engine.conversations, engine.folders, activeId, query) { convs, doc, id, q -> build(convs, doc, id, q) }
             .stateIn(viewModelScope, SharingStarted.Eagerly, MailState())
 
     init {
@@ -103,6 +110,14 @@ class MailViewModel(
         sync()
     }
 
+    /** Обновление жестом «потянуть»: индикатор — только для него. */
+    val pulling = MutableStateFlow(false)
+
+    fun pullRefresh() {
+        pulling.value = true
+        sync()
+    }
+
     /** Синхронизацию попросили, пока шла другая — повторить по её окончании. */
     private var again = false
 
@@ -123,6 +138,7 @@ class MailViewModel(
                 SessionStatus.Offline(e.message ?: "")
             } finally {
                 syncing.value = false
+                pulling.value = false
             }
             onStatus(status)
             if (again) {
@@ -266,7 +282,9 @@ class MailViewModel(
         if (all.any { it.id == id }) open(id)
     }
 
-    private fun build(convs: List<Conversation>, doc: FoldersDoc, id: String?): MailState {
+    private fun build(convs: List<Conversation>, doc: FoldersDoc, id: String?, q: String?): MailState {
+        // Поиск — по всем папкам (как «Диалоги» десктопа, §5).
+        if (!q.isNullOrBlank()) return MailState(emptyList(), null, 0, searchConversations(convs, q), loaded = true)
         // Удалённая папка — снова инбокс. Скрытая видна табом, только пока
         // в неё привели (открытие беседы из неё).
         val active = doc.folders.indexOfFirst { it.id == id }.takeIf { it >= 0 }
@@ -287,4 +305,19 @@ internal fun matchesTarget(c: Conversation, target: Set<String>): Boolean {
     if (cps.isNotEmpty()) return cps == target
     val id = c.id.lowercase()
     return target.all { id.contains(it) }
+}
+
+/**
+ * Локальный поиск по диалогам (контракт §5): имя, адрес любого участника,
+ * тема последнего письма; порядок — сначала совпавшие по имени, затем по
+ * адресу, затем по теме, внутри — как в списке. Регистр складывается в
+ * Kotlin (кириллица складывается правильно).
+ */
+internal fun searchConversations(convs: List<Conversation>, q: String): List<Conversation> {
+    val needle = q.trim().lowercase()
+    if (needle.isEmpty()) return convs
+    val byName = convs.filter { it.label.lowercase().contains(needle) }
+    val byAddr = convs.filter { c -> c !in byName && (c.counterparts.any { it.addr.lowercase().contains(needle) || it.name.lowercase().contains(needle) } || c.receivedBy.lowercase().contains(needle)) }
+    val bySubj = convs.filter { c -> c !in byName && c !in byAddr && c.lastSubject.lowercase().contains(needle) }
+    return byName + byAddr + bySubj
 }

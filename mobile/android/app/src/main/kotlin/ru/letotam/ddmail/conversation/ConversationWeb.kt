@@ -37,6 +37,8 @@ class ConversationWeb(context: Context, private val proxyHttp: OkHttpClient) {
         fun onRequestOlder()
         fun onOpenAttachment(uid: Long, index: Int)
         fun onBubbleMenu(uid: Long)
+        fun onAttachmentMenu(uid: Long, index: Int)
+        fun onAllowSender(uid: Long)
         /** Часть письма `cid:` — блокирующе, вызывается не с главного потока. */
         fun loadPart(uid: Long, cid: String): Pair<ByteArray, String>?
     }
@@ -96,6 +98,12 @@ class ConversationWeb(context: Context, private val proxyHttp: OkHttpClient) {
 
         @JavascriptInterface
         fun bubbleMenu(uid: Long) = main.post { host?.onBubbleMenu(uid) }
+
+        @JavascriptInterface
+        fun attachmentMenu(uid: Long, index: Int) = main.post { host?.onAttachmentMenu(uid, index) }
+
+        @JavascriptInterface
+        fun allowSender(uid: Long) = main.post { host?.onAllowSender(uid) }
     }
 
     private inner class Client : WebViewClient() {
