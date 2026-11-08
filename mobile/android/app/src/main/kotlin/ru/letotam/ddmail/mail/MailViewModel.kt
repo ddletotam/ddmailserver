@@ -115,6 +115,7 @@ class MailViewModel(
         viewModelScope.launch {
             val status = try {
                 engine.sync()
+                afterSync()
                 SessionStatus.Ok
             } catch (e: ApiException.Unauthorized) {
                 SessionStatus.Dead
@@ -130,6 +131,25 @@ class MailViewModel(
             }
         }
     }
+
+    /** После синка: уведомления о новом и докачка тел (если пользователь разрешил). */
+    private suspend fun afterSync() {
+        app.notifier.check(all, doc, selected.value)
+        if (prefetching) return
+        if (app.settings.prefetchAllowedNow()) {
+            prefetching = true
+            viewModelScope.launch {
+                try {
+                    engine.prefetchBodies(allowed = { app.settings.prefetchAllowedNow() })
+                } catch (_: ApiException) {
+                } finally {
+                    prefetching = false
+                }
+            }
+        }
+    }
+
+    private var prefetching = false
 
     override fun onCleared() {
         live.stop()
@@ -220,6 +240,8 @@ class MailViewModel(
             if (fid != activeId.value) selectFolder(fid)
         }
         selected.value = id
+        app.openConversation = id
+        id?.let { ru.letotam.ddmail.background.MailNotifier.cancel(app, it) }
         compose.reset()
         conversation.open(c)
         id?.let { v -> viewModelScope.launch { app.uiPrefs.edit { it[LAST_CONV] = v } } }

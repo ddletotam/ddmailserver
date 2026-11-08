@@ -61,6 +61,9 @@ class AppViewModel(private val app: DdmailApp) : ViewModel() {
         viewModelScope.launch {
             app.sessions.clear()
             app.db.dao().clearAll()
+            app.settings.clearAccountState()
+            ru.letotam.ddmail.background.SyncWorker.cancel(app)
+            androidx.core.app.NotificationManagerCompat.from(app).cancelAll()
             toConnect(ConnectState())
         }
     }

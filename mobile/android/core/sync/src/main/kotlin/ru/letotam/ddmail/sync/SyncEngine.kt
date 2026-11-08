@@ -2,6 +2,7 @@ package ru.letotam.ddmail.sync
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -119,6 +120,35 @@ class SyncEngine(
             emptyMap()
         }
         return refs.mapNotNull { cached[it.uid] ?: fetched[it.uid] }
+    }
+
+    /**
+     * Докачка тел заранее (контракт §4): новые письма всех бесед — на диск до
+     * того, как беседу откроют. От свежей беседы к старой, порциями;
+     * [allowed] проверяется перед каждой порцией (сеть сменилась на
+     * мобильную, пользователь передумал — останавливаемся).
+     */
+    suspend fun prefetchBodies(allowed: suspend () -> Boolean, batch: Int = 30): Int {
+        val cached = dao.cachedBodyUids(accountKey).toHashSet()
+        val convs = dao.observeConversations(accountKey).first()
+        val refs = dao.observeRefs(accountKey).first().groupBy { it.conversationId }
+        val queue = convs.flatMap { c -> refs[c.id].orEmpty().sortedByDescending { it.uid } }
+            .filter { it.uid !in cached }
+            .map { MessageRef(it.folder, it.uid, it.messageId, it.seen) }
+        var n = 0
+        for (chunk in queue.chunked(batch)) {
+            if (!allowed()) break
+            val got = try {
+                api.messages(chunk)
+            } catch (e: ApiException.Unauthorized) {
+                throw e
+            } catch (e: ApiException) {
+                break
+            }
+            dao.putBodies(got.map { it.toEntity() })
+            n += got.size
+        }
+        return n
     }
 
     /** Открыли беседу: прочитана локально сразу, на сервере — следом. */

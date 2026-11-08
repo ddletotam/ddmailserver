@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Конверт в безопасной зоне адаптивной иконки (66 из 108 dp). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M31,38h46a4,4 0,0 1,4 4v26a4,4 0,0 1,-4 4H31a4,4 0,0 1,-4 -4V42a4,4 0,0 1,4 -4z"/>
+    <path android:fillColor="#FF047857"
+        android:pathData="M31.5,42.5L54,58.5 76.5,42.5 76.5,46.2 54,62.2 31.5,46.2z"/>
+</vector>

@@ -148,13 +148,28 @@ fun MailScreen(
 
     ComposeSheetDialog(vm.compose)
     BubbleMenu(vm)
+    val app = context.applicationContext as DdmailApp
+    ru.letotam.ddmail.settings.PrefetchQuestion(app.settings)
+    var settingsOpen by remember { mutableStateOf(false) }
+    if (settingsOpen) ru.letotam.ddmail.settings.SettingsDialog(app.settings, session, onLogout = {
+        settingsOpen = false
+        onLogout()
+    }) { settingsOpen = false }
+    // Открытие беседы из уведомления.
+    val openReq by app.openRequests.collectAsState()
+    LaunchedEffect(openReq) {
+        openReq?.let {
+            vm.open(it)
+            app.openRequests.value = null
+        }
+    }
 
     // Клавиатура EMUI на разложенном Mate XT занимает ~85% высоты: пока она
     // открыта, прячем всё, кроме строки ввода, иначе композера не видно.
     val ime = WindowInsets.isImeVisible
     Column(modifier.fillMaxSize().imePadding()) {
         if (!ime) {
-            TopBar(session, status, syncing, onLogout)
+            TopBar(session, status, syncing, onSettings = { settingsOpen = true }, onLogout = onLogout)
             if (status == SessionStatus.Dead) DeadSessionBanner(onRelogin)
         }
         if (wide) {
@@ -172,7 +187,7 @@ fun MailScreen(
 }
 
 @Composable
-private fun TopBar(session: Session, status: SessionStatus, syncing: Boolean, onLogout: () -> Unit) {
+private fun TopBar(session: Session, status: SessionStatus, syncing: Boolean, onSettings: () -> Unit, onLogout: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 2.dp),
@@ -197,6 +212,10 @@ private fun TopBar(session: Session, status: SessionStatus, syncing: Boolean, on
         Box {
             TextButton(onClick = { menu = true }) { Text("⋮", fontSize = 22.sp) }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                DropdownMenuItem(text = { Text("Настройки") }, onClick = {
+                    menu = false
+                    onSettings()
+                })
                 DropdownMenuItem(text = { Text(stringResource(R.string.action_logout)) }, onClick = {
                     menu = false
                     onLogout()

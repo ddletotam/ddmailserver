@@ -17,10 +17,19 @@ import ru.letotam.ddmail.mail.MailViewModel
 import ru.letotam.ddmail.ui.DdmailTheme
 
 class MainActivity : ComponentActivity() {
+    private val app get() = application as DdmailApp
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        val app = application as DdmailApp
+        handleOpen(intent)
+        // Android 13+: уведомления — только с разрешения пользователя.
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
+        }
+        val app = app
         setContent {
             DdmailTheme {
                 val appVm = viewModel { AppViewModel(app) }
@@ -41,6 +50,9 @@ class MainActivity : ComponentActivity() {
                             val vm = viewModel(key = "mail-${s.session.serverUrl}-${s.session.token.hashCode()}") {
                                 MailViewModel(app, app.engine(s.session), appVm::status)
                             }
+                            androidx.compose.runtime.LaunchedEffect(Unit) {
+                                ru.letotam.ddmail.background.SyncWorker.schedule(app)
+                            }
                             MailScreen(
                                 vm = vm,
                                 session = s.session,
@@ -54,5 +66,29 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        handleOpen(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        app.foreground = true
+    }
+
+    override fun onStop() {
+        super.onStop()
+        app.foreground = false
+    }
+
+    /** Открыть беседу из уведомления. */
+    private fun handleOpen(intent: android.content.Intent?) {
+        intent?.getStringExtra(EXTRA_OPEN)?.let { app.openRequests.value = it }
+    }
+
+    companion object {
+        const val EXTRA_OPEN = "open_conversation"
     }
 }

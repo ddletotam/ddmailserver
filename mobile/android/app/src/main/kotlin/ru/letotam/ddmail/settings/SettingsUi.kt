@@ -1,0 +1,132 @@
+package ru.letotam.ddmail.settings
+
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import kotlinx.coroutines.launch
+import ru.letotam.ddmail.BuildConfig
+import ru.letotam.ddmail.auth.Session
+
+private val labels = listOf(
+    Prefetch.Always to ("Всегда" to "Беседы открываются мгновенно, в том числе без сети."),
+    Prefetch.WifiOnly to ("Только по Wi-Fi" to "На мобильной сети письма качаются при открытии беседы."),
+    Prefetch.Never to ("Нет, при открытии" to "Экономит трафик и место; открытие беседы ждёт сеть."),
+)
+
+@Composable
+private fun PrefetchChoice(current: Prefetch?, onPick: (Prefetch) -> Unit) {
+    Column {
+        labels.forEach { (v, t) ->
+            Row(
+                Modifier.fillMaxWidth().clickable { onPick(v) }.padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioButton(selected = current == v, onClick = { onPick(v) })
+                Column {
+                    Text(t.first, style = MaterialTheme.typography.bodyLarge)
+                    Text(t.second, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * После первого входа (контракт §4): трафик чужой — ответ по умолчанию не
+ * выбран, окно не закрывается без выбора.
+ */
+@Composable
+fun PrefetchQuestion(settings: AppSettings) {
+    val current by settings.prefetch.collectAsState(initial = Prefetch.Always)
+    if (current != null) return
+    val scope = rememberCoroutineScope()
+    AlertDialog(
+        onDismissRequest = {},
+        title = { Text("Загружать письма заранее?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Тогда новые письма окажутся на телефоне до того, как вы откроете беседу. Изменить можно в настройках.")
+                PrefetchChoice(null) { v -> scope.launch { settings.setPrefetch(v) } }
+            }
+        },
+        confirmButton = {},
+    )
+}
+
+@Composable
+fun SettingsDialog(settings: AppSettings, session: Session, onLogout: () -> Unit, onClose: () -> Unit) {
+    val prefetch by settings.prefetch.collectAsState(initial = null)
+    val notify by settings.notifications.collectAsState(initial = true)
+    val scope = rememberCoroutineScope()
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Column(Modifier.fillMaxSize().systemBarsPadding()) {
+                Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = onClose) { Text("←", fontSize = 20.sp) }
+                    Text("Настройки", style = MaterialTheme.typography.titleLarge)
+                }
+                HorizontalDivider()
+                Column(
+                    Modifier.fillMaxWidth().widthIn(max = 640.dp).verticalScroll(rememberScrollState()).padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Section("Учётная запись")
+                    Text("${session.username} · ${session.serverUrl.removePrefix("https://")}")
+                    HorizontalDivider()
+                    Section("Загрузка писем заранее")
+                    PrefetchChoice(prefetch) { v -> scope.launch { settings.setPrefetch(v) } }
+                    HorizontalDivider()
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Уведомления о новых письмах", style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                "Без push-сервиса: пока приложение закрыто, почта проверяется примерно раз в 15 минут.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(checked = notify, onCheckedChange = { v -> scope.launch { settings.setNotifications(v) } })
+                    }
+                    HorizontalDivider()
+                    Section("О приложении")
+                    Text("ddmail для Android, версия ${BuildConfig.VERSION_NAME}")
+                    Spacer(Modifier.padding(8.dp))
+                    OutlinedButton(onClick = onLogout) { Text("Выйти из учётной записи", color = MaterialTheme.colorScheme.error) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Section(title: String) {
+    Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+}

@@ -43,6 +43,18 @@ class DdmailApp : Application() {
 
     val db: CacheDb by lazy { CacheDb.open(this) }
 
+    val settings: ru.letotam.ddmail.settings.AppSettings by lazy { ru.letotam.ddmail.settings.AppSettings(this) }
+    val notifier: ru.letotam.ddmail.background.MailNotifier by lazy { ru.letotam.ddmail.background.MailNotifier(this, settings) }
+
+    /** Приложение на экране (MainActivity между onStart и onStop). */
+    @Volatile var foreground = false
+
+    /** Открытая сейчас беседа — о ней не уведомляем. */
+    @Volatile var openConversation: String? = null
+
+    /** Беседа, которую попросили открыть из уведомления. */
+    val openRequests = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+
     /** Синхронизация сессии; обменянный токен сразу ложится в хранилище. */
     fun engine(session: Session): SyncEngine {
         val tokens = object : TokenSource {

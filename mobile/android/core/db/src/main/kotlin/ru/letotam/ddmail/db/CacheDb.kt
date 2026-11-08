@@ -153,6 +153,10 @@ abstract class CacheDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     abstract suspend fun putBodies(b: List<MessageBodyEntity>)
 
+    /** Какие тела уже в кэше (непустые) — для докачки; сами тела не читаем. */
+    @Query("SELECT uid FROM message_bodies WHERE accountKey = :account AND (html IS NOT NULL OR text IS NOT NULL OR attachmentsJson != '[]')")
+    abstract suspend fun cachedBodyUids(account: String): List<Long>
+
     @Query("UPDATE conversation_messages SET seen = 1 WHERE accountKey = :account AND conversationId = :conv")
     protected abstract suspend fun seeRefs(account: String, conv: String)
 
