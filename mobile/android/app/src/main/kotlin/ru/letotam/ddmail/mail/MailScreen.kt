@@ -100,10 +100,11 @@ fun MailScreen(
     // Вернулись в приложение — подтянуть новое (до push это единственный путь).
     LifecycleResumeEffect(Unit) {
         vm.sync()
-        onPauseOrDispose {}
+        vm.live.start()
+        onPauseOrDispose { vm.live.stop() }
     }
     BackHandler(enabled = !wide && selectedId != null) { vm.open(null) }
-    LaunchedEffect(wide, s.conversations.size) { if (wide) vm.restoreLast() }
+    LaunchedEffect(wide) { vm.setWide(wide) }
 
     // Один WebView на всё время экрана: создаётся сразу, открытие беседы
     // меняет только документ (контракт §8).

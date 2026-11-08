@@ -49,6 +49,36 @@ class SessionApi(
     suspend fun dialogFolders(): DialogFoldersResponse =
         get("/dialog-folders", DialogFoldersResponse.serializer())
 
+    /**
+     * Пуш-канал сервера (`/ws`). Токен — заголовком (контракт §2) и, пока
+     * сервер читает только его, ещё и в query; в логи клиента URL не пишется.
+     * [onEvent] получает тип события; [onClosed] — `true`, если сервер отверг
+     * токен (тогда сначала обменять его, потом переподключаться).
+     */
+    suspend fun openSocket(onEvent: (String) -> Unit, onClosed: (authFailed: Boolean) -> Unit): okhttp3.WebSocket {
+        val token = tokens.current()
+        val wsUrl = baseUrl.replaceFirst("https://", "wss://") + "/api/desktop/v1/ws?token=" +
+            java.net.URLEncoder.encode(token, "UTF-8")
+        val req = Request.Builder().url(wsUrl).header("Authorization", "Bearer $token").build()
+        return http.newWebSocket(req, object : okhttp3.WebSocketListener() {
+            override fun onMessage(webSocket: okhttp3.WebSocket, text: String) {
+                val type = runCatching {
+                    (DdmailApi.json.parseToJsonElement(text) as JsonObject)["type"]
+                        ?.let { (it as JsonPrimitive).content }
+                }.getOrNull() ?: return
+                onEvent(type)
+            }
+
+            override fun onFailure(webSocket: okhttp3.WebSocket, t: Throwable, response: Response?) {
+                onClosed(response?.code == 401 || response?.code == 403)
+            }
+
+            override fun onClosed(webSocket: okhttp3.WebSocket, code: Int, reason: String) {
+                onClosed(false)
+            }
+        })
+    }
+
     suspend fun identities(): List<Identity> =
         get("/identities", ListSerializer(Identity.serializer()))
 

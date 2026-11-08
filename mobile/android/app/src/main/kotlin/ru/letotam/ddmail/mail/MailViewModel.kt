@@ -59,6 +59,8 @@ class MailViewModel(
 
     val compose = ComposeController(app, engine, conversation, viewModelScope, ::sync) { onStatus(SessionStatus.Dead) }
 
+    val live = LiveUpdates(engine, viewModelScope, ::sync)
+
     /** Письмо, на котором открыто меню пузыря. */
     val bubbleMenu = MutableStateFlow<MessageBody?>(null)
 
@@ -80,11 +82,13 @@ class MailViewModel(
             val p = app.uiPrefs.data.first()
             activeId.value = p[ACTIVE_FOLDER]
             lastConv = p[LAST_CONV]
+            tryRestore()
         }
         viewModelScope.launch { engine.folders.collect { doc = it } }
         viewModelScope.launch {
             engine.conversations.collect { list ->
                 all = list
+                tryRestore()
                 selected.value?.let { id -> list.firstOrNull { it.id == id }?.let(conversation::updated) }
                 // Отправили новое письмо — перейти в его беседу, как только она появилась.
                 compose.sentTarget?.let { target ->
@@ -98,8 +102,14 @@ class MailViewModel(
         sync()
     }
 
+    /** Синхронизацию попросили, пока шла другая — повторить по её окончании. */
+    private var again = false
+
     fun sync() {
-        if (syncing.value) return
+        if (syncing.value) {
+            again = true
+            return
+        }
         syncing.value = true
         viewModelScope.launch {
             val status = try {
@@ -113,7 +123,15 @@ class MailViewModel(
                 syncing.value = false
             }
             onStatus(status)
+            if (again) {
+                again = false
+                sync()
+            }
         }
+    }
+
+    override fun onCleared() {
+        live.stop()
     }
 
     /** `null` — «Входящие». Выбор помнится между запусками (контракт §5). */
@@ -141,14 +159,23 @@ class MailViewModel(
         id?.let { v -> viewModelScope.launch { app.uiPrefs.edit { it[LAST_CONV] = v } } }
     }
 
-    /** Раскладка, где беседа видна сразу, — открыть ту, на которой закончили (§5). */
-    fun restoreLast() {
+    private var wide = false
+
+    /** Раскладка сменилась; широкая — беседа видна сразу. */
+    fun setWide(v: Boolean) {
+        wide = v
+        tryRestore()
+    }
+
+    /**
+     * На раскладке, где беседа видна сразу, — открыть ту, на которой
+     * закончили (§5). Один раз: когда прочитаны настройки и пришёл список.
+     */
+    private fun tryRestore() {
         val id = lastConv ?: return
-        if (selected.value != null) return
-        if (all.any { it.id == id }) {
-            lastConv = null
-            open(id)
-        }
+        if (!wide || selected.value != null || all.isEmpty()) return
+        lastConv = null
+        if (all.any { it.id == id }) open(id)
     }
 
     private fun build(convs: List<Conversation>, doc: FoldersDoc, id: String?): MailState {

@@ -185,6 +185,8 @@ class SyncEngine(
 
     suspend fun send(req: SendRequest) = api.send(req)
 
+    suspend fun openSocket(onEvent: (String) -> Unit, onClosed: (Boolean) -> Unit) = api.openSocket(onEvent, onClosed)
+
     suspend fun avatar(email: String): Binary? = api.avatar(email)
 
     suspend fun part(uid: Long, cid: String): Binary = api.part(uid, cid)
