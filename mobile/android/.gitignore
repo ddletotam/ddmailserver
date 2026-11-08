@@ -1,0 +1,9 @@
+# Сборка вынесена в ~/.cache/builds (build.gradle.kts); здесь — то, что
+# Gradle и IDE всё равно кладут в дерево.
+.gradle/
+.kotlin/
+.idea/
+*.iml
+local.properties
+build/
+captures/
