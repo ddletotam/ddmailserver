@@ -1,4 +1,40 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">ddmail</string>
+
+    <!-- Подключение (контракт §3) -->
+    <string name="connect_title">Подключение</string>
+    <string name="connect_email_hint">Введите адрес почты — сервер найдём сами.</string>
+    <string name="field_email">Адрес почты</string>
+    <string name="field_server">Адрес сервера</string>
+    <string name="field_login">Логин</string>
+    <string name="field_password">Пароль</string>
+    <string name="action_find">Найти сервер</string>
+    <string name="action_manual">Ввести адрес сервера вручную</string>
+    <string name="action_login">Войти</string>
+    <string name="action_back">Назад</string>
+    <string name="action_cancel">Отмена</string>
+    <string name="searching_title">Ищем сервер</string>
+    <string name="searching_count">Проверено %1$d из %2$d</string>
+    <string name="found_title">Нашёлся сервер ddmail</string>
+    <string name="manual_title">Вход на сервер ddmail</string>
+    <string name="login_note">Логин — имя пользователя на сервере, обычно часть адреса до @. Пароль не сохраняется: телефон получает от сервера токен сессии.</string>
+    <string name="not_found">Сервер ddmail для %1$s не найден. Введите его адрес вручную.</string>
+    <string name="err_email">Введите адрес почты целиком: имя@домен.</string>
+    <string name="err_fill">Заполните адрес сервера, логин и пароль.</string>
+    <string name="err_credentials">Неверный логин или пароль.</string>
+    <string name="err_network">Нет соединения с сервером: %1$s</string>
+    <string name="err_server">Сервер ответил ошибкой %1$d.</string>
+    <string name="busy_login">Входим…</string>
+    <string name="err_plain">%1$s</string>
+
+    <!-- После входа (пока заглушка) -->
+    <string name="connected_title">Подключено</string>
+    <string name="connected_as">%1$s на %2$s</string>
+    <string name="session_checking">Проверяем сессию…</string>
+    <string name="session_ok">Сессия активна, токен обновлён.</string>
+    <string name="session_offline">Нет связи с сервером: %1$s</string>
+    <string name="session_dead">Сессия истекла — нужен вход.</string>
+    <string name="action_relogin">Войти</string>
+    <string name="action_logout">Выйти</string>
 </resources>

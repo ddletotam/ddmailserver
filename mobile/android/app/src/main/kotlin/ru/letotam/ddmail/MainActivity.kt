@@ -4,43 +4,46 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import ru.letotam.ddmail.connect.ConnectScreen
+import ru.letotam.ddmail.connect.ConnectViewModel
+import ru.letotam.ddmail.ui.DdmailTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        val app = application as DdmailApp
         setContent {
-            MaterialTheme {
+            DdmailTheme {
+                val appVm = viewModel { AppViewModel(app) }
+                val state by appVm.state.collectAsState()
                 Scaffold { inner ->
-                    Probe(Modifier.padding(inner))
+                    val m = Modifier.padding(inner)
+                    when (val s = state) {
+                        AppState.Loading -> {}
+                        is AppState.Connect -> {
+                            // Ключ — поколение: повторный вход начинает форму заново.
+                            val vm = viewModel(key = "connect-${s.generation}") {
+                                ConnectViewModel(app, s.prefill, appVm::connected)
+                            }
+                            ConnectScreen(vm, m)
+                        }
+                        is AppState.Connected -> ConnectedScreen(
+                            session = s.session,
+                            status = s.status,
+                            onRelogin = { appVm.relogin(s.session) },
+                            onLogout = appVm::logout,
+                            modifier = m,
+                        )
+                    }
                 }
             }
         }
-    }
-}
-
-/** Каркас: показывает размер окна — по нему на Mate XT сверяем классы
- *  ширины трёх состояний (контракт §6), прежде чем строить раскладку. */
-@Composable
-private fun Probe(modifier: Modifier = Modifier) {
-    val cfg = LocalConfiguration.current
-    Column(
-        modifier.fillMaxSize().padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Text("ddmail ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.headlineSmall)
-        Text("Окно: ${cfg.screenWidthDp} × ${cfg.screenHeightDp} dp")
-        Text("Плотность: ${cfg.densityDpi} dpi")
     }
 }
