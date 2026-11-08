@@ -14,7 +14,9 @@ import ru.letotam.ddmail.api.Binary
 import ru.letotam.ddmail.api.ChangeEntry
 import ru.letotam.ddmail.api.ContactInfo
 import ru.letotam.ddmail.api.ConversationDto
+import ru.letotam.ddmail.api.Identity
 import ru.letotam.ddmail.api.MessageBody
+import ru.letotam.ddmail.api.SendRequest
 import ru.letotam.ddmail.api.MessageRef
 import ru.letotam.ddmail.api.SessionApi
 import ru.letotam.ddmail.db.CacheDao
@@ -87,6 +89,8 @@ class SyncEngine(
         // надгробия этого прохода не потеряются, их отдадут ещё раз.
         if (ch.latestSeq > 0) dao.setMeta(K_SEQ, ch.latestSeq.toString())
 
+        runCatching { api.identities() }.getOrNull()?.let { dao.setMeta(K_IDENTITIES, json.encodeToString(idents, it)) }
+
         val f = api.dialogFolders()
         f.doc?.let {
             dao.setMeta(K_FOLDERS, it.toString())
@@ -123,6 +127,65 @@ class SyncEngine(
         dao.markRead(accountKey, c.id)
         if (unseen.isNotEmpty()) api.setFlag(unseen, SEEN, add = true)
     }
+
+    /** «Непрочитано» — на последнем письме беседы. */
+    suspend fun markUnread(c: Conversation) {
+        val last = c.messages.maxByOrNull { it.uid } ?: return
+        dao.markUnread(accountKey, c.id, last.uid)
+        api.setFlag(listOf(last), SEEN, add = false)
+    }
+
+    /**
+     * Удалить беседы целиком (§5): все письма — на сервер, из кэша — сразу.
+     * Надгробия журнала потом подтвердят то же самое.
+     */
+    suspend fun deleteConversations(convs: Collection<Conversation>) {
+        val refs = convs.flatMap { it.messages }
+        dao.deleteConversations(accountKey, convs.map { it.id })
+        refs.chunked(200).forEach { api.delete(it) }
+    }
+
+    /**
+     * Положить беседы в папку руками (`null` — во «Входящие») одной правкой
+     * документа (§5). Чужая правка между чтением и записью (`409`) — правка
+     * повторяется поверх свежего документа: назначение диалогов с чужими
+     * изменениями не конфликтует.
+     */
+    suspend fun assignFolder(convs: Collection<Conversation>, folderId: String?) {
+        var version = dao.meta(K_FOLDERS_VERSION)?.toLongOrNull() ?: 0
+        var doc = currentFolders()
+        repeat(3) {
+            val target = folderId?.let { id -> doc.folders.indexOfFirst { it.id == id }.takeIf { it >= 0 } }
+            if (folderId != null && target == null) return
+            val edited = doc.assign(convs, target)
+            // Сразу в кэш: список перестроится, не дожидаясь сервера.
+            dao.setMeta(K_FOLDERS, edited.toJson().toString())
+            try {
+                val r = api.saveDialogFolders(version, edited.toJson())
+                dao.setMeta(K_FOLDERS_VERSION, r.version.toString())
+                return
+            } catch (e: ApiException.Server) {
+                if (e.code != 409) throw e
+                val fresh = runCatching { json.decodeFromString(ru.letotam.ddmail.api.DialogFoldersResponse.serializer(), e.serverMessage) }.getOrNull()
+                    ?: throw e
+                version = fresh.version
+                doc = FoldersDoc.parse(fresh.doc)
+                dao.setMeta(K_FOLDERS_VERSION, version.toString())
+            }
+        }
+    }
+
+    private suspend fun currentFolders(): FoldersDoc =
+        dao.meta(K_FOLDERS)?.let { runCatching { FoldersDoc.parse(json.parseToJsonElement(it)) }.getOrNull() } ?: FoldersDoc()
+
+    /** Свои адреса: из кэша, раз в синк — с сервера. */
+    val identities: Flow<List<Identity>> = dao.observeMeta(K_IDENTITIES).map { s ->
+        s?.let { runCatching { json.decodeFromString(idents, it) }.getOrNull() }.orEmpty()
+    }
+
+    suspend fun send(req: SendRequest) = api.send(req)
+
+    suspend fun avatar(email: String): Binary? = api.avatar(email)
 
     suspend fun part(uid: Long, cid: String): Binary = api.part(uid, cid)
     suspend fun attachment(uid: Long, index: Int): Binary = api.attachment(uid, index)
@@ -210,11 +273,13 @@ class SyncEngine(
         private const val K_EPOCH = "conv_id_epoch"
         private const val K_FOLDERS = "dialog_folders"
         private const val K_FOLDERS_VERSION = "dialog_folders_version"
+        private const val K_IDENTITIES = "identities"
 
         private val json = Json { ignoreUnknownKeys = true }
         private val contacts = ListSerializer(ContactInfo.serializer())
         private val strings = ListSerializer(String.serializer())
         private val atts = ListSerializer(AttachmentDto.serializer())
+        private val idents = ListSerializer(Identity.serializer())
         const val SEEN = "\\Seen"
     }
 }

@@ -105,3 +105,45 @@ data class MessageBody(
     /** Ни HTML, ни текста, ни вложений — сбойный фетч, перезапросить (§4а десктопа). */
     val isBlank: Boolean get() = html.isNullOrBlank() && text.isNullOrBlank() && attachments.isEmpty()
 }
+
+/** Свой адрес (`/identities`): от него можно отправлять. */
+@Serializable
+data class Identity(
+    val email: String = "",
+    val name: String = "",
+    val signature: String = "",
+    @SerialName("is_default") val isDefault: Boolean = false,
+)
+
+@Serializable
+data class OutgoingAttachment(
+    val filename: String,
+    @SerialName("mime_type") val mimeType: String,
+    /** Байты; в JSON — base64 (как `[]byte` у Go). */
+    @Serializable(with = Base64Bytes::class) val content: ByteArray,
+    @SerialName("content_id") val contentId: String? = null,
+)
+
+/** Тело `/send`. Отправка асинхронная: сервер ставит письмо в очередь. */
+@Serializable
+data class SendRequest(
+    val from: String,
+    val to: List<String>,
+    val cc: List<String> = emptyList(),
+    val subject: String,
+    val html: String,
+    val text: String,
+    @SerialName("in_reply_to") val inReplyTo: String = "",
+    val references: String = "",
+    val attachments: List<OutgoingAttachment> = emptyList(),
+)
+
+object Base64Bytes : kotlinx.serialization.KSerializer<ByteArray> {
+    override val descriptor = kotlinx.serialization.descriptors.PrimitiveSerialDescriptor(
+        "Base64Bytes", kotlinx.serialization.descriptors.PrimitiveKind.STRING,
+    )
+    override fun serialize(encoder: kotlinx.serialization.encoding.Encoder, value: ByteArray) =
+        encoder.encodeString(java.util.Base64.getEncoder().encodeToString(value))
+    override fun deserialize(decoder: kotlinx.serialization.encoding.Decoder): ByteArray =
+        java.util.Base64.getDecoder().decode(decoder.decodeString())
+}

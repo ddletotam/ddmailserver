@@ -49,6 +49,51 @@ class SessionApi(
     suspend fun dialogFolders(): DialogFoldersResponse =
         get("/dialog-folders", DialogFoldersResponse.serializer())
 
+    suspend fun identities(): List<Identity> =
+        get("/identities", ListSerializer(Identity.serializer()))
+
+    /** Поставить письмо в отправку. 413 — вложения больше лимита сервера. */
+    suspend fun send(req: SendRequest) {
+        val body = DdmailApi.json.encodeToString(SendRequest.serializer(), req)
+        authed { token ->
+            Request.Builder().url("$baseUrl/api/desktop/v1/send")
+                .header("Authorization", "Bearer $token")
+                .post(body.toRequestBody(JSON))
+                .build()
+        }
+    }
+
+    /** Мягкое удаление писем (vault на сервере, у внешних учёток — и на источнике). */
+    suspend fun delete(refs: List<MessageRef>) {
+        val msgs = JsonArray(refs.map { JsonObject(mapOf("folder" to JsonPrimitive(it.folder), "uid" to JsonPrimitive(it.uid), "message_id" to JsonPrimitive(it.messageId))) })
+        authed { token ->
+            Request.Builder().url("$baseUrl/api/desktop/v1/messages/delete")
+                .header("Authorization", "Bearer $token")
+                .post(JsonObject(mapOf("messages" to msgs)).toString().toRequestBody(JSON))
+                .build()
+        }
+    }
+
+    /** Документ папок: `409` — его поменяла другая станция, в ответе текущий. */
+    suspend fun saveDialogFolders(baseVersion: Long, doc: kotlinx.serialization.json.JsonElement): DialogFoldersResponse {
+        val body = JsonObject(mapOf("base_version" to JsonPrimitive(baseVersion), "doc" to doc)).toString()
+        val text = authed { token ->
+            Request.Builder().url("$baseUrl/api/desktop/v1/dialog-folders")
+                .header("Authorization", "Bearer $token")
+                .put(body.toRequestBody(JSON))
+                .build()
+        }
+        return DdmailApi.json.decodeFromString(DialogFoldersResponse.serializer(), text)
+    }
+
+    /** Аватар адреса (`/avatars?email=`): байты картинки или `null`, если нет. */
+    suspend fun avatar(email: String): Binary? = try {
+        // 204 — аватара нет: пустое тело.
+        binary("/avatars?email=" + java.net.URLEncoder.encode(email, "UTF-8")).takeIf { it.bytes.isNotEmpty() }
+    } catch (e: ApiException.Server) {
+        null
+    }
+
     /** Тела писем по ссылкам. Ключ — стабильный `message_id`, uid — запасной. */
     suspend fun messages(refs: List<MessageRef>): List<MessageBody> {
         val body = DdmailApi.json.encodeToString(ListSerializer(MessageRef.serializer()), refs)

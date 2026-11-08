@@ -15,8 +15,8 @@ android {
         minSdk = 29
         targetSdk = 35
         // Бампается при любой правке клиента (контракт §1).
-        versionCode = 4
-        versionName = "0.0.4"
+        versionCode = 5
+        versionName = "0.0.5"
     }
 
     // Один код для Huawei и обычного Android: различается только доставка
@@ -66,4 +66,5 @@ dependencies {
     implementation(libs.compose.material3)
     implementation(libs.compose.tooling.preview)
     debugImplementation(libs.compose.tooling)
+    testImplementation(libs.junit)
 }

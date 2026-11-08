@@ -48,10 +48,23 @@ class ConversationController(
     private var loaded = 0
     private val shown = mutableSetOf<Long>()
 
+    /** Тела показанных писем — для веток ответа и меню пузыря. */
+    private val loadedBodies = java.util.concurrent.ConcurrentHashMap<Long, MessageBody>()
+
+    fun body(uid: Long): MessageBody? = loadedBodies[uid]
+
+    /** Последнее входящее среди показанных: на него отвечает неявный ответ. */
+    fun lastIncoming(): MessageBody? = loadedBodies.values.filter { !it.isOutgoing }.maxByOrNull { it.dateTs }
+
+    fun last(): MessageBody? = loadedBodies.values.maxByOrNull { it.dateTs }
+
+    val current: Conversation? get() = conv
+
     fun open(c: Conversation?) {
         job?.cancel()
         conv = c
         shown.clear()
+        loadedBodies.clear()
         if (c == null) return
         js.trySend("ddm.set({messages:[],hasOlder:false})")
         job = scope.launch {
@@ -141,7 +154,7 @@ class ConversationController(
     private val names = mutableMapOf<Pair<Long, Int>, String>()
 
     private suspend fun load(refs: List<MessageRef>): List<MessageBody> = try {
-        engine.bodies(refs)
+        engine.bodies(refs).also { list -> list.forEach { loadedBodies[it.uid] = it } }
     } catch (e: ApiException.Unauthorized) {
         onAuthDead()
         emptyList()

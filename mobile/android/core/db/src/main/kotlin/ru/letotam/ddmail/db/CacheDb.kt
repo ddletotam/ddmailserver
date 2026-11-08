@@ -159,6 +159,34 @@ abstract class CacheDao {
     @Query("UPDATE conversations SET unreadCount = 0 WHERE accountKey = :account AND id = :conv")
     protected abstract suspend fun zeroUnread(account: String, conv: String)
 
+    @Query("DELETE FROM conversation_messages WHERE accountKey = :account AND conversationId IN (:ids)")
+    protected abstract suspend fun dropRefs(account: String, ids: List<String>)
+
+    @Query("DELETE FROM conversations WHERE accountKey = :account AND id IN (:ids)")
+    protected abstract suspend fun dropConversations(account: String, ids: List<String>)
+
+    /** Беседы удалены целиком (оптимистично, до ответа журнала). */
+    @Transaction
+    open suspend fun deleteConversations(account: String, ids: List<String>) {
+        ids.chunked(500).forEach {
+            dropRefs(account, it)
+            dropConversations(account, it)
+        }
+    }
+
+    @Query("UPDATE conversation_messages SET seen = 0 WHERE accountKey = :account AND conversationId = :conv AND uid = :uid")
+    protected abstract suspend fun unseeRef(account: String, conv: String, uid: Long)
+
+    @Query("UPDATE conversations SET unreadCount = MAX(unreadCount, 1) WHERE accountKey = :account AND id = :conv")
+    protected abstract suspend fun bumpUnread(account: String, conv: String)
+
+    /** «Непрочитано»: последнее письмо снова непрочитано. */
+    @Transaction
+    open suspend fun markUnread(account: String, conv: String, uid: Long) {
+        unseeRef(account, conv, uid)
+        bumpUnread(account, conv)
+    }
+
     /** Беседу открыли — прочитана локально сразу, сервер — следом. */
     @Transaction
     open suspend fun markRead(account: String, conv: String) {

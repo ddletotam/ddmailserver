@@ -56,7 +56,17 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import ru.letotam.ddmail.DdmailApp
 import ru.letotam.ddmail.R
+import ru.letotam.ddmail.compose.ComposeSheetDialog
+import ru.letotam.ddmail.compose.ComposerBar
 import ru.letotam.ddmail.conversation.ConversationWeb
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import ru.letotam.ddmail.SessionStatus
 import ru.letotam.ddmail.auth.Session
 import ru.letotam.ddmail.sync.Conversation
@@ -68,6 +78,7 @@ private val Accent = Color(0xFF047857)
  * сложен, 350 dp) — список, беседа поверх; шире (712 / 1107 dp) — список и
  * беседа рядом. Табы папок наверху во всех состояниях.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MailScreen(
     vm: MailViewModel,
@@ -92,6 +103,7 @@ fun MailScreen(
         onPauseOrDispose {}
     }
     BackHandler(enabled = !wide && selectedId != null) { vm.open(null) }
+    LaunchedEffect(wide, s.conversations.size) { if (wide) vm.restoreLast() }
 
     // Один WebView на всё время экрана: создаётся сразу, открытие беседы
     // меняет только документ (контракт §8).
@@ -107,6 +119,7 @@ fun MailScreen(
             override fun onOpenAttachment(uid: Long, index: Int) =
                 vm.conversation.openAttachment(uid, index, vm.conversation.attachmentName(uid, index))
             override fun loadPart(uid: Long, cid: String) = vm.conversation.part(uid, cid)
+            override fun onBubbleMenu(uid: Long) = vm.showBubbleMenu(uid)
         }
         onDispose { web.host = null }
     }
@@ -114,17 +127,25 @@ fun MailScreen(
         for (js in vm.conversation.js) web.eval(js)
     }
 
-    Column(modifier.fillMaxSize()) {
-        TopBar(session, status, syncing, onLogout)
-        if (status == SessionStatus.Dead) DeadSessionBanner(onRelogin)
+    ComposeSheetDialog(vm.compose)
+    BubbleMenu(vm)
+
+    // Клавиатура EMUI на разложенном Mate XT занимает ~85% высоты: пока она
+    // открыта, прячем всё, кроме строки ввода, иначе композера не видно.
+    val ime = WindowInsets.isImeVisible
+    Column(modifier.fillMaxSize().imePadding()) {
+        if (!ime) {
+            TopBar(session, status, syncing, onLogout)
+            if (status == SessionStatus.Dead) DeadSessionBanner(onRelogin)
+        }
         if (wide) {
             Row(Modifier.fillMaxSize()) {
                 ListPane(s, syncing, selectedId, vm, Modifier.width(if (width >= 840) 400.dp else 340.dp).fillMaxHeight())
                 VerticalDivider()
-                ConversationPane(selected, web, onBack = null, Modifier.weight(1f).fillMaxHeight())
+                ConversationPane(selected, web, vm, onBack = null, Modifier.weight(1f).fillMaxHeight())
             }
         } else if (selected != null) {
-            ConversationPane(selected, web, onBack = { vm.open(null) }, Modifier.fillMaxSize())
+            ConversationPane(selected, web, vm, onBack = { vm.open(null) }, Modifier.fillMaxSize())
         } else {
             ListPane(s, syncing, selectedId, vm, Modifier.fillMaxSize())
         }
@@ -196,6 +217,12 @@ private fun ListPane(s: MailState, syncing: Boolean, selectedId: String?, vm: Ma
                     ConversationRow(c, selected = c.id == selectedId, onClick = { vm.open(c.id) })
                 }
             }
+            ExtendedFloatingActionButton(
+                onClick = vm.compose::openNew,
+                containerColor = Accent,
+                contentColor = Color.White,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+            ) { Text("✎  Написать") }
         }
     }
 }
@@ -333,15 +360,17 @@ private fun Avatar(c: Conversation) {
 
 /** Панель беседы: нативная шапка и лента в WebView (контракт §8). */
 @Composable
-private fun ConversationPane(c: Conversation?, web: ConversationWeb, onBack: (() -> Unit)?, modifier: Modifier) {
+private fun ConversationPane(c: Conversation?, web: ConversationWeb, vm: MailViewModel, onBack: (() -> Unit)?, modifier: Modifier) {
     if (c == null) {
         Box(modifier, contentAlignment = Alignment.Center) {
             Text(stringResource(R.string.pick_conversation), color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         return
     }
+    @OptIn(ExperimentalLayoutApi::class)
+    val ime = WindowInsets.isImeVisible
     Column(modifier) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (!ime) Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             if (onBack != null) TextButton(onClick = onBack) { Text("←", fontSize = 20.sp) }
             Column(Modifier.weight(1f).padding(start = if (onBack == null) 8.dp else 0.dp)) {
                 Text(c.label, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -359,7 +388,45 @@ private fun ConversationPane(c: Conversation?, web: ConversationWeb, onBack: (()
             // Тот же WebView переезжает между раскладками (сложили/разложили):
             // из прежнего родителя его надо вынуть.
             factory = { web.view.also { (it.parent as? ViewGroup)?.removeView(it) } },
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxWidth().weight(1f),
         )
+        HorizontalDivider()
+        ComposerBar(vm.compose, c)
     }
+}
+
+/** Долгое нажатие на пузырь: ответить именно на это письмо, переслать, копировать. */
+@Composable
+private fun BubbleMenu(vm: MailViewModel) {
+    val b by vm.bubbleMenu.collectAsState()
+    val body = b ?: return
+    val clipboard = LocalClipboardManager.current
+    val close = { vm.bubbleMenu.value = null }
+    AlertDialog(
+        onDismissRequest = close,
+        title = { Text(body.subject.ifBlank { stringResource(R.string.no_subject) }, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        text = {
+            Column {
+                listOf(
+                    "Ответить" to { vm.compose.replyTo(body) },
+                    "Переслать" to { vm.compose.openForward(body) },
+                    "Копировать текст" to {
+                        val plain = body.text?.takeIf { it.isNotBlank() }
+                            ?: android.text.Html.fromHtml(body.html.orEmpty(), android.text.Html.FROM_HTML_MODE_COMPACT).toString()
+                        clipboard.setText(AnnotatedString(plain.trim()))
+                    },
+                ).forEach { (title, action) ->
+                    Text(
+                        title,
+                        modifier = Modifier.fillMaxWidth().clickable {
+                            action()
+                            close()
+                        }.padding(vertical = 14.dp),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = close) { Text("Отмена") } },
+    )
 }

@@ -5,8 +5,10 @@
 //   batch = { messages: [Msg], hasOlder: bool, focusUid?: number }
 //   Msg   = { uid, outgoing, fromName, fromAddr, dateTs (сек), html?, text?,
 //             attachments: [{index, filename, size}], showFrom }
+//                       ddm.stub(Stub), ddm.unstub(key)  — optimistic send
+//   Stub  = { key, html, text, attachments: [{filename, size}] }
 // Документ → нативный:  ready(), openLink(url), requestOlder(),
-//   openAttachment(uid, index)
+//   openAttachment(uid, index), bubbleMenu(uid)
 'use strict';
 
 /** Сменилась нормализация — поднять: клиенты пересчитают закэшированное. */
@@ -392,6 +394,12 @@ function makeRow(msg) {
   b.appendChild(meta);
   row.appendChild(b);
 
+  // Долгое нажатие на пузырь — нативное меню (ответить, переслать, …).
+  row.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    native('bubbleMenu', msg.uid);
+  });
+
   const entry = { msg, host, shadow, root: null, imagesAllowed: false, imagesBtn };
   // Разрешение картинок — на это письмо и до закрытия беседы.
   imagesBtn.addEventListener('click', () => {
@@ -438,6 +446,62 @@ function fitAll() {
   for (const e of bubbles.values()) fit(e);
 }
 
+// ── Optimistic send (§2 десктопа) ─────────────────────────────────────────
+
+/** key → { row, norm } — заглушки отправляемых писем. */
+const stubs = new Map();
+const STUB_TTL_MS = 120000;
+
+function normText(s) {
+  return (s || '').replace(/\s+/g, ' ').trim();
+}
+
+function plainOf(m) {
+  if (m.text) return m.text;
+  if (!m.html) return '';
+  return new DOMParser().parseFromString(m.html, 'text/html').body.textContent || '';
+}
+
+/** Заглушка выглядит как письмо: тот же HTML и те же чипы вложений. */
+function makeStub(st) {
+  const row = document.createElement('div');
+  row.className = 'ddm-row ddm-out ddm-pending';
+  const b = document.createElement('div');
+  b.className = 'ddm-bubble';
+  const host = document.createElement('div');
+  host.className = 'ddm-host';
+  const shadow = host.attachShadow({ mode: 'closed' });
+  const link = document.createElement('link');
+  link.rel = 'stylesheet';
+  link.href = 'bubble.css';
+  const root = document.createElement('div');
+  root.className = 'ddm-root';
+  root.innerHTML = textToHtml(st.text || '');
+  shadow.append(link, root);
+  b.appendChild(host);
+  if (st.attachments && st.attachments.length) {
+    const box = document.createElement('div');
+    box.className = 'ddm-atts';
+    for (const a of st.attachments) {
+      const chip = document.createElement('span');
+      chip.className = 'ddm-att';
+      const name = document.createElement('span');
+      name.textContent = a.filename;
+      const size = document.createElement('small');
+      size.textContent = formatSize(a.size || 0);
+      chip.append('📎', name, size);
+      box.appendChild(chip);
+    }
+    b.appendChild(box);
+  }
+  const meta = document.createElement('div');
+  meta.className = 'ddm-meta';
+  meta.textContent = 'Отправляется…';
+  b.appendChild(meta);
+  row.appendChild(b);
+  return row;
+}
+
 const ddm = {
   /** Новая беседа: всё заново. */
   set(batch) {
@@ -477,10 +541,42 @@ const ddm = {
     if (!fresh.length) return;
     const atBottom = scroller.scrollHeight - scroller.scrollTop - window.innerHeight < 80;
     const prev = order.length ? order[order.length - 1].dateTs : null;
+    // Настоящее письмо пришло — его заглушка уходит (сверка по тексту).
+    for (const m of fresh) {
+      if (!m.outgoing) continue;
+      const norm = normText(plainOf(m));
+      for (const [key, st] of stubs) {
+        if (st.norm && norm.startsWith(st.norm)) {
+          ddm.unstub(key);
+          break;
+        }
+      }
+    }
     feed.appendChild(build(fresh, prev));
+    // Заглушки — всегда последними.
+    for (const st of stubs.values()) feed.appendChild(st.row);
     order = order.concat(fresh);
     fresh.forEach((m) => fit(bubbles.get(m.uid)));
     if (atBottom) scroller.scrollTop = scroller.scrollHeight;
+  },
+
+  /** Мгновенный пузырь отправляемого письма. */
+  stub(st) {
+    ddm.unstub(st.key);
+    const row = makeStub(st);
+    feed.appendChild(row);
+    stubs.set(st.key, { row, norm: normText(st.text) });
+    // Против «призраков»: письмо так и не пришло — заглушка уходит сама.
+    setTimeout(() => ddm.unstub(st.key), STUB_TTL_MS);
+    scroller.scrollTop = scroller.scrollHeight;
+  },
+
+  /** Отправка не удалась — заглушку убрать: не врём, что ушло. */
+  unstub(key) {
+    const s = stubs.get(key);
+    if (!s) return;
+    s.row.remove();
+    stubs.delete(key);
   },
 
   version: NORMALIZER_VERSION,
