@@ -22,6 +22,9 @@ import java.util.concurrent.TimeUnit
 class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         val app = applicationContext as DdmailApp
+        // Приложение на экране — синхронизирует оно само (и WebSocket);
+        // второй движок рядом гонялся бы с ним за кэш.
+        if (app.foreground) return Result.success()
         val session = app.sessions.load() ?: return Result.success()
         val engine = app.engine(session)
         return try {
