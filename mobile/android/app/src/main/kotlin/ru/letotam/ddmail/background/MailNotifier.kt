@@ -30,6 +30,7 @@ import ru.letotam.ddmail.sync.FoldersDoc
 class MailNotifier(private val context: Context, private val settings: AppSettings) {
 
     suspend fun check(convs: List<Conversation>, folders: FoldersDoc, openId: String?) {
+        badge(convs.count { c -> c.unreadCount > 0 && folders.folderOf(c)?.let { folders.folders[it].hidden } != true })
         val unseen = convs.flatMap { c -> c.messages.filter { !it.seen }.map { c to it.uid } }
         val top = convs.flatMap { c -> c.messages.map { it.uid } }.maxOrNull() ?: return
         val last = settings.notifiedMax()
@@ -42,6 +43,26 @@ class MailNotifier(private val context: Context, private val settings: AppSettin
                 c.id != openId && folders.folderOf(c)?.let { folders.folders[it].hidden } != true
             }
         fresh.forEach { (c, uids) -> post(c, uids.size) }
+    }
+
+    /**
+     * Бейдж на иконке — беседы с непрочитанным (как точка трея десктопа:
+     * беседы, а не письма; скрытые папки не считаются). Лаунчер Huawei —
+     * своим API; на других лаунчерах вызов просто не найдёт провайдера.
+     */
+    private fun badge(n: Int) {
+        try {
+            val extra = android.os.Bundle().apply {
+                putString("package", context.packageName)
+                putString("class", MainActivity::class.java.name)
+                putInt("badgenumber", n)
+            }
+            context.contentResolver.call(
+                android.net.Uri.parse("content://com.huawei.android.launcher.settings/badge/"),
+                "change_badge", null, extra,
+            )
+        } catch (_: Exception) {
+        }
     }
 
     private suspend fun settingsOn(): Boolean {

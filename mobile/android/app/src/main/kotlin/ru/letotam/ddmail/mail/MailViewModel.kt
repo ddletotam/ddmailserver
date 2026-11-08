@@ -206,6 +206,15 @@ class MailViewModel(
         }
     }
 
+    /** Свайп вправо: прочитано ⇄ непрочитано. */
+    fun toggleRead(id: String) {
+        val c = all.firstOrNull { it.id == id } ?: return
+        viewModelScope.launch {
+            runCatching { if (c.unreadCount > 0) engine.markRead(c) else engine.markUnread(c) }
+                .onFailure { notice.value = "Не удалось: ${it.message}" }
+        }
+    }
+
     /** В папку (`null` — во «Входящие») — одной правкой документа на весь выбор. */
     fun movePicked(folderId: String?) {
         val convs = pickedConvs()

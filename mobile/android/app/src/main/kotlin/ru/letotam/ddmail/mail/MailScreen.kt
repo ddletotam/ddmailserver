@@ -263,8 +263,13 @@ private fun SelectionBar(n: Int, vm: MailViewModel, onMove: () -> Unit, onDelete
 
 @Composable
 private fun FolderPickerDialog(vm: MailViewModel, close: () -> Unit) {
+    // Закрыли без выбора — выбор, сделанный свайпом, не должен остаться висеть.
+    val dismiss = {
+        vm.clearPicks()
+        close()
+    }
     AlertDialog(
-        onDismissRequest = close,
+        onDismissRequest = dismiss,
         title = { Text("В папку") },
         text = {
             Column {
@@ -363,6 +368,15 @@ private fun ListPane(
             LazyColumn(Modifier.fillMaxSize()) {
                 items(s.conversations, key = { it.accountKey + "\u0000" + it.id }) { c ->
                     val inPick = c.id in picked
+                    SwipeRow(
+                        enabled = picked.isEmpty(),
+                        unread = c.unreadCount > 0,
+                        onRight = { vm.toggleRead(c.id) },
+                        onLeft = {
+                            vm.togglePick(c.id)
+                            onMove()
+                        },
+                    ) {
                     ConversationRow(
                         c,
                         avatars = vm.avatars,
@@ -371,6 +385,7 @@ private fun ListPane(
                         onClick = { if (picked.isNotEmpty()) vm.togglePick(c.id) else vm.open(c.id) },
                         onLongClick = { vm.togglePick(c.id) },
                     )
+                    }
                 }
             }
             // Над кнопкой «Написать», а не под ней.
@@ -444,6 +459,46 @@ private fun Tab(title: String, unread: Int, selected: Boolean, onClick: () -> Un
                 .background(if (selected) Accent else Color.Transparent),
         )
     }
+}
+
+/**
+ * Свайпы по строке (контракт §11 — предложение для пробы): вправо —
+ * прочитано/непрочитано, влево — «В папку…». Удаления свайпом нет: оно
+ * необратимо, а свайп легко сделать случайно. Строка всегда возвращается
+ * на место — действие срабатывает, строка не «улетает».
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SwipeRow(enabled: Boolean, unread: Boolean, onRight: () -> Unit, onLeft: () -> Unit, content: @Composable () -> Unit) {
+    val state = androidx.compose.material3.rememberSwipeToDismissBoxState(
+        confirmValueChange = { v ->
+            when (v) {
+                androidx.compose.material3.SwipeToDismissBoxValue.StartToEnd -> onRight()
+                androidx.compose.material3.SwipeToDismissBoxValue.EndToStart -> onLeft()
+                else -> {}
+            }
+            false
+        },
+        positionalThreshold = { it * 0.35f },
+    )
+    androidx.compose.material3.SwipeToDismissBox(
+        state = state,
+        enableDismissFromStartToEnd = enabled,
+        enableDismissFromEndToStart = enabled,
+        backgroundContent = {
+            val right = state.dismissDirection == androidx.compose.material3.SwipeToDismissBoxValue.StartToEnd
+            Box(
+                Modifier.fillMaxSize().background(if (right) Accent else Color(0xFF1D4ED8)).padding(horizontal = 20.dp),
+                contentAlignment = if (right) Alignment.CenterStart else Alignment.CenterEnd,
+            ) {
+                Text(
+                    if (right) (if (unread) "Прочитано" else "Непрочитано") else "В папку…",
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        },
+    ) { Box(Modifier.background(MaterialTheme.colorScheme.background)) { content() } }
 }
 
 /** Строгий двухстрочный формат (§4 десктопа): имя / тема последнего письма. */
