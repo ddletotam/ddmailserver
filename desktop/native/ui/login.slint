@@ -3,9 +3,13 @@
 // состояния, и из настроек, и с плашки «сессия истекла». Внешне — тот же
 // набор примитивов, что модалка настроек (kit.slint).
 //
-// Логика целиком в Rust (accounts.rs, open_add_connection): серверы по
-// домену подставляет `email-edited`, вход по IMAP и SMTP проверяется до
-// сохранения учётки.
+// Новое подключение — пошагово (`step`): выбор «вручную / автоматически»,
+// адрес, поиск серверов с прогрессом, найденное. Ручной режим — прежняя
+// форма. Правка и повторный вход открываются сразу формой.
+//
+// Логика целиком в Rust (accounts.rs, open_add_connection; поиск —
+// ddmail_core::discover): серверы по домену подставляет `email-edited`, вход
+// по IMAP и SMTP проверяется до сохранения учётки.
 
 import { ScrollView, Palette } from "std-widgets.slint";
 import { KLineEdit } from "keys.slint";
@@ -34,6 +38,86 @@ component FieldRow inherits Rectangle {
     }
 }
 
+// Два взаимоисключающих варианта в одну строку — вид учётки, авторизация SMTP.
+component Segmented inherits Rectangle {
+    in property <[string]> options;
+    in property <int> selected;
+    in property <bool> enabled: true;
+    callback picked(int);
+    height: 34px;
+    border-radius: 8px;
+    background: #e9edf1;
+    HorizontalLayout {
+        padding: 3px;
+        spacing: 3px;
+        for opt[oi] in root.options: Rectangle {
+            horizontal-stretch: 1;
+            border-radius: 6px;
+            background: root.selected == oi ? white : (seg-ta.has-hover ? #dfe4ea : transparent);
+            drop-shadow-blur: root.selected == oi ? 2px : 0px;
+            drop-shadow-color: #0000001f;
+            Text {
+                text: opt;
+                font-size: 13px;
+                font-weight: root.selected == oi ? 600 : 500;
+                color: root.selected == oi ? #065f46 : #2b3640;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            seg-ta := TouchArea {
+                enabled: root.enabled;
+                mouse-cursor: pointer;
+                clicked => { root.picked(oi); }
+            }
+        }
+    }
+}
+
+// Крупная кнопка-вариант первого шага визарда.
+component ChoiceCard inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> primary: false;
+    callback clicked();
+    height: 76px;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: ta.has-hover ? #047857 : #e3e8ee;
+    background: ta.has-hover ? #f2fbf7 : white;
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 12px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 4px;
+            Text {
+                text: root.title;
+                font-size: 14px;
+                font-weight: 700;
+                color: root.primary ? #065f46 : #0f1419;
+            }
+            Text {
+                text: root.subtitle;
+                font-size: 12px;
+                color: #6b7480;
+                wrap: word-wrap;
+            }
+        }
+        Text {
+            text: "›";
+            font-size: 22px;
+            color: #8b95a1;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 export component LoginWindow inherits Window {
     // Палитра std-widgets прибита к светлой, потому что вся вёрстка здесь
     // светлая жёстко: белые карточки, светлый фон, тёмный текст. Сами
@@ -58,6 +142,20 @@ export component LoginWindow inherits Window {
     // 0 = сервер ddmail (native, вход → JWT); 1 = любой ящик IMAP/SMTP
     // (+ необязательные CalDAV/CardDAV).
     in-out property <int> mode: 0;
+
+    // Шаг визарда: 0 — выбор «вручную / автоматически», 1 — адрес, 2 — поиск,
+    // 3 — найденное, 4 — форма целиком (ручной режим, правка, повторный вход).
+    in-out property <int> step: 4;
+    // Прогресс поиска: сделано из верхней границы числа проверок.
+    in property <int> progress-done: 0;
+    in property <int> progress-total: 1;
+    in property <string> progress-text: "";
+    // Найденное на шаге 3: «хост:порт · шифрование» и откуда взялось.
+    in property <string> found-imap: "";
+    in property <string> found-smtp: "";
+    in property <string> found-note: "";
+    // Нейтральное сообщение внизу (не ошибка): «SMTP найти не удалось…».
+    in property <string> notice: "";
 
     // Правка существующей учётки: вид (ddmail / IMAP) не меняется — это была
     // бы уже другая учётка. Переключатель скрыт.
@@ -85,6 +183,10 @@ export component LoginWindow inherits Window {
     in-out property <string> imap-port: "993";
     in-out property <string> smtp-host: "";
     in-out property <string> smtp-port: "465";
+    // SMTP с авторизацией тем же логином и паролем; false — внутренний релей.
+    in-out property <bool> smtp-auth: true;
+    // Найденный SMTP не объявил AUTH — подсказка к выбору.
+    in property <bool> smtp-auth-advertised: true;
     in-out property <string> caldav-url: "";
     in-out property <string> carddav-url: "";
 
@@ -109,6 +211,10 @@ export component LoginWindow inherits Window {
     callback cancel();
     callback google-login();
     callback email-edited(string);
+    // Шаг 0: выбран вариант. Шаги 1–4: «Назад».
+    callback choose-auto();
+    callback choose-manual();
+    callback back();
 
     FocusScope {
         // Сам не остановка в цикле Tab — только ловит то, что поля отдают
@@ -146,7 +252,17 @@ export component LoginWindow inherits Window {
                     color: #0f1419;
                 }
                 Text {
-                    text: root.oauth-only
+                    text: root.step == 0
+                        ? "Как настроить подключение?"
+                        : root.step == 1
+                        ? "Серверы найдём по адресу почты."
+                        : root.step == 2
+                        ? "Ищем серверы для " + root.email
+                        : root.step == 3 && root.mode == 0
+                        ? "Нашёлся сервер ddmail — осталось войти."
+                        : root.step == 3
+                        ? "Серверы найдены — осталось ввести пароль."
+                        : root.oauth-only
                         ? "Учётка Google входит через браузер, пароль ей не нужен."
                         : root.mode == 0
                         ? "Вход на свой сервер ddmail: почта, календарь и контакты придут оттуда."
@@ -155,42 +271,19 @@ export component LoginWindow inherits Window {
                     color: #6b7480;
                     wrap: word-wrap;
                 }
-                if !root.kind-locked: Rectangle { height: 10px; }
-                if !root.kind-locked: Rectangle {
-                    height: 34px;
-                    border-radius: 8px;
-                    background: #e9edf1;
-                    HorizontalLayout {
-                        padding: 3px;
-                        spacing: 3px;
-                        for opt[oi] in ["Сервер ddmail", "Другой ящик (IMAP)"]: Rectangle {
-                            horizontal-stretch: 1;
-                            border-radius: 6px;
-                            background: root.mode == oi ? white : (seg-ta.has-hover ? #dfe4ea : transparent);
-                            drop-shadow-blur: root.mode == oi ? 2px : 0px;
-                            drop-shadow-color: #0000001f;
-                            Text {
-                                text: opt;
-                                font-size: 13px;
-                                font-weight: root.mode == oi ? 600 : 500;
-                                color: root.mode == oi ? #065f46 : #2b3640;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                            seg-ta := TouchArea {
-                                enabled: !root.busy;
-                                mouse-cursor: pointer;
-                                // Фокус сбрасывается здесь, а не в `changed mode`:
-                                // тот срабатывает отложенно и при prefill
-                                // (Rust ставит mode 1 и focus-field "password")
-                                // затирал фокус-в-пароль — набор уходил в email.
-                                clicked => {
-                                    root.mode = oi;
-                                    root.focus-field = "";
-                                    root.focus-pending = true;
-                                }
-                            }
-                        }
+                if root.step == 4 && !root.kind-locked: Rectangle { height: 10px; }
+                if root.step == 4 && !root.kind-locked: Segmented {
+                    options: ["Сервер ddmail", "Другой ящик (IMAP)"];
+                    selected: root.mode;
+                    enabled: !root.busy;
+                    // Фокус сбрасывается здесь, а не в `changed mode`:
+                    // тот срабатывает отложенно и при prefill
+                    // (Rust ставит mode 1 и focus-field "password")
+                    // затирал фокус-в-пароль — набор уходил в email.
+                    picked(oi) => {
+                        root.mode = oi;
+                        root.focus-field = "";
+                        root.focus-pending = true;
                     }
                 }
             }
@@ -212,8 +305,211 @@ export component LoginWindow inherits Window {
                     padding-bottom: 18px;
                     alignment: start;
 
+                    // ===== Шаг 0: как настраивать =====
+                    if root.step == 0: VerticalLayout {
+                        alignment: start;
+                        spacing: 10px;
+                        ChoiceCard {
+                            primary: true;
+                            title: "Автоматическая настройка";
+                            subtitle: "Введите только адрес почты — серверы найдём сами.";
+                            clicked => { root.choose-auto(); }
+                        }
+                        ChoiceCard {
+                            title: "Я знаю все настройки";
+                            subtitle: "Сервер ddmail или IMAP/SMTP — введу руками.";
+                            clicked => { root.choose-manual(); }
+                        }
+                    }
+
+                    // ===== Шаг 1: адрес =====
+                    if root.step == 1: VerticalLayout {
+                        alignment: start;
+                        spacing: 8px;
+                        Caption { text: "АДРЕС ПОЧТЫ"; }
+                        Group {
+                            FieldRow {
+                                label: "Email";
+                                auto-email-field := KLineEdit {
+                                    text <=> root.email;
+                                    placeholder-text: "you@example.com";
+                                    accepted => { root.submit(); }
+                                }
+                                // Фокус — таймером, а не из init: focus() во время
+                                // построения условного блока даёт «Recursion detected».
+                                Timer {
+                                    interval: 1ms;
+                                    running: root.focus-pending;
+                                    triggered => {
+                                        root.focus-pending = false;
+                                        auto-email-field.focus();
+                                    }
+                                }
+                            }
+                        }
+                        Note {
+                            text: "Сначала ищем сервер ddmail, затем настройки домена и стандартные порты IMAP и SMTP с шифрованием. Пароль понадобится после — на найденные серверы.";
+                        }
+                    }
+
+                    // ===== Шаг 2: поиск =====
+                    if root.step == 2: VerticalLayout {
+                        alignment: start;
+                        spacing: 8px;
+                        Caption { text: "ПОИСК СЕРВЕРОВ"; }
+                        Group {
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 10px;
+                                Text {
+                                    text: root.progress-text;
+                                    font-size: 13px;
+                                    color: #2b3640;
+                                    overflow: elide;
+                                }
+                                Rectangle {
+                                    height: 8px;
+                                    border-radius: 4px;
+                                    background: #e9edf1;
+                                    Rectangle {
+                                        x: 0;
+                                        height: parent.height;
+                                        border-radius: 4px;
+                                        background: #10b981;
+                                        width: parent.width * min(1, root.progress-done / max(1, root.progress-total));
+                                        animate width { duration: 150ms; }
+                                    }
+                                }
+                                Text {
+                                    text: "Проверено " + root.progress-done + " из " + root.progress-total;
+                                    font-size: 12px;
+                                    color: #6b7480;
+                                }
+                            }
+                        }
+                        Note {
+                            text: "Проверки идут параллельно; недоступные порты отваливаются по таймауту, поэтому поиск может занять до полуминуты.";
+                        }
+                    }
+
+                    // ===== Шаг 3: найден сервер ddmail =====
+                    if root.step == 3 && root.mode == 0: VerticalLayout {
+                        alignment: start;
+                        spacing: 8px;
+                        Caption { text: "СЕРВЕР DDMAIL"; }
+                        Group {
+                            SettingRow {
+                                title: root.server-url;
+                                subtitle: "Почта, календарь и контакты придут оттуда";
+                            }
+                            Divider {}
+                            FieldRow {
+                                label: "Логин";
+                                KLineEdit {
+                                    text <=> root.username;
+                                    enabled: !root.busy;
+                                    accepted => { root.submit(); }
+                                }
+                            }
+                            Divider {}
+                            FieldRow {
+                                label: "Пароль";
+                                found-native-password := KLineEdit {
+                                    text <=> root.password;
+                                    input-type: InputType.password;
+                                    enabled: !root.busy;
+                                    accepted => { root.submit(); }
+                                }
+                                Timer {
+                                    interval: 1ms;
+                                    running: root.focus-pending;
+                                    triggered => {
+                                        root.focus-pending = false;
+                                        found-native-password.focus();
+                                    }
+                                }
+                            }
+                        }
+                        Note {
+                            text: "Логин на сервере ddmail — имя пользователя, обычно часть адреса до @. Пароль не сохраняется: клиент получает от сервера токен сессии.";
+                        }
+                    }
+
+                    // ===== Шаг 3: найдены IMAP/SMTP =====
+                    if root.step == 3 && root.mode == 1: VerticalLayout {
+                        alignment: start;
+                        spacing: 8px;
+                        Caption { text: "НАЙДЕННЫЕ СЕРВЕРЫ"; }
+                        Group {
+                            SettingRow {
+                                title: "Входящая · IMAP";
+                                subtitle: root.found-imap;
+                            }
+                            Divider {}
+                            SettingRow {
+                                title: "Исходящая · SMTP";
+                                subtitle: root.found-smtp;
+                                Btn {
+                                    text: "Изменить";
+                                    enabled: !root.busy;
+                                    clicked => { root.choose-manual(); }
+                                }
+                            }
+                        }
+                        if root.found-note != "": Note { text: root.found-note; }
+
+                        Rectangle { height: 6px; }
+                        Caption { text: "ВХОД"; }
+                        Group {
+                            FieldRow {
+                                label: "Логин";
+                                KLineEdit {
+                                    text <=> root.imap-username;
+                                    enabled: !root.busy;
+                                    placeholder-text: root.email;
+                                    accepted => { root.submit(); }
+                                }
+                            }
+                            Divider {}
+                            FieldRow {
+                                label: "Пароль";
+                                found-imap-password := KLineEdit {
+                                    text <=> root.password;
+                                    input-type: InputType.password;
+                                    enabled: !root.busy;
+                                    accepted => { root.submit(); }
+                                }
+                                Timer {
+                                    interval: 1ms;
+                                    running: root.focus-pending;
+                                    triggered => {
+                                        root.focus-pending = false;
+                                        found-imap-password.focus();
+                                    }
+                                }
+                            }
+                        }
+                        if root.password-hint != "": Note {
+                            text: root.password-hint;
+                        }
+
+                        Rectangle { height: 6px; }
+                        Caption { text: "АВТОРИЗАЦИЯ НА SMTP"; }
+                        Segmented {
+                            options: ["Тот же логин и пароль", "Без авторизации"];
+                            selected: root.smtp-auth ? 0 : 1;
+                            enabled: !root.busy;
+                            picked(i) => { root.smtp-auth = i == 0; }
+                        }
+                        Note {
+                            text: root.smtp-auth-advertised
+                                ? "Исходящий сервер просит вход — обычно тем же логином и паролем, что и входящий."
+                                : "Исходящий сервер не просит вход — похоже на внутренний релей. Если отправка не пойдёт, включите авторизацию.";
+                        }
+                    }
+
                     // ===== Сервер ddmail =====
-                    if root.mode == 0: VerticalLayout {
+                    if root.step == 4 && root.mode == 0: VerticalLayout {
                         alignment: start;
                         spacing: 8px;
                         Caption { text: "СЕРВЕР"; }
@@ -274,7 +570,7 @@ export component LoginWindow inherits Window {
                     }
 
                     // ===== Другой ящик (IMAP/SMTP) =====
-                    if root.mode == 1: VerticalLayout {
+                    if root.step == 4 && root.mode == 1: VerticalLayout {
                         alignment: start;
                         spacing: 8px;
 
@@ -306,7 +602,7 @@ export component LoginWindow inherits Window {
                         }
                     }
 
-                    if root.mode == 1 && !root.oauth-only: VerticalLayout {
+                    if root.step == 4 && root.mode == 1 && !root.oauth-only: VerticalLayout {
                         alignment: start;
                         spacing: 8px;
 
@@ -369,7 +665,7 @@ export component LoginWindow inherits Window {
                                     : "IMAP " + root.imap-host;
                                 subtitle: root.imap-host == ""
                                     ? "Для известных служб — автоматически"
-                                    : "SMTP " + root.smtp-host + (root.servers-known
+                                    : "SMTP " + root.smtp-host + (root.smtp-auth ? "" : " без авторизации") + (root.servers-known
                                         ? " · настройки " + root.provider-name
                                         : " · угаданы по домену, проверьте");
                                 Btn {
@@ -426,6 +722,16 @@ export component LoginWindow inherits Window {
                                 }
                                 Divider {}
                                 FieldRow {
+                                    label: "Вход SMTP";
+                                    Segmented {
+                                        options: ["Как IMAP", "Без авторизации"];
+                                        selected: root.smtp-auth ? 0 : 1;
+                                        enabled: !root.busy;
+                                        picked(i) => { root.smtp-auth = i == 0; }
+                                    }
+                                }
+                                Divider {}
+                                FieldRow {
                                     label: "Логин";
                                     KLineEdit {
                                         text <=> root.imap-username;
@@ -437,7 +743,7 @@ export component LoginWindow inherits Window {
                             }
                         }
                         if root.servers-open: Note {
-                            text: "Шифрование SSL/TLS; на SMTP-портах 587, 25 и 2525 — STARTTLS. Логин пустой — входим по email.";
+                            text: "Шифрование SSL/TLS; на IMAP-порту 143 и SMTP-портах 587, 25 и 2525 — STARTTLS. Логин пустой — входим по email.";
                         }
 
                         Rectangle { height: 6px; }
@@ -487,6 +793,19 @@ export component LoginWindow inherits Window {
                     spacing: 10px;
                     // Ошибка целиком, с переносом: обрезанная на полуслове
                     // «Connection error: …» ничего не объясняла.
+                    if root.notice != "" && root.error == "": Rectangle {
+                        border-radius: 8px;
+                        background: #eef4fb;
+                        VerticalLayout {
+                            padding: 10px;
+                            Text {
+                                text: root.notice;
+                                font-size: 12.5px;
+                                color: #1f4f82;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
                     if root.error != "": Rectangle {
                         border-radius: 8px;
                         background: #fdecec;
@@ -502,16 +821,24 @@ export component LoginWindow inherits Window {
                     }
                     HorizontalLayout {
                         spacing: 8px;
-                        alignment: end;
+                        // «Назад» — слева, на всех шагах, кроме первого; у
+                        // правки и повторного входа визарда нет.
+                        if root.step > 0 && !root.kind-locked: Btn {
+                            text: "Назад";
+                            enabled: !root.busy;
+                            clicked => { root.back(); }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
                         Btn {
                             text: "Отмена";
                             clicked => { root.cancel(); }
                         }
-                        Btn {
+                        if root.step != 0 && root.step != 2: Btn {
                             kind: 1;
                             min-w: 150px;
                             enabled: !root.busy && (!root.oauth-only || root.google-available);
                             text: root.busy ? root.busy-text
+                                : root.step == 1 ? "Найти серверы"
                                 : root.oauth-only ? "Войти через Google"
                                 : root.mode == 0 ? "Войти" : "Подключить";
                             clicked => { root.submit(); }

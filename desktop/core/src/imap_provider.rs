@@ -18,6 +18,9 @@ pub struct ImapProvider {
     pub username: String,
     pub password: String,
     pub use_tls: bool,
+    /// SMTP с авторизацией (те же логин и пароль, что у IMAP). `false` —
+    /// внутренний релей без AUTH.
+    pub smtp_auth: bool,
     pub user_email: String,
     pub pool: std::sync::Arc<SessionPool>,
     /// Optional CardDAV addressbook-collection URL for this account. When set,
@@ -356,6 +359,7 @@ impl MailProvider for ImapProvider {
             &self.username,
             &self.password,
             self.use_tls,
+            self.smtp_auth,
             message,
         )
         .await

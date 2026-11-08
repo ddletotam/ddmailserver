@@ -349,6 +349,36 @@ where
     Ok(envelopes)
 }
 
+/// Защищённый поток до IMAP-сервера, ещё без входа. Порт 143 — STARTTLS
+/// (приветствие и команда открытым текстом, дальше TLS на том же сокете),
+/// любой другой — TLS сразу. Режим по порту, как у SMTP (`smtp::build_transport`):
+/// учётка хранит только `use_tls`, а неявный TLS на 143 висел бы на рукопожатии.
+pub(crate) type TlsStream =
+    futures_rustls::client::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>;
+
+pub(crate) async fn open_tls(host: &str, port: u16) -> Result<TlsStream, String> {
+    let tls = crate::tls::connector();
+    let tcp =
+        tokio::net::TcpStream::connect((host, port)).await.map_err(|e| format!("TCP: {e}"))?;
+    let tcp = if port == 143 {
+        let mut client = async_imap::Client::new(tcp.compat());
+        // Приветствие сервера читаем сами: иначе его съест ответ на STARTTLS.
+        match client.read_response().await {
+            Some(Ok(_)) => {}
+            Some(Err(e)) => return Err(format!("IMAP: {e}")),
+            None => return Err("IMAP: сервер закрыл соединение".into()),
+        }
+        client
+            .run_command_and_check_ok("STARTTLS", None)
+            .await
+            .map_err(|e| format!("STARTTLS: {e}"))?;
+        client.into_inner()
+    } else {
+        tcp.compat()
+    };
+    tls.connect(crate::tls::server_name(host)?, tcp).await.map_err(|e| format!("TLS: {e}"))
+}
+
 // Macro-like helper: connect, login, get session (TLS)
 pub(crate) async fn connect_tls(
     host: &str,
@@ -361,13 +391,7 @@ pub(crate) async fn connect_tls(
     >,
     String,
 > {
-    let tls = crate::tls::connector();
-    let tcp =
-        tokio::net::TcpStream::connect((host, port)).await.map_err(|e| format!("TCP: {e}"))?;
-    let tls_stream = tls
-        .connect(crate::tls::server_name(host)?, tcp.compat())
-        .await
-        .map_err(|e| format!("TLS: {e}"))?;
+    let tls_stream = open_tls(host, port).await?;
     let client = async_imap::Client::new(tls_stream);
     client.login(username, password).await.map_err(|e| crate::session::friendly_login_error(e.0))
 }
@@ -398,13 +422,7 @@ pub(crate) async fn connect_tls_xoauth2(
     >,
     String,
 > {
-    let tls = crate::tls::connector();
-    let tcp =
-        tokio::net::TcpStream::connect((host, port)).await.map_err(|e| format!("TCP: {e}"))?;
-    let tls_stream = tls
-        .connect(crate::tls::server_name(host)?, tcp.compat())
-        .await
-        .map_err(|e| format!("TLS: {e}"))?;
+    let tls_stream = open_tls(host, port).await?;
     let client = async_imap::Client::new(tls_stream);
     let auth = XOAuth2 { user: email.to_string(), token: access_token.to_string() };
     client.authenticate("XOAUTH2", &auth).await.map_err(|e| format!("XOAUTH2: {}", e.0))

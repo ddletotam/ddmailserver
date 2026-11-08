@@ -206,6 +206,11 @@ pub(crate) fn open_add_connection(
     // выбрал в браузере другой аккаунт Google или вошёл на сервер другим
     // логином — прежняя молча подменилась бы, а её секреты стёрлись.
     let mut target: Option<SaveTarget> = None;
+    // Новое подключение начинается с выбора «вручную / автоматически»;
+    // правка и повторный вход — сразу формой (шаг 4 по умолчанию).
+    if prefill.is_none() {
+        lw.set_step(0);
+    }
     if let Some(c) = &prefill {
         let key = c.account_key();
         let needs_login = SHARED.with(|s| {
@@ -245,6 +250,7 @@ pub(crate) fn open_add_connection(
             lw.set_imap_port(c.port.to_string().into());
             lw.set_smtp_host(c.smtp_host.clone().into());
             lw.set_smtp_port(c.smtp_port.to_string().into());
+            lw.set_smtp_auth(c.smtp_auth);
             // Логин, совпадающий с email, не показываем: пустое поле и
             // значит «как email».
             if c.username != c.email {
@@ -289,22 +295,94 @@ pub(crate) fn open_add_connection(
         }
     });
 
+    // Идущий поиск серверов: его флаг отмены. «Назад», «Отмена» и закрытие
+    // окна его поднимают — поиск бросает следующие фазы, а его поздний
+    // результат окно не примет.
+    let search: Rc<RefCell<Option<Arc<AtomicBool>>>> = Rc::new(RefCell::new(None));
+
     // «Отмена», Esc и крестик окна — одно и то же. Window gone from Shared ⇒
     // a check still running in the background finds nothing to report to and
     // saves nothing (see `save_if_open`).
-    lw.on_cancel(move || close_add_connection(generation));
+    let search_cancel = search.clone();
+    lw.on_cancel(move || {
+        stop_search(&search_cancel);
+        close_add_connection(generation);
+    });
+    let search_close = search.clone();
     lw.window().on_close_requested(move || {
+        stop_search(&search_close);
         close_add_connection(generation);
         slint::CloseRequestResponse::HideWindow
+    });
+
+    // ── Визард ──
+    let weak = lw.as_weak();
+    lw.on_choose_auto(move || {
+        let Some(lw) = weak.upgrade() else { return };
+        lw.set_error("".into());
+        lw.set_notice("".into());
+        lw.set_step(1);
+        lw.set_focus_pending(true);
+    });
+    let weak = lw.as_weak();
+    lw.on_choose_manual(move || {
+        let Some(lw) = weak.upgrade() else { return };
+        lw.set_error("".into());
+        lw.set_notice("".into());
+        // Со страницы найденного — править найденное: серверы раскрыты.
+        if lw.get_step() == 3 {
+            lw.set_servers_open(true);
+            lw.set_focus_field("password".into());
+        } else {
+            lw.set_focus_field("".into());
+        }
+        lw.set_step(4);
+        lw.set_focus_pending(true);
+    });
+    let weak = lw.as_weak();
+    let search_back = search.clone();
+    lw.on_back(move || {
+        let Some(lw) = weak.upgrade() else { return };
+        if lw.get_busy() {
+            return;
+        }
+        lw.set_error("".into());
+        lw.set_notice("".into());
+        let to = match lw.get_step() {
+            2 => {
+                stop_search(&search_back);
+                1
+            }
+            3 => 1,
+            // Форма после «Изменить» на найденном — обратно к найденному.
+            4 if lw.get_found_imap() != "" && lw.get_mode() == 1 => 3,
+            _ => 0,
+        };
+        if to == 0 {
+            lw.set_found_imap("".into());
+        }
+        lw.set_focus_field("".into());
+        lw.set_step(to);
+        lw.set_focus_pending(true);
     });
 
     let weak = lw.as_weak();
     let mw_submit = main_weak.clone();
     let key_submit = target.clone();
+    let search_submit = search.clone();
     lw.on_submit(move || {
         let Some(lw) = weak.upgrade() else { return };
         if lw.get_busy() {
             return;
+        }
+        match lw.get_step() {
+            // Enter на выборе варианта и во время поиска ничего не делает.
+            0 | 2 => return,
+            1 => {
+                start_search(&lw, &search_submit, generation);
+                return;
+            }
+            _ => {}
         }
         if lw.get_oauth_only() {
             // Enter из окна идёт сюда мимо выключенной кнопки.
@@ -382,6 +460,7 @@ pub(crate) fn open_add_connection(
                     email: login.email.clone(),
                     smtp_host: host_from_url(&server),
                     smtp_port: 465,
+                    smtp_auth: true,
                     native_url: Some(server.clone()),
                     native_token: Some(login.token.clone()),
                     carddav_url: None,
@@ -442,6 +521,7 @@ pub(crate) fn open_add_connection(
                 email: email.clone(),
                 smtp_host: "smtp.gmail.com".into(),
                 smtp_port: 465,
+                smtp_auth: true,
                 native_url: None,
                 native_token: None,
                 carddav_url: Some("https://www.googleapis.com/.well-known/carddav".into()),
@@ -460,6 +540,174 @@ pub(crate) fn open_add_connection(
             *sh.accounts.add_conn_window.borrow_mut() = Some((generation, lw));
         }
     });
+}
+
+fn stop_search(search: &RefCell<Option<Arc<AtomicBool>>>) {
+    if let Some(flag) = search.borrow_mut().take() {
+        flag.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Шаг 1 → 2: искать серверы для адреса в фоне, показывая прогресс; итог —
+/// шаг 3 (всё нашлось) или форма с тем, что нашлось (шаг 4).
+fn start_search(lw: &LoginWindow, search: &RefCell<Option<Arc<AtomicBool>>>, generation: u64) {
+    let email = lw.get_email().trim().to_string();
+    if ddmail_core::discover::email_domain(&email).is_none() {
+        lw.set_error("Введите адрес почты целиком: имя@домен.".into());
+        return;
+    }
+    lw.set_email(email.clone().into());
+    lw.set_error("".into());
+    lw.set_notice("".into());
+    lw.set_progress_done(0);
+    lw.set_progress_total(1);
+    lw.set_progress_text("Начинаем…".into());
+    lw.set_step(2);
+
+    let flag = Arc::new(AtomicBool::new(false));
+    if let Some(old) = search.borrow_mut().replace(flag.clone()) {
+        old.store(true, Ordering::SeqCst);
+    }
+    // Известная служба из таблицы — первым кандидатом.
+    let hint = mail_presets::guess(&email).filter(|g| g.provider.is_some()).map(|g| {
+        ddmail_core::discover::Hint {
+            imap_host: g.imap_host,
+            smtp_host: g.smtp_host,
+            smtp_port: g.smtp_port,
+        }
+    });
+    let weak = lw.as_weak();
+    std::thread::spawn(move || {
+        let Ok(rt) = tokio::runtime::Runtime::new() else { return };
+        let progress_weak = weak.clone();
+        let progress_flag = flag.clone();
+        let progress = move |p: ddmail_core::discover::Progress| {
+            if progress_flag.load(Ordering::SeqCst) {
+                return;
+            }
+            let flag = progress_flag.clone();
+            let _ = progress_weak.upgrade_in_event_loop(move |lw| {
+                if flag.load(Ordering::SeqCst) || lw.get_step() != 2 {
+                    return;
+                }
+                lw.set_progress_total(p.total as i32);
+                lw.set_progress_done(p.done as i32);
+                lw.set_progress_text(p.stage.into());
+            });
+        };
+        let found = rt.block_on(ddmail_core::discover::discover(&email, hint, &flag, &progress));
+        let _ = weak.upgrade_in_event_loop(move |lw| {
+            let open = SHARED.with(|s| {
+                s.borrow().as_ref().is_some_and(|sh| {
+                    sh.accounts
+                        .add_conn_window
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|(g, _)| *g == generation)
+                })
+            });
+            if !open || flag.load(Ordering::SeqCst) || lw.get_step() != 2 {
+                return;
+            }
+            apply_found(&lw, &email, found);
+        });
+    });
+}
+
+fn endpoint_label(
+    e: &ddmail_core::discover::Endpoint,
+    sec: ddmail_core::discover::Security,
+) -> String {
+    let sec = match sec {
+        ddmail_core::discover::Security::Tls => "SSL/TLS",
+        ddmail_core::discover::Security::StartTls => "STARTTLS",
+    };
+    format!("{}:{} · {sec}", e.host, e.port)
+}
+
+/// Итог поиска в окно. ddmail — вход на сервер; IMAP и SMTP — оба найдены:
+/// страница найденного, иначе форма с найденным и просьбой дописать.
+fn apply_found(lw: &LoginWindow, email: &str, found: ddmail_core::discover::Found) {
+    use ddmail_core::discover::{imap_security, smtp_security};
+    lw.set_focus_field("password".into());
+    lw.set_focus_pending(true);
+    if let Some(url) = found.ddmail_url {
+        lw.set_mode(0);
+        lw.set_server_url(url.into());
+        // Сервер входит по имени пользователя; чаще всего это часть до @.
+        if lw.get_username().is_empty() {
+            let local = email.rsplit_once('@').map(|(l, _)| l).unwrap_or(email);
+            lw.set_username(local.into());
+        }
+        lw.set_step(3);
+        return;
+    }
+    lw.set_mode(1);
+    lw.set_servers_touched(true);
+    lw.set_password_hint(mail_presets::guess(email).map(|g| g.password_hint).unwrap_or("").into());
+    lw.set_imap_username(found.login.clone().unwrap_or_default().into());
+    lw.set_servers_known(found.provider.is_some());
+    lw.set_provider_name(found.provider.clone().unwrap_or_default().into());
+    match &found.imap {
+        Some(e) => {
+            lw.set_imap_host(e.host.clone().into());
+            lw.set_imap_port(e.port.to_string().into());
+            lw.set_found_imap(endpoint_label(e, imap_security(e.port)).into());
+        }
+        None => {
+            lw.set_imap_host("".into());
+            lw.set_imap_port("993".into());
+            lw.set_found_imap("".into());
+        }
+    }
+    match &found.smtp {
+        Some(e) => {
+            lw.set_smtp_host(e.host.clone().into());
+            lw.set_smtp_port(e.port.to_string().into());
+            lw.set_found_smtp(endpoint_label(e, smtp_security(e.port)).into());
+            // Сервер не просит вход — предлагаем без авторизации.
+            lw.set_smtp_auth(found.smtp_auth);
+            lw.set_smtp_auth_advertised(found.smtp_auth);
+        }
+        None => {
+            lw.set_smtp_host("".into());
+            lw.set_smtp_port("465".into());
+            lw.set_found_smtp("".into());
+            lw.set_smtp_auth(true);
+            lw.set_smtp_auth_advertised(true);
+        }
+    }
+    let domain = email.rsplit_once('@').map(|(_, d)| d).unwrap_or(email);
+    match (&found.imap, &found.smtp) {
+        (Some(_), Some(_)) => {
+            lw.set_found_note(
+                match &found.provider {
+                    Some(p) => format!("Настройки службы «{p}», порты проверены."),
+                    None => "Серверы отвечают, шифрование проверено.".into(),
+                }
+                .into(),
+            );
+            lw.set_step(3);
+        }
+        (imap, smtp) => {
+            let msg = match (imap.is_some(), smtp.is_some()) {
+                (true, false) => {
+                    "Входящий сервер найден, исходящий (SMTP) — нет. Укажите его вручную.".into()
+                }
+                (false, true) => {
+                    "Исходящий сервер найден, входящий (IMAP) — нет. Укажите его вручную.".into()
+                }
+                _ => format!(
+                    "Для {domain} не нашлось ни сервера ddmail, ни IMAP/SMTP на стандартных \
+                     портах с шифрованием. Укажите серверы вручную."
+                ),
+            };
+            lw.set_notice(msg.into());
+            lw.set_found_imap("".into());
+            lw.set_servers_open(true);
+            lw.set_step(4);
+        }
+    }
 }
 
 /// Пароль по `http://` уходит открытым текстом: и вход на сервер ddmail, и
@@ -519,6 +767,7 @@ fn standalone_config(lw: &LoginWindow, password: String) -> Result<engine::Accou
         email,
         smtp_host,
         smtp_port,
+        smtp_auth: lw.get_smtp_auth(),
         native_url: None,
         native_token: None,
         carddav_url,
@@ -570,6 +819,7 @@ async fn check_standalone(cfg: &engine::AccountConfig) -> Result<(), String> {
         &cfg.username,
         &cfg.password,
         cfg.use_tls,
+        cfg.smtp_auth,
     );
     match tokio::time::timeout(timeout, smtp).await {
         Err(_) => Err(format!("SMTP {}:{} не отвечает.", cfg.smtp_host, cfg.smtp_port)),
@@ -694,6 +944,7 @@ pub(crate) fn rebuild_engine(ui: &MainWindow, shared: &Rc<Shared>) {
             email: key,
             smtp_host: host,
             smtp_port: 465,
+            smtp_auth: true,
             native_url: None,
             native_token: None,
             carddav_url: None,

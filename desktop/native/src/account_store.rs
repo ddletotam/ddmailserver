@@ -268,6 +268,10 @@ fn d_true() -> bool {
     true
 }
 
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
 /// Запись учётки на диске.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StoredAccount {
@@ -283,6 +287,10 @@ struct StoredAccount {
     smtp_host: Option<String>,
     #[serde(default = "d_smtp_port")]
     smtp_port: u16,
+    /// Исходящий без авторизации (внутренний релей). Пишется только `false`:
+    /// у старых файлов поля нет, и они остаются с авторизацией.
+    #[serde(default = "d_true", skip_serializing_if = "is_true")]
+    smtp_auth: bool,
     #[serde(default)]
     native_url: Option<String>,
     #[serde(default)]
@@ -357,6 +365,7 @@ impl StoredAccount {
             email: Some(cfg.email.clone()),
             smtp_host: Some(cfg.smtp_host.clone()),
             smtp_port: cfg.smtp_port,
+            smtp_auth: cfg.smtp_auth,
             native_url: cfg.native_url.clone(),
             carddav_url: cfg.carddav_url.clone(),
             caldav_url: cfg.caldav_url.clone(),
@@ -403,6 +412,7 @@ impl StoredAccount {
             email: self.email.clone().unwrap_or_else(|| self.username.clone()),
             smtp_host: self.smtp_host.clone().unwrap_or_else(|| self.host.clone()),
             smtp_port: self.smtp_port,
+            smtp_auth: self.smtp_auth,
             native_url: self.native_url.clone(),
             native_token,
             carddav_url: self.carddav_url.clone(),
@@ -772,6 +782,7 @@ pub(crate) mod tests {
             email: "user@example.org".into(),
             smtp_host: "smtp.example.org".into(),
             smtp_port: 465,
+            smtp_auth: true,
             native_url: None,
             native_token: None,
             carddav_url: Some("https://dav.example.org/c/".into()),

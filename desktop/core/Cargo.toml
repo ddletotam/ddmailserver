@@ -32,6 +32,14 @@ url = "2"
 urlencoding = "2"
 base64 = "0.22"
 async-trait = "0.1"
+# Автонастройка подключения (src/discover.rs): MX домена — через системный
+# резолвер (resolv.conf / настройки адаптеров Windows), чтобы работали и
+# внутренние домены, которых публичный DNS-over-HTTPS не знает. 0.24 — ветка
+# без собственного rustls в зависимостях при этих фичах.
+hickory-resolver = { version = "0.24", default-features = false, features = ["system-config", "tokio-runtime"] }
+# Разбор XML автонастройки Thunderbird (config-v1.1.xml). Крейт уже в дереве
+# клиента (тянет resvg).
+roxmltree = "0.20"
 
 [target.'cfg(windows)'.dependencies]
 # ShellExecuteW — открыть URL/файл системным обработчиком без шелла между

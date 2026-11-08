@@ -27,9 +27,11 @@ pub(crate) async fn send_message_impl(
     username: &str,
     password: &str,
     use_tls: bool,
+    auth: bool,
     message: &OutgoingMessage,
 ) -> Result<String, String> {
-    send_message_auth(host, port, username, password, use_tls, false, message).await
+    let creds = auth.then_some((username, password));
+    send_message_with(host, port, creds, use_tls, false, message).await
 }
 
 /// As `send_message_impl`, but `xoauth2 = true` authenticates with SASL
@@ -40,6 +42,20 @@ pub(crate) async fn send_message_auth(
     port: u16,
     username: &str,
     password: &str,
+    use_tls: bool,
+    xoauth2: bool,
+    message: &OutgoingMessage,
+) -> Result<String, String> {
+    send_message_with(host, port, Some((username, password)), use_tls, xoauth2, message).await
+}
+
+/// `creds = None` — сервер без авторизации (внутренний релей): AUTH не
+/// посылается вовсе. С учётными данными lettre требует AUTH в EHLO и на
+/// таком сервере падал бы, не отправив письмо.
+async fn send_message_with(
+    host: &str,
+    port: u16,
+    creds: Option<(&str, &str)>,
     use_tls: bool,
     xoauth2: bool,
     message: &OutgoingMessage,
@@ -75,7 +91,7 @@ pub(crate) async fn send_message_auth(
 
     let email = email_builder.multipart(mp).map_err(|e| format!("Build email: {e}"))?;
 
-    let mailer = build_transport(host, port, username, password, use_tls, xoauth2)?;
+    let mailer = build_transport(host, port, creds, use_tls, xoauth2)?;
 
     let response = mailer.send(email).await.map_err(|e| format!("Send failed: {e}"))?;
 
@@ -88,19 +104,20 @@ pub(crate) async fn send_message_auth(
 fn build_transport(
     host: &str,
     port: u16,
-    username: &str,
-    password: &str,
+    creds: Option<(&str, &str)>,
     use_tls: bool,
     xoauth2: bool,
 ) -> Result<AsyncSmtpTransport<Tokio1Executor>, String> {
-    let creds = Credentials::new(username.to_string(), password.to_string());
     let builder = if use_tls && !matches!(port, 587 | 25 | 2525) {
         AsyncSmtpTransport::<Tokio1Executor>::relay(host).map_err(|e| format!("SMTP relay: {e}"))?
     } else {
         AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
             .map_err(|e| format!("SMTP starttls: {e}"))?
     };
-    let mut b = builder.port(port).credentials(creds);
+    let mut b = builder.port(port);
+    if let Some((user, pass)) = creds {
+        b = b.credentials(Credentials::new(user.to_string(), pass.to_string()));
+    }
     if xoauth2 {
         b = b.authentication(vec![Mechanism::Xoauth2]);
     }
@@ -108,15 +125,18 @@ fn build_transport(
 }
 
 /// Connect and log in to SMTP without sending anything — the add-connection
-/// form checks the credentials before saving the account.
+/// form checks the credentials before saving the account. `auth = false` —
+/// сервер без авторизации: проверяется только, что он отвечает.
 pub async fn test_login(
     host: &str,
     port: u16,
     username: &str,
     password: &str,
     use_tls: bool,
+    auth: bool,
 ) -> Result<(), String> {
-    let mailer = build_transport(host, port, username, password, use_tls, false)?;
+    let creds = auth.then_some((username, password));
+    let mailer = build_transport(host, port, creds, use_tls, false)?;
     match mailer.test_connection().await {
         Ok(true) => Ok(()),
         Ok(false) => Err("сервер не ответил".to_string()),
@@ -133,7 +153,7 @@ pub async fn send_message(
     use_tls: bool,
     message: OutgoingMessage,
 ) -> Result<String, String> {
-    send_message_impl(&host, port, &username, &password, use_tls, &message).await
+    send_message_impl(&host, port, &username, &password, use_tls, true, &message).await
 }
 
 /// Assemble the message body part. Layered MIME structure:

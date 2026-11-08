@@ -123,14 +123,7 @@ async fn idle_loop(notifier: Notifier, creds: Credentials) {
 }
 
 async fn run_idle_tls(notifier: &Notifier, creds: &Credentials) -> Result<(), String> {
-    let tls = crate::tls::connector();
-    let tcp = tokio::net::TcpStream::connect((creds.host.as_str(), creds.port))
-        .await
-        .map_err(|e| format!("TCP: {e}"))?;
-    let tls_stream = tls
-        .connect(crate::tls::server_name(&creds.host)?, tcp.compat())
-        .await
-        .map_err(|e| format!("TLS: {e}"))?;
+    let tls_stream = crate::imap::open_tls(&creds.host, creds.port).await?;
     let client = async_imap::Client::new(tls_stream);
     let session = client
         .login(&creds.username, &creds.password)

@@ -42,6 +42,9 @@ pub struct AccountConfig {
     pub email: String,
     pub smtp_host: String,
     pub smtp_port: u16,
+    /// Исходящий сервер требует вход (тем же логином и паролем). `false` —
+    /// внутренний релей без авторизации.
+    pub smtp_auth: bool,
     pub native_url: Option<String>,
     pub native_token: Option<String>,
     /// Optional CardDAV addressbook-collection URL (plain-server accounts).
@@ -75,6 +78,7 @@ impl AccountConfig {
             email,
             smtp_host,
             smtp_port,
+            smtp_auth: true,
             native_url: std::env::var("DDMAIL_NATIVE_URL").ok(),
             native_token: std::env::var("DDMAIL_NATIVE_TOKEN").ok(),
             carddav_url: std::env::var("DDMAIL_CARDDAV_URL").ok(),
@@ -257,6 +261,7 @@ fn build_provider(cfg: &AccountConfig) -> Arc<dyn MailProvider> {
             username: cfg.username.clone(),
             password: cfg.password.clone(),
             use_tls: cfg.use_tls,
+            smtp_auth: cfg.smtp_auth,
             user_email: cfg.email.clone(),
             pool: Arc::new(SessionPool::new()),
             carddav_url: cfg.carddav_url.clone(),
