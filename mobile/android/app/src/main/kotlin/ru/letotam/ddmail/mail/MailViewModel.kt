@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.letotam.ddmail.DdmailApp
 import ru.letotam.ddmail.SessionStatus
@@ -134,8 +135,73 @@ class MailViewModel(
         live.stop()
     }
 
+    // ── Множественный выбор (контракт §5) ──
+
+    /** Выбранные беседы — по id, не по позиции: дельта не сбивает выбор. */
+    val picked = MutableStateFlow<Set<String>>(emptySet())
+
+    val snackHost = androidx.compose.material3.SnackbarHostState()
+
+    /** Сообщение об итоге действия над выбором (Snackbar). */
+    val notice = MutableStateFlow<String?>(null)
+
+    fun togglePick(id: String) = picked.update { if (id in it) it - id else it + id }
+
+    fun pickAll() = picked.update { state.value.conversations.map { it.id }.toSet() }
+
+    fun clearPicks() {
+        picked.value = emptySet()
+    }
+
+    private fun pickedConvs(): List<Conversation> {
+        val ids = picked.value
+        return all.filter { it.id in ids }
+    }
+
+    fun markPicked(read: Boolean) {
+        val convs = pickedConvs()
+        clearPicks()
+        viewModelScope.launch {
+            val r = runCatching { convs.forEach { if (read) engine.markRead(it) else engine.markUnread(it) } }
+            notice.value = r.fold(
+                { if (read) "Прочитано: ${convs.size}" else "Непрочитано: ${convs.size}" },
+                { "Не удалось: ${it.message}" },
+            )
+        }
+    }
+
+    /** В папку (`null` — во «Входящие») — одной правкой документа на весь выбор. */
+    fun movePicked(folderId: String?) {
+        val convs = pickedConvs()
+        clearPicks()
+        viewModelScope.launch {
+            val r = runCatching { engine.assignFolder(convs, folderId) }
+            val where = folderId?.let { id -> doc.folders.firstOrNull { it.id == id }?.name } ?: "Входящие"
+            notice.value = r.fold({ "Перенесено в «$where»: ${convs.size}" }, { "Не удалось перенести: ${it.message}" })
+        }
+    }
+
+    /** Сколько бесед и писем удалит «Удалить» — для подтверждения. */
+    fun pickedSummary(): Pair<Int, Int> = pickedConvs().let { c -> c.size to c.sumOf { it.messages.size } }
+
+    fun deletePicked() {
+        val convs = pickedConvs()
+        clearPicks()
+        if (convs.any { it.id == selected.value }) open(null)
+        viewModelScope.launch {
+            val r = runCatching { engine.deleteConversations(convs) }
+            notice.value = r.fold({ "Удалено бесед: ${convs.size}" }, { "Не удалось удалить: ${it.message}" })
+            sync()
+        }
+    }
+
+    /** Папки для «В папку…» — все, включая скрытые (как `folder-targets` десктопа). */
+    fun folderTargets(): List<Pair<String, String>> = doc.folders.map { it.id to (if (it.icon.isBlank()) it.name else "${it.icon} ${it.name}") }
+
     /** `null` — «Входящие». Выбор помнится между запусками (контракт §5). */
     fun selectFolder(id: String?) {
+        // Другой таб — другой набор строк: выбор снимается.
+        clearPicks()
         activeId.value = id
         viewModelScope.launch { app.uiPrefs.edit { p -> if (id == null) p.remove(ACTIVE_FOLDER) else p[ACTIVE_FOLDER] = id } }
     }

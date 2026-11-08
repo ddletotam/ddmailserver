@@ -3,6 +3,10 @@ package ru.letotam.ddmail.mail
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -103,7 +107,21 @@ fun MailScreen(
         vm.live.start()
         onPauseOrDispose { vm.live.stop() }
     }
-    BackHandler(enabled = !wide && selectedId != null) { vm.open(null) }
+    val picked by vm.picked.collectAsState()
+    BackHandler(enabled = picked.isNotEmpty()) { vm.clearPicks() }
+    BackHandler(enabled = picked.isEmpty() && !wide && selectedId != null) { vm.open(null) }
+    val snack = vm.snackHost
+    val notice by vm.notice.collectAsState()
+    LaunchedEffect(notice) {
+        notice?.let {
+            snack.showSnackbar(it)
+            vm.notice.value = null
+        }
+    }
+    var folderPicker by remember { mutableStateOf(false) }
+    var deleteAsk by remember { mutableStateOf(false) }
+    if (folderPicker) FolderPickerDialog(vm) { folderPicker = false }
+    if (deleteAsk) DeleteDialog(vm) { deleteAsk = false }
     LaunchedEffect(wide) { vm.setWide(wide) }
 
     // Один WebView на всё время экрана: создаётся сразу, открытие беседы
@@ -141,14 +159,14 @@ fun MailScreen(
         }
         if (wide) {
             Row(Modifier.fillMaxSize()) {
-                ListPane(s, syncing, selectedId, vm, Modifier.width(if (width >= 840) 400.dp else 340.dp).fillMaxHeight())
+                ListPane(s, syncing, selectedId, picked, vm, { folderPicker = true }, { deleteAsk = true }, Modifier.width(if (width >= 840) 400.dp else 340.dp).fillMaxHeight())
                 VerticalDivider()
                 ConversationPane(selected, web, vm, onBack = null, Modifier.weight(1f).fillMaxHeight())
             }
         } else if (selected != null) {
             ConversationPane(selected, web, vm, onBack = { vm.open(null) }, Modifier.fillMaxSize())
         } else {
-            ListPane(s, syncing, selectedId, vm, Modifier.fillMaxSize())
+            ListPane(s, syncing, selectedId, picked, vm, { folderPicker = true }, { deleteAsk = true }, Modifier.fillMaxSize())
         }
     }
 }
@@ -188,6 +206,76 @@ private fun TopBar(session: Session, status: SessionStatus, syncing: Boolean, on
     }
 }
 
+/** Snackbar-хост живёт в MailScreen; сюда — через ViewModel, чтобы не тащить параметр. */
+@Composable
+private fun snackHost(vm: MailViewModel): SnackbarHostState = remember(vm) { vm.snackHost }
+
+/**
+ * Панель действий над выбранными беседами (§5). Две строки: в колонке списка
+ * (340–400 dp) счётчик и пять действий в одну не помещаются.
+ */
+@Composable
+private fun SelectionBar(n: Int, vm: MailViewModel, onMove: () -> Unit, onDelete: () -> Unit) {
+    Column(Modifier.fillMaxWidth().background(Color(0xFFE9EDF1))) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = vm::clearPicks) { Text("✕", fontSize = 18.sp) }
+            Text("Выбрано: $n", fontWeight = FontWeight.SemiBold, maxLines = 1)
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = vm::pickAll) { Text("Выбрать все") }
+        }
+        LazyRow(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
+            item { TextButton(onClick = { vm.markPicked(true) }) { Text("Прочитано") } }
+            item { TextButton(onClick = { vm.markPicked(false) }) { Text("Непрочитано") } }
+            item { TextButton(onClick = onMove) { Text("В папку…") } }
+            item { TextButton(onClick = onDelete) { Text("Удалить", color = MaterialTheme.colorScheme.error) } }
+        }
+    }
+}
+
+@Composable
+private fun FolderPickerDialog(vm: MailViewModel, close: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = close,
+        title = { Text("В папку") },
+        text = {
+            Column {
+                (listOf<Pair<String?, String>>(null to "← Убрать из папки (во «Входящие»)") + vm.folderTargets()).forEach { (id, title) ->
+                    Text(
+                        title,
+                        modifier = Modifier.fillMaxWidth().clickable {
+                            vm.movePicked(id)
+                            close()
+                        }.padding(vertical = 14.dp),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = close) { Text("Отмена") } },
+    )
+}
+
+/**
+ * Удаление — с подтверждением до, а не «отменить» после: API восстановления
+ * нет, а у внешних учёток удаление сразу уходит на источник (§5).
+ */
+@Composable
+private fun DeleteDialog(vm: MailViewModel, close: () -> Unit) {
+    val (convs, msgs) = remember { vm.pickedSummary() }
+    AlertDialog(
+        onDismissRequest = close,
+        title = { Text("Удалить беседы?") },
+        text = { Text("Бесед: $convs, писем в них: $msgs. Письма будут удалены на сервере; у внешних ящиков — и в исходном ящике.") },
+        confirmButton = {
+            TextButton(onClick = {
+                vm.deletePicked()
+                close()
+            }) { Text("Удалить", color = MaterialTheme.colorScheme.error) }
+        },
+        dismissButton = { TextButton(onClick = close) { Text("Отмена") } },
+    )
+}
+
 /** Несмываемая плашка (контракт §2): кэш виден, но почта не обновляется. */
 @Composable
 private fun DeadSessionBanner(onRelogin: () -> Unit) {
@@ -201,9 +289,19 @@ private fun DeadSessionBanner(onRelogin: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ListPane(s: MailState, syncing: Boolean, selectedId: String?, vm: MailViewModel, modifier: Modifier) {
+private fun ListPane(
+    s: MailState,
+    syncing: Boolean,
+    selectedId: String?,
+    picked: Set<String>,
+    vm: MailViewModel,
+    onMove: () -> Unit,
+    onDelete: () -> Unit,
+    modifier: Modifier,
+) {
     Column(modifier) {
-        FolderTabs(s, vm::selectFolder)
+        // На время выбора панель действий заменяет полосу табов (§5).
+        if (picked.isEmpty()) FolderTabs(s, vm::selectFolder) else SelectionBar(picked.size, vm, onMove, onDelete)
         HorizontalDivider()
         PullToRefreshBox(isRefreshing = syncing, onRefresh = vm::sync, modifier = Modifier.fillMaxSize()) {
             if (s.loaded && s.conversations.isEmpty() && !syncing) {
@@ -215,10 +313,19 @@ private fun ListPane(s: MailState, syncing: Boolean, selectedId: String?, vm: Ma
             }
             LazyColumn(Modifier.fillMaxSize()) {
                 items(s.conversations, key = { it.accountKey + "\u0000" + it.id }) { c ->
-                    ConversationRow(c, selected = c.id == selectedId, onClick = { vm.open(c.id) })
+                    val inPick = c.id in picked
+                    ConversationRow(
+                        c,
+                        selected = c.id == selectedId && picked.isEmpty(),
+                        picked = inPick,
+                        onClick = { if (picked.isNotEmpty()) vm.togglePick(c.id) else vm.open(c.id) },
+                        onLongClick = { vm.togglePick(c.id) },
+                    )
                 }
             }
-            ExtendedFloatingActionButton(
+            // Над кнопкой «Написать», а не под ней.
+            SnackbarHost(snackHost(vm), Modifier.align(Alignment.BottomCenter).padding(bottom = if (picked.isEmpty()) 84.dp else 0.dp))
+            if (picked.isEmpty()) ExtendedFloatingActionButton(
                 onClick = vm.compose::openNew,
                 containerColor = Accent,
                 contentColor = Color.White,
@@ -290,18 +397,31 @@ private fun Tab(title: String, unread: Int, selected: Boolean, onClick: () -> Un
 }
 
 /** Строгий двухстрочный формат (§4 десктопа): имя / тема последнего письма. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ConversationRow(c: Conversation, selected: Boolean, onClick: () -> Unit) {
+private fun ConversationRow(c: Conversation, selected: Boolean, picked: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
     val unread = c.unreadCount > 0
     Row(
         Modifier
             .fillMaxWidth()
-            .background(if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
-            .clickable(onClick = onClick)
+            .background(
+                when {
+                    picked -> Color(0xFFD7E8FF)
+                    selected -> MaterialTheme.colorScheme.primaryContainer
+                    else -> Color.Transparent
+                },
+            )
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Avatar(c)
+        if (picked) {
+            Box(Modifier.size(44.dp).clip(CircleShape).background(Accent), contentAlignment = Alignment.Center) {
+                Text("✓", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+            }
+        } else {
+            Avatar(c)
+        }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
