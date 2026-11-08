@@ -15,8 +15,8 @@ android {
         minSdk = 29
         targetSdk = 35
         // Бампается при любой правке клиента (контракт §1).
-        versionCode = 3
-        versionName = "0.0.3"
+        versionCode = 4
+        versionName = "0.0.4"
     }
 
     // Один код для Huawei и обычного Android: различается только доставка
@@ -40,6 +40,9 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    // Документ ленты беседы — общий с будущим iOS-клиентом (контракт §8).
+    sourceSets["main"].assets.srcDir("../../shared/conversation-doc")
+
     buildFeatures {
         compose = true
         buildConfig = true
@@ -50,6 +53,8 @@ dependencies {
     implementation(project(":core:auth"))
     implementation(project(":core:sync"))
     implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.webkit)
+    implementation(libs.kotlinx.serialization.json)
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.kotlinx.coroutines.android)

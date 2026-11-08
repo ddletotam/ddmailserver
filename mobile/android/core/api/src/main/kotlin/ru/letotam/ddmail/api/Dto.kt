@@ -73,3 +73,35 @@ data class DialogFoldersResponse(
     val version: Long = 0,
     val doc: JsonElement? = null,
 )
+
+@Serializable
+data class AttachmentDto(
+    val filename: String = "",
+    @SerialName("mime_type") val mimeType: String = "",
+    val size: Long = 0,
+    val index: Int = 0,
+)
+
+/** Тело письма (`/conversations/messages`). */
+@Serializable
+data class MessageBody(
+    val uid: Long,
+    val folder: String = "",
+    val subject: String = "",
+    val from: String = "",
+    @SerialName("from_addr") val fromAddr: String = "",
+    val to: List<String> = emptyList(),
+    val cc: List<String> = emptyList(),
+    /** Секунды. */
+    @SerialName("date_ts") val dateTs: Long = 0,
+    val html: String? = null,
+    val text: String? = null,
+    val attachments: List<AttachmentDto> = emptyList(),
+    @SerialName("is_outgoing") val isOutgoing: Boolean = false,
+    @SerialName("message_id") val messageId: String = "",
+    @SerialName("in_reply_to") val inReplyTo: String = "",
+    val references: List<String> = emptyList(),
+) {
+    /** Ни HTML, ни текста, ни вложений — сбойный фетч, перезапросить (§4а десктопа). */
+    val isBlank: Boolean get() = html.isNullOrBlank() && text.isNullOrBlank() && attachments.isEmpty()
+}

@@ -1,0 +1,196 @@
+package ru.letotam.ddmail.conversation
+
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.webkit.MimeTypeMap
+import androidx.core.content.FileProvider
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import ru.letotam.ddmail.api.ApiException
+import ru.letotam.ddmail.api.MessageBody
+import ru.letotam.ddmail.api.MessageRef
+import ru.letotam.ddmail.sync.Conversation
+import ru.letotam.ddmail.sync.SyncEngine
+import java.io.File
+
+/**
+ * Открытая беседа (контракт §8): окно отрисовки по [PAGE] писем — сначала
+ * последние, старые порциями по просьбе документа; новые письма открытой
+ * беседы дописываются снизу. Команды документу — строками JS в [js]
+ * (WebView живёт в UI, модель его не держит).
+ *
+ * Порядок «последние» — по uid (id строки на сервере растёт с приходом
+ * письма): у ссылок нет дат, а качать тела всей беседы ради сортировки
+ * значило бы тянуть сотни писем на открытии.
+ */
+class ConversationController(
+    private val app: Context,
+    private val engine: SyncEngine,
+    private val scope: CoroutineScope,
+    private val onAuthDead: () -> Unit,
+) {
+    val js = Channel<String>(Channel.UNLIMITED)
+
+    private val lock = Mutex()
+    private var job: Job? = null
+    private var conv: Conversation? = null
+    private var pages: List<MessageRef> = emptyList()
+    private var loaded = 0
+    private val shown = mutableSetOf<Long>()
+
+    fun open(c: Conversation?) {
+        job?.cancel()
+        conv = c
+        shown.clear()
+        if (c == null) return
+        js.trySend("ddm.set({messages:[],hasOlder:false})")
+        job = scope.launch {
+            lock.withLock {
+                pages = c.messages.sortedByDescending { it.uid }
+                loaded = minOf(PAGE, pages.size)
+                val bodies = load(pages.take(loaded))
+                // Первое непрочитанное — к нему и прокрутить (как у десктопа).
+                val firstUnseen = pages.take(loaded).filter { !it.seen }.minByOrNull { it.uid }?.uid
+                js.send("ddm.set(${batch(c, bodies, firstUnseen)})")
+            }
+            if (c.unreadCount > 0 || c.messages.any { !it.seen }) {
+                runCatching { engine.markRead(c) }.onFailure { if (it is ApiException.Unauthorized) onAuthDead() }
+            }
+        }
+    }
+
+    /** Документ дошёл до верха — следующая порция старых писем. */
+    fun older() {
+        val c = conv ?: return
+        scope.launch {
+            lock.withLock {
+                if (conv?.id != c.id) return@launch
+                val next = pages.drop(loaded).take(PAGE)
+                loaded += next.size
+                val bodies = load(next)
+                js.send("ddm.prepend(${batch(c, bodies, null)})")
+            }
+        }
+    }
+
+    /** Беседа обновилась дельтой: новые письма — снизу, без перерисовки. */
+    fun updated(c: Conversation) {
+        if (conv?.id != c.id) return
+        conv = c
+        scope.launch {
+            lock.withLock {
+                if (conv?.id != c.id) return@launch
+                val known = pages.map { it.uid }.toSet()
+                val fresh = c.messages.filter { it.uid !in known }
+                if (fresh.isEmpty()) return@launch
+                pages = (fresh + pages).sortedByDescending { it.uid }
+                loaded += fresh.size
+                val bodies = load(fresh)
+                js.send("ddm.append(${batch(c, bodies, null)})")
+            }
+            if (c.messages.any { !it.seen }) runCatching { engine.markRead(c) }
+        }
+    }
+
+    /** Часть `cid:` для документа — блокирующе, с потока перехватчика WebView. */
+    fun part(uid: Long, cid: String): Pair<ByteArray, String>? =
+        blocking { engine.part(uid, cid) }?.let { it.bytes to it.contentType }
+
+    /**
+     * Вложение: скачать в кэш и открыть системным обработчиком через
+     * content:// (файлы приложения наружу напрямую не отдаются).
+     */
+    fun openAttachment(uid: Long, index: Int, filename: String?) {
+        scope.launch {
+            val bin = try {
+                engine.attachment(uid, index)
+            } catch (e: ApiException) {
+                if (e is ApiException.Unauthorized) onAuthDead()
+                return@launch
+            }
+            val file = withContext(Dispatchers.IO) {
+                val dir = File(app.cacheDir, "attachments/$uid").apply { mkdirs() }
+                File(dir, safeName(filename ?: "attachment-$index")).apply { writeBytes(bin.bytes) }
+            }
+            val type = bin.contentType.substringBefore(';').trim().ifEmpty {
+                MimeTypeMap.getSingleton().getMimeTypeFromExtension(file.extension) ?: "application/octet-stream"
+            }
+            val uri = FileProvider.getUriForFile(app, "${app.packageName}.files", file)
+            val intent = Intent(Intent.ACTION_VIEW).setDataAndType(uri, type)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            try {
+                app.startActivity(Intent.createChooser(intent, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (_: ActivityNotFoundException) {
+            }
+        }
+    }
+
+    /** Имя вложения по uid/индексу — из уже показанных тел. */
+    fun attachmentName(uid: Long, index: Int): String? = names[uid to index]
+
+    private val names = mutableMapOf<Pair<Long, Int>, String>()
+
+    private suspend fun load(refs: List<MessageRef>): List<MessageBody> = try {
+        engine.bodies(refs)
+    } catch (e: ApiException.Unauthorized) {
+        onAuthDead()
+        emptyList()
+    }
+
+    private fun batch(c: Conversation, bodies: List<MessageBody>, focusUid: Long?): String {
+        val msgs = bodies.filter { shown.add(it.uid) }.map { b ->
+            b.attachments.forEach { names[b.uid to it.index] = it.filename }
+            JsonObject(
+                buildMap {
+                    put("uid", JsonPrimitive(b.uid))
+                    put("outgoing", JsonPrimitive(b.isOutgoing))
+                    put("fromName", JsonPrimitive(b.from))
+                    put("fromAddr", JsonPrimitive(b.fromAddr))
+                    put("dateTs", JsonPrimitive(b.dateTs))
+                    b.html?.takeIf { it.isNotBlank() }?.let { put("html", JsonPrimitive(it)) }
+                    b.text?.let { put("text", JsonPrimitive(it)) }
+                    put(
+                        "attachments",
+                        JsonArray(
+                            b.attachments.map {
+                                JsonObject(
+                                    mapOf(
+                                        "index" to JsonPrimitive(it.index),
+                                        "filename" to JsonPrimitive(it.filename),
+                                        "size" to JsonPrimitive(it.size),
+                                    ),
+                                )
+                            },
+                        ),
+                    )
+                    // В группе подписываем входящие именем отправителя.
+                    put("showFrom", JsonPrimitive(c.isGroup))
+                },
+            )
+        }
+        val obj = buildMap {
+            put("messages", JsonArray(msgs))
+            put("hasOlder", JsonPrimitive(loaded < pages.size))
+            focusUid?.let { put("focusUid", JsonPrimitive(it)) }
+        }
+        return JsonObject(obj).toString()
+    }
+
+    private companion object {
+        const val PAGE = 20
+
+        /** Имя файла без разделителей пути и управляющих символов. */
+        fun safeName(name: String): String =
+            name.replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_").trim().trimEnd('.').ifEmpty { "attachment" }
+    }
+}

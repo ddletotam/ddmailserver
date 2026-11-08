@@ -6,14 +6,20 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
+import ru.letotam.ddmail.api.ApiException
+import ru.letotam.ddmail.api.AttachmentDto
+import ru.letotam.ddmail.api.Binary
 import ru.letotam.ddmail.api.ChangeEntry
 import ru.letotam.ddmail.api.ContactInfo
 import ru.letotam.ddmail.api.ConversationDto
+import ru.letotam.ddmail.api.MessageBody
 import ru.letotam.ddmail.api.MessageRef
 import ru.letotam.ddmail.api.SessionApi
 import ru.letotam.ddmail.db.CacheDao
 import ru.letotam.ddmail.db.ConversationEntity
+import ru.letotam.ddmail.db.MessageBodyEntity
 import ru.letotam.ddmail.db.MessageRefEntity
 
 /**
@@ -88,6 +94,76 @@ class SyncEngine(
         }
     }
 
+    /**
+     * Тела писем: из кэша, недостающие и пустые — с сервера (и в кэш).
+     * Порядок результата — как у [refs]; чего нет нигде — пропущено.
+     */
+    suspend fun bodies(refs: List<MessageRef>): List<MessageBody> {
+        if (refs.isEmpty()) return emptyList()
+        val cached = dao.bodies(accountKey, refs.map { it.uid }).associateBy { it.uid }
+            .mapValues { it.value.toDomain() }
+            .filterValues { !it.isBlank }
+        val missing = refs.filter { it.uid !in cached }
+        // Нет связи — показываем то, что есть в кэше; мёртвая сессия — наверх.
+        val fetched = if (missing.isEmpty()) emptyMap() else try {
+            val got = api.messages(missing)
+            dao.putBodies(got.map { it.toEntity() })
+            got.associateBy { it.uid }
+        } catch (e: ApiException.Unauthorized) {
+            throw e
+        } catch (e: ApiException) {
+            emptyMap()
+        }
+        return refs.mapNotNull { cached[it.uid] ?: fetched[it.uid] }
+    }
+
+    /** Открыли беседу: прочитана локально сразу, на сервере — следом. */
+    suspend fun markRead(c: Conversation) {
+        val unseen = c.messages.filter { !it.seen }
+        dao.markRead(accountKey, c.id)
+        if (unseen.isNotEmpty()) api.setFlag(unseen, SEEN, add = true)
+    }
+
+    suspend fun part(uid: Long, cid: String): Binary = api.part(uid, cid)
+    suspend fun attachment(uid: Long, index: Int): Binary = api.attachment(uid, index)
+
+    private fun MessageBody.toEntity() = MessageBodyEntity(
+        accountKey = accountKey,
+        uid = uid,
+        messageId = messageId,
+        folder = folder,
+        subject = subject,
+        fromName = from,
+        fromAddr = fromAddr,
+        toJson = json.encodeToString(strings, to),
+        ccJson = json.encodeToString(strings, cc),
+        dateTs = dateTs,
+        html = html,
+        text = text,
+        attachmentsJson = json.encodeToString(atts, attachments),
+        isOutgoing = isOutgoing,
+        inReplyTo = inReplyTo,
+        referencesJson = json.encodeToString(strings, references),
+    )
+
+    private fun MessageBodyEntity.toDomain() = MessageBody(
+        uid = uid,
+        folder = folder,
+        subject = subject,
+        from = fromName,
+        fromAddr = fromAddr,
+        to = runCatching { json.decodeFromString(strings, toJson) }.getOrDefault(emptyList()),
+        cc = runCatching { json.decodeFromString(strings, ccJson) }.getOrDefault(emptyList()),
+        dateTs = dateTs,
+        html = html,
+        text = text,
+        attachments = runCatching { json.decodeFromString(atts, attachmentsJson) }.getOrDefault(emptyList()),
+        isOutgoing = isOutgoing,
+        messageId = messageId,
+        inReplyTo = inReplyTo,
+        references = runCatching { json.decodeFromString(strings, referencesJson) }.getOrDefault(emptyList()),
+    )
+
     private fun ConversationDto.toEntity() = ConversationEntity(
         accountKey = accountKey,
         id = id,
@@ -137,5 +213,8 @@ class SyncEngine(
 
         private val json = Json { ignoreUnknownKeys = true }
         private val contacts = ListSerializer(ContactInfo.serializer())
+        private val strings = ListSerializer(String.serializer())
+        private val atts = ListSerializer(AttachmentDto.serializer())
+        const val SEEN = "\\Seen"
     }
 }

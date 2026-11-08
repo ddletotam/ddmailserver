@@ -33,6 +33,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -43,13 +45,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
+import android.view.ViewGroup
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import ru.letotam.ddmail.DdmailApp
 import ru.letotam.ddmail.R
+import ru.letotam.ddmail.conversation.ConversationWeb
 import ru.letotam.ddmail.SessionStatus
 import ru.letotam.ddmail.auth.Session
 import ru.letotam.ddmail.sync.Conversation
@@ -86,6 +93,27 @@ fun MailScreen(
     }
     BackHandler(enabled = !wide && selectedId != null) { vm.open(null) }
 
+    // Один WebView на всё время экрана: создаётся сразу, открытие беседы
+    // меняет только документ (контракт §8).
+    val context = LocalContext.current
+    val web = remember {
+        val app = context.applicationContext as DdmailApp
+        ConversationWeb(context, ConversationWeb.proxyClient(app.http))
+    }
+    DisposableEffect(web) {
+        web.host = object : ConversationWeb.Host {
+            override fun onReady() {}
+            override fun onRequestOlder() = vm.conversation.older()
+            override fun onOpenAttachment(uid: Long, index: Int) =
+                vm.conversation.openAttachment(uid, index, vm.conversation.attachmentName(uid, index))
+            override fun loadPart(uid: Long, cid: String) = vm.conversation.part(uid, cid)
+        }
+        onDispose { web.host = null }
+    }
+    LaunchedEffect(web) {
+        for (js in vm.conversation.js) web.eval(js)
+    }
+
     Column(modifier.fillMaxSize()) {
         TopBar(session, status, syncing, onLogout)
         if (status == SessionStatus.Dead) DeadSessionBanner(onRelogin)
@@ -93,10 +121,10 @@ fun MailScreen(
             Row(Modifier.fillMaxSize()) {
                 ListPane(s, syncing, selectedId, vm, Modifier.width(if (width >= 840) 400.dp else 340.dp).fillMaxHeight())
                 VerticalDivider()
-                ConversationPane(selected, onBack = null, Modifier.weight(1f).fillMaxHeight())
+                ConversationPane(selected, web, onBack = null, Modifier.weight(1f).fillMaxHeight())
             }
         } else if (selected != null) {
-            ConversationPane(selected, onBack = { vm.open(null) }, Modifier.fillMaxSize())
+            ConversationPane(selected, web, onBack = { vm.open(null) }, Modifier.fillMaxSize())
         } else {
             ListPane(s, syncing, selectedId, vm, Modifier.fillMaxSize())
         }
@@ -303,27 +331,35 @@ private fun Avatar(c: Conversation) {
     }
 }
 
-/** Заглушка панели беседы: сама переписка — следующий шаг (контракт §8). */
+/** Панель беседы: нативная шапка и лента в WebView (контракт §8). */
 @Composable
-private fun ConversationPane(c: Conversation?, onBack: (() -> Unit)?, modifier: Modifier) {
-    Column(modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (onBack != null) TextButton(onClick = onBack) { Text(stringResource(R.string.action_back_list)) }
-        if (c == null) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(stringResource(R.string.pick_conversation), color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            return@Column
+private fun ConversationPane(c: Conversation?, web: ConversationWeb, onBack: (() -> Unit)?, modifier: Modifier) {
+    if (c == null) {
+        Box(modifier, contentAlignment = Alignment.Center) {
+            Text(stringResource(R.string.pick_conversation), color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Text(c.label, style = MaterialTheme.typography.titleLarge)
-        Text(
-            c.counterparts.joinToString(", ") { it.addr } + if (c.receivedBy.isNotBlank()) " → ${c.receivedBy}" else "",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Text(
-            stringResource(R.string.conversation_stub, c.messages.size),
-            modifier = Modifier.widthIn(max = 520.dp),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        return
+    }
+    Column(modifier) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (onBack != null) TextButton(onClick = onBack) { Text("←", fontSize = 20.sp) }
+            Column(Modifier.weight(1f).padding(start = if (onBack == null) 8.dp else 0.dp)) {
+                Text(c.label, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    c.counterparts.joinToString(", ") { it.addr } + if (c.receivedBy.isNotBlank()) " → ${c.receivedBy}" else "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        HorizontalDivider()
+        AndroidView(
+            // Тот же WebView переезжает между раскладками (сложили/разложили):
+            // из прежнего родителя его надо вынуть.
+            factory = { web.view.also { (it.parent as? ViewGroup)?.removeView(it) } },
+            modifier = Modifier.fillMaxSize(),
         )
     }
 }

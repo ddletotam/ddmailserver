@@ -1,0 +1,21 @@
+/* Внутри shadow root письма. Минимум: письмо отвечает за свою вёрстку само. */
+:host { display: block; }
+.ddm-root { overflow-wrap: anywhere; word-break: normal; }
+.ddm-root img { max-width: 100%; height: auto; }
+.ddm-scaled img { max-width: none; }
+.ddm-root a { color: #047857; }
+.ddm-root pre { white-space: pre-wrap; }
+.ddm-text { white-space: pre-wrap; }
+.ddm-blocked {
+  display: inline-block; background: #eef1f5; border-radius: 4px;
+  min-width: 16px; min-height: 16px; max-width: 100%;
+}
+details.ddm-quote { margin-top: 6px; }
+details.ddm-quote > summary {
+  list-style: none; cursor: pointer; display: inline-block;
+  color: #6b7480; background: #eef1f5; border-radius: 8px;
+  padding: 0 8px; font-size: 13px; line-height: 20px;
+}
+details.ddm-quote > summary::-webkit-details-marker { display: none; }
+details.ddm-quote[open] > summary { margin-bottom: 6px; }
+.ddm-tquote { color: #6b7480; border-left: 3px solid #d9dfe6; padding-left: 8px; }

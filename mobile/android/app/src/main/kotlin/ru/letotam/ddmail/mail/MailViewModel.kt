@@ -17,6 +17,7 @@ import kotlinx.coroutines.launch
 import ru.letotam.ddmail.DdmailApp
 import ru.letotam.ddmail.SessionStatus
 import ru.letotam.ddmail.api.ApiException
+import ru.letotam.ddmail.conversation.ConversationController
 import ru.letotam.ddmail.sync.Conversation
 import ru.letotam.ddmail.sync.FoldersDoc
 import ru.letotam.ddmail.sync.SyncEngine
@@ -51,6 +52,11 @@ class MailViewModel(
     /** Открытая беседа — по id, не по позиции: список меняется дельтами. */
     val selected = MutableStateFlow<String?>(null)
 
+    val conversation = ConversationController(app, engine, viewModelScope) { onStatus(SessionStatus.Dead) }
+
+    /** Полный список (не только видимая папка): открытая беседа ищется в нём. */
+    private var all: List<Conversation> = emptyList()
+
     val state: StateFlow<MailState> =
         combine(engine.conversations, engine.folders, activeId) { convs, doc, id -> build(convs, doc, id) }
             .stateIn(viewModelScope, SharingStarted.Eagerly, MailState())
@@ -58,6 +64,12 @@ class MailViewModel(
     init {
         viewModelScope.launch {
             activeId.value = app.uiPrefs.data.map { it[ACTIVE_FOLDER] }.first()
+        }
+        viewModelScope.launch {
+            engine.conversations.collect { list ->
+                all = list
+                selected.value?.let { id -> list.firstOrNull { it.id == id }?.let(conversation::updated) }
+            }
         }
         sync()
     }
@@ -87,7 +99,9 @@ class MailViewModel(
     }
 
     fun open(id: String?) {
+        if (id == selected.value) return
         selected.value = id
+        conversation.open(id?.let { i -> all.firstOrNull { it.id == i } })
     }
 
     private fun build(convs: List<Conversation>, doc: FoldersDoc, id: String?): MailState {

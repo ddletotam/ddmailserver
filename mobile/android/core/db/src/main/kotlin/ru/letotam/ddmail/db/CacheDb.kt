@@ -1,6 +1,7 @@
 package ru.letotam.ddmail.db
 
 import android.content.Context
+import androidx.room.AutoMigration
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
@@ -47,6 +48,31 @@ data class MessageRefEntity(
     val seen: Boolean,
 )
 
+/**
+ * Тело письма. Тела в кэше неизменны (по письму не перезапрашиваются) — кроме
+ * пустых: ни HTML, ни текста, ни вложений значит сбойный фетч (§4а десктопа).
+ */
+@Entity(tableName = "message_bodies", primaryKeys = ["accountKey", "uid"])
+data class MessageBodyEntity(
+    val accountKey: String,
+    val uid: Long,
+    val messageId: String,
+    val folder: String,
+    val subject: String,
+    val fromName: String,
+    val fromAddr: String,
+    val toJson: String,
+    val ccJson: String,
+    /** Секунды. */
+    val dateTs: Long,
+    val html: String?,
+    val text: String?,
+    val attachmentsJson: String,
+    val isOutgoing: Boolean,
+    val inReplyTo: String,
+    val referencesJson: String,
+)
+
 /** Служебные значения синхронизации: курсоры, водяные знаки, кэш документов. */
 @Entity(tableName = "meta")
 data class MetaEntity(@androidx.room.PrimaryKey val key: String, val value: String)
@@ -77,6 +103,9 @@ abstract class CacheDao {
 
     @Query("DELETE FROM conversation_messages WHERE accountKey = :account AND messageId IN (:messageIds)")
     protected abstract suspend fun deleteRefsByMessageId(account: String, messageIds: List<String>): Int
+
+    @Query("DELETE FROM message_bodies WHERE accountKey = :account AND messageId IN (:messageIds)")
+    protected abstract suspend fun deleteBodiesByMessageId(account: String, messageIds: List<String>)
 
     @Query(
         "DELETE FROM conversations WHERE accountKey = :account AND id NOT IN " +
@@ -110,9 +139,31 @@ abstract class CacheDao {
         val ids = messageIds.filter { it.isNotEmpty() }
         if (ids.isEmpty()) return 0
         var n = 0
-        ids.chunked(500).forEach { n += deleteRefsByMessageId(account, it) }
+        ids.chunked(500).forEach {
+            n += deleteRefsByMessageId(account, it)
+            deleteBodiesByMessageId(account, it)
+        }
         deleteEmptyConversations(account)
         return n
+    }
+
+    @Query("SELECT * FROM message_bodies WHERE accountKey = :account AND uid IN (:uids)")
+    abstract suspend fun bodies(account: String, uids: List<Long>): List<MessageBodyEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    abstract suspend fun putBodies(b: List<MessageBodyEntity>)
+
+    @Query("UPDATE conversation_messages SET seen = 1 WHERE accountKey = :account AND conversationId = :conv")
+    protected abstract suspend fun seeRefs(account: String, conv: String)
+
+    @Query("UPDATE conversations SET unreadCount = 0 WHERE accountKey = :account AND id = :conv")
+    protected abstract suspend fun zeroUnread(account: String, conv: String)
+
+    /** Беседу открыли — прочитана локально сразу, сервер — следом. */
+    @Transaction
+    open suspend fun markRead(account: String, conv: String) {
+        seeRefs(account, conv)
+        zeroUnread(account, conv)
     }
 
     @Query("SELECT value FROM meta WHERE `key` = :key")
@@ -135,19 +186,24 @@ abstract class CacheDao {
     @Query("DELETE FROM conversation_messages")
     protected abstract suspend fun clearRefs()
 
+    @Query("DELETE FROM message_bodies")
+    protected abstract suspend fun clearBodies()
+
     /** Выход из учётки: кэш чужой сессии не должен остаться на телефоне. */
     @Transaction
     open suspend fun clearAll() {
         clearRefs()
         clearConversations()
+        clearBodies()
         clearMeta()
     }
 }
 
 @Database(
-    entities = [ConversationEntity::class, MessageRefEntity::class, MetaEntity::class],
-    version = 1,
+    entities = [ConversationEntity::class, MessageRefEntity::class, MetaEntity::class, MessageBodyEntity::class],
+    version = 2,
     exportSchema = true,
+    autoMigrations = [AutoMigration(from = 1, to = 2)],
 )
 abstract class CacheDb : RoomDatabase() {
     abstract fun dao(): CacheDao
