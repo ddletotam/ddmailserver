@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "ddmail-android"
-include(":app", ":core:api", ":core:auth")
+include(":app", ":core:api", ":core:auth", ":core:db", ":core:sync")

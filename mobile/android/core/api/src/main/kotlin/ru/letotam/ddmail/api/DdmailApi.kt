@@ -68,7 +68,11 @@ class DdmailApi(private val baseUrl: String, private val http: OkHttpClient) {
     private data class LoginRequest(val username: String, val password: String)
 
     companion object {
-        internal val json = Json { ignoreUnknownKeys = true }
+        internal val json = Json {
+            ignoreUnknownKeys = true
+            // null вместо коллекции (nil-срез Go) — значение по умолчанию.
+            coerceInputValues = true
+        }
         private val JSON = "application/json; charset=utf-8".toMediaType()
 
         /**

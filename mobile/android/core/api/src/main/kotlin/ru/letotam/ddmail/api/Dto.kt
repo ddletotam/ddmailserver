@@ -1,0 +1,75 @@
+package ru.letotam.ddmail.api
+
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
+
+// Формы ответов /api/desktop/v1 — зеркало Desktop*-структур
+// internal/web/handlers_desktop.go. Лишние поля игнорируются, null у
+// коллекций превращается в пустую (Go отдаёт nil-срез как null).
+
+@Serializable
+data class ContactInfo(val name: String = "", val addr: String = "")
+
+@Serializable
+data class MessageRef(
+    val folder: String = "",
+    val uid: Long = 0,
+    /** Стабильный ключ письма (RFC Message-ID); uid — волатильный. */
+    @SerialName("message_id") val messageId: String = "",
+    val seen: Boolean = false,
+)
+
+@Serializable
+data class ConversationDto(
+    /** Задаёт сервер (набор адресов); клиент его не разбирает. */
+    val id: String,
+    val label: String = "",
+    @SerialName("avatar_hash") val avatarHash: String = "",
+    @SerialName("received_by") val receivedBy: String = "",
+    val counterparts: List<ContactInfo> = emptyList(),
+    @SerialName("is_group") val isGroup: Boolean = false,
+    /** Секунды. */
+    @SerialName("last_date_ts") val lastDateTs: Long = 0,
+    @SerialName("last_subject") val lastSubject: String = "",
+    @SerialName("unread_count") val unreadCount: Int = 0,
+    @SerialName("total_count") val totalCount: Int = 0,
+    val messages: List<MessageRef> = emptyList(),
+    /** Миллисекунды, часы сервера. */
+    @SerialName("updated_at") val updatedAt: Long = 0,
+)
+
+/** `/conversations?since=` — изменившиеся беседы и водяной знак часов сервера. */
+@Serializable
+data class ConversationsDelta(
+    @SerialName("server_now_ms") val serverNowMs: Long = 0,
+    val conversations: List<ConversationDto> = emptyList(),
+)
+
+@Serializable
+data class ChangeEntry(
+    val seq: Long = 0,
+    @SerialName("message_id") val messageId: String = "",
+    val kind: Int = 0,
+) {
+    companion object {
+        const val UPSERT = 1
+        const val DELETE = 2
+    }
+}
+
+/** Хвост журнала изменений; `reset` — курсор негоден, нужна полная синхронизация. */
+@Serializable
+data class ChangesResponse(
+    val entries: List<ChangeEntry> = emptyList(),
+    @SerialName("latest_seq") val latestSeq: Long = 0,
+    @SerialName("low_watermark") val lowWatermark: Long = 0,
+    val reset: Boolean = false,
+)
+
+/** Документ папок диалогов: сервер его не толкует, хранит с версией. */
+@Serializable
+data class DialogFoldersResponse(
+    val version: Long = 0,
+    val doc: JsonElement? = null,
+)

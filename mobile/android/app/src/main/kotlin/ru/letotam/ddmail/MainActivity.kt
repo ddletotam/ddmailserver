@@ -12,6 +12,8 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
 import ru.letotam.ddmail.connect.ConnectScreen
 import ru.letotam.ddmail.connect.ConnectViewModel
+import ru.letotam.ddmail.mail.MailScreen
+import ru.letotam.ddmail.mail.MailViewModel
 import ru.letotam.ddmail.ui.DdmailTheme
 
 class MainActivity : ComponentActivity() {
@@ -34,13 +36,20 @@ class MainActivity : ComponentActivity() {
                             }
                             ConnectScreen(vm, m)
                         }
-                        is AppState.Connected -> ConnectedScreen(
-                            session = s.session,
-                            status = s.status,
-                            onRelogin = { appVm.relogin(s.session) },
-                            onLogout = appVm::logout,
-                            modifier = m,
-                        )
+                        is AppState.Connected -> {
+                            // Своя модель на каждую сессию: новый вход — новый движок.
+                            val vm = viewModel(key = "mail-${s.session.serverUrl}-${s.session.token.hashCode()}") {
+                                MailViewModel(app, app.engine(s.session), appVm::status)
+                            }
+                            MailScreen(
+                                vm = vm,
+                                session = s.session,
+                                status = s.status,
+                                onRelogin = { appVm.relogin(s.session) },
+                                onLogout = appVm::logout,
+                                modifier = m,
+                            )
+                        }
                     }
                 }
             }

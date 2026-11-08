@@ -5,7 +5,6 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
-import ru.letotam.ddmail.api.ApiException
 import ru.letotam.ddmail.auth.Session
 import ru.letotam.ddmail.connect.ConnectState
 import ru.letotam.ddmail.connect.ConnectStep
@@ -41,30 +40,15 @@ class AppViewModel(private val app: DdmailApp) : ViewModel() {
 
     fun connected(session: Session) {
         _state.value = AppState.Connected(session, SessionStatus.Checking)
-        refresh(session)
     }
 
     /**
-     * Обменять токен на свежий: и проверка сессии, и продление (сервер
-     * обменивает токен не старше 30 суток). 401/403 — сессия мертва, ретраи
-     * не помогут; остальное — временное.
+     * Итог синхронизации. «Нужен вход» липкий: его снимает только удачный
+     * проход (токен обменялся, запросы прошли) или новый вход.
      */
-    fun refresh(session: Session) {
-        viewModelScope.launch {
-            val status = try {
-                val r = app.api(session.serverUrl).refresh(session.token)
-                app.sessions.updateToken(r.token)
-                SessionStatus.Ok
-            } catch (e: ApiException.Unauthorized) {
-                SessionStatus.Dead
-            } catch (e: ApiException) {
-                SessionStatus.Offline(e.message ?: "")
-            }
-            val cur = _state.value
-            if (cur is AppState.Connected && cur.session.serverUrl == session.serverUrl) {
-                _state.value = cur.copy(status = status)
-            }
-        }
+    fun status(s: SessionStatus) {
+        val cur = _state.value as? AppState.Connected ?: return
+        _state.value = cur.copy(status = s)
     }
 
     /** Повторный вход: тот же сервер и логин, осталось ввести пароль. */
@@ -72,9 +56,11 @@ class AppViewModel(private val app: DdmailApp) : ViewModel() {
         ConnectState(step = ConnectStep.Found, server = session.serverUrl, username = session.username),
     )
 
+    /** Выход: сессия и кэш чужой учётки не остаются на телефоне. */
     fun logout() {
         viewModelScope.launch {
             app.sessions.clear()
+            app.db.dao().clearAll()
             toConnect(ConnectState())
         }
     }

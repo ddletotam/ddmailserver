@@ -28,13 +28,18 @@
     <string name="busy_login">Входим…</string>
     <string name="err_plain">%1$s</string>
 
-    <!-- После входа (пока заглушка) -->
-    <string name="connected_title">Подключено</string>
-    <string name="connected_as">%1$s на %2$s</string>
-    <string name="session_checking">Проверяем сессию…</string>
-    <string name="session_ok">Сессия активна, токен обновлён.</string>
-    <string name="session_offline">Нет связи с сервером: %1$s</string>
-    <string name="session_dead">Сессия истекла — нужен вход.</string>
+    <!-- Почта -->
+    <string name="mail_title">Почта</string>
+    <string name="status_syncing">Обновляем…</string>
+    <string name="status_offline">Нет связи с сервером — показан кэш</string>
+    <string name="session_dead_banner">Сессия истекла: почта не обновляется.</string>
     <string name="action_relogin">Войти</string>
     <string name="action_logout">Выйти</string>
+    <string name="tab_inbox_back">← Входящие</string>
+    <string name="list_empty_inbox">Во «Входящих» пусто.</string>
+    <string name="list_empty_folder">В этой папке пусто.</string>
+    <string name="no_subject">(без темы)</string>
+    <string name="pick_conversation">Выберите беседу</string>
+    <string name="action_back_list">← К списку</string>
+    <string name="conversation_stub">Писем в беседе: %1$d. Сама переписка — следующий шаг.</string>
 </resources>

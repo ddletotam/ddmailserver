@@ -15,8 +15,8 @@ android {
         minSdk = 29
         targetSdk = 35
         // Бампается при любой правке клиента (контракт §1).
-        versionCode = 2
-        versionName = "0.0.2"
+        versionCode = 3
+        versionName = "0.0.3"
     }
 
     // Один код для Huawei и обычного Android: различается только доставка
@@ -48,6 +48,9 @@ android {
 
 dependencies {
     implementation(project(":core:auth"))
+    implementation(project(":core:sync"))
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.core.ktx)
