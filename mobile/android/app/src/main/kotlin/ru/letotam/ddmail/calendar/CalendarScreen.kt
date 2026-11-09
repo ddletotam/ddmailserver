@@ -32,6 +32,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Today
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
@@ -121,13 +123,23 @@ fun CalendarScreen(vm: CalendarViewModel, modifier: Modifier = Modifier) {
 fun CalendarList(vm: CalendarViewModel) {
     val cals by vm.calendars.collectAsState()
     val hidden by vm.hidden.collectAsState()
+    val default by vm.defaultCalendar.collectAsState()
     if (cals.isEmpty()) Text("Календарей нет", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(8.dp))
     cals.forEach { c ->
         val color = CalendarColors.of(c, c.id)
         Row(Modifier.fillMaxWidth().clickable { vm.toggleCalendar(c.id) }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
             Checkbox(c.id !in hidden, { vm.toggleCalendar(c.id) }, colors = CheckboxDefaults.colors(checkedColor = color, uncheckedColor = color))
             Text(c.name.ifBlank { "Календарь" }, Modifier.weight(1f), maxLines = 1, fontSize = 15.sp)
-            if (!c.canWrite) Icon(Icons.Filled.Lock, "Только чтение", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.outline)
+            if (!c.canWrite) Icon(Icons.Filled.Lock, "Только чтение", Modifier.size(16.dp).padding(end = 0.dp), tint = MaterialTheme.colorScheme.outline)
+            // Звезда — куда пишутся новые события; без неё форма заставит выбрать.
+            else IconButton(onClick = { vm.setDefault(c.id) }, Modifier.size(36.dp)) {
+                val on = default == c.id
+                Icon(
+                    if (on) Icons.Filled.Star else Icons.Filled.StarBorder,
+                    if (on) "Календарь по умолчанию" else "Сделать календарём по умолчанию",
+                    tint = if (on) Color(0xFFF59E0B) else MaterialTheme.colorScheme.outline,
+                )
+            }
         }
     }
 }

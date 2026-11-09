@@ -360,13 +360,15 @@ private fun CardLine(icon: ImageVector, text: String, click: (() -> Unit)?) {
 private fun ContactEditor(vm: ContactsViewModel, wide: Boolean) {
     val d by vm.draft.collectAsState()
     val draft = d ?: return
+    val crowd = ru.letotam.ddmail.ui.imeCrowds()
     Dialog(onDismissRequest = { if (!draft.busy) vm.draft.value = null }, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         Surface(
-            Modifier.then(if (wide) Modifier.widthIn(max = 560.dp).padding(24.dp) else Modifier.fillMaxSize()).imePadding(),
+            Modifier.then(if (wide) Modifier.widthIn(max = 560.dp).padding(if (crowd) 0.dp else 24.dp) else Modifier.fillMaxSize()).imePadding(),
             shape = if (wide) MaterialTheme.shapes.large else androidx.compose.ui.graphics.RectangleShape,
         ) {
             Column {
-                Row(Modifier.fillMaxWidth().padding(4.dp).then(if (!wide) Modifier.padding(top = 24.dp) else Modifier), verticalAlignment = Alignment.CenterVertically) {
+                // Клавиатура в тесноте — без шапки: видно поле ввода, «Готово» её закроет.
+                if (!crowd) Row(Modifier.fillMaxWidth().padding(4.dp).then(if (!wide) Modifier.padding(top = 24.dp) else Modifier), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { vm.draft.value = null }, enabled = !draft.busy) { Icon(Icons.Filled.Close, "Отмена") }
                     Text(if (draft.id == null) "Новый контакт" else "Изменить", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                     if (draft.busy) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)

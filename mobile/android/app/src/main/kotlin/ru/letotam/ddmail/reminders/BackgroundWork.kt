@@ -58,7 +58,11 @@ object BackgroundWork {
     fun isHuawei(): Boolean = android.os.Build.MANUFACTURER.equals("HUAWEI", ignoreCase = true) ||
         android.os.Build.MANUFACTURER.equals("HONOR", ignoreCase = true)
 
-    /** Экран «Запуск приложений» EMUI; нет такого — карточка приложения в настройках. */
+    /**
+     * «Диспетчер запуска» EMUI. На EMUI 14 его экран закрыт для сторонних
+     * приложений (интент под разрешением — проверено на Mate XT), поэтому
+     * прямые пути — для старых EMUI, а дальше — «Батарея», где он пунктом.
+     */
     fun openLaunchManager(context: Context) {
         val candidates = listOf(
             ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"),
@@ -66,6 +70,7 @@ object BackgroundWork {
             ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.optimize.process.ProtectActivity"),
         )
         for (c in candidates) if (start(context, Intent().setComponent(c))) return
+        if (start(context, Intent(Intent.ACTION_POWER_USAGE_SUMMARY))) return
         start(context, Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")))
     }
 
@@ -94,9 +99,9 @@ fun BackgroundWorkSteps() {
         )
         Step(Icons.Filled.BatteryChargingFull, "Не ограничивать в фоне", done = free) { BackgroundWork.requestUnrestricted(context) }
         if (BackgroundWork.isHuawei()) {
-            Step(Icons.Filled.RocketLaunch, "Запуск приложений", done = false) { BackgroundWork.openLaunchManager(context) }
+            Step(Icons.Filled.RocketLaunch, "Диспетчер запуска", done = false) { BackgroundWork.openLaunchManager(context) }
             Text(
-                "Там у ddmail выключите «Автоматически» и оставьте включёнными все три: автозапуск, косвенный запуск, работа в фоне.",
+                "Откроется «Батарея» → «Диспетчер запуска»: у ddmail выключите переключатель и в окне «Управление вручную» нажмите OK — автозапуск, косвенный запуск и работа в фоне останутся включены.",
                 fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }

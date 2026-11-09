@@ -247,13 +247,15 @@ fun EventEditor(vm: CalendarViewModel, wide: Boolean) {
     val draft = d ?: return
     val cals by vm.calendars.collectAsState()
     var pick by remember { mutableStateOf<String?>(null) } // sd / st / ed / et
+    val crowd = ru.letotam.ddmail.ui.imeCrowds()
     Dialog(onDismissRequest = { if (!draft.busy) vm.draft.value = null }, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         Surface(
-            Modifier.then(if (wide) Modifier.widthIn(max = 600.dp).padding(24.dp) else Modifier.fillMaxSize()).imePadding(),
+            Modifier.then(if (wide) Modifier.widthIn(max = 600.dp).padding(if (crowd) 0.dp else 24.dp) else Modifier.fillMaxSize()).imePadding(),
             shape = if (wide) MaterialTheme.shapes.large else androidx.compose.ui.graphics.RectangleShape,
         ) {
             Column(Modifier.then(if (wide) Modifier else Modifier.fillMaxSize())) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp).then(if (!wide) Modifier.padding(top = 24.dp) else Modifier), verticalAlignment = Alignment.CenterVertically) {
+                // Клавиатура в тесноте — без шапки: видно поле ввода, «Готово» её закроет.
+                if (!crowd) Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp).then(if (!wide) Modifier.padding(top = 24.dp) else Modifier), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { vm.draft.value = null }, enabled = !draft.busy) { Icon(Icons.Filled.Close, "Отмена") }
                     Text(if (draft.original == null) "Новое событие" else "Изменить", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                     if (draft.busy) CircularProgressIndicator(Modifier.size(24.dp).padding(end = 8.dp), strokeWidth = 2.dp)
@@ -265,6 +267,22 @@ fun EventEditor(vm: CalendarViewModel, wide: Boolean) {
                         Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.fillMaxWidth().clip(MaterialTheme.shapes.small).background(MaterialTheme.colorScheme.errorContainer).padding(10.dp))
                     }
                     OutlinedTextField(draft.summary, { v -> vm.editDraft { it.copy(summary = v) } }, Modifier.fillMaxWidth(), placeholder = { Text("Название") }, singleLine = true, textStyle = MaterialTheme.typography.titleMedium)
+                    if (draft.original == null) {
+                        val writable = cals.filter { it.canWrite }
+                        if (writable.isEmpty()) Text("Нет календарей, доступных на запись", color = MaterialTheme.colorScheme.error)
+                        // Календаря по умолчанию нет — выбор обязателен, и это видно сразу (§12).
+                        else if (draft.calendarId == 0L) Text("Куда записать? Календарь по умолчанию — звёздочкой в списке календарей.", fontSize = 13.sp, color = MaterialTheme.colorScheme.error)
+                        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            writable.forEach { c ->
+                                FilterChip(
+                                    selected = draft.calendarId == c.id,
+                                    onClick = { vm.editDraft { it.copy(calendarId = c.id) } },
+                                    label = { Text(c.name, maxLines = 1) },
+                                    leadingIcon = { Box(Modifier.size(10.dp).clip(CircleShape).background(CalendarColors.of(c, c.id))) },
+                                )
+                            }
+                        }
+                    }
                     OutlinedTextField(draft.location, { v -> vm.editDraft { it.copy(location = v) } }, Modifier.fillMaxWidth(), placeholder = { Text("Место или ссылка") }, singleLine = true, leadingIcon = { Icon(Icons.Filled.Place, null) })
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Filled.Today, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -279,20 +297,6 @@ fun EventEditor(vm: CalendarViewModel, wide: Boolean) {
                         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                             listOf("all" to "Все повторы", "future" to "Это и следующие").forEachIndexed { i, (k, label) ->
                                 SegmentedButton(draft.scope == k, { vm.editDraft { it.copy(scope = k) } }, SegmentedButtonDefaults.itemShape(i, 2)) { Text(label, fontSize = 13.sp) }
-                            }
-                        }
-                    }
-                    if (draft.original == null) {
-                        val writable = cals.filter { it.canWrite }
-                        if (writable.isEmpty()) Text("Нет календарей, доступных на запись", color = MaterialTheme.colorScheme.error)
-                        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            writable.forEach { c ->
-                                FilterChip(
-                                    selected = draft.calendarId == c.id,
-                                    onClick = { vm.editDraft { it.copy(calendarId = c.id) } },
-                                    label = { Text(c.name, maxLines = 1) },
-                                    leadingIcon = { Box(Modifier.size(10.dp).clip(CircleShape).background(CalendarColors.of(c, c.id))) },
-                                )
                             }
                         }
                     }

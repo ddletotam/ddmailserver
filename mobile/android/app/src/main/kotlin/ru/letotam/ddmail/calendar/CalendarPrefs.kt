@@ -19,6 +19,7 @@ private val Context.calendarStore by preferencesDataStore(name = "calendar")
  */
 class CalendarPrefs(private val context: Context) {
     private val hiddenKey = stringSetPreferencesKey("hidden_calendars")
+    private val defaultKey = androidx.datastore.preferences.core.longPreferencesKey("default_calendar")
     private val remindersKey = booleanPreferencesKey("reminders")
     private val batteryAskedKey = booleanPreferencesKey("battery_asked")
     private val viewKey = stringPreferencesKey("view")
@@ -52,8 +53,18 @@ class CalendarPrefs(private val context: Context) {
     suspend fun setShowCompleted(v: Boolean) = context.calendarStore.edit { it[doneKey] = v }
 
     /** Выход из учётки: id календарей чужой сессии бессмысленны. */
+    /**
+     * Календарь, куда пишутся новые события. Не назначен — форма не выбирает
+     * сама: молча взятый «первый записываемый» мог оказаться рабочим, и
+     * личное событие ушло бы на чужой сервер.
+     */
+    val defaultCalendar: Flow<Long?> = context.calendarStore.data.map { it[defaultKey] }
+
+    suspend fun setDefaultCalendar(id: Long?) = context.calendarStore.edit { if (id == null) it.remove(defaultKey) else it[defaultKey] = id }
+
     suspend fun clear() = context.calendarStore.edit {
         it.remove(hiddenKey)
+        it.remove(defaultKey)
         it.remove(viewKey)
     }
 }

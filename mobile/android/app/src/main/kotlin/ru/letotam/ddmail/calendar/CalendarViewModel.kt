@@ -51,6 +51,7 @@ class CalendarViewModel(
 
     val calendars = MutableStateFlow<List<CalendarDto>>(emptyList())
     val hidden = MutableStateFlow<Set<Long>>(emptySet())
+    val defaultCalendar = MutableStateFlow<Long?>(null)
     val view = MutableStateFlow(CalView.Month)
     val selected = MutableStateFlow(LocalDate.now())
     val detail = MutableStateFlow<Occ?>(null)
@@ -79,6 +80,7 @@ class CalendarViewModel(
             }
         }
         viewModelScope.launch { app.calendarChanged.collect { refresh() } }
+        viewModelScope.launch { app.calendarPrefs.defaultCalendar.collect { defaultCalendar.value = it } }
         loadCalendars()
         viewModelScope.launch {
             runCatching { api.identities() }.onSuccess { list -> myEmails.value = list.map { it.email.lowercase() }.toSet() }
@@ -171,8 +173,14 @@ class CalendarViewModel(
         }
     }
 
+    /** Звезда в списке календарей: повторное нажатие снимает. */
+    fun setDefault(id: Long) = viewModelScope.launch {
+        app.calendarPrefs.setDefaultCalendar(if (defaultCalendar.value == id) null else id)
+    }
+
     fun newEvent(at: LocalDateTime? = null, allDay: Boolean = false) {
-        val cal = writable.firstOrNull()
+        // Только назначенный пользователем; иначе выбор в форме обязателен.
+        val cal = writable.firstOrNull { it.id == defaultCalendar.value }
         val start = at ?: selected.value.atTime(LocalDateTime.now().hour, 0).plusHours(1)
         draft.value = EventDraft(
             original = null,
@@ -180,7 +188,7 @@ class CalendarViewModel(
             allDay = allDay,
             start = start,
             end = if (allDay) start else start.plusHours(1),
-            error = if (cal == null) "Нет календарей, доступных на запись" else null,
+            error = if (writable.isEmpty()) "Нет календарей, доступных на запись" else null,
         )
     }
 
@@ -203,7 +211,7 @@ class CalendarViewModel(
         if (d.busy) return
         val summary = d.summary.trim()
         if (summary.isEmpty()) return draft.update { it?.copy(error = "Нужно название") }
-        if (d.calendarId == 0L) return draft.update { it?.copy(error = "Нет календарей, доступных на запись") }
+        if (d.calendarId == 0L) return draft.update { it?.copy(error = "Выберите календарь") }
         val startMs: Long
         val endMs: Long
         if (d.allDay) {
