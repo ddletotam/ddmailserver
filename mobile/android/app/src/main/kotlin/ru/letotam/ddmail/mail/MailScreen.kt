@@ -179,9 +179,12 @@ fun MailScreen(
     Column(modifier.fillMaxSize().imePadding()) {
         val q by vm.query.collectAsState()
         // Поле поиска видно и с открытой клавиатурой — в него и печатают.
-        if (q != null) SearchBar(q!!, onChange = { vm.query.value = it }, onClose = { vm.query.value = null })
+        // Узкое окно с открытой беседой: у неё своя шапка со стрелкой назад,
+        // шапка приложения и поиск только съедали бы высоту (§6).
+        val convOnly = !wide && selected != null
+        if (q != null && !convOnly) SearchBar(q!!, onChange = { vm.query.value = it }, onClose = { vm.query.value = null })
         else if (!ime) {
-            TopBar(session, status, syncing, onSearch = { vm.query.value = "" }, onSettings = { settingsOpen = true }, onLogout = onLogout)
+            if (!convOnly) TopBar(session, status, syncing, onSearch = { vm.query.value = "" }, onSettings = { settingsOpen = true }, onLogout = onLogout)
             if (status == SessionStatus.Dead) DeadSessionBanner(onRelogin)
         }
         if (wide) {

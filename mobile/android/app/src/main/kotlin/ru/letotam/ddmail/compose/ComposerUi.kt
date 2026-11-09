@@ -101,7 +101,7 @@ fun ComposerBar(cc: ComposeController, conversation: Conversation, modifier: Mod
             }
             Row(verticalAlignment = Alignment.Bottom) {
                 TextButton(onClick = { pick.launch(arrayOf("*/*")) }) { Text("📎", fontSize = 18.sp) }
-                TextButton(onClick = cc::toggleExpanded) { Text(if (u.expanded) "⌃" else "⌄", fontSize = 18.sp) }
+                TextButton(onClick = cc::toggleExpanded) { Text(if (u.expanded) "▴" else "▾", fontSize = 22.sp, color = Accent) }
                 TextField(
                     value = d.text,
                     onValueChange = { t -> cc.edit { it.copy(text = t) } },
