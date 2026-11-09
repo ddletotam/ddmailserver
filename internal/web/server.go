@@ -252,6 +252,7 @@ func (s *Server) setupRoutes() {
 	desktopAuthAPI.HandleFunc("/events/{id}", s.HandleDesktopEventDelete).Methods("DELETE")
 	desktopAuthAPI.HandleFunc("/events", s.HandleDesktopEventCreate).Methods("POST")
 	desktopAuthAPI.HandleFunc("/avatars", s.HandleDesktopAvatar).Methods("GET")
+	desktopAuthAPI.HandleFunc("/address-books", s.HandleDesktopAddressBooks).Methods("GET")
 	desktopAuthAPI.HandleFunc("/contacts/search", s.HandleDesktopContactSearch).Methods("GET")
 	desktopAuthAPI.HandleFunc("/contacts", s.HandleDesktopContacts).Methods("GET")
 	desktopAuthAPI.HandleFunc("/contacts", s.HandleDesktopContactCreate).Methods("POST")

@@ -263,3 +263,15 @@ func TestHideInlineAttachment(t *testing.T) {
 		t.Error("regular attachment must always be visible")
 	}
 }
+
+func TestHandleDesktopAddressBooksNeedsUser(t *testing.T) {
+	s := &Server{}
+	req := httptest.NewRequest("GET", "/api/desktop/v1/address-books", nil)
+	w := httptest.NewRecorder()
+
+	s.HandleDesktopAddressBooks(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
