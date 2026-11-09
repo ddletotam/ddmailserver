@@ -76,7 +76,7 @@ fun AppShell(
     val api = remember(key) { app.sessionApi(session) }
     val calVm = viewModel(key = "cal-$key") { CalendarViewModel(app, api, onDead) }
     val tasksVm = viewModel(key = "tasks-$key") { TasksViewModel(app, api, onDead) }
-    val contactsVm = viewModel(key = "contacts-$key") { ContactsViewModel(api, onDead) }
+    val contactsVm = viewModel(key = "contacts-$key") { ContactsViewModel(app, api, onDead) }
     var section by rememberSaveable { mutableStateOf(Section.Mail) }
     val context = LocalContext.current
     // WebView беседы живёт всю сессию: уход в календарь и обратно ленту не теряет.

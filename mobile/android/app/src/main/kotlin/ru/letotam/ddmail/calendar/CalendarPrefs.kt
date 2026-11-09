@@ -20,6 +20,7 @@ private val Context.calendarStore by preferencesDataStore(name = "calendar")
 class CalendarPrefs(private val context: Context) {
     private val hiddenKey = stringSetPreferencesKey("hidden_calendars")
     private val defaultKey = androidx.datastore.preferences.core.longPreferencesKey("default_calendar")
+    private val defaultBookKey = androidx.datastore.preferences.core.longPreferencesKey("default_address_book")
     private val remindersKey = booleanPreferencesKey("reminders")
     private val batteryAskedKey = booleanPreferencesKey("battery_asked")
     private val viewKey = stringPreferencesKey("view")
@@ -62,7 +63,13 @@ class CalendarPrefs(private val context: Context) {
 
     suspend fun setDefaultCalendar(id: Long?) = context.calendarStore.edit { if (id == null) it.remove(defaultKey) else it[defaultKey] = id }
 
+    /** Адресная книга для новых контактов — тот же принцип, что у календаря (§15). */
+    val defaultAddressBook: Flow<Long?> = context.calendarStore.data.map { it[defaultBookKey] }
+
+    suspend fun setDefaultAddressBook(id: Long?) = context.calendarStore.edit { if (id == null) it.remove(defaultBookKey) else it[defaultBookKey] = id }
+
     suspend fun clear() = context.calendarStore.edit {
+        it.remove(defaultBookKey)
         it.remove(hiddenKey)
         it.remove(defaultKey)
         it.remove(viewKey)

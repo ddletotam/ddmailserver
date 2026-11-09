@@ -116,6 +116,9 @@ class SessionApi(
     suspend fun contacts(limit: Int = 5000): List<ContactDto> =
         get("/contacts?limit=$limit", ListSerializer(ContactDto.serializer()))
 
+    suspend fun addressBooks(): List<AddressBookDto> =
+        get("/address-books", ListSerializer(AddressBookDto.serializer()))
+
     suspend fun createContact(req: ContactWriteRequest) {
         write("POST", "/contacts", DdmailApi.json.encodeToString(ContactWriteRequest.serializer(), req))
     }

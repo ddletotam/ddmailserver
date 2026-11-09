@@ -37,6 +37,10 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
@@ -88,6 +92,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.letotam.ddmail.api.ApiException
+import ru.letotam.ddmail.api.AddressBookDto
 import ru.letotam.ddmail.api.ContactDto
 import ru.letotam.ddmail.api.ContactWriteRequest
 import ru.letotam.ddmail.api.SessionApi
@@ -101,6 +106,8 @@ data class ContactDraft(
     val title: String = "",
     val emails: List<String> = listOf(""),
     val phones: List<String> = listOf(""),
+    /** Книга нового контакта; 0 — не выбрана (сохранить нельзя). */
+    val bookId: Long = 0,
     val busy: Boolean = false,
     val error: String? = null,
 )
@@ -109,20 +116,21 @@ data class ContactDraft(
  * Адресная книга (контракт §15): одна сводная книга по всем источникам —
  * так её отдаёт сервер, источник наружу не показывается.
  */
-class ContactsViewModel(private val api: SessionApi, private val onDead: () -> Unit) : ViewModel() {
+class ContactsViewModel(private val app: ru.letotam.ddmail.DdmailApp, private val api: SessionApi, private val onDead: () -> Unit) : ViewModel() {
+    val books = MutableStateFlow<List<AddressBookDto>>(emptyList())
+    val defaultBook = MutableStateFlow<Long?>(null)
     val contacts = MutableStateFlow<List<ContactDto>?>(null)
     val query = MutableStateFlow("")
     val selected = MutableStateFlow<ContactDto?>(null)
     val draft = MutableStateFlow<ContactDraft?>(null)
     val loading = MutableStateFlow(false)
     val notice = MutableStateFlow<String?>(null)
-    private var identity = ""
-
     init {
         refresh()
         viewModelScope.launch {
-            runCatching { api.identities() }.onSuccess { l -> identity = (l.firstOrNull { it.isDefault } ?: l.firstOrNull())?.email.orEmpty() }
+            runCatching { api.addressBooks() }.onSuccess { books.value = it }
         }
+        viewModelScope.launch { app.calendarPrefs.defaultAddressBook.collect { defaultBook.value = it } }
     }
 
     fun refresh() = viewModelScope.launch {
@@ -137,8 +145,19 @@ class ContactsViewModel(private val api: SessionApi, private val onDead: () -> U
         loading.value = false
     }
 
+    /**
+     * Книга нового контакта — только назначенная пользователем (§15).
+     * Раньше сервер сам брал книгу основного адреса — а она бывает рабочей,
+     * и личный контакт уезжал на корпоративный сервер к коллегам.
+     */
     fun newContact() {
-        draft.value = ContactDraft(id = null)
+        val book = books.value.firstOrNull { it.id == defaultBook.value && it.canWrite }
+        draft.value = ContactDraft(id = null, bookId = book?.id ?: 0)
+        if (books.value.isEmpty()) viewModelScope.launch { runCatching { api.addressBooks() }.onSuccess { books.value = it } }
+    }
+
+    fun setDefaultBook(id: Long) = viewModelScope.launch {
+        app.calendarPrefs.setDefaultAddressBook(if (defaultBook.value == id) null else id)
     }
 
     fun edit(c: ContactDto) {
@@ -157,9 +176,10 @@ class ContactsViewModel(private val api: SessionApi, private val onDead: () -> U
         val emails = d.emails.map { it.trim() }.filter { it.isNotEmpty() }
         val phones = d.phones.map { it.trim() }.filter { it.isNotEmpty() }
         if (name.isEmpty() && emails.isEmpty()) return draft.update { it?.copy(error = "Нужно имя или адрес") }
+        if (d.id == null && d.bookId == 0L) return draft.update { it?.copy(error = "Выберите адресную книгу") }
         draft.update { it?.copy(busy = true) }
         viewModelScope.launch {
-            val req = ContactWriteRequest(name, emails.take(3), phones.take(3), d.org.trim(), d.title.trim(), if (d.id == null) identity else "")
+            val req = ContactWriteRequest(name, emails.take(3), phones.take(3), d.org.trim(), d.title.trim(), addressBookId = if (d.id == null) d.bookId else 0)
             try {
                 if (d.id == null) api.createContact(req) else api.patchContact(d.id, req)
                 draft.value = null
@@ -240,7 +260,12 @@ private fun ContactList(vm: ContactsViewModel, avatars: Avatars, modifier: Modif
     val selected by vm.selected.collectAsState()
     Box(modifier) {
         Column(Modifier.fillMaxSize()) {
-            Text("Контакты", fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 16.dp, top = 10.dp, bottom = 4.dp))
+            var booksOpen by remember { mutableStateOf(false) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Контакты", fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f).padding(start = 16.dp, top = 10.dp, bottom = 4.dp))
+                IconButton(onClick = { booksOpen = true }) { Icon(Icons.Filled.Layers, "Адресные книги") }
+            }
+            if (booksOpen) BooksDialog(vm) { booksOpen = false }
             TextField(
                 q, { vm.query.value = it }, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
                 placeholder = { Text("Поиск") }, singleLine = true,
@@ -378,6 +403,7 @@ private fun ContactEditor(vm: ContactsViewModel, wide: Boolean) {
                 Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     draft.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                     OutlinedTextField(draft.name, { v -> vm.editDraft { it.copy(name = v) } }, Modifier.fillMaxWidth(), placeholder = { Text("Имя") }, singleLine = true, leadingIcon = { Icon(Icons.Filled.Person, null) })
+                    if (draft.id == null) BookChips(vm, draft)
                     OutlinedTextField(draft.org, { v -> vm.editDraft { it.copy(org = v) } }, Modifier.fillMaxWidth(), placeholder = { Text("Организация") }, singleLine = true, leadingIcon = { Icon(Icons.Filled.Business, null) })
                     OutlinedTextField(draft.title, { v -> vm.editDraft { it.copy(title = v) } }, Modifier.fillMaxWidth(), placeholder = { Text("Должность") }, singleLine = true)
                     MultiField(draft.emails, Icons.Filled.Email, "Адрес", KeyboardType.Email) { l -> vm.editDraft { it.copy(emails = l) } }
@@ -400,4 +426,59 @@ private fun MultiField(values: List<String>, icon: ImageVector, hint: String, ty
             trailingIcon = { if (v.isNotEmpty()) IconButton(onClick = { onChange(shown.filterIndexed { j, _ -> j != i }.ifEmpty { listOf("") }) }) { Icon(Icons.Filled.Close, "Убрать") } },
         )
     }
+}
+
+private fun AddressBookDto.label(): String = listOf(name, sourceName.takeIf { it.isNotBlank() && it != name }).filterNotNull().joinToString(" · ").ifBlank { "Адресная книга" }
+
+/** Книги для нового контакта; без книги по умолчанию выбор обязателен (§15). */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun BookChips(vm: ContactsViewModel, draft: ContactDraft) {
+    val books by vm.books.collectAsState()
+    val writable = books.filter { it.canWrite }
+    if (writable.isEmpty()) Text("Нет адресных книг, доступных на запись", color = MaterialTheme.colorScheme.error)
+    else if (draft.bookId == 0L) Text("Куда записать? Книга по умолчанию — звёздочкой в списке адресных книг.", fontSize = 13.sp, color = MaterialTheme.colorScheme.error)
+    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        writable.forEach { b ->
+            androidx.compose.material3.FilterChip(
+                selected = draft.bookId == b.id,
+                onClick = { vm.editDraft { it.copy(bookId = b.id) } },
+                label = { Text(b.label(), maxLines = 1) },
+            )
+        }
+    }
+}
+
+/** Адресные книги: звезда — куда пишутся новые контакты. */
+@Composable
+private fun BooksDialog(vm: ContactsViewModel, close: () -> Unit) {
+    val books by vm.books.collectAsState()
+    val default by vm.defaultBook.collectAsState()
+    AlertDialog(
+        onDismissRequest = close,
+        icon = { Icon(Icons.Filled.Layers, null) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                if (books.isEmpty()) Text("Адресных книг нет", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                books.forEach { b ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(b.label(), fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (b.identityEmail.isNotBlank()) Text(b.identityEmail, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                        }
+                        if (!b.canWrite) Icon(Icons.Filled.Lock, "Только чтение", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.outline)
+                        else IconButton(onClick = { vm.setDefaultBook(b.id) }) {
+                            val on = default == b.id
+                            Icon(
+                                if (on) Icons.Filled.Star else Icons.Filled.StarBorder,
+                                if (on) "Книга по умолчанию" else "Сделать книгой по умолчанию",
+                                tint = if (on) Color(0xFFF59E0B) else MaterialTheme.colorScheme.outline,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { IconButton(onClick = close) { Icon(Icons.Filled.Close, "Закрыть") } },
+    )
 }

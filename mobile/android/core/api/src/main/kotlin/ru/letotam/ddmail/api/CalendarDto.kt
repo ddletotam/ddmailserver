@@ -115,6 +115,17 @@ data class ContactDto(
     @SerialName("photo_url") val photoUrl: String = "",
 )
 
+/** Адресная книга — куда записать новый контакт (выбирает пользователь, не сервер). */
+@Serializable
+data class AddressBookDto(
+    val id: Long,
+    val name: String = "",
+    @SerialName("source_name") val sourceName: String = "",
+    @SerialName("source_type") val sourceType: String = "",
+    @SerialName("identity_email") val identityEmail: String = "",
+    @SerialName("can_write") val canWrite: Boolean = false,
+)
+
 @Serializable
 data class ContactWriteRequest(
     @SerialName("full_name") val fullName: String,
@@ -123,4 +134,6 @@ data class ContactWriteRequest(
     val organization: String = "",
     val title: String = "",
     @SerialName("from_identity") val fromIdentity: String = "",
+    /** Книга нового контакта; 0 — не передаётся (правка). */
+    @SerialName("address_book_id") val addressBookId: Long = 0,
 )
