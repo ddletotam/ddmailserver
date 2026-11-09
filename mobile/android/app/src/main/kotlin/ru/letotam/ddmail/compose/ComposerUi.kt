@@ -52,6 +52,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.*
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import ru.letotam.ddmail.api.Identity
 import ru.letotam.ddmail.sync.Conversation
 
@@ -77,14 +84,15 @@ fun ComposerBar(cc: ComposeController, conversation: Conversation, modifier: Mod
                     Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Color(0xFFE9EDF1)).padding(start = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    Icon(Icons.AutoMirrored.Filled.Reply, null, tint = Accent, modifier = Modifier.size(18.dp))
                     Text(
-                        "↩ ${r.from.ifBlank { r.fromAddr }}: ${r.subject}",
+                        " ${r.from.ifBlank { r.fromAddr }}: ${r.subject}",
                         style = MaterialTheme.typography.bodySmall,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
                     )
-                    TextButton(onClick = { cc.replyTo(null) }) { Text("✕") }
+                    IconButton(onClick = { cc.replyTo(null) }) { Icon(Icons.Filled.Close, "Не отвечать на это письмо") }
                 }
                 Spacer(Modifier.padding(2.dp))
             }
@@ -97,11 +105,18 @@ fun ComposerBar(cc: ComposeController, conversation: Conversation, modifier: Mod
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(4.dp))
             }
             if (u.sentFlash) {
-                Text("✓ Отправлено", color = Accent, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(4.dp))
+                Icon(Icons.Filled.DoneAll, "Отправлено", tint = Accent, modifier = Modifier.padding(4.dp).size(20.dp))
             }
             Row(verticalAlignment = Alignment.Bottom) {
-                TextButton(onClick = { pick.launch(arrayOf("*/*")) }) { Text("📎", fontSize = 18.sp) }
-                TextButton(onClick = cc::toggleExpanded) { Text(if (u.expanded) "▴" else "▾", fontSize = 22.sp, color = Accent) }
+                IconButton(onClick = { pick.launch(arrayOf("*/*")) }) { Icon(Icons.Filled.AttachFile, "Вложить файл") }
+                // Поля «Кому / Копия / Тема / От»: @ — про адреса.
+                IconButton(onClick = cc::toggleExpanded) {
+                    Icon(
+                        Icons.Filled.AlternateEmail,
+                        if (u.expanded) "Скрыть адресатов" else "Адресаты и тема",
+                        tint = if (u.expanded) Accent else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 TextField(
                     value = d.text,
                     onValueChange = { t -> cc.edit { it.copy(text = t) } },
@@ -118,7 +133,12 @@ fun ComposerBar(cc: ComposeController, conversation: Conversation, modifier: Mod
                     modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                 )
                 Spacer(Modifier.padding(2.dp))
-                Button(onClick = { cc.sendReply(conversation) }, enabled = d.canSend) { Text("➤") }
+                androidx.compose.material3.FilledIconButton(
+                    onClick = { cc.sendReply(conversation) },
+                    enabled = d.canSend,
+                    colors = androidx.compose.material3.IconButtonDefaults.filledIconButtonColors(containerColor = Accent),
+                    modifier = Modifier.size(48.dp),
+                ) { Icon(Icons.AutoMirrored.Filled.Send, "Отправить") }
             }
         }
     }
@@ -157,9 +177,10 @@ fun FromPicker(d: Draft, ids: List<Identity>, receivedBy: String?, onPick: (Stri
             Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)).clickable { open = true }.padding(horizontal = 4.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("От: ", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Icon(Icons.Filled.AccountCircle, "От", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.width(8.dp))
             Text(cur?.email ?: "—", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            Text("▾")
+            Icon(Icons.Filled.ArrowDropDown, null)
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             ids.forEach { id ->
@@ -184,9 +205,10 @@ fun Attachments(list: List<PendingAttachment>, onRemove: (PendingAttachment) -> 
                 Modifier.clip(RoundedCornerShape(10.dp)).background(Color(0xFFE9EDF1)).padding(start = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("📎 ${a.name}", maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 200.dp), style = MaterialTheme.typography.bodySmall)
+                Icon(Icons.Filled.AttachFile, null, modifier = Modifier.size(16.dp))
+                Text(a.name, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 200.dp), style = MaterialTheme.typography.bodySmall)
                 Text(" ${formatSize(a.size)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                TextButton(onClick = { onRemove(a) }) { Text("✕") }
+                IconButton(onClick = { onRemove(a) }) { Icon(Icons.Filled.Close, "Убрать вложение", modifier = Modifier.size(18.dp)) }
             }
         }
     }
@@ -219,14 +241,21 @@ fun ComposeSheetDialog(cc: ComposeController) {
           Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
             Column(Modifier.fillMaxSize()) {
                 Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = cc::closeSheet, enabled = !sheet.busy) { Text("✕", fontSize = 18.sp) }
+                    IconButton(onClick = cc::closeSheet, enabled = !sheet.busy) { Icon(Icons.Filled.Close, "Закрыть") }
                     Text(
                         if (sheet.branch is Branch.Forward) "Переслать" else "Новое письмо",
                         style = MaterialTheme.typography.titleLarge,
                         modifier = Modifier.weight(1f),
                     )
-                    TextButton(onClick = { pick.launch(arrayOf("*/*")) }, enabled = !sheet.busy) { Text("📎", fontSize = 18.sp) }
-                    Button(onClick = cc::sendSheet, enabled = !sheet.busy) { Text(if (sheet.busy) "Отправляем…" else "Отправить") }
+                    IconButton(onClick = { pick.launch(arrayOf("*/*")) }, enabled = !sheet.busy) { Icon(Icons.Filled.AttachFile, "Вложить файл") }
+                    if (sheet.busy) {
+                        androidx.compose.material3.CircularProgressIndicator(Modifier.padding(12.dp).size(24.dp), color = Accent, strokeWidth = 2.dp)
+                    } else {
+                        androidx.compose.material3.FilledIconButton(
+                            onClick = cc::sendSheet,
+                            colors = androidx.compose.material3.IconButtonDefaults.filledIconButtonColors(containerColor = Accent),
+                        ) { Icon(Icons.AutoMirrored.Filled.Send, "Отправить") }
+                    }
                 }
                 HorizontalDivider()
                 Column(

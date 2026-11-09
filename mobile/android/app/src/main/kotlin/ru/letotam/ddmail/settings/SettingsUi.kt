@@ -1,5 +1,12 @@
 package ru.letotam.ddmail.settings
 
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.*
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -90,7 +97,7 @@ fun SettingsDialog(settings: AppSettings, session: Session, onLogout: () -> Unit
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize().systemBarsPadding()) {
                 Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = onClose) { Text("←", fontSize = 20.sp) }
+                    IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") }
                     Text("Настройки", style = MaterialTheme.typography.titleLarge)
                 }
                 HorizontalDivider()
@@ -119,7 +126,11 @@ fun SettingsDialog(settings: AppSettings, session: Session, onLogout: () -> Unit
                     Section("О приложении")
                     Text("ddmail для Android, версия ${BuildConfig.VERSION_NAME}")
                     Spacer(Modifier.padding(8.dp))
-                    OutlinedButton(onClick = onLogout) { Text("Выйти из учётной записи", color = MaterialTheme.colorScheme.error) }
+                    OutlinedButton(onClick = onLogout) {
+                        Icon(Icons.AutoMirrored.Filled.Logout, null, tint = MaterialTheme.colorScheme.error)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Выйти", color = MaterialTheme.colorScheme.error)
+                    }
                 }
             }
         }

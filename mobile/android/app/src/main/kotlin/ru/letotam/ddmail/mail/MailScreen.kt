@@ -67,16 +67,35 @@ import ru.letotam.ddmail.conversation.ConversationWeb
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.ime
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.*
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.ui.zIndex
 import ru.letotam.ddmail.SessionStatus
 import ru.letotam.ddmail.auth.Session
 import ru.letotam.ddmail.sync.Conversation
 
 private val Accent = Color(0xFF047857)
+
+/**
+ * Клавиатура занимает больше половины окна (EMUI в разложенном Mate XT —
+ * ~85%): тогда шапки прячутся, иначе строки ввода не видно. В сложенном
+ * виде клавиатура — около трети, шапки остаются.
+ */
+@Composable
+private fun imeCrowds(): Boolean {
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val imePx = WindowInsets.ime.getBottom(density)
+    val heightPx = with(density) { androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp.dp.toPx() }
+    return imePx > heightPx / 2
+}
 
 /** Открытая беседа — как `#10b981` выделения в списке десктопа. */
 private val SelectedRow = Color(0xFF10B981)
@@ -175,8 +194,12 @@ fun MailScreen(
 
     // Клавиатура EMUI на разложенном Mate XT занимает ~85% высоты: пока она
     // открыта, прячем всё, кроме строки ввода, иначе композера не видно.
-    val ime = WindowInsets.isImeVisible
-    Column(modifier.fillMaxSize().imePadding()) {
+    val ime = imeCrowds()
+    // Один хост уведомлений на весь экран: в сложенном виде список не виден,
+    // а «Сохранено в Загрузки» приходит из открытой беседы. Над FAB/строкой ввода.
+    Box(modifier.fillMaxSize().imePadding()) {
+    SnackbarHost(snackHost(vm), Modifier.align(Alignment.BottomCenter).padding(bottom = 84.dp).zIndex(1f))
+    Column(Modifier.fillMaxSize()) {
         val q by vm.query.collectAsState()
         // Поле поиска видно и с открытой клавиатурой — в него и печатают.
         // Узкое окно с открытой беседой: у неё своя шапка со стрелкой назад,
@@ -198,6 +221,7 @@ fun MailScreen(
         } else {
             ListPane(s, syncing, selectedId, picked, vm, { folderPicker = true }, { deleteAsk = true }, Modifier.fillMaxSize())
         }
+    }
     }
 }
 
@@ -224,15 +248,15 @@ private fun TopBar(session: Session, status: SessionStatus, syncing: Boolean, on
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        TextButton(onClick = onSearch) { Text("🔍", fontSize = 18.sp) }
+        IconButton(onClick = onSearch) { Icon(Icons.Filled.Search, "Поиск") }
         Box {
-            TextButton(onClick = { menu = true }) { Text("⋮", fontSize = 22.sp) }
+            IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "Меню") }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                DropdownMenuItem(text = { Text("Настройки") }, onClick = {
+                DropdownMenuItem(leadingIcon = { Icon(Icons.Filled.Settings, null) }, text = { Text("Настройки") }, onClick = {
                     menu = false
                     onSettings()
                 })
-                DropdownMenuItem(text = { Text(stringResource(R.string.action_logout)) }, onClick = {
+                DropdownMenuItem(leadingIcon = { Icon(Icons.AutoMirrored.Filled.Logout, null) }, text = { Text(stringResource(R.string.action_logout)) }, onClick = {
                     menu = false
                     onLogout()
                 })
@@ -246,24 +270,24 @@ private fun TopBar(session: Session, status: SessionStatus, syncing: Boolean, on
 private fun snackHost(vm: MailViewModel): SnackbarHostState = remember(vm) { vm.snackHost }
 
 /**
- * Панель действий над выбранными беседами (§5). Две строки: в колонке списка
- * (340–400 dp) счётчик и пять действий в одну не помещаются.
+ * Панель действий над выбранными беседами (§5) — одна строка иконок
+ * (иконки вместо надписей — правило мобильных клиентов, §0): закрыть,
+ * счётчик, выбрать все, прочитано, непрочитано, в папку, удалить.
  */
 @Composable
 private fun SelectionBar(n: Int, vm: MailViewModel, onMove: () -> Unit, onDelete: () -> Unit) {
-    Column(Modifier.fillMaxWidth().background(Color(0xFFE9EDF1))) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = vm::clearPicks) { Text("✕", fontSize = 18.sp) }
-            Text("Выбрано: $n", fontWeight = FontWeight.SemiBold, maxLines = 1)
-            Spacer(Modifier.weight(1f))
-            TextButton(onClick = vm::pickAll) { Text("Выбрать все") }
-        }
-        LazyRow(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
-            item { TextButton(onClick = { vm.markPicked(true) }) { Text("Прочитано") } }
-            item { TextButton(onClick = { vm.markPicked(false) }) { Text("Непрочитано") } }
-            item { TextButton(onClick = onMove) { Text("В папку…") } }
-            item { TextButton(onClick = onDelete) { Text("Удалить", color = MaterialTheme.colorScheme.error) } }
-        }
+    Row(
+        Modifier.fillMaxWidth().background(Color(0xFFE9EDF1)).padding(horizontal = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = vm::clearPicks) { Icon(Icons.Filled.Close, "Снять выбор") }
+        Text("$n", fontWeight = FontWeight.SemiBold, maxLines = 1)
+        Spacer(Modifier.weight(1f))
+        IconButton(onClick = vm::pickAll) { Icon(Icons.Filled.SelectAll, "Выбрать все") }
+        IconButton(onClick = { vm.markPicked(true) }) { Icon(Icons.Filled.Drafts, "Прочитано") }
+        IconButton(onClick = { vm.markPicked(false) }) { Icon(Icons.Filled.MarkEmailUnread, "Непрочитано") }
+        IconButton(onClick = onMove) { Icon(Icons.AutoMirrored.Filled.DriveFileMove, "В папку") }
+        IconButton(onClick = onDelete) { Icon(Icons.Filled.Delete, "Удалить", tint = MaterialTheme.colorScheme.error) }
     }
 }
 
@@ -279,7 +303,7 @@ private fun FolderPickerDialog(vm: MailViewModel, close: () -> Unit) {
         title = { Text("В папку") },
         text = {
             Column {
-                (listOf<Pair<String?, String>>(null to "← Убрать из папки (во «Входящие»)") + vm.folderTargets()).forEach { (id, title) ->
+                (listOf<Pair<String?, String>>(null to "📥 Во «Входящие»") + vm.folderTargets()).forEach { (id, title) ->
                     Text(
                         title,
                         modifier = Modifier.fillMaxWidth().clickable {
@@ -291,7 +315,7 @@ private fun FolderPickerDialog(vm: MailViewModel, close: () -> Unit) {
                 }
             }
         },
-        confirmButton = { TextButton(onClick = close) { Text("Отмена") } },
+        confirmButton = { IconButton(onClick = close) { Icon(Icons.Filled.Close, "Отмена") } },
     )
 }
 
@@ -307,12 +331,12 @@ private fun DeleteDialog(vm: MailViewModel, close: () -> Unit) {
         title = { Text("Удалить беседы?") },
         text = { Text("Бесед: $convs, писем в них: $msgs. Письма будут удалены на сервере; у внешних ящиков — и в исходном ящике.") },
         confirmButton = {
-            TextButton(onClick = {
+            IconButton(onClick = {
                 vm.deletePicked()
                 close()
-            }) { Text("Удалить", color = MaterialTheme.colorScheme.error) }
+            }) { Icon(Icons.Filled.Delete, "Удалить", tint = MaterialTheme.colorScheme.error) }
         },
-        dismissButton = { TextButton(onClick = close) { Text("Отмена") } },
+        dismissButton = { IconButton(onClick = close) { Icon(Icons.Filled.Close, "Отмена") } },
     )
 }
 
@@ -323,7 +347,7 @@ private fun SearchBar(q: String, onChange: (String) -> Unit, onClose: () -> Unit
     LaunchedEffect(Unit) { focus.requestFocus() }
     BackHandler(onBack = onClose)
     Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-        TextButton(onClick = onClose) { Text("←", fontSize = 20.sp) }
+        IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Закрыть поиск") }
         androidx.compose.material3.OutlinedTextField(
             value = q,
             onValueChange = onChange,
@@ -396,14 +420,12 @@ private fun ListPane(
                     }
                 }
             }
-            // Над кнопкой «Написать», а не под ней.
-            SnackbarHost(snackHost(vm), Modifier.align(Alignment.BottomCenter).padding(bottom = if (picked.isEmpty()) 84.dp else 0.dp))
-            if (picked.isEmpty()) ExtendedFloatingActionButton(
+            if (picked.isEmpty()) androidx.compose.material3.FloatingActionButton(
                 onClick = vm.compose::openNew,
                 containerColor = Accent,
                 contentColor = Color.White,
                 modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-            ) { Text("✎  Написать") }
+            ) { Icon(Icons.Filled.Edit, "Написать") }
         }
     }
 }
@@ -411,7 +433,7 @@ private fun ListPane(
 /**
  * Табы папок, как в Telegram (§4 десктопа): текст, выбранный — акцентом с
  * подчёркиванием; таба «Все» нет — ничего не выбрано значит «Входящие». Пока
- * выбрана папка, первым стоит «← Входящие» со счётчиком — путь назад.
+ * выбрана папка, первым стоит иконка «Входящих» со счётчиком — путь назад.
  */
 @Composable
 private fun FolderTabs(s: MailState, onSelect: (String?) -> Unit) {
@@ -422,7 +444,7 @@ private fun FolderTabs(s: MailState, onSelect: (String?) -> Unit) {
     ) {
         if (s.active != null) {
             item(key = "inbox") {
-                Tab(stringResource(R.string.tab_inbox_back), s.inboxUnread, selected = false) { onSelect(null) }
+                Tab("", s.inboxUnread, selected = false, icon = Icons.Filled.Inbox, description = stringResource(R.string.tab_inbox_back)) { onSelect(null) }
             }
         }
         items(s.tabs, key = { it.id }) { t ->
@@ -435,13 +457,21 @@ private fun FolderTabs(s: MailState, onSelect: (String?) -> Unit) {
 }
 
 @Composable
-private fun Tab(title: String, unread: Int, selected: Boolean, onClick: () -> Unit) {
+private fun Tab(
+    title: String,
+    unread: Int,
+    selected: Boolean,
+    icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    description: String? = null,
+    onClick: () -> Unit,
+) {
     Column(
         Modifier.clip(RoundedCornerShape(6.dp)).clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
+            if (icon != null) Icon(icon, description, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (title.isNotEmpty()) Text(
                 title,
                 color = if (selected) Accent else MaterialTheme.colorScheme.onSurface,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
@@ -499,10 +529,15 @@ private fun SwipeRow(enabled: Boolean, unread: Boolean, onRight: () -> Unit, onL
                 Modifier.fillMaxSize().background(if (right) Accent else Color(0xFF1D4ED8)).padding(horizontal = 20.dp),
                 contentAlignment = if (right) Alignment.CenterStart else Alignment.CenterEnd,
             ) {
-                Text(
-                    if (right) (if (unread) "Прочитано" else "Непрочитано") else "В папку…",
-                    color = Color.White,
-                    fontWeight = FontWeight.SemiBold,
+                Icon(
+                    when {
+                        !right -> Icons.AutoMirrored.Filled.DriveFileMove
+                        unread -> Icons.Filled.Drafts
+                        else -> Icons.Filled.MarkEmailUnread
+                    },
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(28.dp),
                 )
             }
         },
@@ -544,7 +579,7 @@ private fun ConversationRow(
     ) {
         if (picked) {
             Box(Modifier.size(44.dp).clip(CircleShape).background(Accent), contentAlignment = Alignment.Center) {
-                Text("✓", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                Icon(Icons.Filled.Check, "Выбрано", tint = Color.White)
             }
         } else {
             Avatar(c, avatars)
@@ -627,10 +662,10 @@ private fun ConversationPane(c: Conversation?, web: ConversationWeb, vm: MailVie
         return
     }
     @OptIn(ExperimentalLayoutApi::class)
-    val ime = WindowInsets.isImeVisible
+    val ime = imeCrowds()
     Column(modifier) {
         if (!ime) Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (onBack != null) TextButton(onClick = onBack) { Text("←", fontSize = 20.sp) }
+            if (onBack != null) IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "К списку") }
             Column(Modifier.weight(1f).padding(start = if (onBack == null) 8.dp else 0.dp)) {
                 Text(c.label, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
@@ -666,22 +701,11 @@ private fun AttachmentMenu(vm: MailViewModel) {
         title = { Text(name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
         text = {
             Column {
-                listOf(
-                    "Открыть" to { vm.conversation.openAttachment(uid, index, name) },
-                    "Сохранить в «Загрузки»" to { vm.conversation.saveAttachment(uid, index) { msg -> vm.notice.value = msg } },
-                ).forEach { (title, action) ->
-                    Text(
-                        title,
-                        modifier = Modifier.fillMaxWidth().clickable {
-                            action()
-                            close()
-                        }.padding(vertical = 14.dp),
-                        style = MaterialTheme.typography.bodyLarge,
-                    )
-                }
+                MenuRow(Icons.AutoMirrored.Filled.OpenInNew, "Открыть", close) { vm.conversation.openAttachment(uid, index, name) }
+                MenuRow(Icons.Filled.Download, "В «Загрузки»", close) { vm.conversation.saveAttachment(uid, index) { msg -> vm.notice.value = msg } }
             }
         },
-        confirmButton = { TextButton(onClick = close) { Text("Отмена") } },
+        confirmButton = { IconButton(onClick = close) { Icon(Icons.Filled.Close, "Отмена") } },
     )
 }
 
@@ -697,26 +721,31 @@ private fun BubbleMenu(vm: MailViewModel) {
         title = { Text(body.subject.ifBlank { stringResource(R.string.no_subject) }, maxLines = 2, overflow = TextOverflow.Ellipsis) },
         text = {
             Column {
-                listOf(
-                    "Ответить" to { vm.compose.replyTo(body) },
-                    "Переслать" to { vm.compose.openForward(body) },
-                    "Копировать текст" to {
-                        val plain = body.text?.takeIf { it.isNotBlank() }
-                            ?: android.text.Html.fromHtml(body.html.orEmpty(), android.text.Html.FROM_HTML_MODE_COMPACT).toString()
-                        clipboard.setText(AnnotatedString(plain.trim()))
-                    },
-                ).forEach { (title, action) ->
-                    Text(
-                        title,
-                        modifier = Modifier.fillMaxWidth().clickable {
-                            action()
-                            close()
-                        }.padding(vertical = 14.dp),
-                        style = MaterialTheme.typography.bodyLarge,
-                    )
+                MenuRow(Icons.AutoMirrored.Filled.Reply, "Ответить", close) { vm.compose.replyTo(body) }
+                MenuRow(Icons.AutoMirrored.Filled.Forward, "Переслать", close) { vm.compose.openForward(body) }
+                MenuRow(Icons.Filled.ContentCopy, "Копировать", close) {
+                    val plain = body.text?.takeIf { it.isNotBlank() }
+                        ?: android.text.Html.fromHtml(body.html.orEmpty(), android.text.Html.FROM_HTML_MODE_COMPACT).toString()
+                    clipboard.setText(AnnotatedString(plain.trim()))
                 }
             }
         },
-        confirmButton = { TextButton(onClick = close) { Text("Отмена") } },
+        confirmButton = { IconButton(onClick = close) { Icon(Icons.Filled.Close, "Отмена") } },
     )
+}
+
+/** Пункт меню-диалога: иконка и короткое слово. */
+@Composable
+private fun MenuRow(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, close: () -> Unit, action: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable {
+            action()
+            close()
+        }.padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, null, tint = Accent)
+        Spacer(Modifier.width(16.dp))
+        Text(title, style = MaterialTheme.typography.bodyLarge)
+    }
 }

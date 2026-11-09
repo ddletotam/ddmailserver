@@ -27,6 +27,28 @@ const native = (() => {
 
 const feed = document.getElementById('feed');
 const olderEl = document.getElementById('older');
+
+/**
+ * Иконки Material (24×24) — вместо надписей: на мобильных иконки, а не
+ * слова (контракт §0). Инлайн-SVG — CSP не мешает, сеть не нужна.
+ */
+const ICONS = {
+  image: 'M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z',
+  trust: 'M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z',
+  attach: 'M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z',
+};
+
+function icon(name) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.classList.add('ddm-icon');
+  const path = document.createElementNS(NS, 'path');
+  path.setAttribute('d', ICONS[name]);
+  svg.appendChild(path);
+  return svg;
+}
 const scroller = document.scrollingElement;
 
 /** uid → { msg, host, root, imagesAllowed } — для перерисовки и подгонки ширины. */
@@ -346,7 +368,10 @@ function fill(entry) {
   shadow.appendChild(root);
   entry.root = root;
   entry.imagesBox.hidden = !(remoteCount > 0 && !entry.imagesAllowed);
-  if (!entry.imagesBox.hidden) entry.imagesBtn.textContent = `Показать картинки (${remoteCount})`;
+  if (!entry.imagesBox.hidden) {
+    entry.imagesBtn.replaceChildren(icon('image'), String(remoteCount));
+    entry.imagesBtn.setAttribute('aria-label', `Показать картинки: ${remoteCount}`);
+  }
   link.addEventListener('load', () => fit(entry));
   root.querySelectorAll('img').forEach((img) => img.addEventListener('load', () => {
     fit(entry);
@@ -424,7 +449,8 @@ function makeRow(msg) {
   imagesBtn.className = 'ddm-images';
   const alwaysBtn = document.createElement('button');
   alwaysBtn.className = 'ddm-images';
-  alwaysBtn.textContent = 'Всегда от ' + (msg.fromAddr || 'отправителя');
+  alwaysBtn.append(icon('image'), icon('trust'));
+  alwaysBtn.setAttribute('aria-label', 'Всегда показывать картинки от ' + (msg.fromAddr || 'отправителя'));
   imagesBox.append(imagesBtn, alwaysBtn);
   b.appendChild(imagesBox);
 
@@ -438,7 +464,7 @@ function makeRow(msg) {
       name.textContent = a.filename || 'вложение';
       const size = document.createElement('small');
       size.textContent = formatSize(a.size || 0);
-      chip.append('📎', name, size);
+      chip.append(icon('attach'), name, size);
       chip.addEventListener('click', () => native('openAttachment', msg.uid, a.index));
       // Долгое нажатие на чип — «Открыть» / «Сохранить в Загрузки».
       chip.addEventListener('contextmenu', (e) => {
@@ -505,7 +531,7 @@ function byDate(a, b) {
 function setOlder(v) {
   hasOlder = !!v;
   olderEl.hidden = !hasOlder;
-  olderEl.textContent = 'Загружаем раньше…';
+  olderEl.setAttribute('aria-label', 'Загружаем раньше');
 }
 
 function fitAll() {

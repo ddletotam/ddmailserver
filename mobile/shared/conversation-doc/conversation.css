@@ -15,7 +15,15 @@ body {
   -webkit-text-size-adjust: 100%;
 }
 #feed { padding: 8px 10px 16px; }
-.ddm-older { text-align: center; color: var(--muted); font-size: 13px; padding: 10px; }
+.ddm-older { display: flex; justify-content: center; padding: 10px; }
+.ddm-older::before {
+  content: ''; width: 18px; height: 18px; border-radius: 50%;
+  border: 2px solid var(--line); border-top-color: var(--accent);
+  animation: ddm-spin .8s linear infinite;
+}
+@keyframes ddm-spin { to { transform: rotate(360deg); } }
+.ddm-older[hidden] { display: none; }
+.ddm-icon { width: 18px; height: 18px; fill: currentColor; flex: none; }
 .ddm-day {
   text-align: center; margin: 14px 0 6px;
   color: var(--muted); font-size: 12.5px;
@@ -41,11 +49,14 @@ body {
   padding: 6px 10px; font-size: 13px; color: #0f1419;
 }
 .ddm-att span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ddm-att small { color: var(--muted); }
+.ddm-att small { color: var(--muted); white-space: nowrap; flex: none; }
+/* Долгое нажатие — меню вложения/кнопки, а не выделение текста. */
+.ddm-att, .ddm-images { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .ddm-images {
-  display: block; margin-top: 6px; font-size: 12.5px; color: var(--accent);
+  display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; color: var(--accent);
+  min-height: 32px; min-width: 32px;
   background: none; border: 0; padding: 0; font: inherit; font-size: 12.5px;
 }
 .ddm-pending .ddm-bubble { opacity: .75; }
-.ddm-imgbar { display: flex; gap: 14px; flex-wrap: wrap; }
+.ddm-imgbar { display: flex; gap: 18px; flex-wrap: wrap; }
 .ddm-imgbar[hidden] { display: none; }
