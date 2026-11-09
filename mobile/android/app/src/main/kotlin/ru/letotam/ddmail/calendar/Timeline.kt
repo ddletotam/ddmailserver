@@ -35,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
@@ -133,7 +134,8 @@ fun Timeline(
         if (showDayHeader) DayHeaderRow(days, gutter)
         AllDayRow(days, occsOf, onOpen, gutter)
         HorizontalDivider()
-        BoxWithConstraints(Modifier.fillMaxSize().verticalScroll(scroll)) {
+        // Обрезка: в листаемом пейджере линия «сейчас» соседнего дня торчала бы на край.
+        BoxWithConstraints(Modifier.fillMaxSize().clipToBounds().verticalScroll(scroll)) {
             val totalH = hourHeight * 24
             val colW = (maxWidth - gutter) / days.size
             val colWpx = with(density) { colW.toPx() }

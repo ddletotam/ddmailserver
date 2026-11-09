@@ -80,14 +80,19 @@ fun CompactMonth(ym: YearMonth, vm: CalendarViewModel, index: Map<LocalDate, Lis
     val today = LocalDate.now()
     Column(Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
         val firstCol = ym.atDay(1).dayOfWeek.value - 1
-        Row(Modifier.fillMaxWidth()) {
-            // Название месяца — над столбцом его первого числа, как в iOS.
-            Spacer(Modifier.weight(firstCol.toFloat() + 0.0001f))
+        val title = @Composable { m: Modifier ->
             Text(
-                MONTHS[ym.monthValue - 1], fontSize = 20.sp, fontWeight = FontWeight.Bold,
+                MONTHS[ym.monthValue - 1], fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false,
                 color = if (YearMonth.from(today) == ym) NowRed else MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(7f - firstCol).padding(start = 10.dp, bottom = 4.dp),
+                modifier = m.padding(start = 10.dp, end = 10.dp, bottom = 4.dp),
             )
+        }
+        // Название месяца — над столбцом его первого числа, как в iOS; у месяца,
+        // что начинается в сб/вс, справа места на слово нет — прижимаем к краю.
+        if (firstCol >= 5) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { title(Modifier) }
+        else Row(Modifier.fillMaxWidth()) {
+            Spacer(Modifier.weight(firstCol.toFloat() + 0.0001f))
+            title(Modifier.weight(7f - firstCol))
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
         monthCells(ym).chunked(7).forEach { week ->
