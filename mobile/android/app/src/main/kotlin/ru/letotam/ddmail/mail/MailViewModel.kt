@@ -66,7 +66,7 @@ class MailViewModel(
 
     val compose = ComposeController(app, engine, conversation, viewModelScope, ::sync) { onStatus(SessionStatus.Dead) }
 
-    val live = LiveUpdates(engine, viewModelScope, ::sync)
+    val live = LiveUpdates(engine, viewModelScope, ::sync) { app.calendarChanged.tryEmit(Unit) }
     val avatars = Avatars(app, engine)
 
     /** Цвета строк по группам адресов (как у десктопа). */

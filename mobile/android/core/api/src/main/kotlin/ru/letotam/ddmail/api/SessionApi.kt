@@ -27,7 +27,7 @@ interface TokenSource {
 
 /**
  * Запросы от имени сессии. На 401 — один раз обменять токен через
- * `/auth/refresh` и повторить; refresh тоже 401/403 — сессия мертва,
+ * `/auth/refresh` и повторить; refresh тоже отказал — сессия мертва,
  * [ApiException.Unauthorized] уходит наверх (контракт §2: «нужен вход»).
  * Обмен сериализован: десять запросов, разом упёршихся в 401, делают один
  * refresh, а не десять.
@@ -81,6 +81,58 @@ class SessionApi(
                 onClosed(false)
             }
         })
+    }
+
+    // ── Календарь, задачи, контакты ──
+
+    suspend fun calendars(): List<CalendarDto> = get("/calendars", ListSerializer(CalendarDto.serializer()))
+
+    /** События окна `[fromMs, toMs)`; повторяющиеся — мастерами (развёртывает клиент). */
+    suspend fun calendarEvents(fromMs: Long, toMs: Long): List<EventDto> =
+        get("/calendar-events?from=$fromMs&to=$toMs", ListSerializer(EventDto.serializer()))
+
+    suspend fun createEvent(req: EventCreateRequest): String =
+        write("POST", "/events", DdmailApi.json.encodeToString(EventCreateRequest.serializer(), req))
+
+    suspend fun patchEvent(id: Long, req: EventPatchRequest): String =
+        write("PATCH", "/events/$id", DdmailApi.json.encodeToString(EventPatchRequest.serializer(), req))
+
+    suspend fun deleteEvent(id: Long) {
+        write("DELETE", "/events/$id", null)
+    }
+
+    /** Ответ на приглашение: ACCEPTED | TENTATIVE | DECLINED. */
+    suspend fun rsvp(id: Long, partstat: String) {
+        write("POST", "/events/$id/rsvp", JsonObject(mapOf("partstat" to JsonPrimitive(partstat))).toString())
+    }
+
+    suspend fun tasks(includeCompleted: Boolean): List<TaskDto> =
+        get("/tasks" + if (includeCompleted) "?include_completed=1" else "", ListSerializer(TaskDto.serializer()))
+
+    suspend fun setTaskCompleted(id: Long, completed: Boolean) {
+        write("POST", "/tasks/$id/completion", JsonObject(mapOf("completed" to JsonPrimitive(completed))).toString())
+    }
+
+    suspend fun contacts(limit: Int = 5000): List<ContactDto> =
+        get("/contacts?limit=$limit", ListSerializer(ContactDto.serializer()))
+
+    suspend fun createContact(req: ContactWriteRequest) {
+        write("POST", "/contacts", DdmailApi.json.encodeToString(ContactWriteRequest.serializer(), req))
+    }
+
+    suspend fun patchContact(id: Long, req: ContactWriteRequest) {
+        write("PATCH", "/contacts/$id", DdmailApi.json.encodeToString(ContactWriteRequest.serializer(), req))
+    }
+
+    suspend fun deleteContact(id: Long) {
+        write("DELETE", "/contacts/$id", null)
+    }
+
+    private suspend fun write(method: String, path: String, json: String?): String = authed { token ->
+        Request.Builder().url("$baseUrl/api/desktop/v1$path")
+            .header("Authorization", "Bearer $token")
+            .method(method, json?.toRequestBody(JSON))
+            .build()
     }
 
     suspend fun identities(): List<Identity> =
@@ -226,7 +278,7 @@ internal suspend fun Call.awaitBinary(): Binary = suspendCancellableCoroutine { 
                         r.isSuccessful -> Result.success(
                             Binary(r.body?.bytes() ?: ByteArray(0), r.header("Content-Type") ?: "application/octet-stream"),
                         )
-                        r.code == 401 || r.code == 403 -> Result.failure(ApiException.Unauthorized(""))
+                        r.code == 401 -> Result.failure(ApiException.Unauthorized(""))
                         else -> Result.failure(ApiException.Server(r.code, ""))
                     }
                 } catch (e: IOException) {

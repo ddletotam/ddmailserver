@@ -55,8 +55,16 @@ class DdmailApp : Application() {
     /** Беседа, которую попросили открыть из уведомления. */
     val openRequests = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
 
-    /** Синхронизация сессии; обменянный токен сразу ложится в хранилище. */
-    fun engine(session: Session): SyncEngine {
+    private var apiFor: Pair<String, SessionApi>? = null
+
+    /**
+     * API сессии — один на сессию: у почты, календаря и фоновых задач общий
+     * токен, и обменивает его кто-то один.
+     */
+    @Synchronized
+    fun sessionApi(session: Session): SessionApi {
+        val key = "${session.serverUrl}|${session.username}"
+        apiFor?.let { (k, api) -> if (k == key) return api }
         val tokens = object : TokenSource {
             @Volatile private var token = session.token
             override suspend fun current() = token
@@ -65,9 +73,32 @@ class DdmailApp : Application() {
                 sessions.updateToken(token)
             }
         }
+        return SessionApi(session.serverUrl, http, tokens).also { apiFor = key to it }
+    }
+
+    /** Сброс при выходе: новый вход — новый токен. */
+    @Synchronized
+    fun forgetSessionApi() {
+        apiFor = null
+    }
+
+    /** Синхронизация сессии; обменянный токен сразу ложится в хранилище. */
+    fun engine(session: Session): SyncEngine {
         val host = session.serverUrl.removePrefix("https://").substringBefore(':').substringBefore('/')
         // Ключ учётки — как `account_key` десктопа (`логин@хост`): по нему
         // документ папок хранит ручные назначения, ключи обязаны совпадать.
-        return SyncEngine("${session.username}@$host", SessionApi(session.serverUrl, http, tokens), db.dao())
+        return SyncEngine("${session.username}@$host", sessionApi(session), db.dao())
     }
+
+    val calendarPrefs: ru.letotam.ddmail.calendar.CalendarPrefs by lazy { ru.letotam.ddmail.calendar.CalendarPrefs(this) }
+    val reminders: ru.letotam.ddmail.reminders.Reminders by lazy { ru.letotam.ddmail.reminders.Reminders(this) }
+
+    /** Сервер сообщил об изменениях в календаре (WS `calendar_updated`). */
+    val calendarChanged = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    /** Событие, которое попросили открыть из напоминания: (id события, начало вхождения). */
+    val eventRequests = kotlinx.coroutines.flow.MutableStateFlow<Pair<Long, Long>?>(null)
+
+    /** «Напомнить позже» из уведомления: (id события, начало вхождения). */
+    val snoozeRequests = kotlinx.coroutines.flow.MutableStateFlow<Pair<Long, Long>?>(null)
 }

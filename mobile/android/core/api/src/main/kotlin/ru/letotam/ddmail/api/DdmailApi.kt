@@ -32,7 +32,11 @@ data class LoginResponse(
  * временные, повторяем.
  */
 sealed class ApiException(message: String, cause: Throwable? = null) : Exception(message, cause) {
-    /** 401/403: неверный пароль или мёртвая сессия. */
+    /**
+     * 401: неверный пароль или мёртвая сессия. 403 сюда НЕ относится: им
+     * сервер отказывает в конкретном действии при живой сессии (календарь
+     * только для чтения, чужой адрес отправителя) — это [Server].
+     */
     class Unauthorized(val serverMessage: String) : ApiException("unauthorized: $serverMessage")
 
     /** Прочий не-2xx ответ. */
@@ -61,7 +65,13 @@ class DdmailApi(private val baseUrl: String, private val http: OkHttpClient) {
             .header("Authorization", "Bearer $token")
             .post(ByteArray(0).toRequestBody(null))
             .build()
-        return json.decodeFromString(LoginResponse.serializer(), http.newCall(req).awaitBody())
+        val body = try {
+            http.newCall(req).awaitBody()
+        } catch (e: ApiException.Server) {
+            // Отказ в обмене токена — всегда «нужен вход», каким бы кодом ни пришёл.
+            if (e.code == 403) throw ApiException.Unauthorized(e.serverMessage) else throw e
+        }
+        return json.decodeFromString(LoginResponse.serializer(), body)
     }
 
     @Serializable
@@ -109,7 +119,7 @@ internal suspend fun Call.awaitBody(): String = suspendCancellableCoroutine { co
                 }
                 when {
                     r.isSuccessful -> Result.success(text)
-                    r.code == 401 || r.code == 403 -> Result.failure(ApiException.Unauthorized(errorText(text)))
+                    r.code == 401 -> Result.failure(ApiException.Unauthorized(errorText(text)))
                     else -> Result.failure(ApiException.Server(r.code, errorText(text)))
                 }
             }

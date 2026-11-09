@@ -20,6 +20,8 @@ class LiveUpdates(
     private val engine: SyncEngine,
     private val scope: CoroutineScope,
     private val sync: () -> Unit,
+    /** `calendar_updated`: календарь, задачи и напоминания перечитываются, почта — нет. */
+    private val onCalendar: () -> Unit = {},
 ) {
     private var socket: WebSocket? = null
     private var loop: Job? = null
@@ -46,7 +48,7 @@ class LiveUpdates(
             if (!wanted) return@launch
             socket = runCatching {
                 engine.openSocket(
-                    onEvent = { onEvent() },
+                    onEvent = { type -> if (type == "calendar_updated") onCalendar() else onEvent() },
                     onClosed = { authFailed ->
                         scope.launch {
                             if (!wanted) return@launch

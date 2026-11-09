@@ -123,6 +123,27 @@ fun SettingsDialog(settings: AppSettings, session: Session, onLogout: () -> Unit
                         Switch(checked = notify, onCheckedChange = { v -> scope.launch { settings.setNotifications(v) } })
                     }
                     HorizontalDivider()
+                    Section("Календарь")
+                    val app = androidx.compose.ui.platform.LocalContext.current.applicationContext as ru.letotam.ddmail.DdmailApp
+                    val remind by app.calendarPrefs.remindersOn.collectAsState(initial = true)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Напоминания о событиях", style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                "По будильникам событий (VALARM); смахнуть уведомление — больше не напоминать об этой встрече.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(checked = remind, onCheckedChange = { v ->
+                            scope.launch {
+                                app.calendarPrefs.setRemindersOn(v)
+                                if (v) runCatching { app.reminders.refresh(app.sessionApi(session)) } else app.reminders.disable()
+                            }
+                        })
+                    }
+                    ru.letotam.ddmail.reminders.BackgroundWorkSteps()
+                    HorizontalDivider()
                     Section("О приложении")
                     Text("ddmail для Android, версия ${BuildConfig.VERSION_NAME}")
                     Spacer(Modifier.padding(8.dp))

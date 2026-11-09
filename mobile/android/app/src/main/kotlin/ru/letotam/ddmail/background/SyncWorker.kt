@@ -22,10 +22,13 @@ import java.util.concurrent.TimeUnit
 class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         val app = applicationContext as DdmailApp
-        // Приложение на экране — синхронизирует оно само (и WebSocket);
+        val session = app.sessions.load() ?: return Result.success()
+        // Напоминания — и при открытом приложении: их окно привязано к «сейчас»,
+        // а не к тому, что показывает экран (контракт §13).
+        runCatching { app.reminders.refresh(app.sessionApi(session)) }
+        // Приложение на экране — почту синхронизирует оно само (и WebSocket);
         // второй движок рядом гонялся бы с ним за кэш.
         if (app.foreground) return Result.success()
-        val session = app.sessions.load() ?: return Result.success()
         val engine = app.engine(session)
         return try {
             engine.sync()

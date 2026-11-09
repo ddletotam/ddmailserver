@@ -58,7 +58,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.compose.LifecycleResumeEffect
 import ru.letotam.ddmail.DdmailApp
 import ru.letotam.ddmail.R
 import ru.letotam.ddmail.compose.ComposeSheetDialog
@@ -113,6 +112,7 @@ fun MailScreen(
     status: SessionStatus,
     onRelogin: () -> Unit,
     onLogout: () -> Unit,
+    web: ConversationWeb,
     modifier: Modifier = Modifier,
 ) {
     val s by vm.state.collectAsState()
@@ -124,12 +124,8 @@ fun MailScreen(
     // переставить строки.
     val selected = s.conversations.firstOrNull { it.id == selectedId }
 
-    // Вернулись в приложение — подтянуть новое (до push это единственный путь).
-    LifecycleResumeEffect(Unit) {
-        vm.sync()
-        vm.live.start()
-        onPauseOrDispose { vm.live.stop() }
-    }
+    // Синхронизация на возврат и WebSocket — в оболочке (AppShell): они нужны
+    // и пока на экране календарь.
     val picked by vm.picked.collectAsState()
     BackHandler(enabled = picked.isNotEmpty()) { vm.clearPicks() }
     BackHandler(enabled = picked.isEmpty() && !wide && selectedId != null) { vm.open(null) }
@@ -147,13 +143,9 @@ fun MailScreen(
     if (deleteAsk) DeleteDialog(vm) { deleteAsk = false }
     LaunchedEffect(wide) { vm.setWide(wide) }
 
-    // Один WebView на всё время экрана: создаётся сразу, открытие беседы
-    // меняет только документ (контракт §8).
+    // Один WebView на всю сессию (создаёт оболочка): открытие беседы меняет
+    // только документ, уход в календарь и обратно ленту не теряет (контракт §8).
     val context = LocalContext.current
-    val web = remember {
-        val app = context.applicationContext as DdmailApp
-        ConversationWeb(context, ConversationWeb.proxyClient(app.http))
-    }
     DisposableEffect(web) {
         web.host = object : ConversationWeb.Host {
             override fun onReady() {}

@@ -73,6 +73,29 @@ data class MessageBodyEntity(
     val referencesJson: String,
 )
 
+/**
+ * Напоминание об одном вхождении события (контракт §9, как `reminders2`
+ * десктопа). Каскад [leads] — минуты до начала по убыванию; [next] — индекс
+ * следующего звена. [snoozeAt] — «напомнить позже» заменяет каскад одним
+ * сроком. [state]: armed | done | cancelled (✕ — тишина навсегда).
+ */
+@Entity(tableName = "reminders", primaryKeys = ["eventId", "occStart"])
+data class ReminderEntity(
+    val eventId: Long,
+    val occStart: Long,
+    /** 0 — у события нет конца. */
+    val occEnd: Long,
+    val calendarId: Long,
+    val summary: String,
+    /** Минуты через запятую, по убыванию: «15,5,0». */
+    val leads: String,
+    /** Всё, от чего зависит напоминание: сменилось — каскад заново. */
+    val signature: String,
+    val next: Int,
+    val snoozeAt: Long?,
+    val state: String,
+)
+
 /** Служебные значения синхронизации: курсоры, водяные знаки, кэш документов. */
 @Entity(tableName = "meta")
 data class MetaEntity(@androidx.room.PrimaryKey val key: String, val value: String)
@@ -209,6 +232,31 @@ abstract class CacheDao {
 
     suspend fun setMeta(key: String, value: String) = putMeta(MetaEntity(key, value))
 
+    @Query("SELECT * FROM reminders")
+    abstract suspend fun reminders(): List<ReminderEntity>
+
+    @Query("SELECT * FROM reminders WHERE eventId = :eventId AND occStart = :occStart")
+    abstract suspend fun reminder(eventId: Long, occStart: Long): ReminderEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    abstract suspend fun putReminders(r: List<ReminderEntity>)
+
+    @Query("DELETE FROM reminders WHERE eventId = :eventId AND occStart = :occStart")
+    protected abstract suspend fun deleteReminder(eventId: Long, occStart: Long)
+
+    @Query("DELETE FROM reminders WHERE calendarId = :calendarId")
+    abstract suspend fun deleteCalendarReminders(calendarId: Long)
+
+    /** Посев: удалить и записать одной транзакцией. */
+    @Transaction
+    open suspend fun applyReminders(delete: List<Pair<Long, Long>>, put: List<ReminderEntity>) {
+        delete.forEach { (e, s) -> deleteReminder(e, s) }
+        putReminders(put)
+    }
+
+    @Query("DELETE FROM reminders")
+    protected abstract suspend fun clearReminders()
+
     @Query("DELETE FROM meta")
     protected abstract suspend fun clearMeta()
 
@@ -228,14 +276,15 @@ abstract class CacheDao {
         clearConversations()
         clearBodies()
         clearMeta()
+        clearReminders()
     }
 }
 
 @Database(
-    entities = [ConversationEntity::class, MessageRefEntity::class, MetaEntity::class, MessageBodyEntity::class],
-    version = 2,
+    entities = [ConversationEntity::class, MessageRefEntity::class, MetaEntity::class, MessageBodyEntity::class, ReminderEntity::class],
+    version = 3,
     exportSchema = true,
-    autoMigrations = [AutoMigration(from = 1, to = 2)],
+    autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3)],
 )
 abstract class CacheDb : RoomDatabase() {
     abstract fun dao(): CacheDao

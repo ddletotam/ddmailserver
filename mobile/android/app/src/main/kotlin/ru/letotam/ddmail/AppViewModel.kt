@@ -39,6 +39,8 @@ class AppViewModel(private val app: DdmailApp) : ViewModel() {
     }
 
     fun connected(session: Session) {
+        // Новый вход — новый токен: API прошлой сессии держал бы старый.
+        app.forgetSessionApi()
         _state.value = AppState.Connected(session, SessionStatus.Checking)
     }
 
@@ -60,8 +62,11 @@ class AppViewModel(private val app: DdmailApp) : ViewModel() {
     fun logout() {
         viewModelScope.launch {
             app.sessions.clear()
+            app.forgetSessionApi()
+            app.reminders.cancelAll()
             app.db.dao().clearAll()
             app.settings.clearAccountState()
+            app.calendarPrefs.clear()
             ru.letotam.ddmail.background.SyncWorker.cancel(app)
             androidx.core.app.NotificationManagerCompat.from(app).cancelAll()
             toConnect(ConnectState())

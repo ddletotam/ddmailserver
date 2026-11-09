@@ -73,6 +73,9 @@ class ComposeController(
 
     fun openNew() = ui.update { it.copy(sheet = ComposeSheet(Branch.New, Draft())) }
 
+    /** Новое письмо на адрес — из карточки контакта. */
+    fun openNewTo(addr: String) = ui.update { it.copy(sheet = ComposeSheet(Branch.New, Draft(to = addr))) }
+
     fun openForward(b: MessageBody) = ui.update { it.copy(sheet = ComposeSheet(Branch.Forward(b), Draft())) }
 
     fun editSheet(f: (Draft) -> Draft) = ui.update { u -> u.copy(sheet = u.sheet?.let { it.copy(draft = f(it.draft), error = null) }) }

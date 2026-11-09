@@ -4,6 +4,22 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Напоминания о событиях (контракт §9): точный будильник, работающий в
+         Doze; после перезагрузки — взвести заново. До Android 13 точные
+         будильники — SCHEDULE_EXACT_ALARM (на 12 выдаётся при установке),
+         с 13 календарю положен USE_EXACT_ALARM. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Системный диалог «не ограничивать в фоне» — напоминание не должно
+         опаздывать из-за экономии батареи. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Звонок из карточки контакта. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.DIAL" />
+        </intent>
+    </queries>
     <!-- Бейдж непрочитанного на иконке в лаунчере Huawei. -->
     <uses-permission android:name="com.huawei.android.launcher.permission.CHANGE_BADGE" />
 
@@ -31,6 +47,22 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- Будильник и смахнутое уведомление — только свои PendingIntent. -->
+        <receiver
+            android:name=".reminders.ReminderReceiver"
+            android:exported="false" />
+        <!-- Системные события: умеет только перевзвести будильник, так что
+             экспорт ничего не открывает наружу. -->
+        <receiver
+            android:name=".reminders.RescheduleReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
         <!-- Вложения открываются другими приложениями из кэша — через
              content://, файлы приложения наружу напрямую не отдаются. -->
         <provider

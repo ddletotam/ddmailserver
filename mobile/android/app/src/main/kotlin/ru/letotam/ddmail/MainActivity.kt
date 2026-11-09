@@ -12,7 +12,6 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
 import ru.letotam.ddmail.connect.ConnectScreen
 import ru.letotam.ddmail.connect.ConnectViewModel
-import ru.letotam.ddmail.mail.MailScreen
 import ru.letotam.ddmail.mail.MailViewModel
 import ru.letotam.ddmail.ui.DdmailTheme
 
@@ -53,10 +52,12 @@ class MainActivity : ComponentActivity() {
                             androidx.compose.runtime.LaunchedEffect(Unit) {
                                 ru.letotam.ddmail.background.SyncWorker.schedule(app)
                             }
-                            MailScreen(
-                                vm = vm,
+                            AppShell(
+                                app = app,
                                 session = s.session,
                                 status = s.status,
+                                mailVm = vm,
+                                onDead = { appVm.status(SessionStatus.Dead) },
                                 onRelogin = { appVm.relogin(s.session) },
                                 onLogout = appVm::logout,
                                 modifier = m,
@@ -83,12 +84,22 @@ class MainActivity : ComponentActivity() {
         app.foreground = false
     }
 
-    /** Открыть беседу из уведомления. */
+    /** Открыть беседу или событие из уведомления, «напомнить позже». */
     private fun handleOpen(intent: android.content.Intent?) {
-        intent?.getStringExtra(EXTRA_OPEN)?.let { app.openRequests.value = it }
+        intent ?: return
+        intent.getStringExtra(EXTRA_OPEN)?.let { app.openRequests.value = it }
+        val occ = intent.getLongExtra(EXTRA_OCC_START, 0)
+        intent.getLongExtra(EXTRA_EVENT_ID, 0).takeIf { it != 0L }?.let { app.eventRequests.value = it to occ }
+        intent.getLongExtra(EXTRA_SNOOZE_EVENT, 0).takeIf { it != 0L }?.let { app.snoozeRequests.value = it to occ }
+        // Повторная доставка того же интента (поворот, возврат) не должна снова открывать.
+        intent.removeExtra(EXTRA_EVENT_ID)
+        intent.removeExtra(EXTRA_SNOOZE_EVENT)
     }
 
     companion object {
         const val EXTRA_OPEN = "open_conversation"
+        const val EXTRA_EVENT_ID = "event_id"
+        const val EXTRA_OCC_START = "occ_start"
+        const val EXTRA_SNOOZE_EVENT = "snooze_event"
     }
 }
