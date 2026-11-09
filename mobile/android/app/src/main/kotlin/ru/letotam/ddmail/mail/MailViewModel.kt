@@ -69,6 +69,10 @@ class MailViewModel(
     val live = LiveUpdates(engine, viewModelScope, ::sync)
     val avatars = Avatars(app, engine)
 
+    /** Цвета строк по группам адресов (как у десктопа). */
+    val identityColors: StateFlow<ru.letotam.ddmail.sync.IdentityColors> =
+        engine.identityColors.stateIn(viewModelScope, SharingStarted.Eagerly, ru.letotam.ddmail.sync.IdentityColors())
+
     /** Письмо, на котором открыто меню пузыря. */
     val bubbleMenu = MutableStateFlow<MessageBody?>(null)
 

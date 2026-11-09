@@ -49,6 +49,10 @@ class SessionApi(
     suspend fun dialogFolders(): DialogFoldersResponse =
         get("/dialog-folders", DialogFoldersResponse.serializer())
 
+    /** Группы своих адресов (цвета строк, подписи) — тот же формат `version`+`doc`. */
+    suspend fun identityGroups(): DialogFoldersResponse =
+        get("/identity-groups", DialogFoldersResponse.serializer())
+
     /**
      * Пуш-канал сервера (`/ws`). Токен — заголовком (контракт §2) и, пока
      * сервер читает только его, ещё и в query; в логи клиента URL не пишется.

@@ -78,6 +78,9 @@ import ru.letotam.ddmail.sync.Conversation
 
 private val Accent = Color(0xFF047857)
 
+/** Открытая беседа — как `#10b981` выделения в списке десктопа. */
+private val SelectedRow = Color(0xFF10B981)
+
 /**
  * Почта (контракт §5–6). Раскладка — по ширине окна: Compact (Mate XT
  * сложен, 350 dp) — список, беседа поверх; шире (712 / 1107 dp) — список и
@@ -357,6 +360,7 @@ private fun ListPane(
         HorizontalDivider()
         // Крутится только по жесту: фоновые синки показывает строка под заголовком.
         val pulling by vm.pulling.collectAsState()
+        val identColors by vm.identityColors.collectAsState()
         PullToRefreshBox(isRefreshing = pulling, onRefresh = vm::pullRefresh, modifier = Modifier.fillMaxSize()) {
             if (s.loaded && s.conversations.isEmpty() && !syncing) {
                 Text(
@@ -380,6 +384,7 @@ private fun ListPane(
                     ConversationRow(
                         c,
                         avatars = vm.avatars,
+                        tint = Color(identColors.colorOf(c.receivedBy)),
                         selected = c.id == selectedId && picked.isEmpty(),
                         picked = inPick,
                         onClick = { if (picked.isNotEmpty()) vm.togglePick(c.id) else vm.open(c.id) },
@@ -504,16 +509,30 @@ private fun SwipeRow(enabled: Boolean, unread: Boolean, onRight: () -> Unit, onL
 /** Строгий двухстрочный формат (§4 десктопа): имя / тема последнего письма. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ConversationRow(c: Conversation, avatars: Avatars, selected: Boolean, picked: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
+private fun ConversationRow(
+    c: Conversation,
+    avatars: Avatars,
+    tint: Color,
+    selected: Boolean,
+    picked: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
     val unread = c.unreadCount > 0
+    // Как у десктопа: в покое — цвет группы адреса получателя, открытая
+    // беседа — сплошной зелёный с белым текстом (пастель группы бывает
+    // зелёной, светлое выделение на ней не видно).
+    val onSel = selected && !picked
+    val main = if (onSel) Color.White else MaterialTheme.colorScheme.onSurface
+    val dim = if (onSel) Color.White.copy(alpha = 0.85f) else MaterialTheme.colorScheme.onSurfaceVariant
     Row(
         Modifier
             .fillMaxWidth()
             .background(
                 when {
-                    picked -> Color(0xFFD7E8FF)
-                    selected -> MaterialTheme.colorScheme.primaryContainer
-                    else -> Color.Transparent
+                    picked -> Color(0xFFBFD8FF)
+                    selected -> SelectedRow
+                    else -> tint
                 },
             )
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
@@ -533,6 +552,7 @@ private fun ConversationRow(c: Conversation, avatars: Avatars, selected: Boolean
                 Text(
                     c.label.ifBlank { c.counterparts.firstOrNull()?.addr.orEmpty() },
                     fontWeight = if (unread) FontWeight.Bold else FontWeight.SemiBold,
+                    color = main,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
@@ -541,14 +561,14 @@ private fun ConversationRow(c: Conversation, avatars: Avatars, selected: Boolean
                 Text(
                     formatListDate(c.lastDateTs),
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (unread) Accent else MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (unread && !onSel) Accent else dim,
                 )
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     c.lastSubject.ifBlank { stringResource(R.string.no_subject) },
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = dim,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
@@ -557,9 +577,9 @@ private fun ConversationRow(c: Conversation, avatars: Avatars, selected: Boolean
                     Spacer(Modifier.width(8.dp))
                     Text(
                         c.unreadCount.toString(),
-                        color = Color.White,
+                        color = if (onSel) Accent else Color.White,
                         fontSize = 11.sp,
-                        modifier = Modifier.clip(RoundedCornerShape(9.dp)).background(Accent)
+                        modifier = Modifier.clip(RoundedCornerShape(9.dp)).background(if (onSel) Color.White else Accent)
                             .padding(horizontal = 7.dp, vertical = 1.dp),
                     )
                 }

@@ -92,6 +92,9 @@ class SyncEngine(
 
         runCatching { api.identities() }.getOrNull()?.let { dao.setMeta(K_IDENTITIES, json.encodeToString(idents, it)) }
 
+        // Цвета строк — не повод валить проход: старые цвета остаются.
+        runCatching { api.identityGroups() }.getOrNull()?.doc?.let { dao.setMeta(K_IDENT_GROUPS, it.toString()) }
+
         val f = api.dialogFolders()
         f.doc?.let {
             dao.setMeta(K_FOLDERS, it.toString())
@@ -208,6 +211,11 @@ class SyncEngine(
     private suspend fun currentFolders(): FoldersDoc =
         dao.meta(K_FOLDERS)?.let { runCatching { FoldersDoc.parse(json.parseToJsonElement(it)) }.getOrNull() } ?: FoldersDoc()
 
+    /** Цвета строк по группам адресов (контракт §5): из кэша, раз в синк — с сервера. */
+    val identityColors: Flow<IdentityColors> = dao.observeMeta(K_IDENT_GROUPS).map { s ->
+        s?.let { runCatching { IdentityColors.parse(json.parseToJsonElement(it)) }.getOrNull() } ?: IdentityColors()
+    }
+
     /** Свои адреса: из кэша, раз в синк — с сервера. */
     val identities: Flow<List<Identity>> = dao.observeMeta(K_IDENTITIES).map { s ->
         s?.let { runCatching { json.decodeFromString(idents, it) }.getOrNull() }.orEmpty()
@@ -306,6 +314,7 @@ class SyncEngine(
         private const val K_FOLDERS = "dialog_folders"
         private const val K_FOLDERS_VERSION = "dialog_folders_version"
         private const val K_IDENTITIES = "identities"
+        private const val K_IDENT_GROUPS = "identity_groups"
 
         private val json = Json { ignoreUnknownKeys = true }
         private val contacts = ListSerializer(ContactInfo.serializer())
