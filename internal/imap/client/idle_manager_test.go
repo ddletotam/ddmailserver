@@ -19,66 +19,82 @@ func TestReconnectDelay(t *testing.T) {
 	)
 
 	cases := []struct {
-		name       string
-		err        error
-		sessionLen time.Duration
-		current    time.Duration
-		wantWait   time.Duration
-		wantNext   time.Duration
+		name     string
+		err      error
+		idleLen  time.Duration
+		current  time.Duration
+		wantWait time.Duration
+		wantNext time.Duration
 	}{
 		{
-			name:       "плановое обновление — без паузы и с чистым backoff",
-			err:        errIdleRefresh,
-			sessionLen: idleSessionTTL,
-			current:    2 * time.Minute,
-			wantWait:   0,
-			wantNext:   base,
+			name:     "плановое обновление — без паузы и с чистым backoff",
+			err:      errIdleRefresh,
+			idleLen:  idleSessionTTL,
+			current:  2 * time.Minute,
+			wantWait: 0,
+			wantNext: base,
 		},
 		{
-			name:       "обёрнутый errIdleRefresh тоже плановый",
-			err:        errors.Join(errIdleRefresh, errors.New("контекст")),
-			sessionLen: idleSessionTTL,
-			current:    max,
-			wantWait:   0,
-			wantNext:   base,
+			name:     "обёрнутый errIdleRefresh тоже плановый",
+			err:      errors.Join(errIdleRefresh, errors.New("контекст")),
+			idleLen:  idleSessionTTL,
+			current:  max,
+			wantWait: 0,
+			wantNext: base,
 		},
 		{
-			name:       "быстрый сбой — удвоение",
-			err:        errors.New("idle: connection closed"),
-			sessionLen: 5 * time.Second,
-			current:    base,
-			wantWait:   base,
-			wantNext:   2 * base,
+			name:     "быстрый сбой — удвоение",
+			err:      errors.New("idle: connection closed"),
+			idleLen:  5 * time.Second,
+			current:  base,
+			wantWait: base,
+			wantNext: 2 * base,
 		},
 		{
-			name:       "серия быстрых сбоев упирается в потолок",
-			err:        errors.New("idle: connection closed"),
-			sessionLen: time.Second,
-			current:    4 * time.Minute,
-			wantWait:   4 * time.Minute,
-			wantNext:   max,
+			name:     "серия быстрых сбоев упирается в потолок",
+			err:      errors.New("idle: connection closed"),
+			idleLen:  time.Second,
+			current:  4 * time.Minute,
+			wantWait: 4 * time.Minute,
+			wantNext: max,
 		},
 		{
-			name:       "разрыв после долгой работы не наследует прошлый backoff",
-			err:        errors.New("idle: connection closed"),
-			sessionLen: time.Hour,
-			current:    max,
-			wantWait:   base,
-			wantNext:   2 * base,
+			name:     "разрыв после долгой работы не наследует прошлый backoff",
+			err:      errors.New("idle: connection closed"),
+			idleLen:  time.Hour,
+			current:  max,
+			wantWait: 2 * time.Second,
+			wantNext: base,
 		},
 		{
-			name:       "сессия завершилась без ошибки и без TTL — как обычный сбой",
-			err:        nil,
-			sessionLen: 5 * time.Second,
-			current:    base,
-			wantWait:   base,
-			wantNext:   2 * base,
+			name:     "сервер закрыл IDLE через 25 с (Яндекс) — быстрое переподключение",
+			err:      errors.New("idle: connection closed (no BYE from server)"),
+			idleLen:  25 * time.Second,
+			current:  2 * time.Minute,
+			wantWait: 2 * time.Second,
+			wantNext: base,
+		},
+		{
+			name:     "не дошли до IDLE — удвоение",
+			err:      errors.New("connect: connection refused"),
+			idleLen:  0,
+			current:  40 * time.Second,
+			wantWait: 40 * time.Second,
+			wantNext: 80 * time.Second,
+		},
+		{
+			name:     "сессия завершилась без ошибки и без TTL — как обычный сбой",
+			err:      nil,
+			idleLen:  5 * time.Second,
+			current:  base,
+			wantWait: base,
+			wantNext: 2 * base,
 		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			wait, next := reconnectDelay(c.err, c.sessionLen, c.current, base, max)
+			wait, next := reconnectDelay(c.err, c.idleLen, c.current, base, max)
 			if wait != c.wantWait {
 				t.Errorf("пауза = %v, ожидалась %v", wait, c.wantWait)
 			}

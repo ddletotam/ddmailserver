@@ -157,6 +157,9 @@ func (m *IdleManager) watchAccount(ctx context.Context, account *models.Account)
 	const baseBackoff = 10 * time.Second
 	const maxBackoff = 5 * time.Minute
 	backoff := baseBackoff
+	// Переживает переподключения: по UIDNEXT прошлой сессии видно, пришло ли
+	// письмо, пока соединения не было (см. idleSession).
+	sess := &idleSession{}
 
 	for {
 		if ctx.Err() != nil {
@@ -179,8 +182,8 @@ func (m *IdleManager) watchAccount(ctx context.Context, account *models.Account)
 			continue
 		}
 
-		started := time.Now()
-		err := m.runIdleSession(ctx, account)
+		sess.idleSince = time.Time{}
+		err := m.runIdleSession(ctx, account, sess)
 		if ctx.Err() != nil {
 			return
 		}
@@ -191,7 +194,11 @@ func (m *IdleManager) watchAccount(ctx context.Context, account *models.Account)
 			continue
 		}
 
-		wait, next := reconnectDelay(err, time.Since(started), backoff, baseBackoff, maxBackoff)
+		var idleLen time.Duration
+		if !sess.idleSince.IsZero() {
+			idleLen = time.Since(sess.idleSince)
+		}
+		wait, next := reconnectDelay(err, idleLen, backoff, baseBackoff, maxBackoff)
 		if err != nil && !errors.Is(err, errIdleRefresh) {
 			m.accountLog(account.ID, "error", "%v, reconnecting in %v", err, wait)
 		}
@@ -254,26 +261,38 @@ func (m *IdleManager) waitAuthPause(ctx context.Context, accountID int64) bool {
 	}
 }
 
+// idleSession — состояние IDLE-наблюдателя одного аккаунта между сессиями.
+type idleSession struct {
+	// uidNext — UIDNEXT INBOX при последнем SELECT; 0 — сессий ещё не было.
+	uidNext uint32
+	// idleSince — когда текущая сессия вошла в IDLE; нулевое — не дошла.
+	idleSince time.Time
+}
+
 // reconnectDelay решает, сколько ждать перед новой IDLE-сессией и каким станет
-// backoff. Возвращает (пауза, следующий backoff).
+// backoff. idleLen — сколько сессия пробыла в IDLE (0 — не дошла до него).
+// Возвращает (пауза, следующий backoff).
 //
 // Правила:
 //   - плановое обновление по TTL — не сбой: подключаемся немедленно, backoff
 //     возвращается к базовому;
-//   - сессия, прожившая дольше healthySession, тоже считается здоровой: разрыв
-//     после часа работы не имеет отношения к предыдущему разрыву, и наказывать
-//     за него пятиминутной паузой не за что. Раньше backoff удваивался после
-//     ЛЮБОГО завершения сессии и не сбрасывался никогда, так что долгоживущий
-//     аккаунт со временем восстанавливался только через maxBackoff;
-//   - быстрый повторный сбой — обычное удвоение до потолка.
-func reconnectDelay(err error, sessionLen, current, base, max time.Duration) (time.Duration, time.Duration) {
-	const healthySession = 2 * time.Minute
+//   - сессия, проработавшая в IDLE хотя бы healthyIdle, здорова, и её обрыв —
+//     решение сервера, а не наш сбой: переподключаемся через quickReconnect,
+//     backoff к базовому. Замерено на проде 2026-11-10: Яндекс закрывает
+//     IDLE-соединение (FIN без BYE, через 0,5 с RST) через 25 с … 7 мин,
+//     в среднем через 2,5 мин, у разных аккаунтов почти одновременно — у него
+//     ротируются узлы. Прежнее правило («здорова, если прожила 2 мин»)
+//     удваивало паузу до 5 минут, и ~16% суток ящик был без IDLE;
+//   - сбой до IDLE (connect, login, select) — обычное удвоение до потолка.
+func reconnectDelay(err error, idleLen, current, base, max time.Duration) (time.Duration, time.Duration) {
+	const healthyIdle = 10 * time.Second
+	const quickReconnect = 2 * time.Second
 
 	if errors.Is(err, errIdleRefresh) {
 		return 0, base
 	}
-	if sessionLen > healthySession {
-		current = base
+	if idleLen >= healthyIdle {
+		return quickReconnect, base
 	}
 	next := current * 2
 	if next > max {
@@ -299,7 +318,7 @@ func (m *IdleManager) refreshOAuthToken(account *models.Account, force bool) err
 
 // runIdleSession connects, authenticates, selects INBOX and enters an
 // IDLE loop. Returns on any error (caller will reconnect).
-func (m *IdleManager) runIdleSession(ctx context.Context, account *models.Account) error {
+func (m *IdleManager) runIdleSession(ctx context.Context, account *models.Account, sess *idleSession) error {
 	// Refresh OAuth token before connecting (only if near expiry)
 	if account.IsOAuth() {
 		if err := m.refreshOAuthToken(account, false); err != nil {
@@ -351,8 +370,22 @@ func (m *IdleManager) runIdleSession(ctx context.Context, account *models.Accoun
 	m.auth.Accepted(authfail.AccountIMAP(account))
 
 	// Select INBOX
-	if _, err := conn.Select("INBOX", false); err != nil {
+	mbox, err := conn.Select("INBOX", false)
+	if err != nil {
 		return fmt.Errorf("select INBOX: %w", err)
+	}
+	// IDLE сообщает только о том, что случилось после его начала. Письмо,
+	// пришедшее, пока соединения не было, видно по сдвигу UIDNEXT. Если в
+	// прошлой сессии письмо уже пришло через IDLE, сдвиг даст один лишний
+	// инкрементальный синк — дёшево, а пропуск письма до резервного цикла
+	// (5 минут) — нет.
+	missed := sess.uidNext != 0 && mbox.UidNext != 0 && mbox.UidNext != sess.uidNext
+	if mbox.UidNext != 0 {
+		sess.uidNext = mbox.UidNext
+	}
+	if missed && m.syncCallback != nil {
+		m.accountLog(account.ID, "info", "INBOX changed while reconnecting (UIDNEXT moved), triggering sync")
+		m.syncCallback(account)
 	}
 
 	// Set up updates channel to receive mailbox notifications
@@ -371,6 +404,8 @@ func (m *IdleManager) runIdleSession(ctx context.Context, account *models.Accoun
 	} else {
 		m.accountLog(account.ID, "info", "connected to %s, no IDLE support — using NOOP polling", addr)
 	}
+
+	sess.idleSince = time.Now()
 
 	// Возраст сессии считаем от установленного соединения: по его истечении
 	// выходим и подключаемся заново (см. idleSessionTTL).
