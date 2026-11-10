@@ -1053,7 +1053,7 @@ export component MainWindow inherits Window {
     // шапке нет кнопки «Спам».
     in property <string> spam-folder-id: "";
     property <bool> in-spam: root.spam-folder-id != "" && root.active-folder == root.spam-folder-id;
-    callback conv-not-spam(int);
+    callback conv-not-spam(int, bool);   // (строка, доверять отправителю)
     in property <int> hidden-folders: 0;
     in property <bool> show-hidden-folders: false;
     callback folder-add-open();
@@ -1069,6 +1069,9 @@ export component MainWindow inherits Window {
     // Hover query for the pointer cursor: true when (x, y) inside row
     // `idx` sits on a link rect. Pure — it's evaluated from a binding.
     pure callback hover-link(int, length, length) -> bool;
+    // Текст подсказки для ссылки под (x, y) в строке `idx` — её адрес, как его
+    // откроет клик (links::link_tooltip); "" — ссылки нет.
+    pure callback link-tip(int, length, length) -> string;
     // Text selection over the rendered bubbles (PDF-viewer style):
     // drag selects words, Ctrl+C copies. Rust owns the model; the UI
     // just renders the highlight rects for selection-row.
@@ -1838,10 +1841,15 @@ export component MainWindow inherits Window {
                             height: 100%;
                             Menu {
                                 // В «Спам» с беседой можно только одно —
-                                // вернуть её во «Входящие».
+                                // вернуть её во «Входящие»; второй вариант
+                                // заодно вносит отправителя в белый список.
                                 if root.in-spam: MenuItem {
                                     title: "Не спам";
-                                    activated => { root.conv-not-spam(idx); }
+                                    activated => { root.conv-not-spam(idx, false); }
+                                }
+                                if root.in-spam: MenuItem {
+                                    title: "Не спам и доверять отправителю";
+                                    activated => { root.conv-not-spam(idx, true); }
                                 }
                                 if !root.in-spam: MenuItem {
                                     title: "Объединить с открытым диалогом";
@@ -1927,7 +1935,8 @@ export component MainWindow inherits Window {
                             }
                             // Unread pill (Tauri-era): blue with white
                             // count; inverted on the selected row.
-                            if conv.unread > 0: VerticalLayout {
+                            // В «Спаме» счётчиков нет: спам тихий.
+                            if conv.unread > 0 && !root.in-spam: VerticalLayout {
                                 alignment: center;
                                 Rectangle {
                                     width: max(18px, ub-t.preferred-width + 12px);
@@ -2750,7 +2759,14 @@ export component MainWindow inherits Window {
                                             activated => { root.msg-action(idx, "view-html"); }
                                         }
                                     }
-                                    Menu {
+                                    // В «Спаме» сохранённые разрешения не действуют
+                                    // (Policy::for_spam), поэтому «Медиа…» там нет —
+                                    // только разовое «Показать картинки».
+                                    if root.in-spam: MenuItem {
+                                        title: "Показать картинки";
+                                        activated => { root.msg-action(idx, "spam-show-images"); }
+                                    }
+                                    if !root.in-spam: Menu {
                                         title: "Медиа…";
                                         MenuItem {
                                             title: (root.media-allow-all-on ? "✓ " : "") + "Разрешить всё";
@@ -2820,18 +2836,22 @@ export component MainWindow inherits Window {
                                 // widget-space → rect-space for the mouse x (see
                                 // body-rects-width); y is already 1:1.
                                 property <float> fx: root.body-rects-width / max(1px, self.width);
+                                // Адрес ссылки под курсором (link-tip) на последнем движении.
+                                property <string> tip-link;
                                 mouse-cursor: self.has-hover
                                     && root.hover-link(idx, self.mouse-x * self.fx, self.mouse-y)
                                     ? MouseCursor.pointer : MouseCursor.default;
                                 // Адресаты своего письма в склеенном диалоге —
                                 // та же отложенная подсказка, что у событий.
+                                // Поверх — адрес ссылки под курсором (во всех
+                                // письмах): он важнее адресатов.
                                 changed has-hover => {
                                     if (self.has-hover && msg.recipients != "") {
                                         root.tip-text = msg.recipients;
                                         root.tip-x = self.absolute-position.x + self.mouse-x + 12px;
                                         root.tip-y = self.absolute-position.y + self.mouse-y + 18px;
                                         root.tip-armed = true;
-                                    } else if (msg.recipients != "") {
+                                    } else if (!self.has-hover) {
                                         root.tip-armed = false;
                                         root.tip-visible = false;
                                     }
@@ -2852,8 +2872,24 @@ export component MainWindow inherits Window {
                                     // адресатами идёт за курсором, а не стоит
                                     // там, где он вошёл. (`moved` для этого не
                                     // годится — он только при нажатой кнопке.)
-                                    if (e.kind == PointerEventKind.move && !self.pressed
-                                        && msg.recipients != "") {
+                                    if (e.kind == PointerEventKind.move && !self.pressed) {
+                                        // Ссылка под курсором — её адрес; ушли со
+                                        // ссылки — адресаты склейки или ничего.
+                                        // Новый текст на уже видимой подсказке
+                                        // меняется сразу, без повторной задержки.
+                                        self.tip-link = root.link-tip(idx, self.mouse-x * self.fx, self.mouse-y);
+                                        if (self.tip-link != "") {
+                                            root.tip-text = self.tip-link;
+                                            root.tip-armed = true;
+                                        } else if (msg.recipients != "") {
+                                            if (root.tip-text != msg.recipients) {
+                                                root.tip-text = msg.recipients;
+                                            }
+                                            root.tip-armed = true;
+                                        } else {
+                                            root.tip-armed = false;
+                                            root.tip-visible = false;
+                                        }
                                         root.tip-x = self.absolute-position.x + self.mouse-x + 12px;
                                         root.tip-y = self.absolute-position.y + self.mouse-y + 18px;
                                     }

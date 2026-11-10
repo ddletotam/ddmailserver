@@ -42,6 +42,9 @@ class ConversationController(
 ) {
     val js = Channel<String>(Channel.UNLIMITED)
 
+    /** Пропуск внешних картинок для перехватчика WebView ([ConversationWeb.gate]). */
+    val gate = RemoteImageGate()
+
     private val lock = Mutex()
     private var job: Job? = null
     private var conv: Conversation? = null
@@ -66,6 +69,8 @@ class ConversationController(
         conv = c
         shown.clear()
         loadedBodies.clear()
+        // До документа новой беседы: прежние разрешения ей не достаются.
+        gate.open(c?.spam == true, c?.messages.orEmpty().map { it.uid })
         if (c == null) return
         js.trySend("ddm.set({messages:[],hasOlder:false})")
         job = scope.launch {
@@ -108,6 +113,7 @@ class ConversationController(
                 val known = pages.map { it.uid }.toSet()
                 val fresh = c.messages.filter { it.uid !in known }
                 if (fresh.isEmpty()) return@launch
+                gate.extend(fresh.map { it.uid })
                 pages = (fresh + pages).sortedByDescending { it.uid }
                 loaded += fresh.size
                 val bodies = load(fresh)
@@ -152,8 +158,13 @@ class ConversationController(
 
     private var senders: Set<String> = emptySet()
 
-    /** «Всегда показывать картинки от отправителя» этого письма. */
+    /**
+     * «Всегда показывать картинки от отправителя» этого письма. У спама такой
+     * кнопки нет, и сохранять разрешение по спаму нельзя: его отправитель —
+     * кто угодно, кто подделал адрес.
+     */
     fun allowSender(uid: Long) {
+        if (conv?.spam == true) return
         val addr = body(uid)?.fromAddr?.takeIf { it.isNotBlank() } ?: return
         senders = senders + addr.lowercase()
         scope.launch { settings.allowImagesFrom(addr) }
@@ -213,7 +224,10 @@ class ConversationController(
                     put("outgoing", JsonPrimitive(b.isOutgoing))
                     put("fromName", JsonPrimitive(b.from))
                     put("fromAddr", JsonPrimitive(b.fromAddr))
-                    put("imagesAllowed", JsonPrimitive(b.fromAddr.lowercase() in senders))
+                    // Спам: сохранённые разрешения по отправителю не действуют —
+                    // картинки только по нажатию и только на этот показ.
+                    put("imagesAllowed", JsonPrimitive(!c.spam && b.fromAddr.lowercase() in senders))
+                    put("spam", JsonPrimitive(c.spam))
                     put("dateTs", JsonPrimitive(b.dateTs))
                     b.html?.takeIf { it.isNotBlank() }?.let { put("html", JsonPrimitive(it)) }
                     b.text?.let { put("text", JsonPrimitive(it)) }

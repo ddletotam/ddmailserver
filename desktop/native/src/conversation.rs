@@ -287,19 +287,46 @@ pub(crate) fn send_render_job(sh: &Shared, bodies: Vec<MessageBody>, scroll_to: 
     drop(overrides);
     // Склейка — свойство открытого диалога, а не писем: новое письмо
     // compose-режима ни к какой склейке не относится.
-    let merged = sh.compose.pending_compose.borrow().is_none()
-        && sh.convs.borrow().get(sh.current.get()).is_some_and(|c| c.merged);
+    let composing = sh.compose.pending_compose.borrow().is_some();
+    let merged = !composing && sh.convs.borrow().get(sh.current.get()).is_some_and(|c| c.merged);
+    // Беседа из «Спама» рисуется под своей политикой (Policy::for_spam):
+    // сохранённые разрешения не действуют, картинки — по «Показать картинки».
+    let spam_conv = if composing {
+        None
+    } else {
+        sh.convs.borrow().get(sh.current.get()).filter(|c| c.spam).map(|c| c.id.clone())
+    };
+    let (policy, policy_gen) = match spam_conv {
+        Some(id) => {
+            let shown = sh.spam_images_shown.borrow().contains(&id);
+            (policy::Policy::for_spam(shown), policy::spam_generation(sh.policy_gen.get(), shown))
+        }
+        None => (sh.policy.borrow().clone(), sh.policy_gen.get()),
+    };
     let _ = sh.tx.send(Job::SetConversation {
         bodies,
         width: sh.width.get(),
-        policy: sh.policy.borrow().clone(),
-        policy_gen: sh.policy_gen.get(),
+        policy,
+        policy_gen,
         seq,
         scroll_to,
         modes,
         scale: sh.render_scale.get(),
         merged,
     });
+}
+
+/// «Показать картинки» у открытой беседы из «Спама» (меню пузыря или
+/// ссылка-плашка `ddmail-spam-images:` в самом пузыре) и перерисовка.
+pub(crate) fn show_spam_images(sh: &Shared) {
+    let id = sh.convs.borrow().get(sh.current.get()).filter(|c| c.spam).map(|c| c.id.clone());
+    let Some(id) = id else { return };
+    if !sh.spam_images_shown.borrow_mut().insert(id.clone()) {
+        return;
+    }
+    println!("[policy] spam images shown for {id}");
+    let bodies = sh.current_bodies.borrow().clone();
+    send_render_job(sh, bodies, None);
 }
 
 /// Extract a bare lowercase address from a "Name <addr>" header value.
@@ -440,6 +467,12 @@ pub(crate) fn wire_message_actions(ui: &MainWindow, shared: &Rc<Shared>) {
         // «Медиа…» menu: every item toggles one policy switch, persists it
         // immediately, and repaints (the policy generation is part of the
         // texture cache key, so the re-render is guaranteed to miss).
+        // «Показать картинки» в беседе из «Спама»: разрешение только этой
+        // беседе и только до перезапуска; сохранённую политику не трогает.
+        if action == "spam-show-images" {
+            show_spam_images(&sh_act);
+            return;
+        }
         if action.starts_with("media-") {
             let body_opt = sh_act.current_bodies.borrow().get(row).cloned();
             let Some(b) = body_opt else { return };

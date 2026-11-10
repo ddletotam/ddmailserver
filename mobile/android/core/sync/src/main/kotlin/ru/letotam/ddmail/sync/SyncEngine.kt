@@ -200,11 +200,13 @@ class SyncEngine(
      * «Не спам» (§5): письма бесед — во «Входящие» на сервере; из «Спам» в
      * кэше уходят сразу, во «Входящих» появятся со следующим синком (он
      * полный: дельта старого сервера восстановленных писем не принесла бы).
+     * [trust] — ещё и доверять отправителям: прочий их спам сервер вернёт сам,
+     * из «Спам» он уйдёт со следующим синком (список спама — полный).
      */
-    suspend fun restoreSpam(convs: Collection<Conversation>): Int {
+    suspend fun restoreSpam(convs: Collection<Conversation>, trust: Boolean = false): Int {
         val spam = convs.filter { it.spam }
         if (spam.isEmpty()) return 0
-        val n = spam.flatMap { it.messages }.chunked(200).sumOf { api.restoreSpam(it) }
+        val n = spam.flatMap { it.messages }.chunked(200).sumOf { api.restoreSpam(it, trust) }
         dao.deleteConversations(spamKey, spam.map { it.id })
         dao.setMeta(K_FULL_TS, "0")
         return n

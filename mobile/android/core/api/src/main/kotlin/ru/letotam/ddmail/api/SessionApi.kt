@@ -51,10 +51,13 @@ class SessionApi(
     suspend fun spamConversations(limit: Int = 2000): List<ConversationDto> =
         get("/conversations?spam=1&limit=$limit", ListSerializer(ConversationDto.serializer())).filter { it.spam }
 
-    /** «Не спам»: письма — во «Входящие». Сколько вернулось. */
-    suspend fun restoreSpam(refs: List<MessageRef>): Int {
-        val msgs = JsonArray(refs.map { JsonObject(mapOf("uid" to JsonPrimitive(it.uid), "message_id" to JsonPrimitive(it.messageId))) })
-        val body = write("POST", "/spam/restore", JsonObject(mapOf("messages" to msgs)).toString())
+    /**
+     * «Не спам»: письма — во «Входящие». Сколько вернулось.
+     * [trust] — «Не спам и доверять отправителю»: сервер заводит allow-правило
+     * на адрес отправителя и возвращает из спама всё остальное от него.
+     */
+    suspend fun restoreSpam(refs: List<MessageRef>, trust: Boolean = false): Int {
+        val body = write("POST", "/spam/restore", restoreSpamBody(refs, trust))
         val obj = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(body) as? JsonObject }.getOrNull()
         return (obj?.get("restored") as? JsonPrimitive)?.content?.toIntOrNull() ?: 0
     }
@@ -307,4 +310,14 @@ internal suspend fun Call.awaitBinary(): Binary = suspendCancellableCoroutine { 
             }
         }
     })
+}
+
+/** Тело `POST /spam/restore`; `trust` шлётся только когда он нужен. */
+internal fun restoreSpamBody(refs: List<MessageRef>, trust: Boolean): String {
+    val msgs = JsonArray(refs.map { JsonObject(mapOf("uid" to JsonPrimitive(it.uid), "message_id" to JsonPrimitive(it.messageId))) })
+    val fields = buildMap {
+        put("messages", msgs)
+        if (trust) put("trust", JsonPrimitive(true))
+    }
+    return JsonObject(fields).toString()
 }

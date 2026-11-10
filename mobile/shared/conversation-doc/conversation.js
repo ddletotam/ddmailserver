@@ -9,8 +9,11 @@
 //   Stub  = { key, html, text, attachments: [{filename, size}] }
 // Документ → нативный:  ready(), openLink(url), requestOlder(),
 //   openAttachment(uid, index), attachmentMenu(uid, index), bubbleMenu(uid),
-//   allowSender(uid)
+//   allowSender(uid), allowSpamImages(uid)
 //   Msg.imagesAllowed — картинки этого отправителя разрешены всегда.
+//   Msg.spam — письмо из «Спама»: картинки только по нажатию на этот показ
+//     (нативный пропуск — allowSpamImages), «Всегда от отправителя» нет,
+//     внешние шрифты и @import вырезаются (контракт Android §5 «Спам»).
 'use strict';
 
 /** Сменилась нормализация — поднять: клиенты пересчитают закэшированное. */
@@ -93,9 +96,22 @@ function isTrackingPixel(img) {
  * Внешний URL: до разрешения картинок не грузится вовсе, после — только через
  * нативный прокси с источника документа (CSP пускает только его).
  */
-function remoteUrl(u, imagesAllowed) {
+function remoteUrl(u, imagesAllowed, uid) {
   if (!imagesAllowed) return null;
-  return '/remote?u=' + encodeURIComponent(u);
+  // uid — для нативного пропуска: у спама он пускает только письма, которым
+  // нажали «Показать картинки».
+  return '/remote?uid=' + uid + '&u=' + encodeURIComponent(u);
+}
+
+/**
+ * Спам: из CSS — вон всё, что тянет не картинки: `@import` (в том числе
+ * строкой, без `url()`) и `@font-face`. Перехватчик и так пустит только
+ * картинки; это — чтобы не было и попыток.
+ */
+function stripSpamCss(css) {
+  return css
+    .replace(/@import\b[^;]*;?/gi, '')
+    .replace(/@font-face\s*\{[^}]*\}/gi, '');
 }
 
 function rewriteCssUrls(css, uid, imagesAllowed) {
@@ -103,7 +119,7 @@ function rewriteCssUrls(css, uid, imagesAllowed) {
     const url = u.trim();
     if (/^cid:/i.test(url)) return `url("/cid/${uid}/${encodeURIComponent(url.slice(4))}")`;
     if (/^https?:/i.test(url)) {
-      const r = remoteUrl(url, imagesAllowed);
+      const r = remoteUrl(url, imagesAllowed, uid);
       return r ? `url("${r}")` : 'none';
     }
     if (/^data:image\//i.test(url)) return all;
@@ -115,13 +131,14 @@ function rewriteCssUrls(css, uid, imagesAllowed) {
  * Чистка в инертном документе (DOMParser ничего не исполняет и не грузит).
  * Возвращает { styles: [css], body: Element, remoteCount }.
  */
-function sanitize(html, uid, imagesAllowed) {
+function sanitize(html, uid, imagesAllowed, spam) {
   // <base> вырезаем до разбора: иначе CSP документа (`base-uri 'none'`)
   // ругается на каждое такое письмо, хотя тег и так не дожил бы до вставки.
   const doc = new DOMParser().parseFromString(html.replace(/<base\b[^>]*>/gi, ''), 'text/html');
   const styles = [];
   doc.querySelectorAll('style').forEach((s) => {
-    styles.push(rewriteCssUrls(tameCss(s.textContent || ''), uid, imagesAllowed));
+    const css = tameCss(s.textContent || '');
+    styles.push(rewriteCssUrls(spam ? stripSpamCss(css) : css, uid, imagesAllowed));
     s.remove();
   });
   doc.querySelectorAll(DROP).forEach((el) => el.remove());
@@ -160,7 +177,7 @@ function sanitize(html, uid, imagesAllowed) {
       img.setAttribute('src', `/cid/${uid}/${encodeURIComponent(src.slice(4))}`);
     } else if (/^https?:/i.test(src)) {
       remoteCount++;
-      const r = remoteUrl(src, imagesAllowed);
+      const r = remoteUrl(src, imagesAllowed, uid);
       if (r) {
         img.setAttribute('src', r);
       } else {
@@ -353,7 +370,7 @@ function fill(entry) {
   root.className = 'ddm-root';
   let remoteCount = 0;
   if (msg.html) {
-    const s = sanitize(msg.html, msg.uid, entry.imagesAllowed);
+    const s = sanitize(msg.html, msg.uid, entry.imagesAllowed, !!msg.spam);
     remoteCount = s.remoteCount;
     collapseQuotes(s.body);
     for (const css of s.styles) {
@@ -369,7 +386,9 @@ function fill(entry) {
   entry.root = root;
   entry.imagesBox.hidden = !(remoteCount > 0 && !entry.imagesAllowed);
   if (!entry.imagesBox.hidden) {
-    entry.imagesBtn.replaceChildren(icon('image'), String(remoteCount));
+    // У спама — понятная плашка словами: картинки там не грузятся сами.
+    const label = msg.spam ? `Показать картинки (${remoteCount})` : String(remoteCount);
+    entry.imagesBtn.replaceChildren(icon('image'), label);
     entry.imagesBtn.setAttribute('aria-label', `Показать картинки: ${remoteCount}`);
   }
   link.addEventListener('load', () => fit(entry));
@@ -405,6 +424,9 @@ function keepAnchor() {
 }
 
 function allowImages(entry) {
+  // Спам: сначала нативный пропуск (вызов синхронный), потом перерисовка —
+  // иначе перехватчик отказал бы картинкам, которые она запросит.
+  if (entry.msg.spam) native('allowSpamImages', entry.msg.uid);
   holdAnchor(entry.row);
   entry.imagesAllowed = true;
   fill(entry);
@@ -443,7 +465,7 @@ function makeRow(msg) {
   wireClicks(shadow);
 
   const imagesBox = document.createElement('div');
-  imagesBox.className = 'ddm-imgbar';
+  imagesBox.className = 'ddm-imgbar' + (msg.spam ? ' ddm-spambar' : '');
   imagesBox.hidden = true;
   const imagesBtn = document.createElement('button');
   imagesBtn.className = 'ddm-images';
@@ -451,7 +473,9 @@ function makeRow(msg) {
   alwaysBtn.className = 'ddm-images';
   alwaysBtn.append(icon('image'), icon('trust'));
   alwaysBtn.setAttribute('aria-label', 'Всегда показывать картинки от ' + (msg.fromAddr || 'отправителя'));
-  imagesBox.append(imagesBtn, alwaysBtn);
+  // У спама «Всегда от отправителя» нет: его адрес ничего не доказывает.
+  if (msg.spam) imagesBox.append(imagesBtn);
+  else imagesBox.append(imagesBtn, alwaysBtn);
   b.appendChild(imagesBox);
 
   if (msg.attachments && msg.attachments.length) {
@@ -493,9 +517,10 @@ function makeRow(msg) {
   // нативный код для отправителя (политика по отправителю, как у десктопа).
   imagesBtn.addEventListener('click', () => allowImages(entry));
   alwaysBtn.addEventListener('click', () => {
+    if (msg.spam) return;
     native('allowSender', msg.uid);
     for (const e of bubbles.values()) {
-      if (e.msg.fromAddr && e.msg.fromAddr === msg.fromAddr && !e.imagesAllowed) allowImages(e);
+      if (e.msg.fromAddr && e.msg.fromAddr === msg.fromAddr && !e.imagesAllowed && !e.msg.spam) allowImages(e);
     }
   });
   bubbles.set(msg.uid, entry);

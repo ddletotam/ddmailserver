@@ -56,7 +56,8 @@ pub trait MailProvider: Send + Sync {
     }
 
     /// «Не спам»: вернуть письма из спама во «Входящие». Сколько вернулось.
-    async fn restore_spam(&self, _messages: &[MessageRef]) -> Result<u32, String> {
+    /// `trust` — заодно внести отправителя в белый список.
+    async fn restore_spam(&self, _messages: &[MessageRef], _trust: bool) -> Result<u32, String> {
         Err("источник не хранит спам".into())
     }
 

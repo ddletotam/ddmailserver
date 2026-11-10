@@ -27,7 +27,8 @@ import java.util.concurrent.TimeUnit
  *
  * Вся сеть документа — через [shouldInterceptRequest]: наш источник
  * (`appassets.androidplatform.net`) отдаёт документ, части `cid:` и
- * разрешённые внешние картинки через прокси; всё прочее — отказ.
+ * разрешённые внешние картинки через прокси; всё прочее — отказ. Что из
+ * `/remote` пускать (у спама — только картинки по нажатию), решает [gate].
  */
 @SuppressLint("SetJavaScriptEnabled")
 class ConversationWeb(context: Context, private val proxyHttp: OkHttpClient) {
@@ -44,6 +45,13 @@ class ConversationWeb(context: Context, private val proxyHttp: OkHttpClient) {
     }
 
     var host: Host? = null
+
+    /**
+     * Пропуск внешних картинок открытой беседы (его держит модель беседы).
+     * Нет — `/remote` закрыт целиком: лучше без картинок, чем спам с ними.
+     */
+    @Volatile
+    var gate: RemoteImageGate? = null
     private val main = Handler(Looper.getMainLooper())
     private var ready = false
     private val pending = ArrayDeque<String>()
@@ -104,6 +112,16 @@ class ConversationWeb(context: Context, private val proxyHttp: OkHttpClient) {
 
         @JavascriptInterface
         fun allowSender(uid: Long) = main.post { host?.onAllowSender(uid) }
+
+        /**
+         * «Показать картинки» у письма спама. Синхронно, не через главный
+         * поток: документ сразу после вызова перерисовывает письмо, и его
+         * запросы картинок должны застать разрешение уже записанным.
+         */
+        @JavascriptInterface
+        fun allowSpamImages(uid: Long) {
+            gate?.allow(uid)
+        }
     }
 
     private inner class Client : WebViewClient() {
@@ -120,7 +138,10 @@ class ConversationWeb(context: Context, private val proxyHttp: OkHttpClient) {
             return when {
                 path.startsWith("/assets/") -> assets.shouldInterceptRequest(url) ?: denied()
                 path.startsWith("/cid/") -> cid(path)
-                path == "/remote" -> remote(url.getQueryParameter("u"))
+                path == "/remote" -> {
+                    val ok = gate?.permits(url.getQueryParameter("uid")?.toLongOrNull(), request.requestHeaders.orEmpty()) == true
+                    if (ok) remote(url.getQueryParameter("u")) else denied()
+                }
                 else -> denied()
             }
         }

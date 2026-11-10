@@ -67,8 +67,9 @@ pub(crate) fn build_body_html(b: &MessageBody, policy: &policy::Policy, caption:
         b.is_outgoing,
         &fmt_bubble_time(b.date_ts),
         &format!(
-            "{}{inner}{}{}",
+            "{}{}{inner}{}{}",
             subject_caption(b, caption),
+            spam_images_note(b, policy),
             attachment_chips(b),
             empty_body_note(b)
         ),
@@ -108,6 +109,26 @@ pub(crate) fn recipients_tip(b: &MessageBody) -> String {
 /// пузыря для тела, у которого рисовать нечего. Без неё такой пузырь —
 /// пустой прямоугольник с одним временем, визуально неотличимый от
 /// «письмо вообще не отобразилось» (и именно так это и читается).
+/// Плашка над письмом из «Спама», картинки которого не загружены: ссылка
+/// `ddmail-spam-images:` и есть тот клик, без которого они не грузятся
+/// (обрабатывает `links::handle_link`). Без удалённых картинок — пусто.
+pub(crate) fn spam_images_note(b: &MessageBody, policy: &policy::Policy) -> String {
+    if !policy.spam_view || policy.allow_all_media {
+        return String::new();
+    }
+    let html = b.html.as_deref().unwrap_or("");
+    if html.trim().is_empty() || sanitize::first_external_host(html).is_empty() {
+        return String::new();
+    }
+    format!(
+        "<div class=\"{CSS_NS}-spamimg\">Картинки не загружены. \
+         <a href=\"{SPAM_IMAGES_HREF}\">Показать картинки</a></div>"
+    )
+}
+
+/// Внутренняя ссылка плашки «Показать картинки» (см. `spam_images_note`).
+pub(crate) const SPAM_IMAGES_HREF: &str = "ddmail-spam-images:";
+
 pub(crate) fn empty_body_note(b: &MessageBody) -> String {
     if !engine::body_is_blank(b) {
         return String::new();
@@ -330,6 +351,8 @@ pub(crate) fn bubble_template_wide(
                 padding: 4px 10px; margin: 2px 4px 2px 0; color: #10b981;
                 text-decoration: none; font-size: 13px; }}
         .{CSS_NS}-nobody {{ color: #8a97a5; font-size: 13px; font-style: italic; }}
+        .{CSS_NS}-spamimg {{ color: #6b7785; font-size: 12px; line-height: 1.4; margin: 0 0 8px 0;
+                            padding: 6px 8px; background: #f3f5f7; border-radius: 6px; }}
         .{CSS_NS}-subj {{ color: #6b7785; font-size: 12px; font-weight: 600; line-height: 1.3;
                  margin-bottom: 4px; }}
         .{CSS_NS}-time {{ text-align: right; font-size: 11px; color: #8a97a5;

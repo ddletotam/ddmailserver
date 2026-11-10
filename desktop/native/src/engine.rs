@@ -371,9 +371,11 @@ pub enum EngineCmd {
         account_key: String,
     },
     /// «Не спам» у беседы из папки «Спам»: письма — во «Входящие».
+    /// `trust` — «Не спам и доверять отправителю» (allow-правило на сервере).
     RestoreSpam {
         messages: Vec<MessageRef>,
         account_key: String,
+        trust: bool,
     },
     /// `save_to = None` → в Downloads + автооткрытие (клик по чипу);
     /// `save_to = Some(path)` → в выбранный пользователем файл, без открытия.
@@ -1419,11 +1421,11 @@ pub fn spawn(
                         Err(e) => on_result(EngineResult::SpamFailed(e)),
                     }
                 }
-                EngineCmd::RestoreSpam { messages, account_key } => {
+                EngineCmd::RestoreSpam { messages, account_key, trust } => {
                     let conn = route(&conns, &account_key);
                     let provider = conn.provider.clone();
                     let key = conn.key.clone();
-                    match rt.block_on(provider.restore_spam(&messages)) {
+                    match rt.block_on(provider.restore_spam(&messages, trust)) {
                         Ok(restored) => {
                             println!("engine: restored {restored} messages from spam");
                             // Письма вернулись во «Входящие» — следующий список

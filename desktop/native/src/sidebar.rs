@@ -822,7 +822,7 @@ pub(crate) fn wire_sidebar(ui: &MainWindow, shared: &Rc<Shared>) {
     // движок сбросил отметку) покажет её во «Входящих».
     let ui_weak_ns = ui.as_weak();
     let sh_ns = shared.clone();
-    ui.on_conv_not_spam(move |idx| {
+    ui.on_conv_not_spam(move |idx, trust| {
         let Some(ui) = ui_weak_ns.upgrade() else { return };
         let Some(c) = ctx_conv_index(&ui, &sh_ns, idx)
             .and_then(|i| sh_ns.convs.borrow().get(i).cloned())
@@ -831,10 +831,11 @@ pub(crate) fn wire_sidebar(ui: &MainWindow, shared: &Rc<Shared>) {
             return;
         };
         if let Some(etx) = sh_ns.engine_tx.borrow().as_ref() {
-            println!("not spam: {} ({} messages)", c.id, c.messages.len());
+            println!("not spam: {} ({} messages, trust={trust})", c.id, c.messages.len());
             let _ = etx.send(engine::EngineCmd::RestoreSpam {
                 messages: c.messages.clone(),
                 account_key: eff_account(&sh_ns.key, &c),
+                trust,
             });
         }
         sh_ns.raw_convs.borrow_mut().retain(|r| !(r.spam && r.id == c.id));

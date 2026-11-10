@@ -23,6 +23,7 @@ import ru.letotam.ddmail.compose.ComposeController
 import ru.letotam.ddmail.conversation.ConversationController
 import ru.letotam.ddmail.sync.Conversation
 import ru.letotam.ddmail.sync.FoldersDoc
+import ru.letotam.ddmail.sync.SYSTEM_SPAM
 import ru.letotam.ddmail.sync.SyncEngine
 
 private val Context.uiPrefs by preferencesDataStore(name = "ui")
@@ -246,15 +247,20 @@ class MailViewModel(
         }
     }
 
-    /** «Не спам» выбранным беседам: письма — во «Входящие» на сервере. */
-    fun notSpamPicked() {
+    /**
+     * «Не спам» выбранным беседам: письма — во «Входящие» на сервере.
+     * [trust] — «Не спам и доверять отправителю»: сервер заводит allow-правило
+     * на отправителя и возвращает из спама всё остальное от него.
+     */
+    fun notSpamPicked(trust: Boolean = false) {
         val convs = pickedConvs().filter { it.spam }
         clearPicks()
         if (convs.isEmpty()) return
         if (convs.any { it.id == selected.value }) open(null)
         viewModelScope.launch {
-            val r = runCatching { engine.restoreSpam(convs) }
-            notice.value = r.fold({ "Во «Входящие»: бесед ${convs.size}" }, { "Не удалось вернуть из спама: ${it.message}" })
+            val r = runCatching { engine.restoreSpam(convs, trust) }
+            val ok = if (trust) "Во «Входящие», отправителям доверяем: бесед ${convs.size}" else "Во «Входящие»: бесед ${convs.size}"
+            notice.value = r.fold({ ok }, { "Не удалось вернуть из спама: ${it.message}" })
             sync()
         }
     }
@@ -327,7 +333,8 @@ class MailViewModel(
         val active = doc.folders.indexOfFirst { it.id == id }.takeIf { it >= 0 }
         val (counts, inbox) = doc.unreadCounts(convs)
         val tabs = doc.folders.mapIndexedNotNull { i, f ->
-            if (f.hidden && i != active) null else FolderTab(i, f.id, f.name, f.icon, counts[i])
+            // У «Спама» счётчика нет: непрочитанный спам — не повод на него смотреть.
+            if (f.hidden && i != active) null else FolderTab(i, f.id, f.name, f.icon, if (f.system == SYSTEM_SPAM) 0 else counts[i])
         }
         val inSpam = active != null && active == doc.spamIndex
         return MailState(tabs, active, inbox, doc.filter(convs, active), loaded = true, inSpam = inSpam)

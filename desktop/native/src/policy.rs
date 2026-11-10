@@ -43,9 +43,37 @@ pub struct Policy {
     pub allow_all_media: bool,
     /// Per-host allow-list for images and CSS resources.
     pub media_hosts: HashSet<String>,
+    /// Показ беседы из «Спама» (см. [`Policy::for_spam`]). Не сохраняется:
+    /// такая политика собирается на каждый рендер и на диск не попадает.
+    #[serde(skip)]
+    pub spam_view: bool,
+}
+
+/// Бит поколения для рендеров спама: поколение — часть ключа кэша текстур,
+/// и пузырь спама с заблокированными картинками не должен наслуживаться ни
+/// после «Показать картинки», ни после «Не спам» под обычной политикой.
+const SPAM_GEN: u64 = 1 << 62;
+const SPAM_GEN_IMAGES: u64 = 1 << 61;
+
+/// Поколение для рендера беседы из «Спама» поверх обычного `generation`.
+pub fn spam_generation(generation: u64, images_shown: bool) -> u64 {
+    (generation & !(SPAM_GEN | SPAM_GEN_IMAGES))
+        | SPAM_GEN
+        | if images_shown { SPAM_GEN_IMAGES } else { 0 }
 }
 
 impl Policy {
+    /// Политика показа беседы из «Спама». Сохранённые разрешения (по
+    /// отправителю, хосту, «разрешить всё») здесь не действуют: письмо
+    /// спамера — враждебный ввод, и загрузка картинки — сигнал «прочитано».
+    /// Картинки грузятся, только когда пользователь нажал «Показать
+    /// картинки» у этой беседы (`images_shown`, живёт до перезапуска).
+    /// Других внешних ресурсов загрузчик не берёт вовсе: только `<img>` и
+    /// CSS-`background` (см. `emlrender::net`).
+    pub fn for_spam(images_shown: bool) -> Policy {
+        Policy { spam_view: true, allow_all_media: images_shown, ..Policy::default() }
+    }
+
     pub fn media_allowed(&self, sender: &str) -> bool {
         self.allow_all || self.allow_all_media || self.allow_media.contains(&sender.to_lowercase())
     }
@@ -148,6 +176,27 @@ pub fn save(policy: &Policy) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spam_policy_ignores_saved_permissions() {
+        let shut = Policy::for_spam(false);
+        assert!(shut.spam_view);
+        assert!(!shut.media_gate("bad@spam.example")("img.spam.example"));
+        assert!(!shut.media_allowed("bad@spam.example"));
+        let open = Policy::for_spam(true);
+        assert!(open.media_gate("bad@spam.example")("img.spam.example"));
+    }
+
+    #[test]
+    fn spam_generations_never_collide_with_normal_ones() {
+        let g = 41;
+        let shut = spam_generation(g, false);
+        let open = spam_generation(g, true);
+        assert_ne!(shut, g);
+        assert_ne!(open, g);
+        assert_ne!(shut, open);
+        assert_ne!(spam_generation(g + 1, false), shut, "смена политики тоже сбрасывает кэш спама");
+    }
 
     #[test]
     fn media_gate_refuses_by_default() {

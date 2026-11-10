@@ -428,6 +428,7 @@ fn main() {
         scroll_pending: Cell::new(false),
         chat_vp_y: Cell::new(-1.0),
         body_view_text: RefCell::new(HashSet::new()),
+        spam_images_shown: RefCell::new(HashSet::new()),
         pending_source_view: Cell::new(0),
         source_view_full: RefCell::new(String::new()),
         identity_colors: RefCell::new(startup_ident_colors),

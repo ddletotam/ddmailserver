@@ -389,11 +389,44 @@ mod click_target_tests {
     }
 }
 
+/// Текст подсказки при наведении на ссылку в письме: куда она ведёт, байт в
+/// байт как её откроет клик (`click_target`) — подпись ссылки в письме может
+/// говорить одно, а вести в другое место, и это главный способ заметить
+/// фишинг до клика. Схема не из белого списка — с пометкой, что клик ничего
+/// не откроет. Внутренние ссылки (чипы вложений, «Показать картинки») — без
+/// подсказки. Очень длинные адреса обрезаются: подсказка — не место для
+/// километрового трекинг-URL целиком (полный адрес — «Копировать ссылку»).
+pub(crate) fn link_tooltip(href: &str) -> String {
+    const MAX_CHARS: usize = 300;
+    let href = href.trim();
+    if href.is_empty() || href.starts_with("ddmail-") {
+        return String::new();
+    }
+    let shown = match click_target(href, LinkOrigin::Html) {
+        Some(target) => target,
+        None => format!("{href} — не откроется"),
+    };
+    if shown.chars().count() > MAX_CHARS {
+        let cut: String = shown.chars().take(MAX_CHARS).collect();
+        format!("{cut}…")
+    } else {
+        shown
+    }
+}
+
 /// Handle a clicked link from a bubble (UI thread). Internal `ddmail-attach:`
 /// links trigger an attachment download via the engine; `mailto:` opens our own
 /// composer; everything else opens in the system browser. `origin` решает, можно ли ссылку нормализовать —
 /// см. `click_target`.
 pub(crate) fn handle_link(ui: &MainWindow, url: String, origin: LinkOrigin) {
+    if url == SPAM_IMAGES_HREF {
+        SHARED.with(|s| {
+            if let Some(sh) = s.borrow().as_ref() {
+                show_spam_images(sh);
+            }
+        });
+        return;
+    }
     if let Some(rest) = url.strip_prefix("ddmail-attach:") {
         // folder|uid|index|filename (folder/filename percent-кодированы)
         let parts: Vec<&str> = rest.splitn(4, '|').collect();
@@ -654,6 +687,19 @@ pub(crate) fn wire_bubble_links(ui: &MainWindow, shared: &Rc<Shared>) {
             .unwrap_or(false)
     });
 
+    // Подсказка с адресом ссылки под курсором (во всех письмах): пустая
+    // строка — ссылки нет или она внутренняя.
+    let sh_tip = shared.clone();
+    ui.on_link_tip(move |row, x, y| {
+        sh_tip
+            .row_links
+            .borrow()
+            .get(row as usize)
+            .and_then(|links| links.iter().find(|l| l.contains(x, y)).map(|l| link_tooltip(&l.href)))
+            .unwrap_or_default()
+            .into()
+    });
+
     // ── Вложения: контекст правого клика ──
     // Перед показом меню пузыря Slint зовёт probe: если под курсором чип
     // вложения (ddmail-attach:-ссылка), меню получает пункты
@@ -773,4 +819,36 @@ pub(crate) fn wire_bubble_links(ui: &MainWindow, shared: &Rc<Shared>) {
             });
         }
     });
+}
+
+#[cfg(test)]
+mod link_tooltip_tests {
+    use super::link_tooltip;
+
+    #[test]
+    fn shows_exactly_what_a_click_opens() {
+        let url = "https://x.invalid/a?token=abc&utm_source=mail";
+        assert_eq!(link_tooltip(url), url);
+        assert_eq!(link_tooltip("mailto:info@example.invalid"), "mailto:info@example.invalid");
+    }
+
+    #[test]
+    fn internal_links_have_no_tooltip() {
+        assert_eq!(link_tooltip("ddmail-attach:INBOX|1|0|a.pdf"), "");
+        assert_eq!(link_tooltip("ddmail-spam-images:"), "");
+        assert_eq!(link_tooltip(""), "");
+    }
+
+    #[test]
+    fn refused_scheme_is_marked() {
+        assert_eq!(link_tooltip("file:///etc/passwd"), "file:///etc/passwd — не откроется");
+    }
+
+    #[test]
+    fn long_urls_are_cut() {
+        let long = format!("https://t.invalid/{}", "a".repeat(1000));
+        let tip = link_tooltip(&long);
+        assert!(tip.ends_with('…'));
+        assert_eq!(tip.chars().count(), 301);
+    }
 }

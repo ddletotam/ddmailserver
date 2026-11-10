@@ -60,3 +60,9 @@ body {
 .ddm-pending .ddm-bubble { opacity: .75; }
 .ddm-imgbar { display: flex; gap: 18px; flex-wrap: wrap; }
 .ddm-imgbar[hidden] { display: none; }
+/* Спам: картинки не грузятся сами — плашка заметнее обычной кнопки. */
+.ddm-spambar {
+  margin-top: 6px; padding: 2px 10px; border-radius: 8px;
+  background: #fff4e5; border: 1px solid #f0c48a;
+}
+.ddm-spambar .ddm-images { margin-top: 0; color: #9a4a00; font-size: 13px; }

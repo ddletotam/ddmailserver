@@ -49,8 +49,12 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                     let full_len = full.len();
                     // Аватары нужны всем диалогам, а не только видимой папке:
                     // переключение таба не должно показывать серые кружки.
+                    // Кроме спама: за аватаркой сервер идёт на домен
+                    // отправителя (favicon, BIMI) — внешний запрос по сигналу
+                    // спамера. В «Спаме» — инициалы.
                     let avatar_emails: Vec<String> = full
                         .iter()
+                        .filter(|c| !c.spam)
                         .filter_map(|c| c.counterparts.first().map(|cp| cp.addr.clone()))
                         .collect();
                     let merged = current_view(sh, full);

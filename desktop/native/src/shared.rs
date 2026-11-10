@@ -82,6 +82,9 @@ pub(crate) struct Shared {
     /// bubble even when an HTML part exists («Показать → Текстовую
     /// версию»). Session-scoped on purpose.
     pub(crate) body_view_text: RefCell<HashSet<(String, u32)>>,
+    /// Беседы спама, где нажали «Показать картинки» (id беседы). Только на
+    /// эту сессию: в «Спаме» разрешения не сохраняются.
+    pub(crate) spam_images_shown: RefCell<HashSet<String>>,
     /// Which source view a pending FetchSource should open:
     /// 1 = заголовки, 2 = полный исходник.
     pub(crate) pending_source_view: Cell<u8>,

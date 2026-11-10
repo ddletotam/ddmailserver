@@ -159,6 +159,9 @@ fun MailScreen(
             }
             override fun onAllowSender(uid: Long) = vm.conversation.allowSender(uid)
         }
+        // Пропуск внешних картинок (спам — только по нажатию); не снимается
+        // на уходе экрана: WebView живёт дольше него.
+        web.gate = vm.conversation.gate
         onDispose { web.host = null }
     }
     LaunchedEffect(web) {
@@ -288,7 +291,10 @@ private fun SelectionBar(n: Int, vm: MailViewModel, onMove: () -> Unit, onDelete
     }
 }
 
-/** Выбор в папке «Спам»: действие одно — «Не спам» (письма во «Входящие»). */
+/**
+ * Выбор в папке «Спам»: «Не спам» (письма во «Входящие») и «Не спам и
+ * доверять отправителю» (ещё и allow-правило на отправителя на сервере).
+ */
 @Composable
 private fun SpamSelectionBar(n: Int, vm: MailViewModel) {
     Row(
@@ -299,7 +305,8 @@ private fun SpamSelectionBar(n: Int, vm: MailViewModel) {
         Text("$n", fontWeight = FontWeight.SemiBold, maxLines = 1)
         Spacer(Modifier.weight(1f))
         IconButton(onClick = vm::pickAll) { Icon(Icons.Filled.SelectAll, "Выбрать все") }
-        IconButton(onClick = vm::notSpamPicked) { Icon(Icons.Filled.MoveToInbox, "Не спам") }
+        IconButton(onClick = { vm.notSpamPicked(trust = false) }) { Icon(Icons.Filled.MoveToInbox, "Не спам") }
+        IconButton(onClick = { vm.notSpamPicked(trust = true) }) { Icon(Icons.Filled.VerifiedUser, "Не спам и доверять отправителю") }
     }
 }
 
@@ -630,7 +637,8 @@ private fun ConversationRow(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
-                if (unread) {
+                // У спама счётчика нет (жирность остаётся): число зазывает открыть.
+                if (unread && !c.spam) {
                     Spacer(Modifier.width(8.dp))
                     Text(
                         c.unreadCount.toString(),
@@ -645,11 +653,17 @@ private fun ConversationRow(
     }
 }
 
-/** Пока без серверных аватарок — инициалы на цвете, стабильном для диалога. */
+/**
+ * Аватарка с сервера, без неё — инициалы на цвете, стабильном для диалога.
+ * У спама — только инициалы: за аватаркой сервер ходит на домен отправителя
+ * (favicon, BIMI), а это внешний запрос по сигналу спамера.
+ */
 @Composable
 private fun Avatar(c: Conversation, avatars: Avatars) {
-    val email = c.counterparts.firstOrNull()?.addr.orEmpty()
-    val image by androidx.compose.runtime.produceState(avatars.cached(email), email) { value = avatars.get(email) }
+    val email = if (c.spam) "" else c.counterparts.firstOrNull()?.addr.orEmpty()
+    val image by androidx.compose.runtime.produceState(if (email.isEmpty()) null else avatars.cached(email), email) {
+        if (email.isNotEmpty()) value = avatars.get(email)
+    }
     image?.let {
         androidx.compose.foundation.Image(
             it, contentDescription = null,

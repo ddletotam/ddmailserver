@@ -267,10 +267,10 @@ impl FoldersDoc {
 pub fn unread_counts(doc: &FoldersDoc, convs: &[Conversation], fallback: &str) -> (Vec<u32>, u32) {
     let mut out = vec![0u32; doc.folders.len()];
     let mut inbox = 0u32;
-    for c in convs.iter().filter(|c| c.unread_count > 0) {
+    // Спам тихий: ни счётчика у таба «Спам», ни вклада в инбокс.
+    for c in convs.iter().filter(|c| c.unread_count > 0 && !c.spam) {
         match doc.folder_of(c, fallback) {
             Some(i) => out[i] += 1,
-            None if c.spam => {}
             None => inbox += 1,
         }
     }
@@ -533,7 +533,8 @@ mod tests {
         assert_eq!(doc.folder_of(&spam, ""), Some(si));
         assert_eq!(doc.folder_of(&ham, ""), Some(0));
         assert_eq!(ids(filter(&doc, &all, "", Some(si))), vec!["spam:me@a|bad@x"]);
-        assert_eq!(unread_counts(&doc, &all, ""), (vec![1, 1], 0));
+        // Непрочитанный спам счётчика у таба «Спам» не даёт: спам тихий.
+        assert_eq!(unread_counts(&doc, &all, ""), (vec![1, 0], 0));
 
         // Руками ни внутрь, ни наружу.
         doc.assign(&ham, "", Some(si));

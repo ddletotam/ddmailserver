@@ -299,7 +299,7 @@ impl MailProvider for NativeProvider {
         Ok(Some(convs))
     }
 
-    async fn restore_spam(&self, messages: &[MessageRef]) -> Result<u32, String> {
+    async fn restore_spam(&self, messages: &[MessageRef], trust: bool) -> Result<u32, String> {
         #[derive(serde::Deserialize)]
         struct Resp {
             #[serde(default)]
@@ -308,7 +308,9 @@ impl MailProvider for NativeProvider {
         if messages.is_empty() {
             return Ok(0);
         }
-        let body = serde_json::json!({ "messages": messages });
+        // trust — «Не спам и доверять отправителю»: сервер заводит allow-правило
+        // на адрес отправителя и возвращает из спама остальное от него же.
+        let body = serde_json::json!({ "messages": messages, "trust": trust });
         let resp: Resp = self.post("/spam/restore", &body).await?;
         Ok(resp.restored)
     }
