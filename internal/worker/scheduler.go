@@ -150,9 +150,49 @@ func (s *Scheduler) outboxLoop() {
 	}
 }
 
+// idleRetryDelay — пауза перед повтором номер attempt (с 1) синка, запущенного
+// сигналом IDLE; false — повторов больше нет.
+//
+// Замерено на проде 2026-11-10: IDLE iCloud в 21:35:14 сообщил о новом письме,
+// синк упал на резолве `imap.mail.me.com` (DNS-таймаут), и письмо ждало
+// резервного цикла idle-аккаунтов — 300 с от последнего удачного синка. Сигнал
+// IDLE одноразовый: провайдер второй раз о том же письме не скажет. Поэтому
+// неудачу по сигналу повторяем сами; после последней паузы аккаунт снова на
+// общем резервном цикле. Отказ в авторизации не повторяем: его держит auth_backoff, и
+// лишний LOGIN с неверным паролем — путь к блокировке у провайдера.
+func idleRetryDelay(attempt int, err error) (time.Duration, bool) {
+	if err == nil || authfail.Is(err) || errors.Is(err, context.Canceled) {
+		return 0, false
+	}
+	delays := [...]time.Duration{15 * time.Second, 30 * time.Second, time.Minute, 2 * time.Minute}
+	if attempt < 1 || attempt > len(delays) {
+		return 0, false
+	}
+	return delays[attempt-1], true
+}
+
+// onDoneTask вызывает done с результатом Execute обёрнутой задачи. String,
+// Type и Priority — от неё же, так что дедупликация в пуле не меняется.
+type onDoneTask struct {
+	Task
+	done func(error)
+}
+
+func (t onDoneTask) Execute(ctx context.Context) error {
+	err := t.Task.Execute(ctx)
+	t.done(err)
+	return err
+}
+
 // TriggerSyncForAccount submits an immediate sync task for a single account.
-// This is called by the IDLE manager when new mail is detected.
+// This is called by the IDLE manager when new mail is detected. A failed run
+// is retried with backoff (see idleRetryDelay).
 func (s *Scheduler) TriggerSyncForAccount(account *models.Account) {
+	s.triggerIdleSync(account, 0)
+}
+
+// triggerIdleSync — синк по сигналу IDLE; attempt — сколько повторов уже было.
+func (s *Scheduler) triggerIdleSync(account *models.Account, attempt int) {
 	// Refresh OAuth token if needed
 	if account.IsOAuth() {
 		if err := s.refreshAccountOAuthToken(account); err != nil {
@@ -194,7 +234,36 @@ func (s *Scheduler) TriggerSyncForAccount(account *models.Account) {
 		return s.refreshAccountOAuthTokenForce(a, true)
 	})
 
-	s.submit(task, fmt.Sprintf("IDLE-triggered sync for %s", account.Email))
+	accountID := account.ID
+	wrapped := onDoneTask{Task: task, done: func(err error) {
+		delay, ok := idleRetryDelay(attempt+1, err)
+		if !ok || s.ctx.Err() != nil {
+			return
+		}
+		log.Printf("IDLE-triggered sync for %s failed, retry %d in %v", account.Email, attempt+1, delay)
+		time.AfterFunc(delay, func() {
+			if s.ctx.Err() != nil {
+				return
+			}
+			// Свежая копия: за паузу могли смениться пароль или токен,
+			// аккаунт могли выключить.
+			fresh, err := s.database.GetAccountByID(accountID)
+			if err != nil {
+				log.Printf("IDLE retry: failed to reload account %d: %v", accountID, err)
+				return
+			}
+			if !fresh.Enabled {
+				return
+			}
+			s.triggerIdleSync(fresh, attempt+1)
+		})
+	}}
+
+	what := fmt.Sprintf("IDLE-triggered sync for %s", account.Email)
+	if attempt > 0 {
+		what = fmt.Sprintf("IDLE retry %d for %s", attempt, account.Email)
+	}
+	s.submit(wrapped, what)
 }
 
 // expungePublisher turns a sync's "vanished upstream" notice into an expunge
