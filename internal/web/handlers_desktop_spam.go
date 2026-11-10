@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 
+	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/notify"
 )
 
@@ -42,9 +44,13 @@ func (s *Server) respondSpamConversations(w http.ResponseWriter, userID int64, l
 
 // HandleDesktopSpamRestore — «Не спам» у беседы в папке «Спам»: каждое
 // переданное письмо, которое сейчас спам, возвращается во «Входящие» (как
-// «Восстановить» на веб-странице /spam). Правил не создаёт: отправитель,
-// пойманный анализатором, может попасть в спам снова — белый список
-// настраивается отдельно.
+// «Восстановить» на веб-странице /spam). Без `trust` правил не создаёт:
+// отправитель, пойманный анализатором, может попасть в спам снова.
+//
+// `trust: true` — «Не спам и доверять отправителю»: для каждого отправителя
+// возвращённых писем заводится правило allow по адресу (как «Восстановить и
+// разрешить» на /spam), и из спама возвращается всё остальное от него же —
+// раз отправителю доверяют, его письмам в «Спаме» не место.
 func (s *Server) HandleDesktopSpamRestore(w http.ResponseWriter, r *http.Request) {
 	user := s.GetUserFromContext(r.Context())
 	if user == nil {
@@ -57,6 +63,7 @@ func (s *Server) HandleDesktopSpamRestore(w http.ResponseWriter, r *http.Request
 			UID       int64  `json:"uid"`
 			MessageID string `json:"message_id"`
 		} `json:"messages"`
+		Trust bool `json:"trust"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid request body")
@@ -64,10 +71,18 @@ func (s *Server) HandleDesktopSpamRestore(w http.ResponseWriter, r *http.Request
 	}
 
 	restored := 0
+	senders := map[string]bool{}
 	for _, m := range req.Messages {
 		msg := s.resolveSpamRef(user.ID, m.MessageID, m.UID)
 		if msg == 0 {
 			continue
+		}
+		if req.Trust {
+			if full, err := s.database.GetMessageByID(msg); err == nil && full != nil {
+				if addr := strings.ToLower(extractEmail(full.From)); strings.Contains(addr, "@") {
+					senders[addr] = true
+				}
+			}
 		}
 		if err := s.database.RestoreFromSpam(msg, user.ID); err != nil {
 			log.Printf("desktop spam restore: message %d: %v", msg, err)
@@ -75,8 +90,34 @@ func (s *Server) HandleDesktopSpamRestore(w http.ResponseWriter, r *http.Request
 		}
 		restored++
 	}
+	trusted := 0
+	for addr := range senders {
+		if err := s.database.CreateSpamRule(&db.SpamRule{
+			UserID:    user.ID,
+			RuleType:  "address",
+			RuleValue: addr,
+			Action:    "allow",
+		}); err != nil {
+			log.Printf("desktop spam restore: allow rule for sender: %v", err)
+			continue
+		}
+		trusted++
+		ids, err := s.database.GetSpamMessageIDsBySender(user.ID, addr)
+		if err != nil {
+			log.Printf("desktop spam restore: other spam of trusted sender: %v", err)
+			continue
+		}
+		for _, id := range ids {
+			if err := s.database.RestoreFromSpam(id, user.ID); err != nil {
+				log.Printf("desktop spam restore: message %d: %v", id, err)
+				continue
+			}
+			restored++
+		}
+	}
 
-	log.Printf("desktop spam restore: user=%d restored=%d/%d", user.ID, restored, len(req.Messages))
+	log.Printf("desktop spam restore: user=%d restored=%d (requested %d) trusted_senders=%d",
+		user.ID, restored, len(req.Messages), trusted)
 	if restored > 0 && s.notifyHub != nil {
 		// flags_changed, а не new_message: клиенты перечитывают список, но
 		// не поднимают тост «новое письмо» о давно пришедшем.
@@ -87,7 +128,7 @@ func (s *Server) HandleDesktopSpamRestore(w http.ResponseWriter, r *http.Request
 			Mailbox:  "INBOX",
 		})
 	}
-	respondJSON(w, http.StatusOK, map[string]int{"restored": restored})
+	respondJSON(w, http.StatusOK, map[string]int{"restored": restored, "trusted": trusted})
 }
 
 // resolveSpamRef находит письмо-спам пользователя по ссылке клиента. Uid —
