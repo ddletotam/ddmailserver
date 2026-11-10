@@ -13,6 +13,7 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/oauth"
 	"github.com/ddletotam/ddmailserver/internal/tlsverify"
+	"github.com/emersion/go-imap"
 	idle "github.com/emersion/go-imap-idle"
 	imapClient "github.com/emersion/go-imap/client"
 )
@@ -395,6 +396,7 @@ func (m *IdleManager) runIdleSession(ctx context.Context, account *models.Accoun
 
 		// Wait for mailbox update, error, or shutdown
 		triggered := false
+		bye := ""
 	wait:
 		for {
 			select {
@@ -412,17 +414,33 @@ func (m *IdleManager) runIdleSession(ctx context.Context, account *models.Accoun
 				return errIdleRefresh
 
 			case upd := <-updates:
-				switch upd.(type) {
+				switch u := upd.(type) {
 				case *imapClient.MailboxUpdate:
 					triggered = true
 					break wait
+				case *imapClient.StatusUpdate:
+					if u.Status != nil && u.Status.Type == imap.StatusRespBye {
+						// Соединение библиотека уже закрыла; ошибку вернёт
+						// idleDone следующим, причину добавим к ней.
+						bye = statusText(u.Status)
+					}
 				}
 				// Ignore other update types, keep waiting
 
 			case err := <-idleDone:
 				// IDLE ended unexpectedly (connection lost)
 				if err != nil {
-					return fmt.Errorf("idle: %w", err)
+					// Причину сервер называет в «* BYE …», но библиотека
+					// отдаёт его в Updates уже после закрытия соединения,
+					// а ошибка Idle — просто «connection closed». Без текста
+					// BYE не отличить решение сервера от обрыва TCP.
+					if bye == "" {
+						bye = byeReason(updates, 500*time.Millisecond)
+					}
+					if bye != "" {
+						return fmt.Errorf("idle: %w (server BYE: %s)", err, bye)
+					}
+					return fmt.Errorf("idle: %w (no BYE from server)", err)
 				}
 				// Idle returned nil without us closing stop — shouldn't happen, reconnect
 				return fmt.Errorf("idle returned unexpectedly")
@@ -441,6 +459,31 @@ func (m *IdleManager) runIdleSession(ctx context.Context, account *models.Accoun
 			m.syncCallback(account)
 		}
 	}
+}
+
+// byeReason ждёт до wait «* BYE» в уже прочитанных обновлениях и возвращает
+// его текст; прочие обновления выбрасывает — сессия всё равно закончена.
+func byeReason(ch <-chan imapClient.Update, wait time.Duration) string {
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	for {
+		select {
+		case upd := <-ch:
+			if su, ok := upd.(*imapClient.StatusUpdate); ok && su.Status != nil && su.Status.Type == imap.StatusRespBye {
+				return statusText(su.Status)
+			}
+		case <-deadline.C:
+			return ""
+		}
+	}
+}
+
+// statusText — текст статусного ответа вместе с кодом, если он есть.
+func statusText(st *imap.StatusResp) string {
+	if st.Code != "" {
+		return fmt.Sprintf("[%s] %s", st.Code, st.Info)
+	}
+	return st.Info
 }
 
 // drainUpdates empties the updates channel without blocking.
