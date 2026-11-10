@@ -290,7 +290,9 @@ pub(crate) fn tray_sync_dot(sh: &Shared) {
         UI_WEAK.get().and_then(|w| w.upgrade()).is_some_and(|ui| ui.get_badge_hidden_on());
     let doc = sh.folders.borrow();
     tray_set_dot(full_view(sh).iter().any(|c| {
+        // Спам точку не зажигает никогда, даже с «учитывать скрытые».
         c.unread_count > 0
+            && !c.spam
             && (with_hidden
                 || !doc.doc.folder_of(c, &sh.key).is_some_and(|i| doc.doc.folders[i].hidden))
     }));

@@ -29,7 +29,9 @@ import ru.letotam.ddmail.sync.FoldersDoc
  */
 class MailNotifier(private val context: Context, private val settings: AppSettings) {
 
-    suspend fun check(convs: List<Conversation>, folders: FoldersDoc, openId: String?) {
+    suspend fun check(all: List<Conversation>, folders: FoldersDoc, openId: String?) {
+        // Спам молчит всегда: ни уведомления, ни бейджа.
+        val convs = all.filter { !it.spam }
         badge(convs.count { c -> c.unreadCount > 0 && folders.folderOf(c)?.let { folders.folders[it].hidden } != true })
         val unseen = convs.flatMap { c -> c.messages.filter { !it.seen }.map { c to it.uid } }
         val top = convs.flatMap { c -> c.messages.map { it.uid } }.maxOrNull() ?: return

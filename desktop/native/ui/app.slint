@@ -108,6 +108,8 @@ struct FolderTab {
     unread: int,
     // Папка «не показывать в списке» (видна по «Показать скрытые»).
     hidden: bool,
+    // Системная («Спам»): не настраивается, не удаляется, руками в неё не кладут.
+    system: bool,
 }
 
 // One attendee row of the event-detail table: display name + localized
@@ -1045,6 +1047,13 @@ export component MainWindow inherits Window {
     // Меню полосы табов (правый клик): папка под курсором ("" — мимо табов).
     property <string> ftab-menu-id: "";
     property <string> ftab-menu-name: "";
+    property <bool> ftab-menu-system: false;
+    // id системной папки «Спам» ("" — её нет: сервер ddmail не подключён).
+    // Пока она выбрана, список — спам: в меню диалога только «Не спам», в
+    // шапке нет кнопки «Спам».
+    in property <string> spam-folder-id: "";
+    property <bool> in-spam: root.spam-folder-id != "" && root.active-folder == root.spam-folder-id;
+    callback conv-not-spam(int);
     in property <int> hidden-folders: 0;
     in property <bool> show-hidden-folders: false;
     callback folder-add-open();
@@ -1552,14 +1561,14 @@ export component MainWindow inherits Window {
                                 title: "Все прочитаны";
                                 activated => { root.folder-mark-read(root.ftab-menu-id); }
                             }
-                            if root.ftab-menu-id != "": MenuItem {
+                            if root.ftab-menu-id != "" && !root.ftab-menu-system: MenuItem {
                                 title: "Настроить…";
                                 activated => {
                                     root.settings-tab = 4;
                                     root.settings-visible = true;
                                 }
                             }
-                            if root.ftab-menu-id != "": Menu {
+                            if root.ftab-menu-id != "" && !root.ftab-menu-system: Menu {
                                 title: "Удалить";
                                 MenuItem {
                                     title: "Удалить «" + root.ftab-menu-name + "» — диалоги вернутся во «Входящие»";
@@ -1597,6 +1606,7 @@ export component MainWindow inherits Window {
                             pointer-event(pe) => {
                                 if (pe.button == PointerEventButton.right && pe.kind == PointerEventKind.down) {
                                     root.ftab-menu-id = "";
+                                    root.ftab-menu-system = false;
                                     ftab-cm.show({ x: self.mouse-x + ftabs-fl.viewport-x, y: self.mouse-y });
                                 }
                             }
@@ -1756,6 +1766,7 @@ export component MainWindow inherits Window {
                                         if (pe.button == PointerEventButton.right
                                             && pe.kind == PointerEventKind.down) {
                                             root.ftab-menu-id = t.id;
+                                            root.ftab-menu-system = t.system;
                                             root.ftab-menu-name = t.name == "" ? "Без названия" : t.name;
                                             ftab-cm.show({ x: parent.x + self.mouse-x + ftabs-fl.viewport-x, y: self.mouse-y });
                                             return;
@@ -1826,16 +1837,22 @@ export component MainWindow inherits Window {
                             width: 100%;
                             height: 100%;
                             Menu {
-                                MenuItem {
+                                // В «Спам» с беседой можно только одно —
+                                // вернуть её во «Входящие».
+                                if root.in-spam: MenuItem {
+                                    title: "Не спам";
+                                    activated => { root.conv-not-spam(idx); }
+                                }
+                                if !root.in-spam: MenuItem {
                                     title: "Объединить с открытым диалогом";
                                     enabled: idx != root.selected;
                                     activated => { root.conv-merge(idx); }
                                 }
-                                if conv.is-merged: MenuItem {
+                                if !root.in-spam && conv.is-merged: MenuItem {
                                     title: "Разъединить диалоги";
                                     activated => { root.conv-unmerge(idx); }
                                 }
-                                if root.folders-shown: Menu {
+                                if !root.in-spam && root.folders-shown: Menu {
                                     title: "В папку";
                                     for f in root.folder-targets: MenuItem {
                                         title: f.icon == "" ? f.name : f.icon + " " + f.name;
@@ -1843,7 +1860,7 @@ export component MainWindow inherits Window {
                                         activated => { root.conv-to-folder(idx, f.id); }
                                     }
                                 }
-                                if root.folders-shown && root.active-folder != "": MenuItem {
+                                if !root.in-spam && root.folders-shown && root.active-folder != "": MenuItem {
                                     title: "Убрать из папки";
                                     activated => { root.conv-to-folder(idx, ""); }
                                 }
@@ -2299,8 +2316,9 @@ export component MainWindow inherits Window {
                         }
                     }
                     // «Спам»: blacklist the counterpart + purge all their
-                    // mail (with confirmation) — restored from Tauri.
-                    Rectangle {
+                    // mail (with confirmation) — restored from Tauri. В папке
+                    // «Спам» её нет: там действие одно — «Не спам» в меню.
+                    if !root.in-spam: Rectangle {
                         width: 36px;
                         height: 36px;
                         border-radius: 18px;

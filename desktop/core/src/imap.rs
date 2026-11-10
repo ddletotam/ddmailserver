@@ -905,6 +905,7 @@ where
             draft,
             account_key: String::new(), // stamped by the engine on merge
             merged: false,
+            spam: false,
         });
     }
 

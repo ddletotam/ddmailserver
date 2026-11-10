@@ -109,6 +109,7 @@ pub(crate) fn commit(
     {
         let mut st = sh.folders.borrow_mut();
         mutate(&mut st.doc);
+        st.normalize();
         folders::save(&st);
     }
     sh.folders_dirty.set(true);
@@ -174,7 +175,9 @@ pub(crate) fn on_fetched(
                 // Папки, ни разу не побывавшие на сервере (версия 0: заведены
                 // без нативного подключения или пока сервер не отвечал), не
                 // теряем: сервер пуст — отправляем их туда, а не берём пустоту.
-                let push = doc.is_none() && st.version == 0 && !st.doc.folders.is_empty();
+                let push = doc.is_none()
+                    && st.version == 0
+                    && st.doc.folders.iter().any(|f| !f.is_system());
                 if !push && st.store == target && st.version == version {
                     return; // ничего нового (в том числе эхо своей записи)
                 }
@@ -185,6 +188,7 @@ pub(crate) fn on_fetched(
                     st.version = version;
                     st.doc = FoldersDoc::from_value(doc.as_ref());
                 }
+                st.normalize();
                 folders::save(&st);
                 push
             }
@@ -194,9 +198,12 @@ pub(crate) fn on_fetched(
                 if st.store != Store::Local {
                     st.store = Store::Local;
                     st.version = 0;
+                    st.normalize();
                     folders::save(&st);
+                } else {
+                    return;
                 }
-                return;
+                false
             }
         }
     };
@@ -218,10 +225,13 @@ pub(crate) fn on_unavailable(ui: &MainWindow, sh: &Shared, account: String, erro
         let target = Store::Server { account };
         if st.store != target {
             st.store = target;
+            st.normalize();
             folders::save(&st);
         }
     }
     *sh.folders_error.borrow_mut() = error;
+    // Хранилище могло стать сервером — появилась папка «Спам».
+    reapply_view(ui, sh);
     refresh_folder_note(ui, sh);
 }
 
@@ -248,6 +258,7 @@ pub(crate) fn on_saved(
                 let mut st = sh.folders.borrow_mut();
                 st.version = version;
                 st.doc = FoldersDoc::from_value(doc.as_ref());
+                st.normalize();
                 folders::save(&st);
             }
             sh.folders_dirty.set(false);
@@ -355,6 +366,8 @@ pub(crate) fn refresh_folder_settings(ui: &MainWindow, sh: &Shared) {
         .doc
         .folders
         .iter()
+        // Системные папки не настраиваются и не удаляются.
+        .filter(|f| !f.is_system())
         .map(|f| FolderEdit {
             id: f.id.as_str().into(),
             name: f.name.as_str().into(),
@@ -470,7 +483,7 @@ pub(crate) fn wire_folders(ui: &MainWindow, shared: &Rc<Shared>) {
     let sh = shared.clone();
     ui.on_folder_delete(move |id| {
         let Some(ui) = uiw.upgrade() else { return };
-        commit(&ui, &sh, true, |doc| doc.folders.retain(|f| f.id != id.as_str()));
+        commit(&ui, &sh, true, |doc| doc.folders.retain(|f| f.is_system() || f.id != id.as_str()));
     });
 
     let uiw = ui.as_weak();
@@ -478,6 +491,9 @@ pub(crate) fn wire_folders(ui: &MainWindow, shared: &Rc<Shared>) {
     ui.on_folder_edit(move |id, field, value| {
         let Some(ui) = uiw.upgrade() else { return };
         let Some(i) = sh.folders.borrow().doc.index_of(&id) else { return };
+        if sh.folders.borrow().doc.folders[i].is_system() {
+            return;
+        }
         let value = value.to_string();
         let structural = matches!(field.as_str(), "kind" | "clear-manual" | "hidden" | "auto-read");
         commit(&ui, &sh, structural, |doc| {
@@ -634,7 +650,9 @@ pub(crate) fn new_mail_policy(sh: &Shared, from_addr: &str) -> (bool, bool) {
         .raw_convs
         .borrow()
         .iter()
-        .find(|c| c.counterparts.iter().any(|cp| cp.addr.eq_ignore_ascii_case(from_addr)))
+        .find(|c| {
+            !c.spam && c.counterparts.iter().any(|cp| cp.addr.eq_ignore_ascii_case(from_addr))
+        })
         .cloned()
         .or_else(|| {
             // Новый собеседник: диалога ещё нет, но правила по домену его
@@ -658,6 +676,7 @@ pub(crate) fn new_mail_policy(sh: &Shared, from_addr: &str) -> (bool, bool) {
                 draft: None,
                 account_key: String::new(),
                 merged: false,
+                spam: false,
             })
         });
     let Some(c) = probe else { return (false, false) };

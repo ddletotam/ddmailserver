@@ -39,6 +39,8 @@ data class MailState(
     val inboxUnread: Int = 0,
     val conversations: List<Conversation> = emptyList(),
     val loaded: Boolean = false,
+    /** Выбрана папка «Спам»: смотреть и «Не спам», других действий нет. */
+    val inSpam: Boolean = false,
 )
 
 /**
@@ -244,8 +246,29 @@ class MailViewModel(
         }
     }
 
-    /** Папки для «В папку…» — все, включая скрытые (как `folder-targets` десктопа). */
-    fun folderTargets(): List<Pair<String, String>> = doc.folders.map { it.id to (if (it.icon.isBlank()) it.name else "${it.icon} ${it.name}") }
+    /** «Не спам» выбранным беседам: письма — во «Входящие» на сервере. */
+    fun notSpamPicked() {
+        val convs = pickedConvs().filter { it.spam }
+        clearPicks()
+        if (convs.isEmpty()) return
+        if (convs.any { it.id == selected.value }) open(null)
+        viewModelScope.launch {
+            val r = runCatching { engine.restoreSpam(convs) }
+            notice.value = r.fold({ "Во «Входящие»: бесед ${convs.size}" }, { "Не удалось вернуть из спама: ${it.message}" })
+            sync()
+        }
+    }
+
+    /** Папка «Спам» скрыта всегда; попасть в неё — из меню шапки. */
+    fun openSpam() {
+        doc.spamIndex?.let { selectFolder(doc.folders[it].id) }
+    }
+
+    /**
+     * Папки для «В папку…» — все, включая скрытые (как `folder-targets`
+     * десктопа), кроме системных: в «Спам» руками не кладут.
+     */
+    fun folderTargets(): List<Pair<String, String>> = doc.folders.filter { !it.isSystem }.map { it.id to (if (it.icon.isBlank()) it.name else "${it.icon} ${it.name}") }
 
     /** `null` — «Входящие». Выбор помнится между запусками (контракт §5). */
     fun selectFolder(id: String?) {
@@ -297,7 +320,8 @@ class MailViewModel(
 
     private fun build(convs: List<Conversation>, doc: FoldersDoc, id: String?, q: String?): MailState {
         // Поиск — по всем папкам (как «Диалоги» десктопа, §5).
-        if (!q.isNullOrBlank()) return MailState(emptyList(), null, 0, searchConversations(convs, q), loaded = true)
+        // Спам в поиск не попадает: он виден только в своей папке.
+        if (!q.isNullOrBlank()) return MailState(emptyList(), null, 0, searchConversations(convs.filter { !it.spam }, q), loaded = true)
         // Удалённая папка — снова инбокс. Скрытая видна табом, только пока
         // в неё привели (открытие беседы из неё).
         val active = doc.folders.indexOfFirst { it.id == id }.takeIf { it >= 0 }
@@ -305,7 +329,8 @@ class MailViewModel(
         val tabs = doc.folders.mapIndexedNotNull { i, f ->
             if (f.hidden && i != active) null else FolderTab(i, f.id, f.name, f.icon, counts[i])
         }
-        return MailState(tabs, active, inbox, doc.filter(convs, active), loaded = true)
+        val inSpam = active != null && active == doc.spamIndex
+        return MailState(tabs, active, inbox, doc.filter(convs, active), loaded = true, inSpam = inSpam)
     }
 }
 

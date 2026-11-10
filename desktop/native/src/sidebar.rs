@@ -352,7 +352,8 @@ pub(crate) fn visible_view(
     fallback: &str,
 ) -> Vec<Conversation> {
     if !folders_active(doc, on) {
-        return full;
+        // Без папок спаму места нет: в общий список он не попадает.
+        return full.into_iter().filter(|c| !c.spam).collect();
     }
     folders::filter(doc, &full, fallback, doc.index_of(active_id))
 }
@@ -369,6 +370,7 @@ pub(crate) fn refresh_folder_tabs(sh: &Shared, ui: &MainWindow) {
     let on = folders_active(&st.doc, sh.folders_on.get());
     ui.set_folders_shown(on);
     if !on {
+        ui.set_spam_folder_id("".into());
         ui.set_folder_tabs(ModelRc::new(VecModel::from(Vec::<FolderTab>::new())));
         ui.set_folder_targets(ModelRc::new(VecModel::from(Vec::<FolderTab>::new())));
         ui.set_active_folder("".into());
@@ -392,6 +394,7 @@ pub(crate) fn refresh_folder_tabs(sh: &Shared, ui: &MainWindow) {
             icon: f.icon.as_str().into(),
             unread: n as i32,
             hidden: f.hidden,
+            system: f.is_system(),
         })
         .collect();
     let tabs: Vec<FolderTab> = all
@@ -400,8 +403,13 @@ pub(crate) fn refresh_folder_tabs(sh: &Shared, ui: &MainWindow) {
         .cloned()
         .collect();
     ui.set_folder_tabs(ModelRc::new(VecModel::from(tabs)));
-    ui.set_folder_targets(ModelRc::new(VecModel::from(all)));
+    // В «Спам» руками ничего не кладётся.
+    let targets: Vec<FolderTab> = all.iter().filter(|t| !t.system).cloned().collect();
+    ui.set_folder_targets(ModelRc::new(VecModel::from(targets)));
     ui.set_hidden_folders(st.doc.folders.iter().filter(|f| f.hidden).count() as i32);
+    ui.set_spam_folder_id(
+        st.doc.spam_index().map(|i| st.doc.folders[i].id.as_str()).unwrap_or_default().into(),
+    );
     ui.set_show_hidden_folders(show_hidden);
     let active = sh.active_folder.borrow();
     let active = if st.doc.index_of(&active).is_some() { active.as_str() } else { "" };
@@ -807,6 +815,31 @@ pub(crate) fn wire_sidebar(ui: &MainWindow, shared: &Rc<Shared>) {
             .into(),
         );
         ui.set_confirm_delete_visible(true);
+    });
+
+    // «Не спам» в меню беседы из папки «Спам»: письма — во «Входящие» на
+    // сервере, беседа сразу уходит из списка; следующий список (полный —
+    // движок сбросил отметку) покажет её во «Входящих».
+    let ui_weak_ns = ui.as_weak();
+    let sh_ns = shared.clone();
+    ui.on_conv_not_spam(move |idx| {
+        let Some(ui) = ui_weak_ns.upgrade() else { return };
+        let Some(c) = ctx_conv_index(&ui, &sh_ns, idx)
+            .and_then(|i| sh_ns.convs.borrow().get(i).cloned())
+            .filter(|c| c.spam)
+        else {
+            return;
+        };
+        if let Some(etx) = sh_ns.engine_tx.borrow().as_ref() {
+            println!("not spam: {} ({} messages)", c.id, c.messages.len());
+            let _ = etx.send(engine::EngineCmd::RestoreSpam {
+                messages: c.messages.clone(),
+                account_key: eff_account(&sh_ns.key, &c),
+            });
+        }
+        sh_ns.raw_convs.borrow_mut().retain(|r| !(r.spam && r.id == c.id));
+        folders_ui::reapply_view(&ui, &sh_ns);
+        refresh_folder_tabs(&sh_ns, &ui);
     });
 
     // «Спам» in the chat header: blacklist the counterpart's domain and

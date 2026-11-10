@@ -43,6 +43,22 @@ class SessionApi(
     suspend fun conversationsDelta(sinceMs: Long, limit: Int = 5000): ConversationsDelta =
         get("/conversations?limit=$limit&since=${sinceMs.coerceAtLeast(0)}", ConversationsDelta.serializer())
 
+    /**
+     * Беседы из писем, которые сервер счёл спамом, — всегда полный список.
+     * Сервер без `spam=1` отдал бы обычный список; такие беседы спамом не
+     * считаются (флага `spam` у них нет).
+     */
+    suspend fun spamConversations(limit: Int = 2000): List<ConversationDto> =
+        get("/conversations?spam=1&limit=$limit", ListSerializer(ConversationDto.serializer())).filter { it.spam }
+
+    /** «Не спам»: письма — во «Входящие». Сколько вернулось. */
+    suspend fun restoreSpam(refs: List<MessageRef>): Int {
+        val msgs = JsonArray(refs.map { JsonObject(mapOf("uid" to JsonPrimitive(it.uid), "message_id" to JsonPrimitive(it.messageId))) })
+        val body = write("POST", "/spam/restore", JsonObject(mapOf("messages" to msgs)).toString())
+        val obj = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(body) as? JsonObject }.getOrNull()
+        return (obj?.get("restored") as? JsonPrimitive)?.content?.toIntOrNull() ?: 0
+    }
+
     suspend fun changes(since: Long): ChangesResponse =
         get("/changes?since=${since.coerceAtLeast(0)}", ChangesResponse.serializer())
 

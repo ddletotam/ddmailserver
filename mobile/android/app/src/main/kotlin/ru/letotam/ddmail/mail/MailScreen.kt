@@ -199,7 +199,7 @@ fun MailScreen(
         val convOnly = !wide && selected != null
         if (q != null && !convOnly) SearchBar(q!!, onChange = { vm.query.value = it }, onClose = { vm.query.value = null })
         else if (!ime) {
-            if (!convOnly) TopBar(session, status, syncing, onSearch = { vm.query.value = "" }, onSettings = { settingsOpen = true }, onLogout = onLogout)
+            if (!convOnly) TopBar(session, status, syncing, onSearch = { vm.query.value = "" }, onSpam = vm::openSpam, onSettings = { settingsOpen = true }, onLogout = onLogout)
             if (status == SessionStatus.Dead) DeadSessionBanner(onRelogin)
         }
         if (wide) {
@@ -218,7 +218,7 @@ fun MailScreen(
 }
 
 @Composable
-private fun TopBar(session: Session, status: SessionStatus, syncing: Boolean, onSearch: () -> Unit, onSettings: () -> Unit, onLogout: () -> Unit) {
+private fun TopBar(session: Session, status: SessionStatus, syncing: Boolean, onSearch: () -> Unit, onSpam: () -> Unit, onSettings: () -> Unit, onLogout: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 2.dp),
@@ -244,6 +244,11 @@ private fun TopBar(session: Session, status: SessionStatus, syncing: Boolean, on
         Box {
             IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "Меню") }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                // Папка «Спам» скрыта всегда (таба нет) — вход только отсюда.
+                DropdownMenuItem(leadingIcon = { Icon(Icons.Filled.Report, null) }, text = { Text("Спам") }, onClick = {
+                    menu = false
+                    onSpam()
+                })
                 DropdownMenuItem(leadingIcon = { Icon(Icons.Filled.Settings, null) }, text = { Text("Настройки") }, onClick = {
                     menu = false
                     onSettings()
@@ -280,6 +285,21 @@ private fun SelectionBar(n: Int, vm: MailViewModel, onMove: () -> Unit, onDelete
         IconButton(onClick = { vm.markPicked(false) }) { Icon(Icons.Filled.MarkEmailUnread, "Непрочитано") }
         IconButton(onClick = onMove) { Icon(Icons.AutoMirrored.Filled.DriveFileMove, "В папку") }
         IconButton(onClick = onDelete) { Icon(Icons.Filled.Delete, "Удалить", tint = MaterialTheme.colorScheme.error) }
+    }
+}
+
+/** Выбор в папке «Спам»: действие одно — «Не спам» (письма во «Входящие»). */
+@Composable
+private fun SpamSelectionBar(n: Int, vm: MailViewModel) {
+    Row(
+        Modifier.fillMaxWidth().background(Color(0xFFE9EDF1)).padding(horizontal = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = vm::clearPicks) { Icon(Icons.Filled.Close, "Снять выбор") }
+        Text("$n", fontWeight = FontWeight.SemiBold, maxLines = 1)
+        Spacer(Modifier.weight(1f))
+        IconButton(onClick = vm::pickAll) { Icon(Icons.Filled.SelectAll, "Выбрать все") }
+        IconButton(onClick = vm::notSpamPicked) { Icon(Icons.Filled.MoveToInbox, "Не спам") }
     }
 }
 
@@ -375,7 +395,9 @@ private fun ListPane(
 ) {
     Column(modifier) {
         // На время выбора панель действий заменяет полосу табов (§5).
-        if (picked.isEmpty()) FolderTabs(s, vm::selectFolder) else SelectionBar(picked.size, vm, onMove, onDelete)
+        if (picked.isEmpty()) FolderTabs(s, vm::selectFolder)
+        else if (s.inSpam) SpamSelectionBar(picked.size, vm)
+        else SelectionBar(picked.size, vm, onMove, onDelete)
         HorizontalDivider()
         // Крутится только по жесту: фоновые синки показывает строка под заголовком.
         val pulling by vm.pulling.collectAsState()
@@ -383,7 +405,11 @@ private fun ListPane(
         PullToRefreshBox(isRefreshing = pulling, onRefresh = vm::pullRefresh, modifier = Modifier.fillMaxSize()) {
             if (s.loaded && s.conversations.isEmpty() && !syncing) {
                 Text(
-                    if (vm.query.value != null) "Ничего не нашлось." else stringResource(if (s.active == null) R.string.list_empty_inbox else R.string.list_empty_folder),
+                    when {
+                        vm.query.value != null -> "Ничего не нашлось."
+                        s.inSpam -> "Спама нет."
+                        else -> stringResource(if (s.active == null) R.string.list_empty_inbox else R.string.list_empty_folder)
+                    },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(24.dp),
                 )
@@ -392,7 +418,8 @@ private fun ListPane(
                 items(s.conversations, key = { it.accountKey + "\u0000" + it.id }) { c ->
                     val inPick = c.id in picked
                     SwipeRow(
-                        enabled = picked.isEmpty(),
+                        // В «Спам» жестов нет: там только смотрят и «Не спам».
+                        enabled = picked.isEmpty() && !s.inSpam,
                         unread = c.unreadCount > 0,
                         onRight = { vm.toggleRead(c.id) },
                         onLeft = {

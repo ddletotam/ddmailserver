@@ -285,6 +285,7 @@ mod conv_search_tests {
             draft: None,
             account_key: String::new(),
             merged: false,
+            spam: false,
         }
     }
 
@@ -434,8 +435,9 @@ pub(crate) fn wire_search(ui: &MainWindow, shared: &Rc<Shared>) {
                     .unwrap_or_default();
                 // По всем диалогам, а не по выбранной папке: поиск папок не
                 // знает, найденное в другой папке открывается переходом в неё.
-                let hits =
-                    local_search_convs(&full_view(&sh_typed), &subjects, &sh_typed.key, &q_lc);
+                // Спам в поиск не попадает: он виден только в папке «Спам».
+                let ham: Vec<_> = full_view(&sh_typed).into_iter().filter(|c| !c.spam).collect();
+                let hits = local_search_convs(&ham, &subjects, &sh_typed.key, &q_lc);
                 let local = local_search_contacts(
                     &sh_typed.contacts.address_book.borrow(),
                     &conv_hit_addrs(&hits),
@@ -487,6 +489,7 @@ pub(crate) fn wire_search(ui: &MainWindow, shared: &Rc<Shared>) {
         let target_lc = contact.email.to_lowercase();
         let best = full_view(&sh_sel_c)
             .into_iter()
+            .filter(|c| !c.spam)
             .filter(|c| {
                 c.counterparts
                     .first()

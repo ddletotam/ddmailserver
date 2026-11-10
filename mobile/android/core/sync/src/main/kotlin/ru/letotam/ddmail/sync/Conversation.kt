@@ -17,6 +17,8 @@ data class Conversation(
     val unreadCount: Int,
     val totalCount: Int,
     val messages: List<MessageRef>,
+    /** Из спама: место — только системная папка «Спам» (её состав задаёт сервер). */
+    val spam: Boolean = false,
 )
 
 /** Ключ ручного назначения в папку — как `MergeKey` десктопа. */

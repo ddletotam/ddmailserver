@@ -37,6 +37,8 @@ data class ConversationDto(
     val messages: List<MessageRef> = emptyList(),
     /** Миллисекунды, часы сервера. */
     @SerialName("updated_at") val updatedAt: Long = 0,
+    /** Беседа из спама (`/conversations?spam=1`): место ей — только папка «Спам». */
+    val spam: Boolean = false,
 )
 
 /** `/conversations?since=` — изменившиеся беседы и водяной знак часов сервера. */

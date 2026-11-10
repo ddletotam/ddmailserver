@@ -309,8 +309,8 @@ func (db *DB) GetDisabledSpamChecksMap(userID int64) (map[string]bool, error) {
 
 // MarkMessageAsSpam marks a message as spam
 func (db *DB) MarkMessageAsSpam(messageID int64, ruleID *int64) error {
-	query := `UPDATE messages SET is_spam = true, spam_rule_id = $1 WHERE id = $2`
-	_, err := db.Exec(query, ruleID, messageID)
+	query := `UPDATE messages SET is_spam = true, spam_rule_id = $1, updated_at = $3 WHERE id = $2`
+	_, err := db.Exec(query, ruleID, messageID, timeutil.Now())
 	if err != nil {
 		return fmt.Errorf("failed to mark message as spam: %w", err)
 	}
@@ -319,8 +319,8 @@ func (db *DB) MarkMessageAsSpam(messageID int64, ruleID *int64) error {
 
 // UnmarkMessageAsSpam removes spam flag from a message
 func (db *DB) UnmarkMessageAsSpam(messageID int64) error {
-	query := `UPDATE messages SET is_spam = false, spam_rule_id = NULL WHERE id = $1`
-	_, err := db.Exec(query, messageID)
+	query := `UPDATE messages SET is_spam = false, spam_rule_id = NULL, updated_at = $2 WHERE id = $1`
+	_, err := db.Exec(query, messageID, timeutil.Now())
 	if err != nil {
 		return fmt.Errorf("failed to unmark message as spam: %w", err)
 	}
@@ -417,11 +417,14 @@ func (db *DB) RestoreFromSpam(messageID, userID int64) error {
 	// Update message: remove spam flag, move to inbox
 	query := `
 		UPDATE messages
-		SET is_spam = false, spam_rule_id = NULL, folder_id = $1, uid = $2
+		SET is_spam = false, spam_rule_id = NULL, folder_id = $1, uid = $2, updated_at = $5
 		WHERE id = $3 AND user_id = $4
 	`
 
-	result, err := db.Exec(query, folder.ID, nextUID, messageID, userID)
+	// updated_at обязателен: по нему дельта /conversations?since= узнаёт, что
+	// беседа изменилась. Без него восстановленное письмо появлялось у
+	// клиентов только на суточном полном синке.
+	result, err := db.Exec(query, folder.ID, nextUID, messageID, userID, timeutil.Now())
 	if err != nil {
 		return fmt.Errorf("failed to restore message from spam: %w", err)
 	}
@@ -584,4 +587,34 @@ func (db *DB) GetDomainStats(userID int64, domain string) (totalMessages int, sp
 		return 0, 0, fmt.Errorf("failed to get domain stats: %w", err)
 	}
 	return totalMessages, spamMessages, nil
+}
+
+// GetSpamMessagesMeta returns the user's live spam messages, newest first,
+// without body/body_html — the source of the clients' «Спам» folder. Column
+// list matches GetMessagesByFolderMeta so scanMessages reads it.
+func (db *DB) GetSpamMessagesMeta(userID int64, limit int) ([]*models.Message, error) {
+	query := `
+		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
+		       date, '' AS body, '' AS body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
+		       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
+		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at
+		FROM messages
+		WHERE user_id = $1 AND is_spam = true
+		      AND deleted = false AND (soft_deleted = false OR soft_deleted IS NULL)
+		ORDER BY date DESC
+		LIMIT $2
+	`
+	rows, err := db.Query(query, userID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get spam messages: %w", err)
+	}
+	defer rows.Close()
+	messages, err := scanMessages(rows)
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan spam messages: %w", err)
+	}
+	for _, m := range messages {
+		m.IsSpam = true
+	}
+	return messages, nil
 }

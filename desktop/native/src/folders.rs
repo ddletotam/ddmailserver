@@ -23,6 +23,9 @@ use serde::{Deserialize, Serialize};
 use crate::merges::MergeKey;
 use crate::sidebar::conv_merge_key;
 
+/// `Folder::system` системной папки «Спам».
+pub const SYSTEM_SPAM: &str = "spam";
+
 /// 1:1 или группа.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -106,8 +109,19 @@ pub struct Folder {
     /// «Письма сразу прочитаны»: новые письма её диалогов сразу помечаются
     /// прочитанными (и на сервере). Уже лежавшие не трогаются.
     pub auto_read: bool,
+    /// Системная папка (`SYSTEM_SPAM` — «Спам»): состав задаёт сервер, а не
+    /// правила и не руки; её нельзя удалить, настроить и показать в полосе
+    /// без «Показать скрытые». Пусто — обычная папка.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub system: String,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Folder {
+    pub fn is_system(&self) -> bool {
+        !self.system.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -131,13 +145,79 @@ impl FoldersDoc {
         self.folders.iter().position(|f| f.id == id)
     }
 
+    /// Индекс системной папки «Спам».
+    pub fn spam_index(&self) -> Option<usize> {
+        self.folders.iter().position(|f| f.system == SYSTEM_SPAM)
+    }
+
     /// Папка диалога: индекс в `folders` или `None` — инбокс.
+    ///
+    /// Спам — только в «Спам», и ничто другое туда не попадает. Спам без
+    /// папки «Спам» тоже даёт `None`, но в инбокс его не пускают `filter` и
+    /// `unread_counts` — он не виден нигде.
     pub fn folder_of(&self, c: &Conversation, fallback: &str) -> Option<usize> {
+        if c.spam {
+            return self.spam_index();
+        }
         let key = conv_merge_key(fallback, c);
-        if let Some(i) = self.folders.iter().position(|f| f.include.contains(&key)) {
+        if let Some(i) =
+            self.folders.iter().position(|f| !f.is_system() && f.include.contains(&key))
+        {
             return Some(i);
         }
-        self.folders.iter().position(|f| !f.exclude.contains(&key) && f.rules.matches(c))
+        self.folders
+            .iter()
+            .position(|f| !f.is_system() && !f.exclude.contains(&key) && f.rules.matches(c))
+    }
+
+    /// Привести системную папку «Спам» к виду: `on` — она есть ровно одна,
+    /// скрыта, без правил и ручных назначений; иначе (сервера ddmail нет —
+    /// спама взять неоткуда) её нет. Порядок и имя, если их сдвинули другим
+    /// клиентом, не трогаем. `true` — документ изменился.
+    pub fn ensure_spam(&mut self, on: bool) -> bool {
+        let before = self.clone();
+        if !on {
+            self.folders.retain(|f| f.system != SYSTEM_SPAM);
+            return *self != before;
+        }
+        let mut seen = false;
+        self.folders.retain(|f| {
+            if f.system != SYSTEM_SPAM {
+                return true;
+            }
+            let keep = !seen;
+            seen = true;
+            keep
+        });
+        match self.spam_index() {
+            Some(i) => {
+                let f = &mut self.folders[i];
+                f.hidden = true;
+                f.auto_read = false;
+                f.rules = Rules::default();
+                f.include.clear();
+                f.exclude.clear();
+                if f.name.trim().is_empty() {
+                    f.name = "Спам".into();
+                }
+            }
+            None => {
+                let id = if self.index_of(SYSTEM_SPAM).is_none() {
+                    SYSTEM_SPAM.to_string()
+                } else {
+                    self.new_id()
+                };
+                self.folders.push(Folder {
+                    id,
+                    name: "Спам".into(),
+                    icon: "🚫".into(),
+                    hidden: true,
+                    system: SYSTEM_SPAM.into(),
+                    ..Default::default()
+                });
+            }
+        }
+        *self != before
     }
 
     /// Положить диалог в папку `target` руками (`None` — в инбокс).
@@ -147,6 +227,11 @@ impl FoldersDoc {
     /// «Убрать из папки» у диалога, подходящего под правила, ничего бы не
     /// меняло, а перенос из папки-по-правилам в ручную зависел бы от порядка.
     pub fn assign(&mut self, c: &Conversation, fallback: &str, target: Option<usize>) {
+        // Спам из «Спам» руками не выносится («Не спам» — это сервер), и
+        // руками в «Спам» ничего не кладётся.
+        if c.spam || target.is_some_and(|i| self.folders.get(i).is_none_or(|f| f.is_system())) {
+            return;
+        }
         let key = conv_merge_key(fallback, c);
         for (i, f) in self.folders.iter_mut().enumerate() {
             f.include.retain(|k| k != &key);
@@ -185,6 +270,7 @@ pub fn unread_counts(doc: &FoldersDoc, convs: &[Conversation], fallback: &str) -
     for c in convs.iter().filter(|c| c.unread_count > 0) {
         match doc.folder_of(c, fallback) {
             Some(i) => out[i] += 1,
+            None if c.spam => {}
             None => inbox += 1,
         }
     }
@@ -208,7 +294,7 @@ pub fn filter(
             let f = *memo
                 .entry((key.account.clone(), key.id.clone()))
                 .or_insert_with(|| doc.folder_of(c, fallback));
-            f == active
+            f == active && (f.is_some() || !c.spam)
         })
         .cloned()
         .collect()
@@ -233,6 +319,15 @@ pub struct Stored {
     pub store: Store,
     pub version: i64,
     pub doc: FoldersDoc,
+}
+
+impl Stored {
+    /// Папка «Спам» есть, только пока папки хранит сервер ddmail: спам
+    /// приходит только с него. Звать после каждой замены `doc` или `store`.
+    pub fn normalize(&mut self) -> bool {
+        let on = matches!(self.store, Store::Server { .. });
+        self.doc.ensure_spam(on)
+    }
 }
 
 fn path() -> Option<PathBuf> {
@@ -264,7 +359,9 @@ fn path() -> Option<PathBuf> {
 pub fn load() -> Stored {
     let Some(path) = path() else { return Stored::default() };
     let Ok(bytes) = fs::read(&path) else { return Stored::default() };
-    serde_json::from_slice::<Stored>(&bytes).unwrap_or_default()
+    let mut st = serde_json::from_slice::<Stored>(&bytes).unwrap_or_default();
+    st.normalize();
+    st
 }
 
 pub fn save(s: &Stored) {
@@ -302,6 +399,7 @@ mod tests {
             draft: None,
             account_key: "me@host".into(),
             merged: false,
+            spam: false,
         }
     }
 
@@ -408,6 +506,75 @@ mod tests {
         assert_eq!(ids(filter(&doc, &all, "", Some(0))), vec!["a", "b"]);
         assert_eq!(ids(filter(&doc, &all, "", None)), vec!["g"]);
         assert_eq!(unread_counts(&doc, &all, ""), (vec![1], 1));
+    }
+
+    #[test]
+    fn spam_lives_only_in_system_folder() {
+        let any_a = Rules { identities: vec!["me@a".into()], ..Default::default() };
+        let mut doc = FoldersDoc { folders: vec![folder("a", any_a)], ..Default::default() };
+        let mut spam = conv("spam:me@a|bad@x", "me@a", &["bad@x"], false);
+        spam.spam = true;
+        spam.unread_count = 1;
+        let mut ham = conv("me@a|bob@b", "me@a", &["bob@b"], false);
+        ham.unread_count = 1;
+        let all = vec![spam.clone(), ham.clone()];
+        let ids = |v: Vec<Conversation>| v.into_iter().map(|c| c.id).collect::<Vec<_>>();
+
+        // Папки «Спам» нет (сервер ddmail не подключён) — спама не видно
+        // нигде, даже если правила обычной папки его ловят.
+        assert_eq!(doc.folder_of(&spam, ""), None);
+        assert_eq!(ids(filter(&doc, &all, "", None)), Vec::<String>::new());
+        assert_eq!(ids(filter(&doc, &all, "", Some(0))), vec!["me@a|bob@b"]);
+        assert_eq!(unread_counts(&doc, &all, ""), (vec![1], 0));
+
+        assert!(doc.ensure_spam(true));
+        let si = doc.spam_index().unwrap();
+        assert!(doc.folders[si].hidden);
+        assert_eq!(doc.folder_of(&spam, ""), Some(si));
+        assert_eq!(doc.folder_of(&ham, ""), Some(0));
+        assert_eq!(ids(filter(&doc, &all, "", Some(si))), vec!["spam:me@a|bad@x"]);
+        assert_eq!(unread_counts(&doc, &all, ""), (vec![1, 1], 0));
+
+        // Руками ни внутрь, ни наружу.
+        doc.assign(&ham, "", Some(si));
+        assert_eq!(doc.folder_of(&ham, ""), Some(0));
+        doc.assign(&spam, "", None);
+        assert_eq!(doc.folder_of(&spam, ""), Some(si));
+        assert!(doc.folders[si].include.is_empty());
+    }
+
+    #[test]
+    fn ensure_spam_is_idempotent_and_repairs() {
+        let mut doc = FoldersDoc::default();
+        assert!(doc.ensure_spam(true));
+        assert!(!doc.ensure_spam(true), "второй раз — без изменений");
+        // Другой клиент снял «скрыта» и задублировал папку — чиним.
+        doc.folders[0].hidden = false;
+        let dup = doc.folders[0].clone();
+        doc.folders.push(dup);
+        assert!(doc.ensure_spam(true));
+        assert_eq!(doc.folders.len(), 1);
+        assert!(doc.folders[0].hidden);
+        // Пользовательская папка с id "spam" не мешает: системная берёт другой.
+        let mut doc =
+            FoldersDoc { folders: vec![folder("spam", Rules::default())], ..Default::default() };
+        doc.ensure_spam(true);
+        assert_eq!(doc.folders.len(), 2);
+        assert_ne!(doc.folders[1].id, "spam");
+        // Без сервера ddmail системной папки нет, обычная остаётся.
+        assert!(doc.ensure_spam(false));
+        assert_eq!(doc.folders.len(), 1);
+        assert_eq!(doc.folders[0].id, "spam");
+    }
+
+    #[test]
+    fn system_field_roundtrips_and_is_absent_for_plain_folders() {
+        let mut doc =
+            FoldersDoc { folders: vec![folder("a", Rules::default())], ..Default::default() };
+        assert!(doc.to_value()["folders"][0].get("system").is_none());
+        doc.ensure_spam(true);
+        let back = FoldersDoc::from_value(Some(&doc.to_value()));
+        assert_eq!(back.spam_index(), Some(1));
     }
 
     #[test]

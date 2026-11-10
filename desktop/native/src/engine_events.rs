@@ -729,6 +729,50 @@ pub(crate) fn handle_engine_result(ui: &MainWindow, res: engine::EngineResult) {
                 }
             });
         }
+        engine::EngineResult::SpamRestored { restored } => {
+            println!("engine: {restored} messages back from spam");
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                        let _ = etx.send(engine::EngineCmd::FetchConversations {
+                            limit: CONV_FETCH_LIMIT,
+                        });
+                    }
+                }
+            });
+            ui.set_send_confirm_text("✓ Не спам — во «Входящих»".into());
+            ui.set_send_confirm_visible(true);
+            let uiw = ui.as_weak();
+            slint::Timer::single_shot(std::time::Duration::from_millis(2200), move || {
+                if let Some(u) = uiw.upgrade() {
+                    u.set_send_confirm_visible(false);
+                }
+            });
+        }
+        engine::EngineResult::SpamRestoreFailed(e) => {
+            eprintln!("engine: spam restore failed: {e}");
+            // Беседа уже убрана из списка — вернуть её может только сервер.
+            SHARED.with(|s| {
+                if let Some(sh) = s.borrow().as_ref() {
+                    if let Some(etx) = sh.engine_tx.borrow().as_ref() {
+                        let _ = etx.send(engine::EngineCmd::FetchConversations {
+                            limit: CONV_FETCH_LIMIT,
+                        });
+                    }
+                }
+            });
+            toast_window::show(
+                2, // amber
+                0,
+                "Не удалось вернуть из спама",
+                &format!("Причина: {}", e.chars().take(160).collect::<String>()),
+                false,
+                600,
+                || {},
+                || {},
+                || {},
+            );
+        }
         engine::EngineResult::SpamFailed(e) => {
             eprintln!("engine: spam failed: {e}");
             toast_window::show(

@@ -179,6 +179,10 @@ pub struct Conversation {
     /// cache only ever see raw conversations.
     #[serde(skip)]
     pub merged: bool,
+    /// Беседа из спама (сервер ddmail, `/conversations?spam=1`): её место —
+    /// только системная папка «Спам», ни инбокс, ни обычные папки.
+    #[serde(default)]
+    pub spam: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

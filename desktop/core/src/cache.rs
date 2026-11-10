@@ -857,6 +857,7 @@ impl Cache {
                 draft: None,                // Drafts not cached
                 account_key: String::new(), // stamped by the engine on merge
                 merged: false,
+                spam: false,
             });
         }
 

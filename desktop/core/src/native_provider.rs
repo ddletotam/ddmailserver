@@ -286,6 +286,33 @@ impl MailProvider for NativeProvider {
         Ok((resp.conversations, resp.server_now_ms, since > 0))
     }
 
+    async fn fetch_spam_conversations(
+        &self,
+        _our_addrs: &[String],
+        limit: u32,
+    ) -> Result<Option<Vec<Conversation>>, String> {
+        let mut convs: Vec<Conversation> =
+            self.get(&format!("/conversations?spam=1&limit={limit}")).await?;
+        // Сервер ставит флаг сам; старый сервер `spam=1` не знает и отдал бы
+        // обычный список — такой ответ спамом не считаем.
+        convs.retain(|c| c.spam);
+        Ok(Some(convs))
+    }
+
+    async fn restore_spam(&self, messages: &[MessageRef]) -> Result<u32, String> {
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            #[serde(default)]
+            restored: u32,
+        }
+        if messages.is_empty() {
+            return Ok(0);
+        }
+        let body = serde_json::json!({ "messages": messages });
+        let resp: Resp = self.post("/spam/restore", &body).await?;
+        Ok(resp.restored)
+    }
+
     async fn fetch_changes(&self, since: i64) -> Result<Option<ChangesResponse>, String> {
         let resp: ChangesResponse = self.get(&format!("/changes?since={}", since.max(0))).await?;
         Ok(Some(resp))

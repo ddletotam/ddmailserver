@@ -113,4 +113,52 @@ class DialogFoldersTest {
         assertEquals("#fff", f["color"]!!.jsonPrimitive.content)
         assertEquals(1, f["rules"]!!.jsonObject["future"]!!.jsonPrimitive.int)
     }
+
+    // Папка «Спам» — те же случаи, что `spam_lives_only_in_system_folder`
+    // и `ensure_spam_is_idempotent_and_repairs` десктопа.
+    @Test
+    fun spamLivesOnlyInSystemFolder() {
+        val anyA = FolderRules(identities = listOf("me@a"))
+        val bare = FoldersDoc(listOf(folder("a", anyA)))
+        val spam = conv("spam:me@a|bad@x", "me@a", listOf("bad@x"), unread = 1).copy(spam = true)
+        val ham = conv("me@a|bob@b", "me@a", listOf("bob@b"), unread = 1)
+        val all = listOf(spam, ham)
+
+        // Без папки «Спам» спама не видно нигде, даже если правила его ловят.
+        assertNull(bare.folderOf(spam))
+        assertEquals(emptyList<String>(), bare.filter(all, null).map { it.id })
+        assertEquals(listOf(1) to 0, bare.unreadCounts(all))
+
+        val doc = bare.withSpam()
+        val si = doc.spamIndex!!
+        assertTrue(doc.folders[si].hidden)
+        assertEquals(si, doc.folderOf(spam))
+        assertEquals(0, doc.folderOf(ham))
+        assertEquals(listOf("spam:me@a|bad@x"), doc.filter(all, si).map { it.id })
+        assertEquals(listOf(1, 1) to 0, doc.unreadCounts(all))
+
+        // Руками ни внутрь, ни наружу.
+        assertEquals(0, doc.assign(listOf(ham), si).folderOf(ham))
+        assertEquals(si, doc.assign(listOf(spam), null).folderOf(spam))
+    }
+
+    @Test
+    fun withSpamIsIdempotentRepairsAndRoundtrips() {
+        val once = FoldersDoc().withSpam()
+        assertEquals(once.folders, once.withSpam().folders)
+        // Другой клиент снял «скрыта» и задублировал — чиним.
+        val broken = once.copy(folders = once.folders.map { it.copy(hidden = false) } + once.folders)
+        val fixed = broken.withSpam()
+        assertEquals(1, fixed.folders.size)
+        assertTrue(fixed.folders[0].hidden)
+        // Через JSON — та же системная папка.
+        val back = FoldersDoc.parse(Json.parseToJsonElement(once.toJson().toString()))
+        assertEquals(SYSTEM_SPAM, back.folders[0].system)
+        assertEquals(0, back.spamIndex)
+        // Пользовательская папка с id "spam" не мешает.
+        val clash = FoldersDoc(listOf(folder("spam"))).withSpam()
+        assertEquals(2, clash.folders.size)
+        assertTrue(clash.folders[1].id != "spam")
+        assertNull(clash.folderOf(conv("x", "me@a", listOf("x@y"))))
+    }
 }

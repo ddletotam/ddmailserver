@@ -1070,6 +1070,9 @@ type DesktopConversation struct {
 	// Max updated_at (ms, server clock) across the conversation's messages —
 	// drives the ?since= delta below: flag changes bump it too.
 	UpdatedAt int64 `json:"updated_at"`
+	// Беседа из спама (?spam=1). Её место — только системная папка «Спам»
+	// клиента; id таких бесед начинается с "spam:" и с обычными не пересекается.
+	Spam bool `json:"spam,omitempty"`
 }
 
 type msgEntry struct {
@@ -1112,8 +1115,6 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 	}
 
 	identities := s.collectIdentities(user.ID)
-	isOurs := func(addr string) bool { return identities[strings.ToLower(addr)] }
-
 	// Per-folder fetch mirroring the IMAP fallback path: pull recent rows from
 	// INBOX/Sent/Drafts the user is subscribed to. Trash/Spam/Archive stay
 	// invisible in the chat list, and an unsubscribed-from inbox of a second
@@ -1153,6 +1154,22 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 		sortedIdentities = append(sortedIdentities, id)
 	}
 	sort.Strings(sortedIdentities)
+	cc := convContext{
+		identities:       identities,
+		sortedIdentities: sortedIdentities,
+		accountEmail:     accountEmail,
+		folderNames:      folderNames,
+		folderAccount:    folderAccount,
+		sentFolderIDs:    sentFolderIDs,
+	}
+
+	// ?spam=1 — беседы из писем, которые сервер счёл спамом (папка «Спам»
+	// клиентов). Всегда полный список, без дельты: журнал изменений считает
+	// спам удалением (043), и дельта сама убрала бы эти беседы из кэша.
+	if r.URL.Query().Get("spam") == "1" {
+		s.respondSpamConversations(w, user.ID, limit, cc)
+		return
+	}
 
 	type folderQuota struct {
 		id    int64
@@ -1201,323 +1218,7 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	// Диалог опознаётся набором участвующих адресов, и только им. Кто из них
-	// отправитель, кто в «Кому», кто в копии — для ключа не важно: набор тот же,
-	// значит это тот же диалог. Меняется набор — меняется диалог.
-	//
-	// Bcc в набор не входит: он виден только на своей копии в «Отправленных»,
-	// ответ собеседника его не принесёт, и письмо повисло бы в наборе, куда
-	// никто не может ответить. `parseRecipientAddrs` и так читает только To/Cc.
-	//
-	// Ключ обязан совпадать с десктопным (`desktop/core/src/imap.rs`): один и
-	// тот же почтовый ящик может приехать и отсюда, и по IMAP напрямую.
-	type convMeta struct {
-		entries      []msgEntry
-		participants []string // canonical sorted unique visible addresses
-	}
-	convMap := make(map[string]*convMeta)
-
-	for _, msg := range messages {
-		fromLc := strings.ToLower(extractEmail(msg.From))
-		fname := folderNames[msg.FolderID]
-
-		seen := map[string]bool{}
-		participants := []string{}
-		add := func(a string) {
-			a = strings.ToLower(strings.TrimSpace(a))
-			if a == "" || seen[a] {
-				return
-			}
-			seen[a] = true
-			participants = append(participants, a)
-		}
-		add(fromLc)
-		for _, r := range parseRecipientAddrs(msg.To, msg.Cc) {
-			add(r)
-		}
-		if len(participants) == 0 {
-			continue
-		}
-		// Нашего адреса в видимых участниках может не быть вовсе: доставка по
-		// bcc, срезанные заголовки, письмо, восстановленное из спама. Но
-		// участником переписки мы при этом остаёмся — это просто не написано
-		// в заголовках. Адрес, которым письмо принято, добавляем сами, иначе
-		// набор входящего ({bob}) не совпадает с набором нашего ответа
-		// ({me, bob}), и одна переписка разъезжается на два диалога: в одном
-		// входящие, в другом — своё же отправленное, и рядом с письмом его не
-		// видно. На живом кэше так разъехались 73 диалога из 397.
-		//
-		// Источник адреса — аккаунт письма, затем аккаунт его папки; та же
-		// цепочка, которой ниже разрешается айдентика для ответа (`myID`), и
-		// только адрес, который действительно наш.
-		ourHere := false
-		for _, a := range participants {
-			if isOurs(a) {
-				ourHere = true
-				break
-			}
-		}
-		if !ourHere {
-			own := ""
-			if e, ok := accountEmail[msg.AccountID]; ok && identities[e] {
-				own = e
-			}
-			if own == "" {
-				if accID, ok := folderAccount[msg.FolderID]; ok {
-					if e, ok := accountEmail[accID]; ok && identities[e] {
-						own = e
-					}
-				}
-			}
-			if own != "" {
-				add(own)
-			}
-		}
-		sort.Strings(participants)
-
-		key := strings.Join(participants, ",")
-		meta, ok := convMap[key]
-		if !ok {
-			meta = &convMeta{participants: participants}
-			convMap[key] = meta
-		}
-		meta.entries = append(meta.entries, msgEntry{msg: msg, folderName: fname})
-	}
-
-	// Build conversation objects
-	convs := []DesktopConversation{}
-
-	for _, meta := range convMap {
-		entries := meta.entries
-		// Sort by date ascending
-		sortEntriesByDate(entries)
-
-		// Dedup by message_id (prefer Sent copy)
-		entries = dedupEntries(entries, sentFolderIDs)
-
-		// Separate drafts
-		regular := []msgEntry{}
-		var lastDraft *msgEntry
-		for i := range entries {
-			if entries[i].msg.Draft {
-				lastDraft = &entries[i]
-			} else {
-				regular = append(regular, entries[i])
-			}
-		}
-
-		// Drafts never start a conversation on their own. They're useful only
-		// to resume composition for a thread that already exists (regular
-		// messages present). A draft-only conv would render with empty
-		// messages[] and pollute the sidebar with what's effectively a
-		// scratch buffer.
-		if len(regular) == 0 {
-			continue
-		}
-
-		// Stats from regular messages
-		unread := 0
-		var maxUpdated int64
-		var firstMsg, lastMsg *msgEntry
-		for i := range regular {
-			if !regular[i].msg.Seen {
-				unread++
-			}
-			if regular[i].msg.UpdatedAt > maxUpdated {
-				maxUpdated = regular[i].msg.UpdatedAt
-			}
-			if firstMsg == nil {
-				firstMsg = &regular[i]
-			}
-			lastMsg = &regular[i]
-		}
-		if lastDraft != nil && lastDraft.msg.UpdatedAt > maxUpdated {
-			maxUpdated = lastDraft.msg.UpdatedAt
-		}
-		if lastMsg == nil && lastDraft != nil {
-			lastMsg = lastDraft
-		}
-		if firstMsg == nil {
-			firstMsg = lastMsg
-		}
-
-		// Роли внутри диалога. Ключ ролей не знает — он множество адресов; но
-		// показать надо одного собеседника, а отвечать с одной айдентики.
-		mine := []string{}
-		others := []string{}
-		for _, a := range meta.participants {
-			if isOurs(a) {
-				mine = append(mine, a)
-			} else {
-				others = append(others, a)
-			}
-		}
-
-		var cpAddrs []string
-		var myID string
-		if len(others) > 0 {
-			cpAddrs = others
-			// Айдентика — та, что участвовала в первом письме: с неё писали или
-			// ей адресовали. Первое, а не последнее: диалог принадлежит адресу,
-			// на котором начался.
-			firstFrom := strings.ToLower(extractEmail(firstMsg.msg.From))
-			if isOurs(firstFrom) {
-				myID = firstFrom
-			} else {
-				for _, r := range parseRecipientAddrs(firstMsg.msg.To, firstMsg.msg.Cc) {
-					if isOurs(r) {
-						myID = r
-						break
-					}
-				}
-			}
-			if myID == "" && len(mine) > 0 {
-				myID = mine[0]
-			}
-			if myID == "" {
-				// Меня в видимых адресах нет: доставка по bcc, срезанные
-				// заголовки, письмо восстановленное из спама. Цепочка, которая
-				// никогда не возвращает случайную айдентику.
-				if e, ok := accountEmail[firstMsg.msg.AccountID]; ok && identities[e] {
-					myID = e
-				}
-			}
-			if myID == "" {
-				if accID, ok := folderAccount[firstMsg.msg.FolderID]; ok {
-					if e, ok := accountEmail[accID]; ok && identities[e] {
-						myID = e
-					}
-				}
-			}
-			if myID == "" && len(sortedIdentities) > 0 {
-				myID = sortedIdentities[0]
-			}
-		} else {
-			// Все адреса набора — мои (письмо с одной своей айдентики на
-			// другую). Логика тупая и на том держится: собеседник тот, чьё
-			// письмо первое, оставшийся адрес — айдентика. Письмо самому себе
-			// на тот же адрес даёт один адрес в обеих ролях.
-			cp := strings.ToLower(extractEmail(firstMsg.msg.From))
-			found := false
-			for _, a := range meta.participants {
-				if a == cp {
-					found = true
-					break
-				}
-			}
-			if !found {
-				cp = meta.participants[0]
-			}
-			cpAddrs = []string{cp}
-			myID = cp
-			for _, a := range meta.participants {
-				if a != cp {
-					myID = a
-					break
-				}
-			}
-		}
-
-		// Resolve display names for each counterpart from any message in the
-		// thread that referenced them (From for incoming, To/Cc names for
-		// outgoing). First match wins. Anything that looks like a raw address
-		// is dropped — those are useless as labels.
-		cpInfos := make([]DesktopContactInfo, 0, len(cpAddrs))
-		for _, addr := range cpAddrs {
-			cpInfos = append(cpInfos, DesktopContactInfo{Addr: addr, Name: nameForAddr(entries, addr)})
-		}
-
-		isGroup := len(others) > 1
-
-		// id — функция набора и только набора: один и тот же набор адресов всегда
-		// даёт один и тот же id, кто бы кому ни писал. Формат для «одна моя
-		// айдентика» совпадает со старым байт в байт, поэтому закрепления и
-		// склейки переживают смену схемы; новые формы появляются только там, где
-		// диалога раньше не было вовсе. Должен совпадать с `imap.rs`.
-		//
-		//   одна моя + один чужой   →  "me@a|bob"
-		//   одна моя + несколько    →  "me@a|group:bob,carol"
-		//   две моих + чужие        →  "me@a+me@b|bob"
-		//   только мои              →  "me@a+me@b|self"
-		//   меня в наборе нет (bcc) →  "me@own|bob" — см. ниже
-		mineKey := strings.Join(mine, "+")
-		if mineKey == "" && myID != "" {
-			// Нашего адреса в видимых участниках нет: доставка по bcc,
-			// срезанные заголовки, письмо из спама. Ключ всё равно обязан
-			// принадлежать айдентике, которая эту переписку приняла: в своём
-			// же отправленном ответе наш адрес стоит во `From`, попадает в
-			// `mine` — и без этой подстановки ответ собирался в ОТДЕЛЬНЫЙ
-			// диалог с тем же собеседником, рядом с входящими его не было
-			// видно. На живом кэше так разъехались 73 диалога из 397.
-			mineKey = myID
-		}
-		var label string
-		var id string
-		switch {
-		case len(others) == 0:
-			label = cpInfos[0].Name
-			if label == "" {
-				label = cpInfos[0].Addr
-			}
-			id = fmt.Sprintf("%s|self", mineKey)
-		case isGroup:
-			subject := strings.TrimSpace(firstMsg.msg.Subject)
-			if subject == "" {
-				subject = "(без темы)"
-			}
-			label = fmt.Sprintf("%s (%d чел)", subject, len(meta.participants))
-			id = fmt.Sprintf("%s|group:%s", mineKey, strings.Join(others, ","))
-		default:
-			label = cpInfos[0].Name
-			if label == "" {
-				label = cpInfos[0].Addr
-			}
-			id = fmt.Sprintf("%s|%s", mineKey, strings.Join(others, ","))
-		}
-
-		// Build message refs
-		msgRefs := make([]DesktopMessageRef, 0, len(regular))
-		for _, e := range regular {
-			msgRefs = append(msgRefs, DesktopMessageRef{
-				Folder:    e.folderName,
-				UID:       e.msg.ID,
-				MessageID: e.msg.MessageID,
-				Seen:      e.msg.Seen,
-			})
-		}
-
-		var draftRef *DesktopMessageRef
-		if lastDraft != nil {
-			draftRef = &DesktopMessageRef{
-				Folder:    lastDraft.folderName,
-				UID:       lastDraft.msg.ID,
-				MessageID: lastDraft.msg.MessageID,
-				Seen:      true,
-			}
-		}
-
-		// Avatar: use the first counterpart for both 1:1 and groups (groups
-		// would ideally show a stack but that's UI-side).
-		avatarSeed := cpInfos[0].Addr
-
-		conv := DesktopConversation{
-			ID:           id,
-			Label:        label,
-			AvatarHash:   gravatarHash(avatarSeed),
-			ReceivedBy:   myID,
-			Counterparts: cpInfos,
-			IsGroup:      isGroup,
-			LastDate:     timeutil.FromMs(lastMsg.msg.Date).Format(time.RFC1123Z),
-			LastDateTS:   lastMsg.msg.Date / 1000,
-			LastSubject:  lastMsg.msg.Subject,
-			UnreadCount:  unread,
-			TotalCount:   len(regular),
-			Messages:     msgRefs,
-			Draft:        draftRef,
-			UpdatedAt:    maxUpdated,
-		}
-		convs = append(convs, conv)
-	}
+	convs := groupConversations(messages, cc)
 
 	// Sort by last_date_ts DESC and limit. The limit is applied BEFORE the
 	// since-filter on purpose: the client's world is "top-N by date", so a
@@ -2016,4 +1717,348 @@ func buildRawEmail(from, to, cc, subject, text, html, inReplyTo, references stri
 // buildRawEmailWithThreading is a backward-compatible wrapper (no attachments).
 func buildRawEmailWithThreading(from, to, cc, subject, text, html, inReplyTo, references string) []byte {
 	return buildRawEmail(from, to, cc, subject, text, html, inReplyTo, references, nil)
+}
+
+// convContext — всё, что группировке бесед нужно знать о пользователе: его
+// адреса и откуда у письма «наш» адрес, если в заголовках его нет. Общая для
+// обычного списка и спама, чтобы спам-беседы складывались по тем же правилам.
+type convContext struct {
+	identities       map[string]bool
+	sortedIdentities []string
+	accountEmail     map[int64]string
+	folderNames      map[int64]string
+	folderAccount    map[int64]int64
+	sentFolderIDs    map[int64]bool
+}
+
+// groupConversations складывает письма в беседы. Порядок результата не
+// определён — сортирует вызывающий.
+func groupConversations(messages []*models.Message, cc convContext) []DesktopConversation {
+	identities := cc.identities
+	sortedIdentities := cc.sortedIdentities
+	accountEmail := cc.accountEmail
+	folderNames := cc.folderNames
+	folderAccount := cc.folderAccount
+	sentFolderIDs := cc.sentFolderIDs
+	isOurs := func(addr string) bool { return identities[strings.ToLower(addr)] }
+
+	// Диалог опознаётся набором участвующих адресов, и только им. Кто из них
+	// отправитель, кто в «Кому», кто в копии — для ключа не важно: набор тот же,
+	// значит это тот же диалог. Меняется набор — меняется диалог.
+	//
+	// Bcc в набор не входит: он виден только на своей копии в «Отправленных»,
+	// ответ собеседника его не принесёт, и письмо повисло бы в наборе, куда
+	// никто не может ответить. `parseRecipientAddrs` и так читает только To/Cc.
+	//
+	// Ключ обязан совпадать с десктопным (`desktop/core/src/imap.rs`): один и
+	// тот же почтовый ящик может приехать и отсюда, и по IMAP напрямую.
+	type convMeta struct {
+		entries      []msgEntry
+		participants []string // canonical sorted unique visible addresses
+	}
+	convMap := make(map[string]*convMeta)
+
+	for _, msg := range messages {
+		fromLc := strings.ToLower(extractEmail(msg.From))
+		fname := folderNames[msg.FolderID]
+
+		seen := map[string]bool{}
+		participants := []string{}
+		add := func(a string) {
+			a = strings.ToLower(strings.TrimSpace(a))
+			if a == "" || seen[a] {
+				return
+			}
+			seen[a] = true
+			participants = append(participants, a)
+		}
+		add(fromLc)
+		for _, r := range parseRecipientAddrs(msg.To, msg.Cc) {
+			add(r)
+		}
+		if len(participants) == 0 {
+			continue
+		}
+		// Нашего адреса в видимых участниках может не быть вовсе: доставка по
+		// bcc, срезанные заголовки, письмо, восстановленное из спама. Но
+		// участником переписки мы при этом остаёмся — это просто не написано
+		// в заголовках. Адрес, которым письмо принято, добавляем сами, иначе
+		// набор входящего ({bob}) не совпадает с набором нашего ответа
+		// ({me, bob}), и одна переписка разъезжается на два диалога: в одном
+		// входящие, в другом — своё же отправленное, и рядом с письмом его не
+		// видно. На живом кэше так разъехались 73 диалога из 397.
+		//
+		// Источник адреса — аккаунт письма, затем аккаунт его папки; та же
+		// цепочка, которой ниже разрешается айдентика для ответа (`myID`), и
+		// только адрес, который действительно наш.
+		ourHere := false
+		for _, a := range participants {
+			if isOurs(a) {
+				ourHere = true
+				break
+			}
+		}
+		if !ourHere {
+			own := ""
+			if e, ok := accountEmail[msg.AccountID]; ok && identities[e] {
+				own = e
+			}
+			if own == "" {
+				if accID, ok := folderAccount[msg.FolderID]; ok {
+					if e, ok := accountEmail[accID]; ok && identities[e] {
+						own = e
+					}
+				}
+			}
+			if own != "" {
+				add(own)
+			}
+		}
+		sort.Strings(participants)
+
+		key := strings.Join(participants, ",")
+		meta, ok := convMap[key]
+		if !ok {
+			meta = &convMeta{participants: participants}
+			convMap[key] = meta
+		}
+		meta.entries = append(meta.entries, msgEntry{msg: msg, folderName: fname})
+	}
+
+	// Build conversation objects
+	convs := []DesktopConversation{}
+
+	for _, meta := range convMap {
+		entries := meta.entries
+		// Sort by date ascending
+		sortEntriesByDate(entries)
+
+		// Dedup by message_id (prefer Sent copy)
+		entries = dedupEntries(entries, sentFolderIDs)
+
+		// Separate drafts
+		regular := []msgEntry{}
+		var lastDraft *msgEntry
+		for i := range entries {
+			if entries[i].msg.Draft {
+				lastDraft = &entries[i]
+			} else {
+				regular = append(regular, entries[i])
+			}
+		}
+
+		// Drafts never start a conversation on their own. They're useful only
+		// to resume composition for a thread that already exists (regular
+		// messages present). A draft-only conv would render with empty
+		// messages[] and pollute the sidebar with what's effectively a
+		// scratch buffer.
+		if len(regular) == 0 {
+			continue
+		}
+
+		// Stats from regular messages
+		unread := 0
+		var maxUpdated int64
+		var firstMsg, lastMsg *msgEntry
+		for i := range regular {
+			if !regular[i].msg.Seen {
+				unread++
+			}
+			if regular[i].msg.UpdatedAt > maxUpdated {
+				maxUpdated = regular[i].msg.UpdatedAt
+			}
+			if firstMsg == nil {
+				firstMsg = &regular[i]
+			}
+			lastMsg = &regular[i]
+		}
+		if lastDraft != nil && lastDraft.msg.UpdatedAt > maxUpdated {
+			maxUpdated = lastDraft.msg.UpdatedAt
+		}
+		if lastMsg == nil && lastDraft != nil {
+			lastMsg = lastDraft
+		}
+		if firstMsg == nil {
+			firstMsg = lastMsg
+		}
+
+		// Роли внутри диалога. Ключ ролей не знает — он множество адресов; но
+		// показать надо одного собеседника, а отвечать с одной айдентики.
+		mine := []string{}
+		others := []string{}
+		for _, a := range meta.participants {
+			if isOurs(a) {
+				mine = append(mine, a)
+			} else {
+				others = append(others, a)
+			}
+		}
+
+		var cpAddrs []string
+		var myID string
+		if len(others) > 0 {
+			cpAddrs = others
+			// Айдентика — та, что участвовала в первом письме: с неё писали или
+			// ей адресовали. Первое, а не последнее: диалог принадлежит адресу,
+			// на котором начался.
+			firstFrom := strings.ToLower(extractEmail(firstMsg.msg.From))
+			if isOurs(firstFrom) {
+				myID = firstFrom
+			} else {
+				for _, r := range parseRecipientAddrs(firstMsg.msg.To, firstMsg.msg.Cc) {
+					if isOurs(r) {
+						myID = r
+						break
+					}
+				}
+			}
+			if myID == "" && len(mine) > 0 {
+				myID = mine[0]
+			}
+			if myID == "" {
+				// Меня в видимых адресах нет: доставка по bcc, срезанные
+				// заголовки, письмо восстановленное из спама. Цепочка, которая
+				// никогда не возвращает случайную айдентику.
+				if e, ok := accountEmail[firstMsg.msg.AccountID]; ok && identities[e] {
+					myID = e
+				}
+			}
+			if myID == "" {
+				if accID, ok := folderAccount[firstMsg.msg.FolderID]; ok {
+					if e, ok := accountEmail[accID]; ok && identities[e] {
+						myID = e
+					}
+				}
+			}
+			if myID == "" && len(sortedIdentities) > 0 {
+				myID = sortedIdentities[0]
+			}
+		} else {
+			// Все адреса набора — мои (письмо с одной своей айдентики на
+			// другую). Логика тупая и на том держится: собеседник тот, чьё
+			// письмо первое, оставшийся адрес — айдентика. Письмо самому себе
+			// на тот же адрес даёт один адрес в обеих ролях.
+			cp := strings.ToLower(extractEmail(firstMsg.msg.From))
+			found := false
+			for _, a := range meta.participants {
+				if a == cp {
+					found = true
+					break
+				}
+			}
+			if !found {
+				cp = meta.participants[0]
+			}
+			cpAddrs = []string{cp}
+			myID = cp
+			for _, a := range meta.participants {
+				if a != cp {
+					myID = a
+					break
+				}
+			}
+		}
+
+		// Resolve display names for each counterpart from any message in the
+		// thread that referenced them (From for incoming, To/Cc names for
+		// outgoing). First match wins. Anything that looks like a raw address
+		// is dropped — those are useless as labels.
+		cpInfos := make([]DesktopContactInfo, 0, len(cpAddrs))
+		for _, addr := range cpAddrs {
+			cpInfos = append(cpInfos, DesktopContactInfo{Addr: addr, Name: nameForAddr(entries, addr)})
+		}
+
+		isGroup := len(others) > 1
+
+		// id — функция набора и только набора: один и тот же набор адресов всегда
+		// даёт один и тот же id, кто бы кому ни писал. Формат для «одна моя
+		// айдентика» совпадает со старым байт в байт, поэтому закрепления и
+		// склейки переживают смену схемы; новые формы появляются только там, где
+		// диалога раньше не было вовсе. Должен совпадать с `imap.rs`.
+		//
+		//   одна моя + один чужой   →  "me@a|bob"
+		//   одна моя + несколько    →  "me@a|group:bob,carol"
+		//   две моих + чужие        →  "me@a+me@b|bob"
+		//   только мои              →  "me@a+me@b|self"
+		//   меня в наборе нет (bcc) →  "me@own|bob" — см. ниже
+		mineKey := strings.Join(mine, "+")
+		if mineKey == "" && myID != "" {
+			// Нашего адреса в видимых участниках нет: доставка по bcc,
+			// срезанные заголовки, письмо из спама. Ключ всё равно обязан
+			// принадлежать айдентике, которая эту переписку приняла: в своём
+			// же отправленном ответе наш адрес стоит во `From`, попадает в
+			// `mine` — и без этой подстановки ответ собирался в ОТДЕЛЬНЫЙ
+			// диалог с тем же собеседником, рядом с входящими его не было
+			// видно. На живом кэше так разъехались 73 диалога из 397.
+			mineKey = myID
+		}
+		var label string
+		var id string
+		switch {
+		case len(others) == 0:
+			label = cpInfos[0].Name
+			if label == "" {
+				label = cpInfos[0].Addr
+			}
+			id = fmt.Sprintf("%s|self", mineKey)
+		case isGroup:
+			subject := strings.TrimSpace(firstMsg.msg.Subject)
+			if subject == "" {
+				subject = "(без темы)"
+			}
+			label = fmt.Sprintf("%s (%d чел)", subject, len(meta.participants))
+			id = fmt.Sprintf("%s|group:%s", mineKey, strings.Join(others, ","))
+		default:
+			label = cpInfos[0].Name
+			if label == "" {
+				label = cpInfos[0].Addr
+			}
+			id = fmt.Sprintf("%s|%s", mineKey, strings.Join(others, ","))
+		}
+
+		// Build message refs
+		msgRefs := make([]DesktopMessageRef, 0, len(regular))
+		for _, e := range regular {
+			msgRefs = append(msgRefs, DesktopMessageRef{
+				Folder:    e.folderName,
+				UID:       e.msg.ID,
+				MessageID: e.msg.MessageID,
+				Seen:      e.msg.Seen,
+			})
+		}
+
+		var draftRef *DesktopMessageRef
+		if lastDraft != nil {
+			draftRef = &DesktopMessageRef{
+				Folder:    lastDraft.folderName,
+				UID:       lastDraft.msg.ID,
+				MessageID: lastDraft.msg.MessageID,
+				Seen:      true,
+			}
+		}
+
+		// Avatar: use the first counterpart for both 1:1 and groups (groups
+		// would ideally show a stack but that's UI-side).
+		avatarSeed := cpInfos[0].Addr
+
+		conv := DesktopConversation{
+			ID:           id,
+			Label:        label,
+			AvatarHash:   gravatarHash(avatarSeed),
+			ReceivedBy:   myID,
+			Counterparts: cpInfos,
+			IsGroup:      isGroup,
+			LastDate:     timeutil.FromMs(lastMsg.msg.Date).Format(time.RFC1123Z),
+			LastDateTS:   lastMsg.msg.Date / 1000,
+			LastSubject:  lastMsg.msg.Subject,
+			UnreadCount:  unread,
+			TotalCount:   len(regular),
+			Messages:     msgRefs,
+			Draft:        draftRef,
+			UpdatedAt:    maxUpdated,
+		}
+		convs = append(convs, conv)
+	}
+
+	return convs
 }

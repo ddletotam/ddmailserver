@@ -231,6 +231,7 @@ func (s *Server) setupRoutes() {
 	desktopAuthAPI.HandleFunc("/changes", s.HandleDesktopChanges).Methods("GET")
 	desktopAuthAPI.HandleFunc("/spam/mark-domain", s.HandleDesktopMarkSpamByDomain).Methods("POST")
 	desktopAuthAPI.HandleFunc("/spam/blacklist-and-purge", s.HandleDesktopBlacklistAndPurge).Methods("POST")
+	desktopAuthAPI.HandleFunc("/spam/restore", s.HandleDesktopSpamRestore).Methods("POST")
 	desktopAuthAPI.HandleFunc("/identities", s.HandleDesktopIdentities).Methods("GET")
 	desktopAuthAPI.HandleFunc("/dialog-folders", s.HandleDesktopDialogFolders).Methods("GET")
 	desktopAuthAPI.HandleFunc("/dialog-folders", s.HandleDesktopDialogFoldersSave).Methods("PUT")

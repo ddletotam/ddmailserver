@@ -370,6 +370,11 @@ pub enum EngineCmd {
         message_ids: Vec<i64>,
         account_key: String,
     },
+    /// «Не спам» у беседы из папки «Спам»: письма — во «Входящие».
+    RestoreSpam {
+        messages: Vec<MessageRef>,
+        account_key: String,
+    },
     /// `save_to = None` → в Downloads + автооткрытие (клик по чипу);
     /// `save_to = Some(path)` → в выбранный пользователем файл, без открытия.
     DownloadAttachment {
@@ -590,6 +595,12 @@ pub enum EngineResult {
     },
     /// Spam blacklist-and-purge failed — surfaced to the user (toast).
     SpamFailed(String),
+    /// «Не спам» прошёл: столько писем вернулось во «Входящие».
+    SpamRestored {
+        restored: u32,
+    },
+    /// «Не спам» не прошёл — тост.
+    SpamRestoreFailed(String),
     /// Папки диалогов. `store` — ключ подключения, которое их хранит;
     /// `None` — ни одно не хранит, папки живут в локальном файле.
     DialogFolders {
@@ -795,6 +806,11 @@ const PREFETCH_CHUNK: usize = 16;
 /// может подождать один round-trip пачки, ровно столько же, сколько стоил бы
 /// фон, поймавший простой. Пустая очередь не стоит ничего.
 const PREFETCH_STARVATION: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Пространство кэша для бесед спама подключения `key`.
+fn spam_cache_key(key: &str) -> String {
+    format!("{key}#spam")
+}
 
 /// Пересобрать очередь фоновой догрузки тел по свежему списку бесед.
 ///
@@ -1080,6 +1096,22 @@ pub fn spawn(
                             Err(e) => eprintln!("conversations sync [{}]: {e}", conn.key),
                         }
 
+                        // Спам — отдельный полный список в своём пространстве
+                        // кэша: журнал считает спам удалением, и в общем
+                        // пространстве tombstone'ы стирали бы эти беседы.
+                        // `None` — у источника спама нет (IMAP), кэш не трогаем.
+                        match rt.block_on(conn.provider.fetch_spam_conversations(&our, limit)) {
+                            Ok(Some(convs)) => {
+                                if let Err(e) =
+                                    cache.save_conversations(&spam_cache_key(&conn.key), &convs)
+                                {
+                                    eprintln!("spam conversations save [{}]: {e}", conn.key);
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(e) => eprintln!("spam conversations sync [{}]: {e}", conn.key),
+                        }
+
                         // Identities drive the sidebar row tints. Only the IMAP
                         // path used to persist them, so native mode showed grey
                         // rows whenever the cache lacked a prior IMAP-run's
@@ -1113,8 +1145,20 @@ pub fn spawn(
                     merged.sort_by(|a, b| b.last_date_ts.cmp(&a.last_date_ts));
                     // Синк принёс список — значит, известно и чего не хватает
                     // в кэше тел. Ставим недостающее в фон: к клику по беседе
-                    // всё уже должно лежать на диске.
+                    // всё уже должно лежать на диске. Спам — нет: его
+                    // открывают редко, и тела качаются по клику.
                     refill_body_backlog(&cache, &merged, &mut body_backlog);
+                    for conn in &conns {
+                        let mut convs = cache
+                            .load_conversations(&spam_cache_key(&conn.key))
+                            .unwrap_or_default();
+                        for c in &mut convs {
+                            c.account_key = conn.key.clone();
+                            c.spam = true;
+                        }
+                        merged.extend(convs);
+                    }
+                    merged.sort_by(|a, b| b.last_date_ts.cmp(&a.last_date_ts));
                     on_result(EngineResult::Conversations { list: merged, partial: false });
                 }
                 EngineCmd::FetchMessages { messages, generation, account_key } => {
@@ -1373,6 +1417,22 @@ pub fn spawn(
                             });
                         }
                         Err(e) => on_result(EngineResult::SpamFailed(e)),
+                    }
+                }
+                EngineCmd::RestoreSpam { messages, account_key } => {
+                    let conn = route(&conns, &account_key);
+                    let provider = conn.provider.clone();
+                    let key = conn.key.clone();
+                    match rt.block_on(provider.restore_spam(&messages)) {
+                        Ok(restored) => {
+                            println!("engine: restored {restored} messages from spam");
+                            // Письма вернулись во «Входящие» — следующий список
+                            // берём полным, как после удаления: дельта по
+                            // updated_at старого сервера их не принесла бы.
+                            cache.set_meta(&format!("conv_full_ts:{key}"), "0").ok();
+                            on_result(EngineResult::SpamRestored { restored });
+                        }
+                        Err(e) => on_result(EngineResult::SpamRestoreFailed(e)),
                     }
                 }
                 EngineCmd::DownloadAttachment {
@@ -1891,6 +1951,7 @@ mod tests {
             draft: None,
             account_key: account_key.into(),
             merged: false,
+            spam: false,
         }
     }
 

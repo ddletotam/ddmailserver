@@ -35,7 +35,10 @@ import ru.letotam.ddmail.db.MessageRefEntity
  * 2. `/conversations?since=<watermark>` — дельта; полная выдача (`since=0`)
  *    заменяет набор целиком: на первом запуске, по `reset`, раз в сутки и при
  *    смене [CONV_ID_EPOCH];
- * 3. документ папок диалогов `/dialog-folders` — в кэш (табы видны на
+ * 3. спам `/conversations?spam=1` — всегда полный список, в своё
+ *    пространство кэша ([spamKey]): журнал считает спам удалением, и в общем
+ *    пространстве надгробия стирали бы эти беседы;
+ * 4. документ папок диалогов `/dialog-folders` — в кэш (табы видны на
  *    старте, до ответа сервера).
  *
  * Синхронизации одной учётки не идут параллельно ([lock]).
@@ -48,14 +51,27 @@ class SyncEngine(
 ) {
     private val lock = Mutex()
 
+    /** Пространство кэша бесед спама — как `spam_cache_key` десктопа. */
+    private val spamKey = "$accountKey#spam"
+
+    /** Все беседы учётки, со спамом (`spam = true`); порядок — по дате. */
     val conversations: Flow<List<Conversation>> =
-        combine(dao.observeConversations(accountKey), dao.observeRefs(accountKey)) { convs, refs ->
+        combine(
+            dao.observeConversations(accountKey),
+            dao.observeRefs(accountKey),
+            dao.observeConversations(spamKey),
+            dao.observeRefs(spamKey),
+        ) { convs, refs, spamConvs, spamRefs ->
             val byConv = refs.groupBy { it.conversationId }
-            convs.map { it.toDomain(byConv[it.id].orEmpty()) }
+            val bySpam = spamRefs.groupBy { it.conversationId }
+            val ham = convs.map { it.toDomain(byConv[it.id].orEmpty()) }
+            if (spamConvs.isEmpty()) return@combine ham
+            val spam = spamConvs.map { it.toDomain(bySpam[it.id].orEmpty()).copy(accountKey = accountKey, spam = true) }
+            (ham + spam).sortedByDescending { it.lastDateTs }
         }
 
     val folders: Flow<FoldersDoc> = dao.observeMeta(K_FOLDERS).map { s ->
-        s?.let { runCatching { FoldersDoc.parse(json.parseToJsonElement(it)) }.getOrNull() } ?: FoldersDoc()
+        (s?.let { runCatching { FoldersDoc.parse(json.parseToJsonElement(it)) }.getOrNull() } ?: FoldersDoc()).withSpam()
     }
 
     /** Один проход. Ошибки API уходят наверх ([ru.letotam.ddmail.api.ApiException]). */
@@ -89,6 +105,15 @@ class SyncEngine(
         // Курсор журнала — только после того, как дельта легла: упади она,
         // надгробия этого прохода не потеряются, их отдадут ещё раз.
         if (ch.latestSeq > 0) dao.setMeta(K_SEQ, ch.latestSeq.toString())
+
+        // Спам не повод валить проход: папка «Спам» покажет прошлый список.
+        runCatching { api.spamConversations() }.getOrNull()?.let { list ->
+            dao.replaceAll(
+                spamKey,
+                list.map { it.toEntity().copy(accountKey = spamKey) },
+                list.flatMap { c -> c.messages.map { MessageRefEntity(spamKey, c.id, it.folder, it.uid, it.messageId, it.seen) } },
+            )
+        }
 
         runCatching { api.identities() }.getOrNull()?.let { dao.setMeta(K_IDENTITIES, json.encodeToString(idents, it)) }
 
@@ -157,15 +182,32 @@ class SyncEngine(
     /** Открыли беседу: прочитана локально сразу, на сервере — следом. */
     suspend fun markRead(c: Conversation) {
         val unseen = c.messages.filter { !it.seen }
-        dao.markRead(accountKey, c.id)
+        dao.markRead(cacheKey(c), c.id)
         if (unseen.isNotEmpty()) api.setFlag(unseen, SEEN, add = true)
     }
 
     /** «Непрочитано» — на последнем письме беседы. */
     suspend fun markUnread(c: Conversation) {
         val last = c.messages.maxByOrNull { it.uid } ?: return
-        dao.markUnread(accountKey, c.id, last.uid)
+        dao.markUnread(cacheKey(c), c.id, last.uid)
         api.setFlag(listOf(last), SEEN, add = false)
+    }
+
+    /** Пространство кэша, где лежит беседа. */
+    private fun cacheKey(c: Conversation) = if (c.spam) spamKey else accountKey
+
+    /**
+     * «Не спам» (§5): письма бесед — во «Входящие» на сервере; из «Спам» в
+     * кэше уходят сразу, во «Входящих» появятся со следующим синком (он
+     * полный: дельта старого сервера восстановленных писем не принесла бы).
+     */
+    suspend fun restoreSpam(convs: Collection<Conversation>): Int {
+        val spam = convs.filter { it.spam }
+        if (spam.isEmpty()) return 0
+        val n = spam.flatMap { it.messages }.chunked(200).sumOf { api.restoreSpam(it) }
+        dao.deleteConversations(spamKey, spam.map { it.id })
+        dao.setMeta(K_FULL_TS, "0")
+        return n
     }
 
     /**
@@ -209,7 +251,7 @@ class SyncEngine(
     }
 
     private suspend fun currentFolders(): FoldersDoc =
-        dao.meta(K_FOLDERS)?.let { runCatching { FoldersDoc.parse(json.parseToJsonElement(it)) }.getOrNull() } ?: FoldersDoc()
+        (dao.meta(K_FOLDERS)?.let { runCatching { FoldersDoc.parse(json.parseToJsonElement(it)) }.getOrNull() } ?: FoldersDoc()).withSpam()
 
     /** Цвета строк по группам адресов (контракт §5): из кэша, раз в синк — с сервера. */
     val identityColors: Flow<IdentityColors> = dao.observeMeta(K_IDENT_GROUPS).map { s ->

@@ -44,6 +44,22 @@ pub trait MailProvider: Send + Sync {
         Ok(None)
     }
 
+    /// Беседы из писем, которые сервер счёл спамом, — всегда полный список.
+    /// `Ok(None)` — у источника спама как отдельного вида нет (обычный IMAP:
+    /// там спам — просто папка Junk), папки «Спам» в клиенте не будет.
+    async fn fetch_spam_conversations(
+        &self,
+        _our_addrs: &[String],
+        _limit: u32,
+    ) -> Result<Option<Vec<Conversation>>, String> {
+        Ok(None)
+    }
+
+    /// «Не спам»: вернуть письма из спама во «Входящие». Сколько вернулось.
+    async fn restore_spam(&self, _messages: &[MessageRef]) -> Result<u32, String> {
+        Err("источник не хранит спам".into())
+    }
+
     /// Fetch full message bodies for the given refs.
     async fn fetch_conversation_messages(
         &self,

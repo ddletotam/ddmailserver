@@ -20,6 +20,10 @@ import kotlinx.serialization.json.contentOrNull
  *
  * Неизвестные поля документа и папок переживают чтение и запись: каждый
  * объект держит исходный JSON и при записи меняет в нём только своё.
+ *
+ * Системная папка «Спам» (`system: "spam"`): состав задаёт сервер (беседы с
+ * `spam`), а не правила и не руки; всегда скрыта. Android всегда подключён к
+ * серверу ddmail, поэтому она есть всегда ([withSpam]).
  */
 enum class DialogKind { Any, Direct, Group }
 
@@ -62,18 +66,91 @@ data class DialogFolder(
     val hidden: Boolean,
     /** «Письма сразу прочитаны» — исполняет десктоп (§4). */
     val autoRead: Boolean,
+    /** Системная папка (`SYSTEM_SPAM`); пусто — обычная. */
+    val system: String = "",
     internal val raw: JsonObject = JsonObject(emptyMap()),
-)
+) {
+    val isSystem get() = system.isNotEmpty()
+}
+
+/** `system` папки «Спам». */
+const val SYSTEM_SPAM = "spam"
 
 data class FoldersDoc(
     val folders: List<DialogFolder> = emptyList(),
     internal val raw: JsonObject = JsonObject(emptyMap()),
 ) {
-    /** Индекс папки диалога или `null` — инбокс. */
+    val spamIndex: Int? get() = folders.indexOfFirst { it.system == SYSTEM_SPAM }.takeIf { it >= 0 }
+
+    /**
+     * Индекс папки диалога или `null` — инбокс. Спам — только в «Спам», и
+     * ничто другое туда не попадает; спам без папки «Спам» не виден нигде
+     * ([filter], [unreadCounts]).
+     */
     fun folderOf(c: Conversation): Int? {
+        if (c.spam) return spamIndex
         val k = c.key
-        folders.indexOfFirst { k in it.include }.takeIf { it >= 0 }?.let { return it }
-        return folders.indexOfFirst { k !in it.exclude && it.rules.matches(c) }.takeIf { it >= 0 }
+        folders.indexOfFirst { !it.isSystem && k in it.include }.takeIf { it >= 0 }?.let { return it }
+        return folders.indexOfFirst { !it.isSystem && k !in it.exclude && it.rules.matches(c) }.takeIf { it >= 0 }
+    }
+
+    /**
+     * Папка «Спам» ровно одна, скрыта, без правил и ручных назначений — как
+     * `FoldersDoc::ensure_spam` десктопа. Нет — добавляется в конец (в
+     * документ на сервере она попадёт с первой правкой).
+     */
+    fun withSpam(): FoldersDoc {
+        var seen = false
+        val kept = folders.filter { f -> f.system != SYSTEM_SPAM || !seen.also { seen = true } }
+        val i = kept.indexOfFirst { it.system == SYSTEM_SPAM }
+        val fixed = if (i >= 0) {
+            kept.mapIndexed { j, f ->
+                if (j != i) f else {
+                    val name = f.name.ifBlank { "Спам" }
+                    f.copy(
+                        name = name,
+                        rules = FolderRules(),
+                        include = emptyList(),
+                        exclude = emptyList(),
+                        hidden = true,
+                        autoRead = false,
+                        raw = JsonObject(
+                            f.raw + mapOf(
+                                "name" to JsonPrimitive(name),
+                                "rules" to JsonObject(emptyMap()),
+                                "hidden" to JsonPrimitive(true),
+                                "auto_read" to JsonPrimitive(false),
+                            ),
+                        ),
+                    )
+                }
+            }
+        } else {
+            val id = if (kept.none { it.id == SYSTEM_SPAM }) SYSTEM_SPAM else "f${System.currentTimeMillis().toString(16)}0"
+            kept + DialogFolder(
+                id = id,
+                name = "Спам",
+                icon = "🚫",
+                rules = FolderRules(),
+                include = emptyList(),
+                exclude = emptyList(),
+                hidden = true,
+                autoRead = false,
+                system = SYSTEM_SPAM,
+                raw = JsonObject(
+                    mapOf(
+                        "id" to JsonPrimitive(id),
+                        "name" to JsonPrimitive("Спам"),
+                        "icon" to JsonPrimitive("🚫"),
+                        "rules" to JsonObject(emptyMap()),
+                        "hidden" to JsonPrimitive(true),
+                        "auto_read" to JsonPrimitive(false),
+                        "system" to JsonPrimitive(SYSTEM_SPAM),
+                    ),
+                ),
+            )
+        }
+        return copy(folders = fixed)
     }
 
     /**
@@ -83,8 +160,10 @@ data class FoldersDoc(
      * документа на весь набор — для множественного выбора (§5).
      */
     fun assign(convs: Collection<Conversation>, target: Int?): FoldersDoc {
+        // Руками в «Спам» не кладут и из него не выносят («Не спам» — сервер).
+        if (target != null && folders.getOrNull(target)?.isSystem != false) return this
         var out = folders
-        for (c in convs) {
+        for (c in convs.filter { !it.spam }) {
             val k = c.key
             out = out.mapIndexed { i, f ->
                 val inc = f.include.filter { it != k }.toMutableList()
@@ -98,7 +177,7 @@ data class FoldersDoc(
 
     /** Видимая часть списка для папки [active] (`null` — инбокс); порядок исходный. */
     fun filter(convs: List<Conversation>, active: Int?): List<Conversation> =
-        convs.filter { folderOf(it) == active }
+        convs.filter { c -> folderOf(c).let { it == active && (it != null || !c.spam) } }
 
     /** Диалоги с непрочитанным — по папкам и в инбоксе (как у Telegram: диалоги, не письма). */
     fun unreadCounts(convs: List<Conversation>): Pair<List<Int>, Int> {
@@ -107,7 +186,7 @@ data class FoldersDoc(
         for (c in convs) {
             if (c.unreadCount <= 0) continue
             when (val i = folderOf(c)) {
-                null -> inbox++
+                null -> if (!c.spam) inbox++
                 else -> out[i]++
             }
         }
@@ -145,6 +224,7 @@ data class FoldersDoc(
                 exclude = o.keys("exclude"),
                 hidden = o.bool("hidden"),
                 autoRead = o.bool("auto_read"),
+                system = o.str("system"),
                 raw = o,
             )
         }
