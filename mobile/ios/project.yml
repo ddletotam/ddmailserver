@@ -1,0 +1,59 @@
+# Проект Xcode генерируется отсюда (XcodeGen): `DDMail.xcodeproj` в git не
+# хранится — контракт §1. Сборка — `scripts/mac.sh` на Маке по SSH.
+name: DDMail
+
+options:
+  bundleIdPrefix: ru.letotam
+  deploymentTarget:
+    iOS: "27.0"
+    macOS: "27.0"
+  createIntermediateGroups: true
+  developmentLanguage: ru
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    # Версия бампается при любой правке клиента (контракт §1).
+    MARKETING_VERSION: "0.0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    # Команда подписи не в git: mac.sh берёт её из учётки Xcode на Маке.
+    CODE_SIGN_STYLE: Automatic
+    ALWAYS_SEARCH_USER_PATHS: NO
+
+packages:
+  DDMailKit:
+    path: DDMailKit
+
+targets:
+  DDMail:
+    type: application
+    # `auto` + список назначений — одна цель на iOS/iPadOS и нативный macOS
+    # (не Catalyst, контракт §0).
+    platform: auto
+    supportedDestinations: [iOS, macOS]
+    sources:
+      - path: App
+    dependencies:
+      - package: DDMailKit
+        products: [DDMailAPI]
+    settings:
+      base:
+        # XcodeGen 2.46 оставляет список платформ пустым — задаём явно.
+        SUPPORTED_PLATFORMS: iphoneos iphonesimulator macosx
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        PRODUCT_BUNDLE_IDENTIFIER: ru.letotam.ddmail
+        PRODUCT_NAME: DDMail
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: DDMail
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+        # Mac: песочница, из сети — только исходящие соединения.
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_OUTGOING_NETWORK_CONNECTIONS: YES
+        ENABLE_HARDENED_RUNTIME: YES

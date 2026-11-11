@@ -1,0 +1,6 @@
+# Генерируется из project.yml (XcodeGen), контракт §1
+*.xcodeproj/
+# SwiftPM
+.build/
+.swiftpm/
+Package.resolved
