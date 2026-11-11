@@ -36,6 +36,15 @@ final class LoginFlowTests: XCTestCase {
         // Вход прошёл, синк лёг в кэш — в списке появились беседы.
         let firstRow = app.cells.firstMatch
         XCTAssertTrue(firstRow.waitForExistence(timeout: 60), "список бесед пуст")
+        // Системный запрос уведомлений — разрешить.
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let allow = springboard.alerts.buttons.matching(NSPredicate(format: "label IN %@", ["Разрешить", "Allow"])).firstMatch
+        if allow.waitForExistence(timeout: 10) { allow.tap() }
+        // Один вопрос о загрузке заранее (§4): ответа по умолчанию нет.
+        let prefetch = app.alerts["Загружать письма заранее?"]
+        XCTAssertTrue(prefetch.waitForExistence(timeout: 10), "нет вопроса о загрузке заранее")
+        shot(app, "3a-prefetch")
+        prefetch.buttons["Только по Wi-Fi"].tap()
         shot(app, "3-list")
         firstRow.tap()
         // Лента — документ в WKWebView: ждём его и текст пузырей внутри.

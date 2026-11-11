@@ -12,7 +12,8 @@ struct MailView: View {
     @State private var confirmDelete: Set<String>?
     @State private var confirmSpam: Set<String>?
     @State private var moving: Set<String>?
-    @State private var confirmLogout = false
+    @State private var settingsShown = false
+    @Bindable private var settings = AppSettings.shared
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
@@ -45,13 +46,25 @@ struct MailView: View {
                 Button(f.icon.isEmpty ? f.name : "\(f.icon) \(f.name)") { if let ids = moving { model.move(ids, to: f.id) } }
             }
         }
-        .confirmationDialog("Выйти из учётной записи?", isPresented: $confirmLogout, titleVisibility: .visible) {
-            Button("Выйти", role: .destructive, action: app.logout)
-        } message: {
-            Text("Сессия и почта этой учётной записи будут удалены с устройства.")
-        }
         .sheet(isPresented: Binding(get: { model.compose.sheet != nil }, set: { if !$0 { model.compose.sheet = nil } })) {
             ComposeSheetView(model: model.compose)
+        }
+        .sheet(isPresented: $settingsShown) {
+            SettingsView(accountKey: connection.session.accountKey, onLogout: app.logout)
+        }
+        // Один вопрос после первого входа: ответа по умолчанию нет (§4).
+        .alert("Загружать письма заранее?", isPresented: Binding(
+            get: { model.loaded && settings.prefetch == nil && !settingsShown },
+            set: { _ in }
+        )) {
+            ForEach(AppSettings.Prefetch.allCases) { p in
+                Button(p.title) {
+                    settings.prefetch = p
+                    model.startPrefetch()
+                }
+            }
+        } message: {
+            Text("Тогда беседы открываются сразу и без сети. Изменить — «Настройки → Загрузка писем».")
         }
         .onAppear(perform: restoreLast)
         .onChange(of: model.loaded) { restoreLast() }
@@ -148,8 +161,7 @@ struct MailView: View {
                     Button("Выбрать", systemImage: "checkmark.circle") { picking = true }
                     Button("Спам", systemImage: "hand.raised") { model.openSpam() }
                     Divider()
-                    Text(connection.session.accountKey)
-                    Button("Выйти", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { confirmLogout = true }
+                    Button("Настройки", systemImage: "gear") { settingsShown = true }
                 }
             }
             if model.syncing {

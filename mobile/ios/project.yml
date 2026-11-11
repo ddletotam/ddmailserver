@@ -38,6 +38,14 @@ targets:
       - path: ../shared/conversation-doc
         type: folder
         buildPhase: resources
+    info:
+      # Генерируется XcodeGen; ключи, которых нет у INFOPLIST_KEY_*.
+      path: App/Info.plist
+      properties:
+        BGTaskSchedulerPermittedIdentifiers:
+          - ru.letotam.ddmail.refresh
+          - ru.letotam.ddmail.prefetch
+        UIBackgroundModes: [fetch, processing]
     dependencies:
       - package: DDMailKit
         products: [DDMailAPI, DDMailAuth, DDMailStore, DDMailSync]

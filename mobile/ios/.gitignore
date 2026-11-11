@@ -4,3 +4,5 @@
 .build/
 .swiftpm/
 Package.resolved
+# Генерируется XcodeGen из project.yml
+App/Info.plist

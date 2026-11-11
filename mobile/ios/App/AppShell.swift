@@ -37,8 +37,14 @@ struct AppShell: View {
                 return
             }
             if let mail = connection.mail {
+                NotificationRouter.shared.attach { [weak mail] id in
+                    // Открыть беседу из уведомления: раздел «Почта», её папка.
+                    section = .mail
+                    mail?.open(id)
+                }
                 mail.live.start()
                 await mail.sync()
+                await Notifier.requestPermissionIfNeeded()
             } else {
                 await connection.check()
             }

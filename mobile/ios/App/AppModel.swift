@@ -34,7 +34,10 @@ final class AppModel {
         #if DEBUG
         // UI-тесты начинают с чистого листа: сессия в Keychain симулятора
         // переживает переустановку приложения.
-        if ProcessInfo.processInfo.arguments.contains("-ddmail-reset") { store.clear() }
+        if ProcessInfo.processInfo.arguments.contains("-ddmail-reset") {
+            store.clear()
+            if let id = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: id) }
+        }
         #endif
         if let s = store.load() {
             phase = .connected(Connection(session: s, store: store, transport: transport))
@@ -60,6 +63,9 @@ final class AppModel {
         phase = .connected(Connection(session: session, store: store, transport: transport))
     }
 
+    /// Текущая живая сессия (для фона и уведомлений).
+    var connection: Connection? { if case let .connected(c) = phase { c } else { nil } }
+
     /// Повторный вход: тот же сервер и логин, осталось ввести пароль.
     func relogin() {
         guard case let .connected(c) = phase else { return }
@@ -83,6 +89,9 @@ final class AppModel {
 final class Connection {
     let session: Session
     let api: SessionAPI
+    /// Докачка «Только по Wi-Fi»: система не пустит эти запросы в сотовую сеть,
+    /// через точку доступа и в режиме экономии трафика (§4).
+    let prefetchAPI: SessionAPI
     let cache: MailStore?
     let engine: SyncEngine?
     @ObservationIgnored private(set) lazy var mail: MailModel? = engine.map { MailModel(connection: self, engine: $0) }
@@ -92,11 +101,11 @@ final class Connection {
 
     init(session: Session, store: SessionStore, transport: HTTPTransport) {
         self.session = session
-        api = SessionAPI(
-            baseURL: session.serverURL,
-            transport: transport,
-            tokens: StoredTokens(session: session, store: store)
-        )
+        // Один источник токена на оба API: обменявший токен не оставит
+        // другому просроченный.
+        let tokens = StoredTokens(session: session, store: store)
+        api = SessionAPI(baseURL: session.serverURL, transport: transport, tokens: tokens)
+        prefetchAPI = SessionAPI(baseURL: session.serverURL, transport: Self.wifiOnlySession, tokens: tokens)
         do {
             let c = try MailStore(url: Self.cacheURL)
             // Кэш другой учётки (вошли под другим логином) — не наш: с нуля.
@@ -111,6 +120,45 @@ final class Connection {
             engine = nil
             cacheError = error.localizedDescription
         }
+    }
+
+    nonisolated static let wifiOnlySession: URLSession = {
+        let c = URLSessionConfiguration.default
+        c.httpCookieStorage = nil
+        c.urlCache = nil
+        c.allowsExpensiveNetworkAccess = false
+        c.allowsConstrainedNetworkAccess = false
+        c.timeoutIntervalForRequest = 30
+        return URLSession(configuration: c)
+    }()
+
+    /// Докачать тела по выбору пользователя (§4): «Всегда» — обычным API,
+    /// «Только по Wi-Fi» — экономным, «Нет» — ничего.
+    func prefetch() async {
+        guard let engine else { return }
+        let api: SessionAPI
+        switch AppSettings.shared.prefetch {
+        case .always: api = self.api
+        case .wifi: api = prefetchAPI
+        case .never, nil: return
+        }
+        do {
+            _ = try await engine.prefetchBodies(via: api) { !Task.isCancelled }
+        } catch APIError.unauthorized {
+            report(.dead)
+        } catch {}
+    }
+
+    /// Фоновый проход (BGAppRefreshTask): синк и уведомления из кэша.
+    func backgroundRefresh() async {
+        guard let engine else { return }
+        do {
+            try await engine.sync()
+            report(.ok)
+            await Notifier.check(engine: engine, openID: nil)
+        } catch APIError.unauthorized {
+            report(.dead)
+        } catch {}
     }
 
     /// Кэш — в Application Support (не в Caches: система не должна его
@@ -144,5 +192,7 @@ final class Connection {
         mail?.stop()
         try? cache?.clearAll()
         ImageSenders.clear()
+        AppSettings.shared.clearAccountState()
+        Notifier.clearAll()
     }
 }

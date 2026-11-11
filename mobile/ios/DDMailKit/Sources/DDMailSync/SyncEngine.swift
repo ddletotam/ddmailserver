@@ -180,7 +180,8 @@ public actor SyncEngine {
     /// того, как беседу откроют. От свежей беседы к старой, порциями;
     /// `allowed` проверяется перед каждой порцией.
     @discardableResult
-    public func prefetchBodies(batch: Int = 30, allowed: @Sendable () async -> Bool) async throws -> Int {
+    public func prefetchBodies(via prefetchAPI: SessionAPI? = nil, batch: Int = 30, allowed: @Sendable () async -> Bool) async throws -> Int {
+        let api = prefetchAPI ?? self.api
         let cached = try store.cachedBodyUIDs(accountKey)
         let snap = try store.snapshot([accountKey])[accountKey]
         let queue = (snap?.conversations ?? []).flatMap { c in

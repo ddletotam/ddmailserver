@@ -109,6 +109,7 @@ final class MailModel {
 
     func stop() {
         live.stop()
+        prefetchTask?.cancel()
         tasks.forEach { $0.cancel() }
         tasks.removeAll()
     }
@@ -133,12 +134,25 @@ final class MailModel {
             try await engine.sync()
             mailLog.debug("sync ok")
             connection.report(.ok)
+            await Notifier.check(engine: engine, openID: selectedID)
+            startPrefetch()
         } catch is CancellationError {
         } catch APIError.unauthorized {
             connection.report(.dead)
         } catch {
             mailLog.error("sync failed: \(String(describing: error), privacy: .public)")
             connection.report(.offline(error.localizedDescription))
+        }
+    }
+
+    private var prefetchTask: Task<Void, Never>?
+
+    /// Докачка тел после синка — фоном, уступая всему остальному (§4).
+    func startPrefetch() {
+        guard prefetchTask == nil else { return }
+        prefetchTask = Task(priority: .background) { [weak self, connection] in
+            await connection.prefetch()
+            self?.prefetchTask = nil
         }
     }
 
@@ -158,6 +172,7 @@ final class MailModel {
     private func openSelected() {
         compose.reset()
         conversation.open(selected)
+        if let id = selectedID { Notifier.clear(conversation: id) }
         guard let c = selected, c.unreadCount > 0 else { return }
         Task { [engine] in
             do { try await engine.markRead(c) } catch { self.notice = "Не удалось отметить прочитанным: \(error.localizedDescription)" }
