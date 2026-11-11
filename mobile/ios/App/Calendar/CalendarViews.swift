@@ -12,7 +12,8 @@ struct CalendarScreen: View {
     @State private var dayShown = false
 
     var body: some View {
-        NavigationStack {
+        let formOpen = model.draft != nil
+        return NavigationStack {
             Group {
                 if sizeClass == .compact {
                     MonthsFeed(model: model) { d in
@@ -22,7 +23,10 @@ struct CalendarScreen: View {
                     .navigationDestination(isPresented: $dayShown) { DayScreen(model: model) }
                 } else {
                     switch model.mode {
-                    case .month: MonthGrid(model: model, month: model.selected.month1, large: true) { model.select($0) }
+                    case .month:
+                        ScrollView {
+                            MonthGrid(model: model, month: model.selected.month1, large: true) { model.select($0) }
+                        }
                     case .week: WeekTimeline(model: model)
                     case .day: DayScreen(model: model)
                     }
@@ -33,7 +37,7 @@ struct CalendarScreen: View {
             .toolbar { toolbar }
         }
         .sheet(item: $model.detail) { o in EventDetailView(model: model, occ: o) }
-        .sheet(isPresented: Binding(get: { model.draft != nil }, set: { if !$0 { model.draft = nil } })) {
+        .sheet(isPresented: Binding(get: { formOpen }, set: { if !$0 { model.draft = nil } })) {
             EventFormView(model: model)
         }
         .sheet(isPresented: $calendarsShown) { CalendarsListView(model: model) }

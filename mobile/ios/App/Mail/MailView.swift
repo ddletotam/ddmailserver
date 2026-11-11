@@ -13,18 +13,27 @@ struct MailView: View {
     @State private var confirmSpam: Set<String>?
     @State private var moving: Set<String>?
     @State private var settingsShown = false
+    /// Правый край колонки списка в координатах окна (Мак, см. `detailColumn`).
+    @State private var listEdge: CGFloat = 0
     @Bindable private var settings = AppSettings.shared
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
-        NavigationSplitView {
+        // Условия показа окон — читаем здесь, в теле: замыкание `Binding(get:)`
+        // SwiftUI вызывает лениво, вне отслеживания `@Observable` (см. контракт §0).
+        let askPrefetch = model.loaded && settings.prefetch == nil && !settingsShown
+        let composeOpen = model.compose.sheet != nil
+        return NavigationSplitView {
             listPane
                 .navigationSplitViewColumnWidth(min: 320, ideal: 380, max: 480)
         } detail: {
-            if let c = model.selected {
-                ConversationView(conversation: c, model: model.conversation, compose: model.compose) { confirmSpam = [c.id] }
-            } else {
-                ContentUnavailableView("Беседа не выбрана", systemImage: "bubble.left.and.bubble.right")
+            detailColumn {
+                if let c = model.selected {
+                    ConversationView(conversation: c, model: model.conversation, compose: model.compose) { confirmSpam = [c.id] }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ContentUnavailableView("Беседа не выбрана", systemImage: "bubble.left.and.bubble.right")
+                }
             }
         }
         .tint(Palette.accent)
@@ -46,7 +55,7 @@ struct MailView: View {
                 Button(f.icon.isEmpty ? f.name : "\(f.icon) \(f.name)") { if let ids = moving { model.move(ids, to: f.id) } }
             }
         }
-        .sheet(isPresented: Binding(get: { model.compose.sheet != nil }, set: { if !$0 { model.compose.sheet = nil } })) {
+        .sheet(isPresented: Binding(get: { composeOpen }, set: { if !$0 { model.compose.sheet = nil } })) {
             ComposeSheetView(model: model.compose)
         }
         .sheet(isPresented: $settingsShown) {
@@ -55,10 +64,7 @@ struct MailView: View {
             }
         }
         // Один вопрос после первого входа: ответа по умолчанию нет (§4).
-        .alert("Загружать письма заранее?", isPresented: Binding(
-            get: { model.loaded && settings.prefetch == nil && !settingsShown },
-            set: { _ in }
-        )) {
+        .alert("Загружать письма заранее?", isPresented: Binding(get: { askPrefetch }, set: { _ in })) {
             ForEach(AppSettings.Prefetch.allCases) { p in
                 Button(p.title) {
                     settings.prefetch = p
@@ -70,6 +76,23 @@ struct MailView: View {
         }
         .onAppear(perform: restoreLast)
         .onChange(of: model.loaded) { restoreLast() }
+    }
+
+    /// Колонка беседы. На macOS 27 `NavigationSplitView` внутри
+    /// `TabView(.sidebarAdaptable)` тянет колонку под все панели и считает
+    /// отступ слева с лишней шириной боковой панели разделов (замер: колонка
+    /// с x=770, лента — с 914). Отступ берём из измерения — правого края
+    /// колонки списка, — а не из безопасной области.
+    @ViewBuilder private func detailColumn(@ViewBuilder _ content: () -> some View) -> some View {
+        #if os(macOS)
+        let body = content()
+        GeometryReader { geo in
+            body.padding(.leading, max(listEdge - geo.frame(in: .global).minX, 0))
+        }
+        .ignoresSafeArea(.container, edges: .leading)
+        #else
+        content()
+        #endif
     }
 
     // MARK: Список
@@ -92,6 +115,7 @@ struct MailView: View {
         }
         .listStyle(.plain)
         .pickingMode(picking)
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxX } action: { listEdge = $0 }
         .safeAreaInset(edge: .top, spacing: 0) {
             if !tabs.isEmpty {
                 FolderTabs(tabs: tabs, active: $model.activeFolderID)
@@ -243,7 +267,9 @@ struct MailView: View {
     }
 
     private func present(_ v: Binding<Set<String>?>) -> Binding<Bool> {
-        Binding(get: { v.wrappedValue != nil }, set: { if !$0 { v.wrappedValue = nil } })
+        // Значение читается сразу (в теле), а не в ленивом замыкании.
+        let shown = v.wrappedValue != nil
+        return Binding(get: { shown }, set: { if !$0 { v.wrappedValue = nil } })
     }
 }
 
@@ -334,6 +360,7 @@ struct ConversationRow: View {
         .padding(.vertical, 4)
         .listRowBackground(selected ? Palette.accent : Color(argb: colors.color(of: c.receivedBy)))
         .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("conv.row")
     }
 }
 

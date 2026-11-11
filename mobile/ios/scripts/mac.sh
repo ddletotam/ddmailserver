@@ -5,7 +5,7 @@
 #   mac.sh test            swift test пакета DDMailKit
 #   mac.sh build           сгенерировать проект, собрать под симулятор iOS и под macOS
 #   mac.sh run [iphone|ipad]  собрать, поставить в симулятор, запустить, скриншот сюда
-#   mac.sh uitest [iphone|ipad]  сквозные UI-тесты в симуляторе; скриншоты шагов — сюда
+#   mac.sh uitest [iphone|ipad|mac]  сквозные UI-тесты в симуляторе; скриншоты шагов — сюда
 #   mac.sh device [iphone|ipad]  собрать с подписью, поставить на устройство, запустить
 #
 # Окружение: DDMAIL_MAC (ssh-хост, по умолчанию `mac`),
@@ -100,9 +100,15 @@ case "$cmd" in
     build)
         gen
         build_sim
+        # Мак: права на связку ключей требуют подписи командой; нет учётки
+        # Xcode — только компиляция без подписи.
+        team="$(defaults read com.apple.dt.Xcode IDEProvisioningTeamByIdentifier 2>/dev/null \
+            | awk -F'= ' '/teamID/ {gsub(/[ ;"]/, "", $2); print $2; exit}')"
+        if [ -n "${1:-}" ]; then security unlock-keychain -p "$1" login.keychain; fi
+        if [ -n "$team" ]; then sign="-allowProvisioningUpdates DEVELOPMENT_TEAM=$team"; else sign="CODE_SIGNING_ALLOWED=NO"; fi
         xcodebuild -project DDMail.xcodeproj -scheme DDMail -configuration Debug \
             -destination "platform=macOS" -derivedDataPath "$DD" -clonedSourcePackagesDirPath "$SPM" \
-            CODE_SIGN_IDENTITY=- -quiet build
+            $sign -quiet build
         echo "build: ok (iOS Simulator, macOS)"
         ;;
     run)
@@ -122,15 +128,26 @@ case "$cmd" in
         ;;
     uitest)
         gen
-        udid="$(sim_udid "${3:-iphone}")"
+        if [ "${3:-iphone}" = mac ]; then
+            # Мак: приложение подписано командой (иначе Keychain с защитой данных
+            # не пустит), связка разблокирована, назначение — сам Мак.
+            team="$(defaults read com.apple.dt.Xcode IDEProvisioningTeamByIdentifier 2>/dev/null \
+                | awk -F'= ' '/teamID/ {gsub(/[ ;"]/, "", $2); print $2; exit}')"
+            if [ -n "${4:-}" ]; then security unlock-keychain -p "$4" login.keychain; fi
+            dest="platform=macOS"
+            extra="-allowProvisioningUpdates DEVELOPMENT_TEAM=$team"
+        else
+            dest="id=$(sim_udid "${3:-iphone}")"
+            extra=""
+        fi
         rb="$HOME/build/ddmail/ui.xcresult"
         out="$HOME/build/ddmail/ui-shots"
         rm -rf "$rb" "$out"
         rc=0
         TEST_RUNNER_DDMAIL_TEST_EMAIL="${1:-}" TEST_RUNNER_DDMAIL_TEST_PASSWORD="${2:-}" \
             xcodebuild -project DDMail.xcodeproj -scheme DDMail -configuration Debug \
-            -destination "id=$udid" -derivedDataPath "$DD" -clonedSourcePackagesDirPath "$SPM" -resultBundlePath "$rb" \
-            test >"$HOME/build/ddmail/uitest.log" 2>&1 || rc=$?
+            -destination "$dest" -derivedDataPath "$DD" -clonedSourcePackagesDirPath "$SPM" -resultBundlePath "$rb" \
+            $extra test >"$HOME/build/ddmail/uitest.log" 2>&1 || rc=$?
         grep -E "error:|Test Case .*(passed|failed|skipped)|TEST (SUCCEEDED|FAILED)" "$HOME/build/ddmail/uitest.log" | tail -20
         mkdir -p "$out"
         xcrun xcresulttool export attachments --path "$rb" --output-path "$out" >/dev/null 2>&1 || true
@@ -178,9 +195,13 @@ EOF
 
 cmd="${1:-}"
 case "$cmd" in
-    test|build)
+    test)
         sync_code
-        remote "$cmd"
+        remote test
+        ;;
+    build)
+        sync_code
+        remote build "${DDMAIL_KEYCHAIN_PASSWORD:-}"
         ;;
     run)
         sync_code
@@ -193,7 +214,7 @@ case "$cmd" in
     uitest)
         sync_code
         rc=0
-        remote uitest "${DDMAIL_TEST_EMAIL:-}" "${DDMAIL_TEST_PASSWORD:-}" "${2:-iphone}" || rc=$?
+        remote uitest "${DDMAIL_TEST_EMAIL:-}" "${DDMAIL_TEST_PASSWORD:-}" "${2:-iphone}" "${DDMAIL_KEYCHAIN_PASSWORD:-}" || rc=$?
         dir="$SHOTS/uitest-$(date +%H%M%S)"
         mkdir -p "$dir"
         scp -qr "$HOST:$REMOTE/ui-shots/." "$dir/" 2>/dev/null || true

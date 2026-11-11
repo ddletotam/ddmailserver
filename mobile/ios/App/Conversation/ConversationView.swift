@@ -12,10 +12,12 @@ struct ConversationView: View {
     let compose: ComposeModel
     let onSpam: () -> Void
     @State private var exportShown = false
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
         WebViewContainer(web: model.web)
             .background(Color(white: 0.96))
+
             .navigationTitle(conversation.label)
             .toolbarTitleDisplayMode(.inline)
             .toolbar {
@@ -55,7 +57,7 @@ struct ConversationView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if !conversation.spam { ComposerBar(conversation: conversation, model: compose) }
             }
-            .hidingTabBar()
+            .hidingTabBar(sizeClass == .compact)
     }
 
     /// Имя беседы и её адреса: кто → на какой мой адрес пришло.
@@ -78,7 +80,9 @@ struct ConversationView: View {
     }
 
     private func present<T>(_ v: Binding<T?>) -> Binding<Bool> {
-        Binding(get: { v.wrappedValue != nil }, set: { if !$0 { v.wrappedValue = nil } })
+        // Значение читается сразу (в теле), а не в ленивом замыкании.
+        let shown = v.wrappedValue != nil
+        return Binding(get: { shown }, set: { if !$0 { v.wrappedValue = nil } })
     }
 }
 
@@ -94,6 +98,10 @@ struct WebViewContainer: UIViewRepresentable {
     }
 
     func updateUIView(_ host: UIView, context: Context) { attach(to: host) }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UIView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 320, height: proposal.height ?? 480)
+    }
 
     private func attach(to host: UIView) {
         guard let v = web.view, v.superview !== host else { return }
@@ -119,6 +127,12 @@ struct WebViewContainer: NSViewRepresentable {
     }
 
     func updateNSView(_ host: NSView, context: Context) { attach(to: host) }
+
+    /// Занять всё предложенное: без этого AppKit-обёртка сжимается до своего
+    /// «естественного» размера, и лента с композером съезжают от края колонки.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 480, height: proposal.height ?? 480)
+    }
 
     private func attach(to host: NSView) {
         guard let v = web.view, v.superview !== host else { return }
@@ -174,11 +188,12 @@ enum PlainText {
 }
 
 private extension View {
-    /// Открытая беседа на iPhone — без таб-бара разделов (Android §16): у неё
-    /// своя шапка, а внизу место строке ввода. На iPad и Маке разделы сбоку.
-    @ViewBuilder func hidingTabBar() -> some View {
+    /// Открытая беседа на узком экране — без таб-бара разделов (Android §16): у
+    /// неё своя шапка, а внизу место строке ввода. На широком (iPad, Мак)
+    /// разделы видны всегда (§6).
+    @ViewBuilder func hidingTabBar(_ hide: Bool) -> some View {
         #if os(iOS)
-        toolbarVisibility(.hidden, for: .tabBar)
+        toolbarVisibility(hide ? .hidden : .automatic, for: .tabBar)
         #else
         self
         #endif

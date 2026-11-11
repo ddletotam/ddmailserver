@@ -45,10 +45,14 @@ struct ComposerBar: View {
                 } label: {
                     Image(systemName: "plus.circle").font(.title2)
                 }
+                .menuIndicator(.hidden)
+                .fixedSize()
                 .accessibilityLabel("Вложить или поля письма")
 
                 TextField("Сообщение", text: $model.draft.text, axis: .vertical)
                     .lineLimit(1...8)
+                    .textFieldStyle(.plain)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .focused($focused)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)

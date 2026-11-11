@@ -138,7 +138,8 @@ struct ContactsView: View {
     let write: (String) -> Void
 
     var body: some View {
-        NavigationSplitView {
+        let formOpen = model.form != nil
+        return NavigationSplitView {
             let sections = model.sections
             List(selection: $model.selectedID) {
                 ForEach(sections, id: \.letter) { s in
@@ -162,6 +163,7 @@ struct ContactsView: View {
                     else { ContentUnavailableView.search(text: model.query) }
                 }
             }
+            .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 460)
             .searchable(text: $model.query, prompt: "Имя, адрес, телефон")
             .refreshable { await model.load() }
             .navigationTitle("Контакты")
@@ -178,7 +180,7 @@ struct ContactsView: View {
             }
         }
         .tint(Palette.accent)
-        .sheet(isPresented: Binding(get: { model.form != nil }, set: { if !$0 { model.form = nil } })) {
+        .sheet(isPresented: Binding(get: { formOpen }, set: { if !$0 { model.form = nil } })) {
             ContactFormView(model: model)
         }
         .overlay(alignment: .bottom) { NoticeBanner(text: $model.notice) }

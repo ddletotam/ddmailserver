@@ -32,6 +32,10 @@ struct DDMailApp: App {
         WindowGroup {
             RootView(app: app)
         }
+        #if os(macOS)
+        // Три колонки (разделы, список, беседа) — окну нужен простор.
+        .defaultSize(width: 1280, height: 820)
+        #endif
         .onChange(of: scenePhase) {
             // Уходим в фон — поставить фоновый синк и докачку (§4, §7).
             if scenePhase == .background { Task { await BackgroundSync.schedule() } }

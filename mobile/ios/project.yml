@@ -38,6 +38,14 @@ targets:
       - path: ../shared/conversation-doc
         type: folder
         buildPhase: resources
+    entitlements:
+      # Генерируется XcodeGen. Связка ключей с защитой данных (сессия, §2): на
+      # macOS без явной группы SecItemAdd отвечает errSecMissingEntitlement;
+      # та же группа потом — общая с Notification Service Extension (§7).
+      path: App/DDMail.entitlements
+      properties:
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)ru.letotam.ddmail
     info:
       # Генерируется XcodeGen; ключи, которых нет у INFOPLIST_KEY_*.
       path: App/Info.plist
@@ -72,7 +80,8 @@ targets:
   # из окружения запуска, в репозитории их нет.
   DDMailUITests:
     type: bundle.ui-testing
-    platform: iOS
+    platform: auto
+    supportedDestinations: [iOS, macOS]
     sources:
       - path: UITests
     dependencies:
