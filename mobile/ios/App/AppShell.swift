@@ -34,6 +34,7 @@ struct AppShell: View {
             }
         }
         .tabViewStyle(.sidebarAdaptable)
+        .focusedSceneValue(\.mailActions, mailActions)
         // «Нужен вход» — несмываемая плашка над содержимым, кэш виден (контракт §2).
         .safeAreaInset(edge: .top, spacing: 0) {
             if connection.status == .dead {
@@ -76,6 +77,22 @@ struct AppShell: View {
                 await connection.check()
             }
         }
+    }
+}
+
+extension AppShell {
+    /// Действия этого окна для меню и клавиатуры.
+    var mailActions: MailActions? {
+        guard let mail = connection.mail else { return nil }
+        let open = mail.selected
+        return MailActions(
+            newMail: { section = .mail; mail.compose.openNew() },
+            reply: open.map { c in { section = .mail; mail.compose.replyTo = mail.conversation.lastIncoming ?? mail.conversation.last; _ = c } },
+            forward: (mail.conversation.lastIncoming ?? mail.conversation.last).map { b in { mail.compose.openForward(b) } },
+            delete: open.map { c in { mail.confirmDelete = [c.id] } },
+            refresh: { Task { await mail.sync() } },
+            go: { section = $0 }
+        )
     }
 }
 

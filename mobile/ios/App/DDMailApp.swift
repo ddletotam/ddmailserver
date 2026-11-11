@@ -29,9 +29,21 @@ struct DDMailApp: App {
     }
 
     var body: some Scene {
+        mainWindow
+        #if os(macOS)
+        // Беседа в отдельном окне (§6): своя лента и свой композер.
+        WindowGroup("Беседа", id: "conversation", for: String.self) { $id in
+            if let id { ConversationWindow(app: app, conversationID: id) }
+        }
+        .defaultSize(width: 720, height: 820)
+        #endif
+    }
+
+    private var mainWindow: some Scene {
         WindowGroup {
             RootView(app: app)
         }
+        .commands { MailCommands() }
         #if os(macOS)
         // Три колонки (разделы, список, беседа) — окну нужен простор.
         .defaultSize(width: 1280, height: 820)
@@ -41,7 +53,7 @@ struct DDMailApp: App {
             if scenePhase == .background { Task { await BackgroundSync.schedule() } }
         }
         #if os(iOS)
-        .backgroundTask(.appRefresh(BackgroundSync.refreshID)) {
+        .backgroundTask(.appRefresh(BackgroundSync.refreshID)) { [app] in
             await BackgroundSync.schedule()
             await app.connection?.backgroundRefresh()
         }

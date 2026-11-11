@@ -89,6 +89,22 @@ final class LoginFlowTests: XCTestCase {
         XCTAssertTrue(sendButton.isEnabled)
         shot(app, "5-composer")
 
+        #if os(macOS)
+        // Мак: беседа в отдельном окне — из контекстного меню.
+        firstRow.rightClick()
+        let openWin = app.menuItems["Открыть в новом окне"]
+        XCTAssertTrue(openWin.waitForExistence(timeout: 5), "нет пункта «Открыть в новом окне»")
+        openWin.click()
+        let second = app.windows.element(boundBy: 1)
+        XCTAssertTrue(second.waitForExistence(timeout: 10), "окно беседы не открылось")
+        sleep(3)
+        shot(app, "5b-window")
+        app.typeKey("w", modifierFlags: .command)
+        // Меню приложения: команды на месте.
+        XCTAssertTrue(app.menuBars.menuItems["Новое письмо"].exists, "нет команды «Новое письмо»")
+        XCTAssertTrue(app.menuBars.menuBarItems["Письмо"].exists, "нет меню «Письмо»")
+        #endif
+
         // Календарь: лента месяцев с событиями с сервера.
         // В беседе на iPhone таб-бар скрыт (§6): назад к списку — первой кнопкой
         // панели. На iPad и Маке разделы видны всегда.

@@ -9,7 +9,6 @@ struct MailView: View {
     let app: AppModel
     let connection: Connection
     @State private var picking = false
-    @State private var confirmDelete: Set<String>?
     @State private var confirmSpam: Set<String>?
     @State private var moving: Set<String>?
     @State private var settingsShown = false
@@ -17,6 +16,7 @@ struct MailView: View {
     @State private var listEdge: CGFloat = 0
     @Bindable private var settings = AppSettings.shared
     @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         // Условия показа окон — читаем здесь, в теле: замыкание `Binding(get:)`
@@ -38,8 +38,8 @@ struct MailView: View {
         }
         .tint(Palette.accent)
         .overlay(alignment: .bottom) { NoticeBanner(text: $model.notice) }
-        .confirmationDialog(deleteTitle, isPresented: present($confirmDelete), titleVisibility: .visible) {
-            Button("Удалить", role: .destructive) { if let ids = confirmDelete { model.delete(ids) } }
+        .confirmationDialog(deleteTitle, isPresented: present($model.confirmDelete), titleVisibility: .visible) {
+            Button("Удалить", role: .destructive) { if let ids = model.confirmDelete { model.delete(ids) } }
         } message: {
             Text("Письма будут удалены на сервере; у внешних ящиков — и в исходном ящике.")
         }
@@ -162,9 +162,12 @@ struct MailView: View {
             Button(c.unreadCount > 0 ? "Прочитано" : "Непрочитано",
                    systemImage: c.unreadCount > 0 ? "envelope.open" : "envelope.badge") { model.toggleRead(c) }
             Button("В папку…", systemImage: "folder") { moving = [c.id] }
+            #if os(macOS)
+            Button("Открыть в новом окне", systemImage: "macwindow.badge.plus") { openWindow(id: "conversation", value: c.id) }
+            #endif
             Divider()
             Button("В спам…", systemImage: "hand.raised", role: .destructive) { confirmSpam = [c.id] }
-            Button("Удалить…", systemImage: "trash", role: .destructive) { confirmDelete = [c.id] }
+            Button("Удалить…", systemImage: "trash", role: .destructive) { model.confirmDelete = [c.id] }
         }
     }
 
@@ -215,7 +218,7 @@ struct MailView: View {
                 .disabled(ids.isEmpty)
             Button("В спам", systemImage: "hand.raised") { confirmSpam = ids }
                 .disabled(ids.isEmpty)
-            Button("Удалить", systemImage: "trash", role: .destructive) { confirmDelete = ids }
+            Button("Удалить", systemImage: "trash", role: .destructive) { model.confirmDelete = ids }
                 .disabled(ids.isEmpty)
         }
     }
@@ -249,7 +252,7 @@ struct MailView: View {
     }
 
     private var deleteTitle: String {
-        let s = model.summary(confirmDelete ?? [])
+        let s = model.summary(model.confirmDelete ?? [])
         return "Удалить бесед: \(s.conversations), писем в них: \(s.messages)?"
     }
 

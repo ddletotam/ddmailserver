@@ -56,6 +56,9 @@ final class MailModel {
 
     /// Итог действия — короткая плашка внизу.
     var notice: String?
+    /// Беседы, ждущие подтверждения удаления (из меню, контекстного меню, выбора):
+    /// удаление — только после подтверждения, API восстановления нет (§5).
+    var confirmDelete: Set<String>?
 
     private var tasks: [Task<Void, Never>] = []
     private static let activeKey = "mail.activeFolder"

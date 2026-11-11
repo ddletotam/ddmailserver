@@ -15,7 +15,7 @@ struct ConversationView: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
-        WebViewContainer(web: model.web)
+        WebViewContainer(web: model.web, ready: model.webPrepared)
             .background(Color(white: 0.96))
 
             .navigationTitle(conversation.label)
@@ -90,6 +90,8 @@ struct ConversationView: View {
 #if os(iOS)
 struct WebViewContainer: UIViewRepresentable {
     let web: ConversationWeb
+    /// Смена значения — повод вставить представление, если оно появилось позже.
+    let ready: Bool
 
     func makeUIView(context: Context) -> UIView {
         let host = UIView()
@@ -119,6 +121,8 @@ struct WebViewContainer: UIViewRepresentable {
 #else
 struct WebViewContainer: NSViewRepresentable {
     let web: ConversationWeb
+    /// Смена значения — повод вставить представление, если оно появилось позже.
+    let ready: Bool
 
     func makeNSView(context: Context) -> NSView {
         let host = NSView()

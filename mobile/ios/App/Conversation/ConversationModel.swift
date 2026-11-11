@@ -14,6 +14,9 @@ final class ConversationModel {
     private let onAuthDead: () -> Void
 
     private(set) var conversation: Conversation?
+    /// Веб-представление создано: контейнер на экране должен его вставить
+    /// (оно готовится асинхронно и может опоздать к первой отрисовке).
+    private(set) var webPrepared = false
     private var window = FeedWindow([])
     private var shown = Set<Int64>()
     /// Тела показанных писем — для веток ответа и меню пузыря.
@@ -41,7 +44,10 @@ final class ConversationModel {
         self.engine = engine
         self.onAuthDead = onAuthDead
         web.host = self
-        Task { await web.prepare() }
+        Task {
+            await web.prepare()
+            webPrepared = true
+        }
     }
 
     /// Последнее входящее среди показанных: на него отвечает неявный ответ.
