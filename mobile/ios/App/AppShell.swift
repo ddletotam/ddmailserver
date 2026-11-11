@@ -31,8 +31,17 @@ struct AppShell: View {
         }
         // Синк на выход приложения на экран (§4); WebSocket — следующим шагом.
         .task(id: scenePhase) {
-            guard scenePhase == .active else { return }
-            if let mail = connection.mail { await mail.sync() } else { await connection.check() }
+            guard scenePhase == .active else {
+                // Ушли с экрана — канал закрыт: в фоне его держать нельзя (§7).
+                connection.mail?.live.stop()
+                return
+            }
+            if let mail = connection.mail {
+                mail.live.start()
+                await mail.sync()
+            } else {
+                await connection.check()
+            }
         }
     }
 }

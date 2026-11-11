@@ -155,3 +155,42 @@ extension SessionAPI {
         try await send("POST", "/send", body: request)
     }
 }
+
+extension SessionAPI {
+    /// Пуш-канал сервера (`/ws`), пока приложение на экране (§7): поток типов
+    /// событий (`new_message`, `flags_changed`, `calendar_updated`, …).
+    /// Токен — только заголовком `Authorization` (§2): в URL он осел бы в
+    /// журналах nginx. Отказ рукопожатия 401/403 — `APIError.unauthorized`.
+    public func events(session: URLSession = .shared) async -> AsyncThrowingStream<String, Error> {
+        let token = await currentToken()
+        let wsURL = URL(string: baseURL.replacingOccurrences(of: "https://", with: "wss://") + "/api/desktop/v1/ws")!
+        var req = URLRequest(url: wsURL)
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let task = session.webSocketTask(with: req)
+        return AsyncThrowingStream { cont in
+            let reader = Task {
+                task.resume()
+                do {
+                    while !Task.isCancelled {
+                        let msg = try await task.receive()
+                        let data: Data
+                        switch msg {
+                        case let .string(s): data = Data(s.utf8)
+                        case let .data(d): data = d
+                        @unknown default: continue
+                        }
+                        if case let .string(type)? = JSONValue.parse(data)?["type"] { cont.yield(type) }
+                    }
+                    cont.finish()
+                } catch {
+                    let code = (task.response as? HTTPURLResponse)?.statusCode
+                    cont.finish(throwing: code == 401 || code == 403 ? APIError.unauthorized("ws") : error)
+                }
+            }
+            cont.onTermination = { _ in
+                reader.cancel()
+                task.cancel(with: .goingAway, reason: nil)
+            }
+        }
+    }
+}

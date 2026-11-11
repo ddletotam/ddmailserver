@@ -17,6 +17,8 @@ final class MailModel {
     let conversation: ConversationModel
     /// Ответ, новое письмо, пересылка (§5).
     @ObservationIgnored private(set) var compose: ComposeModel!
+    /// WebSocket, пока на экране (§7).
+    @ObservationIgnored private(set) var live: LiveUpdates!
 
     private(set) var all: [Conversation] = []
     private(set) var doc = FoldersDoc().withSpam()
@@ -61,6 +63,7 @@ final class MailModel {
         self.connection = connection
         self.engine = engine
         conversation = ConversationModel(engine: engine) { [weak connection] in connection?.report(.dead) }
+        live = LiveUpdates(api: connection.api, sync: { [weak self] in await self?.sync() })
         compose = ComposeModel(
             engine: engine, conversation: conversation,
             syncSoon: { [weak self] in Task { await self?.sync() } },
@@ -105,6 +108,7 @@ final class MailModel {
     }
 
     func stop() {
+        live.stop()
         tasks.forEach { $0.cancel() }
         tasks.removeAll()
     }
