@@ -303,6 +303,13 @@ pub(crate) fn send_render_job(sh: &Shared, bodies: Vec<MessageBody>, scroll_to: 
         }
         None => (sh.policy.borrow().clone(), sh.policy_gen.get()),
     };
+    // Где сейчас окно переписки: перерисовке без анкора (ресайз, новое
+    // письмо) битмапы нужны именно этим строкам.
+    let view = UI_WEAK
+        .get()
+        .and_then(|w| w.upgrade())
+        .map(|ui| (-ui.get_chat_vp_y(), ui.get_chat_view_h()))
+        .unwrap_or((0.0, 0.0));
     let _ = sh.tx.send(Job::SetConversation {
         bodies,
         width: sh.width.get(),
@@ -313,6 +320,7 @@ pub(crate) fn send_render_job(sh: &Shared, bodies: Vec<MessageBody>, scroll_to: 
         modes,
         scale: sh.render_scale.get(),
         merged,
+        view,
     });
 }
 
@@ -667,6 +675,14 @@ pub(crate) fn wire_viewport(ui: &MainWindow, shared: &Rc<Shared>) -> slint::Time
     // width after the drag settles. No SQLite, no network — the contents
     // didn't change, only the pixels. Debounce coalesces the drag stream;
     // the render seq additionally kills any still-queued older job.
+    // Прокрутка переписки: битмапы держим только у строк возле экрана.
+    let ui_weak_vc = ui.as_weak();
+    ui.on_chat_viewport_changed(move || {
+        if let Some(ui) = ui_weak_vc.upgrade() {
+            render_worker::sync_chat_window(&ui);
+        }
+    });
+
     let sh_rs = shared.clone();
     let resize_debounce = Rc::new(slint::Timer::default());
     ui.on_viewport_resized(move |w| {

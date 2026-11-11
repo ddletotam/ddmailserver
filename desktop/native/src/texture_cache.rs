@@ -127,6 +127,34 @@ impl TextureDiskCache {
         Some(DiskEntry { rgba: img.into_raw(), width: width_px, height: height_px, h, links, runs })
     }
 
+    /// Высота пузыря без распаковки PNG — для индекса высот открываемого
+    /// диалога (render_worker держит битмапы только для окна прокрутки, а
+    /// раскладке нужны высоты всех строк). Читается крошечный `.h`; у записи
+    /// без него — `h` из JSON-сайдкара (он в среднем ~10 КБ, отсюда `.h`).
+    pub fn load_height(
+        &self,
+        folder: &str,
+        uid: u32,
+        width: u32,
+        policy_gen: u64,
+        mode: u8,
+        fp: u64,
+    ) -> Option<f32> {
+        let base = self.base(folder, uid, width, policy_gen, mode, fp);
+        if !base.with_extension("png").exists() {
+            return None;
+        }
+        if let Some(h) = fs::read_to_string(base.with_extension("h"))
+            .ok()
+            .and_then(|s| s.trim().parse::<f32>().ok())
+        {
+            return Some(h);
+        }
+        let meta_raw = fs::read_to_string(base.with_extension("json")).ok()?;
+        let meta: serde_json::Value = serde_json::from_str(&meta_raw).ok()?;
+        Some(meta.get("h")?.as_f64()? as f32)
+    }
+
     /// Best-effort store; failures only cost a future re-render.
     pub fn store(
         &self,
@@ -191,6 +219,7 @@ impl TextureDiskCache {
             return;
         }
         let _ = fs::write(base.with_extension("json"), meta.to_string());
+        let _ = fs::write(base.with_extension("h"), h.to_string());
     }
 
     /// Delete oldest entries (by PNG mtime) until total size is under cap.
@@ -216,6 +245,7 @@ impl TextureDiskCache {
                 break;
             }
             let _ = fs::remove_file(path.with_extension("json"));
+            let _ = fs::remove_file(path.with_extension("h"));
             if fs::remove_file(&path).is_ok() {
                 total = total.saturating_sub(len);
             }

@@ -435,6 +435,8 @@ fn main() {
         row_links: RefCell::new(Vec::new()),
         confirm_mode: Cell::new(0),
         row_text_runs: RefCell::new(Vec::new()),
+        rows_seq: Cell::new(0),
+        rows_requested: RefCell::new(HashSet::new()),
         ctx_link: RefCell::new(None),
         link_apps: url_handler_apps(),
         pending_open_ref: RefCell::new(None),

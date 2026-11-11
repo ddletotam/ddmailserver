@@ -64,7 +64,15 @@ pub(crate) enum Job {
         /// Склеенный диалог: пузыри подписаны темой, у своих — подсказка с
         /// адресатами (контракт §4, «Склеенный диалог»).
         merged: bool,
+        /// Окно переписки на момент отправки: (верх, высота) в CSS px. Нужно
+        /// рендеру без `scroll_to` (ресайз, новое письмо), чтобы битмапы
+        /// получили строки, которые сейчас на экране.
+        view: (f32, f32),
     },
+    /// Битмапы строк, вошедших в окно прокрутки или в запас вокруг него.
+    /// `seq` — задание, чьи строки сейчас стоят в модели: просьба про старые
+    /// строки пропускается.
+    LoadRows { seq: u64, rows: Vec<usize> },
     /// Render the source/headers viewer text to a bitmap + word rects, so the
     /// modal reuses the fast bubble selection layer instead of Slint's
     /// (slow-on-large-text) TextInput.
@@ -113,15 +121,24 @@ impl Packed {
     }
 }
 
-/// Finished bubbles in RAM. Bitmaps are megabytes each, so the entry count is
-/// capped and the oldest insert goes first (the disk layer still has it —
-/// eviction only costs a PNG decode).
+/// Finished bubbles in RAM, the oldest insert goes first (the disk layer
+/// still has it — eviction only costs a PNG decode).
+///
+/// Предел — в байтах, а не в штуках: пузырь весит от сотни килобайт до
+/// десятков мегабайт, и прежние 400 записей держали гигабайты. Модель строк
+/// теперь хранит битмапы только окна прокрутки, так что кэш нужен для
+/// возврата к недавним диалогам, а не для того, чтобы вместить весь открытый.
 struct RamCache {
     map: HashMap<Key, Packed>,
     order: VecDeque<Key>,
+    bytes: usize,
 }
 
-const RAM_CAP: usize = 400;
+const RAM_BUDGET_BYTES: usize = 512 * 1024 * 1024;
+
+fn packed_bytes(p: &Packed) -> usize {
+    p.buf.width() as usize * p.buf.height() as usize * 4
+}
 
 impl RamCache {
     fn get(&self, k: &Key) -> Option<Packed> {
@@ -129,12 +146,15 @@ impl RamCache {
     }
 
     fn insert(&mut self, k: Key, p: Packed) {
-        if self.map.insert(k.clone(), p).is_none() {
-            self.order.push_back(k);
+        self.bytes += packed_bytes(&p);
+        match self.map.insert(k.clone(), p) {
+            Some(old) => self.bytes -= packed_bytes(&old),
+            None => self.order.push_back(k),
         }
-        while self.order.len() > RAM_CAP {
-            if let Some(old) = self.order.pop_front() {
-                self.map.remove(&old);
+        while self.bytes > RAM_BUDGET_BYTES {
+            let Some(old) = self.order.pop_front() else { break };
+            if let Some(p) = self.map.remove(&old) {
+                self.bytes -= packed_bytes(&p);
             }
         }
     }
@@ -164,6 +184,10 @@ struct Ctx {
     disk: Option<TextureDiskCache>,
     to_disk: Mutex<mpsc::Sender<(Key, Packed)>>,
     to_fetch: Mutex<mpsc::Sender<ImageJob>>,
+    /// Точные высоты уже виденных пузырей: индекс высот диалога строится из
+    /// них, не трогая ни битмапы, ни диск. Записи по несколько десятков байт —
+    /// чистится целиком, если разрастётся.
+    heights: Mutex<HashMap<Key, f32>>,
 }
 
 impl Ctx {
@@ -175,6 +199,7 @@ impl Ctx {
     /// send stubs are transient — never persist their textures (the synthetic
     /// uid restarts every session and would collide).
     fn remember(&self, key: Key, p: &Packed) {
+        self.note_height(&key, p.h);
         if key.0 != PENDING_FOLDER {
             let _ = self
                 .to_disk
@@ -183,6 +208,32 @@ impl Ctx {
                 .send((key.clone(), p.clone()));
         }
         self.ram.lock().unwrap_or_else(|e| e.into_inner()).insert(key, p.clone());
+    }
+}
+
+impl Ctx {
+    fn note_height(&self, key: &Key, h: f32) {
+        let mut m = self.heights.lock().unwrap_or_else(|e| e.into_inner());
+        if m.len() > 200_000 {
+            m.clear();
+        }
+        m.insert(key.clone(), h);
+    }
+
+    /// Точная высота пузыря без его битмапа: память, RAM-кэш, диск (`.h`).
+    fn known_height(&self, key: &Key) -> Option<f32> {
+        if let Some(h) = self.heights.lock().unwrap_or_else(|e| e.into_inner()).get(key) {
+            return Some(*h);
+        }
+        let h = self.ram.lock().unwrap_or_else(|e| e.into_inner()).get(key).map(|p| p.h).or_else(
+            || {
+                self.disk
+                    .as_ref()
+                    .and_then(|d| d.load_height(&key.0, key.1, key.2, key.3, key.4, key.5))
+            },
+        )?;
+        self.note_height(key, h);
+        Some(h)
     }
 }
 
@@ -212,10 +263,11 @@ pub(crate) fn spawn(
     let ctx = Arc::new(Ctx {
         ui,
         latest_seq,
-        ram: Mutex::new(RamCache { map: HashMap::new(), order: VecDeque::new() }),
+        ram: Mutex::new(RamCache { map: HashMap::new(), order: VecDeque::new(), bytes: 0 }),
         disk,
         to_disk: Mutex::new(disk_tx),
         to_fetch: Mutex::new(fetch_tx),
+        heights: Mutex::new(HashMap::new()),
     });
 
     {
@@ -256,9 +308,26 @@ pub(crate) fn spawn(
     }
 
     std::thread::spawn(move || {
-        for job in rx {
+        // Диалог, чьи строки сейчас в модели, и строки, которым фон ещё должен
+        // точную высоту. Пока хвост не пуст, цикл не засыпает на `recv`, а
+        // берёт по заходу между заданиями — любое задание важнее хвоста.
+        let mut cur: Option<Conv> = None;
+        let mut back: VecDeque<usize> = VecDeque::new();
+        loop {
+            let job = if back.is_empty() {
+                match rx.recv() {
+                    Ok(j) => Some(j),
+                    Err(_) => break,
+                }
+            } else {
+                match rx.try_recv() {
+                    Ok(j) => Some(j),
+                    Err(mpsc::TryRecvError::Empty) => None,
+                    Err(mpsc::TryRecvError::Disconnected) => break,
+                }
+            };
             match job {
-                Job::SetConversation {
+                Some(Job::SetConversation {
                     bodies,
                     width,
                     policy,
@@ -268,61 +337,105 @@ pub(crate) fn spawn(
                     modes,
                     scale,
                     merged,
-                } => {
+                    view,
+                }) => {
                     if ctx.stale(seq) {
                         println!("[perf] render job seq={seq} superseded — skipped");
                         continue;
                     }
-                    let job = ConvJob {
-                        bodies: &bodies,
-                        width,
-                        policy: &policy,
-                        policy_gen,
-                        seq,
-                        modes: &modes,
-                        scale,
-                        merged,
-                    };
-                    render_conversation(&ctx, &job, scroll_to);
+                    let mut conv =
+                        Conv::new(bodies, width, policy, policy_gen, seq, modes, scale, merged);
+                    back = open_conv(&ctx, &mut conv, scroll_to, view).unwrap_or_default();
+                    cur = Some(conv);
                 }
-                Job::RenderSource { text, width, scale } => {
+                Some(Job::LoadRows { seq, rows }) => {
+                    if let Some(conv) = cur.as_mut().filter(|c| c.seq == seq && !ctx.stale(seq)) {
+                        serve_rows(&ctx, conv, &rows);
+                    }
+                }
+                Some(Job::RenderSource { text, width, scale }) => {
                     render_source(&ctx, &text, width, scale)
                 }
+                None => match cur.as_mut() {
+                    Some(conv) if !ctx.stale(conv.seq) => background_step(&ctx, conv, &mut back),
+                    _ => back.clear(),
+                },
             }
         }
     });
     tx
 }
 
-/// One `Job::SetConversation`, borrowed for the pool.
-struct ConvJob<'a> {
-    bodies: &'a [MessageBody],
+/// Оценка высоты строки, которую ещё никто не раскладывал, когда в диалоге
+/// нет ни одной известной.
+const DEFAULT_ROW_H: f32 = 400.0;
+
+/// Открытый диалог глазами воркера: что рисуем, ключи пузырей и высоты строк.
+/// Битмапов здесь нет — они живут в кэшах и в модели (только для окна).
+struct Conv {
+    bodies: Vec<MessageBody>,
     width: u32,
-    policy: &'a policy::Policy,
-    policy_gen: u64,
+    policy: policy::Policy,
     seq: u64,
-    modes: &'a [u8],
+    modes: Vec<u8>,
     scale: f32,
     merged: bool,
+    keys: Vec<Key>,
+    /// Высота строки в CSS px: точная, если `exact[i]`, иначе оценка.
+    h: Vec<f32>,
+    exact: Vec<bool>,
 }
 
-impl ConvJob<'_> {
+impl Conv {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        bodies: Vec<MessageBody>,
+        width: u32,
+        policy: policy::Policy,
+        policy_gen: u64,
+        seq: u64,
+        modes: Vec<u8>,
+        scale: f32,
+        merged: bool,
+    ) -> Self {
+        let n = bodies.len();
+        let keys = bodies
+            .iter()
+            .enumerate()
+            .map(|(i, body)| {
+                let mode = modes.get(i).copied().unwrap_or(0);
+                let fp = fingerprint(body, scale, merged);
+                (body.folder.clone(), body.uid, width, policy_gen, mode, fp)
+            })
+            .collect();
+        Conv {
+            bodies,
+            width,
+            policy,
+            seq,
+            modes,
+            scale,
+            merged,
+            keys,
+            h: vec![DEFAULT_ROW_H; n],
+            exact: vec![false; n],
+        }
+    }
+
     fn mode(&self, i: usize) -> u8 {
         // Mode 1 = «Текстовая версия» override for this body.
         self.modes.get(i).copied().unwrap_or(0)
     }
 
     fn key(&self, i: usize) -> Key {
-        let body = &self.bodies[i];
-        let fp = fingerprint(body, self.scale, self.merged);
-        (body.folder.clone(), body.uid, self.width, self.policy_gen, self.mode(i), fp)
+        self.keys[i].clone()
     }
 
     /// Context-menu data: per-sender / per-host checkbox states reflect the
     /// policy this job rendered under (a toggle re-renders anyway).
     fn meta(&self, i: usize) -> RowMeta {
         let body = &self.bodies[i];
-        let policy = self.policy;
+        let policy = &self.policy;
         let (has_html, has_text) = content_of(body);
         let force_text = self.mode(i) == 1 && has_html;
         let sender_lc = body.from_addr.to_lowercase();
@@ -399,7 +512,7 @@ enum Source {
 /// First pass for one row that missed the RAM cache: the disk layer, or a
 /// layout with the images already in memory. `Some(job)` = remote images are
 /// still missing and the caller should hand the job to a fetcher.
-fn first_pass(ctx: &Ctx, job: &ConvJob, i: usize) -> (Packed, Source, Option<ImageJob>) {
+fn first_pass(ctx: &Ctx, job: &Conv, i: usize) -> (Packed, Source, Option<ImageJob>) {
     let body = &job.bodies[i];
     let key = job.key(i);
     if let Some(de) =
@@ -420,7 +533,7 @@ fn first_pass(ctx: &Ctx, job: &ConvJob, i: usize) -> (Packed, Source, Option<Ima
     let html = if force_text {
         build_text_only_html(body, job.merged)
     } else {
-        build_body_html(body, job.policy, job.merged)
+        build_body_html(body, &job.policy, job.merged)
     };
     // Текстовой версии картинки не положены вовсе.
     let gate: Gate = if force_text {
@@ -477,91 +590,173 @@ fn first_pass(ctx: &Ctx, job: &ConvJob, i: usize) -> (Packed, Source, Option<Ima
     (p, source, fetch)
 }
 
-fn render_conversation(ctx: &Ctx, job: &ConvJob, scroll_to: Option<i32>) {
-    let t_wall = Instant::now();
-    let n = job.bodies.len();
-    let seq = job.seq;
-
-    // Tell the UI to show the progress bar.
-    let n_total = n as i32;
-    let _ = ctx.ui.upgrade_in_event_loop(move |ui| {
-        ui.set_render_total(n_total);
-        ui.set_render_progress(0);
-    });
-
-    // RAM hits first, on this thread: they cost a refcount bump.
-    let mut slots: Vec<Option<(Packed, Source)>> = {
+/// Строки одним заходом пула: RAM-попадания сразу, остальные — диск или
+/// раскладка в `layout_threads()` потоков. Задание, устаревшее посреди
+/// работы, останавливает пул в пределах пузыря на поток — тогда результат
+/// неполный, и вызывающий проверяет `ctx.stale` сам.
+fn load_rows(
+    ctx: &Ctx,
+    conv: &Conv,
+    rows: &[usize],
+) -> Vec<(usize, Packed, Source, Option<ImageJob>)> {
+    let mut out = Vec::new();
+    let mut misses = Vec::new();
+    {
         let ram = ctx.ram.lock().unwrap_or_else(|e| e.into_inner());
-        (0..n).map(|i| ram.get(&job.key(i)).map(|p| (p, Source::Ram))).collect()
-    };
-    let misses: Vec<usize> = (0..n).filter(|&i| slots[i].is_none()).collect();
-    let done = AtomicUsize::new(n - misses.len());
-    let report = |d: usize| {
-        let d = d as i32;
-        let _ = ctx.ui.upgrade_in_event_loop(move |ui| ui.set_render_progress(d));
-    };
-    report(n - misses.len());
-
-    // The misses, in parallel. Each thread pulls the next index, so a heavy
-    // newsletter does not leave the others idle; each checks `seq` before
-    // taking work — a newer job (conversation switch, next resize step) stops
-    // the pool within one bubble per thread.
+        for &i in rows {
+            match ram.get(&conv.keys[i]) {
+                Some(p) => out.push((i, p, Source::Ram, None)),
+                None => misses.push(i),
+            }
+        }
+    }
+    if misses.is_empty() {
+        return out;
+    }
     let next = AtomicUsize::new(0);
-    let results: Mutex<Vec<(usize, Packed, Source, Option<ImageJob>)>> = Mutex::new(Vec::new());
-    let t_layout = Instant::now();
+    let results = Mutex::new(Vec::new());
     let threads = layout_threads().min(misses.len());
     std::thread::scope(|s| {
         for _ in 0..threads {
             s.spawn(|| {
                 loop {
-                    if ctx.stale(seq) {
+                    if ctx.stale(conv.seq) {
                         return;
                     }
                     let k = next.fetch_add(1, Ordering::SeqCst);
                     let Some(&i) = misses.get(k) else { return };
-                    let (p, source, fetch) = first_pass(ctx, job, i);
+                    let (p, source, fetch) = first_pass(ctx, conv, i);
                     results.lock().unwrap_or_else(|e| e.into_inner()).push((i, p, source, fetch));
-                    report(done.fetch_add(1, Ordering::SeqCst) + 1);
                 }
             });
         }
     });
-    let layout_ms = t_layout.elapsed().as_millis();
+    out.extend(results.into_inner().unwrap_or_else(|e| e.into_inner()));
+    out
+}
 
-    if ctx.stale(seq) {
-        println!("[perf] render job seq={seq} aborted mid-render — newer job queued");
-        // Hide the progress bar; the superseding job re-seeds it with its
-        // own totals.
-        let _ = ctx.ui.upgrade_in_event_loop(move |ui| {
-            ui.set_render_total(0);
-            ui.set_render_progress(0);
-        });
-        return;
+/// Строки, которые окажутся на экране: при `scroll_to` — там, куда встанет
+/// прокрутка открытия (`-1` — низ, `r` — строка r наверху), без него — в
+/// окне с верхом `view_top`. Плюс по строке с краёв — на дробную прокрутку.
+fn window_rows(h: &[f32], scroll_to: Option<i32>, view_top: f32, view_h: f32) -> Vec<usize> {
+    let n = h.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let total: f32 = h.iter().sum();
+    let top = match scroll_to {
+        Some(r) if r < 0 => (total - view_h).max(0.0),
+        Some(r) => h.iter().take(r as usize).sum(),
+        None => view_top.clamp(0.0, (total - view_h).max(0.0)),
+    };
+    let bottom = top + view_h;
+    let mut out = Vec::new();
+    let mut y = 0.0;
+    for (i, &hi) in h.iter().enumerate() {
+        if y + hi > top && y < bottom {
+            out.push(i);
+        }
+        y += hi;
+    }
+    if let (Some(&first), Some(&last)) = (out.first(), out.last()) {
+        if first > 0 {
+            out.insert(0, first - 1);
+        }
+        if last + 1 < n {
+            out.push(last + 1);
+        }
+    }
+    out
+}
+
+/// Открытие (и любая перерисовка) диалога. Высоты всех строк — из индекса
+/// (`Ctx::known_height`) или оценкой, битмапы — только окну, которое увидит
+/// пользователь: стоимость открытия не растёт с длиной диалога (контракт
+/// §4в-бис). Возвращает строки без точной высоты, ближние к окну первыми, —
+/// их доделывает фон; `None` — задание устарело.
+fn open_conv(
+    ctx: &Ctx,
+    conv: &mut Conv,
+    scroll_to: Option<i32>,
+    view: (f32, f32),
+) -> Option<VecDeque<usize>> {
+    let t_wall = Instant::now();
+    let n = conv.bodies.len();
+
+    let mut known = 0;
+    for i in 0..n {
+        if let Some(h) = ctx.known_height(&conv.keys[i]) {
+            conv.h[i] = h;
+            conv.exact[i] = true;
+            known += 1;
+        }
+    }
+    // Неизвестным — медиана известных этого же диалога: письма одного
+    // отправителя обычно похожи, и прокрутка меньше прыгает, когда фон
+    // доложит точные.
+    let mut hs: Vec<f32> = (0..n).filter(|&i| conv.exact[i]).map(|i| conv.h[i]).collect();
+    hs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let estimate = hs.get(hs.len() / 2).copied().unwrap_or(DEFAULT_ROW_H);
+    for i in 0..n {
+        if !conv.exact[i] {
+            conv.h[i] = estimate;
+        }
     }
 
+    // Окно может уточняться: строка, разложенная только что, получила
+    // точную высоту, и экран покрыли другие строки. Несколько заходов
+    // сходятся — каждый добирает только недостающие.
+    let view_h = if view.1 > 1.0 { view.1 } else { 900.0 };
+    let mut slots: Vec<Option<Packed>> = vec![None; n];
     let mut fetches: Vec<ImageJob> = Vec::new();
-    for (i, p, source, fetch) in results.into_inner().unwrap_or_else(|e| e.into_inner()) {
-        slots[i] = Some((p, source));
-        fetches.extend(fetch);
+    let mut by_source = [0usize; 4];
+    let t_layout = Instant::now();
+    let mut window = 0;
+    for _ in 0..8 {
+        let missing: Vec<usize> = window_rows(&conv.h, scroll_to, view.0, view_h)
+            .into_iter()
+            .filter(|&i| slots[i].is_none())
+            .collect();
+        if missing.is_empty() {
+            break;
+        }
+        let got = load_rows(ctx, conv, &missing);
+        if ctx.stale(conv.seq) {
+            println!("[perf] render job seq={} aborted mid-render — newer job queued", conv.seq);
+            let _ = ctx.ui.upgrade_in_event_loop(move |ui| {
+                ui.set_render_total(0);
+                ui.set_render_progress(0);
+            });
+            return None;
+        }
+        for (i, p, source, fetch) in got {
+            conv.h[i] = p.h;
+            conv.exact[i] = true;
+            by_source[source as usize] += 1;
+            slots[i] = Some(p);
+            fetches.extend(fetch);
+            window += 1;
+        }
     }
-    let count = |want: Source| slots.iter().flatten().filter(|(_, s)| *s == want).count();
+    let layout_ms = t_layout.elapsed().as_millis();
     println!(
-        "[perf] render N={n} width={}px threads={threads} cache_hits={} disk_hits={} \
-         fallback={} images_pending={} layout={layout_ms}ms total_job={}ms",
-        job.width,
-        count(Source::Ram),
-        count(Source::Disk),
-        count(Source::Fallback),
+        "[perf] render N={n} window={window} width={}px known_h={known} cache_hits={} \
+         disk_hits={} laid_out={} fallback={} images_pending={} layout={layout_ms}ms total_job={}ms",
+        conv.width,
+        by_source[Source::Ram as usize],
+        by_source[Source::Disk as usize],
+        by_source[Source::Layout as usize],
+        by_source[Source::Fallback as usize],
         fetches.len(),
         t_wall.elapsed().as_millis()
     );
 
-    let rows: Vec<(Packed, RowMeta)> = slots
+    let rows: Vec<RowOut> = slots
         .into_iter()
         .enumerate()
-        .filter_map(|(i, s)| s.map(|(p, _)| (p, job.meta(i))))
+        .map(|(i, packed)| RowOut { h: conv.h[i], packed, meta: conv.meta(i) })
         .collect();
-    install_rows(ctx, rows, job.width, scroll_to);
+    install_rows(ctx, conv.seq, rows, conv.width, scroll_to);
 
     // Only now: the rows are queued for the UI ahead of any update a fetcher
     // could send for them (one event loop, first in first out).
@@ -569,25 +764,102 @@ fn render_conversation(ctx: &Ctx, job: &ConvJob, scroll_to: Option<i32>) {
     for f in fetches {
         let _ = to_fetch.send(f);
     }
+
+    let win = window_rows(&conv.h, scroll_to, view.0, view_h);
+    let center = win.get(win.len() / 2).copied().unwrap_or(n.saturating_sub(1));
+    let mut back: Vec<usize> = (0..n).filter(|&i| !conv.exact[i]).collect();
+    back.sort_by_key(|&i| i.abs_diff(center));
+    Some(back.into())
+}
+
+/// Фон: точные высоты строкам, которых ещё никто не раскладывал, по заходу
+/// в `layout_threads()` строк. Между заходами цикл воркера смотрит очередь,
+/// так что просьба UI или другой диалог не ждут весь хвост.
+fn background_step(ctx: &Ctx, conv: &mut Conv, back: &mut VecDeque<usize>) {
+    let mut batch = Vec::new();
+    while batch.len() < layout_threads() {
+        let Some(i) = back.pop_front() else { break };
+        if !conv.exact[i] {
+            batch.push(i);
+        }
+    }
+    if batch.is_empty() {
+        return;
+    }
+    deliver(ctx, conv, &batch);
+    if ctx.stale(conv.seq) {
+        back.clear();
+    }
+}
+
+/// Просьба UI: битмапы строк, вошедших в окно прокрутки.
+fn serve_rows(ctx: &Ctx, conv: &mut Conv, rows: &[usize]) {
+    let rows: Vec<usize> = rows.iter().copied().filter(|&i| i < conv.bodies.len()).collect();
+    deliver(ctx, conv, &rows);
+}
+
+/// Загрузить строки и отдать их UI: высоту — всегда, битмап — если строка в
+/// окне (решает `apply_row_update` на UI-потоке, там видно, где прокрутка).
+fn deliver(ctx: &Ctx, conv: &mut Conv, rows: &[usize]) {
+    let got = load_rows(ctx, conv, rows);
+    if ctx.stale(conv.seq) {
+        return;
+    }
+    let mut updates = Vec::with_capacity(got.len());
+    let to_fetch = ctx.to_fetch.lock().unwrap_or_else(|e| e.into_inner());
+    for (i, p, _, fetch) in got {
+        conv.h[i] = p.h;
+        conv.exact[i] = true;
+        if let Some(f) = fetch {
+            let _ = to_fetch.send(f);
+        }
+        updates.push((i, p));
+    }
+    drop(to_fetch);
+    let seq = conv.seq;
+    let latest = Arc::clone(&ctx.latest_seq);
+    let _ = ctx.ui.upgrade_in_event_loop(move |ui| {
+        if seq != latest.load(Ordering::SeqCst) {
+            return;
+        }
+        for (row, p) in updates {
+            apply_row_update(&ui, row, p);
+        }
+    });
+}
+
+/// Строка для модели: высота есть всегда, битмап — только у окна.
+struct RowOut {
+    h: f32,
+    packed: Option<Packed>,
+    meta: RowMeta,
 }
 
 /// Hand a finished first pass to the UI thread: one model swap for the whole
 /// conversation, so bubbles appear together and in order, and the scroll
 /// anchor is computed from final row heights.
-fn install_rows(ctx: &Ctx, rows: Vec<(Packed, RowMeta)>, width: u32, scroll_to: Option<i32>) {
+fn install_rows(ctx: &Ctx, seq: u64, rows: Vec<RowOut>, width: u32, scroll_to: Option<i32>) {
     let rects_width = width as f32;
     let _ = ctx.ui.upgrade_in_event_loop(move |ui| {
+        let t_ui = Instant::now();
         // The width these rows' link/text rects were extracted at — Slint
         // maps mouse coords into (and highlight rects out of) this space, so
         // hits stay exact even while the column width drifts from the render
         // width (resize-debounce window).
         ui.set_body_rects_width(rects_width);
-        let (links, runs): (Vec<_>, Vec<_>) =
-            rows.iter().map(|(p, _)| (p.links.clone(), p.runs.clone())).unzip();
+        let (links, runs): (Vec<_>, Vec<_>) = rows
+            .iter()
+            .map(|r| {
+                r.packed.as_ref().map(|p| (p.links.clone(), p.runs.clone())).unwrap_or_default()
+            })
+            .unzip();
         SHARED.with(|s| {
             if let Some(sh) = s.borrow().as_ref() {
                 *sh.row_links.borrow_mut() = links;
                 *sh.row_text_runs.borrow_mut() = runs;
+                // Эти строки — задания `seq`: просьбы окна идут с ним же.
+                sh.rows_seq.set(seq);
+                sh.rows_requested.borrow_mut().clear();
                 // Rows are being replaced — any active selection now points
                 // at stale indices.
                 sh.selection.sel_row.set(-1);
@@ -598,9 +870,9 @@ fn install_rows(ctx: &Ctx, rows: Vec<(Packed, RowMeta)>, width: u32, scroll_to: 
         // memcpy) and the only step that has to run on the UI thread.
         let rows: Vec<RowItem> = rows
             .into_iter()
-            .map(|(p, m)| RowItem {
-                img: Image::from_rgba8(p.buf),
-                h: p.h,
+            .map(|RowOut { h, packed, meta: m }| RowItem {
+                img: packed.map(|p| Image::from_rgba8(p.buf)).unwrap_or_default(),
+                h,
                 has_html: m.has_html,
                 has_text: m.has_text,
                 viewing_html: m.viewing_html,
@@ -623,7 +895,18 @@ fn install_rows(ctx: &Ctx, rows: Vec<(Packed, RowMeta)>, width: u32, scroll_to: 
         // ходу. Сумму мы и так уже считаем строкой выше.
         let content_h: f32 = rows.iter().map(|r| r.h).sum();
         ui.set_chat_content_h(content_h);
+        let n = rows.len();
         ui.set_messages(ModelRc::new(VecModel::from(rows)));
+        println!("[perf] install rows={n} ui={}ms", t_ui.elapsed().as_millis());
+        // Окно вокруг экрана догружается по прокрутке (`sync_chat_window`), но
+        // перерисовка без прокрутки (ресайз, новое письмо) вьюпорт не двигает —
+        // спросим сами, когда раскладка доедет.
+        let weak = ui.as_weak();
+        slint::Timer::single_shot(Duration::from_millis(30), move || {
+            if let Some(ui) = weak.upgrade() {
+                sync_chat_window(&ui);
+            }
+        });
         // Hide the progress bar.
         ui.set_render_total(0);
         ui.set_render_progress(0);
@@ -698,11 +981,17 @@ fn apply_row_update(ui: &MainWindow, row: usize, p: Packed) {
     let old_h = item.h;
     let dh = p.h - old_h;
     let row_top: f32 = (0..row).filter_map(|i| vm.row_data(i)).map(|r| r.h).sum();
-    item.img = Image::from_rgba8(p.buf);
+    // Битмап нужен строке в окне (или уже показанной — её заменяем версией
+    // с картинками); дальней хватит высоты, битмап подтянет прокрутка.
+    let (keep_a, keep_b) = keep_span(ui);
+    if item.img.size().width > 0 || (row_top + p.h > keep_a && row_top < keep_b) {
+        item.img = Image::from_rgba8(p.buf);
+    }
     item.h = p.h;
     vm.set_row_data(row, item);
     SHARED.with(|s| {
         if let Some(sh) = s.borrow().as_ref() {
+            sh.rows_requested.borrow_mut().remove(&row);
             if let Some(l) = sh.row_links.borrow_mut().get_mut(row) {
                 *l = p.links;
             }
@@ -755,6 +1044,65 @@ fn apply_row_update(ui: &MainWindow, row: usize, p: Packed) {
     }
 }
 
+/// Запас вокруг экрана в высотах экрана: битмапы просим для
+/// [верх − WANT, низ + WANT], выгружаем вне [верх − KEEP, низ + KEEP].
+/// Разрыв между ними — чтобы строка на границе не моргала туда-обратно.
+const WANT_SCREENS: f32 = 1.0;
+const KEEP_SCREENS: f32 = 3.0;
+
+fn view_span(ui: &MainWindow) -> (f32, f32) {
+    let top = -ui.get_chat_vp_y();
+    let h = ui.get_chat_view_h().max(300.0);
+    (top, h)
+}
+
+fn keep_span(ui: &MainWindow) -> (f32, f32) {
+    let (top, h) = view_span(ui);
+    (top - KEEP_SCREENS * h, top + h + KEEP_SCREENS * h)
+}
+
+/// Держать битмапы только у строк возле экрана: недостающие попросить у
+/// воркера, далёкие выгрузить (высота и геометрия ссылок остаются). Зовётся
+/// на каждое движение прокрутки и после установки строк — проход по модели
+/// дешёвый, сотни строк — это микросекунды.
+pub(crate) fn sync_chat_window(ui: &MainWindow) {
+    // Анкор открытия ещё не применён — вьюпорт показывает не то место, куда
+    // встанет прокрутка, и просьбы по нему были бы мимо.
+    if ui.get_chat_scroll_pending() {
+        return;
+    }
+    let model = ui.get_messages();
+    let Some(vm) = model.as_any().downcast_ref::<VecModel<RowItem>>() else { return };
+    let (top, h) = view_span(ui);
+    let (want_a, want_b) = (top - WANT_SCREENS * h, top + h + WANT_SCREENS * h);
+    let (keep_a, keep_b) = keep_span(ui);
+    SHARED.with(|s| {
+        let Some(sh) = s.borrow().as_ref().cloned() else { return };
+        let mut want = Vec::new();
+        {
+            let mut requested = sh.rows_requested.borrow_mut();
+            let mut y = 0.0;
+            for i in 0..vm.row_count() {
+                let Some(mut r) = vm.row_data(i) else { continue };
+                let (a, b) = (y, y + r.h);
+                y = b;
+                let has = r.img.size().width > 0;
+                if b > want_a && a < want_b {
+                    if !has && requested.insert(i) {
+                        want.push(i);
+                    }
+                } else if has && !(b > keep_a && a < keep_b) {
+                    r.img = Image::default();
+                    vm.set_row_data(i, r);
+                }
+            }
+        }
+        if !want.is_empty() {
+            let _ = sh.tx.send(crate::Job::LoadRows { seq: sh.rows_seq.get(), rows: want });
+        }
+    });
+}
+
 /// Render the viewer text the same way as a bubble: a bitmap + word rects.
 /// The modal then selects via the fast Rust text-run layer, not Slint's
 /// TextInput.
@@ -774,4 +1122,38 @@ fn render_source(ctx: &Ctx, text: &str, width: u32, scale: f32) {
         ui.set_source_img_h(p.h);
         ui.set_source_selection_rects(ModelRc::new(VecModel::from(Vec::<SelRect>::new())));
     });
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::window_rows;
+
+    /// Открытие «в конец»: экран покрывают последние строки, плюс одна сверху
+    /// на дробную прокрутку. Хвост длинного диалога не тянет за собой начало.
+    #[test]
+    fn bottom_anchor_takes_only_the_tail() {
+        let h = vec![300.0; 500];
+        assert_eq!(window_rows(&h, Some(-1), 0.0, 900.0), vec![496, 497, 498, 499]);
+    }
+
+    /// Анкор на строку: она встаёт наверх, окно идёт вниз от неё.
+    #[test]
+    fn row_anchor_starts_at_that_row() {
+        let h = vec![300.0; 500];
+        assert_eq!(window_rows(&h, Some(100), 0.0, 900.0), vec![99, 100, 101, 102, 103]);
+    }
+
+    /// Без анкора — текущее окно; верх за пределами содержимого клампится.
+    #[test]
+    fn no_anchor_follows_the_viewport() {
+        let h = vec![100.0, 500.0, 100.0, 100.0];
+        assert_eq!(window_rows(&h, None, 120.0, 200.0), vec![0, 1, 2]);
+        assert_eq!(window_rows(&h, None, 1.0e9, 200.0), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn short_and_empty_conversations() {
+        assert_eq!(window_rows(&[50.0, 50.0], Some(-1), 0.0, 900.0), vec![0, 1]);
+        assert!(window_rows(&[], Some(-1), 0.0, 900.0).is_empty());
+    }
 }

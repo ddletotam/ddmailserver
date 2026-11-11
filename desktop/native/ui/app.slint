@@ -1099,6 +1099,9 @@ export component MainWindow inherits Window {
     // the ListView reacts to the seq change and assigns viewport-y. (A
     // plain binding would be destroyed by the user's first manual scroll.)
     in-out property <length> chat-scroll-y: 0;
+    // Окно переписки сдвинулось или изменилось: Rust держит битмапы только у
+    // строк возле экрана (render_worker::sync_chat_window).
+    callback chat-viewport-changed();
     in-out property <int> chat-scroll-seq: 0;
     // True between a seq bump and the first post-layout re-apply: the
     // initial imperative assign happens BEFORE the ListView has laid out
@@ -2658,7 +2661,10 @@ export component MainWindow inherits Window {
                     viewport-width: self.visible-width;
                     // Mirror scroll state for the Rust-side "at bottom?" check
                     // (new-mail append behaviour).
-                    changed viewport-y => { root.chat-vp-y = self.viewport-y; }
+                    changed viewport-y => {
+                        root.chat-vp-y = self.viewport-y;
+                        root.chat-viewport-changed();
+                    }
                     changed viewport-height => {
                         root.chat-vp-h = self.viewport-height;
                         // Заодно обновляем видимую высоту. Свой `changed
@@ -2680,10 +2686,15 @@ export component MainWindow inherits Window {
                             root.chat-scroll-pending = false;
                             lv.viewport-y = -max(0px, min(root.chat-scroll-y,
                                 lv.viewport-height - lv.height));
+                            // Анкор мог совпасть с текущей позицией — тогда
+                            // `changed viewport-y` не придёт, а окну вокруг
+                            // экрана нужны битмапы.
+                            root.chat-viewport-changed();
                         }
                     }
                     changed visible-height => {
                         root.chat-view-h = self.visible-height;
+                        root.chat-viewport-changed();
                         // Панель почты условная (view-mode == 0): при возврате
                         // из календаря ListView создаётся заново и стоит в
                         // начале, а bump seq в этот момент до моста не доходит

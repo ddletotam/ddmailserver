@@ -107,6 +107,13 @@ pub(crate) struct Shared {
     /// Per-row text layers (word rects, bubble-relative CSS px) — mouse
     /// selection. Parallel to the rendered rows, like row_links.
     pub(crate) row_text_runs: RefCell<Vec<Vec<render_common::TextRun>>>,
+    /// Задание рендера, чьи строки сейчас в модели переписки: просьбы окна
+    /// (`Job::LoadRows`) идут с ним, чтобы воркер не путал строки разных
+    /// перерисовок.
+    pub(crate) rows_seq: Cell<u64>,
+    /// Строки, чьи битмапы уже попрошены и ещё не пришли — чтобы прокрутка не
+    /// просила одно и то же на каждом шаге. Чистится установкой строк.
+    pub(crate) rows_requested: RefCell<HashSet<usize>>,
     /// Ссылка под курсором на момент показа контекстного меню и приложения,
     /// умеющие её открыть (имя + .desktop). Список читается один раз при старте.
     pub(crate) ctx_link: RefCell<Option<String>>,
