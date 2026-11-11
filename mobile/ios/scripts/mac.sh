@@ -5,7 +5,7 @@
 #   mac.sh test            swift test пакета DDMailKit
 #   mac.sh build           сгенерировать проект, собрать под симулятор iOS и под macOS
 #   mac.sh run [iphone|ipad]  собрать, поставить в симулятор, запустить, скриншот сюда
-#   mac.sh uitest          сквозные UI-тесты в симуляторе iPhone; скриншоты шагов — сюда
+#   mac.sh uitest [iphone|ipad]  сквозные UI-тесты в симуляторе; скриншоты шагов — сюда
 #   mac.sh device [iphone|ipad]  собрать с подписью, поставить на устройство, запустить
 #
 # Окружение: DDMAIL_MAC (ssh-хост, по умолчанию `mac`),
@@ -122,7 +122,7 @@ case "$cmd" in
         ;;
     uitest)
         gen
-        udid="$(sim_udid iphone)"
+        udid="$(sim_udid "${3:-iphone}")"
         rb="$HOME/build/ddmail/ui.xcresult"
         out="$HOME/build/ddmail/ui-shots"
         rm -rf "$rb" "$out"
@@ -193,7 +193,7 @@ case "$cmd" in
     uitest)
         sync_code
         rc=0
-        remote uitest "${DDMAIL_TEST_EMAIL:-}" "${DDMAIL_TEST_PASSWORD:-}" || rc=$?
+        remote uitest "${DDMAIL_TEST_EMAIL:-}" "${DDMAIL_TEST_PASSWORD:-}" "${2:-iphone}" || rc=$?
         dir="$SHOTS/uitest-$(date +%H%M%S)"
         mkdir -p "$dir"
         scp -qr "$HOST:$REMOTE/ui-shots/." "$dir/" 2>/dev/null || true
