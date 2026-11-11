@@ -95,7 +95,13 @@ final class Connection {
     let cache: MailStore?
     let engine: SyncEngine?
     @ObservationIgnored private(set) lazy var mail: MailModel? = engine.map { MailModel(connection: self, engine: $0) }
-    @ObservationIgnored private(set) lazy var calendar = CalendarModel(api: api) { [weak self] in self?.report(.dead) }
+    @ObservationIgnored private(set) lazy var calendar: CalendarModel = {
+        let m = CalendarModel(api: api) { [weak self] in self?.report(.dead) }
+        // Календарь перечитан (правка, calendar_updated) — напоминания пересеять.
+        m.onReloaded = { [weak self] in Task { await self?.reminders.refresh() } }
+        return m
+    }()
+    @ObservationIgnored private(set) lazy var reminders = ReminderService(api: api)
     private(set) var status: SessionStatus = .checking
     /// Кэш не открылся (диск полон, файл повреждён) — почта без кэша не работает.
     private(set) var cacheError: String?
@@ -157,6 +163,7 @@ final class Connection {
             try await engine.sync()
             report(.ok)
             await Notifier.check(engine: engine, openID: nil)
+            await reminders.refresh()
         } catch APIError.unauthorized {
             report(.dead)
         } catch {}
@@ -195,6 +202,8 @@ final class Connection {
         ImageSenders.clear()
         AppSettings.shared.clearAccountState()
         CalendarPrefs.shared.clear()
+        let r = reminders
+        Task { await r.clear() }
         Notifier.clearAll()
     }
 }

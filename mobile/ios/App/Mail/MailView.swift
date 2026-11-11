@@ -50,7 +50,9 @@ struct MailView: View {
             ComposeSheetView(model: model.compose)
         }
         .sheet(isPresented: $settingsShown) {
-            SettingsView(accountKey: connection.session.accountKey, onLogout: app.logout)
+            SettingsView(accountKey: connection.session.accountKey, onLogout: app.logout) {
+                Task { await connection.reminders.refresh() }
+            }
         }
         // Один вопрос после первого входа: ответа по умолчанию нет (§4).
         .alert("Загружать письма заранее?", isPresented: Binding(

@@ -4,8 +4,10 @@ import UserNotifications
 /// Настройки (Android «Настройки»): загрузка писем, уведомления, учётная запись.
 struct SettingsView: View {
     @Bindable var settings = AppSettings.shared
+    @Bindable var calPrefs = CalendarPrefs.shared
     let accountKey: String
     let onLogout: () -> Void
+    var onRemindersChanged: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @State private var denied = false
@@ -39,6 +41,12 @@ struct SettingsView: View {
                     Text(denied
                          ? "Уведомления запрещены в настройках системы."
                          : "Текст уведомления собирается на устройстве: отправитель и тема через серверы Apple не передаются.")
+                }
+                Section {
+                    Toggle("Напоминания о событиях", isOn: $calPrefs.reminders)
+                        .onChange(of: calPrefs.reminders) { onRemindersChanged() }
+                } footer: {
+                    Text("Каскад напоминаний события; смахнули уведомление — по этому событию больше не напомнит.")
                 }
                 Section("Учётная запись") {
                     LabeledContent("Вход", value: accountKey)

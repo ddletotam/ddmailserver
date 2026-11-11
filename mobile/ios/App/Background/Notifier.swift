@@ -1,3 +1,4 @@
+import DDMailCalendar
 import DDMailSync
 import Foundation
 import UserNotifications
@@ -61,6 +62,17 @@ final class NotificationRouter: NSObject, UNUserNotificationCenterDelegate, @unc
     static let shared = NotificationRouter()
     @MainActor var open: ((String) -> Void)?
     @MainActor private var pending: String?
+    /// Напоминание: ключ вхождения и действие (смахнули, «позже», нажатие).
+    @MainActor var reminder: ((ReminderRow.Key, String) -> Void)?
+    @MainActor private var pendingReminder: (ReminderRow.Key, String)?
+
+    @MainActor func attachReminders(_ handle: @escaping (ReminderRow.Key, String) -> Void) {
+        reminder = handle
+        if let (k, a) = pendingReminder {
+            pendingReminder = nil
+            handle(k, a)
+        }
+    }
 
     @MainActor func attach(_ open: @escaping (String) -> Void) {
         self.open = open
@@ -71,6 +83,13 @@ final class NotificationRouter: NSObject, UNUserNotificationCenterDelegate, @unc
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        let action = response.actionIdentifier
+        if let key = ReminderPlanner.parseNotificationID(response.notification.request.identifier) {
+            await MainActor.run {
+                if let reminder { reminder(key, action) } else { pendingReminder = (key, action) }
+            }
+            return
+        }
         guard let id = response.notification.request.content.userInfo["conversation"] as? String else { return }
         await MainActor.run {
             if let open { open(id) } else { pending = id }

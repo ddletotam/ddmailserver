@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 /// Разделы приложения (контракт §6, Android §16): таб-бар внизу на iPhone,
 /// боковая панель на iPad и Маке — `.sidebarAdaptable` решает сам по ширине окна.
@@ -44,9 +45,25 @@ struct AppShell: View {
                     section = .mail
                     mail?.open(id)
                 }
+                NotificationRouter.shared.attachReminders { [connection] key, action in
+                    let r = connection.reminders
+                    switch action {
+                    case UNNotificationDismissActionIdentifier:
+                        Task { await r.dismiss(key) }
+                    case UNNotificationDefaultActionIdentifier:
+                        // Тап — событие в календаре; уведомление «Скоро» остаётся (§13).
+                        section = .calendar
+                        connection.calendar.open(eventID: key.eventID, occStart: key.occStart)
+                    default:
+                        if let s = ReminderService.snoozeActions.first(where: { $0.id == action }) {
+                            Task { await r.snooze(key, minutes: s.minutes) }
+                        }
+                    }
+                }
                 mail.live.start()
                 await mail.sync()
                 await Notifier.requestPermissionIfNeeded()
+                await connection.reminders.refresh()
             } else {
                 await connection.check()
             }

@@ -13,6 +13,7 @@ struct DDMailApp: App {
         let model = AppModel()
         _app = State(initialValue: model)
         UNUserNotificationCenter.current().delegate = NotificationRouter.shared
+        Task { await ReminderService.registerCategory() }
         #if os(iOS)
         // Докачка тел — задача обработки: SwiftUI `.backgroundTask` её не
         // умеет, регистрируем до конца запуска, как требует BGTaskScheduler.
