@@ -15,6 +15,8 @@ final class MailModel {
     private let connection: Connection
     /// Открытая беседа — одна лента на всё время работы почты (§8).
     let conversation: ConversationModel
+    /// Ответ, новое письмо, пересылка (§5).
+    @ObservationIgnored private(set) var compose: ComposeModel!
 
     private(set) var all: [Conversation] = []
     private(set) var doc = FoldersDoc().withSpam()
@@ -59,6 +61,11 @@ final class MailModel {
         self.connection = connection
         self.engine = engine
         conversation = ConversationModel(engine: engine) { [weak connection] in connection?.report(.dead) }
+        compose = ComposeModel(
+            engine: engine, conversation: conversation,
+            syncSoon: { [weak self] in Task { await self?.sync() } },
+            onAuthDead: { [weak connection] in connection?.report(.dead) }
+        )
         activeFolderID = UserDefaults.standard.string(forKey: Self.activeKey)
         start()
     }
@@ -73,6 +80,11 @@ final class MailModel {
                 rebuild()
                 // Новые письма открытой беседы — дописать снизу.
                 if let c = selected { conversation.updated(c) }
+                // Отправили новое письмо — открыть его беседу, как только появится.
+                if let target = compose.sentTarget, let c = convs.first(where: { matchesTarget($0, target) }) {
+                    compose.consumeTarget()
+                    open(c.id)
+                }
             }
         })
         tasks.append(Task { [weak self, engine] in
@@ -140,6 +152,7 @@ final class MailModel {
     }
 
     private func openSelected() {
+        compose.reset()
         conversation.open(selected)
         guard let c = selected, c.unreadCount > 0 else { return }
         Task { [engine] in

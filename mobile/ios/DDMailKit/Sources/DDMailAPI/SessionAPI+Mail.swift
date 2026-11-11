@@ -147,3 +147,11 @@ func queryEscaped(_ s: String) -> String {
 func pathEscaped(_ s: String) -> String {
     s.addingPercentEncoding(withAllowedCharacters: unreserved) ?? s
 }
+
+extension SessionAPI {
+    /// Поставить письмо в отправку. 413 — вложения больше лимита сервера.
+    /// JSON с base64 собирается вне главного потока вызывающего: вложения бывают по 20 МБ.
+    public func send(_ request: SendRequest) async throws {
+        try await send("POST", "/send", body: request)
+    }
+}

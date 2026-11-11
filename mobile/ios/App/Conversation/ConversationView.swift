@@ -9,6 +9,7 @@ import WebKit
 struct ConversationView: View {
     let conversation: Conversation
     @Bindable var model: ConversationModel
+    let compose: ComposeModel
     let onSpam: () -> Void
     @State private var exportShown = false
 
@@ -33,6 +34,10 @@ struct ConversationView: View {
             .onChange(of: model.exporting) { exportShown = model.exporting != nil }
             .confirmationDialog(bubbleTitle, isPresented: present($model.bubbleMenu), titleVisibility: .visible) {
                 if let b = model.bubbleMenu {
+                    if !conversation.spam {
+                        Button("Ответить", systemImage: "arrowshape.turn.up.left") { compose.replyTo = b }
+                        Button("Переслать", systemImage: "arrowshape.turn.up.right") { compose.openForward(b) }
+                    }
                     Button("Копировать текст", systemImage: "doc.on.doc") { Clipboard.copy(PlainText.of(b)) }
                     if !b.fromAddr.isEmpty {
                         Button("Копировать адрес", systemImage: "at") { Clipboard.copy(b.fromAddr) }
@@ -46,6 +51,10 @@ struct ConversationView: View {
                 }
             }
             .overlay(alignment: .bottom) { NoticeBanner(text: $model.notice) }
+            // Ответа в спам нет: на спам не отвечают (§5).
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if !conversation.spam { ComposerBar(conversation: conversation, model: compose) }
+            }
             .hidingTabBar()
     }
 

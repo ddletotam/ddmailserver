@@ -120,3 +120,20 @@ struct SessionAPITests {
         #expect(yes.log.withLock { $0 } == ["GET /.well-known/ddmail -"])
     }
 }
+
+struct SendRequestTests {
+    /// Форма `/send` — как у Android и десктопа: snake_case и base64 вложений.
+    @Test func encodesLikeServerExpects() throws {
+        let r = SendRequest(
+            from: "\"Я\" <me@a.ru>", to: ["bob@x.ru"], subject: "Re: тема", html: "<div>x</div>", text: "x",
+            inReplyTo: "<m1@x>", references: "<m0@x> <m1@x>",
+            attachments: [OutgoingAttachment(filename: "a.txt", mimeType: "text/plain", content: Data("hi".utf8))]
+        )
+        let obj = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(r)) as? [String: Any])
+        #expect(obj["in_reply_to"] as? String == "<m1@x>")
+        #expect(obj["cc"] as? [String] == [])
+        let att = try #require((obj["attachments"] as? [[String: Any]])?.first)
+        #expect(att["mime_type"] as? String == "text/plain")
+        #expect(att["content"] as? String == "aGk=")
+    }
+}

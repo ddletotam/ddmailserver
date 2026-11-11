@@ -21,7 +21,7 @@ struct MailView: View {
                 .navigationSplitViewColumnWidth(min: 320, ideal: 380, max: 480)
         } detail: {
             if let c = model.selected {
-                ConversationView(conversation: c, model: model.conversation) { confirmSpam = [c.id] }
+                ConversationView(conversation: c, model: model.conversation, compose: model.compose) { confirmSpam = [c.id] }
             } else {
                 ContentUnavailableView("Беседа не выбрана", systemImage: "bubble.left.and.bubble.right")
             }
@@ -49,6 +49,9 @@ struct MailView: View {
             Button("Выйти", role: .destructive, action: app.logout)
         } message: {
             Text("Сессия и почта этой учётной записи будут удалены с устройства.")
+        }
+        .sheet(isPresented: Binding(get: { model.compose.sheet != nil }, set: { if !$0 { model.compose.sheet = nil } })) {
+            ComposeSheetView(model: model.compose)
         }
         .onAppear(perform: restoreLast)
         .onChange(of: model.loaded) { restoreLast() }
@@ -136,6 +139,10 @@ struct MailView: View {
             }
             ToolbarItemGroup(placement: Self.actionsPlacement) { pickingActions }
         } else {
+            ToolbarItem(placement: .primaryAction) {
+                Button("Новое письмо", systemImage: "square.and.pencil") { model.compose.openNew() }
+                    .keyboardShortcut("n", modifiers: .command)
+            }
             ToolbarItem(placement: .primaryAction) {
                 Menu("Ещё", systemImage: "ellipsis.circle") {
                     Button("Выбрать", systemImage: "checkmark.circle") { picking = true }

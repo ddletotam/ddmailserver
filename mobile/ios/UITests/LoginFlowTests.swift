@@ -43,6 +43,17 @@ final class LoginFlowTests: XCTestCase {
         XCTAssertTrue(web.waitForExistence(timeout: 20), "лента беседы не появилась")
         XCTAssertTrue(web.staticTexts.firstMatch.waitForExistence(timeout: 30), "в ленте нет писем")
         shot(app, "4-opened")
+
+        // Композер: пусто — отправлять нельзя; набрали — можно. Не отправляем:
+        // это было бы настоящее письмо с адреса пользователя.
+        let message = app.textViews["Сообщение"].exists ? app.textViews["Сообщение"] : app.textFields["Сообщение"]
+        XCTAssertTrue(message.waitForExistence(timeout: 5), "нет строки ответа")
+        let sendButton = app.buttons["Отправить"]
+        XCTAssertFalse(sendButton.isEnabled)
+        message.tap()
+        message.typeText("Проверка")
+        XCTAssertTrue(sendButton.isEnabled)
+        shot(app, "5-composer")
     }
 
     /// Печать только после появления клавиатуры: иначе первые символы теряются.

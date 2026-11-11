@@ -294,3 +294,47 @@ public struct Binary: Sendable {
     public let data: Data
     public let contentType: String
 }
+
+/// Вложение исходящего письма; байты в JSON — base64 (как `[]byte` у Go).
+public struct OutgoingAttachment: Encodable, Equatable, Sendable {
+    public var filename: String
+    public var mimeType: String
+    public var content: Data
+
+    enum CodingKeys: String, CodingKey {
+        case filename, content
+        case mimeType = "mime_type"
+    }
+
+    public init(filename: String, mimeType: String, content: Data) {
+        self.filename = filename
+        self.mimeType = mimeType
+        self.content = content
+    }
+}
+
+/// Тело `/send`. Отправка асинхронная: сервер ставит письмо в очередь.
+public struct SendRequest: Encodable, Equatable, Sendable {
+    public var from: String
+    public var to: [String]
+    public var cc: [String]
+    public var subject: String
+    public var html: String
+    public var text: String
+    public var inReplyTo: String
+    public var references: String
+    public var attachments: [OutgoingAttachment]
+
+    enum CodingKeys: String, CodingKey {
+        case from, to, cc, subject, html, text, references, attachments
+        case inReplyTo = "in_reply_to"
+    }
+
+    public init(
+        from: String, to: [String], cc: [String] = [], subject: String, html: String, text: String,
+        inReplyTo: String = "", references: String = "", attachments: [OutgoingAttachment] = []
+    ) {
+        self.from = from; self.to = to; self.cc = cc; self.subject = subject; self.html = html
+        self.text = text; self.inReplyTo = inReplyTo; self.references = references; self.attachments = attachments
+    }
+}

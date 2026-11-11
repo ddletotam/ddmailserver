@@ -217,6 +217,11 @@ public actor SyncEngine {
         try await api.attachment(uid: uid, index: index)
     }
 
+    /// Поставить письмо в отправку (сервер ставит в очередь).
+    public nonisolated func send(_ request: SendRequest) async throws {
+        try await api.send(request)
+    }
+
     // MARK: Мутации
 
     private func cacheKey(_ c: Conversation) -> String { c.spam ? spamKey : accountKey }
