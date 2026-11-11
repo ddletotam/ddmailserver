@@ -62,6 +62,19 @@ class SessionApi(
         return (obj?.get("restored") as? JsonPrimitive)?.content?.toIntOrNull() ?: 0
     }
 
+    /**
+     * «В спам»: удалить письма бесед и заблокировать их отправителей.
+     * Отправителя сервер берёт из самих писем ([messageIds] — серверные id,
+     * то есть `uid` ссылок), а не из догадки клиента: в BCC-рассылке среди
+     * участников беседы есть и получатель. [scope] — `address` или `domain`
+     * (против спамеров с меняющейся частью до `@`). [fallbackAddress] — только
+     * на случай, если по id сервер отправителя не нашёл.
+     */
+    suspend fun blacklistAndPurge(scope: String, messageIds: List<Long>, fallbackAddress: String): PurgeOutcome {
+        val body = write("POST", "/spam/blacklist-and-purge", blacklistAndPurgeBody(scope, messageIds, fallbackAddress))
+        return DdmailApi.json.decodeFromString(PurgeOutcome.serializer(), body)
+    }
+
     suspend fun changes(since: Long): ChangesResponse =
         get("/changes?since=${since.coerceAtLeast(0)}", ChangesResponse.serializer())
 
@@ -321,3 +334,13 @@ internal fun restoreSpamBody(refs: List<MessageRef>, trust: Boolean): String {
     }
     return JsonObject(fields).toString()
 }
+
+/** Тело `POST /spam/blacklist-and-purge` — как у десктопа (`native_provider.rs`). */
+internal fun blacklistAndPurgeBody(scope: String, messageIds: List<Long>, fallbackAddress: String): String =
+    JsonObject(
+        mapOf(
+            "scope" to JsonPrimitive(scope),
+            "address" to JsonPrimitive(fallbackAddress),
+            "message_ids" to JsonArray(messageIds.map { JsonPrimitive(it) }),
+        ),
+    ).toString()

@@ -141,6 +141,7 @@ fun MailScreen(
     var deleteAsk by remember { mutableStateOf(false) }
     if (folderPicker) FolderPickerDialog(vm) { folderPicker = false }
     if (deleteAsk) DeleteDialog(vm) { deleteAsk = false }
+    SpamDialog(vm)
     LaunchedEffect(wide) { vm.setWide(wide) }
 
     // Один WebView на всю сессию (создаёт оболочка): открытие беседы меняет
@@ -272,7 +273,7 @@ private fun snackHost(vm: MailViewModel): SnackbarHostState = remember(vm) { vm.
 /**
  * Панель действий над выбранными беседами (§5) — одна строка иконок
  * (иконки вместо надписей — правило мобильных клиентов, §0): закрыть,
- * счётчик, выбрать все, прочитано, непрочитано, в папку, удалить.
+ * счётчик, выбрать все, прочитано, непрочитано, в папку, в спам, удалить.
  */
 @Composable
 private fun SelectionBar(n: Int, vm: MailViewModel, onMove: () -> Unit, onDelete: () -> Unit) {
@@ -287,6 +288,7 @@ private fun SelectionBar(n: Int, vm: MailViewModel, onMove: () -> Unit, onDelete
         IconButton(onClick = { vm.markPicked(true) }) { Icon(Icons.Filled.Drafts, "Прочитано") }
         IconButton(onClick = { vm.markPicked(false) }) { Icon(Icons.Filled.MarkEmailUnread, "Непрочитано") }
         IconButton(onClick = onMove) { Icon(Icons.AutoMirrored.Filled.DriveFileMove, "В папку") }
+        IconButton(onClick = vm::askSpamPicked) { Icon(Icons.Filled.Report, "В спам") }
         IconButton(onClick = onDelete) { Icon(Icons.Filled.Delete, "Удалить", tint = MaterialTheme.colorScheme.error) }
     }
 }
@@ -354,6 +356,36 @@ private fun DeleteDialog(vm: MailViewModel, close: () -> Unit) {
                 vm.deletePicked()
                 close()
             }) { Icon(Icons.Filled.Delete, "Удалить", tint = MaterialTheme.colorScheme.error) }
+        },
+        dismissButton = { IconButton(onClick = close) { Icon(Icons.Filled.Close, "Отмена") } },
+    )
+}
+
+/**
+ * «В спам» — с подтверждением, как удаление: письма удаляются, отправитель
+ * блокируется. Два ответа, как на десктопе (§5а): адрес — этот отправитель,
+ * домен — против спамеров с меняющейся частью до `@`.
+ */
+@Composable
+private fun SpamDialog(vm: MailViewModel) {
+    val ids by vm.spamAsk.collectAsState()
+    val list = ids ?: return
+    val (convs, msgs) = remember(list) { vm.spamSummary(list) }
+    val close = { vm.spamAsk.value = null }
+    AlertDialog(
+        onDismissRequest = close,
+        title = { Text("В спам?") },
+        text = {
+            Text(
+                "Бесед: $convs, писем в них: $msgs. Письма будут удалены, отправитель — заблокирован. " +
+                    "«Домен» останавливает спам с меняющихся адресов одного домена.",
+            )
+        },
+        confirmButton = {
+            Row {
+                TextButton(onClick = { vm.spamConfirmed("address") }) { Text("Адрес") }
+                TextButton(onClick = { vm.spamConfirmed("domain") }) { Text("Домен", color = MaterialTheme.colorScheme.error) }
+            }
         },
         dismissButton = { IconButton(onClick = close) { Icon(Icons.Filled.Close, "Отмена") } },
     )
@@ -709,6 +741,7 @@ private fun ConversationPane(c: Conversation?, web: ConversationWeb, vm: MailVie
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            if (!c.spam) IconButton(onClick = { vm.askSpam(c.id) }) { Icon(Icons.Filled.Report, "В спам") }
         }
         HorizontalDivider()
         AndroidView(

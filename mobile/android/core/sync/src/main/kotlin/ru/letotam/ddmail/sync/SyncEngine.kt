@@ -17,6 +17,7 @@ import ru.letotam.ddmail.api.ContactInfo
 import ru.letotam.ddmail.api.ConversationDto
 import ru.letotam.ddmail.api.Identity
 import ru.letotam.ddmail.api.MessageBody
+import ru.letotam.ddmail.api.PurgeOutcome
 import ru.letotam.ddmail.api.SendRequest
 import ru.letotam.ddmail.api.MessageRef
 import ru.letotam.ddmail.api.SessionApi
@@ -210,6 +211,26 @@ class SyncEngine(
         dao.deleteConversations(spamKey, spam.map { it.id })
         dao.setMeta(K_FULL_TS, "0")
         return n
+    }
+
+    /**
+     * «В спам» (§5): письма бесед удаляются на сервере, их отправители (или
+     * домены, [scope] = `domain`) блокируются. Из кэша беседы уходят сразу;
+     * следующий синк — полный: при отказе он вернёт их, при успехе уберёт и
+     * другие беседы, которые зацепило правило по отправителю.
+     */
+    suspend fun spamConversations(convs: Collection<Conversation>, scope: String): PurgeOutcome {
+        val ham = convs.filter { !it.spam }
+        val ids = ham.flatMap { it.messages }.map { it.uid }
+        // Запасной адрес — только когда беседа одна: у нескольких он был бы
+        // адресом одной из них, и по ошибке сервера заблокировался бы не тот.
+        val fallback = ham.singleOrNull()?.counterparts?.firstOrNull()?.addr?.lowercase().orEmpty()
+        dao.deleteConversations(accountKey, ham.map { it.id })
+        try {
+            return api.blacklistAndPurge(scope, ids, fallback)
+        } finally {
+            dao.setMeta(K_FULL_TS, "0")
+        }
     }
 
     /**

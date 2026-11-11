@@ -149,3 +149,12 @@ object Base64Bytes : kotlinx.serialization.KSerializer<ByteArray> {
     override fun deserialize(decoder: kotlinx.serialization.encoding.Decoder): ByteArray =
         java.util.Base64.getDecoder().decode(decoder.decodeString())
 }
+
+/** Итог «В спам»: сколько писем удалено и какое правило заведено первым. */
+@Serializable
+data class PurgeOutcome(
+    val deleted: Long = 0,
+    @SerialName("rule_type") val ruleType: String = "",
+    @SerialName("rule_value") val ruleValue: String = "",
+    @SerialName("rule_count") val ruleCount: Int = 0,
+)

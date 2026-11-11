@@ -248,6 +248,49 @@ class MailViewModel(
     }
 
     /**
+     * Беседы, ждущие подтверждения «В спам»: выбранные или открытая (кнопка в
+     * шапке беседы). `null` — диалог закрыт.
+     */
+    val spamAsk = MutableStateFlow<List<String>?>(null)
+
+    fun askSpamPicked() {
+        spamAsk.value = picked.value.toList()
+    }
+
+    fun askSpam(id: String) {
+        spamAsk.value = listOf(id)
+    }
+
+    /** Сколько бесед и писем уйдёт в спам — для подтверждения. */
+    fun spamSummary(ids: Collection<String>): Pair<Int, Int> =
+        all.filter { it.id in ids && !it.spam }.let { c -> c.size to c.sumOf { it.messages.size } }
+
+    /**
+     * «В спам» (контракт §5): письма бесед удаляются, отправители блокируются —
+     * по адресу или по домену ([scope] `address` / `domain`), как на десктопе.
+     */
+    fun spamConfirmed(scope: String) {
+        val ids = spamAsk.value ?: return
+        spamAsk.value = null
+        val convs = all.filter { it.id in ids && !it.spam }
+        clearPicks()
+        if (convs.isEmpty()) return
+        if (convs.any { it.id == selected.value }) open(null)
+        viewModelScope.launch {
+            val r = runCatching { engine.spamConversations(convs, scope) }
+            notice.value = r.fold(
+                { o ->
+                    val what = (if (o.ruleType == "domain") "домен " else "") + o.ruleValue
+                    val more = if (o.ruleCount > 1) " и ещё ${o.ruleCount - 1}" else ""
+                    "✓ В спам: $what$more, удалено писем: ${o.deleted}"
+                },
+                { "Не удалось отправить в спам: ${it.message}" },
+            )
+            sync()
+        }
+    }
+
+    /**
      * «Не спам» выбранным беседам: письма — во «Входящие» на сервере.
      * [trust] — «Не спам и доверять отправителю»: сервер заводит allow-правило
      * на отправителя и возвращает из спама всё остальное от него.
