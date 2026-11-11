@@ -1,0 +1,122 @@
+import Foundation
+import Synchronization
+import Testing
+@testable import DDMailAPI
+
+/// Подмена сети: ответ по пути запроса, журнал запросов.
+final class FakeTransport: HTTPTransport {
+    typealias Handler = @Sendable (URLRequest) async throws -> (Int, String)
+    private let handler: Handler
+    let log = Mutex<[String]>([])
+
+    init(_ handler: @escaping Handler) { self.handler = handler }
+
+    func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let path = request.url!.path()
+        let auth = request.value(forHTTPHeaderField: "Authorization") ?? "-"
+        log.withLock { $0.append("\(request.httpMethod ?? "GET") \(path) \(auth)") }
+        let (code, body) = try await handler(request)
+        return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: code, httpVersion: nil, headerFields: nil)!)
+    }
+
+    var refreshCount: Int { log.withLock { $0.filter { $0.contains("/auth/refresh") }.count } }
+}
+
+actor MemoryTokens: TokenStore {
+    var token: String
+    init(_ t: String) { token = t }
+    func current() -> String { token }
+    func update(_ t: String) { token = t }
+}
+
+private let base = "https://mail.example.ru"
+private func login(_ token: String) -> String { #"{"token":"\#(token)","user_id":7,"username":"bob"}"# }
+
+struct SessionAPITests {
+    @Test func loginDecodesResponse() async throws {
+        let t = FakeTransport { _ in (200, login("T1")) }
+        let r = try await DdmailAPI(baseURL: base, transport: t).login(username: "bob", password: "pw")
+        #expect(r == LoginResponse(token: "T1", userID: 7, username: "bob"))
+    }
+
+    @Test func wrongPasswordIsUnauthorized() async {
+        let t = FakeTransport { _ in (401, #"{"error":"invalid credentials"}"#) }
+        await #expect(throws: APIError.unauthorized("invalid credentials")) {
+            try await DdmailAPI(baseURL: base, transport: t).login(username: "bob", password: "x")
+        }
+    }
+
+    @Test func expiredTokenIsRefreshedOnceAndRetried() async throws {
+        let tokens = MemoryTokens("OLD")
+        let t = FakeTransport { req in
+            let auth = req.value(forHTTPHeaderField: "Authorization")
+            if req.url!.path().hasSuffix("/auth/refresh") { return (200, login("NEW")) }
+            return auth == "Bearer NEW" ? (200, #"[{"email":"bob@example.ru","is_default":true}]"#) : (401, "")
+        }
+        let api = SessionAPI(baseURL: base, transport: t, tokens: tokens)
+        let ids = try await api.identities()
+        #expect(ids == [Identity(email: "bob@example.ru", isDefault: true)])
+        #expect(await tokens.current() == "NEW")
+        #expect(t.refreshCount == 1)
+    }
+
+    /// Десять запросов разом упёрлись в 401 — обмен один.
+    @Test func concurrent401sShareOneRefresh() async throws {
+        let tokens = MemoryTokens("OLD")
+        let t = FakeTransport { req in
+            if req.url!.path().hasSuffix("/auth/refresh") {
+                try await Task.sleep(for: .milliseconds(50))
+                return (200, login("NEW"))
+            }
+            return req.value(forHTTPHeaderField: "Authorization") == "Bearer NEW" ? (200, "[]") : (401, "")
+        }
+        let api = SessionAPI(baseURL: base, transport: t, tokens: tokens)
+        try await withThrowingTaskGroup(of: Void.self) { g in
+            for _ in 0..<10 { g.addTask { _ = try await api.identities() } }
+            try await g.waitForAll()
+        }
+        #expect(t.refreshCount == 1)
+    }
+
+    /// Отказ самого refresh — «нужен вход», даже если пришёл 403.
+    @Test func refusedRefreshMeansLogin() async {
+        let t = FakeTransport { req in
+            req.url!.path().hasSuffix("/auth/refresh") ? (403, #"{"error":"token too old"}"#) : (401, "")
+        }
+        let api = SessionAPI(baseURL: base, transport: t, tokens: MemoryTokens("OLD"))
+        await #expect(throws: APIError.unauthorized("token too old")) { try await api.identities() }
+    }
+
+    /// 403 на обычном запросе — отказ в действии, а не мёртвая сессия.
+    @Test func forbiddenActionIsNotLogout() async {
+        let t = FakeTransport { _ in (403, #"{"error":"calendar is read-only"}"#) }
+        let api = SessionAPI(baseURL: base, transport: t, tokens: MemoryTokens("T"))
+        await #expect(throws: APIError.server(code: 403, message: "calendar is read-only")) { try await api.identities() }
+        #expect(t.refreshCount == 0)
+    }
+
+    /// Сбой сервера на refresh — временное, не выход из сессии.
+    @Test func refreshServerErrorIsTemporary() async {
+        let t = FakeTransport { req in
+            req.url!.path().hasSuffix("/auth/refresh") ? (502, "Bad Gateway") : (401, "")
+        }
+        let api = SessionAPI(baseURL: base, transport: t, tokens: MemoryTokens("OLD"))
+        await #expect(throws: APIError.server(code: 502, message: "Bad Gateway")) { try await api.identities() }
+    }
+
+    @Test func nullFieldsTakeDefaults() async throws {
+        let t = FakeTransport { _ in (200, #"[{"email":"a@b.ru","name":null,"extra":1}]"#) }
+        let ids = try await SessionAPI(baseURL: base, transport: t, tokens: MemoryTokens("T")).identities()
+        #expect(ids == [Identity(email: "a@b.ru")])
+    }
+
+    @Test func wellKnownProbe() async {
+        let yes = FakeTransport { _ in (200, #"{"ddmail":true,"version":"x"}"#) }
+        let no = FakeTransport { _ in (200, "<html>") }
+        let gone = FakeTransport { _ in (404, "") }
+        #expect(await DdmailAPI.isDdmail(host: "mail.x.ru", transport: yes))
+        #expect(!(await DdmailAPI.isDdmail(host: "mail.x.ru", transport: no)))
+        #expect(!(await DdmailAPI.isDdmail(host: "mail.x.ru", transport: gone)))
+        #expect(yes.log.withLock { $0 } == ["GET /.well-known/ddmail -"])
+    }
+}

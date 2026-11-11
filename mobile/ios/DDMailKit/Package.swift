@@ -9,10 +9,13 @@ let package = Package(
     platforms: [.iOS("27.0"), .macOS("27.0")],
     products: [
         .library(name: "DDMailAPI", targets: ["DDMailAPI"]),
+        .library(name: "DDMailAuth", targets: ["DDMailAuth"]),
     ],
     targets: [
         .target(name: "DDMailAPI"),
+        .target(name: "DDMailAuth", dependencies: ["DDMailAPI"]),
         .testTarget(name: "DDMailAPITests", dependencies: ["DDMailAPI"]),
+        .testTarget(name: "DDMailAuthTests", dependencies: ["DDMailAuth", "DDMailAPI"]),
     ],
     swiftLanguageModes: [.v6]
 )

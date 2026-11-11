@@ -36,11 +36,9 @@ targets:
       - path: App
     dependencies:
       - package: DDMailKit
-        products: [DDMailAPI]
+        products: [DDMailAPI, DDMailAuth]
     settings:
       base:
-        # XcodeGen 2.46 оставляет список платформ пустым — задаём явно.
-        SUPPORTED_PLATFORMS: iphoneos iphonesimulator macosx
         SUPPORTS_MACCATALYST: NO
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
         PRODUCT_BUNDLE_IDENTIFIER: ru.letotam.ddmail
@@ -57,3 +55,29 @@ targets:
         ENABLE_APP_SANDBOX: YES
         ENABLE_OUTGOING_NETWORK_CONNECTIONS: YES
         ENABLE_HARDENED_RUNTIME: YES
+
+  # Сквозные сценарии в симуляторе (mac.sh uitest). Учётные данные — только
+  # из окружения запуска, в репозитории их нет.
+  DDMailUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: DDMail
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ru.letotam.ddmail.uitests
+        PRODUCT_NAME: DDMailUITests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: DDMail
+
+schemes:
+  DDMail:
+    build:
+      targets:
+        DDMail: all
+    test:
+      config: Debug
+      targets:
+        - DDMailUITests

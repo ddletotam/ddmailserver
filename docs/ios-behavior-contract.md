@@ -47,7 +47,8 @@ Android** с причиной.
   пользователя; совместимость со старыми не нужна, свежий SwiftUI используется
   без обходов. Если какое-то из устройств не получит 27 — опускаемся до 26.
 - **Язык:** Swift 6, строгая проверка конкурентности (`complete`).
-- **Устройства проверки:** iPhone 15 Pro, iPad Pro 13″, MacBook (Apple Silicon).
+- **Устройства проверки:** iPhone 15 (iPhone15,4, iOS 27.0.1), iPad Pro 13″, MacBook
+  (Apple Silicon). Симуляторы — iPhone 18 Pro и iPad Pro 13-inch (M5) на iOS 27.2.
 - **Bundle ID:** `ru.letotam.ddmail` — как пакет Android.
 - **Проект Xcode генерируется** из `mobile/ios/project.yml` (XcodeGen). Сам
   `.xcodeproj` в git не хранится: его правка руками и конфликты слияния —
@@ -85,10 +86,11 @@ Android** с причиной.
 и не в git: иначе получим два источника правды):
 
 ```bash
-mobile/ios/scripts/mac.sh build      # rsync → xcodegen → xcodebuild (симулятор)
-mobile/ios/scripts/mac.sh test       # swift test пакета + тесты приложения
-mobile/ios/scripts/mac.sh run-sim    # поставить в симулятор, запустить, скриншот сюда
-mobile/ios/scripts/mac.sh device     # собрать и поставить на iPhone/iPad (devicectl)
+mobile/ios/scripts/mac.sh test             # swift test пакета DDMailKit
+mobile/ios/scripts/mac.sh build            # rsync → xcodegen → xcodebuild (симулятор iOS и macOS)
+mobile/ios/scripts/mac.sh run iphone|ipad  # поставить в симулятор, запустить, скриншот сюда
+mobile/ios/scripts/mac.sh uitest           # сквозные UI-тесты на настоящем сервере, скриншоты шагов
+mobile/ios/scripts/mac.sh device iphone    # собрать с подписью и поставить на устройство (devicectl)
 ```
 
 - Хост — алиас `mac` в `~/.ssh/config` станции. Каталог на Маке —
@@ -97,9 +99,19 @@ mobile/ios/scripts/mac.sh device     # собрать и поставить на
 - Скриншоты и видео симулятора — `xcrun simctl io`, с устройства — по
   `devicectl`; файл забирается на станцию.
 - Устройства спарены с Маком один раз кабелем, дальше установка по сети.
-- **Подпись в SSH-сессии:** связка ключей login в сессии SSH заблокирована;
-  скрипт разблокирует её перед `xcodebuild` (пароль — в Keychain Мака, не в
-  репозитории и не в скрипте).
+- **Подпись в SSH-сессии:** связка ключей login в сессии SSH заблокирована
+  («User interaction is not allowed»); скрипт разблокирует её перед
+  `xcodebuild`. **Секреты станции — `~/.config/ddmail-ios/`** (вне git, как
+  `~/.config/ddmail-android`): `keychain-password` — пароль входа на Мак,
+  `test.env` — учётка для `uitest`. Команда подписи берётся из учётки Xcode
+  на Маке, в `project.yml` её нет.
+- **XcodeGen** — релизная сборка в `~/.local/xcodegen` на Маке, вызывается по
+  полному пути: через симлинк он не находит свои пресеты настроек, и проект
+  выходит без `SUPPORTED_PLATFORMS`, `ONLY_ACTIVE_ARCH` и прочих умолчаний.
+- **UI-тесты** (`UITests/`, XCUITest) — сквозные сценарии в симуляторе на
+  настоящем сервере; без учётки из окружения пропускаются. Пароль вводится
+  вставкой из буфера: программная клавиатура симулятора iOS 27.2 теряет цифры
+  и знаки в защищённом поле.
 - **Версия** — `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` в `project.yml`;
   бампается при любой правке клиента, как у десктопа и Android.
 - **Аккаунт разработчика.** До push хватает бесплатного (сборки на свои

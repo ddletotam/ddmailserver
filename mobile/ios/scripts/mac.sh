@@ -5,10 +5,25 @@
 #   mac.sh test            swift test пакета DDMailKit
 #   mac.sh build           сгенерировать проект, собрать под симулятор iOS и под macOS
 #   mac.sh run [iphone|ipad]  собрать, поставить в симулятор, запустить, скриншот сюда
+#   mac.sh uitest          сквозные UI-тесты в симуляторе iPhone; скриншоты шагов — сюда
+#   mac.sh device [iphone|ipad]  собрать с подписью, поставить на устройство, запустить
 #
 # Окружение: DDMAIL_MAC (ssh-хост, по умолчанию `mac`),
-#            DDMAIL_SHOTS (куда класть скриншоты, по умолчанию ~/.cache/ddmail-ios).
+#            DDMAIL_SHOTS (куда класть скриншоты, по умолчанию ~/.cache/ddmail-ios),
+#            DDMAIL_TEST_EMAIL / DDMAIL_TEST_PASSWORD — учётка для uitest (без них
+#            сквозные тесты пропускаются), DDMAIL_KEYCHAIN_PASSWORD — для device.
+#            По умолчанию — из ~/.config/ddmail-ios/ (см. ниже); в git их нет.
 set -euo pipefail
+
+# Секреты станции — вне репозитория (как ~/.config/ddmail-android у Android):
+#   test.env           DDMAIL_TEST_EMAIL / DDMAIL_TEST_PASSWORD для uitest
+#   keychain-password  пароль входа на Мак: разблокировать связку для подписи
+SECRETS="${XDG_CONFIG_HOME:-$HOME/.config}/ddmail-ios"
+# shellcheck source=/dev/null
+[ -f "$SECRETS/test.env" ] && . "$SECRETS/test.env"
+if [ -z "${DDMAIL_KEYCHAIN_PASSWORD:-}" ] && [ -f "$SECRETS/keychain-password" ]; then
+    DDMAIL_KEYCHAIN_PASSWORD="$(cat "$SECRETS/keychain-password")"
+fi
 
 HOST="${DDMAIL_MAC:-mac}"
 SHOTS="${DDMAIL_SHOTS:-$HOME/.cache/ddmail-ios}"
@@ -26,7 +41,7 @@ remote() {
     # Общая часть для команд на Маке: PATH к xcodegen, выход при ошибке.
     ssh "$HOST" "bash -s" -- "$@" <<'EOF'
 set -euo pipefail
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$HOME/.local/xcodegen/bin:$PATH"
 cd "$HOME/build/ddmail/mobile/ios"
 DD="$HOME/build/ddmail/DerivedData"
 cmd="$1"; shift
@@ -60,7 +75,12 @@ build_sim() {
 
 case "$cmd" in
     test)
-        (cd DDMailKit && swift test 2>&1 | tail -40)
+        # Итоги по наборам и все падения; полный вывод — в test.log на Маке.
+        log="$HOME/build/ddmail/test.log"
+        rc=0
+        (cd DDMailKit && swift test >"$log" 2>&1) || rc=$?
+        grep -E "error:|✘|Expectation failed|Suite .* (passed|failed)|Test run with" "$log" || tail -30 "$log"
+        exit "$rc"
         ;;
     build)
         gen
@@ -85,6 +105,52 @@ case "$cmd" in
         xcrun simctl io "$udid" screenshot --type=png "$HOME/build/ddmail/shot.png" >/dev/null 2>&1
         echo "run: ok ($kind $udid)"
         ;;
+    uitest)
+        gen
+        udid="$(sim_udid iphone)"
+        rb="$HOME/build/ddmail/ui.xcresult"
+        out="$HOME/build/ddmail/ui-shots"
+        rm -rf "$rb" "$out"
+        rc=0
+        TEST_RUNNER_DDMAIL_TEST_EMAIL="${1:-}" TEST_RUNNER_DDMAIL_TEST_PASSWORD="${2:-}" \
+            xcodebuild -project DDMail.xcodeproj -scheme DDMail -configuration Debug \
+            -destination "id=$udid" -derivedDataPath "$DD" -resultBundlePath "$rb" \
+            test >"$HOME/build/ddmail/uitest.log" 2>&1 || rc=$?
+        grep -E "error:|Test Case .*(passed|failed|skipped)|TEST (SUCCEEDED|FAILED)" "$HOME/build/ddmail/uitest.log" | tail -20
+        mkdir -p "$out"
+        xcrun xcresulttool export attachments --path "$rb" --output-path "$out" >/dev/null 2>&1 || true
+        exit "$rc"
+        ;;
+    device)
+        kind="${1:-iphone}"
+        gen
+        # Команда подписи — из учётки Xcode на Маке, в репозитории её нет.
+        team="$(defaults read com.apple.dt.Xcode IDEProvisioningTeamByIdentifier 2>/dev/null \
+            | awk -F'= ' '/teamID/ {gsub(/[ ;"]/, "", $2); print $2; exit}')"
+        [ -n "$team" ] || { echo "в Xcode не выполнен вход (Settings → Accounts)" >&2; exit 1; }
+        xcrun devicectl list devices --json-output "$HOME/build/ddmail/devices.json" >/dev/null
+        udid="$(/usr/bin/python3 - "$kind" "$HOME/build/ddmail/devices.json" <<'PY'
+import json, sys
+kind, path = sys.argv[1], sys.argv[2]
+want = "iPad" if kind == "ipad" else "iPhone"
+for d in json.load(open(path))["result"]["devices"]:
+    hw, cp = d["hardwareProperties"], d["connectionProperties"]
+    if hw.get("reality") == "physical" and hw.get("deviceType") == want and cp.get("pairingState") == "paired":
+        print(hw["udid"]); sys.exit(0)
+sys.exit(f"нет спаренного {want}: подключите кабелем, «Доверять», включите режим разработчика")
+PY
+)"
+        # В SSH-сессии связка ключей заблокирована, и подпись падает с
+        # errSecInternalComponent; пароль — из DDMAIL_KEYCHAIN_PASSWORD, если задан.
+        if [ -n "${2:-}" ]; then security unlock-keychain -p "$2" login.keychain; fi
+        xcodebuild -project DDMail.xcodeproj -scheme DDMail -configuration Debug \
+            -destination "id=$udid" -derivedDataPath "$DD" \
+            -allowProvisioningUpdates DEVELOPMENT_TEAM="$team" -quiet build
+        app="$DD/Build/Products/Debug-iphoneos/DDMail.app"
+        xcrun devicectl device install app --device "$udid" "$app" >/dev/null
+        xcrun devicectl device process launch --terminate-existing --device "$udid" ru.letotam.ddmail >/dev/null
+        echo "device: ok ($kind $udid)"
+        ;;
     *)
         echo "неизвестная команда: $cmd" >&2; exit 2 ;;
 esac
@@ -105,8 +171,22 @@ case "$cmd" in
         scp -q "$HOST:$REMOTE/shot.png" "$out"
         echo "скриншот: $out"
         ;;
+    uitest)
+        sync_code
+        rc=0
+        remote uitest "${DDMAIL_TEST_EMAIL:-}" "${DDMAIL_TEST_PASSWORD:-}" || rc=$?
+        dir="$SHOTS/uitest-$(date +%H%M%S)"
+        mkdir -p "$dir"
+        scp -qr "$HOST:$REMOTE/ui-shots/." "$dir/" 2>/dev/null || true
+        echo "скриншоты: $dir"
+        exit "$rc"
+        ;;
+    device)
+        sync_code
+        remote device "${2:-iphone}" "${DDMAIL_KEYCHAIN_PASSWORD:-}"
+        ;;
     *)
-        sed -n '2,11p' "$0" >&2
+        sed -n '2,17p' "$0" >&2
         exit 2
         ;;
 esac
