@@ -13,6 +13,8 @@ let mailLog = Logger(subsystem: "ru.letotam.ddmail", category: "mail")
 final class MailModel {
     let engine: SyncEngine
     private let connection: Connection
+    /// Открытая беседа — одна лента на всё время работы почты (§8).
+    let conversation: ConversationModel
 
     private(set) var all: [Conversation] = []
     private(set) var doc = FoldersDoc().withSpam()
@@ -56,6 +58,7 @@ final class MailModel {
     init(connection: Connection, engine: SyncEngine) {
         self.connection = connection
         self.engine = engine
+        conversation = ConversationModel(engine: engine) { [weak connection] in connection?.report(.dead) }
         activeFolderID = UserDefaults.standard.string(forKey: Self.activeKey)
         start()
     }
@@ -68,6 +71,8 @@ final class MailModel {
                 all = convs
                 loaded = true
                 rebuild()
+                // Новые письма открытой беседы — дописать снизу.
+                if let c = selected { conversation.updated(c) }
             }
         })
         tasks.append(Task { [weak self, engine] in
@@ -135,6 +140,7 @@ final class MailModel {
     }
 
     private func openSelected() {
+        conversation.open(selected)
         guard let c = selected, c.unreadCount > 0 else { return }
         Task { [engine] in
             do { try await engine.markRead(c) } catch { self.notice = "Не удалось отметить прочитанным: \(error.localizedDescription)" }

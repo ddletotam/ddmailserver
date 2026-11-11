@@ -21,7 +21,7 @@ struct MailView: View {
                 .navigationSplitViewColumnWidth(min: 320, ideal: 380, max: 480)
         } detail: {
             if let c = model.selected {
-                ConversationPlaceholder(conversation: c)
+                ConversationView(conversation: c, model: model.conversation) { confirmSpam = [c.id] }
             } else {
                 ContentUnavailableView("Беседа не выбрана", systemImage: "bubble.left.and.bubble.right")
             }
@@ -349,21 +349,6 @@ struct NoticeBanner: View {
                 }
                 .accessibilityAddTraits(.updatesFrequently)
         }
-    }
-}
-
-/// Беседа — до этапа ленты (§8) показываем, что она открылась.
-private struct ConversationPlaceholder: View {
-    let conversation: Conversation
-
-    var body: some View {
-        ContentUnavailableView {
-            Label(conversation.label, systemImage: "bubble.left.and.bubble.right")
-        } description: {
-            Text("\(conversation.lastSubject)\nПисем: \(conversation.totalCount)")
-        }
-        .navigationTitle(conversation.label)
-        .toolbarTitleDisplayMode(.inline)
     }
 }
 

@@ -206,6 +206,17 @@ public actor SyncEngine {
         return n
     }
 
+    // MARK: Части и вложения
+
+    /// Встроенная часть письма (`cid:`) — для документа ленты.
+    public nonisolated func part(uid: Int64, cid: String) async throws -> Binary {
+        try await api.part(uid: uid, cid: cid)
+    }
+
+    public nonisolated func attachment(uid: Int64, index: Int) async throws -> Binary {
+        try await api.attachment(uid: uid, index: index)
+    }
+
     // MARK: Мутации
 
     private func cacheKey(_ c: Conversation) -> String { c.spam ? spamKey : accountKey }

@@ -38,6 +38,10 @@ final class LoginFlowTests: XCTestCase {
         XCTAssertTrue(firstRow.waitForExistence(timeout: 60), "список бесед пуст")
         shot(app, "3-list")
         firstRow.tap()
+        // Лента — документ в WKWebView: ждём его и текст пузырей внутри.
+        let web = app.webViews.firstMatch
+        XCTAssertTrue(web.waitForExistence(timeout: 20), "лента беседы не появилась")
+        XCTAssertTrue(web.staticTexts.firstMatch.waitForExistence(timeout: 30), "в ленте нет писем")
         shot(app, "4-opened")
     }
 

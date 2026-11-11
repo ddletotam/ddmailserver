@@ -143,5 +143,6 @@ final class Connection {
     func close() {
         mail?.stop()
         try? cache?.clearAll()
+        ImageSenders.clear()
     }
 }
