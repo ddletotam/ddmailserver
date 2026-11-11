@@ -12,6 +12,7 @@ let package = Package(
         .library(name: "DDMailAuth", targets: ["DDMailAuth"]),
         .library(name: "DDMailStore", targets: ["DDMailStore"]),
         .library(name: "DDMailSync", targets: ["DDMailSync"]),
+        .library(name: "DDMailCalendar", targets: ["DDMailCalendar"]),
     ],
     dependencies: [
         // Единственная сторонняя зависимость логики (контракт §1): кэш на SQLite
@@ -23,10 +24,12 @@ let package = Package(
         .target(name: "DDMailAuth", dependencies: ["DDMailAPI"]),
         .target(name: "DDMailStore", dependencies: ["DDMailAPI", .product(name: "GRDB", package: "GRDB.swift")]),
         .target(name: "DDMailSync", dependencies: ["DDMailAPI", "DDMailStore"]),
+        .target(name: "DDMailCalendar", dependencies: ["DDMailAPI"]),
         .testTarget(name: "DDMailAPITests", dependencies: ["DDMailAPI"]),
         .testTarget(name: "DDMailAuthTests", dependencies: ["DDMailAuth", "DDMailAPI"]),
         .testTarget(name: "DDMailStoreTests", dependencies: ["DDMailStore", "DDMailAPI"]),
         .testTarget(name: "DDMailSyncTests", dependencies: ["DDMailSync", "DDMailStore", "DDMailAPI"]),
+        .testTarget(name: "DDMailCalendarTests", dependencies: ["DDMailCalendar", "DDMailAPI"]),
     ],
     swiftLanguageModes: [.v6]
 )
