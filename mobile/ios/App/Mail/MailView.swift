@@ -105,7 +105,7 @@ struct MailView: View {
 
     @ViewBuilder private func rows(_ convs: [Conversation], colors: IdentityColors, selectedID: String?) -> some View {
         ForEach(convs) { c in
-            ConversationRow(conversation: c, colors: colors, selected: c.id == selectedID)
+            ConversationRow(conversation: c, colors: colors, selected: c.id == selectedID, avatars: model.avatars)
                 .tag(c.id)
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
                     if !c.spam {
@@ -293,12 +293,13 @@ struct ConversationRow: View {
     let conversation: Conversation
     let colors: IdentityColors
     let selected: Bool
+    let avatars: AvatarStore?
 
     var body: some View {
         let c = conversation
         let unread = c.unreadCount > 0
         HStack(alignment: .top, spacing: 12) {
-            Avatar(name: c.label, seed: c.counterparts.first?.addr ?? c.id)
+            ConversationAvatar(name: c.label, email: c.counterparts.first?.addr ?? "", spam: c.spam, store: avatars)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(c.label.isEmpty ? (c.counterparts.first?.addr ?? "—") : c.label)

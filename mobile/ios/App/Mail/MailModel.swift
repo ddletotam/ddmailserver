@@ -17,6 +17,8 @@ final class MailModel {
     let conversation: ConversationModel
     /// Ответ, новое письмо, пересылка (§5).
     @ObservationIgnored private(set) var compose: ComposeModel!
+    /// Аватарки собеседников (§5).
+    let avatars: AvatarStore
     /// WebSocket, пока на экране (§7).
     @ObservationIgnored private(set) var live: LiveUpdates!
 
@@ -63,6 +65,7 @@ final class MailModel {
         self.connection = connection
         self.engine = engine
         conversation = ConversationModel(engine: engine) { [weak connection] in connection?.report(.dead) }
+        avatars = AvatarStore(api: connection.api)
         live = LiveUpdates(api: connection.api, sync: { [weak self] in await self?.sync() })
         compose = ComposeModel(
             engine: engine, conversation: conversation,
@@ -109,6 +112,7 @@ final class MailModel {
 
     func stop() {
         live.stop()
+        Task { [avatars] in await avatars.clear() }
         prefetchTask?.cancel()
         tasks.forEach { $0.cancel() }
         tasks.removeAll()
