@@ -14,6 +14,8 @@ struct AppShell: View {
                 Tab(s.title, systemImage: s.symbol, value: s) {
                     if s == .mail, let mail = connection.mail {
                         MailView(model: mail, app: app, connection: connection)
+                    } else if s == .calendar {
+                        CalendarScreen(model: connection.calendar)
                     } else {
                         NavigationStack {
                             SectionPlaceholder(section: s, app: app, connection: connection)

@@ -95,6 +95,7 @@ final class Connection {
     let cache: MailStore?
     let engine: SyncEngine?
     @ObservationIgnored private(set) lazy var mail: MailModel? = engine.map { MailModel(connection: self, engine: $0) }
+    @ObservationIgnored private(set) lazy var calendar = CalendarModel(api: api) { [weak self] in self?.report(.dead) }
     private(set) var status: SessionStatus = .checking
     /// Кэш не открылся (диск полон, файл повреждён) — почта без кэша не работает.
     private(set) var cacheError: String?
@@ -193,6 +194,7 @@ final class Connection {
         try? cache?.clearAll()
         ImageSenders.clear()
         AppSettings.shared.clearAccountState()
+        CalendarPrefs.shared.clear()
         Notifier.clearAll()
     }
 }

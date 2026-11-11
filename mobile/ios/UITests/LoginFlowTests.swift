@@ -63,6 +63,16 @@ final class LoginFlowTests: XCTestCase {
         message.typeText("Проверка")
         XCTAssertTrue(sendButton.isEnabled)
         shot(app, "5-composer")
+
+        // Календарь: лента месяцев с событиями с сервера.
+        // В беседе таб-бар скрыт (§6): назад к списку — первой кнопкой панели.
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let calTab = app.buttons["Календарь"].firstMatch
+        XCTAssertTrue(calTab.waitForExistence(timeout: 10), "нет раздела «Календарь»")
+        calTab.tap()
+        XCTAssertTrue(app.buttons["Сегодня"].waitForExistence(timeout: 10), "календарь не открылся")
+        sleep(4)
+        shot(app, "6-calendar")
     }
 
     /// Печать только после появления клавиатуры: иначе первые символы теряются.

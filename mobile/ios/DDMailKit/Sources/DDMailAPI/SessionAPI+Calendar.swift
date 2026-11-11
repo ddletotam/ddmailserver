@@ -20,7 +20,7 @@ extension SessionAPI {
     }
 
     public func deleteEvent(id: Int64) async throws {
-        try await authed {
+        _ = try await authed {
             var r = URLRequest(url: url("/events/\(id)"))
             r.httpMethod = "DELETE"
             return r.bearer($0)
@@ -59,7 +59,7 @@ extension SessionAPI {
     }
 
     public func deleteContact(id: Int64) async throws {
-        try await authed {
+        _ = try await authed {
             var r = URLRequest(url: url("/contacts/\(id)"))
             r.httpMethod = "DELETE"
             return r.bearer($0)

@@ -66,7 +66,12 @@ final class MailModel {
         self.engine = engine
         conversation = ConversationModel(engine: engine) { [weak connection] in connection?.report(.dead) }
         avatars = AvatarStore(api: connection.api)
-        live = LiveUpdates(api: connection.api, sync: { [weak self] in await self?.sync() })
+        live = LiveUpdates(
+            api: connection.api,
+            sync: { [weak self] in await self?.sync() },
+            // `calendar_updated`: календарь перечитывается, почта — нет.
+            onCalendar: { [weak connection] in Task { await connection?.calendar.refresh() } }
+        )
         compose = ComposeModel(
             engine: engine, conversation: conversation,
             syncSoon: { [weak self] in Task { await self?.sync() } },
