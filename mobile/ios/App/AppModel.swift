@@ -1,5 +1,7 @@
 import DDMailAPI
 import DDMailAuth
+import DDMailStore
+import DDMailSync
 import Foundation
 import Observation
 
@@ -66,6 +68,7 @@ final class AppModel {
 
     /// Выход: сессия чужой учётки не остаётся на устройстве.
     func logout() {
+        if case let .connected(c) = phase { c.close() }
         store.clear()
         phase = .connect(makeConnect(.init()))
     }
@@ -75,13 +78,17 @@ final class AppModel {
     }
 }
 
-/// Живая сессия: API и её состояние.
+/// Живая сессия: API, кэш почты, движок синхронизации и состояние.
 @MainActor @Observable
 final class Connection {
     let session: Session
     let api: SessionAPI
+    let cache: MailStore?
+    let engine: SyncEngine?
+    @ObservationIgnored private(set) lazy var mail: MailModel? = engine.map { MailModel(connection: self, engine: $0) }
     private(set) var status: SessionStatus = .checking
-    private var checking = false
+    /// Кэш не открылся (диск полон, файл повреждён) — почта без кэша не работает.
+    private(set) var cacheError: String?
 
     init(session: Session, store: SessionStore, transport: HTTPTransport) {
         self.session = session
@@ -90,23 +97,51 @@ final class Connection {
             transport: transport,
             tokens: StoredTokens(session: session, store: store)
         )
+        do {
+            let c = try MailStore(url: Self.cacheURL)
+            // Кэш другой учётки (вошли под другим логином) — не наш: с нуля.
+            if try c.meta("account_key") != session.accountKey {
+                try c.clearAll()
+                try c.setMeta("account_key", session.accountKey)
+            }
+            cache = c
+            engine = SyncEngine(accountKey: session.accountKey, api: api, store: c)
+        } catch {
+            cache = nil
+            engine = nil
+            cacheError = error.localizedDescription
+        }
     }
 
-    /// Проверить сессию лёгким запросом. Синхронизация (следующий этап) будет
-    /// сообщать то же самое по итогам каждого прохода.
+    /// Кэш — в Application Support (не в Caches: система не должна его
+    /// выбрасывать, иначе на старте пустой список до ответа сервера).
+    static var cacheURL: URL {
+        URL.applicationSupportDirectory.appending(path: "ddmail/cache.sqlite")
+    }
+
+    /// Итог синхронизации или проверки (§2). «Нужен вход» липкий: его снимает
+    /// только удачный проход (токен обменялся, запросы прошли) или новый вход.
+    func report(_ s: SessionStatus) {
+        if status == .dead, case .offline = s { return }
+        status = s
+    }
+
+    /// Проверить сессию лёгким запросом — когда синхронизировать нечем (кэш не открылся).
     func check() async {
-        guard !checking else { return }
-        checking = true
-        defer { checking = false }
         do {
             _ = try await api.identities()
-            status = .ok
+            report(.ok)
         } catch APIError.unauthorized {
-            status = .dead
+            report(.dead)
         } catch is CancellationError {
         } catch {
-            // «Нужен вход» не смывается сетевой ошибкой: ретраи его не лечат.
-            if status != .dead { status = .offline(error.localizedDescription) }
+            report(.offline(error.localizedDescription))
         }
+    }
+
+    /// Выход: остановить наблюдение и стереть кэш учётки.
+    func close() {
+        mail?.stop()
+        try? cache?.clearAll()
     }
 }

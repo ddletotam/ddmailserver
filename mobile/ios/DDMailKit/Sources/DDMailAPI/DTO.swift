@@ -6,7 +6,7 @@ import Foundation
 // (Go отдаёт nil-срез как null).
 
 /// Свой адрес отправки.
-public struct Identity: Decodable, Equatable, Sendable {
+public struct Identity: Codable, Equatable, Sendable {
     public var email = ""
     public var name = ""
     public var signature = ""

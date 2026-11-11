@@ -29,13 +29,26 @@ public final class SessionAPI: Sendable {
 
     /// Запрос с токеном; на 401 — обмен и один повтор.
     func authed(_ build: (String) throws -> URLRequest) async throws -> Data {
+        try await authedResponse(build).0
+    }
+
+    func authedResponse(_ build: (String) throws -> URLRequest) async throws -> (Data, HTTPURLResponse) {
         let token = await tokens.current()
         do {
-            return try await transport.body(build(token))
+            return try await transport.checked(build(token))
         } catch APIError.unauthorized {
             let fresh = try await gate.refreshed(stale: token, tokens: tokens, api: raw)
-            return try await transport.body(build(fresh))
+            return try await transport.checked(build(fresh))
         }
+    }
+
+    /// Текущий токен (WebSocket ставит его в заголовок рукопожатия сам).
+    public func currentToken() async -> String { await tokens.current() }
+
+    /// Обменять токен вне запроса: WebSocket отвергнут как неавторизованный.
+    public func refreshToken() async throws {
+        let token = await tokens.current()
+        _ = try await gate.refreshed(stale: token, tokens: tokens, api: raw)
     }
 
     func get<T: Decodable>(_ path: String, as type: T.Type) async throws -> T {

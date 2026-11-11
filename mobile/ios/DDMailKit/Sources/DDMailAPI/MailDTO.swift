@@ -1,0 +1,296 @@
+import Foundation
+
+// Почта: зеркало Dto.kt Android и Desktop*-структур сервера.
+
+public struct ContactInfo: Codable, Equatable, Hashable, Sendable {
+    public var name: String
+    public var addr: String
+
+    public init(name: String = "", addr: String = "") {
+        self.name = name
+        self.addr = addr
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.value(.name, "")
+        addr = try c.value(.addr, "")
+    }
+}
+
+/// Ссылка на письмо беседы. `uid` у учётки ddmail — серверный id письма.
+public struct MessageRef: Codable, Equatable, Hashable, Sendable {
+    public var folder: String
+    public var uid: Int64
+    /// Стабильный ключ письма (RFC Message-ID); uid — волатильный.
+    public var messageID: String
+    public var seen: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case folder, uid, seen
+        case messageID = "message_id"
+    }
+
+    public init(folder: String = "", uid: Int64, messageID: String = "", seen: Bool = false) {
+        self.folder = folder
+        self.uid = uid
+        self.messageID = messageID
+        self.seen = seen
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        folder = try c.value(.folder, "")
+        uid = try c.value(.uid, 0)
+        messageID = try c.value(.messageID, "")
+        seen = try c.value(.seen, false)
+    }
+}
+
+public struct ConversationDTO: Decodable, Equatable, Sendable {
+    /// Задаёт сервер (набор адресов); клиент его не разбирает.
+    public var id: String
+    public var label: String
+    public var avatarHash: String
+    public var receivedBy: String
+    public var counterparts: [ContactInfo]
+    public var isGroup: Bool
+    /// Секунды.
+    public var lastDateTs: Int64
+    public var lastSubject: String
+    public var unreadCount: Int
+    public var totalCount: Int
+    public var messages: [MessageRef]
+    /// Миллисекунды, часы сервера.
+    public var updatedAt: Int64
+    /// Беседа из спама (`/conversations?spam=1`).
+    public var spam: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case id, label, counterparts, messages, spam
+        case avatarHash = "avatar_hash"
+        case receivedBy = "received_by"
+        case isGroup = "is_group"
+        case lastDateTs = "last_date_ts"
+        case lastSubject = "last_subject"
+        case unreadCount = "unread_count"
+        case totalCount = "total_count"
+        case updatedAt = "updated_at"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        label = try c.value(.label, "")
+        avatarHash = try c.value(.avatarHash, "")
+        receivedBy = try c.value(.receivedBy, "")
+        counterparts = try c.value(.counterparts, [])
+        isGroup = try c.value(.isGroup, false)
+        lastDateTs = try c.value(.lastDateTs, 0)
+        lastSubject = try c.value(.lastSubject, "")
+        unreadCount = try c.value(.unreadCount, 0)
+        totalCount = try c.value(.totalCount, 0)
+        messages = try c.value(.messages, [])
+        updatedAt = try c.value(.updatedAt, 0)
+        spam = try c.value(.spam, false)
+    }
+}
+
+/// `/conversations?since=` — изменившиеся беседы и водяной знак часов сервера.
+public struct ConversationsDelta: Decodable, Sendable {
+    public var serverNowMs: Int64
+    public var conversations: [ConversationDTO]
+
+    enum CodingKeys: String, CodingKey {
+        case conversations
+        case serverNowMs = "server_now_ms"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        serverNowMs = try c.value(.serverNowMs, 0)
+        conversations = try c.value(.conversations, [])
+    }
+}
+
+public struct ChangeEntry: Decodable, Equatable, Sendable {
+    public static let upsert = 1
+    public static let delete = 2
+
+    public var seq: Int64
+    public var messageID: String
+    public var kind: Int
+
+    enum CodingKeys: String, CodingKey {
+        case seq, kind
+        case messageID = "message_id"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        seq = try c.value(.seq, 0)
+        messageID = try c.value(.messageID, "")
+        kind = try c.value(.kind, 0)
+    }
+}
+
+/// Хвост журнала изменений; `reset` — курсор негоден, нужна полная синхронизация.
+public struct ChangesResponse: Decodable, Sendable {
+    public var entries: [ChangeEntry]
+    public var latestSeq: Int64
+    public var reset: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case entries, reset
+        case latestSeq = "latest_seq"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        entries = try c.value(.entries, [])
+        latestSeq = try c.value(.latestSeq, 0)
+        reset = try c.value(.reset, false)
+    }
+}
+
+/// Документ, который сервер хранит с версией и не толкует (`/dialog-folders`,
+/// `/identity-groups`).
+public struct VersionedDoc: Decodable, Sendable {
+    public var version: Int64
+    public var doc: JSONValue?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.value(.version, 0)
+        doc = try c.decodeIfPresent(JSONValue.self, forKey: .doc)
+    }
+
+    enum CodingKeys: String, CodingKey { case version, doc }
+}
+
+public struct AttachmentDTO: Codable, Equatable, Hashable, Sendable {
+    public var filename: String
+    public var mimeType: String
+    public var size: Int64
+    public var index: Int
+
+    enum CodingKeys: String, CodingKey {
+        case filename, size, index
+        case mimeType = "mime_type"
+    }
+
+    public init(filename: String = "", mimeType: String = "", size: Int64 = 0, index: Int = 0) {
+        self.filename = filename
+        self.mimeType = mimeType
+        self.size = size
+        self.index = index
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        filename = try c.value(.filename, "")
+        mimeType = try c.value(.mimeType, "")
+        size = try c.value(.size, 0)
+        index = try c.value(.index, 0)
+    }
+}
+
+/// Тело письма (`/conversations/messages`).
+public struct MessageBody: Codable, Equatable, Sendable {
+    public var uid: Int64
+    public var folder: String
+    public var subject: String
+    public var from: String
+    public var fromAddr: String
+    public var to: [String]
+    public var cc: [String]
+    /// Секунды.
+    public var dateTs: Int64
+    public var html: String?
+    public var text: String?
+    public var attachments: [AttachmentDTO]
+    public var isOutgoing: Bool
+    public var messageID: String
+    public var inReplyTo: String
+    public var references: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case uid, folder, subject, from, to, cc, html, text, attachments, references
+        case fromAddr = "from_addr"
+        case dateTs = "date_ts"
+        case isOutgoing = "is_outgoing"
+        case messageID = "message_id"
+        case inReplyTo = "in_reply_to"
+    }
+
+    public init(
+        uid: Int64, folder: String = "", subject: String = "", from: String = "", fromAddr: String = "",
+        to: [String] = [], cc: [String] = [], dateTs: Int64 = 0, html: String? = nil, text: String? = nil,
+        attachments: [AttachmentDTO] = [], isOutgoing: Bool = false, messageID: String = "",
+        inReplyTo: String = "", references: [String] = []
+    ) {
+        self.uid = uid; self.folder = folder; self.subject = subject; self.from = from
+        self.fromAddr = fromAddr; self.to = to; self.cc = cc; self.dateTs = dateTs; self.html = html
+        self.text = text; self.attachments = attachments; self.isOutgoing = isOutgoing
+        self.messageID = messageID; self.inReplyTo = inReplyTo; self.references = references
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        uid = try c.decode(Int64.self, forKey: .uid)
+        folder = try c.value(.folder, "")
+        subject = try c.value(.subject, "")
+        from = try c.value(.from, "")
+        fromAddr = try c.value(.fromAddr, "")
+        to = try c.value(.to, [])
+        cc = try c.value(.cc, [])
+        dateTs = try c.value(.dateTs, 0)
+        html = try c.decodeIfPresent(String.self, forKey: .html)
+        text = try c.decodeIfPresent(String.self, forKey: .text)
+        attachments = try c.value(.attachments, [])
+        isOutgoing = try c.value(.isOutgoing, false)
+        messageID = try c.value(.messageID, "")
+        inReplyTo = try c.value(.inReplyTo, "")
+        references = try c.value(.references, [])
+    }
+
+    /// Ни HTML, ни текста, ни вложений — сбойный фетч, перезапросить (§4а десктопа).
+    public var isBlank: Bool {
+        (html ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && attachments.isEmpty
+    }
+}
+
+/// Итог «В спам»: сколько писем удалено и какое правило заведено первым.
+public struct PurgeOutcome: Decodable, Equatable, Sendable {
+    public var deleted: Int64
+    public var ruleType: String
+    public var ruleValue: String
+    public var ruleCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case deleted
+        case ruleType = "rule_type"
+        case ruleValue = "rule_value"
+        case ruleCount = "rule_count"
+    }
+
+    public init(deleted: Int64 = 0, ruleType: String = "", ruleValue: String = "", ruleCount: Int = 0) {
+        self.deleted = deleted; self.ruleType = ruleType; self.ruleValue = ruleValue; self.ruleCount = ruleCount
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        deleted = try c.value(.deleted, 0)
+        ruleType = try c.value(.ruleType, "")
+        ruleValue = try c.value(.ruleValue, "")
+        ruleCount = try c.value(.ruleCount, 0)
+    }
+}
+
+/// Двоичный ответ: аватар, часть письма, вложение.
+public struct Binary: Sendable {
+    public let data: Data
+    public let contentType: String
+}

@@ -33,12 +33,12 @@ final class LoginFlowTests: XCTestCase {
         XCTAssertEqual((passwordField.value as? String)?.count, password.count, "пароль напечатался не целиком")
         app.buttons["connect.login"].tap()
 
-        let status = app.staticTexts["session.status"]
-        XCTAssertTrue(status.waitForExistence(timeout: 30), "вход не прошёл")
-        let ok = NSPredicate(format: "label BEGINSWITH 'Вход выполнен'")
-        expectation(for: ok, evaluatedWith: status)
-        waitForExpectations(timeout: 20)
-        shot(app, "3-connected")
+        // Вход прошёл, синк лёг в кэш — в списке появились беседы.
+        let firstRow = app.cells.firstMatch
+        XCTAssertTrue(firstRow.waitForExistence(timeout: 60), "список бесед пуст")
+        shot(app, "3-list")
+        firstRow.tap()
+        shot(app, "4-opened")
     }
 
     /// Печать только после появления клавиатуры: иначе первые символы теряются.

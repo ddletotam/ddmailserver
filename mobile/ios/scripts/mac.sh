@@ -46,7 +46,21 @@ cd "$HOME/build/ddmail/mobile/ios"
 DD="$HOME/build/ddmail/DerivedData"
 cmd="$1"; shift
 
-gen() { xcodegen generate --quiet; }
+# Зеркала пакетов на Маке (~/src-mirrors): полный клон с GitHub провайдер
+# обрывает («unexpected disconnect»), поверхностный проходит. Конфигурация
+# зеркал — и для пакета (swift test), и для проекта (xcodebuild); в git её нет.
+mirrors() {
+    local json="{\"object\":[{\"mirror\":\"file://$HOME/src-mirrors/GRDB.swift\",\"original\":\"https://github.com/groue/GRDB.swift.git\"}],\"version\":1}"
+    [ -d "$HOME/src-mirrors/GRDB.swift" ] || return 0
+    for d in DDMailKit/.swiftpm/configuration DDMail.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/configuration; do
+        mkdir -p "$d" && printf '%s' "$json" > "$d/mirrors.json"
+    done
+}
+
+gen() { xcodegen generate --quiet; mirrors; }
+
+# Пакеты xcodebuild — в постоянном каталоге, а не в DerivedData: клонируются один раз.
+SPM="$HOME/build/ddmail/SourcePackages"
 
 # Простой симулятор нужного типа на самой свежей iOS: «iPhone … Pro» (не Max) или «iPad Pro 13».
 sim_udid() {
@@ -69,7 +83,7 @@ sys.exit("нет симулятора под " + sys.argv[1])
 
 build_sim() {
     xcodebuild -project DDMail.xcodeproj -scheme DDMail -configuration Debug \
-        -destination "generic/platform=iOS Simulator" -derivedDataPath "$DD" \
+        -destination "generic/platform=iOS Simulator" -derivedDataPath "$DD" -clonedSourcePackagesDirPath "$SPM" \
         -quiet build
 }
 
@@ -78,6 +92,7 @@ case "$cmd" in
         # Итоги по наборам и все падения; полный вывод — в test.log на Маке.
         log="$HOME/build/ddmail/test.log"
         rc=0
+        mirrors
         (cd DDMailKit && swift test >"$log" 2>&1) || rc=$?
         grep -E "error:|✘|Expectation failed|Suite .* (passed|failed)|Test run with" "$log" || tail -30 "$log"
         exit "$rc"
@@ -86,7 +101,7 @@ case "$cmd" in
         gen
         build_sim
         xcodebuild -project DDMail.xcodeproj -scheme DDMail -configuration Debug \
-            -destination "platform=macOS" -derivedDataPath "$DD" \
+            -destination "platform=macOS" -derivedDataPath "$DD" -clonedSourcePackagesDirPath "$SPM" \
             CODE_SIGN_IDENTITY=- -quiet build
         echo "build: ok (iOS Simulator, macOS)"
         ;;
@@ -114,7 +129,7 @@ case "$cmd" in
         rc=0
         TEST_RUNNER_DDMAIL_TEST_EMAIL="${1:-}" TEST_RUNNER_DDMAIL_TEST_PASSWORD="${2:-}" \
             xcodebuild -project DDMail.xcodeproj -scheme DDMail -configuration Debug \
-            -destination "id=$udid" -derivedDataPath "$DD" -resultBundlePath "$rb" \
+            -destination "id=$udid" -derivedDataPath "$DD" -clonedSourcePackagesDirPath "$SPM" -resultBundlePath "$rb" \
             test >"$HOME/build/ddmail/uitest.log" 2>&1 || rc=$?
         grep -E "error:|Test Case .*(passed|failed|skipped)|TEST (SUCCEEDED|FAILED)" "$HOME/build/ddmail/uitest.log" | tail -20
         mkdir -p "$out"
@@ -144,12 +159,16 @@ PY
         # errSecInternalComponent; пароль — из DDMAIL_KEYCHAIN_PASSWORD, если задан.
         if [ -n "${2:-}" ]; then security unlock-keychain -p "$2" login.keychain; fi
         xcodebuild -project DDMail.xcodeproj -scheme DDMail -configuration Debug \
-            -destination "id=$udid" -derivedDataPath "$DD" \
+            -destination "id=$udid" -derivedDataPath "$DD" -clonedSourcePackagesDirPath "$SPM" \
             -allowProvisioningUpdates DEVELOPMENT_TEAM="$team" -quiet build
         app="$DD/Build/Products/Debug-iphoneos/DDMail.app"
         xcrun devicectl device install app --device "$udid" "$app" >/dev/null
-        xcrun devicectl device process launch --terminate-existing --device "$udid" ru.letotam.ddmail >/dev/null
-        echo "device: ok ($kind $udid)"
+        # Заблокированный телефон не запустит приложение — это не провал установки.
+        if xcrun devicectl device process launch --terminate-existing --device "$udid" ru.letotam.ddmail >/dev/null 2>&1; then
+            echo "device: установлено и запущено ($kind $udid)"
+        else
+            echo "device: установлено ($kind $udid); запуск не удался — телефон заблокирован или сборке ещё не доверяют"
+        fi
         ;;
     *)
         echo "неизвестная команда: $cmd" >&2; exit 2 ;;

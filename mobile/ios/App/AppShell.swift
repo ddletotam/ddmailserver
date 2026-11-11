@@ -12,8 +12,12 @@ struct AppShell: View {
         TabView(selection: $section) {
             ForEach(AppSection.allCases) { s in
                 Tab(s.title, systemImage: s.symbol, value: s) {
-                    NavigationStack {
-                        SectionPlaceholder(section: s, app: app, connection: connection)
+                    if s == .mail, let mail = connection.mail {
+                        MailView(model: mail, app: app, connection: connection)
+                    } else {
+                        NavigationStack {
+                            SectionPlaceholder(section: s, app: app, connection: connection)
+                        }
                     }
                 }
             }
@@ -25,8 +29,10 @@ struct AppShell: View {
                 SessionDeadBanner(relogin: app.relogin)
             }
         }
+        // Синк на выход приложения на экран (§4); WebSocket — следующим шагом.
         .task(id: scenePhase) {
-            if scenePhase == .active { await connection.check() }
+            guard scenePhase == .active else { return }
+            if let mail = connection.mail { await mail.sync() } else { await connection.check() }
         }
     }
 }

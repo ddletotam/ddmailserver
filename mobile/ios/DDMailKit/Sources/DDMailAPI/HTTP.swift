@@ -19,6 +19,11 @@ extension HTTPTransport {
     /// Выполнить запрос; 2xx — тело, иначе `APIError`. Отмена задачи
     /// пробрасывается как есть (`CancellationError` / `URLError.cancelled`).
     func body(_ request: URLRequest) async throws -> Data {
+        try await checked(request).0
+    }
+
+    /// То же, что `body`, но с ответом целиком (тип содержимого у двоичных).
+    func checked(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let data: Data
         let response: HTTPURLResponse
         do {
@@ -29,7 +34,7 @@ extension HTTPTransport {
             throw APIError.network(e.localizedDescription)
         }
         switch response.statusCode {
-        case 200..<300: return data
+        case 200..<300: return (data, response)
         case 401: throw APIError.unauthorized(errorText(data))
         default: throw APIError.server(code: response.statusCode, message: errorText(data))
         }
