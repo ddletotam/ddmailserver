@@ -17,6 +17,14 @@ struct AppShell: View {
                         MailView(model: mail, app: app, connection: connection)
                     } else if s == .calendar {
                         CalendarScreen(model: connection.calendar)
+                    } else if s == .tasks {
+                        TasksView(model: connection.tasks)
+                    } else if s == .contacts {
+                        ContactsView(model: connection.contacts, avatars: connection.mail?.avatars) { addr in
+                            // «Написать» — новое письмо на адрес, в разделе почты.
+                            section = .mail
+                            connection.mail?.compose.openNew(to: addr)
+                        }
                     } else {
                         NavigationStack {
                             SectionPlaceholder(section: s, app: app, connection: connection)

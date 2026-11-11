@@ -73,6 +73,14 @@ final class LoginFlowTests: XCTestCase {
         XCTAssertTrue(app.buttons["Сегодня"].waitForExistence(timeout: 10), "календарь не открылся")
         sleep(4)
         shot(app, "6-calendar")
+
+        app.buttons["Задачи"].firstMatch.tap()
+        sleep(3)
+        shot(app, "7-tasks")
+
+        app.buttons["Контакты"].firstMatch.tap()
+        XCTAssertTrue(app.cells.firstMatch.waitForExistence(timeout: 20), "контакты не загрузились")
+        shot(app, "8-contacts")
     }
 
     /// Печать только после появления клавиатуры: иначе первые символы теряются.

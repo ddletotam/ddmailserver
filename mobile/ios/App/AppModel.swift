@@ -102,6 +102,8 @@ final class Connection {
         return m
     }()
     @ObservationIgnored private(set) lazy var reminders = ReminderService(api: api)
+    @ObservationIgnored private(set) lazy var tasks = TasksModel(api: api) { [weak self] in self?.report(.dead) }
+    @ObservationIgnored private(set) lazy var contacts = ContactsModel(api: api) { [weak self] in self?.report(.dead) }
     private(set) var status: SessionStatus = .checking
     /// Кэш не открылся (диск полон, файл повреждён) — почта без кэша не работает.
     private(set) var cacheError: String?
