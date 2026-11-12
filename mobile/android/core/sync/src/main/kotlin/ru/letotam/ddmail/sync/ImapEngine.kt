@@ -3,6 +3,10 @@ package ru.letotam.ddmail.sync
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -169,6 +173,7 @@ class ImapEngine(
     // ── Синк ──
 
     override suspend fun sync() = syncLock.withLock {
+        if (closed) return@withLock
         var changed = false
         withClient { c ->
             val found = FolderRoles.detect(c.list())
@@ -185,14 +190,19 @@ class ImapEngine(
                 }
                 // Папку роли переименовали или подменили — это другая папка.
                 val prevState = prev?.takeIf { it.name == name }?.let { FolderState(it.uidValidity, it.uidNext, it.highestModSeq, it.lastUid) }
-                val cached = dao.imapUids(accountKey, role.code)
-                val d = FolderSync.sync(c, name, role.window, prevState, cached)
+                val cachedFlags = dao.imapFlags(accountKey, role.code).associateBy { it.uid }
+                val d = FolderSync.sync(c, name, role.window, prevState, cachedFlags.keys)
                 val reset = d.reset || prevState == null
-                if (reset || d.added.isNotEmpty() || d.flags.isNotEmpty() || d.removed.isNotEmpty()) changed = true
+                // Без CONDSTORE приходят флаги всего окна — в кэш и в пересборку
+                // идут только действительно изменившиеся.
+                val flags = d.flags.map { CacheDao.ImapFlags(it.uid, "\\SEEN" in it.flags, "\\FLAGGED" in it.flags, "\\DRAFT" in it.flags) }
+                    .filter { f -> cachedFlags[f.uid] != f }
+                if (reset || d.added.isNotEmpty() || flags.isNotEmpty() || d.removed.isNotEmpty()) changed = true
+                if (closed) return@withClient
                 dao.applyImapFolder(
                     accountKey, role.code, reset,
                     d.added.map { it.toEntity(role) },
-                    d.flags.map { CacheDao.ImapFlags(it.uid, "\\SEEN" in it.flags, "\\FLAGGED" in it.flags, "\\DRAFT" in it.flags) },
+                    flags,
                     d.removed,
                     ImapFolderEntity(accountKey, role.code, name, d.state.uidValidity, d.state.uidNext, d.state.highestModSeq, d.state.lastUid),
                     role.pack(0),
@@ -211,7 +221,7 @@ class ImapEngine(
                 dao.setMeta(kMetaTs, System.currentTimeMillis().toString())
             }
         }
-        if (changed || dao.meta("$accountKey:built") == null) rebuild()
+        if (!closed && (changed || dao.meta("$accountKey:built") == null)) rebuild()
     }
 
     /** Беседы заново из кэша заголовков (после синка и для отката правок). */
@@ -284,7 +294,7 @@ class ImapEngine(
         return refs.mapNotNull { cached[it.uid] ?: fetched[it.uid] }
     }
 
-    private suspend fun fetchBodies(refs: List<MessageRef>): List<MessageBody> {
+    private suspend fun fetchBodies(refs: List<MessageRef>, maxSize: Long = 0): List<MessageBody> {
         val ours = ourAddrs()
         val r = roles()
         val out = mutableListOf<MessageBody>()
@@ -292,7 +302,12 @@ class ImapEngine(
             for ((role, list) in refs.groupBy { FolderRole.unpackRole(it.uid) }) {
                 val name = role?.let { r[it] } ?: continue
                 c.select(name)
-                val raws = c.fetchRaw(list.map { FolderRole.unpackUid(it.uid) })
+                var uids = list.map { FolderRole.unpackUid(it.uid) }
+                if (maxSize > 0) {
+                    val sizes = c.sizes(uids)
+                    uids = uids.filter { (sizes[it] ?: 0) <= maxSize }
+                }
+                val raws = c.fetchRaw(uids)
                 for (ref in list) {
                     val bytes = raws[FolderRole.unpackUid(ref.uid)] ?: continue
                     raw.put(ref.uid, bytes)
@@ -312,10 +327,12 @@ class ImapEngine(
             .filter { it.uid !in have }
             .map { MessageRef(it.folder, it.uid, it.messageId, it.seen) }
         var n = 0
-        for (chunk in queue.chunked(batch)) {
+        // Письма целиком (с вложениями) — порции маленькие, большие письма
+        // заранее не качаются: откроют — скачаются (память телефона не резиновая).
+        for (chunk in queue.chunked(PREFETCH_BATCH)) {
             if (!allowed()) break
             n += try {
-                fetchBodies(chunk).size
+                fetchBodies(chunk, maxSize = PREFETCH_MAX_SIZE).size
             } catch (e: MailException.Auth) {
                 throw e
             } catch (e: MailException) {
@@ -340,14 +357,23 @@ class ImapEngine(
 
     override suspend fun part(uid: Long, cid: String): Binary {
         val bytes = rawOf(uid)
-        val (b, type) = withContext(Dispatchers.Default) { MimeParse.part(bytes, cid) } ?: throw MailException.Rejected("Часть письма не найдена")
+        val (b, type) = mime { MimeParse.part(bytes, cid) } ?: throw MailException.Rejected("Часть письма не найдена")
         return Binary(b, type)
     }
 
     override suspend fun attachment(uid: Long, index: Int): Binary {
         val bytes = rawOf(uid)
-        val (b, type, _) = withContext(Dispatchers.Default) { MimeParse.attachment(bytes, index) } ?: throw MailException.Rejected("Вложение не найдено")
+        val (b, type, _) = mime { MimeParse.attachment(bytes, index) } ?: throw MailException.Rejected("Вложение не найдено")
         return Binary(b, type)
+    }
+
+    /** Разбор MIME: битое письмо — ошибка действия, а не падение приложения. */
+    private suspend fun <T> mime(block: () -> T): T = withContext(Dispatchers.Default) {
+        try {
+            block()
+        } catch (e: Exception) {
+            throw MailException.Rejected("Письмо повреждено: ${e.message ?: e.javaClass.simpleName}")
+        }
     }
 
     // ── Правки ──
@@ -391,7 +417,8 @@ class ImapEngine(
     }
 
     override suspend fun markUnread(c: Conversation) {
-        val last = c.messages.lastOrNull() ?: return
+        // Последнее входящее (ссылки идут по дате), а не своё из «Отправленных».
+        val last = c.messages.lastOrNull { FolderRole.unpackRole(it.uid) == FolderRole.Inbox } ?: c.messages.lastOrNull() ?: return
         dao.markUnread(cacheKey(c), c.id, last.uid)
         setSeen(c, listOf(last), false)
     }
@@ -462,7 +489,7 @@ class ImapEngine(
      */
     override suspend fun send(req: SendRequest) {
         val cfg = smtp()
-        val out = withContext(Dispatchers.Default) { Smtp.build(req) }
+        val out = mime { Smtp.build(req) }
         withContext(Dispatchers.IO) { Smtp.send(cfg, out) }
         if (account.imapHost.endsWith("gmail.com") || account.imapHost.endsWith("googlemail.com")) {
             scope.launch { delay(5_000); runCatching { sync() } }
@@ -509,39 +536,64 @@ class ImapEngine(
      * мин. Возвращается при обрыве (ошибкой) — переподключение решает
      * вызывающий, с бэкоффом.
      */
-    suspend fun watch(onChange: () -> Unit) = withContext(Dispatchers.IO) {
+    suspend fun watch(onChange: () -> Unit) {
+        if (closed) return
         val pw = password() ?: throw MailException.Auth("нет пароля")
-        val c = openClient(pw)
-        val job = kotlinx.coroutines.currentCoroutineContext()[Job]
-        val stopper = job?.invokeOnCompletion { c.conn.stopIdle() }
-        try {
-            val inbox = roles()[FolderRole.Inbox] ?: "INBOX"
-            if (!c.idleSupported) {
-                while (true) {
-                    delay(POLL_MS)
-                    onChange()
+        val inbox = roles()[FolderRole.Inbox] ?: "INBOX"
+        val c = withContext(Dispatchers.IO) { openClient(pw) }
+        if (!c.idleSupported) {
+            // Без IDLE соединение не держим: опрос — обычным синком.
+            withContext(Dispatchers.IO) { runCatching { c.logout() }; c.close() }
+            while (true) {
+                delay(POLL_MS)
+                onChange()
+            }
+        }
+        coroutineScope {
+            // Отмена (приложение ушло с экрана) закрывает сокет сразу: блокирующее
+            // чтение IDLE падает, а не ждёт события до 25 минут.
+            val guard = launch {
+                try {
+                    awaitCancellation()
+                } finally {
+                    c.conn.stopIdle()
+                    c.close()
                 }
             }
-            c.select(inbox)
-            while (job?.isActive != false) {
-                var fired = false
-                c.idle(IDLE_MS) { d: Resp.Data ->
-                    if (d.kind in setOf("EXISTS", "EXPUNGE", "FETCH", "VANISHED")) fired = true
-                    fired
+            try {
+                withContext(Dispatchers.IO) {
+                    c.select(inbox)
+                    while (isActive) {
+                        var fired = false
+                        c.conn.resetIdleStop()
+                        c.idle(IDLE_MS) { d: Resp.Data ->
+                            if (d.kind in setOf("EXISTS", "EXPUNGE", "FETCH", "VANISHED")) fired = true
+                            fired
+                        }
+                        if (fired) onChange()
+                    }
                 }
-                if (fired) onChange()
+            } finally {
+                guard.cancel()
+                withContext(NonCancellable + Dispatchers.IO) {
+                    runCatching { c.logout() }
+                    c.close()
+                }
             }
-        } finally {
-            stopper?.dispose()
-            runCatching { c.logout() }
-            c.close()
         }
     }
 
+    /** Учётку удаляют: ни синк, ни соединения больше не пишут в кэш. */
+    @Volatile private var closed = false
+
     override suspend fun forget() {
+        closed = true
         close()
-        dao.clearAccount(accountKey)
-        raw.clear()
+        // Под замком синка: идущий проход не допишет удалённое обратно.
+        syncLock.withLock {
+            dao.clearAccount(accountKey)
+            raw.clear()
+        }
     }
 
     companion object {
@@ -549,6 +601,8 @@ class ImapEngine(
         const val REUSE_MS = 60_000L
         const val IDLE_MS = 25 * 60_000L
         const val POLL_MS = 2 * 60_000L
+        const val PREFETCH_BATCH = 10
+        const val PREFETCH_MAX_SIZE = 5L shl 20
         const val METADATA_IDENTITIES = "/shared/vendor/ddmail/identities"
         val SYNCED = listOf(FolderRole.Inbox, FolderRole.Sent, FolderRole.Drafts, FolderRole.Junk)
         private val identSer = ListSerializer(Identity.serializer())

@@ -35,7 +35,8 @@ class LiveUpdates(
     private var loop: Job? = null
     private var debounce: Job? = null
     private var watchers: Job? = null
-    private val imap = mutableMapOf<String, Job>()
+    /** IDLE по учётке: движок (после правки учётки — новый) и его цикл. */
+    private val imap = mutableMapOf<String, Pair<ImapEngine, Job>>()
     private var wanted = false
 
     fun start() {
@@ -46,8 +47,9 @@ class LiveUpdates(
         watchers = scope.launch {
             hub.sources.collect { list ->
                 val engines = list.filterIsInstance<ImapEngine>().associateBy { it.accountKey }
-                (imap.keys - engines.keys).forEach { imap.remove(it)?.cancel() }
-                engines.forEach { (k, e) -> if (k !in imap) imap[k] = scope.launch { watch(e) } }
+                // Ушедшие учётки и подменённые движки (правка настроек) — свои циклы заново.
+                imap.entries.filter { (k, v) -> engines[k] !== v.first }.map { it.key }.forEach { imap.remove(it)?.second?.cancel() }
+                engines.forEach { (k, e) -> if (k !in imap) imap[k] = e to scope.launch { watch(e) } }
             }
         }
     }
@@ -56,7 +58,7 @@ class LiveUpdates(
         wanted = false
         loop?.cancel()
         watchers?.cancel()
-        imap.values.forEach { it.cancel() }
+        imap.values.forEach { it.second.cancel() }
         imap.clear()
         socket?.close(1000, null)
         socket = null
@@ -72,7 +74,8 @@ class LiveUpdates(
             }
             val started = System.currentTimeMillis()
             try {
-                e.watch { onEvent() }
+                // Событие приходит с потока IDLE — синк заводим в своём scope.
+                e.watch { scope.launch { onEvent() } }
             } catch (ex: Exception) {
                 if (ex is kotlinx.coroutines.CancellationException) throw ex
                 if (ex.isAuthError()) hub.setStatus(e.accountKey, AccountStatus.NeedsLogin)

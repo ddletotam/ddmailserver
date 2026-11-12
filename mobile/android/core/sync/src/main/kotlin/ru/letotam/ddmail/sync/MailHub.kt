@@ -62,7 +62,8 @@ class MailHub(
     /** Набор учёток сменился: новые подключаются, ушедшие закрывают соединения. */
     fun setSources(list: List<MailSource>) {
         val keep = list.map { it.accountKey }.toSet()
-        _sources.value.filter { it.accountKey !in keep }.forEach { it.close() }
+        // Закрываются и подменённые экземпляры той же учётки (правка настроек).
+        _sources.value.filter { old -> list.none { it === old } }.forEach { it.close() }
         _sources.value = list
         _statuses.update { m -> m.filterKeys { it in keep } }
     }

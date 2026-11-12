@@ -38,6 +38,12 @@ class MailNotifier(private val context: Context, private val settings: AppSettin
         for ((key, list) in convs.groupBy { it.accountKey }) {
             val top = list.flatMap { c -> c.messages.map { it.uid }.filter(::incoming) }.maxOrNull() ?: continue
             val last = settings.notifiedMax(key)
+            // UID начались заново (сменилась UIDVALIDITY ящика) — рубеж тоже заново,
+            // иначе уведомлений не было бы, пока новые UID не перерастут старые.
+            if (last != null && top < last) {
+                settings.setNotifiedMax(key, top)
+                continue
+            }
             settings.setNotifiedMax(key, maxOf(top, last ?: 0))
             if (last == null || !on) continue
             val fresh = list.flatMap { c -> c.messages.filter { !it.seen && incoming(it.uid) && it.uid > last }.map { c to it.uid } }

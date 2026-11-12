@@ -150,7 +150,8 @@ abstract class CacheDao {
     @Query("SELECT * FROM conversations WHERE accountKey = :account ORDER BY lastDateTs DESC")
     abstract fun observeConversations(account: String): Flow<List<ConversationEntity>>
 
-    @Query("SELECT * FROM conversation_messages WHERE accountKey = :account")
+    /** Порядок вставки: источники кладут письма беседы по дате (у IMAP UID папок несравнимы). */
+    @Query("SELECT * FROM conversation_messages WHERE accountKey = :account ORDER BY rowid")
     abstract fun observeRefs(account: String): Flow<List<MessageRefEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -327,6 +328,9 @@ abstract class CacheDao {
 
     @Query("SELECT uid FROM imap_headers WHERE accountKey = :account AND role = :role")
     abstract suspend fun imapUids(account: String, role: Int): List<Long>
+
+    @Query("SELECT uid, seen, flagged, draft FROM imap_headers WHERE accountKey = :account AND role = :role")
+    abstract suspend fun imapFlags(account: String, role: Int): List<ImapFlags>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     protected abstract suspend fun putImapHeaders(h: List<ImapHeaderEntity>)

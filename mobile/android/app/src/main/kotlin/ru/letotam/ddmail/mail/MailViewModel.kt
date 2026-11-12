@@ -23,6 +23,7 @@ import ru.letotam.ddmail.sync.Conversation
 import ru.letotam.ddmail.sync.FoldersDoc
 import ru.letotam.ddmail.sync.SYSTEM_SPAM
 import ru.letotam.ddmail.sync.MailHub
+import ru.letotam.ddmail.sync.MailSource
 import ru.letotam.ddmail.sync.SpamOutcome
 import ru.letotam.ddmail.sync.errorText
 import ru.letotam.ddmail.sync.isMailError
@@ -109,6 +110,15 @@ class MailViewModel(
             tryRestore()
         }
         viewModelScope.launch { hub.folders.collect { doc = it } }
+        // Добавили учётку (или поправили настройки) — сразу её первый синк.
+        viewModelScope.launch {
+            var known = emptySet<MailSource>()
+            hub.sources.collect { list ->
+                val fresh = list.filter { it !in known }
+                if (known.isNotEmpty() && fresh.isNotEmpty()) sync()
+                known = list.toSet()
+            }
+        }
         viewModelScope.launch {
             hub.conversations.collect { list ->
                 all = list

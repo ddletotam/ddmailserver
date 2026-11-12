@@ -76,12 +76,12 @@ class ConversationController(
         js.trySend("ddm.set({messages:[],hasOlder:false})")
         job = scope.launch {
             lock.withLock {
-                pages = c.messages.sortedByDescending { it.uid }
+                pages = newestFirst(c.messages)
                 loaded = minOf(PAGE, pages.size)
                 senders = settings.imageSenders()
                 val bodies = load(pages.take(loaded))
                 // Первое непрочитанное — к нему и прокрутить (как у десктопа).
-                val firstUnseen = pages.take(loaded).filter { !it.seen }.minByOrNull { it.uid }?.uid
+                val firstUnseen = pages.take(loaded).lastOrNull { !it.seen }?.uid
                 js.send("ddm.set(${batch(c, bodies, firstUnseen)})")
             }
             if (c.unreadCount > 0 || c.messages.any { !it.seen }) {
@@ -95,7 +95,7 @@ class ConversationController(
         val c = conv ?: return
         scope.launch {
             lock.withLock {
-                if (conv?.id != c.id) return@launch
+                if (conv?.ref != c.ref) return@launch
                 val next = pages.drop(loaded).take(PAGE)
                 loaded += next.size
                 val bodies = load(next)
@@ -106,16 +106,16 @@ class ConversationController(
 
     /** Беседа обновилась дельтой: новые письма — снизу, без перерисовки. */
     fun updated(c: Conversation) {
-        if (conv?.id != c.id) return
+        if (conv?.ref != c.ref) return
         conv = c
         scope.launch {
             lock.withLock {
-                if (conv?.id != c.id) return@launch
+                if (conv?.ref != c.ref) return@launch
                 val known = pages.map { it.uid }.toSet()
                 val fresh = c.messages.filter { it.uid !in known }
                 if (fresh.isEmpty()) return@launch
                 gate.extend(fresh.map { it.uid })
-                pages = (fresh + pages).sortedByDescending { it.uid }
+                pages = newestFirst(c.messages).filter { it.uid in known || fresh.contains(it) }
                 loaded += fresh.size
                 val bodies = load(fresh)
                 js.send("ddm.append(${batch(c, bodies, null)})")
@@ -138,7 +138,7 @@ class ConversationController(
             val bin = try {
                 hub.attachment(key, uid, index)
             } catch (e: Exception) {
-                if (!e.isMailError()) throw e
+                if (e is kotlinx.coroutines.CancellationException) throw e
                 return@launch
             }
             val file = withContext(Dispatchers.IO) {
@@ -183,7 +183,7 @@ class ConversationController(
             val bin = try {
                 hub.attachment(key, uid, index)
             } catch (e: Exception) {
-                if (!e.isMailError()) throw e
+                if (e is kotlinx.coroutines.CancellationException) throw e
                 onDone("Не удалось скачать «$name».")
                 return@launch
             }
@@ -264,6 +264,15 @@ class ConversationController(
 
     private companion object {
         const val PAGE = 20
+
+        /**
+         * От нового к старому. У ddmail id письма растёт с его приходом —
+         * порядок по uid (§8). У IMAP uid упакован с ролью папки и между
+         * папками несравним — берётся порядок беседы (источник кладёт письма
+         * по дате).
+         */
+        fun newestFirst(refs: List<MessageRef>): List<MessageRef> =
+            if (refs.any { (it.uid ushr 32) != 0L }) refs.reversed() else refs.sortedByDescending { it.uid }
 
         /** Имя файла без разделителей пути и управляющих символов. */
         fun safeName(name: String): String =

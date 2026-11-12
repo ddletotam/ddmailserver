@@ -155,6 +155,11 @@ class ImapConnection internal constructor(
 
     @Volatile private var idleStop = false
 
+    /** Новый IDLE-цикл: прежняя просьба остановиться больше не действует. */
+    fun resetIdleStop() {
+        idleStop = false
+    }
+
     /** Остановить IDLE из другого потока: ответ придёт в течение [IDLE_POLL_MS]. */
     fun stopIdle() {
         idleStop = true
@@ -166,7 +171,6 @@ class ImapConnection internal constructor(
      * [stopIdle] срабатывал без закрытия сокета.
      */
     fun idle(maxMs: Long, onData: (Resp.Data) -> Boolean) {
-        idleStop = false
         val tag = "A" + (++seq).toString().padStart(3, '0')
         try {
             out.write("$tag IDLE".toByteArray())
@@ -191,10 +195,13 @@ class ImapConnection internal constructor(
         try {
             socket?.soTimeout = IDLE_POLL_MS
             while (!idleStop && System.currentTimeMillis() < deadline) {
+                // Короткий таймаут — только на ожидание начала ответа: таймаут
+                // посреди ответа (литерал двумя TLS-записями) сбил бы разбор.
+                socket?.soTimeout = IDLE_POLL_MS
+                if (!reader.awaitData()) continue
+                socket?.soTimeout = prevTimeout
                 val r = try {
                     reader.read()
-                } catch (e: SocketTimeoutException) {
-                    continue
                 } catch (e: IOException) {
                     throw Tls.networkError(e)
                 }

@@ -29,6 +29,104 @@ class LiveImapTest {
         books.getOrNull()?.forEach { b -> println("  contacts: ${ru.letotam.ddmail.dav.DavPim.contacts(c, b.url).size}") }
     }
 
+    /**
+     * Тот же ящик через IMAP и через сервер ddmail (`DDMAIL_LIVE_API`) —
+     * id бесед обязаны совпасть (контракт §3). Печатает только счётчики.
+     */
+    @Test
+    fun conversationIdsMatchServer(): Unit = kotlinx.coroutines.runBlocking {
+        val api = System.getenv("DDMAIL_LIVE_API")
+        assumeTrue(api != null && System.getenv("DDMAIL_LIVE_HOST") != null)
+        val user = System.getenv("DDMAIL_LIVE_USER")!!
+        val pass = System.getenv("DDMAIL_LIVE_PASS")!!
+        val http = okhttp3.OkHttpClient.Builder().readTimeout(120, java.util.concurrent.TimeUnit.SECONDS).build()
+        val token = ru.letotam.ddmail.api.DdmailApi(api!!, http).login(user, pass).token
+        val tokens = object : ru.letotam.ddmail.api.TokenSource {
+            override suspend fun current() = token
+            override suspend fun update(token: String) {}
+        }
+        val session = ru.letotam.ddmail.api.SessionApi(api, http, tokens)
+        val server = session.conversationsDelta(0).conversations
+        val idents = session.identities().map { it.email.lowercase() }
+
+        val c = ImapClient.connect(System.getenv("DDMAIL_LIVE_HOST")!!, 993)
+        c.login(user, pass)
+        val roles = FolderRoles.detect(c.list())
+        val msgs = mutableListOf<ru.letotam.ddmail.conv.ConvMessage>()
+        for (role in listOf(FolderRole.Inbox, FolderRole.Sent, FolderRole.Drafts)) {
+            val name = roles[role] ?: continue
+            val d = FolderSync.sync(c, name, role.window, null, emptyList())
+            d.added.sortedBy { it.uid }.forEach { h ->
+                msgs += ru.letotam.ddmail.conv.ConvMessage(
+                    name, role == FolderRole.Sent, role.pack(h.uid), h.fromName, h.fromAddr, h.toAddrs, h.toNames,
+                    h.ccAddrs, h.ccNames, h.subject, h.dateTs, h.seen, h.draft || role == FolderRole.Drafts, h.messageId,
+                )
+            }
+        }
+        c.logout()
+        val serverIds = server.map { it.id }.toSet()
+        println("server: ${server.size} convs, identities: ${idents.size}, imap messages: ${msgs.size}")
+        // Своя учётка — какой адрес ни возьми из айдентик, ids с сервером сравниваются.
+        for ((i, own) in idents.withIndex()) {
+            val built = ru.letotam.ddmail.conv.Conversations.build(msgs, idents, own)
+            val ids = built.map { it.id }.toSet()
+            val both = ids.intersect(serverIds)
+            // Сверка содержимого: число писем у совпавших по id.
+            val sameCount = built.filter { it.id in both }.count { b -> server.first { it.id == b.id }.totalCount == b.totalCount }
+            println("own#$i: imap=${ids.size} common=${both.size} onlyImap=${(ids - serverIds).size} onlyServer=${(serverIds - ids).size} sameCount=$sameCount")
+            if (both.size > server.size * 9 / 10) {
+                // Разбор расхождений без адресов: та же «чужая» часть, другая «своя»?
+                val serverByOthers = server.groupBy { it.id.substringAfter('|') }
+                for (id in ids - serverIds) {
+                    val others = id.substringAfter('|')
+                    val s = serverByOthers[others]
+                    val mineN = id.substringBefore('|').split('+').size
+                    val b = built.first { it.id == id }
+                    println("  onlyImap: mine=$mineN group=${others.startsWith("group:")} serverSameOthers=${s?.size ?: 0} serverMineN=${s?.map { it.id.substringBefore('|').split('+').size }} msgs=${b.totalCount}/${s?.map { it.totalCount }}")
+                }
+            }
+        }
+    }
+
+    /**
+     * Отправка самому себе (`DDMAIL_LIVE_SELF` — адрес ящика, `DDMAIL_LIVE_SMTP`
+     * — сервер:порт) и поиск копии в «Отправленных» по Message-ID; не нашлась —
+     * APPEND, как в ImapEngine. Чужим адресам не пишет.
+     */
+    @Test
+    fun sendToSelfAndCopyToSent() {
+        val self = System.getenv("DDMAIL_LIVE_SELF")
+        val smtp = System.getenv("DDMAIL_LIVE_SMTP")
+        assumeTrue(self != null && smtp != null && System.getenv("DDMAIL_LIVE_HOST") != null)
+        val user = System.getenv("DDMAIL_LIVE_USER")!!
+        val pass = System.getenv("DDMAIL_LIVE_PASS")!!
+        val req = ru.letotam.ddmail.api.SendRequest(
+            from = self!!, to = listOf(self), subject = "ddmail Android: проверка SMTP",
+            html = "<div>Проверка отправки с внешней учётки (Android, 0.0.24).</div>", text = "Проверка отправки с внешней учётки (Android, 0.0.24).",
+        )
+        val out = ru.letotam.ddmail.smtp.Smtp.build(req)
+        val (host, port) = smtp!!.split(':')
+        ru.letotam.ddmail.smtp.Smtp.send(ru.letotam.ddmail.smtp.SmtpConfig(host, port.toInt(), true, user, pass), out)
+        println("sent: id-domain=${out.messageId.substringAfter('@') == self.substringAfter('@')}")
+        val c = ImapClient.connect(System.getenv("DDMAIL_LIVE_HOST")!!, 993)
+        c.login(user, pass)
+        val sent = FolderRoles.detect(c.list())[FolderRole.Sent]!!
+        var found = false
+        for (i in 0 until 4) {
+            Thread.sleep(5_000)
+            c.select(sent)
+            if (c.searchMessageId(out.messageId).isNotEmpty()) {
+                found = true
+                break
+            }
+        }
+        println("copy in Sent by server: $found")
+        if (!found) println("append uid: ${c.append(sent, "\\Seen", out.bytes())}")
+        c.select("INBOX")
+        println("in INBOX: ${c.searchMessageId(out.messageId).size}")
+        c.logout()
+    }
+
     @Test
     fun syncInboxOnRealServer() {
         val host = System.getenv("DDMAIL_LIVE_HOST")

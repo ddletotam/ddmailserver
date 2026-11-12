@@ -75,6 +75,14 @@ class ImapReaderTest {
     }
 
     @Test
+    fun garbageAndHugeLiteralAreErrorsNotHangs() {
+        val stray = runCatching { reader("* 1 FETCH (UID 5)) ]\r\n").read() }.exceptionOrNull()
+        assertTrue(stray is MailException.Network)
+        val huge = runCatching { reader("* 1 FETCH (BODY[] {2000000000}\r\nx)\r\n").read() }.exceptionOrNull()
+        assertTrue(huge is MailException.Network)
+    }
+
+    @Test
     fun uidSetFormat() {
         assertEquals("1:3,7,9:10", UidSet.format(listOf(10, 1, 2, 3, 7, 9)))
         assertEquals("", UidSet.format(emptyList()))

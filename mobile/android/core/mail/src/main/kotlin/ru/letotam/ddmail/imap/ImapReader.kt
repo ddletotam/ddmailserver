@@ -85,7 +85,18 @@ class ImapReader(private val input: InputStream) {
         val c = peek()
         peeked = -2
         if (c < 0) throw EOFException("сервер закрыл соединение")
+        consumed++
         return c
+    }
+
+    /**
+     * Есть ли начало ответа (ждёт с таймаутом сокета). Таймаут здесь не
+     * портит разбор: ни один байт ответа ещё не прочитан.
+     */
+    fun awaitData(): Boolean = try {
+        peek() >= 0 || true
+    } catch (e: java.net.SocketTimeoutException) {
+        false
     }
 
     fun read(): Resp {
@@ -128,7 +139,7 @@ class ImapReader(private val input: InputStream) {
                 eol()
                 break
             }
-            items += value()
+            items += progress { value() }
         }
         return if (tag == null) Resp.Data(items) else Resp.Status(tag, "", emptyList(), items.joinToString(" "))
     }
@@ -156,7 +167,7 @@ class ImapReader(private val input: InputStream) {
                 return items
             }
             if (c == '\r'.code || c == '\n'.code || c < 0) return items
-            items += value(stopAtBracket = true)
+            items += progress { value(stopAtBracket = true) }
         }
     }
 
@@ -178,7 +189,7 @@ class ImapReader(private val input: InputStream) {
                         break
                     }
                     if (d == '\r'.code || d == '\n'.code || d < 0) break
-                    items += value(stopAtBracket)
+                    items += progress { value(stopAtBracket) }
                 }
                 IVal.Lst(items)
             }
@@ -230,7 +241,8 @@ class ImapReader(private val input: InputStream) {
             if (c == '}'.code) break
             if (c != '+'.code) sb.append(c.toChar())
         }
-        val n = sb.toString().toInt()
+        val n = sb.toString().toIntOrNull()?.takeIf { it in 0..MAX_LITERAL }
+            ?: throw ru.letotam.ddmail.imap.MailException.Network("IMAP: литерал недопустимого размера")
         eol()
         val buf = ByteArray(n)
         var off = 0
@@ -244,6 +256,7 @@ class ImapReader(private val input: InputStream) {
             if (r < 0) throw EOFException("литерал оборван")
             off += r
         }
+        consumed += n
         return IVal.Str(buf)
     }
 
@@ -270,7 +283,20 @@ class ImapReader(private val input: InputStream) {
         return String(out.toByteArray(), Charsets.UTF_8)
     }
 
+    /** Значение, не сдвинувшее разбор (лишняя `)` или `]`), — битый ответ, а не вечный цикл. */
+    private var consumed = 0L
+
+    private inline fun progress(read: () -> IVal): IVal {
+        val before = consumed
+        val v = read()
+        if (consumed == before) throw MailException.Network("IMAP: ошибка разбора ответа")
+        return v
+    }
+
     private companion object {
         val STATUS = setOf("OK", "NO", "BAD", "BYE", "PREAUTH")
+
+        /** Литерал больше — не письмо, а атака или сбой: 64 МБ. */
+        const val MAX_LITERAL = 64 shl 20
     }
 }

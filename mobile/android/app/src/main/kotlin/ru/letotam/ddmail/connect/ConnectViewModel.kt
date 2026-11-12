@@ -253,6 +253,8 @@ class ConnectViewModel(
                     val card = runCatching { ru.letotam.ddmail.sync.PimHub.discover(app.davHttp, account, pw, "carddav") }.getOrNull()
                     account.copy(caldavUrl = cal.orEmpty(), carddavUrl = card.orEmpty())
                 } else account
+                // Сменился ключ (хост или логин) — кэш прежнего ключа не должен остаться без хозяина.
+                s.editingKey?.takeIf { it != withDav.key }?.let { old -> app.hub.source(old)?.forget() ?: app.db.dao().clearAccount(old) }
                 app.accounts.put(withDav, pw, replacingKey = s.editingKey)
                 _state.update { it.copy(busy = false, password = "") }
                 onImapSaved(account.key)

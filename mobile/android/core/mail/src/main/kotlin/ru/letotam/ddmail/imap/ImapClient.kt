@@ -204,10 +204,24 @@ class ImapClient(val conn: ImapConnection) : Closeable {
         }
     }
 
+    /** Размеры писем (`RFC822.SIZE`) — чтобы не качать заранее гигантские. */
+    fun sizes(uids: Collection<Long>): Map<Long, Long> {
+        val out = mutableMapOf<Long, Long>()
+        for (set in UidSet.chunks(uids)) {
+            conn.command(Arg.Raw("UID FETCH $set (UID RFC822.SIZE)")) { d ->
+                if (d.kind != "FETCH") return@command
+                val it = fetchItems(d)
+                val uid = it["UID"]?.long ?: return@command
+                it["RFC822.SIZE"]?.long?.let { s -> out[uid] = s }
+            }
+        }
+        return out
+    }
+
     /** Письмо целиком без `\Seen` (`BODY.PEEK[]`). */
     fun fetchRaw(uids: Collection<Long>): Map<Long, ByteArray> {
         val out = mutableMapOf<Long, ByteArray>()
-        for (set in UidSet.chunks(uids, 50)) {
+        for (set in UidSet.chunks(uids, 10)) {
             conn.command(Arg.Raw("UID FETCH $set (UID BODY.PEEK[])")) { d ->
                 if (d.kind != "FETCH") return@command
                 val it = fetchItems(d)
