@@ -79,9 +79,22 @@ Android** с причиной.
 | `DDMailSync` | движок синхронизации, доменные типы, папки диалогов, цвета айдентик | `:core:sync` |
 | `DDMailAuth` | вход, токен в Keychain, автонастройка | `:core:auth` |
 | `DDMailCalendar` | развёртка повторов, планировщик напоминаний | `Recurrence`, `ReminderPlanner` |
+| `DDMailMIME` | разбор и сборка писем: кодировки, QP/base64, RFC 2047/2231, адреса, даты, структура частей, `cid:` | — |
+| `DDMailNet` | соединение с почтовым сервером: TLS сразу (`NWConnection`) и STARTTLS (`URLSessionStreamTask`), построчное чтение с таймаутами | — |
+| `DDMailIMAP` | кодек IMAP (литералы, ENVELOPE, `VANISHED`, modified UTF-7) и клиент: вход, SELECT с QRESYNC/CONDSTORE, FETCH, STORE, MOVE, APPEND, IDLE | — |
+| `DDMailSMTP` | отправка: STARTTLS обязателен на 587/25/2525, AUTH PLAIN/LOGIN, точка-экранирование | — |
 
 Цели Xcode: приложение (iOS + macOS) и Notification Service Extension (§7).
 
+- **Протоколы почты — свои модули, без пакетов.** IMAP-кодек, SMTP и MIME
+  написаны в `DDMailKit` (решение 2026-11-12): swift-nio-imap тянет цепочку
+  пакетов, а клоны с GitHub на Маке рвутся (см. зеркала ниже). Сеть —
+  платформы: неявный TLS — Network.framework; STARTTLS — `URLSessionStreamTask`
+  (`startSecureConnection`), потому что Network.framework не включает TLS на
+  уже открытом соединении. Доверие в обоих — системное хранилище, TLS 1.2+.
+  Данные, пришедшие до рукопожатия STARTTLS, рвут соединение (защита от
+  внедрения открытым текстом). Тесты — на записанных сессиях серверов; живая
+  проверка `LiveIMAPTests` — по учётке из окружения.
 - **Кэш — GRDB, не SwiftData.** Нужны явные миграции, версия схемы, точный
   контроль запросов и один писатель — то, что Android получает от Room.
   SwiftData скрывает SQL и миграции и менялась от версии к версии; ради

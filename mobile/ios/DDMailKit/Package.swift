@@ -13,6 +13,10 @@ let package = Package(
         .library(name: "DDMailStore", targets: ["DDMailStore"]),
         .library(name: "DDMailSync", targets: ["DDMailSync"]),
         .library(name: "DDMailCalendar", targets: ["DDMailCalendar"]),
+        .library(name: "DDMailMIME", targets: ["DDMailMIME"]),
+        .library(name: "DDMailNet", targets: ["DDMailNet"]),
+        .library(name: "DDMailIMAP", targets: ["DDMailIMAP"]),
+        .library(name: "DDMailSMTP", targets: ["DDMailSMTP"]),
     ],
     dependencies: [
         // Единственная сторонняя зависимость логики (контракт §1): кэш на SQLite
@@ -21,15 +25,24 @@ let package = Package(
     ],
     targets: [
         .target(name: "DDMailAPI"),
-        .target(name: "DDMailAuth", dependencies: ["DDMailAPI"]),
+        // Внешние учётки (mobile-external-accounts.md): MIME, сеть, IMAP, SMTP
+        // — свои модули без сторонних зависимостей (решение ios §1).
+        .target(name: "DDMailMIME"),
+        .target(name: "DDMailNet"),
+        .target(name: "DDMailIMAP", dependencies: ["DDMailNet", "DDMailMIME"]),
+        .target(name: "DDMailSMTP", dependencies: ["DDMailNet", "DDMailMIME"]),
+        .target(name: "DDMailAuth", dependencies: ["DDMailAPI", "DDMailNet", "DDMailIMAP", "DDMailSMTP"]),
         .target(name: "DDMailStore", dependencies: ["DDMailAPI", .product(name: "GRDB", package: "GRDB.swift")]),
-        .target(name: "DDMailSync", dependencies: ["DDMailAPI", "DDMailStore"]),
+        .target(name: "DDMailSync", dependencies: ["DDMailAPI", "DDMailStore", "DDMailMIME", "DDMailNet", "DDMailIMAP", "DDMailSMTP"]),
         .target(name: "DDMailCalendar", dependencies: ["DDMailAPI"]),
         .testTarget(name: "DDMailAPITests", dependencies: ["DDMailAPI"]),
         .testTarget(name: "DDMailAuthTests", dependencies: ["DDMailAuth", "DDMailAPI"]),
         .testTarget(name: "DDMailStoreTests", dependencies: ["DDMailStore", "DDMailAPI"]),
-        .testTarget(name: "DDMailSyncTests", dependencies: ["DDMailSync", "DDMailStore", "DDMailAPI"]),
+        .testTarget(name: "DDMailSyncTests", dependencies: ["DDMailSync", "DDMailStore", "DDMailAPI", "DDMailIMAP", "DDMailNet", "DDMailMIME"]),
         .testTarget(name: "DDMailCalendarTests", dependencies: ["DDMailCalendar", "DDMailAPI"]),
+        .testTarget(name: "DDMailMIMETests", dependencies: ["DDMailMIME"]),
+        .testTarget(name: "DDMailIMAPTests", dependencies: ["DDMailIMAP", "DDMailNet", "DDMailMIME"]),
+        .testTarget(name: "DDMailSMTPTests", dependencies: ["DDMailSMTP", "DDMailNet", "DDMailMIME"]),
     ],
     swiftLanguageModes: [.v6]
 )
