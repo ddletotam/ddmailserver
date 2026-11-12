@@ -13,7 +13,7 @@ import ru.letotam.ddmail.api.CalendarDto
 import ru.letotam.ddmail.api.EventCreateRequest
 import ru.letotam.ddmail.api.EventDto
 import ru.letotam.ddmail.api.EventPatchRequest
-import ru.letotam.ddmail.api.SessionApi
+import ru.letotam.ddmail.api.PimApi
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.YearMonth
@@ -44,7 +44,7 @@ data class EventDraft(
  */
 class CalendarViewModel(
     private val app: DdmailApp,
-    private val api: SessionApi,
+    private val api: PimApi,
     private val onDead: () -> Unit,
 ) : ViewModel() {
     private val zone: ZoneId get() = ZoneId.systemDefault()

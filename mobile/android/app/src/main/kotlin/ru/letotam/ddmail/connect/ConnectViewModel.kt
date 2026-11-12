@@ -246,7 +246,14 @@ class ConnectViewModel(
             try {
                 val pw = s.password.ifEmpty { s.editingKey?.let { app.accounts.password(it) }.orEmpty() }
                 ImapEngine.check(account, pw)
-                app.accounts.put(account, pw, replacingKey = s.editingKey)
+                // Новая учётка: CalDAV/CardDAV по её домену (контракт §8), правятся в настройках.
+                val withDav = if (s.editingKey == null && account.caldavUrl.isEmpty() && account.carddavUrl.isEmpty()) {
+                    _state.update { it.copy(notice = Msg(R.string.err_plain, listOf("Ищем календарь и контакты…"))) }
+                    val cal = runCatching { ru.letotam.ddmail.sync.PimHub.discover(app.davHttp, account, pw, "caldav") }.getOrNull()
+                    val card = runCatching { ru.letotam.ddmail.sync.PimHub.discover(app.davHttp, account, pw, "carddav") }.getOrNull()
+                    account.copy(caldavUrl = cal.orEmpty(), carddavUrl = card.orEmpty())
+                } else account
+                app.accounts.put(withDav, pw, replacingKey = s.editingKey)
                 _state.update { it.copy(busy = false, password = "") }
                 onImapSaved(account.key)
             } catch (e: MailException) {

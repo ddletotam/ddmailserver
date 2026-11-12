@@ -9,7 +9,7 @@ package ru.letotam.ddmail.imap
 sealed class MailException(message: String, cause: Throwable? = null) : Exception(message, cause) {
     class Auth(message: String) : MailException(message)
     class Network(message: String, cause: Throwable? = null) : MailException(message, cause)
-    class Rejected(message: String) : MailException(message)
+    open class Rejected(message: String) : MailException(message)
 }
 
 /** Текст для человека: как предписывает контракт (§1 «Первый запуск»). */

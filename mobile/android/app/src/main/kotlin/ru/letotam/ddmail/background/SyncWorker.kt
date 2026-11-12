@@ -27,7 +27,7 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         app.ensureAccounts()
         // Напоминания — и при открытом приложении: их окно привязано к «сейчас»,
         // а не к тому, что показывает экран (контракт §13).
-        app.ddmailSession()?.let { s -> runCatching { app.reminders.refresh(app.sessionApi(s)) } }
+        app.pim()?.let { p -> runCatching { app.reminders.refresh(p) } }
         // Приложение на экране — почту синхронизирует оно само (WebSocket, IDLE);
         // второй проход рядом гонялся бы с ним за кэш.
         if (app.foreground) return Result.success()

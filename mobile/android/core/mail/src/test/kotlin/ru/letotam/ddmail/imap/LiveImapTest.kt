@@ -11,6 +11,24 @@ import ru.letotam.ddmail.mime.MimeParse
  * числа и роли папок — не содержимое писем.
  */
 class LiveImapTest {
+    /** `DDMAIL_LIVE_DAV` — базовый адрес CalDAV/CardDAV; печатает только числа. */
+    @Test
+    fun davOnRealServer(): Unit = kotlinx.coroutines.runBlocking {
+        val base = System.getenv("DDMAIL_LIVE_DAV")
+        assumeTrue(base != null)
+        val c = ru.letotam.ddmail.dav.DavClient(okhttp3.OkHttpClient(), System.getenv("DDMAIL_LIVE_USER")!!, System.getenv("DDMAIL_LIVE_PASS")!!)
+        val cals = ru.letotam.ddmail.dav.DavPim.collections(c, base!!, "calendar")
+        println("calendars: ${cals.size} writable=${cals.count { it.canWrite }}")
+        val now = System.currentTimeMillis()
+        cals.forEach { col ->
+            val evs = ru.letotam.ddmail.dav.DavPim.events(c, col.url, now - 30L * 86_400_000, now + 30L * 86_400_000)
+            println("  events: ${evs.size} rrule=${evs.count { it.event.rrule.isNotEmpty() }} etag=${evs.count { it.etag != null }}")
+        }
+        val books = runCatching { ru.letotam.ddmail.dav.DavPim.collections(c, System.getenv("DDMAIL_LIVE_CARDDAV") ?: base, "addressbook") }
+        println("books: ${books.getOrNull()?.size} ${books.exceptionOrNull()?.message}")
+        books.getOrNull()?.forEach { b -> println("  contacts: ${ru.letotam.ddmail.dav.DavPim.contacts(c, b.url).size}") }
+    }
+
     @Test
     fun syncInboxOnRealServer() {
         val host = System.getenv("DDMAIL_LIVE_HOST")

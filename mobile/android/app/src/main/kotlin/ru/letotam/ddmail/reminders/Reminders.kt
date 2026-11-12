@@ -22,7 +22,7 @@ import ru.letotam.ddmail.DdmailApp
 import ru.letotam.ddmail.MainActivity
 import ru.letotam.ddmail.R
 import ru.letotam.ddmail.api.EventDto
-import ru.letotam.ddmail.api.SessionApi
+import ru.letotam.ddmail.api.PimApi
 import ru.letotam.ddmail.calendar.ReminderPlanner
 import ru.letotam.ddmail.calendar.ReminderPlanner.Mode
 import ru.letotam.ddmail.db.ReminderEntity
@@ -47,7 +47,7 @@ class Reminders(private val app: DdmailApp) {
     private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
 
     /** Забрать события окна посева и пересеять. Ошибку сети — наверх (вызывающий решит). */
-    suspend fun refresh(api: SessionApi) {
+    suspend fun refresh(api: PimApi) {
         if (!app.calendarPrefs.remindersOn.first()) {
             lock.withLock { clearLocked() }
             return

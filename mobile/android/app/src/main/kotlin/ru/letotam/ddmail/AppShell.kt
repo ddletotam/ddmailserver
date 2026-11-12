@@ -72,13 +72,15 @@ fun AppShell(
     accounts: AccountActions,
     modifier: Modifier = Modifier,
 ) {
-    val key = session?.let { "${it.serverUrl}-${it.token.hashCode()}" } ?: "none"
+    val key = app.pimKey()
+    // Календарь и контакты — ddmail вместе с CalDAV/CardDAV внешних учёток; задачи — только ddmail.
+    val pim = remember(key) { app.pim() }
     val api = remember(key) { session?.let { app.sessionApi(it) } }
     // Календарь «только для чтения» и т.п. — не «нужен вход» (§2); 401 после refresh — он.
     val onDead = { session?.let { app.hub.setStatus(it.accountKey, ru.letotam.ddmail.sync.AccountStatus.NeedsLogin) }; Unit }
-    val calVm = api?.let { viewModel(key = "cal-$key") { CalendarViewModel(app, it, onDead) } }
+    val calVm = pim?.let { viewModel(key = "cal-$key") { CalendarViewModel(app, it, onDead) } }
     val tasksVm = api?.let { viewModel(key = "tasks-$key") { TasksViewModel(app, it, onDead) } }
-    val contactsVm = api?.let { viewModel(key = "contacts-$key") { ContactsViewModel(app, it, onDead) } }
+    val contactsVm = pim?.let { viewModel(key = "contacts-$key") { ContactsViewModel(app, it, onDead) } }
     var section by rememberSaveable { mutableStateOf(Section.Mail) }
     val context = LocalContext.current
     // WebView беседы живёт всё время работы приложения: уход в календарь и обратно ленту не теряет.
@@ -92,9 +94,9 @@ fun AppShell(
     }
     // Изменения календаря с сервера — перевзвести напоминания, даже если календарь не открыт.
     LaunchedEffect(key) {
-        if (api != null) app.calendarChanged.collect { launch { runCatching { app.reminders.refresh(api) } } }
+        if (pim != null) app.calendarChanged.collect { launch { runCatching { app.reminders.refresh(pim) } } }
     }
-    LaunchedEffect(key) { if (api != null) runCatching { app.reminders.refresh(api) } }
+    LaunchedEffect(key) { if (pim != null) runCatching { app.reminders.refresh(pim) } }
 
     // Из уведомления-напоминания: открыть событие в календаре.
     val eventReq by app.eventRequests.collectAsState()

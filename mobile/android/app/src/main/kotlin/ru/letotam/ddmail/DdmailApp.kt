@@ -133,6 +133,7 @@ class DdmailApp : Application() {
      */
     suspend fun applyAccounts(ddmail: Session?, imap: List<ImapAccount>) = accountsLock.withLock {
         session = ddmail
+        imapAccounts = imap
         loaded = true
         val old = hub.sources.value
         val list = mutableListOf<MailSource>()
@@ -146,6 +147,40 @@ class DdmailApp : Application() {
         }
         hub.setSources(list)
     }
+
+    @Volatile private var imapAccounts: List<ImapAccount> = emptyList()
+    private var pimFor: Pair<String, ru.letotam.ddmail.sync.PimHub>? = null
+
+    /** CalDAV/CardDAV: ответа ждём дольше, чем пробы автонастройки, но не вечно. */
+    val davHttp: OkHttpClient by lazy {
+        http.newBuilder().connectTimeout(8, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
+    }
+
+    /**
+     * Календарь и контакты: сервер ddmail вместе с CalDAV/CardDAV внешних
+     * учёток (mobile-external-accounts §8). `null` — источников нет вовсе.
+     */
+    @Synchronized
+    fun pim(): ru.letotam.ddmail.api.PimApi? {
+        val s = session
+        val dav = imapAccounts.filter { it.caldavUrl.isNotBlank() || it.carddavUrl.isNotBlank() }
+        if (s == null && dav.isEmpty()) return null
+        val key = pimKey()
+        pimFor?.let { (k, p) -> if (k == key) return p }
+        val p = ru.letotam.ddmail.sync.PimHub(
+            ddmail = s?.let { sessionApi(it) },
+            accounts = dav,
+            password = { k -> accounts.password(k) },
+            http = davHttp,
+            onAuthFailed = { k -> hub.setStatus(k, ru.letotam.ddmail.sync.AccountStatus.NeedsLogin) },
+        )
+        pimFor = key to p
+        return p
+    }
+
+    /** Меняется вместе с набором источников календаря — по нему пересоздаются экраны. */
+    fun pimKey(): String = (session?.let { "${it.serverUrl}|${it.username}|${it.token.hashCode()}" } ?: "-") + "|" +
+        imapAccounts.filter { it.caldavUrl.isNotBlank() || it.carddavUrl.isNotBlank() }.joinToString { "${it.key}:${it.caldavUrl}:${it.carddavUrl}" }.hashCode()
 
     /** Для фона: процесс поднялся без экрана — учётки с диска. */
     suspend fun ensureAccounts() {

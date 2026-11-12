@@ -95,7 +95,7 @@ import ru.letotam.ddmail.api.ApiException
 import ru.letotam.ddmail.api.AddressBookDto
 import ru.letotam.ddmail.api.ContactDto
 import ru.letotam.ddmail.api.ContactWriteRequest
-import ru.letotam.ddmail.api.SessionApi
+import ru.letotam.ddmail.api.PimApi
 import ru.letotam.ddmail.mail.Avatars
 
 /** Форма контакта: новый ([id] = null) или правка. Сервер хранит до трёх адресов и телефонов. */
@@ -116,7 +116,7 @@ data class ContactDraft(
  * Адресная книга (контракт §15): одна сводная книга по всем источникам —
  * так её отдаёт сервер, источник наружу не показывается.
  */
-class ContactsViewModel(private val app: ru.letotam.ddmail.DdmailApp, private val api: SessionApi, private val onDead: () -> Unit) : ViewModel() {
+class ContactsViewModel(private val app: ru.letotam.ddmail.DdmailApp, private val api: PimApi, private val onDead: () -> Unit) : ViewModel() {
     val books = MutableStateFlow<List<AddressBookDto>>(emptyList())
     val defaultBook = MutableStateFlow<Long?>(null)
     val contacts = MutableStateFlow<List<ContactDto>?>(null)

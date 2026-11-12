@@ -184,8 +184,8 @@ fun SettingsDialog(
                         Switch(checked = remind, onCheckedChange = { v ->
                             scope.launch {
                                 app.calendarPrefs.setRemindersOn(v)
-                                val session = app.ddmailSession()
-                                if (!v) app.reminders.disable() else if (session != null) runCatching { app.reminders.refresh(app.sessionApi(session)) }
+                                val pim = app.pim()
+                                if (!v) app.reminders.disable() else if (pim != null) runCatching { app.reminders.refresh(pim) }
                             }
                         })
                     }
