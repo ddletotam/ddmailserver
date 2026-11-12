@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CalendarMonth
@@ -42,6 +44,7 @@ import ru.letotam.ddmail.contacts.ContactsViewModel
 import ru.letotam.ddmail.conversation.ConversationWeb
 import ru.letotam.ddmail.mail.MailScreen
 import ru.letotam.ddmail.mail.MailViewModel
+import ru.letotam.ddmail.mail.AccountActions
 import ru.letotam.ddmail.reminders.BackgroundWork
 import ru.letotam.ddmail.reminders.BackgroundWorkDialog
 import ru.letotam.ddmail.tasks.TasksScreen
@@ -64,25 +67,26 @@ enum class Section(val icon: ImageVector, val label: String) {
 @Composable
 fun AppShell(
     app: DdmailApp,
-    session: Session,
-    status: SessionStatus,
+    session: Session?,
     mailVm: MailViewModel,
-    onDead: () -> Unit,
-    onRelogin: () -> Unit,
-    onLogout: () -> Unit,
+    accounts: AccountActions,
     modifier: Modifier = Modifier,
 ) {
-    val key = "${session.serverUrl}-${session.token.hashCode()}"
-    val api = remember(key) { app.sessionApi(session) }
-    val calVm = viewModel(key = "cal-$key") { CalendarViewModel(app, api, onDead) }
-    val tasksVm = viewModel(key = "tasks-$key") { TasksViewModel(app, api, onDead) }
-    val contactsVm = viewModel(key = "contacts-$key") { ContactsViewModel(app, api, onDead) }
+    val key = app.pimKey()
+    // Календарь и контакты — ddmail вместе с CalDAV/CardDAV внешних учёток; задачи — только ddmail.
+    val pim = remember(key) { app.pim() }
+    val api = remember(key) { session?.let { app.sessionApi(it) } }
+    // Календарь «только для чтения» и т.п. — не «нужен вход» (§2); 401 после refresh — он.
+    val onDead = { session?.let { app.hub.setStatus(it.accountKey, ru.letotam.ddmail.sync.AccountStatus.NeedsLogin) }; Unit }
+    val calVm = pim?.let { viewModel(key = "cal-$key") { CalendarViewModel(app, it, onDead) } }
+    val tasksVm = api?.let { viewModel(key = "tasks-$key") { TasksViewModel(app, it, onDead) } }
+    val contactsVm = pim?.let { viewModel(key = "contacts-$key") { ContactsViewModel(app, it, onDead) } }
     var section by rememberSaveable { mutableStateOf(Section.Mail) }
     val context = LocalContext.current
-    // WebView беседы живёт всю сессию: уход в календарь и обратно ленту не теряет.
-    val web = remember(key) { ConversationWeb(context, ConversationWeb.proxyClient(app.http)) }
+    // WebView беседы живёт всё время работы приложения: уход в календарь и обратно ленту не теряет.
+    val web = remember { ConversationWeb(context, ConversationWeb.proxyClient(app.http)) }
 
-    // Вернулись в приложение — подтянуть новое; WebSocket — пока приложение на экране.
+    // Вернулись в приложение — подтянуть новое; WebSocket и IDLE — пока приложение на экране.
     LifecycleResumeEffect(key) {
         mailVm.sync()
         mailVm.live.start()
@@ -90,16 +94,16 @@ fun AppShell(
     }
     // Изменения календаря с сервера — перевзвести напоминания, даже если календарь не открыт.
     LaunchedEffect(key) {
-        app.calendarChanged.collect { launch { runCatching { app.reminders.refresh(api) } } }
+        if (pim != null) app.calendarChanged.collect { launch { runCatching { app.reminders.refresh(pim) } } }
     }
-    LaunchedEffect(key) { runCatching { app.reminders.refresh(api) } }
+    LaunchedEffect(key) { if (pim != null) runCatching { app.reminders.refresh(pim) } }
 
     // Из уведомления-напоминания: открыть событие в календаре.
     val eventReq by app.eventRequests.collectAsState()
     LaunchedEffect(eventReq) {
         eventReq?.let { (id, start) ->
             section = Section.Calendar
-            calVm.openById(id, start)
+            calVm?.openById(id, start)
             app.eventRequests.value = null
         }
     }
@@ -139,13 +143,15 @@ fun AppShell(
         Column(Modifier.weight(1f).fillMaxHeight()) {
             val content = Modifier.weight(1f)
             when (section) {
-                Section.Mail -> MailScreen(mailVm, session, status, onRelogin, onLogout, web, content)
-                Section.Calendar -> CalendarScreen(calVm, content)
-                Section.Tasks -> TasksScreen(tasksVm, content)
-                Section.Contacts -> ContactsScreen(contactsVm, mailVm.avatars, onMail = { addr ->
-                    section = Section.Mail
-                    mailVm.compose.openNewTo(addr)
-                }, content)
+                Section.Mail -> MailScreen(mailVm, accounts, web, content)
+                Section.Calendar -> if (calVm != null) CalendarScreen(calVm, content) else NoServer(content)
+                Section.Tasks -> if (tasksVm != null) TasksScreen(tasksVm, content) else NoServer(content)
+                Section.Contacts -> if (contactsVm != null) {
+                    ContactsScreen(contactsVm, mailVm.avatars, onMail = { addr ->
+                        section = Section.Mail
+                        mailVm.compose.openNewTo(addr)
+                    }, content)
+                } else NoServer(content)
             }
             if (barVisible) NavigationBar {
                 Section.entries.forEach { s ->
@@ -153,5 +159,16 @@ fun AppShell(
                 }
             }
         }
+    }
+}
+
+/** Раздел без источника: календарь и контакты внешних учёток — через CalDAV/CardDAV. */
+@Composable
+private fun NoServer(modifier: Modifier) {
+    androidx.compose.foundation.layout.Box(modifier.fillMaxSize(), contentAlignment = androidx.compose.ui.Alignment.Center) {
+        androidx.compose.material3.Text(
+            "Нет источника: подключите сервер ddmail или адрес CalDAV/CardDAV в настройках учётки.",
+            modifier = androidx.compose.ui.Modifier.padding(24.dp),
+        )
     }
 }

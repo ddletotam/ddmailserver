@@ -16,15 +16,17 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.letotam.ddmail.DdmailApp
-import ru.letotam.ddmail.SessionStatus
-import ru.letotam.ddmail.api.ApiException
 import ru.letotam.ddmail.api.MessageBody
 import ru.letotam.ddmail.compose.ComposeController
 import ru.letotam.ddmail.conversation.ConversationController
 import ru.letotam.ddmail.sync.Conversation
 import ru.letotam.ddmail.sync.FoldersDoc
 import ru.letotam.ddmail.sync.SYSTEM_SPAM
-import ru.letotam.ddmail.sync.SyncEngine
+import ru.letotam.ddmail.sync.MailHub
+import ru.letotam.ddmail.sync.MailSource
+import ru.letotam.ddmail.sync.SpamOutcome
+import ru.letotam.ddmail.sync.errorText
+import ru.letotam.ddmail.sync.isMailError
 
 private val Context.uiPrefs by preferencesDataStore(name = "ui")
 private val ACTIVE_FOLDER = stringPreferencesKey("active_folder")
@@ -44,14 +46,18 @@ data class MailState(
     val inSpam: Boolean = false,
 )
 
+/** Подтверждение «В спам»: беседы и что умеют их учётки. */
+data class SpamAsk(val refs: List<String>, val rules: Boolean)
+
 /**
- * Список бесед учётки: кэш Room → видимая часть выбранной папки. Сеть только
- * пополняет кэш ([SyncEngine]); экран рисует из кэша сразу.
+ * Список бесед всех учёток: кэш Room → видимая часть выбранной папки. Сеть
+ * только пополняет кэш (источники [MailHub]); экран рисует из кэша сразу и не
+ * знает, из какой учётки беседа (mobile-external-accounts §1). Беседы
+ * опознаются по `Conversation.ref` (учётка + id).
  */
 class MailViewModel(
     private val app: DdmailApp,
-    private val engine: SyncEngine,
-    private val onStatus: (SessionStatus) -> Unit,
+    private val hub: MailHub,
 ) : ViewModel() {
     private val activeId = MutableStateFlow<String?>(null)
 
@@ -59,22 +65,26 @@ class MailViewModel(
     val query = MutableStateFlow<String?>(null)
     val syncing = MutableStateFlow(false)
 
-    /** Открытая беседа — по id, не по позиции: список меняется дельтами. */
+    /** Открытая беседа — по `ref`, не по позиции: список меняется дельтами. */
     val selected = MutableStateFlow<String?>(null)
 
-    val conversation = ConversationController(app, app.settings, engine, viewModelScope) { onStatus(SessionStatus.Dead) }
+    val conversation = ConversationController(app, app.settings, hub, viewModelScope)
 
     /** Вложение, на котором открыто меню (uid письма, индекс). */
     val attachmentMenu = MutableStateFlow<Pair<Long, Int>?>(null)
 
-    val compose = ComposeController(app, engine, conversation, viewModelScope, ::sync) { onStatus(SessionStatus.Dead) }
+    val compose = ComposeController(app, hub, conversation, viewModelScope, ::sync)
 
-    val live = LiveUpdates(engine, viewModelScope, ::sync) { app.calendarChanged.tryEmit(Unit) }
-    val avatars = Avatars(app, engine)
+    val live = LiveUpdates(hub, viewModelScope, ::sync) { app.calendarChanged.tryEmit(Unit) }
+    val avatars = Avatars(app, hub)
+
+    /** Учётки и их состояния — для шапки и плашек «нужен вход». */
+    val sources = hub.sources
+    val statuses = hub.statuses
 
     /** Цвета строк по группам адресов (как у десктопа). */
     val identityColors: StateFlow<ru.letotam.ddmail.sync.IdentityColors> =
-        engine.identityColors.stateIn(viewModelScope, SharingStarted.Eagerly, ru.letotam.ddmail.sync.IdentityColors())
+        hub.identityColors.stateIn(viewModelScope, SharingStarted.Eagerly, ru.letotam.ddmail.sync.IdentityColors())
 
     /** Письмо, на котором открыто меню пузыря. */
     val bubbleMenu = MutableStateFlow<MessageBody?>(null)
@@ -89,7 +99,7 @@ class MailViewModel(
     private var lastConv: String? = null
 
     val state: StateFlow<MailState> =
-        combine(engine.conversations, engine.folders, activeId, query) { convs, doc, id, q -> build(convs, doc, id, q) }
+        combine(hub.conversations, hub.folders, activeId, query) { convs, doc, id, q -> build(convs, doc, id, q) }
             .stateIn(viewModelScope, SharingStarted.Eagerly, MailState())
 
     init {
@@ -99,17 +109,26 @@ class MailViewModel(
             lastConv = p[LAST_CONV]
             tryRestore()
         }
-        viewModelScope.launch { engine.folders.collect { doc = it } }
+        viewModelScope.launch { hub.folders.collect { doc = it } }
+        // Добавили учётку (или поправили настройки) — сразу её первый синк.
         viewModelScope.launch {
-            engine.conversations.collect { list ->
+            var known = emptySet<MailSource>()
+            hub.sources.collect { list ->
+                val fresh = list.filter { it !in known }
+                if (known.isNotEmpty() && fresh.isNotEmpty()) sync()
+                known = list.toSet()
+            }
+        }
+        viewModelScope.launch {
+            hub.conversations.collect { list ->
                 all = list
                 tryRestore()
-                selected.value?.let { id -> list.firstOrNull { it.id == id }?.let(conversation::updated) }
+                selected.value?.let { ref -> list.firstOrNull { it.ref == ref }?.let(conversation::updated) }
                 // Отправили новое письмо — перейти в его беседу, как только она появилась.
                 compose.sentTarget?.let { target ->
                     list.firstOrNull { c -> matchesTarget(c, target) }?.let { c ->
                         compose.consumeTarget()
-                        open(c.id)
+                        open(c.ref)
                     }
                 }
             }
@@ -135,19 +154,13 @@ class MailViewModel(
         }
         syncing.value = true
         viewModelScope.launch {
-            val status = try {
-                engine.sync()
+            try {
+                hub.syncAll()
                 afterSync()
-                SessionStatus.Ok
-            } catch (e: ApiException.Unauthorized) {
-                SessionStatus.Dead
-            } catch (e: ApiException) {
-                SessionStatus.Offline(e.message ?: "")
             } finally {
                 syncing.value = false
                 pulling.value = false
             }
-            onStatus(status)
             if (again) {
                 again = false
                 sync()
@@ -163,8 +176,14 @@ class MailViewModel(
             prefetching = true
             viewModelScope.launch {
                 try {
-                    engine.prefetchBodies(allowed = { app.settings.prefetchAllowedNow() })
-                } catch (_: ApiException) {
+                    for (s in hub.sources.value) {
+                        try {
+                            s.prefetchBodies(allowed = { app.settings.prefetchAllowedNow() })
+                        } catch (e: Exception) {
+                            if (!e.isMailError()) throw e
+                            hub.noteError(s.accountKey, e)
+                        }
+                    }
                 } finally {
                     prefetching = false
                 }
@@ -180,7 +199,7 @@ class MailViewModel(
 
     // ── Множественный выбор (контракт §5) ──
 
-    /** Выбранные беседы — по id, не по позиции: дельта не сбивает выбор. */
+    /** Выбранные беседы — по `ref`, не по позиции: дельта не сбивает выбор. */
     val picked = MutableStateFlow<Set<String>>(emptySet())
 
     val snackHost = androidx.compose.material3.SnackbarHostState()
@@ -190,7 +209,7 @@ class MailViewModel(
 
     fun togglePick(id: String) = picked.update { if (id in it) it - id else it + id }
 
-    fun pickAll() = picked.update { state.value.conversations.map { it.id }.toSet() }
+    fun pickAll() = picked.update { state.value.conversations.map { it.ref }.toSet() }
 
     fun clearPicks() {
         picked.value = emptySet()
@@ -198,27 +217,27 @@ class MailViewModel(
 
     private fun pickedConvs(): List<Conversation> {
         val ids = picked.value
-        return all.filter { it.id in ids }
+        return all.filter { it.ref in ids }
     }
 
     fun markPicked(read: Boolean) {
         val convs = pickedConvs()
         clearPicks()
         viewModelScope.launch {
-            val r = runCatching { convs.forEach { if (read) engine.markRead(it) else engine.markUnread(it) } }
+            val r = runCatching { convs.forEach { if (read) hub.markRead(it) else hub.markUnread(it) } }
             notice.value = r.fold(
                 { if (read) "Прочитано: ${convs.size}" else "Непрочитано: ${convs.size}" },
-                { "Не удалось: ${it.message}" },
+                { "Не удалось: ${it.errorText()}" },
             )
         }
     }
 
     /** Свайп вправо: прочитано ⇄ непрочитано. */
-    fun toggleRead(id: String) {
-        val c = all.firstOrNull { it.id == id } ?: return
+    fun toggleRead(ref: String) {
+        val c = all.firstOrNull { it.ref == ref } ?: return
         viewModelScope.launch {
-            runCatching { if (c.unreadCount > 0) engine.markRead(c) else engine.markUnread(c) }
-                .onFailure { notice.value = "Не удалось: ${it.message}" }
+            runCatching { if (c.unreadCount > 0) hub.markRead(c) else hub.markUnread(c) }
+                .onFailure { notice.value = "Не удалось: ${it.errorText()}" }
         }
     }
 
@@ -227,9 +246,9 @@ class MailViewModel(
         val convs = pickedConvs()
         clearPicks()
         viewModelScope.launch {
-            val r = runCatching { engine.assignFolder(convs, folderId) }
+            val r = runCatching { hub.assignFolder(convs, folderId) }
             val where = folderId?.let { id -> doc.folders.firstOrNull { it.id == id }?.name } ?: "Входящие"
-            notice.value = r.fold({ "Перенесено в «$where»: ${convs.size}" }, { "Не удалось перенести: ${it.message}" })
+            notice.value = r.fold({ "Перенесено в «$where»: ${convs.size}" }, { "Не удалось перенести: ${it.errorText()}" })
         }
     }
 
@@ -239,10 +258,10 @@ class MailViewModel(
     fun deletePicked() {
         val convs = pickedConvs()
         clearPicks()
-        if (convs.any { it.id == selected.value }) open(null)
+        if (convs.any { it.ref == selected.value }) open(null)
         viewModelScope.launch {
-            val r = runCatching { engine.deleteConversations(convs) }
-            notice.value = r.fold({ "Удалено бесед: ${convs.size}" }, { "Не удалось удалить: ${it.message}" })
+            val r = runCatching { hub.deleteConversations(convs) }
+            notice.value = r.fold({ "Удалено бесед: ${convs.size}" }, { "Не удалось удалить: ${it.errorText()}" })
             sync()
         }
     }
@@ -251,40 +270,47 @@ class MailViewModel(
      * Беседы, ждущие подтверждения «В спам»: выбранные или открытая (кнопка в
      * шапке беседы). `null` — диалог закрыт.
      */
-    val spamAsk = MutableStateFlow<List<String>?>(null)
+    val spamAsk = MutableStateFlow<SpamAsk?>(null)
 
-    fun askSpamPicked() {
-        spamAsk.value = picked.value.toList()
-    }
+    fun askSpamPicked() = ask(picked.value.toList())
 
-    fun askSpam(id: String) {
-        spamAsk.value = listOf(id)
+    fun askSpam(ref: String) = ask(listOf(ref))
+
+    /**
+     * «В спам» есть, если у всех учёток выбора есть куда (у IMAP — папка Junk);
+     * «адрес/домен» — только если все они ddmail (правила держит только сервер).
+     */
+    private fun ask(refs: List<String>) {
+        viewModelScope.launch {
+            val (can, rules) = hub.spamAbility(all.filter { it.ref in refs && !it.spam })
+            if (!can) {
+                notice.value = "В ящике нет папки «Спам» — некуда переносить."
+                return@launch
+            }
+            spamAsk.value = SpamAsk(refs, rules)
+        }
     }
 
     /** Сколько бесед и писем уйдёт в спам — для подтверждения. */
     fun spamSummary(ids: Collection<String>): Pair<Int, Int> =
-        all.filter { it.id in ids && !it.spam }.let { c -> c.size to c.sumOf { it.messages.size } }
+        all.filter { it.ref in ids && !it.spam }.let { c -> c.size to c.sumOf { it.messages.size } }
 
     /**
      * «В спам» (контракт §5): письма бесед удаляются, отправители блокируются —
      * по адресу или по домену ([scope] `address` / `domain`), как на десктопе.
      */
     fun spamConfirmed(scope: String) {
-        val ids = spamAsk.value ?: return
+        val ids = spamAsk.value?.refs ?: return
         spamAsk.value = null
-        val convs = all.filter { it.id in ids && !it.spam }
+        val convs = all.filter { it.ref in ids && !it.spam }
         clearPicks()
         if (convs.isEmpty()) return
-        if (convs.any { it.id == selected.value }) open(null)
+        if (convs.any { it.ref == selected.value }) open(null)
         viewModelScope.launch {
-            val r = runCatching { engine.spamConversations(convs, scope) }
+            val r = runCatching { hub.spam(convs, scope) }
             notice.value = r.fold(
-                { o ->
-                    val what = (if (o.ruleType == "domain") "домен " else "") + o.ruleValue
-                    val more = if (o.ruleCount > 1) " и ещё ${o.ruleCount - 1}" else ""
-                    "✓ В спам: $what$more, удалено писем: ${o.deleted}"
-                },
-                { "Не удалось отправить в спам: ${it.message}" },
+                { list -> list.joinToString("; ") { spamText(it) } },
+                { "Не удалось отправить в спам: ${it.errorText()}" },
             )
             sync()
         }
@@ -299,11 +325,11 @@ class MailViewModel(
         val convs = pickedConvs().filter { it.spam }
         clearPicks()
         if (convs.isEmpty()) return
-        if (convs.any { it.id == selected.value }) open(null)
+        if (convs.any { it.ref == selected.value }) open(null)
         viewModelScope.launch {
-            val r = runCatching { engine.restoreSpam(convs, trust) }
+            val r = runCatching { hub.restoreSpam(convs, trust) }
             val ok = if (trust) "Во «Входящие», отправителям доверяем: бесед ${convs.size}" else "Во «Входящие»: бесед ${convs.size}"
-            notice.value = r.fold({ ok }, { "Не удалось вернуть из спама: ${it.message}" })
+            notice.value = r.fold({ ok }, { "Не удалось вернуть из спама: ${it.errorText()}" })
             sync()
         }
     }
@@ -334,7 +360,7 @@ class MailViewModel(
      */
     fun open(id: String?) {
         if (id == selected.value) return
-        val c = id?.let { i -> all.firstOrNull { it.id == i } }
+        val c = id?.let { i -> all.firstOrNull { it.ref == i } }
         if (c != null) {
             val f = doc.folderOf(c)
             val fid = f?.let { doc.folders[it].id }
@@ -364,7 +390,7 @@ class MailViewModel(
         val id = lastConv ?: return
         if (!wide || selected.value != null || all.isEmpty()) return
         lastConv = null
-        if (all.any { it.id == id }) open(id)
+        if (all.any { it.ref == id }) open(id)
     }
 
     private fun build(convs: List<Conversation>, doc: FoldersDoc, id: String?, q: String?): MailState {
@@ -388,6 +414,17 @@ class MailViewModel(
  * Беседа нового письма: набор собеседников совпал с адресатами. Письмо себе
  * сервер отдаёт беседой без собеседников — тогда сверяем по её id.
  */
+/** Итог «В спам» словами: у ddmail — правило, у IMAP — перенос в «Спам». */
+internal fun spamText(o: SpamOutcome): String = when (o) {
+    is SpamOutcome.Rule -> {
+        val r = o.outcome
+        val what = (if (r.ruleType == "domain") "домен " else "") + r.ruleValue
+        val more = if (r.ruleCount > 1) " и ещё ${r.ruleCount - 1}" else ""
+        "✓ В спам: $what$more, удалено писем: ${r.deleted}"
+    }
+    is SpamOutcome.Moved -> "✓ В спам: перенесено писем: ${o.messages}"
+}
+
 internal fun matchesTarget(c: Conversation, target: Set<String>): Boolean {
     val cps = c.counterparts.map { it.addr.lowercase() }.filter { it.isNotEmpty() }.toSet()
     if (cps.isNotEmpty()) return cps == target

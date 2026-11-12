@@ -29,22 +29,37 @@ import ru.letotam.ddmail.sync.FoldersDoc
  */
 class MailNotifier(private val context: Context, private val settings: AppSettings) {
 
-    suspend fun check(all: List<Conversation>, folders: FoldersDoc, openId: String?) {
+    suspend fun check(all: List<Conversation>, folders: FoldersDoc, openRef: String?) {
         // Спам молчит всегда: ни уведомления, ни бейджа.
         val convs = all.filter { !it.spam }
         badge(convs.count { c -> c.unreadCount > 0 && folders.folderOf(c)?.let { folders.folders[it].hidden } != true })
-        val unseen = convs.flatMap { c -> c.messages.filter { !it.seen }.map { c to it.uid } }
-        val top = convs.flatMap { c -> c.messages.map { it.uid } }.maxOrNull() ?: return
-        val last = settings.notifiedMax()
-        settings.setNotifiedMax(maxOf(top, last ?: 0))
-        if (last == null) return
-        if (!settingsOn()) return
-        val fresh = unseen.filter { it.second > last }
-            .groupBy({ it.first }, { it.second })
-            .filterKeys { c ->
-                c.id != openId && folders.folderOf(c)?.let { folders.folders[it].hidden } != true
+        val on = settingsOn()
+        // Рубеж — у каждой учётки свой: uid разных учёток несравнимы.
+        for ((key, list) in convs.groupBy { it.accountKey }) {
+            val top = list.flatMap { c -> c.messages.map { it.uid }.filter(::incoming) }.maxOrNull() ?: continue
+            val last = settings.notifiedMax(key)
+            // UID начались заново (сменилась UIDVALIDITY ящика) — рубеж тоже заново,
+            // иначе уведомлений не было бы, пока новые UID не перерастут старые.
+            if (last != null && top < last) {
+                settings.setNotifiedMax(key, top)
+                continue
             }
-        fresh.forEach { (c, uids) -> post(c, uids.size) }
+            settings.setNotifiedMax(key, maxOf(top, last ?: 0))
+            if (last == null || !on) continue
+            val fresh = list.flatMap { c -> c.messages.filter { !it.seen && incoming(it.uid) && it.uid > last }.map { c to it.uid } }
+                .groupBy({ it.first }, { it.second })
+                .filterKeys { c -> c.ref != openRef && folders.folderOf(c)?.let { folders.folders[it].hidden } != true }
+            fresh.forEach { (c, uids) -> post(c, uids.size) }
+        }
+    }
+
+    /**
+     * Письмо, о котором уведомляют: у ddmail — любое (id сервера), у IMAP —
+     * из INBOX (упакованный UID с ролью 1): UID «Отправленных» с ним несравнимы.
+     */
+    private fun incoming(uid: Long): Boolean {
+        val role = uid ushr 32
+        return role == 0L || role == 1L
     }
 
     /**
@@ -78,9 +93,9 @@ class MailNotifier(private val context: Context, private val settings: AppSettin
         ensureChannel(context)
         val open = Intent(context, MainActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            .putExtra(MainActivity.EXTRA_OPEN, c.id)
+            .putExtra(MainActivity.EXTRA_OPEN, c.ref)
         val pi = PendingIntent.getActivity(
-            context, c.id.hashCode(), open,
+            context, c.ref.hashCode(), open,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val title = c.label.ifBlank { c.counterparts.firstOrNull()?.addr.orEmpty() }
@@ -96,7 +111,7 @@ class MailNotifier(private val context: Context, private val settings: AppSettin
             .setNumber(n)
             .build()
         try {
-            NotificationManagerCompat.from(context).notify(c.id.hashCode(), notification)
+            NotificationManagerCompat.from(context).notify(c.ref.hashCode(), notification)
         } catch (_: SecurityException) {
         }
     }
@@ -113,8 +128,8 @@ class MailNotifier(private val context: Context, private val settings: AppSettin
         }
 
         /** Беседу открыли — её уведомление больше не нужно. */
-        fun cancel(context: Context, conversationId: String) {
-            NotificationManagerCompat.from(context).cancel(conversationId.hashCode())
+        fun cancel(context: Context, ref: String) {
+            NotificationManagerCompat.from(context).cancel(ref.hashCode())
         }
     }
 }

@@ -45,18 +45,19 @@ import ru.letotam.ddmail.db.MessageRefEntity
  * Синхронизации одной учётки не идут параллельно ([lock]).
  */
 class SyncEngine(
-    val accountKey: String,
+    override val accountKey: String,
     private val api: SessionApi,
     private val dao: CacheDao,
+    override val title: String = accountKey,
     private val now: () -> Long = { System.currentTimeMillis() / 1000 },
-) {
+) : MailSource {
     private val lock = Mutex()
 
     /** Пространство кэша бесед спама — как `spam_cache_key` десктопа. */
     private val spamKey = "$accountKey#spam"
 
     /** Все беседы учётки, со спамом (`spam = true`); порядок — по дате. */
-    val conversations: Flow<List<Conversation>> =
+    override val conversations: Flow<List<Conversation>> =
         combine(
             dao.observeConversations(accountKey),
             dao.observeRefs(accountKey),
@@ -76,7 +77,7 @@ class SyncEngine(
     }
 
     /** Один проход. Ошибки API уходят наверх ([ru.letotam.ddmail.api.ApiException]). */
-    suspend fun sync() = lock.withLock {
+    override suspend fun sync(): Unit = lock.withLock {
         var forceFull = false
 
         val seq = dao.meta(K_SEQ)?.toLongOrNull() ?: 0
@@ -132,7 +133,7 @@ class SyncEngine(
      * Тела писем: из кэша, недостающие и пустые — с сервера (и в кэш).
      * Порядок результата — как у [refs]; чего нет нигде — пропущено.
      */
-    suspend fun bodies(refs: List<MessageRef>): List<MessageBody> {
+    override suspend fun bodies(refs: List<MessageRef>): List<MessageBody> {
         if (refs.isEmpty()) return emptyList()
         val cached = dao.bodies(accountKey, refs.map { it.uid }).associateBy { it.uid }
             .mapValues { it.value.toDomain() }
@@ -157,7 +158,7 @@ class SyncEngine(
      * [allowed] проверяется перед каждой порцией (сеть сменилась на
      * мобильную, пользователь передумал — останавливаемся).
      */
-    suspend fun prefetchBodies(allowed: suspend () -> Boolean, batch: Int = 30): Int {
+    override suspend fun prefetchBodies(allowed: suspend () -> Boolean, batch: Int): Int {
         val cached = dao.cachedBodyUids(accountKey).toHashSet()
         val convs = dao.observeConversations(accountKey).first()
         val refs = dao.observeRefs(accountKey).first().groupBy { it.conversationId }
@@ -181,14 +182,14 @@ class SyncEngine(
     }
 
     /** Открыли беседу: прочитана локально сразу, на сервере — следом. */
-    suspend fun markRead(c: Conversation) {
+    override suspend fun markRead(c: Conversation) {
         val unseen = c.messages.filter { !it.seen }
         dao.markRead(cacheKey(c), c.id)
         if (unseen.isNotEmpty()) api.setFlag(unseen, SEEN, add = true)
     }
 
     /** «Непрочитано» — на последнем письме беседы. */
-    suspend fun markUnread(c: Conversation) {
+    override suspend fun markUnread(c: Conversation) {
         val last = c.messages.maxByOrNull { it.uid } ?: return
         dao.markUnread(cacheKey(c), c.id, last.uid)
         api.setFlag(listOf(last), SEEN, add = false)
@@ -204,7 +205,7 @@ class SyncEngine(
      * [trust] — ещё и доверять отправителям: прочий их спам сервер вернёт сам,
      * из «Спам» он уйдёт со следующим синком (список спама — полный).
      */
-    suspend fun restoreSpam(convs: Collection<Conversation>, trust: Boolean = false): Int {
+    override suspend fun restoreSpam(convs: Collection<Conversation>, trust: Boolean): Int {
         val spam = convs.filter { it.spam }
         if (spam.isEmpty()) return 0
         val n = spam.flatMap { it.messages }.chunked(200).sumOf { api.restoreSpam(it, trust) }
@@ -237,7 +238,7 @@ class SyncEngine(
      * Удалить беседы целиком (§5): все письма — на сервер, из кэша — сразу.
      * Надгробия журнала потом подтвердят то же самое.
      */
-    suspend fun deleteConversations(convs: Collection<Conversation>) {
+    override suspend fun deleteConversations(convs: Collection<Conversation>) {
         val refs = convs.flatMap { it.messages }
         dao.deleteConversations(accountKey, convs.map { it.id })
         refs.chunked(200).forEach { api.delete(it) }
@@ -282,18 +283,31 @@ class SyncEngine(
     }
 
     /** Свои адреса: из кэша, раз в синк — с сервера. */
-    val identities: Flow<List<Identity>> = dao.observeMeta(K_IDENTITIES).map { s ->
+    override val identities: Flow<List<Identity>> = dao.observeMeta(K_IDENTITIES).map { s ->
         s?.let { runCatching { json.decodeFromString(idents, it) }.getOrNull() }.orEmpty()
     }
 
-    suspend fun send(req: SendRequest) = api.send(req)
+    override suspend fun send(req: SendRequest) = api.send(req)
 
     suspend fun openSocket(onEvent: (String) -> Unit, onClosed: (Boolean) -> Unit) = api.openSocket(onEvent, onClosed)
 
     suspend fun avatar(email: String): Binary? = api.avatar(email)
 
-    suspend fun part(uid: Long, cid: String): Binary = api.part(uid, cid)
-    suspend fun attachment(uid: Long, index: Int): Binary = api.attachment(uid, index)
+    override suspend fun part(uid: Long, cid: String): Binary = api.part(uid, cid)
+    override suspend fun attachment(uid: Long, index: Int): Binary = api.attachment(uid, index)
+
+    override val spamRules: Boolean get() = true
+
+    override suspend fun canSpam() = true
+
+    override suspend fun spam(convs: Collection<Conversation>, scope: String): SpamOutcome =
+        SpamOutcome.Rule(spamConversations(convs, scope))
+
+    /** Учётку ddmail удаляют: её беседы, тела и курсоры синка. */
+    override suspend fun forget() {
+        dao.clearAccount(accountKey)
+        for (k in listOf(K_SEQ, K_SINCE, K_FULL_TS, K_EPOCH, K_FOLDERS, K_FOLDERS_VERSION, K_IDENTITIES, K_IDENT_GROUPS)) dao.deleteMeta(k)
+    }
 
     private fun MessageBody.toEntity() = MessageBodyEntity(
         accountKey = accountKey,

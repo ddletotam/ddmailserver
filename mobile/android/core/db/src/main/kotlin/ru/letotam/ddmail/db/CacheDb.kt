@@ -96,6 +96,51 @@ data class ReminderEntity(
     val state: String,
 )
 
+/**
+ * Состояние папки внешней IMAP-учётки (mobile-external-accounts §3): по нему
+ * синк инкрементальный. [role] — код роли (`FolderRole.code`), [name] — имя
+ * на сервере (modified UTF-7).
+ */
+@Entity(tableName = "imap_folders", primaryKeys = ["accountKey", "role"])
+data class ImapFolderEntity(
+    val accountKey: String,
+    val role: Int,
+    val name: String,
+    val uidValidity: Long,
+    val uidNext: Long,
+    val highestModSeq: Long,
+    val lastUid: Long,
+)
+
+/**
+ * Заголовки письма IMAP-учётки — из них на устройстве строятся беседы.
+ * [uid] — UID в папке (не упакованный).
+ */
+@Entity(tableName = "imap_headers", primaryKeys = ["accountKey", "role", "uid"])
+data class ImapHeaderEntity(
+    val accountKey: String,
+    val role: Int,
+    val uid: Long,
+    val seen: Boolean,
+    val flagged: Boolean,
+    val draft: Boolean,
+    val subject: String,
+    val fromName: String,
+    val fromAddr: String,
+    val toAddrsJson: String,
+    val toNamesJson: String,
+    val ccAddrsJson: String,
+    val ccNamesJson: String,
+    /** Секунды. */
+    val dateTs: Long,
+    val messageId: String,
+    val inReplyTo: String,
+    val referencesJson: String,
+    val hasAttachments: Boolean,
+    /** Миллисекунды: когда строка последний раз менялась. */
+    val updatedAt: Long,
+)
+
 /** Служебные значения синхронизации: курсоры, водяные знаки, кэш документов. */
 @Entity(tableName = "meta")
 data class MetaEntity(@androidx.room.PrimaryKey val key: String, val value: String)
@@ -105,7 +150,8 @@ abstract class CacheDao {
     @Query("SELECT * FROM conversations WHERE accountKey = :account ORDER BY lastDateTs DESC")
     abstract fun observeConversations(account: String): Flow<List<ConversationEntity>>
 
-    @Query("SELECT * FROM conversation_messages WHERE accountKey = :account")
+    /** Порядок вставки: источники кладут письма беседы по дате (у IMAP UID папок несравнимы). */
+    @Query("SELECT * FROM conversation_messages WHERE accountKey = :account ORDER BY rowid")
     abstract fun observeRefs(account: String): Flow<List<MessageRefEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -232,6 +278,9 @@ abstract class CacheDao {
 
     suspend fun setMeta(key: String, value: String) = putMeta(MetaEntity(key, value))
 
+    @Query("DELETE FROM meta WHERE `key` = :key")
+    abstract suspend fun deleteMeta(key: String)
+
     @Query("SELECT * FROM reminders")
     abstract suspend fun reminders(): List<ReminderEntity>
 
@@ -269,7 +318,136 @@ abstract class CacheDao {
     @Query("DELETE FROM message_bodies")
     protected abstract suspend fun clearBodies()
 
-    /** Выход из учётки: кэш чужой сессии не должен остаться на телефоне. */
+    // ── Внешние IMAP-учётки ──
+
+    @Query("SELECT * FROM imap_folders WHERE accountKey = :account")
+    abstract suspend fun imapFolders(account: String): List<ImapFolderEntity>
+
+    @Query("SELECT * FROM imap_headers WHERE accountKey = :account")
+    abstract suspend fun imapHeaders(account: String): List<ImapHeaderEntity>
+
+    @Query("SELECT uid FROM imap_headers WHERE accountKey = :account AND role = :role")
+    abstract suspend fun imapUids(account: String, role: Int): List<Long>
+
+    @Query("SELECT uid, seen, flagged, draft FROM imap_headers WHERE accountKey = :account AND role = :role")
+    abstract suspend fun imapFlags(account: String, role: Int): List<ImapFlags>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    protected abstract suspend fun putImapHeaders(h: List<ImapHeaderEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    protected abstract suspend fun putImapFolder(f: ImapFolderEntity)
+
+    @Query("DELETE FROM imap_headers WHERE accountKey = :account AND role = :role")
+    protected abstract suspend fun dropImapRole(account: String, role: Int)
+
+    @Query("DELETE FROM imap_headers WHERE accountKey = :account AND role = :role AND uid IN (:uids)")
+    protected abstract suspend fun dropImapHeaders(account: String, role: Int, uids: List<Long>)
+
+    @Query("DELETE FROM message_bodies WHERE accountKey = :account AND uid IN (:uids)")
+    protected abstract suspend fun dropBodies(account: String, uids: List<Long>)
+
+    @Query("DELETE FROM message_bodies WHERE accountKey = :account AND uid >= :from AND uid < :to")
+    protected abstract suspend fun dropBodiesRange(account: String, from: Long, to: Long)
+
+    @Query("UPDATE imap_headers SET seen = :seen, flagged = :flagged, draft = :draft, updatedAt = :at WHERE accountKey = :account AND role = :role AND uid = :uid")
+    protected abstract suspend fun setImapFlags(account: String, role: Int, uid: Long, seen: Boolean, flagged: Boolean, draft: Boolean, at: Long)
+
+    @Query("UPDATE imap_headers SET seen = :seen, updatedAt = :at WHERE accountKey = :account AND role = :role AND uid IN (:uids)")
+    protected abstract suspend fun setImapSeen(account: String, role: Int, uids: List<Long>, seen: Boolean, at: Long)
+
+    @Query("DELETE FROM imap_folders WHERE accountKey = :account AND role = :role")
+    protected abstract suspend fun dropImapFolder(account: String, role: Int)
+
+    /** Флаги и строки, изменённые одним проходом по папке, — одной транзакцией. */
+    data class ImapFlags(val uid: Long, val seen: Boolean, val flagged: Boolean, val draft: Boolean)
+
+    /**
+     * Итог прохода по папке. [reset] — сменилась UIDVALIDITY: заголовки и тела
+     * папки уходят целиком. [bodyBase] — упакованный UID ноль этой роли
+     * (`role shl 32`): тела в кэше лежат под упакованными UID.
+     */
+    @Transaction
+    open suspend fun applyImapFolder(
+        account: String,
+        role: Int,
+        reset: Boolean,
+        added: List<ImapHeaderEntity>,
+        flags: List<ImapFlags>,
+        removed: Collection<Long>,
+        state: ImapFolderEntity,
+        bodyBase: Long,
+    ) {
+        if (reset) {
+            dropImapRole(account, role)
+            dropBodiesRange(account, bodyBase, bodyBase + (1L shl 32))
+        }
+        removed.chunked(500).forEach { chunk ->
+            dropImapHeaders(account, role, chunk)
+            dropBodies(account, chunk.map { bodyBase or it })
+        }
+        val now = System.currentTimeMillis()
+        flags.forEach { setImapFlags(account, role, it.uid, it.seen, it.flagged, it.draft, now) }
+        putImapHeaders(added)
+        putImapFolder(state)
+    }
+
+    /** Папка роли пропала на сервере — её кэш уходит. */
+    @Transaction
+    open suspend fun dropImapFolderRole(account: String, role: Int, bodyBase: Long) {
+        dropImapRole(account, role)
+        dropBodiesRange(account, bodyBase, bodyBase + (1L shl 32))
+        dropImapFolder(account, role)
+    }
+
+    /** Флаг `\Seen` после ответа сервера. */
+    suspend fun markImapSeen(account: String, role: Int, uids: List<Long>, seen: Boolean) =
+        uids.chunked(500).forEach { setImapSeen(account, role, it, seen, System.currentTimeMillis()) }
+
+    /** Письма ушли с сервера по нашей правке (удаление, перенос). */
+    @Transaction
+    open suspend fun dropImapMessages(account: String, role: Int, uids: List<Long>, bodyBase: Long) {
+        uids.chunked(500).forEach { chunk ->
+            dropImapHeaders(account, role, chunk)
+            dropBodies(account, chunk.map { bodyBase or it })
+        }
+    }
+
+    @Query("DELETE FROM imap_headers WHERE accountKey = :account")
+    protected abstract suspend fun clearImapHeaders(account: String)
+
+    @Query("DELETE FROM imap_folders WHERE accountKey = :account")
+    protected abstract suspend fun clearImapFolders(account: String)
+
+    @Query("DELETE FROM message_bodies WHERE accountKey = :account")
+    protected abstract suspend fun clearAccountBodies(account: String)
+
+    @Query("DELETE FROM meta WHERE `key` LIKE :prefix || '%'")
+    protected abstract suspend fun clearMetaPrefix(prefix: String)
+
+    /**
+     * Учётку удалили: её беседы, заголовки, тела и служебные значения
+     * (ключи meta с префиксом `<учётка>:`) не остаются на телефоне.
+     */
+    @Transaction
+    open suspend fun clearAccount(account: String) {
+        for (k in listOf(account, "$account#spam")) {
+            deleteAllRefs(k)
+            deleteAllConversations(k)
+            clearAccountBodies(k)
+        }
+        clearImapHeaders(account)
+        clearImapFolders(account)
+        clearMetaPrefix("$account:")
+    }
+
+    @Query("DELETE FROM imap_headers")
+    protected abstract suspend fun clearAllImapHeaders()
+
+    @Query("DELETE FROM imap_folders")
+    protected abstract suspend fun clearAllImapFolders()
+
+    /** Удалена последняя учётка: на телефоне не остаётся ничего из кэша. */
     @Transaction
     open suspend fun clearAll() {
         clearRefs()
@@ -277,14 +455,19 @@ abstract class CacheDao {
         clearBodies()
         clearMeta()
         clearReminders()
+        clearAllImapHeaders()
+        clearAllImapFolders()
     }
 }
 
 @Database(
-    entities = [ConversationEntity::class, MessageRefEntity::class, MetaEntity::class, MessageBodyEntity::class, ReminderEntity::class],
-    version = 3,
+    entities = [
+        ConversationEntity::class, MessageRefEntity::class, MetaEntity::class, MessageBodyEntity::class, ReminderEntity::class,
+        ImapFolderEntity::class, ImapHeaderEntity::class,
+    ],
+    version = 4,
     exportSchema = true,
-    autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3)],
+    autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3), AutoMigration(from = 3, to = 4)],
 )
 abstract class CacheDb : RoomDatabase() {
     abstract fun dao(): CacheDao

@@ -40,26 +40,26 @@ class MainActivity : ComponentActivity() {
                         is AppState.Connect -> {
                             // Ключ — поколение: повторный вход начинает форму заново.
                             val vm = viewModel(key = "connect-${s.generation}") {
-                                ConnectViewModel(app, s.prefill, appVm::connected)
+                                ConnectViewModel(app, s.prefill, appVm::connected, appVm::imapSaved)
                             }
-                            ConnectScreen(vm, m)
+                            ConnectScreen(vm, m, onCancel = if (s.cancellable) appVm::cancelConnect else null)
                         }
-                        is AppState.Connected -> {
-                            // Своя модель на каждую сессию: новый вход — новый движок.
-                            val vm = viewModel(key = "mail-${s.session.serverUrl}-${s.session.token.hashCode()}") {
-                                MailViewModel(app, app.engine(s.session), appVm::status)
-                            }
+                        is AppState.Ready -> {
+                            // Одна модель почты на всё время: учётки приходят и уходят через MailHub.
+                            val vm = viewModel(key = "mail") { MailViewModel(app, app.hub) }
                             androidx.compose.runtime.LaunchedEffect(Unit) {
                                 ru.letotam.ddmail.background.SyncWorker.schedule(app)
                             }
                             AppShell(
                                 app = app,
                                 session = s.session,
-                                status = s.status,
                                 mailVm = vm,
-                                onDead = { appVm.status(SessionStatus.Dead) },
-                                onRelogin = { appVm.relogin(s.session) },
-                                onLogout = appVm::logout,
+                                accounts = ru.letotam.ddmail.mail.AccountActions(
+                                    add = appVm::addAccount,
+                                    relogin = appVm::reloginAccount,
+                                    edit = appVm::editImap,
+                                    remove = appVm::removeAccount,
+                                ),
                                 modifier = m,
                             )
                         }

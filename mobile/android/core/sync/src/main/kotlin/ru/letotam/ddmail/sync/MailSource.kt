@@ -1,0 +1,94 @@
+package ru.letotam.ddmail.sync
+
+import kotlinx.coroutines.flow.Flow
+import ru.letotam.ddmail.api.ApiException
+import ru.letotam.ddmail.api.Binary
+import ru.letotam.ddmail.api.Identity
+import ru.letotam.ddmail.api.MessageBody
+import ru.letotam.ddmail.api.MessageRef
+import ru.letotam.ddmail.api.PurgeOutcome
+import ru.letotam.ddmail.api.SendRequest
+import ru.letotam.ddmail.imap.MailException
+import ru.letotam.ddmail.imap.humanText
+
+/** Итог «В спам». */
+sealed interface SpamOutcome {
+    /** Сервер ddmail: письма удалены, отправитель заблокирован правилом. */
+    data class Rule(val outcome: PurgeOutcome) : SpamOutcome
+
+    /** IMAP: письма перенесены в папку «Спам» (Junk) ящика. */
+    data class Moved(val messages: Int) : SpamOutcome
+}
+
+/**
+ * Источник почты одной учётки (mobile-external-accounts §1). Сервер ddmail
+ * ([SyncEngine]) и внешний IMAP ([ImapEngine]) — две реализации; экран не
+ * знает, откуда пришла беседа: все правки идут через [MailHub] по
+ * `Conversation.accountKey`.
+ *
+ * Ошибки: [ApiException] у ddmail, [ru.letotam.ddmail.imap.MailException] у
+ * IMAP; толкование — [isAuthError] и [errorText].
+ */
+interface MailSource {
+    val accountKey: String
+
+    /** Подпись учётки для людей: адрес или `логин · сервер`. */
+    val title: String
+
+    /** Беседы учётки вместе со спамом (`spam = true`). */
+    val conversations: Flow<List<Conversation>>
+
+    /** Свои адреса учётки (From, «свои» в беседах). */
+    val identities: Flow<List<Identity>>
+
+    /** «В спам» с правилами «адрес/домен» — только у сервера ddmail. */
+    val spamRules: Boolean
+
+    /** Есть куда отправлять в спам (у IMAP — найдена папка Junk). */
+    suspend fun canSpam(): Boolean
+
+    suspend fun sync()
+
+    suspend fun bodies(refs: List<MessageRef>): List<MessageBody>
+
+    suspend fun prefetchBodies(allowed: suspend () -> Boolean, batch: Int = 30): Int
+
+    suspend fun markRead(c: Conversation)
+
+    suspend fun markUnread(c: Conversation)
+
+    suspend fun deleteConversations(convs: Collection<Conversation>)
+
+    /** «В спам»; [scope] (`address`/`domain`) значим только при [spamRules]. */
+    suspend fun spam(convs: Collection<Conversation>, scope: String): SpamOutcome
+
+    /** «Не спам»: во «Входящие». [trust] — только у ddmail. */
+    suspend fun restoreSpam(convs: Collection<Conversation>, trust: Boolean): Int
+
+    suspend fun send(req: SendRequest)
+
+    suspend fun part(uid: Long, cid: String): Binary
+
+    suspend fun attachment(uid: Long, index: Int): Binary
+
+    /** Учётку удаляют: её кэш уходит с телефона. */
+    suspend fun forget()
+
+    /** Освободить соединения (IMAP); у ddmail — нечего. */
+    fun close() {}
+}
+
+/** Отказ входа: ретраи не лечат, нужен вход (контракт §7). */
+fun Throwable.isAuthError(): Boolean = this is ApiException.Unauthorized || this is MailException.Auth
+
+/** Ошибка, которую можно показать человеку. */
+fun Throwable.errorText(): String = when (this) {
+    is MailException -> humanText()
+    is ApiException.Unauthorized -> "сессия истекла — войдите заново"
+    is ApiException.Network -> "нет соединения с сервером"
+    is ApiException.Server -> serverMessage.ifBlank { "сервер ответил ошибкой $code" }
+    else -> message ?: javaClass.simpleName
+}
+
+/** Ошибка источника почты, а не программы. */
+fun Throwable.isMailError(): Boolean = this is ApiException || this is MailException

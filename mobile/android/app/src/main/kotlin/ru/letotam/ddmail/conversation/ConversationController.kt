@@ -20,7 +20,9 @@ import ru.letotam.ddmail.api.ApiException
 import ru.letotam.ddmail.api.MessageBody
 import ru.letotam.ddmail.api.MessageRef
 import ru.letotam.ddmail.sync.Conversation
-import ru.letotam.ddmail.sync.SyncEngine
+import ru.letotam.ddmail.sync.MailHub
+import ru.letotam.ddmail.sync.isAuthError
+import ru.letotam.ddmail.sync.isMailError
 import java.io.File
 
 /**
@@ -36,9 +38,8 @@ import java.io.File
 class ConversationController(
     private val app: Context,
     private val settings: ru.letotam.ddmail.settings.AppSettings,
-    private val engine: SyncEngine,
+    private val hub: MailHub,
     private val scope: CoroutineScope,
-    private val onAuthDead: () -> Unit,
 ) {
     val js = Channel<String>(Channel.UNLIMITED)
 
@@ -75,16 +76,16 @@ class ConversationController(
         js.trySend("ddm.set({messages:[],hasOlder:false})")
         job = scope.launch {
             lock.withLock {
-                pages = c.messages.sortedByDescending { it.uid }
+                pages = newestFirst(c.messages)
                 loaded = minOf(PAGE, pages.size)
                 senders = settings.imageSenders()
                 val bodies = load(pages.take(loaded))
                 // Первое непрочитанное — к нему и прокрутить (как у десктопа).
-                val firstUnseen = pages.take(loaded).filter { !it.seen }.minByOrNull { it.uid }?.uid
+                val firstUnseen = pages.take(loaded).lastOrNull { !it.seen }?.uid
                 js.send("ddm.set(${batch(c, bodies, firstUnseen)})")
             }
             if (c.unreadCount > 0 || c.messages.any { !it.seen }) {
-                runCatching { engine.markRead(c) }.onFailure { if (it is ApiException.Unauthorized) onAuthDead() }
+                runCatching { hub.markRead(c) }
             }
         }
     }
@@ -94,7 +95,7 @@ class ConversationController(
         val c = conv ?: return
         scope.launch {
             lock.withLock {
-                if (conv?.id != c.id) return@launch
+                if (conv?.ref != c.ref) return@launch
                 val next = pages.drop(loaded).take(PAGE)
                 loaded += next.size
                 val bodies = load(next)
@@ -105,27 +106,27 @@ class ConversationController(
 
     /** Беседа обновилась дельтой: новые письма — снизу, без перерисовки. */
     fun updated(c: Conversation) {
-        if (conv?.id != c.id) return
+        if (conv?.ref != c.ref) return
         conv = c
         scope.launch {
             lock.withLock {
-                if (conv?.id != c.id) return@launch
+                if (conv?.ref != c.ref) return@launch
                 val known = pages.map { it.uid }.toSet()
                 val fresh = c.messages.filter { it.uid !in known }
                 if (fresh.isEmpty()) return@launch
                 gate.extend(fresh.map { it.uid })
-                pages = (fresh + pages).sortedByDescending { it.uid }
+                pages = newestFirst(c.messages).filter { it.uid in known || fresh.contains(it) }
                 loaded += fresh.size
                 val bodies = load(fresh)
                 js.send("ddm.append(${batch(c, bodies, null)})")
             }
-            if (c.messages.any { !it.seen }) runCatching { engine.markRead(c) }
+            if (c.messages.any { !it.seen }) runCatching { hub.markRead(c) }
         }
     }
 
     /** Часть `cid:` для документа — блокирующе, с потока перехватчика WebView. */
     fun part(uid: Long, cid: String): Pair<ByteArray, String>? =
-        blocking { engine.part(uid, cid) }?.let { it.bytes to it.contentType }
+        conv?.accountKey?.let { key -> blocking { hub.part(key, uid, cid) } }?.let { it.bytes to it.contentType }
 
     /**
      * Вложение: скачать в кэш и открыть системным обработчиком через
@@ -133,10 +134,11 @@ class ConversationController(
      */
     fun openAttachment(uid: Long, index: Int, filename: String?) {
         scope.launch {
+            val key = conv?.accountKey ?: return@launch
             val bin = try {
-                engine.attachment(uid, index)
-            } catch (e: ApiException) {
-                if (e is ApiException.Unauthorized) onAuthDead()
+                hub.attachment(key, uid, index)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
                 return@launch
             }
             val file = withContext(Dispatchers.IO) {
@@ -177,10 +179,11 @@ class ConversationController(
     fun saveAttachment(uid: Long, index: Int, onDone: (String) -> Unit) {
         val name = safeName(names[uid to index] ?: "attachment-$index")
         scope.launch {
+            val key = conv?.accountKey ?: return@launch
             val bin = try {
-                engine.attachment(uid, index)
-            } catch (e: ApiException) {
-                if (e is ApiException.Unauthorized) onAuthDead()
+                hub.attachment(key, uid, index)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
                 onDone("Не удалось скачать «$name».")
                 return@launch
             }
@@ -209,9 +212,10 @@ class ConversationController(
     private val names = mutableMapOf<Pair<Long, Int>, String>()
 
     private suspend fun load(refs: List<MessageRef>): List<MessageBody> = try {
-        engine.bodies(refs).also { list -> list.forEach { loadedBodies[it.uid] = it } }
-    } catch (e: ApiException.Unauthorized) {
-        onAuthDead()
+        val key = conv?.accountKey ?: return emptyList()
+        hub.bodies(key, refs).also { list -> list.forEach { loadedBodies[it.uid] = it } }
+    } catch (e: Exception) {
+        if (!e.isMailError()) throw e
         emptyList()
     }
 
@@ -260,6 +264,15 @@ class ConversationController(
 
     private companion object {
         const val PAGE = 20
+
+        /**
+         * От нового к старому. У ddmail id письма растёт с его приходом —
+         * порядок по uid (§8). У IMAP uid упакован с ролью папки и между
+         * папками несравним — берётся порядок беседы (источник кладёт письма
+         * по дате).
+         */
+        fun newestFirst(refs: List<MessageRef>): List<MessageRef> =
+            if (refs.any { (it.uid ushr 32) != 0L }) refs.reversed() else refs.sortedByDescending { it.uid }
 
         /** Имя файла без разделителей пути и управляющих символов. */
         fun safeName(name: String): String =

@@ -19,7 +19,17 @@ data class Conversation(
     val messages: List<MessageRef>,
     /** Из спама: место — только системная папка «Спам» (её состав задаёт сервер). */
     val spam: Boolean = false,
-)
+) {
+    /**
+     * Ключ беседы в интерфейсе: id уникален только внутри учётки, одинаковые
+     * id в разных учётках — разные беседы (mobile-external-accounts §1).
+     */
+    val ref: String get() = refOf(accountKey, id)
+
+    companion object {
+        fun refOf(accountKey: String, id: String) = "$accountKey\u0000$id"
+    }
+}
 
 /** Ключ ручного назначения в папку — как `MergeKey` десктопа. */
 data class DialogKey(val account: String, val id: String)

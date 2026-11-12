@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
@@ -19,6 +20,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -42,13 +44,17 @@ import ru.letotam.ddmail.R
 import ru.letotam.ddmail.ui.Msg
 
 /**
- * Подключение (контракт §3). Колонка ограничена по ширине: на разложенном
- * Mate XT (до 1107 dp) поля во всю ширину читались бы плохо.
+ * Подключение (контракт §3; mobile-external-accounts §1): первый запуск и
+ * «Добавить учётку» — одно окно. Колонка ограничена по ширине: на разложенном
+ * Mate XT (до 1107 dp) поля во всю ширину читались бы плохо. [onCancel] —
+ * учётки уже есть, можно вернуться к почте.
  */
 @Composable
-fun ConnectScreen(vm: ConnectViewModel, modifier: Modifier = Modifier) {
+fun ConnectScreen(vm: ConnectViewModel, modifier: Modifier = Modifier, onCancel: (() -> Unit)? = null) {
     val s by vm.state.collectAsState()
-    BackHandler(enabled = s.step != ConnectStep.Email && !s.busy) { vm.back() }
+    BackHandler(enabled = !s.busy && (s.step != ConnectStep.Email || onCancel != null)) {
+        if (!vm.back()) onCancel?.invoke()
+    }
 
     Box(modifier.fillMaxSize().imePadding(), contentAlignment = Alignment.TopCenter) {
         Column(
@@ -65,6 +71,7 @@ fun ConnectScreen(vm: ConnectViewModel, modifier: Modifier = Modifier) {
                     ConnectStep.Searching -> stringResource(R.string.searching_title)
                     ConnectStep.Found -> stringResource(R.string.found_title)
                     ConnectStep.Manual -> stringResource(R.string.manual_title)
+                    ConnectStep.Imap -> stringResource(if (s.editingKey != null) R.string.imap_edit_title else R.string.imap_title)
                 },
                 style = MaterialTheme.typography.headlineSmall,
             )
@@ -72,12 +79,13 @@ fun ConnectScreen(vm: ConnectViewModel, modifier: Modifier = Modifier) {
                 ConnectStep.Email -> EmailStep(s, vm)
                 ConnectStep.Searching -> SearchingStep(s)
                 ConnectStep.Found, ConnectStep.Manual -> LoginStep(s, vm)
+                ConnectStep.Imap -> ImapStep(s, vm)
             }
             s.notice?.let { Notice(it) }
             s.error?.let {
                 Text(it.text(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
             }
-            Buttons(s, vm)
+            Buttons(s, vm, onCancel)
         }
     }
 }
@@ -105,7 +113,7 @@ private fun SearchingStep(s: ConnectState) {
         if (p == null || p.total == 0) 0f else p.done.toFloat() / p.total,
         label = "discovery",
     )
-    Text(p?.stage ?: s.email, style = MaterialTheme.typography.bodyMedium)
+    Text(p?.stage?.ifEmpty { null } ?: s.email, style = MaterialTheme.typography.bodyMedium)
     LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
     if (p != null) {
         Text(
@@ -141,6 +149,16 @@ private fun LoginStep(s: ConnectState, vm: ConnectViewModel) {
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
         modifier = Modifier.fillMaxWidth(),
     )
+    PasswordField(s, vm, focus)
+    Text(
+        stringResource(R.string.login_note),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+@Composable
+private fun PasswordField(s: ConnectState, vm: ConnectViewModel, focus: FocusRequester) {
     OutlinedTextField(
         value = s.password,
         onValueChange = vm::setPassword,
@@ -152,11 +170,60 @@ private fun LoginStep(s: ConnectState, vm: ConnectViewModel) {
         keyboardActions = KeyboardActions(onDone = { vm.login() }),
         modifier = Modifier.fillMaxWidth().focusRequester(focus),
     )
-    Text(
-        stringResource(R.string.login_note),
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+}
+
+/** IMAP/SMTP: найденное и пароль; «Изменить настройки» или ручной режим — все поля. */
+@Composable
+private fun ImapStep(s: ConnectState, vm: ConnectViewModel) {
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(s.step) { if (!s.showServers) runCatching { focus.requestFocus() } }
+    @Composable
+    fun field(value: String, label: Int, kb: KeyboardType = KeyboardType.Text, mod: Modifier = Modifier.fillMaxWidth(), set: (ConnectState, String) -> ConnectState) =
+        OutlinedTextField(
+            value = value,
+            onValueChange = { v -> vm.edit { set(it, v) } },
+            label = { Text(stringResource(label)) },
+            singleLine = true,
+            enabled = !s.busy,
+            keyboardOptions = KeyboardOptions(keyboardType = kb, imeAction = ImeAction.Next),
+            modifier = mod,
+        )
+    field(s.email, R.string.field_email, KeyboardType.Email) { st, v -> st.copy(email = v) }
+    if (s.showServers) {
+        field(s.name, R.string.field_name) { st, v -> st.copy(name = v) }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            field(s.imapHost, R.string.field_imap_host, KeyboardType.Uri, Modifier.weight(1f)) { st, v -> st.copy(imapHost = v) }
+            field(s.imapPort, R.string.field_port, KeyboardType.Number, Modifier.width(96.dp)) { st, v -> st.copy(imapPort = v.filter { it.isDigit() }) }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            field(s.smtpHost, R.string.field_smtp_host, KeyboardType.Uri, Modifier.weight(1f)) { st, v -> st.copy(smtpHost = v) }
+            field(s.smtpPort, R.string.field_port, KeyboardType.Number, Modifier.width(96.dp)) { st, v -> st.copy(smtpPort = v.filter { it.isDigit() }) }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = !s.smtpAuth, onCheckedChange = { v -> vm.edit { it.copy(smtpAuth = !v) } }, enabled = !s.busy)
+            Text(stringResource(R.string.smtp_no_auth), style = MaterialTheme.typography.bodyMedium)
+        }
+        field(s.imapLogin, R.string.field_imap_login, KeyboardType.Email) { st, v -> st.copy(imapLogin = v) }
+        if (s.editingKey != null) {
+            field(s.extraAddresses, R.string.field_extra_addresses, KeyboardType.Email) { st, v -> st.copy(extraAddresses = v) }
+            field(s.caldavUrl, R.string.field_caldav, KeyboardType.Uri) { st, v -> st.copy(caldavUrl = v) }
+            field(s.carddavUrl, R.string.field_carddav, KeyboardType.Uri) { st, v -> st.copy(carddavUrl = v) }
+        }
+        Text(stringResource(R.string.imap_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    } else {
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("IMAP: ${s.foundImap}", style = MaterialTheme.typography.bodyMedium)
+                Text("SMTP: ${s.foundSmtp}" + if (!s.smtpAuth) " · без авторизации" else "", style = MaterialTheme.typography.bodyMedium)
+                Text("Логин: ${s.imapLogin}", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        TextButton(onClick = { vm.edit { it.copy(showServers = true) } }, enabled = !s.busy) { Text(stringResource(R.string.action_change_servers)) }
+    }
+    PasswordField(s, vm, focus)
+    if (s.passwordHint.isNotEmpty()) {
+        Text(s.passwordHint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
 }
 
 @Composable
@@ -175,17 +242,25 @@ private fun Notice(msg: Msg) {
 }
 
 @Composable
-private fun Buttons(s: ConnectState, vm: ConnectViewModel) {
+private fun Buttons(s: ConnectState, vm: ConnectViewModel, onCancel: (() -> Unit)?) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        when (s.step) {
-            ConnectStep.Email -> TextButton(onClick = vm::manual) { Text(stringResource(R.string.action_manual)) }
-            ConnectStep.Searching -> TextButton(onClick = { vm.back() }) { Text(stringResource(R.string.action_cancel)) }
+        when {
+            s.step == ConnectStep.Email -> Column {
+                TextButton(onClick = vm::manual) { Text(stringResource(R.string.action_manual_imap)) }
+                TextButton(onClick = vm::manualDdmail) { Text(stringResource(R.string.action_ddmail_server)) }
+                if (onCancel != null) TextButton(onClick = onCancel) { Text(stringResource(R.string.action_cancel)) }
+            }
+            s.step == ConnectStep.Searching -> TextButton(onClick = { vm.back() }) { Text(stringResource(R.string.action_cancel)) }
+            s.editingKey != null -> TextButton(onClick = { onCancel?.invoke() }, enabled = !s.busy) { Text(stringResource(R.string.action_cancel)) }
             else -> TextButton(onClick = { vm.back() }, enabled = !s.busy) { Text(stringResource(R.string.action_back)) }
         }
         Spacer(Modifier.weight(1f))
         when (s.step) {
             ConnectStep.Email -> Button(onClick = vm::findServer) { Text(stringResource(R.string.action_find)) }
             ConnectStep.Searching -> {}
+            ConnectStep.Imap -> Button(onClick = vm::login, enabled = !s.busy) {
+                Text(stringResource(if (s.busy) R.string.busy_check else R.string.action_save))
+            }
             else -> Button(onClick = vm::login, enabled = !s.busy) {
                 Text(stringResource(if (s.busy) R.string.busy_login else R.string.action_login))
             }

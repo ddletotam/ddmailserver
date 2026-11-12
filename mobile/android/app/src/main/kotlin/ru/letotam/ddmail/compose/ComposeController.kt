@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -21,7 +22,9 @@ import ru.letotam.ddmail.api.Identity
 import ru.letotam.ddmail.api.MessageBody
 import ru.letotam.ddmail.conversation.ConversationController
 import ru.letotam.ddmail.sync.Conversation
-import ru.letotam.ddmail.sync.SyncEngine
+import ru.letotam.ddmail.sync.MailHub
+import ru.letotam.ddmail.sync.errorText
+import ru.letotam.ddmail.sync.isMailError
 
 /** Отдельное окно письма: новое или пересылка. */
 data class ComposeSheet(val branch: Branch, val draft: Draft, val error: String? = null, val busy: Boolean = false)
@@ -49,14 +52,20 @@ data class ComposerUi(
  */
 class ComposeController(
     private val app: Context,
-    private val engine: SyncEngine,
+    private val hub: MailHub,
     private val conversation: ConversationController,
     private val scope: CoroutineScope,
     private val syncSoon: () -> Unit,
-    private val onAuthDead: () -> Unit,
 ) {
     val ui = MutableStateFlow(ComposerUi())
-    val identities: StateFlow<List<Identity>> = engine.identities.stateIn(scope, SharingStarted.Eagerly, emptyList())
+
+    /** Свои адреса всех учёток с их владельцами (маршрутизация по From, §5). */
+    private val owners: StateFlow<List<Pair<String, Identity>>> = hub.identities.stateIn(scope, SharingStarted.Eagerly, emptyList())
+
+    /** Свои адреса для выбора «От кого» — без повторов. */
+    val identities: StateFlow<List<Identity>> = hub.identities
+        .map { l -> l.map { it.second }.distinctBy { it.email.lowercase() } }
+        .stateIn(scope, SharingStarted.Eagerly, emptyList())
 
     /** После нового письма — открыть беседу с этими адресатами, когда появится. */
     var sentTarget: Set<String>? = null
@@ -76,7 +85,7 @@ class ComposeController(
     /** Новое письмо на адрес — из карточки контакта. */
     fun openNewTo(addr: String) = ui.update { it.copy(sheet = ComposeSheet(Branch.New, Draft(to = addr))) }
 
-    fun openForward(b: MessageBody) = ui.update { it.copy(sheet = ComposeSheet(Branch.Forward(b), Draft())) }
+    fun openForward(b: MessageBody) = ui.update { it.copy(sheet = ComposeSheet(Branch.Forward(b, conversation.current?.accountKey.orEmpty()), Draft())) }
 
     fun editSheet(f: (Draft) -> Draft) = ui.update { u -> u.copy(sheet = u.sheet?.let { it.copy(draft = f(it.draft), error = null) }) }
 
@@ -125,13 +134,13 @@ class ComposeController(
                 ui.update { ComposerUi(sheet = it.sheet) }
                 scope.launch {
                     try {
-                        engine.send(built.request)
+                        hub.send(built.request, owners.value, prefer = c.accountKey)
                         ui.update { it.copy(sentFlash = true) }
                         afterSend()
                         delay(2000)
                         ui.update { it.copy(sentFlash = false) }
-                    } catch (e: ApiException) {
-                        if (e is ApiException.Unauthorized) onAuthDead()
+                    } catch (e: Exception) {
+                        if (!e.isMailError()) throw e
                         conversation.js.trySend("ddm.unstub(\"$key\")")
                         // Текст возвращается, если композер пуст (не затираем набранное заново).
                         ui.update { cur ->
@@ -153,29 +162,31 @@ class ComposeController(
         if (sheet.busy) return
         ui.update { it.copy(sheet = sheet.copy(busy = true, error = null)) }
         scope.launch {
-            val fwd = (sheet.branch as? Branch.Forward)?.original
+            val fwdBranch = sheet.branch as? Branch.Forward
+            val fwd = fwdBranch?.original
             val (fwdText, fwdHtml) = fwd?.let(::forwardBlock) ?: ("" to "")
             // Пересылка несёт вложения исходного письма.
             val extra = try {
                 fwd?.attachments.orEmpty().map { a ->
-                    val bin = engine.attachment(fwd!!.uid, a.index)
+                    val bin = hub.attachment(fwdBranch!!.accountKey, fwd!!.uid, a.index)
                     PendingAttachment(a.filename, a.mimeType.ifBlank { bin.contentType }, bin.bytes)
                 }
-            } catch (e: ApiException) {
+            } catch (e: Exception) {
+                if (!e.isMailError()) throw e
                 ui.update { u -> u.copy(sheet = u.sheet?.copy(busy = false, error = "Не удалось забрать вложения пересылаемого письма: ${sendError(e)}")) }
                 return@launch
             }
             when (val built = build(sheet.branch, sheet.draft, identities.value, fwdHtml, fwdText, extra)) {
                 is Built.Refused -> ui.update { u -> u.copy(sheet = u.sheet?.copy(busy = false, error = built.reason)) }
                 is Built.Ok -> try {
-                    engine.send(built.request)
+                    hub.send(built.request, owners.value, prefer = fwdBranch?.accountKey)
                     if (sheet.branch is Branch.New) sentTarget = built.to.map { it.lowercase() }.toSet()
                     ui.update { it.copy(sheet = null, sentFlash = true) }
                     afterSend()
                     delay(2000)
                     ui.update { it.copy(sentFlash = false) }
-                } catch (e: ApiException) {
-                    if (e is ApiException.Unauthorized) onAuthDead()
+                } catch (e: Exception) {
+                    if (!e.isMailError()) throw e
                     ui.update { u -> u.copy(sheet = u.sheet?.copy(busy = false, error = sendError(e))) }
                 }
             }
@@ -192,10 +203,9 @@ class ComposeController(
         }
     }
 
-    private fun sendError(e: ApiException): String = when (e) {
-        is ApiException.Unauthorized -> "сессия истекла — войдите заново"
-        is ApiException.Network -> "нет соединения с сервером"
+    private fun sendError(e: Exception): String = when (e) {
         is ApiException.Server -> if (e.code == 413) "вложения больше лимита сервера" else "сервер ответил ошибкой ${e.code}"
+        else -> e.errorText()
     }.let { "Не отправлено: $it." }
 
     private fun stubJson(key: String, d: Draft) = JsonObject(

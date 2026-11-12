@@ -31,6 +31,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -40,7 +41,10 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.launch
 import ru.letotam.ddmail.BuildConfig
-import ru.letotam.ddmail.auth.Session
+import ru.letotam.ddmail.mail.AccountActions
+import ru.letotam.ddmail.sync.AccountStatus
+import ru.letotam.ddmail.sync.ImapEngine
+import ru.letotam.ddmail.sync.MailSource
 
 private val labels = listOf(
     Prefetch.Always to ("Всегда" to "Беседы открываются мгновенно, в том числе без сети."),
@@ -89,7 +93,28 @@ fun PrefetchQuestion(settings: AppSettings) {
 }
 
 @Composable
-fun SettingsDialog(settings: AppSettings, session: Session, onLogout: () -> Unit, onClose: () -> Unit) {
+fun SettingsDialog(
+    settings: AppSettings,
+    sources: List<MailSource>,
+    statuses: Map<String, AccountStatus>,
+    accounts: AccountActions,
+    onClose: () -> Unit,
+) {
+    var removeAsk by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<MailSource?>(null) }
+    removeAsk?.let { src ->
+        AlertDialog(
+            onDismissRequest = { removeAsk = null },
+            title = { Text("Удалить учётку?") },
+            text = { Text("${src.title}: пароль и кэш писем этой учётки будут удалены с телефона. На сервере ничего не изменится.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    removeAsk = null
+                    accounts.remove(src.accountKey)
+                }) { Text("Удалить", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { IconButton(onClick = { removeAsk = null }) { Icon(Icons.Filled.Close, "Отмена") } },
+        )
+    }
     val prefetch by settings.prefetch.collectAsState(initial = null)
     val notify by settings.notifications.collectAsState(initial = true)
     val scope = rememberCoroutineScope()
@@ -105,8 +130,29 @@ fun SettingsDialog(settings: AppSettings, session: Session, onLogout: () -> Unit
                     Modifier.fillMaxWidth().widthIn(max = 640.dp).verticalScroll(rememberScrollState()).padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    Section("Учётная запись")
-                    Text("${session.username} · ${session.serverUrl.removePrefix("https://")}")
+                    Section("Учётки")
+                    sources.forEach { src ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(src.title, style = MaterialTheme.typography.bodyLarge)
+                                val kind = if (src is ImapEngine) "IMAP · ${src.account.imapHost}" else "Сервер ddmail"
+                                val st = when (val x = statuses[src.accountKey]) {
+                                    AccountStatus.NeedsLogin -> " · нужен вход"
+                                    is AccountStatus.Offline -> " · нет связи"
+                                    else -> ""
+                                }
+                                Text(kind + st, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            IconButton(onClick = { accounts.relogin(src.accountKey) }) { Icon(Icons.AutoMirrored.Filled.Login, "Войти заново") }
+                            if (src is ImapEngine) IconButton(onClick = { accounts.edit(src.accountKey) }) { Icon(Icons.Filled.Edit, "Изменить") }
+                            IconButton(onClick = { removeAsk = src }) { Icon(Icons.Filled.Delete, "Удалить", tint = MaterialTheme.colorScheme.error) }
+                        }
+                    }
+                    OutlinedButton(onClick = accounts.add) {
+                        Icon(Icons.Filled.PersonAdd, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Добавить учётку")
+                    }
                     HorizontalDivider()
                     Section("Загрузка писем заранее")
                     PrefetchChoice(prefetch) { v -> scope.launch { settings.setPrefetch(v) } }
@@ -138,7 +184,8 @@ fun SettingsDialog(settings: AppSettings, session: Session, onLogout: () -> Unit
                         Switch(checked = remind, onCheckedChange = { v ->
                             scope.launch {
                                 app.calendarPrefs.setRemindersOn(v)
-                                if (v) runCatching { app.reminders.refresh(app.sessionApi(session)) } else app.reminders.disable()
+                                val pim = app.pim()
+                                if (!v) app.reminders.disable() else if (pim != null) runCatching { app.reminders.refresh(pim) }
                             }
                         })
                     }
@@ -146,12 +193,6 @@ fun SettingsDialog(settings: AppSettings, session: Session, onLogout: () -> Unit
                     HorizontalDivider()
                     Section("О приложении")
                     Text("ddmail для Android, версия ${BuildConfig.VERSION_NAME}")
-                    Spacer(Modifier.padding(8.dp))
-                    OutlinedButton(onClick = onLogout) {
-                        Icon(Icons.AutoMirrored.Filled.Logout, null, tint = MaterialTheme.colorScheme.error)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Выйти", color = MaterialTheme.colorScheme.error)
-                    }
                 }
             }
         }

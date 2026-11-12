@@ -36,7 +36,7 @@ class SessionApi(
     private val baseUrl: String,
     private val http: OkHttpClient,
     private val tokens: TokenSource,
-) {
+) : PimApi {
     private val raw = DdmailApi(baseUrl, http)
     private val refreshLock = Mutex()
 
@@ -117,24 +117,24 @@ class SessionApi(
 
     // ── Календарь, задачи, контакты ──
 
-    suspend fun calendars(): List<CalendarDto> = get("/calendars", ListSerializer(CalendarDto.serializer()))
+    override suspend fun calendars(): List<CalendarDto> = get("/calendars", ListSerializer(CalendarDto.serializer()))
 
     /** События окна `[fromMs, toMs)`; повторяющиеся — мастерами (развёртывает клиент). */
-    suspend fun calendarEvents(fromMs: Long, toMs: Long): List<EventDto> =
+    override suspend fun calendarEvents(fromMs: Long, toMs: Long): List<EventDto> =
         get("/calendar-events?from=$fromMs&to=$toMs", ListSerializer(EventDto.serializer()))
 
-    suspend fun createEvent(req: EventCreateRequest): String =
+    override suspend fun createEvent(req: EventCreateRequest): String =
         write("POST", "/events", DdmailApi.json.encodeToString(EventCreateRequest.serializer(), req))
 
-    suspend fun patchEvent(id: Long, req: EventPatchRequest): String =
+    override suspend fun patchEvent(id: Long, req: EventPatchRequest): String =
         write("PATCH", "/events/$id", DdmailApi.json.encodeToString(EventPatchRequest.serializer(), req))
 
-    suspend fun deleteEvent(id: Long) {
+    override suspend fun deleteEvent(id: Long) {
         write("DELETE", "/events/$id", null)
     }
 
     /** Ответ на приглашение: ACCEPTED | TENTATIVE | DECLINED. */
-    suspend fun rsvp(id: Long, partstat: String) {
+    override suspend fun rsvp(id: Long, partstat: String) {
         write("POST", "/events/$id/rsvp", JsonObject(mapOf("partstat" to JsonPrimitive(partstat))).toString())
     }
 
@@ -145,21 +145,21 @@ class SessionApi(
         write("POST", "/tasks/$id/completion", JsonObject(mapOf("completed" to JsonPrimitive(completed))).toString())
     }
 
-    suspend fun contacts(limit: Int = 5000): List<ContactDto> =
+    override suspend fun contacts(limit: Int): List<ContactDto> =
         get("/contacts?limit=$limit", ListSerializer(ContactDto.serializer()))
 
-    suspend fun addressBooks(): List<AddressBookDto> =
+    override suspend fun addressBooks(): List<AddressBookDto> =
         get("/address-books", ListSerializer(AddressBookDto.serializer()))
 
-    suspend fun createContact(req: ContactWriteRequest) {
+    override suspend fun createContact(req: ContactWriteRequest) {
         write("POST", "/contacts", DdmailApi.json.encodeToString(ContactWriteRequest.serializer(), req))
     }
 
-    suspend fun patchContact(id: Long, req: ContactWriteRequest) {
+    override suspend fun patchContact(id: Long, req: ContactWriteRequest) {
         write("PATCH", "/contacts/$id", DdmailApi.json.encodeToString(ContactWriteRequest.serializer(), req))
     }
 
-    suspend fun deleteContact(id: Long) {
+    override suspend fun deleteContact(id: Long) {
         write("DELETE", "/contacts/$id", null)
     }
 
@@ -170,7 +170,7 @@ class SessionApi(
             .build()
     }
 
-    suspend fun identities(): List<Identity> =
+    override suspend fun identities(): List<Identity> =
         get("/identities", ListSerializer(Identity.serializer()))
 
     /** Поставить письмо в отправку. 413 — вложения больше лимита сервера. */
@@ -323,6 +323,20 @@ internal suspend fun Call.awaitBinary(): Binary = suspendCancellableCoroutine { 
             }
         }
     })
+}
+
+/** Внешний двоичный ресурс (Gravatar): 404 — `null`, прочие отказы — [ApiException]. */
+suspend fun fetchBinary(http: OkHttpClient, req: Request): Binary? = try {
+    http.newCall(req).awaitBinary()
+} catch (e: ApiException.Server) {
+    if (e.code == 404) null else throw e
+}
+
+/** GET текста (автонастройка): тело при 2xx, иначе `null`. */
+suspend fun fetchText(http: OkHttpClient, url: String): String? = try {
+    http.newCall(Request.Builder().url(url).build()).awaitBody()
+} catch (e: ApiException) {
+    null
 }
 
 /** Тело `POST /spam/restore`; `trust` шлётся только когда он нужен. */

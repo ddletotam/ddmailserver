@@ -42,12 +42,18 @@ class AppSettings(private val context: Context) {
 
     suspend fun setNotifications(v: Boolean) = context.settingsStore.edit { it[notifyKey] = v }
 
-    /** Самое новое письмо, о котором уже уведомили (uid). `null` — ещё ни о чём. */
-    suspend fun notifiedMax(): Long? = context.settingsStore.data.first()[notifiedKey]
+    private fun notifiedKey(account: String) = longPreferencesKey("notified_max_uid:$account")
 
-    suspend fun setNotifiedMax(v: Long) = context.settingsStore.edit { it[notifiedKey] = v }
+    /** Самое новое письмо учётки, о котором уже уведомили (uid). `null` — ещё ни о чём. */
+    suspend fun notifiedMax(account: String): Long? = context.settingsStore.data.first()[notifiedKey(account)]
 
-    suspend fun clearAccountState() = context.settingsStore.edit { it.remove(notifiedKey) }
+    suspend fun setNotifiedMax(account: String, v: Long) = context.settingsStore.edit { it[notifiedKey(account)] = v }
+
+    /** Учётку удалили — её рубеж уведомлений тоже. */
+    suspend fun clearAccountState(account: String) = context.settingsStore.edit {
+        it.remove(notifiedKey(account))
+        it.remove(notifiedKey)
+    }
 
     /** Можно ли качать тела прямо сейчас — по выбору и по типу сети. */
     suspend fun prefetchAllowedNow(): Boolean = when (prefetch.first()) {

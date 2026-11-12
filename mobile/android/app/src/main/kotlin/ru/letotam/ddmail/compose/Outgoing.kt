@@ -31,7 +31,7 @@ data class Draft(
 /** Ветка отправки (§1 десктопа), в порядке проверки. */
 sealed interface Branch {
     /** Пересылка: адресат — только явное «Кому». */
-    data class Forward(val original: MessageBody) : Branch
+    data class Forward(val original: MessageBody, val accountKey: String = "") : Branch
 
     /** Новое письмо (из списка). */
     data object New : Branch

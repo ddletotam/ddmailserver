@@ -28,6 +28,30 @@
     <string name="busy_login">Входим…</string>
     <string name="err_plain">%1$s</string>
 
+    <!-- Внешние учётки (mobile-external-accounts §1–§2) -->
+    <string name="action_manual_imap">Я знаю все настройки</string>
+    <string name="action_ddmail_server">Сервер ddmail…</string>
+    <string name="imap_title">Почтовый ящик</string>
+    <string name="imap_edit_title">Учётка</string>
+    <string name="ddmail_taken">Это сервер ddmail, но учётка ddmail уже подключена. Этот ящик можно добавить по IMAP.</string>
+    <string name="imap_only_found">Входящий сервер найден, исходящий (SMTP) — нет. Укажите его вручную.</string>
+    <string name="smtp_only_found">Исходящий сервер найден, входящий (IMAP) — нет. Укажите его вручную.</string>
+    <string name="nothing_found">Серверы для %1$s не нашлись. Укажите их вручную.</string>
+    <string name="err_fill_imap">Заполните серверы, порты и пароль.</string>
+    <string name="field_name">Имя отправителя (необязательно)</string>
+    <string name="field_imap_host">Входящий сервер (IMAP)</string>
+    <string name="field_smtp_host">Исходящий сервер (SMTP)</string>
+    <string name="field_port">Порт</string>
+    <string name="field_imap_login">Логин (обычно — адрес почты)</string>
+    <string name="field_extra_addresses">Другие мои адреса (через запятую)</string>
+    <string name="field_caldav">CalDAV (адрес сервера или календаря)</string>
+    <string name="field_carddav">CardDAV (адрес сервера или книги)</string>
+    <string name="smtp_no_auth">SMTP без авторизации</string>
+    <string name="action_change_servers">Изменить настройки</string>
+    <string name="action_save">Проверить и сохранить</string>
+    <string name="busy_check">Проверяем вход…</string>
+    <string name="imap_note">Порт 993 — TLS, 143 — STARTTLS; SMTP 465 — TLS, 587 — STARTTLS. Открытым текстом не подключаемся. Пароль хранится на телефоне зашифрованным и уходит только на эти серверы.</string>
+
     <!-- Почта -->
     <string name="mail_title">Почта</string>
     <string name="status_syncing">Обновляем…</string>
