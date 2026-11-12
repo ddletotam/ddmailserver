@@ -14,12 +14,78 @@ public struct ConversationSnapshot: Equatable, Sendable {
 public final class MailStore: Sendable {
     let db: any DatabaseWriter
 
-    /// Кэш в файле `url` (каталог создаётся).
+    /// Кэш в файле `url` (каталог создаётся). Файл общий для приложения и
+    /// Notification Service Extension (App Group, контракт §7): открытие и
+    /// миграции схемы — под координацией файлов, чтобы два процесса не
+    /// создавали таблицы одновременно; запись, занятая другим процессом, ждёт.
     public convenience init(url: URL) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         var config = Configuration()
         config.foreignKeysEnabled = false
-        try self.init(writer: DatabasePool(path: url.path, configuration: config))
+        // Другой процесс пишет — ждём, а не падаем с SQLITE_BUSY: проход
+        // расширения короткий.
+        config.busyMode = .timeout(10)
+        #if os(iOS)
+        // Усыплённое приложение с блокировкой SQLite в общем контейнере iOS
+        // убивает (0xdead10cc): по `MailStore.suspend()` GRDB прерывает
+        // запросы и не берёт блокировок до `resume()`.
+        config.observesSuspensionNotifications = true
+        #endif
+        var opened: Result<DatabasePool, Error>?
+        var coordError: NSError?
+        NSFileCoordinator(filePresenter: nil).coordinate(writingItemAt: url, options: .forMerging, error: &coordError) { u in
+            opened = Result { try DatabasePool(path: u.path, configuration: config) }
+        }
+        if let coordError { throw coordError }
+        guard let pool = try opened?.get() else { throw CocoaError(.fileWriteUnknown) }
+        try self.init(writer: pool)
+    }
+
+    /// Приложение уходит в фон (iOS): запросы прерываются, новых блокировок
+    /// нет, пока не `resume()`. Фоновая задача приложения — между `resume` и
+    /// `suspend`.
+    public static func suspend() {
+        NotificationCenter.default.post(name: Database.suspendNotification, object: nil)
+    }
+
+    public static func resume() {
+        NotificationCenter.default.post(name: Database.resumeNotification, object: nil)
+    }
+
+    /// Кэш изменил другой процесс (расширение): наблюдения этого процесса
+    /// перечитывают данные — сами они чужой записи не видят.
+    public func externalChange() throws {
+        try db.write { try $0.notifyChanges(in: .fullDatabase) }
+    }
+
+    /// Перенос кэша на новое место (в App Group) без потери данных: копия
+    /// через SQLite backup (журнал WAL входит в неё), затем атомарная замена
+    /// и удаление старого файла с его `-wal`/`-shm`. Новый файл уже есть —
+    /// только уборка старого. Ответ — был ли перенос.
+    @discardableResult
+    public static func moveDatabase(from old: URL, to new: URL) throws -> Bool {
+        let fm = FileManager.default
+        let leftovers = ["", "-wal", "-shm"].map { URL(filePath: old.path + $0) }
+        guard old.standardizedFileURL != new.standardizedFileURL, fm.fileExists(atPath: old.path) else { return false }
+        if fm.fileExists(atPath: new.path) {
+            for f in leftovers { try? fm.removeItem(at: f) }
+            return false
+        }
+        try fm.createDirectory(at: new.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let temp = URL(filePath: new.path + ".migrating")
+        for f in ["", "-wal", "-shm", "-journal"] { try? fm.removeItem(at: URL(filePath: temp.path + f)) }
+        do {
+            var config = Configuration()
+            config.foreignKeysEnabled = false
+            let source = try DatabaseQueue(path: old.path, configuration: config)
+            let target = try DatabaseQueue(path: temp.path, configuration: config)
+            try source.backup(to: target)
+            try target.close()
+            try source.close()
+        }
+        try fm.moveItem(at: temp, to: new)
+        for f in leftovers { try? fm.removeItem(at: f) }
+        return true
     }
 
     /// Кэш в памяти — для тестов.

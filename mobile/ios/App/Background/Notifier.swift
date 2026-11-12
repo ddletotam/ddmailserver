@@ -1,4 +1,5 @@
 import DDMailCalendar
+import DDMailStore
 import DDMailSync
 import Foundation
 import UserNotifications
@@ -14,10 +15,17 @@ enum Notifier {
     /// беседы (учётка и id): у разных учёток id могут совпасть.
     static func check(conversations convs: [Conversation], folders: FoldersDoc, openRef: String?) async {
         let settings = AppSettings.shared
+        // Рубежи общие с расширением уведомлений (§7): прочитать и записать
+        // их одним куском — иначе о письме уведомили бы оба.
+        let held = await ProcessLock.notify.acquire(timeout: .seconds(2))
         let plan = NotificationPlan(conversations: convs, folders: folders, openRef: openRef, previous: settings.notifiedMarks)
         settings.notifiedMarks = plan.watermarks
+        held?.release()
         let center = UNUserNotificationCenter.current()
         try? await center.setBadgeCount(plan.badge)
+        // Синк прошёл — обезличенные push («Новые письма», «нечего
+        // показать») своё отслужили: о новом теперь говорят уведомления бесед.
+        await clearPushPlaceholders()
         guard settings.notifications, !plan.items.isEmpty else { return }
         let auth = await center.notificationSettings().authorizationStatus
         guard auth == .authorized || auth == .provisional else { return }
@@ -28,25 +36,56 @@ enum Notifier {
             content.body = t.body
             content.threadIdentifier = item.conversation.ref
             content.categoryIdentifier = category
-            content.userInfo = ["conversation": item.conversation.ref]
+            content.userInfo = [conversationKey: item.conversation.ref]
             content.sound = .default
             try? await center.add(UNNotificationRequest(identifier: item.conversation.ref, content: content, trigger: nil))
         }
     }
 
-    /// Учётку удалили — её уведомления тоже.
+    /// Учётку удалили — её уведомления тоже (и показанные push: у них свой id,
+    /// беседа — в `userInfo`).
     static func clear(account key: String) {
         let center = UNUserNotificationCenter.current()
         Task {
-            let ids = await center.deliveredNotifications().map(\.request.identifier)
-                .filter { Conversation.parseRef($0)?.account == key }
+            let ids = await center.deliveredNotifications().map(\.request)
+                .filter { Conversation.parseRef(conversationRef($0) ?? $0.identifier)?.account == key }
+                .map(\.identifier)
             center.removeDeliveredNotifications(withIdentifiers: ids)
         }
     }
 
-    /// Беседу открыли — её уведомление больше не нужно.
+    /// Беседу открыли — её уведомление больше не нужно (своё — по id, push,
+    /// переписанный расширением, — по беседе в `userInfo`).
     static func clear(conversation id: String) {
-        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
+        let center = UNUserNotificationCenter.current()
+        center.removeDeliveredNotifications(withIdentifiers: [id])
+        Task {
+            let ids = await center.deliveredNotifications().map(\.request)
+                .filter { conversationRef($0) == id }
+                .map(\.identifier)
+            if !ids.isEmpty { center.removeDeliveredNotifications(withIdentifiers: ids) }
+        }
+    }
+
+    /// Ключи `userInfo` уведомлений почты (их же ставит расширение).
+    nonisolated static let conversationKey = "conversation"
+    nonisolated static let pushKey = "ddmail_push"
+
+    nonisolated static func conversationRef(_ r: UNNotificationRequest) -> String? {
+        r.content.userInfo[conversationKey] as? String
+    }
+
+    /// Push, который расширение не превратило в уведомление беседы:
+    /// обезличенный («не успело») или «нечего показать». У расширения нет
+    /// права скрыть такой push (§12), поэтому его снимает приложение.
+    nonisolated static func isPlaceholder(_ r: UNNotificationRequest) -> Bool {
+        conversationRef(r) == nil && (r.content.userInfo[pushKey] != nil || r.content.threadIdentifier == "mail")
+    }
+
+    static func clearPushPlaceholders() async {
+        let center = UNUserNotificationCenter.current()
+        let ids = await center.deliveredNotifications().map(\.request).filter(isPlaceholder).map(\.identifier)
+        if !ids.isEmpty { center.removeDeliveredNotifications(withIdentifiers: ids) }
     }
 
     /// Разрешение спрашиваем один раз, после входа (не на экране подключения).
@@ -98,14 +137,22 @@ final class NotificationRouter: NSObject, UNUserNotificationCenterDelegate, @unc
             }
             return
         }
-        guard let id = response.notification.request.content.userInfo["conversation"] as? String else { return }
+        guard let id = Notifier.conversationRef(response.notification.request) else { return }
         await MainActor.run {
             if let open { open(id) } else { pending = id }
         }
     }
 
-    /// На экране — тоже показываем (о других беседах), но тихо.
+    /// Открытая на экране беседа (`ref`) — о ней не показываем.
+    @MainActor var openRef: (() -> String?)?
+
+    /// На экране — тоже показываем (о других беседах), но тихо. Push «нечего
+    /// показать» и push об открытой беседе — нет: приложение на экране само
+    /// синхронизировано.
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        [.banner, .list]
+        let request = notification.request
+        if request.content.userInfo[Notifier.pushKey] as? String == "stale" { return [] }
+        if let ref = Notifier.conversationRef(request), await MainActor.run(body: { openRef?() == ref }) { return [] }
+        return [.banner, .list]
     }
 }

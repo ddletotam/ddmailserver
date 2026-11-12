@@ -41,4 +41,25 @@ struct MailStoreTests {
         #expect(try s.bodies("a", uids: [1, 2]).keys.sorted() == [2])
         #expect(try s.cachedBodyUIDs("a") == [2])
     }
+
+    /// Перенос кэша в App Group (контракт §7): данные — все, включая ещё не
+    /// перенесённые из журнала WAL; старые файлы удалены; повтор безвреден.
+    @Test func moveDatabaseKeepsData() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appending(path: "ddmail-move-\(UUID().uuidString)")
+        let old = root.appending(path: "app/ddmail/cache.sqlite")
+        let new = root.appending(path: "group/ddmail/cache.sqlite")
+        do {
+            let s = try MailStore(url: old)
+            try s.replaceAll("a", [try dto("x", [(1, "<1>"), (2, "<2>")])])
+            try s.setMeta("local/dialog_folders", #"{"folders":[]}"#)
+        }
+        #expect(try MailStore.moveDatabase(from: old, to: new))
+        for suffix in ["", "-wal", "-shm"] { #expect(!fm.fileExists(atPath: old.path + suffix)) }
+        #expect(!fm.fileExists(atPath: new.path + ".migrating"))
+        let moved = try MailStore(url: new)
+        #expect(try moved.snapshot(["a"])["a"]?.refs["x"]?.count == 2)
+        #expect(try moved.meta("local/dialog_folders") == #"{"folders":[]}"#)
+        #expect(try MailStore.moveDatabase(from: old, to: new) == false)
+    }
 }
