@@ -325,6 +325,20 @@ internal suspend fun Call.awaitBinary(): Binary = suspendCancellableCoroutine { 
     })
 }
 
+/** Внешний двоичный ресурс (Gravatar): 404 — `null`, прочие отказы — [ApiException]. */
+suspend fun fetchBinary(http: OkHttpClient, req: Request): Binary? = try {
+    http.newCall(req).awaitBinary()
+} catch (e: ApiException.Server) {
+    if (e.code == 404) null else throw e
+}
+
+/** GET текста (автонастройка): тело при 2xx, иначе `null`. */
+suspend fun fetchText(http: OkHttpClient, url: String): String? = try {
+    http.newCall(Request.Builder().url(url).build()).awaitBody()
+} catch (e: ApiException) {
+    null
+}
+
 /** Тело `POST /spam/restore`; `trust` шлётся только когда он нужен. */
 internal fun restoreSpamBody(refs: List<MessageRef>, trust: Boolean): String {
     val msgs = JsonArray(refs.map { JsonObject(mapOf("uid" to JsonPrimitive(it.uid), "message_id" to JsonPrimitive(it.messageId))) })

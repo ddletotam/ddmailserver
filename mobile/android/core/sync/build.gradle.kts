@@ -22,6 +22,7 @@ android {
 dependencies {
     api(project(":core:api"))
     api(project(":core:db"))
+    api(project(":core:mail"))
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
     testImplementation(libs.junit)
