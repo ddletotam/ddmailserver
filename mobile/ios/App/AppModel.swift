@@ -5,45 +5,52 @@ import DDMailSync
 import Foundation
 import Observation
 
-/// Состояние сессии (контракт §2): «нужен вход» отдельно от «нет связи».
+/// Состояние учётки (контракт §2, внешние учётки §7): «нужен вход» отдельно
+/// от «нет связи» — и отдельно для каждой учётки.
 enum SessionStatus: Equatable {
     case checking
     case ok
     case offline(String)
-    /// Refresh отказал — ретраи не помогут, нужен вход. Липкое: снимает его
-    /// только удачный запрос (токен обменялся) или новый вход.
+    /// Ретраи не помогут, нужен вход (refresh ddmail отказал, IMAP/SMTP отверг
+    /// пароль). Липкое: снимает его только удачный проход или новый вход.
     case dead
 }
 
-/// Корень приложения: есть ли сессия, и что с ней.
+/// Корень приложения: учётки есть — рабочее пространство, нет — подключение.
 @MainActor @Observable
 final class AppModel {
     enum Phase {
         case connect(ConnectModel)
-        case connected(Connection)
+        case ready(Workspace)
     }
 
     private(set) var phase: Phase
-    let store: SessionStore
+    /// «Добавить учётку» и «Войти» поверх рабочего пространства — то же окно подключения.
+    var connectSheet: ConnectModel?
+    let accounts: AccountStore
     let transport: HTTPTransport
 
-    init(store: SessionStore = KeychainSessionStore(), transport: HTTPTransport = AppModel.makeSession()) {
-        self.store = store
+    init(accounts: KeychainAccountStore = KeychainAccountStore(), transport: HTTPTransport = AppModel.makeSession()) {
+        self.accounts = accounts
         self.transport = transport
         phase = .connect(ConnectModel(transport: transport))
         #if DEBUG
-        // UI-тесты начинают с чистого листа: сессия в Keychain симулятора
-        // переживает переустановку приложения.
+        // UI-тесты начинают с чистого листа: секреты в Keychain симулятора
+        // переживают переустановку приложения.
         if ProcessInfo.processInfo.arguments.contains("-ddmail-reset") {
-            store.clear()
+            accounts.removeAll()
+            KeychainSessionStore().clear()
+            try? FileManager.default.removeItem(at: Workspace.cacheURL.deletingLastPathComponent())
             if let id = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: id) }
         }
         #endif
-        if let s = store.load() {
-            phase = .connected(Connection(session: s, store: store, transport: transport))
-        } else {
-            phase = .connect(makeConnect(ConnectModel.Prefill()))
-        }
+        accounts.migrateLegacy()
+        phase = Self.phase(for: accounts.accounts(), self)
+    }
+
+    private static func phase(for list: [MailAccount], _ app: AppModel) -> Phase {
+        if list.isEmpty { return .connect(app.makeConnect(.init())) }
+        return .ready(Workspace(accounts: list, store: app.accounts, transport: app.transport))
     }
 
     /// URLSession клиента: без кук и без дискового кэша ответов — в ответах
@@ -58,76 +65,137 @@ final class AppModel {
         return URLSession(configuration: c)
     }
 
-    /// Вход прошёл: сессия уже в Keychain.
-    func connected(_ session: Session) {
-        phase = .connected(Connection(session: session, store: store, transport: transport))
+    var workspace: Workspace? { if case let .ready(w) = phase { w } else { nil } }
+
+    /// Учётка добавлена или вошли заново: набор учёток другой — рабочее
+    /// пространство собирается заново (кэш остаётся: он по учёткам).
+    func added(_ account: MailAccount) {
+        connectSheet = nil
+        reload()
     }
 
-    /// Текущая живая сессия (для фона и уведомлений).
-    var connection: Connection? { if case let .connected(c) = phase { c } else { nil } }
-
-    /// Повторный вход: тот же сервер и логин, осталось ввести пароль.
-    func relogin() {
-        guard case let .connected(c) = phase else { return }
-        phase = .connect(makeConnect(.init(server: c.session.serverURL, username: c.session.username)))
+    func reload() {
+        workspace?.close()
+        phase = Self.phase(for: accounts.accounts(), self)
     }
 
-    /// Выход: сессия чужой учётки не остаётся на устройстве.
-    func logout() {
-        if case let .connected(c) = phase { c.close() }
-        store.clear()
-        phase = .connect(makeConnect(.init()))
+    /// «Добавить учётку» из настроек.
+    func addAccount() {
+        connectSheet = makeConnect(.init(adding: true))
+    }
+
+    /// Повторный вход в учётку: тот же сервер и логин, осталось ввести пароль.
+    func relogin(_ key: String) {
+        guard let a = accounts.accounts().first(where: { $0.key == key }) else { return }
+        connectSheet = makeConnect(.init(relogin: a))
+    }
+
+    /// Удалить учётку: секреты и кэш учётки (контракт §1).
+    func remove(_ key: String) {
+        workspace?.forget(key)
+        try? accounts.remove(key)
+        if accounts.accounts().isEmpty {
+            workspace?.close()
+            Workspace.clearDeviceState()
+        }
+        reload()
     }
 
     private func makeConnect(_ prefill: ConnectModel.Prefill) -> ConnectModel {
-        ConnectModel(transport: transport, store: store, prefill: prefill) { [weak self] in self?.connected($0) }
+        ConnectModel(transport: transport, accounts: accounts, prefill: prefill) { [weak self] in self?.added($0) }
     }
 }
 
-/// Живая сессия: API, кэш почты, движок синхронизации и состояние.
+/// Живая учётка: источник почты и её состояние.
 @MainActor @Observable
-final class Connection {
-    let session: Session
-    let api: SessionAPI
-    /// Докачка «Только по Wi-Fi»: система не пустит эти запросы в сотовую сеть,
-    /// через точку доступа и в режиме экономии трафика (§4).
-    let prefetchAPI: SessionAPI
-    let cache: MailStore?
+final class AccountLink: Identifiable {
+    let account: MailAccount
+    let provider: any MailProvider
+    /// Только у ddmail: API сервера (календарь, контакты, аватарки, WebSocket).
+    let api: SessionAPI?
     let engine: SyncEngine?
-    @ObservationIgnored private(set) lazy var mail: MailModel? = engine.map { MailModel(connection: self, engine: $0) }
-    @ObservationIgnored private(set) lazy var calendar: CalendarModel = {
-        let m = CalendarModel(api: api) { [weak self] in self?.report(.dead) }
-        // Календарь перечитан (правка, calendar_updated) — напоминания пересеять.
-        m.onReloaded = { [weak self] in Task { await self?.reminders.refresh() } }
-        return m
-    }()
-    @ObservationIgnored private(set) lazy var reminders = ReminderService(api: api)
-    @ObservationIgnored private(set) lazy var tasks = TasksModel(api: api) { [weak self] in self?.report(.dead) }
-    @ObservationIgnored private(set) lazy var contacts = ContactsModel(api: api) { [weak self] in self?.report(.dead) }
     private(set) var status: SessionStatus = .checking
+
+    nonisolated var id: String { account.key }
+
+    init(account: MailAccount, provider: any MailProvider, api: SessionAPI? = nil, engine: SyncEngine? = nil) {
+        self.account = account
+        self.provider = provider
+        self.api = api
+        self.engine = engine
+    }
+
+    /// Итог синхронизации или проверки. «Нужен вход» липкий: временная
+    /// ошибка его не снимает.
+    func report(_ s: SessionStatus) {
+        if status == .dead, case .offline = s { return }
+        status = s
+    }
+
+    /// Ошибка прохода → состояние.
+    func report(error: Error) {
+        if isAuthFailure(error) { report(.dead) } else if !(error is CancellationError) { report(.offline(error.localizedDescription)) }
+    }
+}
+
+/// Учётки, кэш почты, почта на экране и разделы ddmail (календарь, задачи,
+/// контакты — у первой ddmail-учётки; внешние CalDAV/CardDAV — §8).
+@MainActor @Observable
+final class Workspace {
+    let store: AccountStore
+    let cache: MailStore?
+    let links: [AccountLink]
     /// Кэш не открылся (диск полон, файл повреждён) — почта без кэша не работает.
     private(set) var cacheError: String?
+    @ObservationIgnored private(set) lazy var mail: MailModel? = cache.map { MailModel(workspace: self, cache: $0) }
 
-    init(session: Session, store: SessionStore, transport: HTTPTransport) {
-        self.session = session
-        // Один источник токена на оба API: обменявший токен не оставит
-        // другому просроченный.
-        let tokens = StoredTokens(session: session, store: store)
-        api = SessionAPI(baseURL: session.serverURL, transport: transport, tokens: tokens)
-        prefetchAPI = SessionAPI(baseURL: session.serverURL, transport: Self.wifiOnlySession, tokens: tokens)
+    /// Первая ddmail-учётка: её сервер ведёт календарь, задачи, контакты,
+    /// аватарки и документы папок.
+    var primary: AccountLink? { links.first { $0.engine != nil } }
+
+    @ObservationIgnored private(set) lazy var calendar: CalendarModel? = primary?.api.map { api in
+        let m = CalendarModel(api: api) { [weak self] in self?.primary?.report(.dead) }
+        // Календарь перечитан (правка, calendar_updated) — напоминания пересеять.
+        m.onReloaded = { [weak self] in Task { await self?.reminders?.refresh() } }
+        return m
+    }
+    @ObservationIgnored private(set) lazy var reminders: ReminderService? = primary?.api.map { ReminderService(api: $0) }
+    @ObservationIgnored private(set) lazy var tasks: TasksModel? = primary?.api.map { api in
+        TasksModel(api: api) { [weak self] in self?.primary?.report(.dead) }
+    }
+    @ObservationIgnored private(set) lazy var contacts: ContactsModel? = primary?.api.map { api in
+        ContactsModel(api: api) { [weak self] in self?.primary?.report(.dead) }
+    }
+
+    init(accounts: [MailAccount], store: AccountStore, transport: HTTPTransport) {
+        self.store = store
+        var cache: MailStore?
         do {
-            let c = try MailStore(url: Self.cacheURL)
-            // Кэш другой учётки (вошли под другим логином) — не наш: с нуля.
-            if try c.meta("account_key") != session.accountKey {
-                try c.clearAll()
-                try c.setMeta("account_key", session.accountKey)
-            }
-            cache = c
-            engine = SyncEngine(accountKey: session.accountKey, api: api, store: c)
+            cache = try MailStore(url: Self.cacheURL)
         } catch {
-            cache = nil
-            engine = nil
             cacheError = error.localizedDescription
+        }
+        self.cache = cache
+        links = accounts.compactMap { Self.link($0, store: store, cache: cache, transport: transport) }
+    }
+
+    private static func link(_ a: MailAccount, store: AccountStore, cache: MailStore?, transport: HTTPTransport) -> AccountLink? {
+        guard let cache else { return nil }
+        switch a.kind {
+        case .ddmail:
+            // Секрета нет (восстановили из копии) — учётка видна, но просит входа.
+            let session = store.secret(a.key)?.session ?? Session(serverURL: a.serverURL, username: a.username, userID: a.userID, token: "")
+            // Один источник токена на оба API: обменявший токен не оставит другому просроченный.
+            let tokens = StoredTokens(session: session, store: AccountSessionStore(key: a.key, store: store))
+            let api = SessionAPI(baseURL: session.serverURL, transport: transport, tokens: tokens)
+            let wifi = SessionAPI(baseURL: session.serverURL, transport: wifiOnlySession, tokens: tokens)
+            let engine = SyncEngine(accountKey: a.key, api: api, store: cache, prefetchAPI: wifi)
+            let link = AccountLink(account: a, provider: engine, api: api, engine: engine)
+            if session.token.isEmpty { link.report(.dead) }
+            return link
+        case .imap:
+            // IMAP-учётки — следующим этапом (ImapEngine).
+            return nil
         }
     }
 
@@ -141,71 +209,60 @@ final class Connection {
         return URLSession(configuration: c)
     }()
 
-    /// Докачать тела по выбору пользователя (§4): «Всегда» — обычным API,
-    /// «Только по Wi-Fi» — экономным, «Нет» — ничего.
-    func prefetch() async {
-        guard let engine else { return }
-        let api: SessionAPI
-        switch AppSettings.shared.prefetch {
-        case .always: api = self.api
-        case .wifi: api = prefetchAPI
-        case .never, nil: return
-        }
-        do {
-            _ = try await engine.prefetchBodies(via: api) { !Task.isCancelled }
-        } catch APIError.unauthorized {
-            report(.dead)
-        } catch {}
-    }
-
-    /// Фоновый проход (BGAppRefreshTask): синк и уведомления из кэша.
-    func backgroundRefresh() async {
-        guard let engine else { return }
-        do {
-            try await engine.sync()
-            report(.ok)
-            await Notifier.check(engine: engine, openID: nil)
-            await reminders.refresh()
-        } catch APIError.unauthorized {
-            report(.dead)
-        } catch {}
-    }
-
     /// Кэш — в Application Support (не в Caches: система не должна его
     /// выбрасывать, иначе на старте пустой список до ответа сервера).
     static var cacheURL: URL {
         URL.applicationSupportDirectory.appending(path: "ddmail/cache.sqlite")
     }
 
-    /// Итог синхронизации или проверки (§2). «Нужен вход» липкий: его снимает
-    /// только удачный проход (токен обменялся, запросы прошли) или новый вход.
-    func report(_ s: SessionStatus) {
-        if status == .dead, case .offline = s { return }
-        status = s
-    }
+    func link(_ key: String) -> AccountLink? { links.first { $0.account.key == key } }
 
-    /// Проверить сессию лёгким запросом — когда синхронизировать нечем (кэш не открылся).
-    func check() async {
-        do {
-            _ = try await api.identities()
-            report(.ok)
-        } catch APIError.unauthorized {
-            report(.dead)
-        } catch is CancellationError {
-        } catch {
-            report(.offline(error.localizedDescription))
+    /// Учётки, которым нужен вход.
+    var dead: [AccountLink] { links.filter { $0.status == .dead } }
+
+    /// Докачать тела по выбору пользователя (§4): «Всегда» — обычной сетью,
+    /// «Только по Wi-Fi» — экономной, «Нет» — ничего. Учётки — по очереди.
+    func prefetch() async {
+        let constrained: Bool
+        switch AppSettings.shared.prefetch {
+        case .always: constrained = false
+        case .wifi: constrained = true
+        case .never, nil: return
+        }
+        for l in links where l.status != .dead {
+            do {
+                _ = try await l.provider.prefetchBodies(constrained: constrained) { !Task.isCancelled }
+            } catch {
+                if isAuthFailure(error) { l.report(.dead) }
+            }
         }
     }
 
-    /// Выход: остановить наблюдение и стереть кэш учётки.
+    /// Фоновый проход (BGAppRefreshTask): синк всех учёток и уведомления из кэша.
+    func backgroundRefresh() async {
+        await mail?.syncAll(notify: true)
+        await reminders?.refresh()
+    }
+
+    /// Учётку удаляют: её кэш и уведомления — прочь.
+    func forget(_ key: String) {
+        try? cache?.clearAccount(key)
+        Notifier.clear(account: key)
+        AppSettings.shared.forget(account: key)
+    }
+
+    /// Остановить наблюдение (пространство пересобирается или учёток не осталось).
     func close() {
         mail?.stop()
-        try? cache?.clearAll()
+    }
+
+    /// Учёток не осталось: состояние чужого человека не остаётся на устройстве.
+    static func clearDeviceState() {
         ImageSenders.clear()
+        AvatarStore.clearDisk()
         AppSettings.shared.clearAccountState()
         CalendarPrefs.shared.clear()
-        let r = reminders
-        Task { await r.clear() }
+        Task { await ReminderService.clearAll() }
         Notifier.clearAll()
     }
 }

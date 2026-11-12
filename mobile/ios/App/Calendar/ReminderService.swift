@@ -198,6 +198,16 @@ final class ReminderService {
     /// Выход из учётки: напоминания чужой учётки не звонят.
     func clear() async { await removeAll() }
 
+    /// Учёток не осталось — без экземпляра сервиса (его API уже нет).
+    static func clearAll() async {
+        let center = UNUserNotificationCenter.current()
+        let pending = await center.pendingNotificationRequests().map(\.identifier).filter { $0.hasPrefix("rem|") }
+        center.removePendingNotificationRequests(withIdentifiers: pending)
+        let delivered = await center.deliveredNotifications().map(\.request.identifier).filter { $0.hasPrefix("rem|") }
+        center.removeDeliveredNotifications(withIdentifiers: delivered)
+        try? FileManager.default.removeItem(at: URL.applicationSupportDirectory.appending(path: "ddmail/reminders.json"))
+    }
+
     private func save() {
         try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         if let d = try? JSONEncoder().encode(Saved(rows: rows, scheduled: scheduled)) {

@@ -58,13 +58,13 @@ public func searchConversations(_ convs: [Conversation], _ q: String) -> [Conver
     func has(_ s: String) -> Bool { fold(s).contains(needle) }
     var taken = Set<String>()
     let byName = convs.filter { has($0.label) }
-    byName.forEach { taken.insert($0.id) }
+    byName.forEach { taken.insert($0.ref) }
     let byAddr = convs.filter { c in
-        !taken.contains(c.id)
+        !taken.contains(c.ref)
             && (c.counterparts.contains { has($0.addr) || has($0.name) } || has(c.receivedBy))
     }
-    byAddr.forEach { taken.insert($0.id) }
-    let bySubject = convs.filter { !taken.contains($0.id) && has($0.lastSubject) }
+    byAddr.forEach { taken.insert($0.ref) }
+    let bySubject = convs.filter { !taken.contains($0.ref) && has($0.lastSubject) }
     return byName + byAddr + bySubject
 }
 

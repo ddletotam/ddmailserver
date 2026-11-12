@@ -8,21 +8,25 @@ import os
 let mailLog = Logger(subsystem: "ru.letotam.ddmail", category: "mail")
 
 /// Почта на экране (порт `MailViewModel` Android): список, табы папок,
-/// поиск, выбор, действия. Данные — из кэша (`SyncEngine`), сеть — синком.
+/// поиск, выбор, действия. Учёток несколько — беседы всех учёток в одном
+/// списке; беседу определяет `ref` (учётка и id), действие уходит своей
+/// учётке. Данные — из кэша, сеть — синком.
 @MainActor @Observable
 final class MailModel {
-    let engine: SyncEngine
-    private let connection: Connection
+    @ObservationIgnored unowned let workspace: Workspace
     /// Открытая беседа — одна лента на всё время работы почты (§8).
     let conversation: ConversationModel
     /// Ответ, новое письмо, пересылка (§5).
     @ObservationIgnored private(set) var compose: ComposeModel!
-    /// Аватарки собеседников (§5).
+    /// Аватарки собеседников (§5) — с сервера ddmail, если он есть.
     let avatars: AvatarStore
-    /// WebSocket, пока на экране (§7).
-    @ObservationIgnored private(set) var live: LiveUpdates!
+    /// Живые каналы, пока на экране: WebSocket ddmail, IDLE у IMAP (§7).
+    @ObservationIgnored private(set) var live: [LiveChannel] = []
+    /// Папки диалогов: документ ddmail-учётки или локальный (внешние учётки §4).
+    let folderSource: any DialogFolderSource
 
     private(set) var all: [Conversation] = []
+    private var byAccount: [String: [Conversation]] = [:]
     private(set) var doc = FoldersDoc().withSpam()
     private(set) var colors = IdentityColors()
     private(set) var list = MailListState()
@@ -42,7 +46,7 @@ final class MailModel {
 
     var query = "" { didSet { rebuild() } }
 
-    /// Открытая беседа (по id: дельта не сбивает выбор).
+    /// Открытая беседа (`Conversation.ref`: дельта не сбивает выбор).
     var selectedID: String? {
         didSet {
             guard oldValue != selectedID else { return }
@@ -51,7 +55,7 @@ final class MailModel {
         }
     }
 
-    /// Множественный выбор (§5): id бесед.
+    /// Множественный выбор (§5): `ref` бесед.
     var picked: Set<String> = []
 
     /// Итог действия — короткая плашка внизу.
@@ -64,63 +68,75 @@ final class MailModel {
     private static let activeKey = "mail.activeFolder"
     private static let lastKey = "mail.lastConversation"
 
-    init(connection: Connection, engine: SyncEngine) {
-        self.connection = connection
-        self.engine = engine
-        conversation = ConversationModel(engine: engine) { [weak connection] in connection?.report(.dead) }
-        avatars = AvatarStore(api: connection.api)
-        live = LiveUpdates(
-            api: connection.api,
-            sync: { [weak self] in await self?.sync() },
-            // `calendar_updated`: календарь перечитывается, почта — нет.
-            onCalendar: { [weak connection] in Task { await connection?.calendar.refresh() } }
-        )
+    init(workspace: Workspace, cache: MailStore) {
+        self.workspace = workspace
+        folderSource = workspace.primary?.engine ?? LocalDialogFolders(store: cache)
+        let resolve: @MainActor (String) -> (any MailProvider)? = { [weak workspace] key in workspace?.link(key)?.provider }
+        let dead: @MainActor (String) -> Void = { [weak workspace] key in workspace?.link(key)?.report(.dead) }
+        conversation = ConversationModel(provider: resolve, onAuthDead: dead)
+        avatars = AvatarStore(api: workspace.primary?.api)
         compose = ComposeModel(
-            engine: engine, conversation: conversation,
-            syncSoon: { [weak self] in Task { await self?.sync() } },
-            onAuthDead: { [weak connection] in connection?.report(.dead) }
+            workspace: workspace, conversation: conversation,
+            syncSoon: { [weak self] key in Task { await self?.sync(only: key) } },
+            onAuthDead: dead
         )
+        live = workspace.links.compactMap { link in
+            guard let api = link.api else { return nil }
+            return LiveUpdates(
+                api: api,
+                sync: { [weak self] in await self?.sync(only: link.account.key) },
+                // `calendar_updated`: календарь перечитывается, почта — нет.
+                onCalendar: { [weak workspace] in Task { await workspace?.calendar?.refresh() } }
+            )
+        }
         activeFolderID = UserDefaults.standard.string(forKey: Self.activeKey)
         start()
     }
 
     private func start() {
-        tasks.append(Task { [weak self, engine] in
-            for await convs in engine.conversations() {
-                mailLog.debug("conversations: \(convs.count)")
-                guard let self else { return }
-                all = convs
-                loaded = true
-                rebuild()
-                // Новые письма открытой беседы — дописать снизу.
-                if let c = selected { conversation.updated(c) }
-                // Отправили новое письмо — открыть его беседу, как только появится.
-                if let target = compose.sentTarget, let c = convs.first(where: { matchesTarget($0, target) }) {
-                    compose.consumeTarget()
-                    open(c.id)
+        for link in workspace.links {
+            let key = link.account.key
+            let provider = link.provider
+            tasks.append(Task { [weak self] in
+                for await convs in provider.conversations() {
+                    guard let self else { return }
+                    byAccount[key] = convs
+                    merge()
                 }
-            }
-        })
-        tasks.append(Task { [weak self, engine] in
-            mailLog.debug("folders: subscribe")
-            for await d in engine.folders() {
-                mailLog.debug("folders: \(d.folders.count)")
+            })
+        }
+        if workspace.links.isEmpty { loaded = true }
+        tasks.append(Task { [weak self, folderSource] in
+            for await d in folderSource.folders() {
                 guard let self else { return }
                 doc = d
                 rebuild()
             }
         })
-        tasks.append(Task { [weak self, engine] in
-            for await c in engine.identityColors() {
-                mailLog.debug("colors updated")
-                self?.colors = c
-            }
-        })
+        if let engine = workspace.primary?.engine {
+            tasks.append(Task { [weak self] in
+                for await c in engine.identityColors() { self?.colors = c }
+            })
+        }
+    }
+
+    /// Беседы всех учёток — одним списком по дате.
+    private func merge() {
+        all = byAccount.values.flatMap { $0 }.sorted { ($0.lastDateTs, $1.ref) > ($1.lastDateTs, $0.ref) }
+        // Список готов, когда отозвались все учётки (кэш читается сразу).
+        loaded = byAccount.count >= workspace.links.count
+        rebuild()
+        // Новые письма открытой беседы — дописать снизу.
+        if let c = selected { conversation.updated(c) }
+        // Отправили новое письмо — открыть его беседу, как только появится.
+        if let target = compose.sentTarget, let c = all.first(where: { matchesTarget($0, target) }) {
+            compose.consumeTarget()
+            open(c.ref)
+        }
     }
 
     func stop() {
-        live.stop()
-        Task { [avatars] in await avatars.clear() }
+        live.forEach { $0.stop() }
         prefetchTask?.cancel()
         tasks.forEach { $0.cancel() }
         tasks.removeAll()
@@ -130,31 +146,53 @@ final class MailModel {
         list = buildMailList(all, doc: doc, activeID: activeFolderID, query: query)
     }
 
-    var selected: Conversation? { selectedID.flatMap { id in all.first { $0.id == id } } }
+    var selected: Conversation? { selectedID.flatMap { ref in all.first { $0.ref == ref } } }
 
     /// Беседа, на которой закончили, — для раскладок, где беседа видна сразу.
     var lastConversationID: String? { UserDefaults.standard.string(forKey: Self.lastKey) }
 
+    func provider(_ c: Conversation) -> (any MailProvider)? { workspace.link(c.accountKey)?.provider }
+
     // MARK: Синхронизация
 
-    /// Один проход; итог — в состояние сессии (§2).
+    /// Проход по всем учёткам разом; ошибка одной не мешает другим (§7).
     func sync() async {
         guard !syncing else { return }
         syncing = true
         defer { syncing = false }
-        do {
-            try await engine.sync()
-            mailLog.debug("sync ok")
-            connection.report(.ok)
-            await Notifier.check(engine: engine, openID: selectedID)
-            startPrefetch()
-        } catch is CancellationError {
-        } catch APIError.unauthorized {
-            connection.report(.dead)
-        } catch {
-            mailLog.error("sync failed: \(String(describing: error), privacy: .public)")
-            connection.report(.offline(error.localizedDescription))
+        await syncAll(notify: true)
+        startPrefetch()
+    }
+
+    /// Одна учётка (событие её канала, отправка с неё).
+    func sync(only key: String) async {
+        guard let link = workspace.link(key) else { return }
+        await run(link)
+        await notify()
+    }
+
+    func syncAll(notify: Bool) async {
+        await withTaskGroup(of: Void.self) { group in
+            for link in workspace.links {
+                group.addTask { await self.run(link) }
+            }
         }
+        if notify { await self.notify() }
+    }
+
+    private func run(_ link: AccountLink) async {
+        do {
+            try await link.provider.sync()
+            link.report(.ok)
+        } catch is CancellationError {
+        } catch {
+            mailLog.error("sync \(link.account.key, privacy: .private): \(String(describing: error), privacy: .public)")
+            link.report(error: error)
+        }
+    }
+
+    private func notify() async {
+        await Notifier.check(conversations: all, folders: doc, openRef: selectedID)
     }
 
     private var prefetchTask: Task<Void, Never>?
@@ -162,8 +200,8 @@ final class MailModel {
     /// Докачка тел после синка — фоном, уступая всему остальному (§4).
     func startPrefetch() {
         guard prefetchTask == nil else { return }
-        prefetchTask = Task(priority: .background) { [weak self, connection] in
-            await connection.prefetch()
+        prefetchTask = Task(priority: .background) { [weak self, workspace] in
+            await workspace.prefetch()
             self?.prefetchTask = nil
         }
     }
@@ -173,21 +211,21 @@ final class MailModel {
     /// Беседа в другой папке — переключаемся на её папку (как
     /// `folders_ui::reveal` десктопа): иначе открытие из уведомления молча
     /// ничего бы не показало.
-    func open(_ id: String?) {
-        if let id, let c = all.first(where: { $0.id == id }) {
+    func open(_ ref: String?) {
+        if let ref, let c = all.first(where: { $0.ref == ref }) {
             let fid = doc.folderOf(c).map { doc.folders[$0].id }
             if fid != activeFolderID { activeFolderID = fid }
         }
-        selectedID = id
+        selectedID = ref
     }
 
     private func openSelected() {
         compose.reset()
         conversation.open(selected)
-        if let id = selectedID { Notifier.clear(conversation: id) }
-        guard let c = selected, c.unreadCount > 0 else { return }
-        Task { [engine] in
-            do { try await engine.markRead(c) } catch { self.notice = "Не удалось отметить прочитанным: \(error.localizedDescription)" }
+        if let ref = selectedID { Notifier.clear(conversation: ref) }
+        guard let c = selected, c.unreadCount > 0, let p = provider(c) else { return }
+        Task {
+            do { try await p.markRead(c) } catch { self.fail("Не удалось отметить прочитанным", error, c.accountKey) }
         }
     }
 
@@ -198,25 +236,41 @@ final class MailModel {
 
     // MARK: Действия
 
-    private func targets(_ ids: Set<String>) -> [Conversation] { all.filter { ids.contains($0.id) } }
+    private func targets(_ refs: Set<String>) -> [Conversation] { all.filter { refs.contains($0.ref) } }
 
-    /// Свайп и меню: прочитано ⇄ непрочитано.
-    func toggleRead(_ c: Conversation) {
-        Task { [engine] in
-            do {
-                if c.unreadCount > 0 { try await engine.markRead(c) } else { try await engine.markUnread(c) }
-            } catch { notice = "Не удалось: \(error.localizedDescription)" }
+    /// Беседы по учёткам — каждой учётке своё.
+    private func byProvider(_ convs: [Conversation]) -> [(any MailProvider, [Conversation])] {
+        Dictionary(grouping: convs, by: \.accountKey).compactMap { key, list in
+            workspace.link(key).map { ($0.provider, list) }
         }
     }
 
-    func markRead(_ ids: Set<String>, read: Bool) {
-        let convs = targets(ids)
-        picked.removeAll()
-        Task { [engine] in
+    private func fail(_ what: String, _ error: Error, _ key: String? = nil) {
+        if isAuthFailure(error), let key { workspace.link(key)?.report(.dead) }
+        notice = "\(what): \(error.localizedDescription)"
+    }
+
+    /// Свайп и меню: прочитано ⇄ непрочитано.
+    func toggleRead(_ c: Conversation) {
+        guard let p = provider(c) else { return }
+        Task {
             do {
-                for c in convs { if read { try await engine.markRead(c) } else { try await engine.markUnread(c) } }
+                if c.unreadCount > 0 { try await p.markRead(c) } else { try await p.markUnread(c) }
+            } catch { fail("Не удалось", error, c.accountKey) }
+        }
+    }
+
+    func markRead(_ refs: Set<String>, read: Bool) {
+        let convs = targets(refs)
+        picked.removeAll()
+        Task {
+            do {
+                for c in convs {
+                    guard let p = provider(c) else { continue }
+                    if read { try await p.markRead(c) } else { try await p.markUnread(c) }
+                }
                 notice = read ? "Прочитано: \(convs.count)" : "Непрочитано: \(convs.count)"
-            } catch { notice = "Не удалось: \(error.localizedDescription)" }
+            } catch { fail("Не удалось", error) }
         }
     }
 
@@ -225,69 +279,109 @@ final class MailModel {
     var folderTargets: [DialogFolder] { doc.folders.filter { !$0.isSystem } }
 
     /// В папку (`nil` — во «Входящие») — одной правкой документа на весь выбор.
-    func move(_ ids: Set<String>, to folderID: String?) {
-        let convs = targets(ids)
+    func move(_ refs: Set<String>, to folderID: String?) {
+        let convs = targets(refs)
         picked.removeAll()
         let name = folderID.flatMap { id in doc.folders.first { $0.id == id }?.name } ?? "Входящие"
-        Task { [engine] in
+        Task { [folderSource] in
             do {
-                try await engine.assignFolder(convs, folderID: folderID)
+                try await folderSource.assignFolder(convs, folderID: folderID)
                 notice = "Перенесено в «\(name)»: \(convs.count)"
-            } catch { notice = "Не удалось перенести: \(error.localizedDescription)" }
+            } catch { fail("Не удалось перенести", error, workspace.primary?.account.key) }
         }
     }
 
     /// Сколько бесед и писем — для подтверждений удаления и «В спам».
-    func summary(_ ids: Set<String>) -> (conversations: Int, messages: Int) {
-        let c = targets(ids)
+    func summary(_ refs: Set<String>) -> (conversations: Int, messages: Int) {
+        let c = targets(refs)
         return (c.count, c.reduce(0) { $0 + $1.messages.count })
     }
 
-    func delete(_ ids: Set<String>) {
-        let convs = targets(ids)
+    func delete(_ refs: Set<String>) {
+        let convs = targets(refs)
         picked.removeAll()
-        if let s = selectedID, ids.contains(s) { selectedID = nil }
-        Task { [engine] in
-            do {
-                try await engine.deleteConversations(convs)
-                notice = "Удалено бесед: \(convs.count)"
-            } catch { notice = "Не удалось удалить: \(error.localizedDescription)" }
+        if let s = selectedID, refs.contains(s) { selectedID = nil }
+        Task {
+            var failed = false
+            for (p, list) in byProvider(convs) {
+                do { try await p.deleteConversations(list) } catch {
+                    failed = true
+                    fail("Не удалось удалить", error, p.accountKey)
+                }
+            }
+            if !failed { notice = "Удалено бесед: \(convs.count)" }
             await sync()
         }
     }
 
-    /// «В спам» (Android §5): письма удаляются, отправители блокируются —
-    /// по адресу или по домену.
-    func reportSpam(_ ids: Set<String>, scope: String) {
-        let convs = targets(ids).filter { !$0.spam }
+    /// Как выбранные беседы умеют «В спам»: правилом (ddmail), переносом в
+    /// Junk (IMAP) или никак (нет папки Junk — пункта нет).
+    func spamSupport(_ refs: Set<String>) -> SpamSupport {
+        let kinds = Set(targets(refs).compactMap { provider($0)?.spamSupport() })
+        if kinds.isEmpty || kinds.contains(.none) { return .none }
+        return kinds.contains(.rules) && kinds.count == 1 ? .rules : .folder
+    }
+
+    /// «В спам» (Android §5): ddmail — письма удаляются, отправители
+    /// блокируются по адресу или домену; IMAP — перенос в Junk.
+    func reportSpam(_ refs: Set<String>, scope: String) {
+        let convs = targets(refs).filter { !$0.spam }
         picked.removeAll()
         guard !convs.isEmpty else { return }
-        if let s = selectedID, ids.contains(s) { selectedID = nil }
-        Task { [engine] in
-            do {
-                let o = try await engine.reportSpam(convs, scope: scope)
-                let what = (o.ruleType == "domain" ? "домен " : "") + o.ruleValue
-                let more = o.ruleCount > 1 ? " и ещё \(o.ruleCount - 1)" : ""
-                notice = "✓ В спам: \(what)\(more), удалено писем: \(o.deleted)"
-            } catch { notice = "Не удалось отправить в спам: \(error.localizedDescription)" }
+        if let s = selectedID, refs.contains(s) { selectedID = nil }
+        Task {
+            var notes: [String] = []
+            for (p, list) in byProvider(convs) {
+                do {
+                    let o = try await p.reportSpam(list, scope: scope)
+                    if o.ruleValue.isEmpty {
+                        notes.append("✓ В спам: бесед \(list.count)")
+                    } else {
+                        let what = (o.ruleType == "domain" ? "домен " : "") + o.ruleValue
+                        let more = o.ruleCount > 1 ? " и ещё \(o.ruleCount - 1)" : ""
+                        notes.append("✓ В спам: \(what)\(more), удалено писем: \(o.deleted)")
+                    }
+                } catch { fail("Не удалось отправить в спам", error, p.accountKey) }
+            }
+            if !notes.isEmpty { notice = notes.joined(separator: "; ") }
             await sync()
         }
     }
 
-    /// «Не спам»; `trust` — ещё и доверять отправителю.
-    func notSpam(_ ids: Set<String>, trust: Bool) {
-        let convs = targets(ids).filter(\.spam)
+    /// «Не спам»; `trust` — ещё и доверять отправителю (только ddmail).
+    func notSpam(_ refs: Set<String>, trust: Bool) {
+        let convs = targets(refs).filter(\.spam)
         picked.removeAll()
         guard !convs.isEmpty else { return }
-        if let s = selectedID, ids.contains(s) { selectedID = nil }
-        Task { [engine] in
-            do {
-                try await engine.restoreSpam(convs, trust: trust)
+        if let s = selectedID, refs.contains(s) { selectedID = nil }
+        Task {
+            var ok = true
+            for (p, list) in byProvider(convs) {
+                do { try await p.restoreSpam(list, trust: trust) } catch {
+                    ok = false
+                    fail("Не удалось вернуть из спама", error, p.accountKey)
+                }
+            }
+            if ok {
                 notice = trust
                     ? "Во «Входящие», отправителям доверяем: бесед \(convs.count)"
                     : "Во «Входящие»: бесед \(convs.count)"
-            } catch { notice = "Не удалось вернуть из спама: \(error.localizedDescription)" }
+            }
             await sync()
         }
     }
+
+    /// «Доверять отправителю» есть только у ddmail (правило сервера).
+    func canTrust(_ refs: Set<String>) -> Bool {
+        targets(refs).allSatisfy { provider($0)?.spamSupport() == .rules }
+    }
 }
+
+/// Живой канал учётки, пока приложение на экране.
+@MainActor
+protocol LiveChannel: AnyObject {
+    func start()
+    func stop()
+}
+
+extension LiveUpdates: LiveChannel {}

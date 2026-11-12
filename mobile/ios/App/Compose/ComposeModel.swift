@@ -25,10 +25,11 @@ final class ComposeModel {
         var original: MessageBody? { if case let .forward(o) = branch { o } else { nil } }
     }
 
-    private let engine: SyncEngine
+    @ObservationIgnored private unowned let workspace: Workspace
     private let conversation: ConversationModel
-    private let syncSoon: () -> Void
-    private let onAuthDead: () -> Void
+    /// Синк учётки, через которую ушло письмо.
+    private let syncSoon: (String) -> Void
+    private let onAuthDead: @MainActor (String) -> Void
 
     /// Черновик ответа в открытой беседе.
     var draft = Draft()
@@ -45,14 +46,46 @@ final class ComposeModel {
     private(set) var sentTarget: Set<String>?
     private var stubSeq = 0
 
-    init(engine: SyncEngine, conversation: ConversationModel, syncSoon: @escaping () -> Void, onAuthDead: @escaping () -> Void) {
-        self.engine = engine
+    init(workspace: Workspace, conversation: ConversationModel, syncSoon: @escaping (String) -> Void, onAuthDead: @escaping @MainActor (String) -> Void) {
+        self.workspace = workspace
         self.conversation = conversation
         self.syncSoon = syncSoon
         self.onAuthDead = onAuthDead
     }
 
-    var identities: [Identity] { engine.identities() }
+    /// Свои адреса всех учёток; учётка открытой беседы — первой, чтобы при
+    /// одинаковом адресе в двух учётках ответ ушёл через свою (`owner_for`).
+    var identities: [Identity] {
+        let prefer = conversation.conversation?.accountKey
+        let ordered = workspace.links.sorted { ($0.account.key == prefer ? 0 : 1) < ($1.account.key == prefer ? 0 : 1) }
+        var seen = Set<String>()
+        return ordered.flatMap { $0.provider.identities() }.filter { seen.insert($0.email.lowercased()).inserted }
+    }
+
+    /// Учётка для отправки — владелец адреса From (как `owner_for` десктопа):
+    /// учётка открытой беседы, если адрес её; иначе первая владеющая.
+    func owner(of request: SendRequest) -> AccountLink? {
+        let from = bareAddress(request.from)
+        let owners = workspace.links.filter { l in l.provider.identities().contains { $0.email.lowercased() == from } }
+        if let prefer = conversation.conversation?.accountKey, let l = owners.first(where: { $0.account.key == prefer }) { return l }
+        return owners.first
+    }
+
+    /// Отправить через учётку-владельца адреса From; нет владельца — отказ.
+    private func send(_ request: SendRequest) async throws -> String {
+        guard let link = owner(of: request) else { throw SendRefused() }
+        do {
+            try await link.provider.send(request)
+        } catch {
+            if isAuthFailure(error) { onAuthDead(link.account.key) }
+            throw error
+        }
+        return link.account.key
+    }
+
+    struct SendRefused: Error, LocalizedError {
+        var errorDescription: String? { "Не через что отправить: адрес «От» не принадлежит ни одной учётке" }
+    }
 
     /// Сменилась беседа — явный ответ и переопределения не переезжают в другую.
     func reset() {
@@ -114,11 +147,10 @@ final class ComposeModel {
             reset()
             Task {
                 do {
-                    try await engine.send(request)
+                    let via = try await send(request)
                     flash()
-                    afterSend()
+                    afterSend(via)
                 } catch {
-                    if case APIError.unauthorized = error { onAuthDead() }
                     conversation.web.run("ddm.unstub(\"\(key)\")")
                     // Текст возвращается, если композер пуст (не затираем набранное заново).
                     if draft.isEmpty { draft = sent }
@@ -143,8 +175,12 @@ final class ComposeModel {
                 (fwdText, fwdHTML) = forwardBlock(o)
                 // Пересылка несёт вложения исходного письма.
                 do {
+                    guard let p = conversation.conversation.flatMap({ workspace.link($0.accountKey)?.provider }) else {
+                        fail("Беседа пересылаемого письма закрыта.")
+                        return
+                    }
                     for a in o.attachments {
-                        let bin = try await engine.attachment(uid: o.uid, index: a.index)
+                        let bin = try await p.attachment(uid: o.uid, index: a.index)
                         extra.append(PendingAttachment(name: a.filename, mime: a.mimeType.isEmpty ? bin.contentType : a.mimeType, data: bin.data))
                     }
                 } catch {
@@ -158,13 +194,12 @@ final class ComposeModel {
                 fail(reason)
             case let .ok(request, to):
                 do {
-                    try await engine.send(request)
+                    let via = try await send(request)
                     if case .new = snapshot.branch { sentTarget = Set(to.map { $0.lowercased() }) }
                     sheet = nil
                     flash()
-                    afterSend()
+                    afterSend(via)
                 } catch {
-                    if case APIError.unauthorized = error { onAuthDead() }
                     fail(Self.sendError(error))
                 }
             }
@@ -185,11 +220,11 @@ final class ComposeModel {
     }
 
     /// Копия в «Отправленных» появится после доставки — подтягиваем её.
-    private func afterSend() {
+    private func afterSend(_ key: String) {
         Task {
             for d in [2, 6, 15, 40] {
                 try? await Task.sleep(for: .seconds(d))
-                syncSoon()
+                syncSoon(key)
             }
         }
     }
@@ -197,7 +232,8 @@ final class ComposeModel {
     static func sendError(_ e: Error) -> String {
         let why: String
         switch e {
-        case APIError.unauthorized: why = "сессия истекла — войдите заново"
+        case APIError.unauthorized: why = "нужен вход в учётку"
+        case is SendRefused: return e.localizedDescription + "."
         case APIError.network: why = "нет соединения с сервером"
         case let APIError.server(code, _): why = code == 413 ? "вложения больше лимита сервера" : "сервер ответил ошибкой \(code)"
         default: why = e.localizedDescription

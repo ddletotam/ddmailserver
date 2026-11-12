@@ -13,6 +13,26 @@ final class ConnectModel {
     struct Prefill {
         var server = ""
         var username = ""
+        /// Окно открыто поверх рабочего пространства («Добавить учётку», «Войти»).
+        var sheet = false
+        /// Повторный вход в эту учётку.
+        var relogin: MailAccount?
+
+        init(server: String = "", username: String = "") {
+            self.server = server
+            self.username = username
+        }
+
+        init(adding: Bool) {
+            sheet = adding
+        }
+
+        init(relogin a: MailAccount) {
+            sheet = true
+            relogin = a
+            server = a.serverURL
+            username = a.username
+        }
     }
 
     var step: Step = .email
@@ -27,21 +47,24 @@ final class ConnectModel {
     private(set) var busy = false
 
     private let transport: HTTPTransport
-    private let store: SessionStore?
+    private let accounts: AccountStore?
     private let discovery: ServerDiscovery
-    private let onConnected: (Session) -> Void
+    private let onAdded: (MailAccount) -> Void
     private var search: Task<Void, Never>?
+    let prefill: Prefill
 
     init(
         transport: HTTPTransport,
-        store: SessionStore? = nil,
+        accounts: AccountStore? = nil,
         prefill: Prefill = Prefill(),
-        onConnected: @escaping (Session) -> Void = { _ in }
+        onAdded: @escaping (MailAccount) -> Void = { _ in }
     ) {
         self.transport = transport
-        self.store = store
-        self.onConnected = onConnected
+        self.accounts = accounts
+        self.onAdded = onAdded
+        self.prefill = prefill
         discovery = .live(transport: transport)
+        if let a = prefill.relogin { email = a.email }
         if !prefill.server.isEmpty {
             step = .found
             server = prefill.server
@@ -134,9 +157,17 @@ final class ConnectModel {
             do {
                 let r = try await DdmailAPI(baseURL: url, transport: transport).login(username: user, password: pw)
                 let session = Session(serverURL: url, username: r.username, userID: r.userID, token: r.token)
-                try store?.save(session)
+                var account = MailAccount.ddmail(session, email: email.contains("@") ? email.lowercased() : "")
+                // Повторный вход — настройки учётки (адреса DAV и т. п.) сохраняются.
+                if let old = prefill.relogin, old.key == account.key {
+                    account = old
+                    account.serverURL = session.serverURL
+                    account.username = session.username
+                    account.userID = session.userID
+                }
+                try accounts?.upsert(account, secret: .session(session))
                 password = ""
-                onConnected(session)
+                onAdded(account)
             } catch {
                 self.error = error.localizedDescription
             }

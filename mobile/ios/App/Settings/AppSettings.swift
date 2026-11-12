@@ -36,16 +36,21 @@ final class AppSettings {
         notifications = d.object(forKey: "settings.notifications") as? Bool ?? true
     }
 
-    /// Самый большой uid, о котором уже уведомили (`nil` — ещё не было прохода).
-    var notifiedMax: Int64? {
-        get { (d.object(forKey: "notify.max") as? NSNumber)?.int64Value }
-        set { d.set(newValue.map { NSNumber(value: $0) }, forKey: "notify.max") }
+    /// Рубежи уведомлений по учёткам: самый большой uid, о котором уже
+    /// уведомили (учётки нет — ещё не было прохода).
+    var notifiedMarks: [String: Int64] {
+        get { (d.dictionary(forKey: "notify.marks") as? [String: NSNumber])?.mapValues(\.int64Value) ?? [:] }
+        set { d.set(newValue.mapValues { NSNumber(value: $0) }, forKey: "notify.marks") }
     }
 
-    /// Выход из учётки: состояние чужой учётки не остаётся.
+    /// Учётку удалили — её рубеж тоже.
+    func forget(account key: String) {
+        notifiedMarks.removeValue(forKey: key)
+    }
+
+    /// Учёток не осталось: состояние чужого человека не остаётся.
     func clearAccountState() {
         prefetch = nil
-        notifiedMax = nil
-        for k in ["mail.activeFolder", "mail.lastConversation"] { d.removeObject(forKey: k) }
+        for k in ["notify.marks", "notify.max", "mail.activeFolder", "mail.lastConversation"] { d.removeObject(forKey: k) }
     }
 }

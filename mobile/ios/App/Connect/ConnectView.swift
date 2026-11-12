@@ -4,6 +4,8 @@ import SwiftUI
 /// ограничена по ширине — поля во всю ширину большого экрана читаются плохо.
 struct ConnectView: View {
     @Bindable var model: ConnectModel
+    /// Окно поверх рабочего пространства — его можно закрыть.
+    var onCancel: (() -> Void)? = nil
     @FocusState private var focus: Field?
 
     enum Field { case email, server, username, password }
@@ -34,8 +36,14 @@ struct ConnectView: View {
             .frame(maxWidth: .infinity)
             .navigationTitle(model.title)
             .toolbar {
-                if model.step != .email {
+                if let onCancel {
                     ToolbarItem(placement: .cancellationAction) {
+                        Button("Закрыть", systemImage: "xmark", action: onCancel)
+                            .disabled(model.busy)
+                    }
+                }
+                if model.step != .email {
+                    ToolbarItem(placement: .navigation) {
                         Button("Назад", systemImage: "chevron.backward") { model.back() }
                             .disabled(model.busy)
                     }

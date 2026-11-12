@@ -5,76 +5,93 @@ import UserNotifications
 /// боковая панель на iPad и Маке — `.sidebarAdaptable` решает сам по ширине окна.
 struct AppShell: View {
     let app: AppModel
-    let connection: Connection
+    let workspace: Workspace
     @SceneStorage("section") private var section: AppSection = .mail
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
+        // Учётки, которым нужен вход, — читаем в теле (контракт §0).
+        let dead = workspace.dead.map { ($0.account.key, $0.account.title) }
         TabView(selection: $section) {
             ForEach(AppSection.allCases) { s in
                 Tab(s.title, systemImage: s.symbol, value: s) {
-                    if s == .mail, let mail = connection.mail {
-                        MailView(model: mail, app: app, connection: connection)
-                    } else if s == .calendar {
-                        CalendarScreen(model: connection.calendar)
-                    } else if s == .tasks {
-                        TasksView(model: connection.tasks)
-                    } else if s == .contacts {
-                        ContactsView(model: connection.contacts, avatars: connection.mail?.avatars) { addr in
-                            // «Написать» — новое письмо на адрес, в разделе почты.
-                            section = .mail
-                            connection.mail?.compose.openNew(to: addr)
-                        }
-                    } else {
-                        NavigationStack {
-                            SectionPlaceholder(section: s, app: app, connection: connection)
-                        }
-                    }
+                    content(s)
                 }
             }
         }
         .tabViewStyle(.sidebarAdaptable)
         .focusedSceneValue(\.mailActions, mailActions)
-        // «Нужен вход» — несмываемая плашка над содержимым, кэш виден (контракт §2).
+        // «Нужен вход» — несмываемая плашка над содержимым у каждой такой
+        // учётки, кэш виден (контракт §2, внешние учётки §7).
         .safeAreaInset(edge: .top, spacing: 0) {
-            if connection.status == .dead {
-                SessionDeadBanner(relogin: app.relogin)
+            if !dead.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(dead, id: \.0) { key, title in
+                        SessionDeadBanner(title: dead.count > 1 || workspace.links.count > 1 ? title : nil) { app.relogin(key) }
+                    }
+                }
             }
         }
-        // Синк на выход приложения на экран (§4); WebSocket — следующим шагом.
+        // Синк на выход приложения на экран (§4), живые каналы — пока на экране (§7).
         .task(id: scenePhase) {
             guard scenePhase == .active else {
-                // Ушли с экрана — канал закрыт: в фоне его держать нельзя (§7).
-                connection.mail?.live.stop()
+                // Ушли с экрана — каналы закрыты: в фоне их держать нельзя (§7).
+                workspace.mail?.live.forEach { $0.stop() }
                 return
             }
-            if let mail = connection.mail {
-                NotificationRouter.shared.attach { [weak mail] id in
-                    // Открыть беседу из уведомления: раздел «Почта», её папка.
-                    section = .mail
-                    mail?.open(id)
-                }
-                NotificationRouter.shared.attachReminders { [connection] key, action in
-                    let r = connection.reminders
+            guard let mail = workspace.mail else { return }
+            NotificationRouter.shared.attach { [weak mail] ref in
+                // Открыть беседу из уведомления: раздел «Почта», её папка.
+                section = .mail
+                mail?.open(ref)
+            }
+            if let reminders = workspace.reminders {
+                NotificationRouter.shared.attachReminders { [workspace] key, action in
                     switch action {
                     case UNNotificationDismissActionIdentifier:
-                        Task { await r.dismiss(key) }
+                        Task { await reminders.dismiss(key) }
                     case UNNotificationDefaultActionIdentifier:
                         // Тап — событие в календаре; уведомление «Скоро» остаётся (§13).
                         section = .calendar
-                        connection.calendar.open(eventID: key.eventID, occStart: key.occStart)
+                        workspace.calendar?.open(eventID: key.eventID, occStart: key.occStart)
                     default:
                         if let s = ReminderService.snoozeActions.first(where: { $0.id == action }) {
-                            Task { await r.snooze(key, minutes: s.minutes) }
+                            Task { await reminders.snooze(key, minutes: s.minutes) }
                         }
                     }
                 }
-                mail.live.start()
-                await mail.sync()
-                await Notifier.requestPermissionIfNeeded()
-                await connection.reminders.refresh()
+            }
+            mail.live.forEach { $0.start() }
+            await mail.sync()
+            await Notifier.requestPermissionIfNeeded()
+            await workspace.reminders?.refresh()
+        }
+    }
+
+    @ViewBuilder private func content(_ s: AppSection) -> some View {
+        switch s {
+        case .mail:
+            if let mail = workspace.mail {
+                MailView(model: mail, app: app, workspace: workspace)
             } else {
-                await connection.check()
+                NavigationStack {
+                    ContentUnavailableView("Почта недоступна", systemImage: "exclamationmark.triangle",
+                                           description: Text(workspace.cacheError ?? "Кэш почты не открылся."))
+                }
+            }
+        case .calendar:
+            if let cal = workspace.calendar { CalendarScreen(model: cal) } else { SectionPlaceholder(section: s) }
+        case .tasks:
+            if let t = workspace.tasks { TasksView(model: t) } else { SectionPlaceholder(section: s) }
+        case .contacts:
+            if let c = workspace.contacts {
+                ContactsView(model: c, avatars: workspace.mail?.avatars) { addr in
+                    // «Написать» — новое письмо на адрес, в разделе почты.
+                    section = .mail
+                    workspace.mail?.compose.openNew(to: addr)
+                }
+            } else {
+                SectionPlaceholder(section: s)
             }
         }
     }
@@ -83,28 +100,30 @@ struct AppShell: View {
 extension AppShell {
     /// Действия этого окна для меню и клавиатуры.
     var mailActions: MailActions? {
-        guard let mail = connection.mail else { return nil }
+        guard let mail = workspace.mail else { return nil }
         let open = mail.selected
         return MailActions(
             newMail: { section = .mail; mail.compose.openNew() },
             reply: open.map { c in { section = .mail; mail.compose.replyTo = mail.conversation.lastIncoming ?? mail.conversation.last; _ = c } },
             forward: (mail.conversation.lastIncoming ?? mail.conversation.last).map { b in { mail.compose.openForward(b) } },
-            delete: open.map { c in { mail.confirmDelete = [c.id] } },
+            delete: open.map { c in { mail.confirmDelete = [c.ref] } },
             refresh: { Task { await mail.sync() } },
             go: { section = $0 }
         )
     }
 }
 
-/// Плашка «сессия истекла»: почта не обновляется, пока не войти заново.
+/// Плашка «нужен вход»: почта учётки не обновляется, пока не войти заново.
 struct SessionDeadBanner: View {
+    /// Учёток несколько — какая именно.
+    let title: String?
     let relogin: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: "person.crop.circle.badge.exclamationmark")
                 .font(.title3)
-            Text("Сессия истекла: почта не обновляется.")
+            Text(title.map { "\($0): нужен вход, почта не обновляется." } ?? "Сессия истекла: почта не обновляется.")
                 .font(.subheadline)
             Spacer(minLength: 8)
             Button("Войти", action: relogin)
@@ -117,46 +136,18 @@ struct SessionDeadBanner: View {
     }
 }
 
-/// Заглушка раздела до его этапа. Меню учётки — в шапке «Почты».
+/// Раздел, которому нужна учётка ddmail (календарь, задачи, контакты), а её нет.
 private struct SectionPlaceholder: View {
     let section: AppSection
-    let app: AppModel
-    let connection: Connection
-    @State private var confirmLogout = false
 
     var body: some View {
-        ContentUnavailableView {
-            Label(section.title, systemImage: section.symbol)
-        } description: {
-            Text(statusText)
-                .accessibilityIdentifier("session.status")
-        }
-        .navigationTitle(section.title)
-        .toolbar {
-            if section == .mail {
-                ToolbarItem(placement: .primaryAction) {
-                    Menu("Учётная запись", systemImage: "person.crop.circle") {
-                        Text(connection.session.accountKey)
-                        Button("Выйти", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
-                            confirmLogout = true
-                        }
-                    }
-                }
+        NavigationStack {
+            ContentUnavailableView {
+                Label(section.title, systemImage: section.symbol)
+            } description: {
+                Text("Раздел ведёт сервер ddmail или CalDAV/CardDAV учётки. Добавьте их в «Настройки → Учётки».")
             }
-        }
-        .confirmationDialog("Выйти из учётной записи?", isPresented: $confirmLogout, titleVisibility: .visible) {
-            Button("Выйти", role: .destructive, action: app.logout)
-        } message: {
-            Text("Сессия и данные учётной записи будут удалены с устройства.")
-        }
-    }
-
-    private var statusText: String {
-        switch connection.status {
-        case .checking: "Проверяем сессию…"
-        case .ok: "Вход выполнен: \(connection.session.accountKey)"
-        case let .offline(reason): reason
-        case .dead: "Нужен вход."
+            .navigationTitle(section.title)
         }
     }
 }

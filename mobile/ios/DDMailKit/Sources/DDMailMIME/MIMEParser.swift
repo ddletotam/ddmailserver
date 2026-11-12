@@ -125,7 +125,16 @@ public struct ParsedMessage: Sendable {
         var atts: [MIMEAttachment] = []
         var attParts: [MIMEPart] = []
         var inline: [String: MIMEPart] = [:]
-        Self.walk(root, inAlternative: false, html: &html, text: &text, atts: &atts, attParts: &attParts, inline: &inline)
+        var embedded: [MIMEPart] = []
+        Self.walk(root, inAlternative: false, html: &html, text: &text, atts: &atts, attParts: &attParts, inline: &inline, embedded: &embedded)
+        // Встроенная часть, на которую HTML не ссылается, — настоящий
+        // документ (так шлют Directum и подобные): её видно как вложение
+        // (правило сервера `hideInlineAttachment`).
+        let lowerHTML = (html ?? "").lowercased()
+        for p in embedded {
+            guard let cid = p.contentID, !lowerHTML.contains("cid:" + cid.lowercased()) else { continue }
+            Self.addAttachment(p, &atts, &attParts)
+        }
         self.html = html
         self.text = text
         attachments = atts
@@ -142,12 +151,13 @@ public struct ParsedMessage: Sendable {
     private static func walk(
         _ p: MIMEPart, inAlternative: Bool,
         html: inout String?, text: inout String?,
-        atts: inout [MIMEAttachment], attParts: inout [MIMEPart], inline: inout [String: MIMEPart]
+        atts: inout [MIMEAttachment], attParts: inout [MIMEPart], inline: inout [String: MIMEPart],
+        embedded: inout [MIMEPart]
     ) {
         if p.isMultipart {
             let alt = p.mimeType == "multipart/alternative"
             for c in p.children {
-                walk(c, inAlternative: alt, html: &html, text: &text, atts: &atts, attParts: &attParts, inline: &inline)
+                walk(c, inAlternative: alt, html: &html, text: &text, atts: &atts, attParts: &attParts, inline: &inline, embedded: &embedded)
             }
             return
         }
@@ -163,8 +173,12 @@ public struct ParsedMessage: Sendable {
             isAttachment = p.filename != nil && !inAlternative && disp != "inline"
         } else if type == "message/rfc822" {
             isAttachment = true
+        } else if type == "text/calendar" {
+            // Синтетическое приглашение рядом с текстом — не вложение (как у сервера).
+            isAttachment = false
         } else {
             isAttachment = cid == nil || p.filename != nil && disp != "inline"
+            if !isAttachment { embedded.append(p) }
         }
         if isText && !isAttachment {
             if type == "text/html", html == nil { html = p.text }
@@ -174,20 +188,25 @@ public struct ParsedMessage: Sendable {
         // Пустой «лист» без имени (например, text/plain с пустым телом в
         // конце mixed) — не вложение.
         if isAttachment && !(isText && p.filename == nil) {
-            let body = p.decodedBody
-            var name = p.filename ?? ""
-            if name.isEmpty {
-                if type == "message/rfc822" {
-                    let inner = MIMEPart(raw: body)
-                    let subj = inner.headers.text("Subject") ?? ""
-                    name = (subj.isEmpty ? "письмо" : subj) + ".eml"
-                } else {
-                    name = "attachment_\(atts.count)"
-                }
-            }
-            atts.append(MIMEAttachment(filename: name, mimeType: type, size: body.count, index: atts.count))
-            attParts.append(p)
+            addAttachment(p, &atts, &attParts)
         }
+    }
+
+    private static func addAttachment(_ p: MIMEPart, _ atts: inout [MIMEAttachment], _ attParts: inout [MIMEPart]) {
+        let type = p.mimeType
+        let body = p.decodedBody
+        var name = p.filename ?? ""
+        if name.isEmpty {
+            if type == "message/rfc822" {
+                let inner = MIMEPart(raw: body)
+                let subj = inner.headers.text("Subject") ?? ""
+                name = (subj.isEmpty ? "письмо" : subj) + ".eml"
+            } else {
+                name = "attachment_\(atts.count)"
+            }
+        }
+        atts.append(MIMEAttachment(filename: name, mimeType: type, size: body.count, index: atts.count))
+        attParts.append(p)
     }
 
     /// Байты вложения по номеру и его тип.

@@ -10,8 +10,9 @@ import Observation
 final class ConversationModel {
     let web = ConversationWeb()
     let gate = RemoteImageGate()
-    private let engine: SyncEngine
-    private let onAuthDead: () -> Void
+    /// Источник почты по учётке беседы.
+    private let provider: @MainActor (String) -> (any MailProvider)?
+    private let onAuthDead: @MainActor (String) -> Void
 
     private(set) var conversation: Conversation?
     /// Веб-представление создано: контейнер на экране должен его вставить
@@ -40,8 +41,8 @@ final class ConversationModel {
         var id: String { "\(uid)/\(index)" }
     }
 
-    init(engine: SyncEngine, onAuthDead: @escaping () -> Void) {
-        self.engine = engine
+    init(provider: @escaping @MainActor (String) -> (any MailProvider)?, onAuthDead: @escaping @MainActor (String) -> Void) {
+        self.provider = provider
         self.onAuthDead = onAuthDead
         web.host = self
         Task {
@@ -68,22 +69,22 @@ final class ConversationModel {
         let first = window.first
         let focus = window.focus
         loading = Task {
-            let loaded = await load(first)
-            guard !Task.isCancelled, conversation?.id == c.id else { return }
+            let loaded = await load(first, of: c)
+            guard !Task.isCancelled, conversation?.ref == c.ref else { return }
             send("set", c, loaded, focus: focus)
         }
     }
 
     /// Беседа обновилась дельтой: новые письма — снизу, без перерисовки.
     func updated(_ c: Conversation) {
-        guard conversation?.id == c.id else { return }
+        guard conversation?.ref == c.ref else { return }
         conversation = c
         let fresh = window.fresh(c.messages)
         guard !fresh.isEmpty else { return }
         gate.extend(fresh.map(\.uid))
         Task {
-            let loaded = await load(fresh)
-            guard conversation?.id == c.id else { return }
+            let loaded = await load(fresh, of: c)
+            guard conversation?.ref == c.ref else { return }
             send("append", c, loaded, focus: nil)
         }
     }
@@ -93,24 +94,26 @@ final class ConversationModel {
         let next = window.older()
         guard !next.isEmpty else { return }
         Task {
-            let loaded = await load(next)
-            guard conversation?.id == c.id else { return }
+            let loaded = await load(next, of: c)
+            guard conversation?.ref == c.ref else { return }
             send("prepend", c, loaded, focus: nil)
         }
     }
 
-    private func load(_ refs: [MessageRef]) async -> [MessageBody] {
+    private func load(_ refs: [MessageRef], of c: Conversation) async -> [MessageBody] {
+        guard let p = provider(c.accountKey) else { return [] }
         do {
-            let got = try await engine.bodies(refs)
+            let got = try await p.bodies(refs)
             for b in got { bodies[b.uid] = b }
             return got
-        } catch APIError.unauthorized {
-            onAuthDead()
-            return []
         } catch {
+            if isAuthFailure(error) { onAuthDead(c.accountKey) }
             return []
         }
     }
+
+    /// Источник почты открытой беседы.
+    private var current: (any MailProvider)? { conversation.flatMap { provider($0.accountKey) } }
 
     private func send(_ op: String, _ c: Conversation, _ list: [MessageBody], focus: Int64?) {
         let fresh = list.filter { shown.insert($0.uid).inserted }
@@ -128,15 +131,15 @@ final class ConversationModel {
     func download(uid: Int64, index: Int) async -> URL? {
         let name = safeFileName(attachmentName(uid: uid, index: index))
         do {
-            let bin = try await engine.attachment(uid: uid, index: index)
+            guard let p = current else { return nil }
+            let bin = try await p.attachment(uid: uid, index: index)
             let dir = URL.temporaryDirectory.appending(path: "attachments/\(uid)-\(index)")
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let file = dir.appending(path: name)
             try bin.data.write(to: file, options: .atomic)
             return file
-        } catch APIError.unauthorized {
-            onAuthDead()
         } catch {
+            if isAuthFailure(error), let k = conversation?.accountKey { onAuthDead(k) }
             notice = "Не удалось скачать «\(name)»: \(error.localizedDescription)"
         }
         return nil
@@ -173,7 +176,8 @@ extension ConversationModel: ConversationWebHost {
     func webAllowSpamImages(uid: Int64) { gate.allow(uid) }
 
     func webPart(uid: Int64, cid: String) async throws -> (Data, String) {
-        let b = try await engine.part(uid: uid, cid: cid)
+        guard let p = current else { throw APIError.network("беседа закрыта") }
+        let b = try await p.part(uid: uid, cid: cid)
         return (b.data, b.contentType)
     }
 
