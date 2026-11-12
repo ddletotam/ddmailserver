@@ -133,7 +133,9 @@ final class ConversationModel {
         do {
             guard let p = current else { return nil }
             let bin = try await p.attachment(uid: uid, index: index)
-            let dir = URL.temporaryDirectory.appending(path: "attachments/\(uid)-\(index)")
+            // Учёток несколько — id писем разных учёток могут совпасть: каталог по учётке.
+            let account = abs((conversation?.accountKey ?? "").hashValue)
+            let dir = URL.temporaryDirectory.appending(path: "attachments/\(account)/\(uid)-\(index)")
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let file = dir.appending(path: name)
             try bin.data.write(to: file, options: .atomic)

@@ -103,20 +103,34 @@ final class ImapFlowTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(common.count, min(3, viaIMAP.count), "беседы по IMAP не совпали с ddmail по id")
 
         // 4. Календарь той же учётки — по CalDAV, найденному при подключении (§8).
-        #if os(iOS)
-        if app.navigationBars.buttons.count > 0, !app.tabBars.buttons["Календарь"].exists {
+        // В беседе на iPhone таб-бар скрыт — назад к списку; на iPad и Маке разделы видны всегда.
+        if !section("Календарь", app).exists, app.navigationBars.buttons.count > 0 {
             app.navigationBars.buttons.element(boundBy: 0).tap()
         }
-        #endif
-        let cal = app.tabBars.buttons["Календарь"].exists ? app.tabBars.buttons["Календарь"].firstMatch : app.buttons["Календарь"].firstMatch
+        settle(app)
+        let cal = section("Календарь", app)
         XCTAssertTrue(cal.waitForExistence(timeout: 10), "нет раздела «Календарь»")
         cal.tap()
-        XCTAssertTrue(app.buttons["Сегодня"].waitForExistence(timeout: 20), "календарь CalDAV не открылся")
+        let today = app.buttons["Сегодня"].waitForExistence(timeout: 20)
+        shot(app, "lucky-4a-calendar-tapped")
+        XCTAssertTrue(today, "календарь CalDAV не открылся")
         sleep(4)
         shot(app, "lucky-4-caldav")
     }
 
     // MARK: Помощники
+
+    /// Раздел: кнопка таб-бара (iPhone) или строка боковой панели (iPad, Мак).
+    @MainActor
+    private func section(_ name: String, _ app: XCUIApplication) -> XCUIElement {
+        let button = app.tabBars.buttons[name].firstMatch
+        if button.exists { return button }
+        let any = app.buttons[name].firstMatch
+        if any.exists { return any }
+        let text = app.staticTexts[name].firstMatch
+        if text.exists { return text }
+        return app.cells.containing(.staticText, identifier: name).firstMatch
+    }
 
     /// Ждём строки списка (и закрываем вопросы: уведомления, загрузка заранее); id видимых бесед.
     @MainActor
@@ -162,12 +176,32 @@ final class ImapFlowTests: XCTestCase {
 
     @MainActor
     private func openSettings(_ app: XCUIApplication) {
+        settle(app)
         let more = app.buttons["Ещё"].firstMatch
         XCTAssertTrue(more.waitForExistence(timeout: 10), "нет меню «Ещё»")
         more.tap()
         let item = app.buttons["Настройки"].exists ? app.buttons["Настройки"].firstMatch : app.menuItems["Настройки"].firstMatch
         XCTAssertTrue(item.waitForExistence(timeout: 5), "нет пункта «Настройки»")
         item.tap()
+        shot(app, "settings-1-open")
+    }
+
+    /// Вопрос о загрузке и системный запрос уведомлений могут прийти уже
+    /// после списка — сначала ответить на них, иначе нажатие уйдёт в них.
+    @MainActor
+    private func settle(_ app: XCUIApplication) {
+        let wifi = app.buttons["Только по Wi-Fi"].firstMatch
+        #if os(iOS)
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let allow = springboard.alerts.buttons.matching(NSPredicate(format: "label IN %@", ["Разрешить", "Allow"])).firstMatch
+        #endif
+        for _ in 0..<6 {
+            #if os(iOS)
+            if allow.exists { allow.tap() }
+            #endif
+            if wifi.exists { wifi.tap() }
+            sleep(1)
+        }
     }
 
     @MainActor
