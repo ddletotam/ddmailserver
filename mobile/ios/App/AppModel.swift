@@ -1,5 +1,6 @@
 import DDMailAPI
 import DDMailAuth
+import DDMailDAV
 import DDMailStore
 import DDMailSync
 import Foundation
@@ -162,18 +163,54 @@ final class Workspace {
     /// аватарки и документы папок.
     var primary: AccountLink? { links.first { $0.engine != nil } }
 
-    @ObservationIgnored private(set) lazy var calendar: CalendarModel? = primary?.api.map { api in
-        let m = CalendarModel(api: api) { [weak self] in self?.primary?.report(.dead) }
+    /// Общий календарь: ddmail (первая учётка) и CalDAV внешних учёток (§8).
+    @ObservationIgnored private(set) lazy var calendarHub: CalendarHub? = {
+        var sources: [(key: String, source: any CalendarSource)] = []
+        if let p = primary, let api = p.api { sources.append((p.account.key, api)) }
+        for l in links where l.account.kind == .imap {
+            guard let url = URL(string: l.account.caldavURL), !l.account.caldavURL.isEmpty else { continue }
+            sources.append((l.account.key, DAVCalendarSource(accountKey: l.account.key, url: url, email: l.account.email, client: davClient(l.account))))
+        }
+        return sources.isEmpty ? nil : CalendarHub(sources, onFailure: reportFailure)
+    }()
+
+    /// Общая книга: ddmail и CardDAV внешних учёток.
+    @ObservationIgnored private(set) lazy var contactsHub: ContactsHub? = {
+        var sources: [(key: String, source: any ContactsSource)] = []
+        if let p = primary, let api = p.api { sources.append((p.account.key, api)) }
+        for l in links where l.account.kind == .imap {
+            guard let url = URL(string: l.account.carddavURL), !l.account.carddavURL.isEmpty else { continue }
+            sources.append((l.account.key, DAVContactsSource(accountKey: l.account.key, url: url, email: l.account.email, client: davClient(l.account))))
+        }
+        return sources.isEmpty ? nil : ContactsHub(sources, onFailure: reportFailure)
+    }()
+
+    /// DAV внешней учётки — Basic паролем учётки; пароль — из Keychain при каждом запросе.
+    private func davClient(_ a: MailAccount) -> DAVClient {
+        let store = self.store, key = a.key
+        return DAVClient(user: a.imapLogin, password: { store.secret(key)?.password })
+    }
+
+    /// Отказ источника календаря или контактов — состояние его учётки.
+    private var reportFailure: CalendarHub.Failure {
+        { [weak self] key, error in
+            await MainActor.run { self?.link(key)?.report(error: error) }
+        }
+    }
+
+    @ObservationIgnored private(set) lazy var calendar: CalendarModel? = calendarHub.map { hub in
+        let m = CalendarModel(api: hub) { [weak self] in self?.primary?.report(.dead) }
         // Календарь перечитан (правка, calendar_updated) — напоминания пересеять.
         m.onReloaded = { [weak self] in Task { await self?.reminders?.refresh() } }
+        m.myEmails = Set(links.flatMap { $0.provider.identities().map { $0.email.lowercased() } })
         return m
     }
-    @ObservationIgnored private(set) lazy var reminders: ReminderService? = primary?.api.map { ReminderService(api: $0) }
+    @ObservationIgnored private(set) lazy var reminders: ReminderService? = calendarHub.map { ReminderService(api: $0) }
     @ObservationIgnored private(set) lazy var tasks: TasksModel? = primary?.api.map { api in
         TasksModel(api: api) { [weak self] in self?.primary?.report(.dead) }
     }
-    @ObservationIgnored private(set) lazy var contacts: ContactsModel? = primary?.api.map { api in
-        ContactsModel(api: api) { [weak self] in self?.primary?.report(.dead) }
+    @ObservationIgnored private(set) lazy var contacts: ContactsModel? = contactsHub.map { hub in
+        ContactsModel(api: hub) { [weak self] in self?.primary?.report(.dead) }
     }
 
     init(accounts: [MailAccount], store: AccountStore, transport: HTTPTransport) {

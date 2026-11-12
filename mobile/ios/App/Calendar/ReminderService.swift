@@ -1,5 +1,6 @@
 import DDMailAPI
 import DDMailCalendar
+import DDMailDAV
 import Foundation
 import os
 import UserNotifications
@@ -22,7 +23,7 @@ final class ReminderService {
         ("snooze.60", 60, "Через 1 ч"), ("snooze.start", nil, "В момент начала"),
     ]
 
-    private let api: SessionAPI
+    private let api: any CalendarSource
     private var rows: [ReminderRow] = []
     /// id уведомлений, которые мы ставили (их срок прошёл — значит, показаны).
     private var scheduled: Set<String> = []
@@ -33,7 +34,7 @@ final class ReminderService {
         var scheduled: Set<String>
     }
 
-    init(api: SessionAPI) {
+    init(api: any CalendarSource) {
         self.api = api
         if let d = try? Data(contentsOf: file), let s = try? JSONDecoder().decode(Saved.self, from: d) {
             rows = s.rows

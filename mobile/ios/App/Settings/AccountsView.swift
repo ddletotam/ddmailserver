@@ -63,6 +63,8 @@ struct AccountDetailView: View {
     @State private var confirmRemove = false
     @State private var name = ""
     @State private var extra = ""
+    @State private var caldav = ""
+    @State private var carddav = ""
     @State private var loaded = false
 
     var body: some View {
@@ -87,15 +89,30 @@ struct AccountDetailView: View {
                     Text("Адреса, с которых вы тоже пишете через этот ящик (псевдонимы). По ним беседы понимают, где вы, а где собеседник.")
                 }
                 Section {
+                    TextField("CalDAV", text: $caldav, prompt: Text("https://… (календарь)"))
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("account.caldav")
+                    TextField("CardDAV", text: $carddav, prompt: Text("https://… (контакты)"))
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("account.carddav")
+                } header: {
+                    Text("Календарь и контакты")
+                } footer: {
+                    Text("Находятся по домену при подключении; вход — тем же паролем. Пусто — календаря и контактов этой учётки нет.")
+                }
+                Section {
                     Button("Сохранить", systemImage: "checkmark") {
                         var b = a
                         b.displayName = name.trimmingCharacters(in: .whitespaces)
                         b.extraAddresses = extra.split(whereSeparator: { ",; \n".contains($0) })
                             .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { $0.contains("@") }
+                        b.caldavURL = caldav.trimmingCharacters(in: .whitespaces)
+                        b.carddavURL = carddav.trimmingCharacters(in: .whitespaces)
                         close()
                         app.update(b)
                     }
-                    .disabled(name == a.displayName && extra == a.extraAddresses.joined(separator: ", "))
+                    .disabled(name == a.displayName && extra == a.extraAddresses.joined(separator: ", ")
+                              && caldav == a.caldavURL && carddav == a.carddavURL)
                 }
             }
             Section {
@@ -114,6 +131,8 @@ struct AccountDetailView: View {
             loaded = true
             name = a.displayName
             extra = a.extraAddresses.joined(separator: ", ")
+            caldav = a.caldavURL
+            carddav = a.carddavURL
         }
         .confirmationDialog("Удалить учётку \(a.title)?", isPresented: $confirmRemove, titleVisibility: .visible) {
             Button("Удалить", role: .destructive) {

@@ -101,6 +101,19 @@ final class ImapFlowTests: XCTestCase {
         let common = Set(viaIMAP).intersection(viaDdmail)
         print("ddmail: \(viaDdmail)\nIMAP: \(viaIMAP)")
         XCTAssertGreaterThanOrEqual(common.count, min(3, viaIMAP.count), "беседы по IMAP не совпали с ddmail по id")
+
+        // 4. Календарь той же учётки — по CalDAV, найденному при подключении (§8).
+        #if os(iOS)
+        if app.navigationBars.buttons.count > 0, !app.tabBars.buttons["Календарь"].exists {
+            app.navigationBars.buttons.element(boundBy: 0).tap()
+        }
+        #endif
+        let cal = app.tabBars.buttons["Календарь"].exists ? app.tabBars.buttons["Календарь"].firstMatch : app.buttons["Календарь"].firstMatch
+        XCTAssertTrue(cal.waitForExistence(timeout: 10), "нет раздела «Календарь»")
+        cal.tap()
+        XCTAssertTrue(app.buttons["Сегодня"].waitForExistence(timeout: 20), "календарь CalDAV не открылся")
+        sleep(4)
+        shot(app, "lucky-4-caldav")
     }
 
     // MARK: Помощники

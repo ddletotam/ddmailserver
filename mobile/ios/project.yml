@@ -56,7 +56,7 @@ targets:
         UIBackgroundModes: [fetch, processing]
     dependencies:
       - package: DDMailKit
-        products: [DDMailAPI, DDMailAuth, DDMailStore, DDMailSync, DDMailCalendar, DDMailMIME, DDMailNet, DDMailIMAP, DDMailSMTP]
+        products: [DDMailAPI, DDMailAuth, DDMailStore, DDMailSync, DDMailCalendar, DDMailMIME, DDMailNet, DDMailIMAP, DDMailSMTP, DDMailDAV]
     settings:
       base:
         SUPPORTS_MACCATALYST: NO

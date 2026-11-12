@@ -322,7 +322,7 @@ public struct MailDiscovery: Sendable {
     /// Разбор `config-v1.1.xml`. Сервер годится, если его шифрование совпадает
     /// с тем, что подключение выберет по порту; `plain` отвергается.
     static func parseAutoconfig(_ xml: String, email: String) -> Autoconfig? {
-        guard let root = XMLNode.parse(xml) else { return nil }
+        guard let root = XMLTree.parse(xml) else { return nil }
         func pick(_ tag: String, _ kind: String, _ rule: (Int) -> MailSecurity) -> (Endpoint, String?)? {
             for n in root.descendants(tag) where n.attrs["type"] == kind {
                 guard let hostTpl = n.child("hostname"), let port = n.child("port").flatMap({ Int($0) }),
@@ -415,64 +415,3 @@ public func withTimeout<T: Sendable>(_ limit: Duration, _ work: @escaping @Senda
     }
 }
 
-/// Маленькое дерево XML (автонастройка, ответы DAV) поверх `XMLParser`.
-public final class XMLNode: @unchecked Sendable {
-    public let name: String
-    public let attrs: [String: String]
-    public private(set) var children: [XMLNode] = []
-    public private(set) var text = ""
-
-    init(name: String, attrs: [String: String]) {
-        self.name = name
-        self.attrs = attrs
-    }
-
-    /// Разобрать документ; имена — без префикса пространства имён.
-    public static func parse(_ xml: String) -> XMLNode? {
-        let b = Builder()
-        let p = XMLParser(data: Data(xml.utf8))
-        p.shouldProcessNamespaces = true
-        p.delegate = b
-        guard p.parse(), let root = b.root else { return nil }
-        return root
-    }
-
-    public func child(_ tag: String) -> String? {
-        children.first { $0.name == tag }?.text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    public func first(_ tag: String) -> XMLNode? { children.first { $0.name == tag } }
-
-    public func descendants(_ tag: String) -> [XMLNode] {
-        var out: [XMLNode] = []
-        for c in children {
-            if c.name == tag { out.append(c) }
-            out += c.descendants(tag)
-        }
-        return out
-    }
-
-    private final class Builder: NSObject, XMLParserDelegate {
-        var root: XMLNode?
-        var stack: [XMLNode] = []
-
-        func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes: [String: String] = [:]) {
-            let n = XMLNode(name: elementName, attrs: attributes)
-            stack.last?.children.append(n)
-            if root == nil { root = n }
-            stack.append(n)
-        }
-
-        func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
-            _ = stack.popLast()
-        }
-
-        func parser(_ parser: XMLParser, foundCharacters string: String) {
-            stack.last?.text += string
-        }
-
-        func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
-            stack.last?.text += String(decoding: CDATABlock, as: UTF8.self)
-        }
-    }
-}

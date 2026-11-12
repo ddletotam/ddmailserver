@@ -1,5 +1,6 @@
 import DDMailAPI
 import DDMailAuth
+import DDMailDAV
 import DDMailNet
 import Foundation
 import Observation
@@ -341,9 +342,21 @@ final class ConnectModel {
             defer { busy = false }
             do {
                 try await AccountCheck.check(candidate, password: pw)
-                try accounts?.upsert(candidate, secret: .password(pw))
+                var account = candidate
+                // Адреса CalDAV/CardDAV — по домену, тем же паролем (§8); не нашлись — правятся в настройках.
+                if account.caldavURL.isEmpty || account.carddavURL.isEmpty {
+                    busyText = "Ищем календарь и контакты…"
+                    let dav = DAVClient(user: account.imapLogin, password: { pw })
+                    let host = account.imap?.host ?? "", mail = account.email
+                    async let cal = dav.find(email: mail, imapHost: host, kind: .calendar)
+                    async let card = dav.find(email: mail, imapHost: host, kind: .addressBook)
+                    let (c, d) = await (cal, card)
+                    if account.caldavURL.isEmpty, let c { account.caldavURL = c.absoluteString }
+                    if account.carddavURL.isEmpty, let d { account.carddavURL = d.absoluteString }
+                }
+                try accounts?.upsert(account, secret: .password(pw))
                 password = ""
-                onAdded(candidate)
+                onAdded(account)
             } catch {
                 self.error = error.localizedDescription
             }

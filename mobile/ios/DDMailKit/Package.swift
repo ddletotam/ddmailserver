@@ -17,6 +17,7 @@ let package = Package(
         .library(name: "DDMailNet", targets: ["DDMailNet"]),
         .library(name: "DDMailIMAP", targets: ["DDMailIMAP"]),
         .library(name: "DDMailSMTP", targets: ["DDMailSMTP"]),
+        .library(name: "DDMailDAV", targets: ["DDMailDAV"]),
     ],
     dependencies: [
         // Единственная сторонняя зависимость логики (контракт §1): кэш на SQLite
@@ -31,6 +32,7 @@ let package = Package(
         .target(name: "DDMailNet"),
         .target(name: "DDMailIMAP", dependencies: ["DDMailNet", "DDMailMIME"]),
         .target(name: "DDMailSMTP", dependencies: ["DDMailNet", "DDMailMIME"]),
+        .target(name: "DDMailDAV", dependencies: ["DDMailAPI"]),
         .target(name: "DDMailAuth", dependencies: ["DDMailAPI", "DDMailNet", "DDMailIMAP", "DDMailSMTP"]),
         .target(name: "DDMailStore", dependencies: ["DDMailAPI", .product(name: "GRDB", package: "GRDB.swift")]),
         .target(name: "DDMailSync", dependencies: ["DDMailAPI", "DDMailStore", "DDMailMIME", "DDMailNet", "DDMailIMAP", "DDMailSMTP"]),
@@ -43,6 +45,7 @@ let package = Package(
         .testTarget(name: "DDMailMIMETests", dependencies: ["DDMailMIME"]),
         .testTarget(name: "DDMailIMAPTests", dependencies: ["DDMailIMAP", "DDMailNet", "DDMailMIME"]),
         .testTarget(name: "DDMailSMTPTests", dependencies: ["DDMailSMTP", "DDMailNet", "DDMailMIME"]),
+        .testTarget(name: "DDMailDAVTests", dependencies: ["DDMailDAV", "DDMailAPI"]),
     ],
     swiftLanguageModes: [.v6]
 )
