@@ -90,7 +90,7 @@ class ConnectViewModel(
     fun edit(f: (ConnectState) -> ConnectState) = _state.update { f(it).copy(error = null) }
 
     fun findServer() {
-        val email = _state.value.email.trim()
+        val email = _state.value.email.noSpaces()
         val domain = emailDomain(email)
         if (domain == null) {
             _state.update { it.copy(error = Msg(R.string.err_email)) }
@@ -155,7 +155,7 @@ class ConnectViewModel(
 
     /** «Я знаю все настройки» — ручная IMAP-форма. */
     fun manual() = _state.update { s ->
-        val email = s.email.trim()
+        val email = s.email.noSpaces()
         val p = MailPresets.guess(email)
         s.copy(
             step = ConnectStep.Imap,
@@ -219,7 +219,7 @@ class ConnectViewModel(
     /** IMAP-учётка: проверка входа на IMAP и SMTP, потом — сохранение. */
     private fun saveImap() {
         val s = _state.value
-        val email = s.email.trim().lowercase()
+        val email = s.email.noSpaces().lowercase()
         val imapPort = s.imapPort.trim().toIntOrNull()
         val smtpPort = s.smtpPort.trim().toIntOrNull()
         val needPassword = s.editingKey == null || s.password.isNotEmpty()
@@ -233,10 +233,10 @@ class ConnectViewModel(
             val account = ImapAccount(
                 email = email,
                 name = s.name.trim(),
-                imapHost = s.imapHost.trim().lowercase(),
+                imapHost = s.imapHost.noSpaces().lowercase(),
                 imapPort = imapPort,
-                login = s.imapLogin.trim().ifEmpty { email },
-                smtpHost = s.smtpHost.trim().lowercase(),
+                login = s.imapLogin.noSpaces().ifEmpty { email },
+                smtpHost = s.smtpHost.noSpaces().lowercase(),
                 smtpPort = smtpPort,
                 smtpAuth = s.smtpAuth,
                 extraAddresses = s.extraAddresses.split(',', ';', ' ', '\n').map { it.trim().lowercase() }.filter { it.contains('@') }.distinct(),
@@ -270,3 +270,10 @@ internal fun ApiException.toMsg(): Msg = when (this) {
     is ApiException.Network -> Msg(R.string.err_network, listOf(message ?: ""))
     is ApiException.Server -> Msg(R.string.err_server, listOf(code))
 }
+
+/**
+ * Адрес, логин, хост: пробелы в них — только опечатка или автопробел клавиатуры
+ * (EMUI ставит его после точки даже в поле адреса). Чистим при использовании, а не
+ * в onValueChange: правка текста под IME сбивает ему композицию и съедает буквы.
+ */
+internal fun String.noSpaces(): String = filterNot { it.isWhitespace() }
