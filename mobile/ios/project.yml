@@ -17,7 +17,8 @@ settings:
     # Версия бампается при любой правке клиента (контракт §1).
     MARKETING_VERSION: "0.0.3"
     CURRENT_PROJECT_VERSION: "3"
-    # Команда подписи не в git: mac.sh берёт её из учётки Xcode на Маке.
+    # Команда подписи не в git: mac.sh берёт её из ~/.config/ddmail-ios/team
+    # станции (или из учётки Xcode на Маке).
     CODE_SIGN_STYLE: Automatic
     ALWAYS_SEARCH_USER_PATHS: NO
     # App Group (контракт §7): на iOS — `group.…` (зарегистрирована в
