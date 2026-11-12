@@ -110,15 +110,21 @@ public actor ImapEngine: MailProvider {
         SyncEngine.domain(try store.snapshot([accountKey, spamKey]), account: accountKey, spam: spamKey)
     }
 
-    /// Свои адреса: адрес учётки (по умолчанию), «другие мои» и объявленные сервером.
+    /// Свои адреса: адрес учётки (по умолчанию), «другие мои» и объявленные
+    /// сервером. Сервер ddmail объявил адрес по умолчанию — он и есть
+    /// «От кого» по умолчанию: адрес, введённый при подключении, сервер может
+    /// и не разрешать для отправки.
     public nonisolated func identities() -> [Identity] {
-        var out = [Identity(email: config.email, name: config.displayName, isDefault: true)]
+        let server = serverIdentities()
+        let serverDefault = server.first(where: \.isDefault)?.email.lowercased()
+        var out = [Identity(email: config.email, name: config.displayName, isDefault: serverDefault == nil || serverDefault == config.email.lowercased())]
         var seen: Set<String> = [config.email.lowercased()]
         for a in config.ownAddresses where seen.insert(a.lowercased()).inserted {
             out.append(Identity(email: a, name: config.displayName))
         }
-        for i in serverIdentities() where seen.insert(i.email.lowercased()).inserted {
-            out.append(Identity(email: i.email.lowercased(), name: i.name.isEmpty ? config.displayName : i.name, signature: i.signature))
+        for i in server where seen.insert(i.email.lowercased()).inserted {
+            out.append(Identity(email: i.email.lowercased(), name: i.name.isEmpty ? config.displayName : i.name, signature: i.signature,
+                                isDefault: i.email.lowercased() == serverDefault))
         }
         return out
     }
