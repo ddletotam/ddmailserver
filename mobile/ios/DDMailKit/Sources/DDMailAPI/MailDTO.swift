@@ -304,6 +304,11 @@ public struct PurgeOutcome: Decodable, Equatable, Sendable {
 public struct Binary: Sendable {
     public let data: Data
     public let contentType: String
+
+    public init(data: Data, contentType: String) {
+        self.data = data
+        self.contentType = contentType
+    }
 }
 
 /// Вложение исходящего письма; байты в JSON — base64 (как `[]byte` у Go).

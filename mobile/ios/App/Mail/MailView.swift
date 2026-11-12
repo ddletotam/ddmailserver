@@ -378,7 +378,16 @@ struct ConversationRow: View {
         .padding(.vertical, 4)
         .listRowBackground(selected ? Palette.accent : Color(argb: colors.color(of: c.receivedBy)))
         .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("conv.row")
+        .accessibilityIdentifier(Self.identifier(c))
+    }
+
+    /// Сквозной тест IMAP сверяет беседы по id: в отладочной сборке с
+    /// `-ddmail-uitest-ids` id беседы — в идентификаторе строки (озвучку не меняет).
+    static func identifier(_ c: Conversation) -> String {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-ddmail-uitest-ids") { return "conv.row:\(c.id)" }
+        #endif
+        return "conv.row"
     }
 }
 

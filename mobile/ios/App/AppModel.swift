@@ -120,15 +120,18 @@ final class AccountLink: Identifiable {
     /// Только у ddmail: API сервера (календарь, контакты, аватарки, WebSocket).
     let api: SessionAPI?
     let engine: SyncEngine?
+    /// Только у IMAP: движок (IDLE, закрытие соединений).
+    let imap: ImapEngine?
     private(set) var status: SessionStatus = .checking
 
     nonisolated var id: String { account.key }
 
-    init(account: MailAccount, provider: any MailProvider, api: SessionAPI? = nil, engine: SyncEngine? = nil) {
+    init(account: MailAccount, provider: any MailProvider, api: SessionAPI? = nil, engine: SyncEngine? = nil, imap: ImapEngine? = nil) {
         self.account = account
         self.provider = provider
         self.api = api
         self.engine = engine
+        self.imap = imap
     }
 
     /// Итог синхронизации или проверки. «Нужен вход» липкий: временная
@@ -200,8 +203,17 @@ final class Workspace {
             if session.token.isEmpty { link.report(.dead) }
             return link
         case .imap:
-            // IMAP-учётки — следующим этапом (ImapEngine).
-            return nil
+            guard let imap = a.imap, let smtp = a.smtp else { return nil }
+            let config = ImapAccountConfig(
+                key: a.key, email: a.email, displayName: a.displayName, login: a.imapLogin, imap: imap, smtp: smtp,
+                smtpLogin: a.smtpLogin, smtpAuth: a.smtpAuth, ownAddresses: a.ownAddresses
+            )
+            let key = a.key
+            // Пароль читается из Keychain при каждом соединении: в памяти его не держим.
+            let engine = ImapEngine(config: config, store: cache, password: { store.secret(key)?.password })
+            let link = AccountLink(account: a, provider: engine, imap: engine)
+            if store.secret(a.key)?.password == nil { link.report(.dead) }
+            return link
         }
     }
 
@@ -260,6 +272,7 @@ final class Workspace {
     /// Остановить наблюдение (пространство пересобирается или учёток не осталось).
     func close() {
         mail?.stop()
+        for l in links { if let e = l.imap { Task { await e.close() } } }
     }
 
     /// Учёток не осталось: состояние чужого человека не остаётся на устройстве.

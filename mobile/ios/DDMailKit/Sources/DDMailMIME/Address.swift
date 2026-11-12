@@ -57,8 +57,10 @@ public struct MailAddress: Equatable, Hashable, Sendable {
     static func parseOne(_ item: String) -> MailAddress? {
         if let lt = item.lastIndex(of: "<"), let gt = item[lt...].firstIndex(of: ">") {
             let addr = item[item.index(after: lt)..<gt].trimmingCharacters(in: .whitespaces).lowercased()
+            // Имя — всё до «<» как есть, с «комментарием» в скобках: так берут
+            // имя сервер (`extractName`) и десктоп, и метки бесед совпадают.
             var name = String(item[..<lt]).trimmingCharacters(in: .whitespaces)
-            name = unquote(stripComments(name))
+            name = unquote(name)
             name = EncodedWord.decode(name).trimmingCharacters(in: .whitespaces)
             let email = addr.hasPrefix("mailto:") ? String(addr.dropFirst(7)) : addr
             guard !email.isEmpty else { return nil }

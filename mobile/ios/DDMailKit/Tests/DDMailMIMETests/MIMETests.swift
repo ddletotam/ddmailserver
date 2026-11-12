@@ -182,6 +182,20 @@ struct MIMEParserTests {
         #expect(m.html == "<b>B</b>\n")
     }
 
+    /// Правило сервера `hideInlineAttachment`: встроенный документ, на который
+    /// HTML не ссылается, виден вложением; синтетический text/calendar — нет.
+    @Test func unreferencedInlineIsAttachmentCalendarHidden() {
+        let raw = "Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/html\r\n\r\n<p>без картинок</p>\r\n"
+            + "--b\r\nContent-Type: application/msword; name=doc.docx\r\nContent-Disposition: inline; filename=doc.docx\r\nContent-ID: <d1@x>\r\n\r\nDOC\r\n"
+            + "--b\r\nContent-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\n--b--\r\n"
+        let m = ParsedMessage(raw: Array(raw.utf8))
+        #expect(m.attachments.map(\.filename) == ["doc.docx"])
+    }
+
+    @Test func displayNameKeepsParenthesesLikeServer() {
+        #expect(MailAddress.parseList("Anastasiya K (Confluence) <n@x.ru>").first?.name == "Anastasiya K (Confluence)")
+    }
+
     @Test func forwardedMessageIsAttachment() {
         let raw = "Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nсм.\r\n--b\r\nContent-Type: message/rfc822\r\n\r\nSubject: Отчёт\r\n\r\nтело\r\n--b--\r\n"
         let m = ParsedMessage(raw: Array(raw.utf8))
