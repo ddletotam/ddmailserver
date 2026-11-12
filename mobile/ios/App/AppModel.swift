@@ -90,6 +90,12 @@ final class AppModel {
         connectSheet = makeConnect(.init(relogin: a))
     }
 
+    /// Правка настроек учётки (адреса, имя, DAV) — без секрета.
+    func update(_ account: MailAccount) {
+        try? accounts.upsert(account, secret: nil)
+        reload()
+    }
+
     /// Удалить учётку: секреты и кэш учётки (контракт §1).
     func remove(_ key: String) {
         workspace?.forget(key)

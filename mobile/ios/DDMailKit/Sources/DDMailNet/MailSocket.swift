@@ -237,17 +237,25 @@ final class StreamTaskSocket: MailSocket, @unchecked Sendable {
     }
 
     func send(_ data: Data) async throws {
-        do { try await task.write(data, timeout: timeout) } catch { throw Self.map(error) }
+        try await withTaskCancellationHandler {
+            do { try await task.write(data, timeout: timeout) } catch { throw Self.map(error) }
+        } onCancel: { [task] in
+            task.cancel()
+        }
     }
 
     func receive() async throws -> Data {
-        do {
-            let (data, eof) = try await task.readData(ofMinLength: 1, maxLength: 256 * 1024, timeout: 3600)
-            if let data, !data.isEmpty { return data }
-            if eof { return Data() }
-            return Data()
-        } catch {
-            throw Self.map(error)
+        // Отмена задачи (таймаут чтения, отмена поиска) рвёт соединение — иначе
+        // чтение висело бы до своего часового предела.
+        try await withTaskCancellationHandler {
+            do {
+                let (data, _) = try await task.readData(ofMinLength: 1, maxLength: 256 * 1024, timeout: 3600)
+                return data ?? Data()
+            } catch {
+                throw Self.map(error)
+            }
+        } onCancel: { [task] in
+            task.cancel()
         }
     }
 

@@ -70,6 +70,9 @@ public actor SMTPClient {
 
     func has(_ ext: String) -> Bool { extensions.contains { $0 == ext || $0.hasPrefix(ext + " ") } }
 
+    /// Сервер объявил AUTH (под TLS) — для автонастройки: нет — релей без авторизации.
+    public var advertisesAuth: Bool { !authMechanisms.isEmpty }
+
     private var authMechanisms: [String] {
         extensions.first { $0.hasPrefix("AUTH ") || $0.hasPrefix("AUTH=") }
             .map { $0.dropFirst(5).split(separator: " ").map(String.init) } ?? []

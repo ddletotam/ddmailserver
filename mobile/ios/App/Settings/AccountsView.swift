@@ -61,6 +61,9 @@ struct AccountDetailView: View {
     let link: AccountLink
     let close: () -> Void
     @State private var confirmRemove = false
+    @State private var name = ""
+    @State private var extra = ""
+    @State private var loaded = false
 
     var body: some View {
         let a = link.account
@@ -75,6 +78,26 @@ struct AccountDetailView: View {
                     if let s = a.smtp { LabeledContent("SMTP", value: "\(s.host):\(s.port)") }
                 }
             }
+            if a.kind == .imap {
+                Section {
+                    TextField("Имя в письмах", text: $name, prompt: Text("Как вас подписывать"))
+                    TextField("Другие мои адреса", text: $extra, prompt: Text("через запятую"), axis: .vertical)
+                        .autocorrectionDisabled()
+                } footer: {
+                    Text("Адреса, с которых вы тоже пишете через этот ящик (псевдонимы). По ним беседы понимают, где вы, а где собеседник.")
+                }
+                Section {
+                    Button("Сохранить", systemImage: "checkmark") {
+                        var b = a
+                        b.displayName = name.trimmingCharacters(in: .whitespaces)
+                        b.extraAddresses = extra.split(whereSeparator: { ",; \n".contains($0) })
+                            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { $0.contains("@") }
+                        close()
+                        app.update(b)
+                    }
+                    .disabled(name == a.displayName && extra == a.extraAddresses.joined(separator: ", "))
+                }
+            }
             Section {
                 Button("Войти заново", systemImage: "person.badge.key") {
                     close()
@@ -86,6 +109,12 @@ struct AccountDetailView: View {
         }
         .formStyle(.grouped)
         .navigationTitle(a.title)
+        .onAppear {
+            guard !loaded else { return }
+            loaded = true
+            name = a.displayName
+            extra = a.extraAddresses.joined(separator: ", ")
+        }
         .confirmationDialog("Удалить учётку \(a.title)?", isPresented: $confirmRemove, titleVisibility: .visible) {
             Button("Удалить", role: .destructive) {
                 close()
