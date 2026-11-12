@@ -11,8 +11,8 @@ struct ConversationWindow: View {
     @State private var compose: ComposeModel?
 
     var body: some View {
-        let mail = app.connection?.mail
-        let conv = mail?.all.first { $0.id == conversationID }
+        let mail = app.workspace?.mail
+        let conv = mail?.all.first { $0.ref == conversationID }
         Group {
             if let conv, let model, let compose {
                 NavigationStack {
@@ -28,11 +28,12 @@ struct ConversationWindow: View {
         .frame(minWidth: 480, minHeight: 520)
         .navigationTitle(conv?.label ?? "Беседа")
         .task {
-            guard model == nil, let mail, let conn = app.connection else { return }
-            let m = ConversationModel(engine: mail.engine) { [weak conn] in conn?.report(.dead) }
-            compose = ComposeModel(engine: mail.engine, conversation: m,
-                                   syncSoon: { Task { await mail.sync() } },
-                                   onAuthDead: { [weak conn] in conn?.report(.dead) })
+            guard model == nil, let mail, let ws = app.workspace else { return }
+            let dead: @MainActor (String) -> Void = { [weak ws] key in ws?.link(key)?.report(.dead) }
+            let m = ConversationModel(provider: { [weak ws] key in ws?.link(key)?.provider }, onAuthDead: dead)
+            compose = ComposeModel(workspace: ws, conversation: m,
+                                   syncSoon: { key in Task { await mail.sync(only: key) } },
+                                   onAuthDead: dead)
             model = m
             // Лента готовится асинхронно; документ откроется, как только она будет.
             m.open(conv)

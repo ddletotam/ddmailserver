@@ -1,5 +1,6 @@
 import DDMailAPI
 import DDMailCalendar
+import DDMailDAV
 import Foundation
 import os
 import UserNotifications
@@ -22,7 +23,7 @@ final class ReminderService {
         ("snooze.60", 60, "Через 1 ч"), ("snooze.start", nil, "В момент начала"),
     ]
 
-    private let api: SessionAPI
+    private let api: any CalendarSource
     private var rows: [ReminderRow] = []
     /// id уведомлений, которые мы ставили (их срок прошёл — значит, показаны).
     private var scheduled: Set<String> = []
@@ -33,7 +34,7 @@ final class ReminderService {
         var scheduled: Set<String>
     }
 
-    init(api: SessionAPI) {
+    init(api: any CalendarSource) {
         self.api = api
         if let d = try? Data(contentsOf: file), let s = try? JSONDecoder().decode(Saved.self, from: d) {
             rows = s.rows
@@ -197,6 +198,16 @@ final class ReminderService {
 
     /// Выход из учётки: напоминания чужой учётки не звонят.
     func clear() async { await removeAll() }
+
+    /// Учёток не осталось — без экземпляра сервиса (его API уже нет).
+    static func clearAll() async {
+        let center = UNUserNotificationCenter.current()
+        let pending = await center.pendingNotificationRequests().map(\.identifier).filter { $0.hasPrefix("rem|") }
+        center.removePendingNotificationRequests(withIdentifiers: pending)
+        let delivered = await center.deliveredNotifications().map(\.request.identifier).filter { $0.hasPrefix("rem|") }
+        center.removeDeliveredNotifications(withIdentifiers: delivered)
+        try? FileManager.default.removeItem(at: URL.applicationSupportDirectory.appending(path: "ddmail/reminders.json"))
+    }
 
     private func save() {
         try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)

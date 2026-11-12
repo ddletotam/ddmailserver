@@ -7,7 +7,7 @@ import SwiftUI
 struct MailView: View {
     @Bindable var model: MailModel
     let app: AppModel
-    let connection: Connection
+    let workspace: Workspace
     @State private var picking = false
     @State private var confirmSpam: Set<String>?
     @State private var moving: Set<String>?
@@ -29,7 +29,7 @@ struct MailView: View {
         } detail: {
             detailColumn {
                 if let c = model.selected {
-                    ConversationView(conversation: c, model: model.conversation, compose: model.compose) { confirmSpam = [c.id] }
+                    ConversationView(conversation: c, model: model.conversation, compose: model.compose) { confirmSpam = [c.ref] }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ContentUnavailableView("Беседа не выбрана", systemImage: "bubble.left.and.bubble.right")
@@ -44,8 +44,14 @@ struct MailView: View {
             Text("Письма будут удалены на сервере; у внешних ящиков — и в исходном ящике.")
         }
         .confirmationDialog("В спам?", isPresented: present($confirmSpam), titleVisibility: .visible) {
-            Button("Заблокировать адрес", role: .destructive) { if let ids = confirmSpam { model.reportSpam(ids, scope: "address") } }
-            Button("Заблокировать домен", role: .destructive) { if let ids = confirmSpam { model.reportSpam(ids, scope: "domain") } }
+            // ddmail блокирует адрес или домен правилом сервера; у внешних
+            // учёток правил нет — одна кнопка, письма уходят в Junk (§4).
+            if spamKind == .rules {
+                Button("Заблокировать адрес", role: .destructive) { if let ids = confirmSpam { model.reportSpam(ids, scope: "address") } }
+                Button("Заблокировать домен", role: .destructive) { if let ids = confirmSpam { model.reportSpam(ids, scope: "domain") } }
+            } else {
+                Button("В спам", role: .destructive) { if let ids = confirmSpam { model.reportSpam(ids, scope: "address") } }
+            }
         } message: {
             Text(spamMessage)
         }
@@ -59,8 +65,8 @@ struct MailView: View {
             ComposeSheetView(model: model.compose)
         }
         .sheet(isPresented: $settingsShown) {
-            SettingsView(accountKey: connection.session.accountKey, onLogout: app.logout) {
-                Task { await connection.reminders.refresh() }
+            SettingsView(app: app, workspace: workspace) {
+                Task { await workspace.reminders?.refresh() }
             }
         }
         // Один вопрос после первого входа: ответа по умолчанию нет (§4).
@@ -130,9 +136,9 @@ struct MailView: View {
     }
 
     @ViewBuilder private func rows(_ convs: [Conversation], colors: IdentityColors, selectedID: String?) -> some View {
-        ForEach(convs) { c in
-            ConversationRow(conversation: c, colors: colors, selected: c.id == selectedID, avatars: model.avatars)
-                .tag(c.id)
+        ForEach(convs, id: \.ref) { c in
+            ConversationRow(conversation: c, colors: colors, selected: c.ref == selectedID, avatars: model.avatars)
+                .tag(c.ref)
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
                     if !c.spam {
                         Button {
@@ -146,28 +152,32 @@ struct MailView: View {
                 }
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     if !c.spam {
-                        Button { moving = [c.id] } label: { Label("В папку", systemImage: "folder") }
+                        Button { moving = [c.ref] } label: { Label("В папку", systemImage: "folder") }
                             .tint(.indigo)
                     }
                 }
-                .contextMenu { contextMenu(c) }
+                .contextMenu { contextMenu(c, spamOK: model.spamSupport([c.ref]) != .none) }
         }
     }
 
-    @ViewBuilder private func contextMenu(_ c: Conversation) -> some View {
+    @ViewBuilder private func contextMenu(_ c: Conversation, spamOK: Bool) -> some View {
         if c.spam {
-            Button("Не спам", systemImage: "tray.and.arrow.down") { model.notSpam([c.id], trust: false) }
-            Button("Не спам и доверять отправителю", systemImage: "checkmark.shield") { model.notSpam([c.id], trust: true) }
+            Button("Не спам", systemImage: "tray.and.arrow.down") { model.notSpam([c.ref], trust: false) }
+            if model.canTrust([c.ref]) {
+                Button("Не спам и доверять отправителю", systemImage: "checkmark.shield") { model.notSpam([c.ref], trust: true) }
+            }
         } else {
             Button(c.unreadCount > 0 ? "Прочитано" : "Непрочитано",
                    systemImage: c.unreadCount > 0 ? "envelope.open" : "envelope.badge") { model.toggleRead(c) }
-            Button("В папку…", systemImage: "folder") { moving = [c.id] }
+            Button("В папку…", systemImage: "folder") { moving = [c.ref] }
             #if os(macOS)
-            Button("Открыть в новом окне", systemImage: "macwindow.badge.plus") { openWindow(id: "conversation", value: c.id) }
+            Button("Открыть в новом окне", systemImage: "macwindow.badge.plus") { openWindow(id: "conversation", value: c.ref) }
             #endif
             Divider()
-            Button("В спам…", systemImage: "hand.raised", role: .destructive) { confirmSpam = [c.id] }
-            Button("Удалить…", systemImage: "trash", role: .destructive) { model.confirmDelete = [c.id] }
+            if spamOK {
+                Button("В спам…", systemImage: "hand.raised", role: .destructive) { confirmSpam = [c.ref] }
+            }
+            Button("Удалить…", systemImage: "trash", role: .destructive) { model.confirmDelete = [c.ref] }
         }
     }
 
@@ -202,13 +212,13 @@ struct MailView: View {
     /// Панель множественного выбора (§5): иконки, подписи — для озвучки.
     @ViewBuilder private var pickingActions: some View {
         let ids = model.picked
-        Button("Выбрать все", systemImage: "checklist") { model.picked = Set(model.list.conversations.map(\.id)) }
+        Button("Выбрать все", systemImage: "checklist") { model.picked = Set(model.list.conversations.map(\.ref)) }
         Spacer()
         if model.list.inSpam {
             Button("Не спам", systemImage: "tray.and.arrow.down") { model.notSpam(ids, trust: false); picking = false }
                 .disabled(ids.isEmpty)
             Button("Не спам и доверять отправителю", systemImage: "checkmark.shield") { model.notSpam(ids, trust: true); picking = false }
-                .disabled(ids.isEmpty)
+                .disabled(ids.isEmpty || !model.canTrust(ids))
         } else {
             Button("Прочитано", systemImage: "envelope.open") { model.markRead(ids, read: true); picking = false }
                 .disabled(ids.isEmpty)
@@ -217,7 +227,7 @@ struct MailView: View {
             Button("В папку", systemImage: "folder") { moving = ids }
                 .disabled(ids.isEmpty)
             Button("В спам", systemImage: "hand.raised") { confirmSpam = ids }
-                .disabled(ids.isEmpty)
+                .disabled(ids.isEmpty || model.spamSupport(ids) == .none)
             Button("Удалить", systemImage: "trash", role: .destructive) { model.confirmDelete = ids }
                 .disabled(ids.isEmpty)
         }
@@ -256,15 +266,20 @@ struct MailView: View {
         return "Удалить бесед: \(s.conversations), писем в них: \(s.messages)?"
     }
 
+    private var spamKind: SpamSupport { model.spamSupport(confirmSpam ?? []) }
+
     private var spamMessage: String {
         let s = model.summary(confirmSpam ?? [])
-        return "Бесед: \(s.conversations), писем в них: \(s.messages). Письма будут удалены, отправитель — заблокирован. Домен останавливает спам с меняющихся адресов одного домена."
+        if spamKind == .rules {
+            return "Бесед: \(s.conversations), писем в них: \(s.messages). Письма будут удалены, отправитель — заблокирован. Домен останавливает спам с меняющихся адресов одного домена."
+        }
+        return "Бесед: \(s.conversations), писем в них: \(s.messages). Письма будут перенесены в папку «Спам» почтового ящика."
     }
 
     /// На раскладке, где беседа видна сразу, — открыть ту, на которой закончили (§5).
     private func restoreLast() {
         guard sizeClass == .regular, model.selectedID == nil, model.loaded,
-              let id = model.lastConversationID, model.all.contains(where: { $0.id == id })
+              let id = model.lastConversationID, model.all.contains(where: { $0.ref == id })
         else { return }
         model.open(id)
     }
@@ -363,7 +378,16 @@ struct ConversationRow: View {
         .padding(.vertical, 4)
         .listRowBackground(selected ? Palette.accent : Color(argb: colors.color(of: c.receivedBy)))
         .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("conv.row")
+        .accessibilityIdentifier(Self.identifier(c))
+    }
+
+    /// Сквозной тест IMAP сверяет беседы по id: в отладочной сборке с
+    /// `-ddmail-uitest-ids` id беседы — в идентификаторе строки (озвучку не меняет).
+    static func identifier(_ c: Conversation) -> String {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-ddmail-uitest-ids") { return "conv.row:\(c.id)" }
+        #endif
+        return "conv.row"
     }
 }
 

@@ -43,6 +43,10 @@ public struct AttendeeDTO: Codable, Equatable, Hashable, Sendable {
     public var role: String
     public var partstat: String
 
+    public init(email: String, name: String = "", role: String = "", partstat: String = "") {
+        self.email = email; self.name = name; self.role = role; self.partstat = partstat
+    }
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         email = try c.value(.email, "")
@@ -250,6 +254,11 @@ public struct ContactDTO: Decodable, Equatable, Identifiable, Sendable {
         case photoURL = "photo_url"
     }
 
+    public init(id: Int64, fullName: String, emails: [String] = [], phones: [String] = [], organization: String = "", title: String = "", photoURL: String = "") {
+        self.id = id; self.fullName = fullName; self.emails = emails; self.phones = phones
+        self.organization = organization; self.title = title; self.photoURL = photoURL
+    }
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(Int64.self, forKey: .id)
@@ -273,6 +282,10 @@ public struct AddressBookDTO: Decodable, Equatable, Identifiable, Sendable {
         case id, name
         case sourceName = "source_name"
         case canWrite = "can_write"
+    }
+
+    public init(id: Int64, name: String, sourceName: String = "", canWrite: Bool = false) {
+        self.id = id; self.name = name; self.sourceName = sourceName; self.canWrite = canWrite
     }
 
     public init(from decoder: Decoder) throws {

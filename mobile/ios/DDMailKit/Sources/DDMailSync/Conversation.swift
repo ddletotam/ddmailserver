@@ -1,6 +1,8 @@
 import DDMailAPI
 
 /// Беседа для UI. Семантика — сервера и десктопного контракта (§4).
+/// Учёток несколько: беседу определяет пара (`accountKey`, `id`) — одинаковые
+/// id в разных учётках — разные беседы. Для экрана эта пара — `ref`.
 public struct Conversation: Equatable, Hashable, Identifiable, Sendable {
     public var accountKey: String
     public var id: String
@@ -30,6 +32,17 @@ public struct Conversation: Equatable, Hashable, Identifiable, Sendable {
     }
 
     public var key: DialogKey { DialogKey(account: accountKey, id: id) }
+
+    /// Ключ беседы для экрана, уведомлений и окон: учётка и id.
+    public var ref: String { Self.ref(accountKey, id) }
+
+    public static func ref(_ account: String, _ id: String) -> String { account + "\u{1F}" + id }
+
+    /// `ref` → (учётка, id).
+    public static func parseRef(_ ref: String) -> (account: String, id: String)? {
+        guard let i = ref.firstIndex(of: "\u{1F}") else { return nil }
+        return (String(ref[..<i]), String(ref[ref.index(after: i)...]))
+    }
 }
 
 /// Ключ ручного назначения в папку — как `MergeKey` десктопа: `{account, id}`,

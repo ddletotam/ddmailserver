@@ -1,5 +1,6 @@
 import DDMailAPI
 import DDMailCalendar
+import DDMailDAV
 import Foundation
 import Observation
 
@@ -65,7 +66,8 @@ final class CalendarModel {
         }
     }
 
-    let api: SessionAPI
+    /// ddmail и CalDAV внешних учёток вместе (внешние учётки §8).
+    let api: any CalendarSource
     let prefs = CalendarPrefs.shared
     private let onDead: () -> Void
     var cal: Calendar = {
@@ -91,7 +93,7 @@ final class CalendarModel {
     /// Вызывается после перечитывания: напоминания пересеваются.
     var onReloaded: (() -> Void)?
 
-    init(api: SessionAPI, onDead: @escaping () -> Void) {
+    init(api: any CalendarSource, onDead: @escaping () -> Void) {
         self.api = api
         self.onDead = onDead
         var c = Calendar.current

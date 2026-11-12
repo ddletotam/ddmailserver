@@ -1,4 +1,5 @@
 import DDMailAPI
+import DDMailSync
 import Foundation
 
 /// WebSocket, пока приложение на экране (§7, порт `LiveUpdates` Android):
@@ -66,4 +67,50 @@ final class LiveUpdates {
             await self?.sync()
         }
     }
+
+}
+
+/// IMAP-учётка на экране (внешние учётки §6): IDLE на INBOX своим
+/// соединением; событие — синк этой учётки, слитый в один на пачку событий.
+@MainActor
+final class ImapLive: LiveChannel {
+    private let engine: ImapEngine
+    private let sync: () async -> Void
+    private let onDead: () -> Void
+    private var loop: Task<Void, Never>?
+    private var debounce: Task<Void, Never>?
+
+    init(engine: ImapEngine, sync: @escaping () async -> Void, onDead: @escaping () -> Void) {
+        self.engine = engine
+        self.sync = sync
+        self.onDead = onDead
+    }
+
+    func start() {
+        guard loop == nil else { return }
+        loop = Task { [weak self, engine] in
+            await engine.watch(
+                onEvent: { [weak self] in await self?.event() },
+                onAuthFailure: { [weak self] in await self?.dead() }
+            )
+        }
+    }
+
+    func stop() {
+        loop?.cancel()
+        loop = nil
+        debounce?.cancel()
+    }
+
+    private func event() {
+        debounce?.cancel()
+        debounce = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            await self?.sync()
+        }
+    }
+
+    private func dead() { onDead() }
+
 }

@@ -57,7 +57,8 @@ public struct DdmailAPI: Sendable {
     public static func isDdmail(host: String, transport: HTTPTransport) async -> Bool {
         guard let url = URL(string: "https://\(host)/.well-known/ddmail") else { return false }
         var req = URLRequest(url: url)
-        req.timeoutInterval = 10
+        // Ответ — 8 с, как у остальных проверок автонастройки (контракт внешних учёток §2).
+        req.timeoutInterval = 8
         guard let data = try? await transport.body(req),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return false }

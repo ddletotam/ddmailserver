@@ -10,14 +10,12 @@ import UserNotifications
 enum Notifier {
     static let category = "mail"
 
-    static func check(engine: SyncEngine, openID: String?) async {
-        guard let convs = try? engine.currentConversations() else { return }
+    /// Беседы всех учёток после синка. Идентификатор уведомления — `ref`
+    /// беседы (учётка и id): у разных учёток id могут совпасть.
+    static func check(conversations convs: [Conversation], folders: FoldersDoc, openRef: String?) async {
         let settings = AppSettings.shared
-        let plan = NotificationPlan(
-            conversations: convs, folders: engine.currentFolders(),
-            openID: openID, previousWatermark: settings.notifiedMax
-        )
-        settings.notifiedMax = plan.watermark
+        let plan = NotificationPlan(conversations: convs, folders: folders, openRef: openRef, previous: settings.notifiedMarks)
+        settings.notifiedMarks = plan.watermarks
         let center = UNUserNotificationCenter.current()
         try? await center.setBadgeCount(plan.badge)
         guard settings.notifications, !plan.items.isEmpty else { return }
@@ -28,11 +26,21 @@ enum Notifier {
             let content = UNMutableNotificationContent()
             content.title = t.title
             content.body = t.body
-            content.threadIdentifier = item.conversation.id
+            content.threadIdentifier = item.conversation.ref
             content.categoryIdentifier = category
-            content.userInfo = ["conversation": item.conversation.id]
+            content.userInfo = ["conversation": item.conversation.ref]
             content.sound = .default
-            try? await center.add(UNNotificationRequest(identifier: item.conversation.id, content: content, trigger: nil))
+            try? await center.add(UNNotificationRequest(identifier: item.conversation.ref, content: content, trigger: nil))
+        }
+    }
+
+    /// Учётку удалили — её уведомления тоже.
+    static func clear(account key: String) {
+        let center = UNUserNotificationCenter.current()
+        Task {
+            let ids = await center.deliveredNotifications().map(\.request.identifier)
+                .filter { Conversation.parseRef($0)?.account == key }
+            center.removeDeliveredNotifications(withIdentifiers: ids)
         }
     }
 

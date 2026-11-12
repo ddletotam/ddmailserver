@@ -20,7 +20,7 @@ struct DDMailApp: App {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: BackgroundSync.prefetchID, using: nil) { task in
             nonisolated(unsafe) let task = task
             let work = Task { @MainActor in
-                await model.connection?.prefetch()
+                await model.workspace?.prefetch()
                 task.setTaskCompleted(success: !Task.isCancelled)
             }
             task.expirationHandler = { work.cancel() }
@@ -55,22 +55,34 @@ struct DDMailApp: App {
         #if os(iOS)
         .backgroundTask(.appRefresh(BackgroundSync.refreshID)) { [app] in
             await BackgroundSync.schedule()
-            await app.connection?.backgroundRefresh()
+            await app.workspace?.backgroundRefresh()
         }
         #endif
     }
 }
 
-/// Без сессии — подключение; с сессией — разделы приложения.
+/// Без учёток — подключение; с учётками — разделы приложения. «Добавить
+/// учётку» и «Войти» — то же окно подключения поверх.
 struct RootView: View {
-    let app: AppModel
+    @Bindable var app: AppModel
 
     var body: some View {
-        switch app.phase {
-        case let .connect(model):
-            ConnectView(model: model)
-        case let .connected(connection):
-            AppShell(app: app, connection: connection)
+        let sheet = app.connectSheet
+        Group {
+            switch app.phase {
+            case let .connect(model):
+                ConnectView(model: model)
+            case let .ready(workspace):
+                AppShell(app: app, workspace: workspace)
+            }
+        }
+        .sheet(isPresented: Binding(get: { sheet != nil }, set: { if !$0 { app.connectSheet = nil } })) {
+            if let sheet {
+                ConnectView(model: sheet) { app.connectSheet = nil }
+                    #if os(macOS)
+                    .frame(minWidth: 520, minHeight: 560)
+                    #endif
+            }
         }
     }
 }

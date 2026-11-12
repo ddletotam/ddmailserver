@@ -15,27 +15,34 @@ public struct NotificationPlan: Equatable, Sendable {
     /// Бейдж на иконке — беседы с непрочитанным вне скрытых папок (как точка
     /// трея десктопа: беседы, а не письма).
     public let badge: Int
-    /// Новый рубеж: самый большой uid из известных.
-    public let watermark: Int64?
+    /// Новые рубежи по учёткам: самый большой uid из известных. У каждой
+    /// учётки своя нумерация писем, поэтому и рубеж свой.
+    public let watermarks: [String: Int64]
     public let items: [Item]
 
-    public init(conversations all: [Conversation], folders: FoldersDoc, openID: String?, previousWatermark: Int64?) {
+    /// `previous` — рубежи прошлого прохода; учётка без рубежа в первом проходе
+    /// только запоминает его (иначе после входа посыпались бы уведомления обо
+    /// всём непрочитанном). `openRef` — открытая беседа (`Conversation.ref`).
+    public init(conversations all: [Conversation], folders: FoldersDoc, openRef: String?, previous: [String: Int64]) {
         let convs = all.filter { !$0.spam }
         func hidden(_ c: Conversation) -> Bool {
             folders.folderOf(c).map { folders.folders[$0].hidden } ?? false
         }
         badge = convs.filter { $0.unreadCount > 0 && !hidden($0) }.count
-        let top = convs.flatMap { $0.messages.map(\.uid) }.max()
-        watermark = top.map { max($0, previousWatermark ?? 0) } ?? previousWatermark
-        guard let last = previousWatermark, top != nil else {
-            items = []
-            return
+        var marks = previous
+        var out: [Item] = []
+        for (account, list) in Dictionary(grouping: convs, by: \.accountKey) {
+            let top = list.flatMap { $0.messages.map(\.uid) }.max()
+            if let top { marks[account] = max(top, previous[account] ?? 0) }
+            guard let last = previous[account], top != nil else { continue }
+            for c in list {
+                guard c.ref != openRef, !hidden(c) else { continue }
+                let n = c.messages.filter { !$0.seen && $0.uid > last }.count
+                if n > 0 { out.append(Item(conversation: c, count: n)) }
+            }
         }
-        items = convs.compactMap { c in
-            guard c.id != openID, !hidden(c) else { return nil }
-            let n = c.messages.filter { !$0.seen && $0.uid > last }.count
-            return n > 0 ? Item(conversation: c, count: n) : nil
-        }
+        watermarks = marks
+        items = out.sorted { $0.conversation.lastDateTs > $1.conversation.lastDateTs }
     }
 
     /// Текст уведомления — собирается на устройстве из своего кэша (152-ФЗ:

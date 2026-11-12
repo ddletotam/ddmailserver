@@ -1,11 +1,13 @@
 import DDMailAPI
+import DDMailDAV
 import SwiftUI
 
 /// Контакты (Android §15): одна сводная книга, как её отдаёт сервер; поиск
 /// локальный — имя, организация, адреса, цифры телефона.
 @MainActor @Observable
 final class ContactsModel {
-    let api: SessionAPI
+    /// ddmail и CardDAV внешних учёток вместе (внешние учётки §8).
+    let api: any ContactsSource
     private let onDead: () -> Void
     private(set) var contacts: [ContactDTO] = []
     private(set) var books: [AddressBookDTO] = []
@@ -28,14 +30,14 @@ final class ContactsModel {
         var busy = false
     }
 
-    init(api: SessionAPI, onDead: @escaping () -> Void) {
+    init(api: any ContactsSource, onDead: @escaping () -> Void) {
         self.api = api
         self.onDead = onDead
     }
 
     func load() async {
         do {
-            async let c = api.contacts()
+            async let c = api.contacts(limit: 5000)
             async let b = api.addressBooks()
             contacts = try await c.sorted { $0.fullName.localizedStandardCompare($1.fullName) == .orderedAscending }
             books = (try? await b) ?? books

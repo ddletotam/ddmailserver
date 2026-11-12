@@ -5,13 +5,15 @@
 #   mac.sh test            swift test пакета DDMailKit
 #   mac.sh build           сгенерировать проект, собрать под симулятор iOS и под macOS
 #   mac.sh run [iphone|ipad]  собрать, поставить в симулятор, запустить, скриншот сюда
-#   mac.sh uitest [iphone|ipad|mac]  сквозные UI-тесты в симуляторе; скриншоты шагов — сюда
+#   mac.sh uitest [iphone|ipad|mac] [Класс/тест]  сквозные UI-тесты; скриншоты шагов — сюда
 #   mac.sh device [iphone|ipad]  собрать с подписью, поставить на устройство, запустить
 #
 # Окружение: DDMAIL_MAC (ssh-хост, по умолчанию `mac`),
 #            DDMAIL_SHOTS (куда класть скриншоты, по умолчанию ~/.cache/ddmail-ios),
 #            DDMAIL_TEST_EMAIL / DDMAIL_TEST_PASSWORD — учётка для uitest (без них
-#            сквозные тесты пропускаются), DDMAIL_KEYCHAIN_PASSWORD — для device.
+#            сквозные тесты пропускаются), DDMAIL_TEST_MAILRU_EMAIL /
+#            DDMAIL_TEST_MAILRU_PASSWORD — внешний ящик для ImapFlowTests,
+#            DDMAIL_KEYCHAIN_PASSWORD — для device.
 #            По умолчанию — из ~/.config/ddmail-ios/ (см. ниже); в git их нет.
 set -euo pipefail
 
@@ -144,10 +146,13 @@ case "$cmd" in
         out="$HOME/build/ddmail/ui-shots"
         rm -rf "$rb" "$out"
         rc=0
+        only=""
+        if [ -n "${7:-}" ]; then only="-only-testing:DDMailUITests/$7"; fi
         TEST_RUNNER_DDMAIL_TEST_EMAIL="${1:-}" TEST_RUNNER_DDMAIL_TEST_PASSWORD="${2:-}" \
+        TEST_RUNNER_DDMAIL_TEST_MAILRU_EMAIL="${5:-}" TEST_RUNNER_DDMAIL_TEST_MAILRU_PASSWORD="${6:-}" \
             xcodebuild -project DDMail.xcodeproj -scheme DDMail -configuration Debug \
             -destination "$dest" -derivedDataPath "$DD" -clonedSourcePackagesDirPath "$SPM" -resultBundlePath "$rb" \
-            $extra test >"$HOME/build/ddmail/uitest.log" 2>&1 || rc=$?
+            $extra test $only >"$HOME/build/ddmail/uitest.log" 2>&1 || rc=$?
         grep -E "error:|Test Case .*(passed|failed|skipped)|TEST (SUCCEEDED|FAILED)" "$HOME/build/ddmail/uitest.log" | tail -20
         mkdir -p "$out"
         xcrun xcresulttool export attachments --path "$rb" --output-path "$out" >/dev/null 2>&1 || true
@@ -214,7 +219,8 @@ case "$cmd" in
     uitest)
         sync_code
         rc=0
-        remote uitest "${DDMAIL_TEST_EMAIL:-}" "${DDMAIL_TEST_PASSWORD:-}" "${2:-iphone}" "${DDMAIL_KEYCHAIN_PASSWORD:-}" || rc=$?
+        remote uitest "${DDMAIL_TEST_EMAIL:-}" "${DDMAIL_TEST_PASSWORD:-}" "${2:-iphone}" "${DDMAIL_KEYCHAIN_PASSWORD:-}" \
+            "${DDMAIL_TEST_MAILRU_EMAIL:-}" "${DDMAIL_TEST_MAILRU_PASSWORD:-}" "${3:-}" || rc=$?
         dir="$SHOTS/uitest-$(date +%H%M%S)"
         mkdir -p "$dir"
         scp -qr "$HOST:$REMOTE/ui-shots/." "$dir/" 2>/dev/null || true

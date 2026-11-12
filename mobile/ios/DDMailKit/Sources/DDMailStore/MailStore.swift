@@ -74,6 +74,7 @@ public final class MailStore: Sendable {
                 t.column("value", .text).notNull()
             }
         }
+        registerImapTables(&m)
         return m
     }
 
@@ -242,7 +243,7 @@ public final class MailStore: Sendable {
     /// Выход из учётки: кэш чужой учётки не остаётся на устройстве.
     public func clearAll() throws {
         try db.write { db in
-            for t in ["conversations", "conversation_messages", "message_bodies", "meta"] {
+            for t in ["conversations", "conversation_messages", "message_bodies", "meta", "imap_messages", "imap_folders"] {
                 try db.execute(sql: "DELETE FROM \(t)")
             }
         }

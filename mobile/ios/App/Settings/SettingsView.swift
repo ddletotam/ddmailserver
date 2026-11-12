@@ -1,21 +1,22 @@
+import DDMailAuth
 import SwiftUI
 import UserNotifications
 
-/// Настройки (Android «Настройки»): загрузка писем, уведомления, учётная запись.
+/// Настройки (Android «Настройки»): учётки, загрузка писем, уведомления.
 struct SettingsView: View {
     @Bindable var settings = AppSettings.shared
     @Bindable var calPrefs = CalendarPrefs.shared
-    let accountKey: String
-    let onLogout: () -> Void
+    let app: AppModel
+    let workspace: Workspace
     var onRemindersChanged: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @State private var denied = false
-    @State private var confirmLogout = false
 
     var body: some View {
         NavigationStack {
             Form {
+                AccountsSection(app: app, workspace: workspace, close: { dismiss() })
                 Section {
                     Picker("Загружать письма заранее", selection: $settings.prefetch) {
                         Text("Не выбрано").tag(AppSettings.Prefetch?.none)
@@ -48,10 +49,6 @@ struct SettingsView: View {
                 } footer: {
                     Text("Каскад напоминаний события; смахнули уведомление — по этому событию больше не напомнит.")
                 }
-                Section("Учётная запись") {
-                    LabeledContent("Вход", value: accountKey)
-                    Button("Выйти", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { confirmLogout = true }
-                }
             }
             .formStyle(.grouped)
             .navigationTitle("Настройки")
@@ -63,14 +60,6 @@ struct SettingsView: View {
             }
             .task {
                 denied = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus == .denied
-            }
-            .confirmationDialog("Выйти из учётной записи?", isPresented: $confirmLogout, titleVisibility: .visible) {
-                Button("Выйти", role: .destructive) {
-                    dismiss()
-                    onLogout()
-                }
-            } message: {
-                Text("Сессия и почта этой учётной записи будут удалены с устройства.")
             }
         }
     }

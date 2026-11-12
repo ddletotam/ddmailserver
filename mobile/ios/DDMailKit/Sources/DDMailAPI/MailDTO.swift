@@ -66,6 +66,17 @@ public struct ConversationDTO: Decodable, Equatable, Sendable {
     /// Беседа из спама (`/conversations?spam=1`).
     public var spam: Bool
 
+    public init(
+        id: String, label: String = "", avatarHash: String = "", receivedBy: String = "", counterparts: [ContactInfo] = [],
+        isGroup: Bool = false, lastDateTs: Int64 = 0, lastSubject: String = "", unreadCount: Int = 0, totalCount: Int = 0,
+        messages: [MessageRef] = [], updatedAt: Int64 = 0, spam: Bool = false
+    ) {
+        self.id = id; self.label = label; self.avatarHash = avatarHash; self.receivedBy = receivedBy
+        self.counterparts = counterparts; self.isGroup = isGroup; self.lastDateTs = lastDateTs
+        self.lastSubject = lastSubject; self.unreadCount = unreadCount; self.totalCount = totalCount
+        self.messages = messages; self.updatedAt = updatedAt; self.spam = spam
+    }
+
     enum CodingKeys: String, CodingKey {
         case id, label, counterparts, messages, spam
         case avatarHash = "avatar_hash"
@@ -293,6 +304,11 @@ public struct PurgeOutcome: Decodable, Equatable, Sendable {
 public struct Binary: Sendable {
     public let data: Data
     public let contentType: String
+
+    public init(data: Data, contentType: String) {
+        self.data = data
+        self.contentType = contentType
+    }
 }
 
 /// Вложение исходящего письма; байты в JSON — base64 (как `[]byte` у Go).

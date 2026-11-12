@@ -8,21 +8,22 @@ import SwiftUI
 /// Спам аватарки не запрашивает: `/avatars` ходит на домен отправителя, то
 /// есть по сигналу спамера (решает вызывающий).
 actor AvatarStore {
-    private let api: SessionAPI
+    /// Аватарки отдаёт сервер ddmail; без ddmail-учётки — только инициалы.
+    private let api: SessionAPI?
     private var memory: [String: Data] = [:]
     private var missing: Set<String> = []
     private var inflight: [String: Task<Data?, Never>] = [:]
     private let dir = URL.cachesDirectory.appending(path: "avatars")
     private static let negativeTTL: TimeInterval = 7 * 24 * 3600
 
-    init(api: SessionAPI) {
+    init(api: SessionAPI?) {
         self.api = api
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     }
 
     func image(for email: String) async -> Data? {
         let key = email.lowercased()
-        guard !key.isEmpty else { return nil }
+        guard !key.isEmpty, let api else { return nil }
         if let d = memory[key] { return d }
         if missing.contains(key) { return nil }
         if let t = inflight[key] { return await t.value }
@@ -54,6 +55,11 @@ actor AvatarStore {
             FileManager.default.createFile(atPath: none.path, contents: Data())
         }
         return data
+    }
+
+    /// Учёток не осталось: чужие аватарки не остаются.
+    nonisolated static func clearDisk() {
+        try? FileManager.default.removeItem(at: URL.cachesDirectory.appending(path: "avatars"))
     }
 
     /// Выход из учётки: чужие аватарки не остаются.
