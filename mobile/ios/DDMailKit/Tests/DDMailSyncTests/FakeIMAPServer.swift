@@ -32,6 +32,8 @@ final class FakeIMAPServer: @unchecked Sendable {
     var log: [String] = []
     /// Команды, на которые отвечать NO (по префиксу).
     var failing: [String] = []
+    /// Соединения в IDLE: им — уведомление о новом письме.
+    var idlers: [(String) -> Void] = []
 
     init(condstore: Bool = true, qresync: Bool = true, move: Bool = true) {
         var c: Set<String> = ["IMAP4REV1", "UIDPLUS", "IDLE", "LITERAL+"]
@@ -64,6 +66,7 @@ final class FakeIMAPServer: @unchecked Sendable {
             let raw = "From: \(from)\r\nTo: \(to)\r\nSubject: \(subject)\r\nDate: \(date)\r\nMessage-ID: <\(messageID)>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n\(body)\r\n"
             f.messages.append(Message(uid: uid, flags: seen ? ["\\Seen"] : [], modseq: modseq, raw: raw))
             folders[folder] = f
+            for notify in idlers { notify("* \(f.messages.count) EXISTS\r\n") }
             return uid
         }
     }
@@ -123,6 +126,7 @@ final class FakeIMAPSocket: MailSocket, @unchecked Sendable {
     private var inbuf = Data()
     private var selected: String?
     private var qresync = false
+    private var idleTag: String?
     /// Ждём байты литерала APPEND.
     private var pendingAppend: (tag: String, folder: String, flags: [String], size: Int)?
 
@@ -184,7 +188,13 @@ final class FakeIMAPSocket: MailSocket, @unchecked Sendable {
             push("\(tag) OK APPEND done\r\n")
             return
         }
-        if line == "DONE" { return }
+        if line == "DONE" {
+            if let t = idleTag {
+                idleTag = nil
+                push("\(t) OK IDLE terminated\r\n")
+            }
+            return
+        }
         let sp = line.firstIndex(of: " ") ?? line.endIndex
         let tag = String(line[..<sp])
         let cmd = line[sp...].trimmingCharacters(in: .whitespaces)
@@ -278,6 +288,10 @@ final class FakeIMAPSocket: MailSocket, @unchecked Sendable {
             let open = cmd.lastIndex(of: "{")!
             let size = Int(cmd[cmd.index(after: open)...].prefix { $0.isNumber })!
             lock.withLock { pendingAppend = (tag, folder, flags, size) }
+        } else if upper == "IDLE" {
+            idleTag = tag
+            server.with { $0.idlers.append { [weak self] line in self?.push(line) } }
+            push("+ idling\r\n")
         } else if upper == "LOGOUT" {
             push("* BYE bye\r\n")
             ok()

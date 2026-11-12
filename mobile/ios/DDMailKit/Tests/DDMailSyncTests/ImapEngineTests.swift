@@ -160,4 +160,39 @@ struct ImapEngineTests {
         await e.ensureSentCopy(messageID: "abc@example.org", data: Data(), firstDelay: .zero, window: .zero)
         #expect(server.uids("Sent").count == 1)
     }
+
+    /// IDLE: новое письмо — событие; перевыдача по сроку не рвёт соединение.
+    @Test func idleReportsNewMail() async throws {
+        let server = FakeIMAPServer()
+        let (e, _) = try engine(server)
+        try await e.sync()
+        let (events, sink) = AsyncStream.makeStream(of: Void.self)
+        let watcher = Task {
+            await e.watch(idleFor: .milliseconds(300), onEvent: { sink.yield() }, onAuthFailure: {})
+        }
+        try await Task.sleep(for: .milliseconds(800))
+        server.deliver("INBOX", from: "bob@example.net", to: me, subject: "новое")
+        var it = events.makeAsyncIterator()
+        _ = await it.next()
+        watcher.cancel()
+        // Перевыдача IDLE по сроку шла на том же соединении.
+        #expect(server.with { $0.log.filter { $0 == "IDLE" }.count } >= 2)
+        #expect(server.with { $0.log.filter { $0.hasPrefix("LOGIN") }.count } == 2)
+    }
+
+    @Test func idleStopsOnWrongPassword() async throws {
+        let server = FakeIMAPServer()
+        server.with { $0.password = "other" }
+        let (e, _) = try engine(server)
+        let dead = Flag()
+        await e.watch(onEvent: {}, onAuthFailure: { dead.set() })
+        #expect(dead.value)
+    }
+
+    final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var v = false
+        func set() { lock.withLock { v = true } }
+        var value: Bool { lock.withLock { v } }
+    }
 }

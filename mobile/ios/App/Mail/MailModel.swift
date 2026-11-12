@@ -80,7 +80,14 @@ final class MailModel {
             syncSoon: { [weak self] key in Task { await self?.sync(only: key) } },
             onAuthDead: dead
         )
-        live = workspace.links.compactMap { link in
+        live = workspace.links.compactMap { link -> LiveChannel? in
+            if let imap = link.imap {
+                return ImapLive(
+                    engine: imap,
+                    sync: { [weak self] in await self?.sync(only: link.account.key) },
+                    onDead: { [weak link] in link?.report(.dead) }
+                )
+            }
             guard let api = link.api else { return nil }
             return LiveUpdates(
                 api: api,

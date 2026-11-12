@@ -632,6 +632,51 @@ public actor ImapEngine: MailProvider {
         try? await sync()
     }
 
+    // MARK: Новая почта на экране (контракт §6)
+
+    /// IDLE на INBOX своим соединением, пока задачу не отменят: событие —
+    /// `onEvent` (инкрементальный синк); перевыдача IDLE каждые 25 мин;
+    /// обрыв — переподключение не чаще раза в 30 с; без IDLE у сервера —
+    /// опрос раз в 2 мин. Неверный пароль — `onAuthFailure` и конец: ретраи
+    /// его не лечат.
+    public nonisolated func watch(
+        idleFor: Duration = .seconds(25 * 60), pollEvery: Duration = .seconds(120), backoff: Duration = .seconds(30),
+        onEvent: @escaping @Sendable () async -> Void, onAuthFailure: @escaping @Sendable () async -> Void
+    ) async {
+        let open = Self.opener(config, password, connector)
+        let inbox = { [store, accountKey] in (try? store.imapFolders(accountKey)[ImapRole.inbox.rawValue]?.name) ?? "INBOX" }
+        while !Task.isCancelled {
+            let started = ContinuousClock.now
+            do {
+                let c = try await open()
+                defer { Task { await c.close() } }
+                if await c.has("IDLE") {
+                    _ = try await c.select(inbox(), readOnly: true)
+                    while !Task.isCancelled {
+                        if try await c.idle(timeout: idleFor) { await onEvent() }
+                    }
+                } else {
+                    await c.logout()
+                    while !Task.isCancelled {
+                        try await Task.sleep(for: pollEvery)
+                        await onEvent()
+                    }
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                if isAuthFailure(error) {
+                    await onAuthFailure()
+                    return
+                }
+                imapLog.notice("IDLE \(self.accountKey, privacy: .private): \(error.localizedDescription, privacy: .public)")
+            }
+            // Не чаще раза в 30 с: сервер, рвущий соединение сразу, не превратит это в шторм.
+            let elapsed = ContinuousClock.now - started
+            if elapsed < backoff { try? await Task.sleep(for: backoff - elapsed) }
+        }
+    }
+
     /// Закрыть соединения (учётку удалили или пространство пересобирается).
     public func close() async {
         await syncChannel.close()

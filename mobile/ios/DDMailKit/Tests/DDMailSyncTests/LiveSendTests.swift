@@ -27,6 +27,11 @@ struct LiveSendTests {
         )
         let engine = ImapEngine(config: cfg, store: store, password: { pw })
         try await engine.sync()
+        // IDLE на INBOX: письмо себе должно его разбудить.
+        let woke = Woke()
+        let watcher = Task { await engine.watch(onEvent: { woke.hit() }, onAuthFailure: {}) }
+        defer { watcher.cancel() }
+        try await Task.sleep(for: .seconds(2))
         let subject = "Проверка отправки iOS \(Int(Date().timeIntervalSince1970))"
         try await engine.send(SendRequest(
             from: "\"Проверка iOS\" <\(email)>", to: [email], subject: subject,
@@ -53,11 +58,20 @@ struct LiveSendTests {
         // Сервер ddmail письмо себе может не класть во «Входящие» (только «Отправленные»).
         if e["DDMAIL_LIVE_EXPECT_INBOX"] == "1" { #expect(inInbox) }
         #expect(sentCount == 1)
+        print("IDLE разбудил: \(woke.count) раз")
+        if e["DDMAIL_LIVE_EXPECT_INBOX"] == "1" { #expect(woke.count > 0) }
         // Тело своего письма разбирается: вложение на месте.
         if let c = try engine.currentConversations().first(where: { $0.lastSubject == subject }) {
             let b = try await engine.bodies(c.messages)
             print("вложения: \(b.flatMap(\.attachments).map(\.filename)), исходящее: \(b.map(\.isOutgoing))")
             #expect(b.contains { $0.attachments.contains { $0.filename == "проверка.txt" } })
         }
+    }
+
+    final class Woke: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        func hit() { lock.withLock { n += 1 } }
+        var count: Int { lock.withLock { n } }
     }
 }
