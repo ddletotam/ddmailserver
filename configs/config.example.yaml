@@ -82,3 +82,18 @@ workers:
 logging:
   level: "info"  # debug, info, warn, error
   format: "json" # json, text
+
+# Push-уведомления о новой почте для мобильных клиентов. Нет секции — push
+# выключен, сервер работает как раньше (регистрация токенов принимается).
+# В push уходит только «Новые письма» — ни отправителя, ни темы (152-ФЗ).
+# push:
+#   apns:
+#     key_file: "/etc/mailserver/apns/AuthKey_XXXXXXXXXX.p8"  # Apple Developer → Keys
+#     key_id: "XXXXXXXXXX"
+#     team_id: "XXXXXXXXXX"
+#     topic: "ru.letotam.ddmail"   # bundle id приложения
+#     # auto (по умолчанию): окружение из регистрации токена (отладочная
+#     # сборка — sandbox, релизная — production); sandbox / production —
+#     # обслуживать только токены этого окружения.
+#     environment: auto
+#   # hms / fcm — ещё не реализованы.

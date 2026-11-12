@@ -23,6 +23,7 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/notify"
 	"github.com/ddletotam/ddmailserver/internal/oauth"
 	"github.com/ddletotam/ddmailserver/internal/parser"
+	"github.com/ddletotam/ddmailserver/internal/push"
 	"github.com/ddletotam/ddmailserver/internal/search"
 	smtpmx "github.com/ddletotam/ddmailserver/internal/smtp/mx"
 	smtpserver "github.com/ddletotam/ddmailserver/internal/smtp/server"
@@ -381,6 +382,10 @@ func main() {
 	webSrv.SetClientIPResolver(clientIPResolver)
 	webSrv.SetAuthLimiter(authLimiter)
 	webSrv.SetNotifyHub(notifyHub)
+	// Push о новой почте (ios §7, android §7): без ключа службы — выключен,
+	// регистрация токенов всё равно принимается.
+	pushDispatcher := newPushDispatcher(cfg.Push, database, notifyHub)
+	webSrv.SetPush(pushDispatcher)
 	// What device profiles tell clients to connect to. Not the listen ports:
 	// this deployment binds 10993/10465 behind a firewall redirect from
 	// 993/465, so a profile built from the listen config would be unusable.
@@ -401,6 +406,9 @@ func main() {
 		}
 	}()
 	listeners = append(listeners, namedStop{"web server", webSrv.Stop})
+	// Стоит после веб-сервера в списке — останавливается раньше него (список
+	// разбирается с конца): отложенные push отменяются, идущие обрываются.
+	listeners = append(listeners, namedStop{"push", pushDispatcher.Stop})
 	log.Printf("Web interface available at http://%s:%d", cfg.Server.WebHost, cfg.Server.WebPort)
 
 	log.Println("✓ MailServer started successfully")
@@ -489,4 +497,29 @@ func shutdown(sigChan <-chan os.Signal, scheduler *worker.Scheduler, idleManager
 	}
 
 	log.Printf("Shutdown complete in %v", time.Since(started).Round(time.Millisecond))
+}
+
+// newPushDispatcher собирает доставку push по секции push конфига и
+// подписывает её на хаб. Служба без настроек выключена; настроенная, но
+// сломанная (нет файла ключа) — тоже, с ошибкой в журнале: из-за push
+// почтовый сервер не должен переставать работать.
+func newPushDispatcher(cfg config.PushConfig, database *db.DB, hub *notify.Hub) *push.Dispatcher {
+	var senders []push.Sender
+	if cfg.APNs.Enabled() {
+		apns, err := push.APNsFromConfig(cfg.APNs)
+		if err != nil {
+			log.Printf("ERROR: push via APNs disabled: %v", err)
+		} else {
+			senders = append(senders, apns)
+			log.Printf("Push via APNs enabled (topic %s, environment %s)", cfg.APNs.Topic, cfg.APNs.EnvironmentOrDefault())
+		}
+	} else {
+		log.Printf("Push via APNs disabled (push.apns not configured)")
+	}
+	if cfg.HMS.AppID != "" || cfg.FCM.ProjectID != "" {
+		log.Printf("WARNING: push.hms / push.fcm are not implemented yet — ignored")
+	}
+	d := push.NewDispatcher(database, push.DefaultWindow, senders...)
+	d.Attach(hub)
+	return d
 }
