@@ -11,7 +11,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import ru.letotam.ddmail.api.ApiException
-import ru.letotam.ddmail.sync.SyncEngine
+import ru.letotam.ddmail.sync.MailHub
 import java.io.File
 import java.nio.ByteBuffer
 import java.security.MessageDigest
@@ -24,7 +24,7 @@ import java.security.MessageDigest
  *
  * SVG (BIMI-логотипы) не рисуем: Android их не декодирует — будут инициалы.
  */
-class Avatars(context: Context, private val engine: SyncEngine) {
+class Avatars(context: Context, private val hub: MailHub) {
     private val dir = File(context.cacheDir, "avatars").apply { mkdirs() }
     private val memory = LruCache<String, Holder>(300)
     private val gate = Semaphore(4)
@@ -53,7 +53,7 @@ class Avatars(context: Context, private val engine: SyncEngine) {
         if (none.exists() && System.currentTimeMillis() - none.lastModified() < WEEK) return null
         val bin = gate.withPermit {
             try {
-                engine.avatar(email)
+                hub.avatar(email)
             } catch (e: ApiException) {
                 return null
             }

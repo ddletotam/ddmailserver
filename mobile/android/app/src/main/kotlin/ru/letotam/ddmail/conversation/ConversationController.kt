@@ -20,7 +20,9 @@ import ru.letotam.ddmail.api.ApiException
 import ru.letotam.ddmail.api.MessageBody
 import ru.letotam.ddmail.api.MessageRef
 import ru.letotam.ddmail.sync.Conversation
-import ru.letotam.ddmail.sync.SyncEngine
+import ru.letotam.ddmail.sync.MailHub
+import ru.letotam.ddmail.sync.isAuthError
+import ru.letotam.ddmail.sync.isMailError
 import java.io.File
 
 /**
@@ -36,9 +38,8 @@ import java.io.File
 class ConversationController(
     private val app: Context,
     private val settings: ru.letotam.ddmail.settings.AppSettings,
-    private val engine: SyncEngine,
+    private val hub: MailHub,
     private val scope: CoroutineScope,
-    private val onAuthDead: () -> Unit,
 ) {
     val js = Channel<String>(Channel.UNLIMITED)
 
@@ -84,7 +85,7 @@ class ConversationController(
                 js.send("ddm.set(${batch(c, bodies, firstUnseen)})")
             }
             if (c.unreadCount > 0 || c.messages.any { !it.seen }) {
-                runCatching { engine.markRead(c) }.onFailure { if (it is ApiException.Unauthorized) onAuthDead() }
+                runCatching { hub.markRead(c) }
             }
         }
     }
@@ -119,13 +120,13 @@ class ConversationController(
                 val bodies = load(fresh)
                 js.send("ddm.append(${batch(c, bodies, null)})")
             }
-            if (c.messages.any { !it.seen }) runCatching { engine.markRead(c) }
+            if (c.messages.any { !it.seen }) runCatching { hub.markRead(c) }
         }
     }
 
     /** Часть `cid:` для документа — блокирующе, с потока перехватчика WebView. */
     fun part(uid: Long, cid: String): Pair<ByteArray, String>? =
-        blocking { engine.part(uid, cid) }?.let { it.bytes to it.contentType }
+        conv?.accountKey?.let { key -> blocking { hub.part(key, uid, cid) } }?.let { it.bytes to it.contentType }
 
     /**
      * Вложение: скачать в кэш и открыть системным обработчиком через
@@ -133,10 +134,11 @@ class ConversationController(
      */
     fun openAttachment(uid: Long, index: Int, filename: String?) {
         scope.launch {
+            val key = conv?.accountKey ?: return@launch
             val bin = try {
-                engine.attachment(uid, index)
-            } catch (e: ApiException) {
-                if (e is ApiException.Unauthorized) onAuthDead()
+                hub.attachment(key, uid, index)
+            } catch (e: Exception) {
+                if (!e.isMailError()) throw e
                 return@launch
             }
             val file = withContext(Dispatchers.IO) {
@@ -177,10 +179,11 @@ class ConversationController(
     fun saveAttachment(uid: Long, index: Int, onDone: (String) -> Unit) {
         val name = safeName(names[uid to index] ?: "attachment-$index")
         scope.launch {
+            val key = conv?.accountKey ?: return@launch
             val bin = try {
-                engine.attachment(uid, index)
-            } catch (e: ApiException) {
-                if (e is ApiException.Unauthorized) onAuthDead()
+                hub.attachment(key, uid, index)
+            } catch (e: Exception) {
+                if (!e.isMailError()) throw e
                 onDone("Не удалось скачать «$name».")
                 return@launch
             }
@@ -209,9 +212,10 @@ class ConversationController(
     private val names = mutableMapOf<Pair<Long, Int>, String>()
 
     private suspend fun load(refs: List<MessageRef>): List<MessageBody> = try {
-        engine.bodies(refs).also { list -> list.forEach { loadedBodies[it.uid] = it } }
-    } catch (e: ApiException.Unauthorized) {
-        onAuthDead()
+        val key = conv?.accountKey ?: return emptyList()
+        hub.bodies(key, refs).also { list -> list.forEach { loadedBodies[it.uid] = it } }
+    } catch (e: Exception) {
+        if (!e.isMailError()) throw e
         emptyList()
     }
 

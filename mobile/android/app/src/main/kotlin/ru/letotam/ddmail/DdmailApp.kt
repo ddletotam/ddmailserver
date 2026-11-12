@@ -1,16 +1,29 @@
 package ru.letotam.ddmail
 
 import android.app.Application
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
+import ru.letotam.ddmail.account.ImapAccount
 import ru.letotam.ddmail.api.DdmailApi
 import ru.letotam.ddmail.api.SessionApi
 import ru.letotam.ddmail.api.TokenSource
-import ru.letotam.ddmail.auth.Session
-import ru.letotam.ddmail.db.CacheDb
-import ru.letotam.ddmail.sync.SyncEngine
+import ru.letotam.ddmail.auth.AccountStore
 import ru.letotam.ddmail.auth.DnsMx
 import ru.letotam.ddmail.auth.ServerDiscovery
+import ru.letotam.ddmail.auth.Session
 import ru.letotam.ddmail.auth.SessionStore
+import ru.letotam.ddmail.db.CacheDb
+import ru.letotam.ddmail.discover.Discovery
+import ru.letotam.ddmail.discover.Probes
+import ru.letotam.ddmail.sync.ImapEngine
+import ru.letotam.ddmail.sync.MailHub
+import ru.letotam.ddmail.sync.MailSource
+import ru.letotam.ddmail.sync.SyncEngine
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 /** Корень зависимостей приложения — вручную, без DI-фреймворка, пока их мало. */
@@ -25,17 +38,37 @@ class DdmailApp : Application() {
     /** Для поиска сервера: закрытый файрволом порт молчит до таймаута — ждём его коротко. */
     private val probeHttp: OkHttpClient by lazy {
         http.newBuilder()
-            .connectTimeout(3, TimeUnit.SECONDS)
-            .callTimeout(8, TimeUnit.SECONDS)
+            .connectTimeout(Discovery.CONNECT_MS.toLong(), TimeUnit.MILLISECONDS)
+            .callTimeout(Discovery.PROBE_MS, TimeUnit.MILLISECONDS)
+            .followRedirects(true)
             .build()
     }
 
+    /** Фоновые задачи вне экранов: копия в «Отправленные», закрытие соединений. */
+    val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
     val sessions: SessionStore by lazy { SessionStore(this) }
+
+    /** Внешние IMAP-учётки и их пароли (зашифрованы Keystore). */
+    val accounts: AccountStore by lazy { AccountStore(this) }
 
     val discovery: ServerDiscovery by lazy {
         ServerDiscovery(
             probe = { host -> DdmailApi.isDdmail(probeHttp, host) },
             mx = { domain -> DnsMx.lookup(domain) },
+        )
+    }
+
+    /** Автонастройка внешних учёток (порт `discover.rs`): ddmail, autoconfig, IMAP, SMTP. */
+    val mailDiscovery: Discovery by lazy {
+        Discovery(
+            object : Discovery.Net {
+                override suspend fun mx(domain: String) = DnsMx.lookup(domain)
+                override suspend fun isDdmail(host: String) = DdmailApi.isDdmail(probeHttp, host)
+                override suspend fun get(url: String): String? = ru.letotam.ddmail.api.fetchText(probeHttp, url)
+                override suspend fun probeImap(host: String, port: Int) = Probes.imap(host, port)
+                override suspend fun probeSmtp(host: String, port: Int) = Probes.smtp(host, port)
+            },
         )
     }
 
@@ -46,13 +79,16 @@ class DdmailApp : Application() {
     val settings: ru.letotam.ddmail.settings.AppSettings by lazy { ru.letotam.ddmail.settings.AppSettings(this) }
     val notifier: ru.letotam.ddmail.background.MailNotifier by lazy { ru.letotam.ddmail.background.MailNotifier(this, settings) }
 
+    /** Все учётки разом: сводный список бесед, правки — источнику беседы. */
+    val hub: MailHub by lazy { MailHub(db.dao(), http) }
+
     /** Приложение на экране (MainActivity между onStart и onStop). */
     @Volatile var foreground = false
 
-    /** Открытая сейчас беседа — о ней не уведомляем. */
+    /** Открытая сейчас беседа (`Conversation.ref`) — о ней не уведомляем. */
     @Volatile var openConversation: String? = null
 
-    /** Беседа, которую попросили открыть из уведомления. */
+    /** Беседа (`Conversation.ref`), которую попросили открыть из уведомления. */
     val openRequests = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
 
     private var apiFor: Pair<String, SessionApi>? = null
@@ -82,12 +118,39 @@ class DdmailApp : Application() {
         apiFor = null
     }
 
-    /** Синхронизация сессии; обменянный токен сразу ложится в хранилище. */
-    fun engine(session: Session): SyncEngine {
-        val host = session.serverUrl.removePrefix("https://").substringBefore(':').substringBefore('/')
-        // Ключ учётки — как `account_key` десктопа (`логин@хост`): по нему
-        // документ папок хранит ручные назначения, ключи обязаны совпадать.
-        return SyncEngine("${session.username}@$host", sessionApi(session), db.dao())
+    // ── Учётки ──
+
+    private val accountsLock = Mutex()
+    private var loaded = false
+    @Volatile private var session: Session? = null
+
+    /** Текущая учётка ddmail (не больше одной). */
+    fun ddmailSession(): Session? = session
+
+    /**
+     * Источники почты по сохранённым учёткам. Живые источники переиспользуются
+     * (у них соединения и замки синка): пересоздаётся только изменившаяся учётка.
+     */
+    suspend fun applyAccounts(ddmail: Session?, imap: List<ImapAccount>) = accountsLock.withLock {
+        session = ddmail
+        loaded = true
+        val old = hub.sources.value
+        val list = mutableListOf<MailSource>()
+        if (ddmail != null) {
+            val reuse = old.filterIsInstance<SyncEngine>().firstOrNull { it.accountKey == ddmail.accountKey && apiFor?.first == "${ddmail.serverUrl}|${ddmail.username}" }
+            list += reuse ?: SyncEngine(ddmail.accountKey, sessionApi(ddmail), db.dao(), title = "${ddmail.username} · ${ddmail.serverUrl.removePrefix("https://")}")
+        }
+        for (a in imap) {
+            val reuse = old.filterIsInstance<ImapEngine>().firstOrNull { it.account == a }
+            list += reuse ?: ImapEngine(a, { accounts.password(a.key) }, db.dao(), appScope, File(cacheDir, "imap-raw"))
+        }
+        hub.setSources(list)
+    }
+
+    /** Для фона: процесс поднялся без экрана — учётки с диска. */
+    suspend fun ensureAccounts() {
+        if (loaded) return
+        applyAccounts(sessions.load(), accounts.list())
     }
 
     val calendarPrefs: ru.letotam.ddmail.calendar.CalendarPrefs by lazy { ru.letotam.ddmail.calendar.CalendarPrefs(this) }

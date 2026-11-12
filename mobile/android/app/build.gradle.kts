@@ -17,8 +17,8 @@ android {
         minSdk = 29
         targetSdk = 35
         // Бампается при любой правке клиента (контракт §1).
-        versionCode = 22
-        versionName = "0.0.22"
+        versionCode = 23
+        versionName = "0.0.23"
     }
 
     // Один код для Huawei и обычного Android: различается только доставка
@@ -63,6 +63,15 @@ android {
     }
     // Документ ленты беседы — общий с будущим iOS-клиентом (контракт §8).
     sourceSets["main"].assets.srcDir("../../shared/conversation-doc")
+
+    // Angus Mail: лицензии в каждом jar — одна на APK; описания провайдеров и
+    // типов (javamail.*, mailcap) сливаются, а не выбираются.
+    packaging {
+        resources {
+            excludes += setOf("META-INF/NOTICE.md", "META-INF/LICENSE.md")
+            merges += setOf("META-INF/javamail.*", "META-INF/mailcap*", "META-INF/mimetypes.default")
+        }
+    }
 
     buildFeatures {
         compose = true

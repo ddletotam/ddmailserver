@@ -77,9 +77,9 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.ui.zIndex
-import ru.letotam.ddmail.SessionStatus
-import ru.letotam.ddmail.auth.Session
+import ru.letotam.ddmail.sync.AccountStatus
 import ru.letotam.ddmail.sync.Conversation
+import ru.letotam.ddmail.sync.MailSource
 
 private val Accent = Color(0xFF047857)
 
@@ -108,13 +108,12 @@ private val SelectedRow = Color(0xFF10B981)
 @Composable
 fun MailScreen(
     vm: MailViewModel,
-    session: Session,
-    status: SessionStatus,
-    onRelogin: () -> Unit,
-    onLogout: () -> Unit,
+    accounts: AccountActions,
     web: ConversationWeb,
     modifier: Modifier = Modifier,
 ) {
+    val sources by vm.sources.collectAsState()
+    val statuses by vm.statuses.collectAsState()
     val s by vm.state.collectAsState()
     val syncing by vm.syncing.collectAsState()
     val selectedId by vm.selected.collectAsState()
@@ -122,7 +121,7 @@ fun MailScreen(
     val wide = width >= 600
     // Открытая беседа ищется по id в полном видимом списке: дельта могла
     // переставить строки.
-    val selected = s.conversations.firstOrNull { it.id == selectedId }
+    val selected = s.conversations.firstOrNull { it.ref == selectedId }
 
     // Синхронизация на возврат и WebSocket — в оболочке (AppShell): они нужны
     // и пока на экране календарь.
@@ -175,10 +174,7 @@ fun MailScreen(
     val app = context.applicationContext as DdmailApp
     ru.letotam.ddmail.settings.PrefetchQuestion(app.settings)
     var settingsOpen by remember { mutableStateOf(false) }
-    if (settingsOpen) ru.letotam.ddmail.settings.SettingsDialog(app.settings, session, onLogout = {
-        settingsOpen = false
-        onLogout()
-    }) { settingsOpen = false }
+    if (settingsOpen) ru.letotam.ddmail.settings.SettingsDialog(app.settings, sources, statuses, accounts.closing { settingsOpen = false }) { settingsOpen = false }
     // Открытие беседы из уведомления.
     val openReq by app.openRequests.collectAsState()
     LaunchedEffect(openReq) {
@@ -203,8 +199,11 @@ fun MailScreen(
         val convOnly = !wide && selected != null
         if (q != null && !convOnly) SearchBar(q!!, onChange = { vm.query.value = it }, onClose = { vm.query.value = null })
         else if (!ime) {
-            if (!convOnly) TopBar(session, status, syncing, onSearch = { vm.query.value = "" }, onSpam = vm::openSpam, onSettings = { settingsOpen = true }, onLogout = onLogout)
-            if (status == SessionStatus.Dead) DeadSessionBanner(onRelogin)
+            if (!convOnly) TopBar(sources, statuses, syncing, onSearch = { vm.query.value = "" }, onSpam = vm::openSpam, onSettings = { settingsOpen = true }, onAdd = accounts.add)
+            // «Нужен вход» — у каждой учётки своя плашка (mobile-external-accounts §7).
+            sources.filter { statuses[it.accountKey] == AccountStatus.NeedsLogin }.forEach { src ->
+                DeadSessionBanner(src.title) { accounts.relogin(src.accountKey) }
+            }
         }
         if (wide) {
             Row(Modifier.fillMaxSize()) {
@@ -222,7 +221,16 @@ fun MailScreen(
 }
 
 @Composable
-private fun TopBar(session: Session, status: SessionStatus, syncing: Boolean, onSearch: () -> Unit, onSpam: () -> Unit, onSettings: () -> Unit, onLogout: () -> Unit) {
+private fun TopBar(
+    sources: List<MailSource>,
+    statuses: Map<String, AccountStatus>,
+    syncing: Boolean,
+    onSearch: () -> Unit,
+    onSpam: () -> Unit,
+    onSettings: () -> Unit,
+    onAdd: () -> Unit,
+) {
+    val offline = sources.mapNotNull { src -> (statuses[src.accountKey] as? AccountStatus.Offline)?.let { src.title } }
     var menu by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 2.dp),
@@ -231,14 +239,15 @@ private fun TopBar(session: Session, status: SessionStatus, syncing: Boolean, on
         Column(Modifier.weight(1f)) {
             Text(stringResource(R.string.mail_title), style = MaterialTheme.typography.titleLarge)
             val sub = when {
-                status is SessionStatus.Offline -> stringResource(R.string.status_offline)
+                offline.isNotEmpty() && offline.size == sources.size -> stringResource(R.string.status_offline)
+                offline.isNotEmpty() -> "Нет связи: " + offline.joinToString(", ")
                 syncing -> stringResource(R.string.status_syncing)
-                else -> "${session.username} · ${session.serverUrl.removePrefix("https://")}"
+                else -> sources.joinToString(", ") { it.title }
             }
             Text(
                 sub,
                 style = MaterialTheme.typography.bodySmall,
-                color = if (status is SessionStatus.Offline) MaterialTheme.colorScheme.error
+                color = if (offline.isNotEmpty()) MaterialTheme.colorScheme.error
                 else MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -257,9 +266,9 @@ private fun TopBar(session: Session, status: SessionStatus, syncing: Boolean, on
                     menu = false
                     onSettings()
                 })
-                DropdownMenuItem(leadingIcon = { Icon(Icons.AutoMirrored.Filled.Logout, null) }, text = { Text(stringResource(R.string.action_logout)) }, onClick = {
+                DropdownMenuItem(leadingIcon = { Icon(Icons.Filled.PersonAdd, null) }, text = { Text("Добавить учётку") }, onClick = {
                     menu = false
-                    onLogout()
+                    onAdd()
                 })
             }
         }
@@ -368,8 +377,9 @@ private fun DeleteDialog(vm: MailViewModel, close: () -> Unit) {
  */
 @Composable
 private fun SpamDialog(vm: MailViewModel) {
-    val ids by vm.spamAsk.collectAsState()
-    val list = ids ?: return
+    val ask by vm.spamAsk.collectAsState()
+    val list = ask?.refs ?: return
+    val rules = ask?.rules == true
     val (convs, msgs) = remember(list) { vm.spamSummary(list) }
     val close = { vm.spamAsk.value = null }
     AlertDialog(
@@ -377,14 +387,23 @@ private fun SpamDialog(vm: MailViewModel) {
         title = { Text("В спам?") },
         text = {
             Text(
-                "Бесед: $convs, писем в них: $msgs. Письма будут удалены, отправитель — заблокирован. " +
-                    "«Домен» останавливает спам с меняющихся адресов одного домена.",
+                if (rules) {
+                    "Бесед: $convs, писем в них: $msgs. Письма будут удалены, отправитель — заблокирован. " +
+                        "«Домен» останавливает спам с меняющихся адресов одного домена."
+                } else {
+                    // Внешний ящик: правил «адрес/домен» нет — их держит только сервер ddmail.
+                    "Бесед: $convs, писем в них: $msgs. Письма уйдут в папку «Спам» ящика."
+                },
             )
         },
         confirmButton = {
             Row {
-                TextButton(onClick = { vm.spamConfirmed("address") }) { Text("Адрес") }
-                TextButton(onClick = { vm.spamConfirmed("domain") }) { Text("Домен", color = MaterialTheme.colorScheme.error) }
+                if (rules) {
+                    TextButton(onClick = { vm.spamConfirmed("address") }) { Text("Адрес") }
+                    TextButton(onClick = { vm.spamConfirmed("domain") }) { Text("Домен", color = MaterialTheme.colorScheme.error) }
+                } else {
+                    TextButton(onClick = { vm.spamConfirmed("address") }) { Text("В спам", color = MaterialTheme.colorScheme.error) }
+                }
             }
         },
         dismissButton = { IconButton(onClick = close) { Icon(Icons.Filled.Close, "Отмена") } },
@@ -411,10 +430,10 @@ private fun SearchBar(q: String, onChange: (String) -> Unit, onClose: () -> Unit
 
 /** Несмываемая плашка (контракт §2): кэш виден, но почта не обновляется. */
 @Composable
-private fun DeadSessionBanner(onRelogin: () -> Unit) {
+private fun DeadSessionBanner(title: String, onRelogin: () -> Unit) {
     Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(stringResource(R.string.session_dead_banner), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+            Text("$title: " + stringResource(R.string.session_dead_banner), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
             Button(onClick = onRelogin) { Text(stringResource(R.string.action_relogin)) }
         }
     }
@@ -455,14 +474,14 @@ private fun ListPane(
             }
             LazyColumn(Modifier.fillMaxSize()) {
                 items(s.conversations, key = { it.accountKey + "\u0000" + it.id }) { c ->
-                    val inPick = c.id in picked
+                    val inPick = c.ref in picked
                     SwipeRow(
                         // В «Спам» жестов нет: там только смотрят и «Не спам».
                         enabled = picked.isEmpty() && !s.inSpam,
                         unread = c.unreadCount > 0,
-                        onRight = { vm.toggleRead(c.id) },
+                        onRight = { vm.toggleRead(c.ref) },
                         onLeft = {
-                            vm.togglePick(c.id)
+                            vm.togglePick(c.ref)
                             onMove()
                         },
                     ) {
@@ -470,10 +489,10 @@ private fun ListPane(
                         c,
                         avatars = vm.avatars,
                         tint = Color(identColors.colorOf(c.receivedBy)),
-                        selected = c.id == selectedId && picked.isEmpty(),
+                        selected = c.ref == selectedId && picked.isEmpty(),
                         picked = inPick,
-                        onClick = { if (picked.isNotEmpty()) vm.togglePick(c.id) else vm.open(c.id) },
-                        onLongClick = { vm.togglePick(c.id) },
+                        onClick = { if (picked.isNotEmpty()) vm.togglePick(c.ref) else vm.open(c.ref) },
+                        onLongClick = { vm.togglePick(c.ref) },
                     )
                     }
                 }
@@ -741,7 +760,7 @@ private fun ConversationPane(c: Conversation?, web: ConversationWeb, vm: MailVie
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (!c.spam) IconButton(onClick = { vm.askSpam(c.id) }) { Icon(Icons.Filled.Report, "В спам") }
+            if (!c.spam) IconButton(onClick = { vm.askSpam(c.ref) }) { Icon(Icons.Filled.Report, "В спам") }
         }
         HorizontalDivider()
         AndroidView(
@@ -814,4 +833,21 @@ private fun MenuRow(icon: androidx.compose.ui.graphics.vector.ImageVector, title
         Spacer(Modifier.width(16.dp))
         Text(title, style = MaterialTheme.typography.bodyLarge)
     }
+}
+
+/** Действия над учётками, которые живут выше экрана почты (AppViewModel). */
+class AccountActions(
+    val add: () -> Unit,
+    /** «Войти» у учётки с «нужен вход». */
+    val relogin: (String) -> Unit,
+    val edit: (String) -> Unit,
+    val remove: (String) -> Unit,
+) {
+    /** Те же действия, но сначала закрыть окно (настройки). */
+    fun closing(close: () -> Unit) = AccountActions(
+        add = { close(); add() },
+        relogin = { close(); relogin(it) },
+        edit = { close(); edit(it) },
+        remove = { close(); remove(it) },
+    )
 }
