@@ -10,6 +10,6 @@ func (s *Server) HandleDDMailDiscovery(w http.ResponseWriter, r *http.Request) {
 		"version":  1,
 		"api_base": "/api/desktop/v1",
 		"ws_path":  "/api/desktop/v1/ws",
-		"features": []string{"delta-sync", "server-search", "push-all-folders", "thread-grouping"},
+		"features": []string{"delta-sync", "server-search", "push-all-folders", "thread-grouping", "push-token"},
 	})
 }

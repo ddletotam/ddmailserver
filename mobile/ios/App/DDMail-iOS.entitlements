@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Права приложения на iOS/iPadOS (контракт §2, §7). -->
+<plist version="1.0">
+<dict>
+	<key>aps-environment</key>
+	<string>$(DDMAIL_APS_ENVIRONMENT)</string>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>$(DDMAIL_APP_GROUP)</string>
+	</array>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)ru.letotam.ddmail</string>
+	</array>
+</dict>
+</plist>

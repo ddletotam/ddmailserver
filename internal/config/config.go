@@ -20,6 +20,66 @@ type Config struct {
 	Spam        SpamConfig        `yaml:"spam"`
 	Meilisearch MeilisearchConfig `yaml:"meilisearch"`
 	DKIM        DKIMConfig        `yaml:"dkim"`
+	Push        PushConfig        `yaml:"push"`
+}
+
+// PushConfig — доставка push-уведомлений о новой почте (ios-behavior-contract
+// §7, android-behavior-contract §7). Нет секции или ключа — доставка этой
+// службой выключена, сервер работает как без неё; регистрация токенов при
+// этом всё равно принимается.
+type PushConfig struct {
+	APNs APNsConfig `yaml:"apns"`
+	// HMS и FCM — место под будущие службы (Android): секции читаются, но
+	// отправителей у них пока нет.
+	HMS HMSConfig `yaml:"hms"`
+	FCM FCMConfig `yaml:"fcm"`
+}
+
+// APNsConfig — Apple Push Notification service, token-based auth: ключ .p8
+// из Apple Developer (Keys → Apple Push Notifications service).
+type APNsConfig struct {
+	KeyFile string `yaml:"key_file"` // путь к AuthKey_<KEYID>.p8 (секрет, вне git)
+	KeyID   string `yaml:"key_id"`   // 10 символов, из имени ключа
+	TeamID  string `yaml:"team_id"`  // команда разработчика
+	Topic   string `yaml:"topic"`    // bundle id приложения, apns-topic
+	// Environment: "auto" (по умолчанию) — окружение берётся из регистрации
+	// токена (отладочная сборка — sandbox, релизная — production);
+	// "sandbox" или "production" — обслуживаются только токены этого
+	// окружения, остальные пропускаются.
+	Environment string `yaml:"environment"`
+}
+
+// Значения APNsConfig.Environment.
+const (
+	APNsEnvAuto       = "auto"
+	APNsEnvSandbox    = "sandbox"
+	APNsEnvProduction = "production"
+)
+
+// Enabled — заданы ли все ключи, без которых APNs не работает.
+func (c APNsConfig) Enabled() bool {
+	return c.KeyFile != "" && c.KeyID != "" && c.TeamID != "" && c.Topic != ""
+}
+
+// EnvironmentOrDefault — Environment с пустым значением как "auto".
+func (c APNsConfig) EnvironmentOrDefault() string {
+	e := strings.ToLower(strings.TrimSpace(c.Environment))
+	if e == "" {
+		return APNsEnvAuto
+	}
+	return e
+}
+
+// HMSConfig — Huawei Push Kit (не реализовано).
+type HMSConfig struct {
+	AppID        string `yaml:"app_id"`
+	ClientSecret string `yaml:"client_secret"`
+}
+
+// FCMConfig — Firebase Cloud Messaging (не реализовано).
+type FCMConfig struct {
+	ProjectID          string `yaml:"project_id"`
+	ServiceAccountFile string `yaml:"service_account_file"`
 }
 
 // DKIMConfig enables DKIM signing of direct-delivery outgoing mail.
@@ -282,6 +342,11 @@ func (c *Config) Validate() error {
 	case "", SecureCookiesAuto, SecureCookiesTrue, SecureCookiesFalse:
 	default:
 		return fmt.Errorf("server.public.secure_cookies must be auto, true or false, got %q", c.Server.Public.SecureCookies)
+	}
+	switch c.Push.APNs.EnvironmentOrDefault() {
+	case APNsEnvAuto, APNsEnvSandbox, APNsEnvProduction:
+	default:
+		return fmt.Errorf("push.apns.environment must be auto, sandbox or production, got %q", c.Push.APNs.Environment)
 	}
 	return nil
 }

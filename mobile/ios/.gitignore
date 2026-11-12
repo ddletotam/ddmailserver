@@ -6,4 +6,4 @@
 Package.resolved
 # Генерируется XcodeGen из project.yml
 App/Info.plist
-App/DDMail.entitlements
+NotificationService/Info.plist

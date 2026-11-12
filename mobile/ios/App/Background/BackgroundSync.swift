@@ -1,8 +1,10 @@
+import DDMailStore
 import DDMailSync
 import Foundation
 import os
 #if canImport(BackgroundTasks) && os(iOS)
 import BackgroundTasks
+import UIKit
 #endif
 
 /// Фон (§4, §7): `BGAppRefreshTask` — страховка от потерянного push (синк и
@@ -26,6 +28,20 @@ enum BackgroundSync {
             p.earliestBeginDate = Date(timeIntervalSinceNow: 30 * 60)
             await submit(p)
         }
+        #endif
+    }
+
+    /// Работа в фоне с открытой базой: приложение в фоне держит кэш
+    /// «усыплённым» (`MailStore.suspend`), фоновая задача будит его на время
+    /// работы и усыпляет снова, если на экран так и не вышли.
+    @MainActor
+    static func withDatabase(_ work: @MainActor () async -> Void) async {
+        #if os(iOS)
+        MailStore.resume()
+        await work()
+        if UIApplication.shared.applicationState == .background { MailStore.suspend() }
+        #else
+        await work()
         #endif
     }
 

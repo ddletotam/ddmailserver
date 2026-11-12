@@ -18,6 +18,7 @@ let package = Package(
         .library(name: "DDMailIMAP", targets: ["DDMailIMAP"]),
         .library(name: "DDMailSMTP", targets: ["DDMailSMTP"]),
         .library(name: "DDMailDAV", targets: ["DDMailDAV"]),
+        .library(name: "DDMailPush", targets: ["DDMailPush"]),
     ],
     dependencies: [
         // Единственная сторонняя зависимость логики (контракт §1): кэш на SQLite
@@ -37,6 +38,9 @@ let package = Package(
         .target(name: "DDMailStore", dependencies: ["DDMailAPI", .product(name: "GRDB", package: "GRDB.swift")]),
         .target(name: "DDMailSync", dependencies: ["DDMailAPI", "DDMailStore", "DDMailMIME", "DDMailNet", "DDMailIMAP", "DDMailSMTP"]),
         .target(name: "DDMailCalendar", dependencies: ["DDMailAPI"]),
+        // Push (контракт §7): общее приложения и Notification Service Extension —
+        // регистрация токена, состояние в App Group, проход расширения.
+        .target(name: "DDMailPush", dependencies: ["DDMailAPI", "DDMailAuth", "DDMailStore", "DDMailSync", "DDMailNet"]),
         .testTarget(name: "DDMailAPITests", dependencies: ["DDMailAPI"]),
         .testTarget(name: "DDMailAuthTests", dependencies: ["DDMailAuth", "DDMailAPI", "DDMailNet"]),
         .testTarget(name: "DDMailStoreTests", dependencies: ["DDMailStore", "DDMailAPI", .product(name: "GRDB", package: "GRDB.swift")]),
@@ -46,6 +50,7 @@ let package = Package(
         .testTarget(name: "DDMailIMAPTests", dependencies: ["DDMailIMAP", "DDMailNet", "DDMailMIME"]),
         .testTarget(name: "DDMailSMTPTests", dependencies: ["DDMailSMTP", "DDMailNet", "DDMailMIME"]),
         .testTarget(name: "DDMailDAVTests", dependencies: ["DDMailDAV", "DDMailAPI"]),
+        .testTarget(name: "DDMailPushTests", dependencies: ["DDMailPush", "DDMailAPI", "DDMailAuth", "DDMailStore", "DDMailSync"]),
     ],
     swiftLanguageModes: [.v6]
 )

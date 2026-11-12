@@ -61,9 +61,13 @@ struct AppShell: View {
                     }
                 }
             }
+            NotificationRouter.shared.openRef = { [weak mail] in mail?.selectedID }
             mail.live.forEach { $0.start() }
             await mail.sync()
             await Notifier.requestPermissionIfNeeded()
+            // Push (§7): токен APNs и регистрация ddmail-учёток — после
+            // разрешения на уведомления, при каждом выходе на экран.
+            PushService.shared.attach(workspace)
             await workspace.reminders?.refresh()
         }
     }

@@ -13,7 +13,10 @@
 #            DDMAIL_TEST_EMAIL / DDMAIL_TEST_PASSWORD — учётка для uitest (без них
 #            сквозные тесты пропускаются), DDMAIL_TEST_MAILRU_EMAIL /
 #            DDMAIL_TEST_MAILRU_PASSWORD — внешний ящик для ImapFlowTests,
-#            DDMAIL_KEYCHAIN_PASSWORD — для device.
+#            DDMAIL_KEYCHAIN_PASSWORD — для device,
+#            DDMAIL_TEAM — команда подписи (иначе — из учётки Xcode на Маке),
+#            ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_FILE — ключ App Store Connect
+#            API: Xcode сам заводит профили с push и App Group (контракт §7).
 #            По умолчанию — из ~/.config/ddmail-ios/ (см. ниже); в git их нет.
 set -euo pipefail
 
@@ -26,6 +29,14 @@ SECRETS="${XDG_CONFIG_HOME:-$HOME/.config}/ddmail-ios"
 if [ -z "${DDMAIL_KEYCHAIN_PASSWORD:-}" ] && [ -f "$SECRETS/keychain-password" ]; then
     DDMAIL_KEYCHAIN_PASSWORD="$(cat "$SECRETS/keychain-password")"
 fi
+#   team               команда подписи (Team ID): кэш Xcode на Маке может
+#                      помнить только Personal Team, у которой нет push
+#   asc.env            ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_FILE
+if [ -z "${DDMAIL_TEAM:-}" ] && [ -f "$SECRETS/team" ]; then
+    DDMAIL_TEAM="$(tr -d '[:space:]' < "$SECRETS/team")"
+fi
+# shellcheck source=/dev/null
+[ -f "$SECRETS/asc.env" ] && . "$SECRETS/asc.env"
 
 HOST="${DDMAIL_MAC:-mac}"
 SHOTS="${DDMAIL_SHOTS:-$HOME/.cache/ddmail-ios}"
@@ -39,14 +50,49 @@ sync_code() {
         mobile/ios mobile/shared "$HOST:$REMOTE/")
 }
 
+# Ключ App Store Connect API — на Мак только на время сборки: временный
+# каталог с правами 700, файл 600, удаляется по выходе (и при ошибке).
+ASC_REMOTE=""
+ASC_DIR=""
+asc_cleanup() {
+    if [ -n "$ASC_DIR" ]; then ssh "$HOST" "rm -rf '$ASC_DIR'" >/dev/null 2>&1 || true; fi
+}
+asc_upload() {
+    local key="${ASC_KEY_FILE:-}"
+    key="${key/#\~/$HOME}"
+    if [ -z "$key" ] || [ ! -f "$key" ] || [ -z "${ASC_KEY_ID:-}" ] || [ -z "${ASC_ISSUER_ID:-}" ]; then return 0; fi
+    ASC_DIR="$(ssh "$HOST" 'umask 077; mktemp -d /tmp/ddmail-asc.XXXXXX')"
+    trap asc_cleanup EXIT
+    ASC_REMOTE="$ASC_DIR/AuthKey_$ASC_KEY_ID.p8"
+    scp -q "$key" "$HOST:$ASC_REMOTE"
+    ssh "$HOST" "chmod 600 '$ASC_REMOTE'"
+}
+
 remote() {
     # Общая часть для команд на Маке: PATH к xcodegen, выход при ошибке.
-    ssh "$HOST" "bash -s" -- "$@" <<'EOF'
+    # Команда подписи и ключ ASC — окружением (не секреты: путь и id).
+    ssh "$HOST" "DDMAIL_TEAM='${DDMAIL_TEAM:-}' ASC_PATH='$ASC_REMOTE' ASC_ID='${ASC_KEY_ID:-}' ASC_ISSUER='${ASC_ISSUER_ID:-}' bash -s" -- "$@" <<'EOF'
 set -euo pipefail
 export PATH="$HOME/.local/xcodegen/bin:$PATH"
 cd "$HOME/build/ddmail/mobile/ios"
 DD="$HOME/build/ddmail/DerivedData"
 cmd="$1"; shift
+
+# Команда подписи: явная (DDMAIL_TEAM) или из учётки Xcode на Маке.
+team_id() {
+    if [ -n "${DDMAIL_TEAM:-}" ]; then echo "$DDMAIL_TEAM"; return; fi
+    defaults read com.apple.dt.Xcode IDEProvisioningTeamByIdentifier 2>/dev/null \
+        | awk -F'= ' '/teamID/ {gsub(/[ ;"]/, "", $2); print $2; exit}'
+}
+
+# Подпись с автоматическими профилями; с ключом ASC Xcode сам включает
+# возможности (push, App Group) и заводит id расширения.
+sign_args() {
+    printf '%s' "-allowProvisioningUpdates DEVELOPMENT_TEAM=$1"
+    if [ -n "${ASC_PATH:-}" ]; then
+        printf ' %s' "-authenticationKeyPath $ASC_PATH -authenticationKeyID $ASC_ID -authenticationKeyIssuerID $ASC_ISSUER"
+    fi
+}
 
 # Зеркала пакетов на Маке (~/src-mirrors): полный клон с GitHub провайдер
 # обрывает («unexpected disconnect»), поверхностный проходит. Конфигурация
@@ -104,10 +150,9 @@ case "$cmd" in
         build_sim
         # Мак: права на связку ключей требуют подписи командой; нет учётки
         # Xcode — только компиляция без подписи.
-        team="$(defaults read com.apple.dt.Xcode IDEProvisioningTeamByIdentifier 2>/dev/null \
-            | awk -F'= ' '/teamID/ {gsub(/[ ;"]/, "", $2); print $2; exit}')"
+        team="$(team_id)"
         if [ -n "${1:-}" ]; then security unlock-keychain -p "$1" login.keychain; fi
-        if [ -n "$team" ]; then sign="-allowProvisioningUpdates DEVELOPMENT_TEAM=$team"; else sign="CODE_SIGNING_ALLOWED=NO"; fi
+        if [ -n "$team" ]; then sign="$(sign_args "$team")"; else sign="CODE_SIGNING_ALLOWED=NO"; fi
         xcodebuild -project DDMail.xcodeproj -scheme DDMail -configuration Debug \
             -destination "platform=macOS" -derivedDataPath "$DD" -clonedSourcePackagesDirPath "$SPM" \
             $sign -quiet build
@@ -133,11 +178,10 @@ case "$cmd" in
         if [ "${3:-iphone}" = mac ]; then
             # Мак: приложение подписано командой (иначе Keychain с защитой данных
             # не пустит), связка разблокирована, назначение — сам Мак.
-            team="$(defaults read com.apple.dt.Xcode IDEProvisioningTeamByIdentifier 2>/dev/null \
-                | awk -F'= ' '/teamID/ {gsub(/[ ;"]/, "", $2); print $2; exit}')"
+            team="$(team_id)"
             if [ -n "${4:-}" ]; then security unlock-keychain -p "$4" login.keychain; fi
             dest="platform=macOS"
-            extra="-allowProvisioningUpdates DEVELOPMENT_TEAM=$team"
+            extra="$(sign_args "$team")"
         else
             dest="id=$(sim_udid "${3:-iphone}")"
             extra=""
@@ -162,8 +206,7 @@ case "$cmd" in
         kind="${1:-iphone}"
         gen
         # Команда подписи — из учётки Xcode на Маке, в репозитории её нет.
-        team="$(defaults read com.apple.dt.Xcode IDEProvisioningTeamByIdentifier 2>/dev/null \
-            | awk -F'= ' '/teamID/ {gsub(/[ ;"]/, "", $2); print $2; exit}')"
+        team="$(team_id)"
         [ -n "$team" ] || { echo "в Xcode не выполнен вход (Settings → Accounts)" >&2; exit 1; }
         xcrun devicectl list devices --json-output "$HOME/build/ddmail/devices.json" >/dev/null
         udid="$(/usr/bin/python3 - "$kind" "$HOME/build/ddmail/devices.json" <<'PY'
@@ -182,7 +225,7 @@ PY
         if [ -n "${2:-}" ]; then security unlock-keychain -p "$2" login.keychain; fi
         xcodebuild -project DDMail.xcodeproj -scheme DDMail -configuration Debug \
             -destination "id=$udid" -derivedDataPath "$DD" -clonedSourcePackagesDirPath "$SPM" \
-            -allowProvisioningUpdates DEVELOPMENT_TEAM="$team" -quiet build
+            $(sign_args "$team") -quiet build
         app="$DD/Build/Products/Debug-iphoneos/DDMail.app"
         xcrun devicectl device install app --device "$udid" "$app" >/dev/null
         # Заблокированный телефон не запустит приложение — это не провал установки.
@@ -206,6 +249,7 @@ case "$cmd" in
         ;;
     build)
         sync_code
+        asc_upload
         remote build "${DDMAIL_KEYCHAIN_PASSWORD:-}"
         ;;
     run)
@@ -218,6 +262,7 @@ case "$cmd" in
         ;;
     uitest)
         sync_code
+        if [ "${2:-iphone}" = mac ]; then asc_upload; fi
         rc=0
         remote uitest "${DDMAIL_TEST_EMAIL:-}" "${DDMAIL_TEST_PASSWORD:-}" "${2:-iphone}" "${DDMAIL_KEYCHAIN_PASSWORD:-}" \
             "${DDMAIL_TEST_MAILRU_EMAIL:-}" "${DDMAIL_TEST_MAILRU_PASSWORD:-}" "${3:-}" || rc=$?
@@ -229,10 +274,11 @@ case "$cmd" in
         ;;
     device)
         sync_code
+        asc_upload
         remote device "${2:-iphone}" "${DDMAIL_KEYCHAIN_PASSWORD:-}"
         ;;
     *)
-        sed -n '2,17p' "$0" >&2
+        sed -n '2,20p' "$0" >&2
         exit 2
         ;;
 esac

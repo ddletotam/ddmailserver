@@ -1,6 +1,7 @@
 import DDMailAPI
 import DDMailAuth
 import DDMailDAV
+import DDMailPush
 import DDMailStore
 import DDMailSync
 import Foundation
@@ -41,12 +42,30 @@ final class AppModel {
         if ProcessInfo.processInfo.arguments.contains("-ddmail-reset") {
             accounts.removeAll()
             KeychainSessionStore().clear()
-            try? FileManager.default.removeItem(at: Workspace.cacheURL.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: AppGroup.dataDirectory)
+            try? FileManager.default.removeItem(at: AppGroup.legacyDataDirectory)
             if let id = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: id) }
+            UserDefaults(suiteName: AppGroup.id)?.removePersistentDomain(forName: AppGroup.id)
         }
         #endif
+        Self.migrateStorage(accounts)
         accounts.migrateLegacy()
         phase = Self.phase(for: accounts.accounts(), self)
+    }
+
+    /// До App Group (контракт §7) список учёток и кэш жили в Application
+    /// Support приложения — переносятся в общий контейнер, чтобы их видело
+    /// расширение уведомлений. Без потерь: кэш копируется резервной копией
+    /// SQLite, старое удаляется после удачной записи нового; не вышло —
+    /// старое остаётся, перенос повторится при следующем запуске.
+    private static func migrateStorage(_ accounts: KeychainAccountStore) {
+        guard AppGroup.containerURL != nil else { return }
+        accounts.migrateFile()
+        do {
+            try MailStore.moveDatabase(from: AppGroup.legacyDataDirectory.appending(path: "cache.sqlite"), to: AppGroup.cacheURL)
+        } catch {
+            mailLog.error("cache move to app group: \(String(describing: error), privacy: .public)")
+        }
     }
 
     private static func phase(for list: [MailAccount], _ app: AppModel) -> Phase {
@@ -78,6 +97,8 @@ final class AppModel {
     func reload() {
         workspace?.close()
         phase = Self.phase(for: accounts.accounts(), self)
+        // Новая учётка (или вход заново) — зарегистрировать push и для неё.
+        if let workspace { PushService.shared.attach(workspace) }
     }
 
     /// «Добавить учётку» из настроек.
@@ -99,6 +120,10 @@ final class AppModel {
 
     /// Удалить учётку: секреты и кэш учётки (контракт §1).
     func remove(_ key: String) {
+        // Push этой учётки снимается её же сессией — пока секрет не стёрт.
+        if let a = accounts.accounts().first(where: { $0.key == key }) {
+            PushService.shared.remove(account: a, session: accounts.secret(key)?.session)
+        }
         workspace?.forget(key)
         try? accounts.remove(key)
         if accounts.accounts().isEmpty {
@@ -264,11 +289,10 @@ final class Workspace {
         return URLSession(configuration: c)
     }()
 
-    /// Кэш — в Application Support (не в Caches: система не должна его
-    /// выбрасывать, иначе на старте пустой список до ответа сервера).
-    static var cacheURL: URL {
-        URL.applicationSupportDirectory.appending(path: "ddmail/cache.sqlite")
-    }
+    /// Кэш — в Application Support общего контейнера App Group (не в Caches:
+    /// система не должна его выбрасывать, иначе на старте пустой список до
+    /// ответа сервера); тот же файл открывает расширение уведомлений (§7).
+    static var cacheURL: URL { AppGroup.cacheURL }
 
     func link(_ key: String) -> AccountLink? { links.first { $0.account.key == key } }
 
@@ -293,9 +317,13 @@ final class Workspace {
         }
     }
 
-    /// Фоновый проход (BGAppRefreshTask): синк всех учёток и уведомления из кэша.
+    /// Фоновый проход (BGAppRefreshTask): синк всех учёток и уведомления из
+    /// кэша. Не одновременно с расширением уведомлений (§4): межпроцессная
+    /// блокировка; не дождались — синк всё равно, дельта идемпотентна.
     func backgroundRefresh() async {
+        let held = await ProcessLock.sync.acquire(timeout: .seconds(10))
         await mail?.syncAll(notify: true)
+        held?.release()
         await reminders?.refresh()
     }
 

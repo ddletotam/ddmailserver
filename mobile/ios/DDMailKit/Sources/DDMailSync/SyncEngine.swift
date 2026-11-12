@@ -127,14 +127,21 @@ public actor SyncEngine: MailProvider, DialogFolderSource {
     // MARK: Проход
 
     /// Один проход. Идущий проход сначала закончится; ошибки API — наверх.
+    /// Отмена вызывающего отменяет и проход (расширение уведомлений и фоновая
+    /// задача ограничены по времени).
     public func sync() async throws {
         let previous = tail
         let run = Task { [weak self] in
             await previous?.value
+            try Task.checkCancellation()
             try await self?.syncOnce()
         }
         tail = Task { _ = try? await run.value }
-        try await run.value
+        try await withTaskCancellationHandler {
+            try await run.value
+        } onCancel: {
+            run.cancel()
+        }
     }
 
     private func syncOnce() async throws {

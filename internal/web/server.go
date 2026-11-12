@@ -15,6 +15,7 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/notify"
 	"github.com/ddletotam/ddmailserver/internal/oauth"
+	"github.com/ddletotam/ddmailserver/internal/push"
 	"github.com/ddletotam/ddmailserver/internal/search"
 	msgsvc "github.com/ddletotam/ddmailserver/internal/service/messages"
 	"github.com/gorilla/mux"
@@ -60,6 +61,11 @@ type Server struct {
 	// the internet-facing hostname and ports, which are not the ports this
 	// process listens on. See SetPublicEndpoints.
 	publicEndpoints config.PublicEndpoints
+
+	// push — доставка push о новой почте (nil — выключена); pushTokens
+	// подменяет database для токенов устройств (тесты). См. SetPush.
+	push       *push.Dispatcher
+	pushTokens PushTokenStore
 }
 
 // New creates a new web server
@@ -259,6 +265,9 @@ func (s *Server) setupRoutes() {
 	desktopAuthAPI.HandleFunc("/contacts", s.HandleDesktopContactCreate).Methods("POST")
 	desktopAuthAPI.HandleFunc("/contacts/{id}", s.HandleDesktopContactPatch).Methods("PATCH")
 	desktopAuthAPI.HandleFunc("/contacts/{id}", s.HandleDesktopContactDelete).Methods("DELETE")
+	// Устройства для push (APNs, HMS, FCM) — одна регистрация на все платформы.
+	desktopAuthAPI.HandleFunc("/push/token", s.HandleDesktopPushTokenRegister).Methods("POST")
+	desktopAuthAPI.HandleFunc("/push/token", s.HandleDesktopPushTokenDelete).Methods("DELETE")
 
 	// CalDAV server (uses Basic Auth, handles its own authentication)
 	// MUST be registered BEFORE the catch-all "/" web routes

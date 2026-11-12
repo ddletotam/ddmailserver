@@ -178,7 +178,7 @@ public final class KeychainAccountStore: AccountStore, @unchecked Sendable {
     private let lock = NSLock()
 
     public init(
-        file: URL = URL.applicationSupportDirectory.appending(path: "ddmail/accounts.json"),
+        file: URL = AppGroup.accountsURL,
         service: String = "ru.letotam.ddmail.account"
     ) {
         self.file = file
@@ -235,6 +235,27 @@ public final class KeychainAccountStore: AccountStore, @unchecked Sendable {
 
     public func removeSecret(_ key: String) {
         SecItemDelete(query(key) as CFDictionary)
+    }
+
+    /// Список учёток жил в Application Support приложения; с App Group
+    /// (контракт §7) — в общем контейнере, чтобы его видело расширение
+    /// уведомлений. Переносится один раз, старый файл удаляется после
+    /// удачной записи нового.
+    public func migrateFile(from old: URL = AppGroup.legacyDataDirectory.appending(path: "accounts.json")) {
+        let fm = FileManager.default
+        guard old.standardizedFileURL != file.standardizedFileURL, fm.fileExists(atPath: old.path) else { return }
+        lock.withLock {
+            if !fm.fileExists(atPath: file.path) {
+                do {
+                    try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    let data = try Data(contentsOf: old)
+                    try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+                } catch {
+                    return // старый файл остаётся — попробуем при следующем запуске
+                }
+            }
+            try? fm.removeItem(at: old)
+        }
     }
 
     /// Переход со старой версии (одна ddmail-сессия в `KeychainSessionStore`):

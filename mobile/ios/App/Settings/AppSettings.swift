@@ -1,3 +1,4 @@
+import DDMailPush
 import Foundation
 import Observation
 
@@ -27,30 +28,43 @@ final class AppSettings {
         didSet { d.set(prefetch?.rawValue, forKey: "settings.prefetch") }
     }
 
+    /// «Новые письма». Общая с расширением уведомлений настройка (App Group):
+    /// выключено — расширение тоже молчит, а регистрации push снимаются.
     var notifications: Bool {
-        didSet { d.set(notifications, forKey: "settings.notifications") }
+        didSet {
+            shared.notificationsEnabled = notifications
+            onNotificationsChanged?()
+        }
     }
+
+    /// Состояние, общее с Notification Service Extension (контракт §7).
+    let shared = SharedState()
+    /// Выключатель уведомлений переключили — push перерегистрируется.
+    @ObservationIgnored var onNotificationsChanged: (() -> Void)?
 
     private init() {
         prefetch = d.string(forKey: "settings.prefetch").flatMap(Prefetch.init)
-        notifications = d.object(forKey: "settings.notifications") as? Bool ?? true
+        // До App Group рубежи и выключатель жили в настройках приложения.
+        shared.migrate(from: d)
+        notifications = shared.notificationsEnabled
     }
 
     /// Рубежи уведомлений по учёткам: самый большой uid, о котором уже
-    /// уведомили (учётки нет — ещё не было прохода).
+    /// уведомили (учётки нет — ещё не было прохода). Общие с расширением.
     var notifiedMarks: [String: Int64] {
-        get { (d.dictionary(forKey: "notify.marks") as? [String: NSNumber])?.mapValues(\.int64Value) ?? [:] }
-        set { d.set(newValue.mapValues { NSNumber(value: $0) }, forKey: "notify.marks") }
+        get { shared.notifiedMarks }
+        set { shared.notifiedMarks = newValue }
     }
 
-    /// Учётку удалили — её рубеж тоже.
+    /// Учётку удалили — её рубеж и регистрация push тоже.
     func forget(account key: String) {
-        notifiedMarks.removeValue(forKey: key)
+        shared.forget(account: key)
     }
 
     /// Учёток не осталось: состояние чужого человека не остаётся.
     func clearAccountState() {
         prefetch = nil
+        shared.clearAccountState()
         for k in ["notify.marks", "notify.max", "mail.activeFolder", "mail.lastConversation"] { d.removeObject(forKey: k) }
     }
 }

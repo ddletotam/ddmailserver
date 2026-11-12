@@ -1,3 +1,4 @@
+import DDMailStore
 import SwiftUI
 import UserNotifications
 #if os(iOS)
@@ -8,6 +9,12 @@ import BackgroundTasks
 struct DDMailApp: App {
     @State private var app: AppModel
     @Environment(\.scenePhase) private var scenePhase
+    // Токен APNs SwiftUI не отдаёт — только делегат приложения (§7).
+    #if os(iOS)
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+    #else
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+    #endif
 
     init() {
         let model = AppModel()
@@ -20,7 +27,9 @@ struct DDMailApp: App {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: BackgroundSync.prefetchID, using: nil) { task in
             nonisolated(unsafe) let task = task
             let work = Task { @MainActor in
-                await model.workspace?.prefetch()
+                await BackgroundSync.withDatabase {
+                    await model.workspace?.prefetch()
+                }
                 task.setTaskCompleted(success: !Task.isCancelled)
             }
             task.expirationHandler = { work.cancel() }
@@ -51,11 +60,22 @@ struct DDMailApp: App {
         .onChange(of: scenePhase) {
             // Уходим в фон — поставить фоновый синк и докачку (§4, §7).
             if scenePhase == .background { Task { await BackgroundSync.schedule() } }
+            #if os(iOS)
+            // Кэш в общем контейнере: усыплённое с блокировкой SQLite
+            // приложение iOS убивает — в фоне база закрыта для запросов.
+            if scenePhase == .background { MailStore.suspend() } else { MailStore.resume() }
+            #endif
+            if scenePhase == .active {
+                // Пока нас не было, кэш мог пополнить push (расширение).
+                try? app.workspace?.cache?.externalChange()
+            }
         }
         #if os(iOS)
         .backgroundTask(.appRefresh(BackgroundSync.refreshID)) { [app] in
             await BackgroundSync.schedule()
-            await app.workspace?.backgroundRefresh()
+            await BackgroundSync.withDatabase {
+                await app.workspace?.backgroundRefresh()
+            }
         }
         #endif
     }
