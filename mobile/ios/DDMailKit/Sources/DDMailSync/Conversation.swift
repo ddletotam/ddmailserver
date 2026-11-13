@@ -18,13 +18,16 @@ public struct Conversation: Equatable, Hashable, Identifiable, Sendable {
     public var messages: [MessageRef]
     /// Из спама: место — только системная папка «Спам» (её состав задаёт сервер).
     public var spam: Bool
+    /// Статус доставки последнего письма, если оно наше исходящее (`last_delivery_status`).
+    public var lastDelivery: DeliveryState
 
     public init(
         accountKey: String, id: String, label: String = "", receivedBy: String = "",
         counterparts: [ContactInfo] = [], isGroup: Bool = false, lastDateTs: Int64 = 0,
         lastSubject: String = "", unreadCount: Int = 0, totalCount: Int = 0,
-        messages: [MessageRef] = [], spam: Bool = false
+        messages: [MessageRef] = [], spam: Bool = false, lastDelivery: DeliveryState = .unknown
     ) {
+        self.lastDelivery = lastDelivery
         self.accountKey = accountKey; self.id = id; self.label = label; self.receivedBy = receivedBy
         self.counterparts = counterparts; self.isGroup = isGroup; self.lastDateTs = lastDateTs
         self.lastSubject = lastSubject; self.unreadCount = unreadCount; self.totalCount = totalCount

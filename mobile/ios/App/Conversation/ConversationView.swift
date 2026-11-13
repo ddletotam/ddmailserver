@@ -44,6 +44,8 @@ struct ConversationView: View {
                         Button("Копировать адрес", systemImage: "at") { Clipboard.copy(b.fromAddr) }
                     }
                 }
+            } message: {
+                if let b = model.bubbleMenu, let why = DeliveryText.of(b) { Text(why) }
             }
             .confirmationDialog(model.attachmentMenu?.name ?? "", isPresented: present($model.attachmentMenu), titleVisibility: .visible) {
                 if let a = model.attachmentMenu {
@@ -93,8 +95,6 @@ struct NewConversationView: View {
     let compose: ComposeModel
 
     var body: some View {
-        // Наблюдаемое — в теле (контракт §0): `safeAreaInset` ленив.
-        let waiting = compose.awaitingDelivery
         WebViewContainer(web: model.web, ready: model.webPrepared)
             .background(Color(white: 0.96))
             .navigationTitle(address)
@@ -108,21 +108,11 @@ struct NewConversationView: View {
                     .accessibilityElement(children: .combine)
                 }
             }
+            // Подсказки «сервер принял, но не доставил» больше нет: копия в
+            // «Отправленных» ложится при приёме, беседа приходит сразу, а
+            // статус доставки виден на самом письме (§5).
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                VStack(spacing: 0) {
-                    if waiting {
-                        Label("Сервер принял письмо, но ещё не доставил его. Беседа появится, когда письмо ляжет в «Отправленные».",
-                              systemImage: "clock")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 8)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.bar)
-                            .accessibilityIdentifier("compose.awaiting")
-                    }
-                    ComposerBar(model: compose, autofocus: true) { compose.sendNew(to: address, $0) }
-                }
+                ComposerBar(model: compose, autofocus: true) { compose.sendNew(to: address, $0) }
             }
     }
 }
@@ -213,6 +203,25 @@ enum Clipboard {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(s, forType: .string)
         #endif
+    }
+}
+
+/// Статус доставки своего письма словами — для меню пузыря (сам пузырь
+/// рисует документ ленты по полю `delivery`).
+enum DeliveryText {
+    static func of(_ b: MessageBody) -> String? {
+        guard b.isOutgoing else { return nil }
+        switch b.delivery {
+        case .failed:
+            var s = "Не доставлено"
+            if !b.deliveryFailed.isEmpty { s += " — \(b.deliveryFailed.joined(separator: ", "))" }
+            if !b.deliveryError.isEmpty { s += ": \(b.deliveryError)" }
+            return s
+        case .pending:
+            return b.deliveryError.isEmpty ? "Отправляется…" : "Отправляется… Последняя попытка: \(b.deliveryError)"
+        case .delivered, .unknown:
+            return nil
+        }
     }
 }
 

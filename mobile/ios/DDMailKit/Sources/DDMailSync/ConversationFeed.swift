@@ -75,6 +75,24 @@ public struct FeedBatch: Encodable, Sendable {
         let size: Int64
     }
 
+    /// Доставка своего исходящего — для отрисовки пузыря документом
+    /// (договорённость мобильных клиентов): `status` — `delivery_status`
+    /// (`""` = доставлено), `error` — `delivery_error`, `failed` — `delivery_failed`.
+    public struct Delivery: Encodable, Equatable, Sendable {
+        let status: String
+        let error: String
+        let failed: [String]
+
+        public init(status: String, error: String, failed: [String]) {
+            self.status = status
+            self.error = error
+            self.failed = failed
+        }
+
+        /// JSON для `ddm.delivery(…)` / `ddm.stubDelivery(…)`.
+        public func javaScriptLiteral() -> String { jsLiteral(self) }
+    }
+
     public struct Message: Encodable, Sendable {
         let uid: Int64
         let outgoing: Bool
@@ -89,6 +107,7 @@ public struct FeedBatch: Encodable, Sendable {
         let attachments: [Attachment]
         /// В группе подписываем входящие именем отправителя.
         let showFrom: Bool
+        let delivery: Delivery
     }
 
     public let messages: [Message]
@@ -105,21 +124,36 @@ public struct FeedBatch: Encodable, Sendable {
                 html: b.html.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 },
                 text: b.text,
                 attachments: b.attachments.map { Attachment(index: $0.index, filename: $0.filename, size: $0.size) },
-                showFrom: c.isGroup
+                showFrom: c.isGroup,
+                delivery: Delivery(status: b.deliveryStatus, error: b.deliveryError, failed: b.deliveryFailed)
             )
         }
         self.hasOlder = hasOlder
         self.focusUid = focusUid
     }
 
+    /// Перерисовать уже показанные письма (сменился статус доставки) без
+    /// перезагрузки ленты: `ddm.delivery(uid, d)` по письму — плашка пузыря
+    /// меняется на месте; документ старше (без `delivery`) — `ddm.set(full)`
+    /// всем окном, иначе статус не дошёл бы до пузыря до переоткрытия беседы.
+    public static func updateScript(_ changed: FeedBatch, orSet full: FeedBatch) -> String {
+        """
+        (function(u,f){if(typeof ddm.delivery==='function'){u.messages.forEach(function(m){ddm.delivery(m.uid,m.delivery)})}\
+        else{ddm.set(f)}})(\(changed.javaScriptLiteral()),\(full.javaScriptLiteral()))
+        """
+    }
+
     /// JSON для вызова `ddm.*(…)`. JSON — подмножество литералов JS, кроме
     /// U+2028/U+2029 в строках: их экранируем, иначе старый разбор JS сломается.
-    public func javaScriptLiteral() -> String {
-        let e = JSONEncoder()
-        e.outputFormatting = [.withoutEscapingSlashes]
-        let s = String(decoding: (try? e.encode(self)) ?? Data("{}".utf8), as: UTF8.self)
-        return s.replacingOccurrences(of: "\u{2028}", with: "\\u2028").replacingOccurrences(of: "\u{2029}", with: "\\u2029")
-    }
+    public func javaScriptLiteral() -> String { jsLiteral(self) }
+}
+
+/// JSON как литерал JS: U+2028/U+2029 в строках экранируются.
+func jsLiteral(_ v: some Encodable) -> String {
+    let e = JSONEncoder()
+    e.outputFormatting = [.withoutEscapingSlashes]
+    let s = String(decoding: (try? e.encode(v)) ?? Data("{}".utf8), as: UTF8.self)
+    return s.replacingOccurrences(of: "\u{2028}", with: "\\u2028").replacingOccurrences(of: "\u{2029}", with: "\\u2029")
 }
 
 /// Окно отрисовки беседы (§8): сначала последние `page` писем, старые —
@@ -157,6 +191,21 @@ public struct FeedWindow: Sendable {
         order = (new + order).sorted { $0.uid > $1.uid }
         loaded += new.count
         return new
+    }
+
+    /// Беседа обновилась: уже известные письма, у которых сменился статус
+    /// доставки, — их пузыри перерисовать. Пустой статус («неизвестно»,
+    /// кэш до миграции) сменой не считается.
+    public mutating func redelivered(_ refs: [MessageRef]) -> [MessageRef] {
+        let now = Dictionary(refs.map { ($0.uid, $0) }, uniquingKeysWith: { a, _ in a })
+        var changed: [MessageRef] = []
+        for i in order.indices {
+            guard let r = now[order[i].uid], !r.deliveryStatus.isEmpty,
+                  r.deliveryStatus != order[i].deliveryStatus else { continue }
+            order[i].deliveryStatus = r.deliveryStatus
+            changed.append(r)
+        }
+        return changed
     }
 }
 

@@ -141,6 +141,19 @@ public final class MailStore: Sendable {
             }
         }
         registerImapTables(&m)
+        m.registerMigration("v3-delivery") { db in
+            // Статус доставки исходящих (контракт §5): у ссылки письма и у
+            // строки беседы. Старые строки — пусто (= доставлено).
+            try db.alter(table: "conversations") { t in
+                t.add(column: "lastDeliveryStatus", .text).notNull().defaults(to: "")
+            }
+            try db.alter(table: "conversation_messages") { t in
+                t.add(column: "deliveryStatus", .text).notNull().defaults(to: "")
+            }
+            // Дельта приносит только изменившиеся беседы: чтобы статусы
+            // появились и у старых, следующий синк учёток ddmail — полный.
+            try db.execute(sql: "DELETE FROM meta WHERE key LIKE '%/conv_full_ts'")
+        }
         return m
     }
 
@@ -255,6 +268,58 @@ public final class MailStore: Sendable {
         try db.write { db in
             try db.execute(sql: "UPDATE conversation_messages SET seen = 0 WHERE accountKey = ? AND conversationID = ? AND uid = ?", arguments: [account, conversation, uid])
             try db.execute(sql: "UPDATE conversations SET unreadCount = MAX(unreadCount, 1) WHERE accountKey = ? AND id = ?", arguments: [account, conversation])
+        }
+    }
+
+    // MARK: Доставка
+
+    /// Событие `delivery_status` (десктоп §1): новый статус письма — в его
+    /// ссылку, в закэшированное тело и в строку беседы, если письмо в ней
+    /// последнее (по uid: у ссылок нет дат, а свежее своё письмо — с самым
+    /// большим серверным id). Письмо ищется по uid (серверный id), иначе по
+    /// Message-ID. Ответ — затронутые беседы; пусто — письма в кэше нет,
+    /// статус принесёт синк.
+    @discardableResult
+    public func applyDelivery(_ account: String, _ d: DeliveryUpdate) throws -> [String] {
+        try db.write { db in
+            let mid = normalizedMessageID(d.messageID)
+            var refs: [MessageRefRecord] = []
+            if d.uid > 0 {
+                refs = try MessageRefRecord.filter(Column("accountKey") == account && Column("uid") == d.uid).fetchAll(db)
+            }
+            if refs.isEmpty, !mid.isEmpty {
+                refs = try MessageRefRecord.filter(Column("accountKey") == account).fetchAll(db)
+                    .filter { normalizedMessageID($0.messageID) == mid }
+            }
+            guard !refs.isEmpty else { return [] }
+            let uids = Set(refs.map(\.uid))
+            for uid in uids {
+                try db.execute(
+                    sql: "UPDATE conversation_messages SET deliveryStatus = ? WHERE accountKey = ? AND uid = ?",
+                    arguments: [d.status, account, uid]
+                )
+                if let row = try BodyRecord.filter(Column("accountKey") == account && Column("uid") == uid).fetchOne(db),
+                   var body = try? JSONDecoder().decode(MessageBody.self, from: row.json) {
+                    body.apply(d)
+                    var updated = row
+                    updated.json = try JSONEncoder().encode(body)
+                    try updated.update(db)
+                }
+            }
+            let convIDs = Array(Set(refs.map(\.conversationID)))
+            for id in convIDs {
+                let last = try Int64.fetchOne(
+                    db, sql: "SELECT MAX(uid) FROM conversation_messages WHERE accountKey = ? AND conversationID = ?",
+                    arguments: [account, id]
+                )
+                if let last, uids.contains(last) {
+                    try db.execute(
+                        sql: "UPDATE conversations SET lastDeliveryStatus = ? WHERE accountKey = ? AND id = ?",
+                        arguments: [d.status, account, id]
+                    )
+                }
+            }
+            return convIDs.sorted()
         }
     }
 

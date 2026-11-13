@@ -127,7 +127,17 @@ final class MailModel {
                 api: api,
                 sync: { [weak self] in await self?.sync(only: link.account.key) },
                 // `calendar_updated`: календарь перечитывается, почта — нет.
-                onCalendar: { [weak workspace] in Task { await workspace?.calendar?.refresh() } }
+                onCalendar: { [weak workspace] in Task { await workspace?.calendar?.refresh() } },
+                // `delivery_status`: статус — в кэш сразу, пузырь и строка
+                // перерисуются от наблюдения кэша.
+                onDelivery: { [weak link] d in
+                    guard let engine = link?.engine else { return }
+                    Task {
+                        do { try await engine.applyDelivery(d) } catch {
+                            mailLog.error("delivery: \(String(describing: error), privacy: .public)")
+                        }
+                    }
+                }
             )
         }
         activeFolderID = UserDefaults.standard.string(forKey: Self.activeKey)
@@ -224,6 +234,9 @@ final class MailModel {
     func sync(only key: String) async {
         guard let link = workspace.link(key) else { return }
         await run(link)
+        // Цель отправки могла узнать свой Message-ID уже после того, как
+        // беседа пришла (кэш не менялся — списку перестраиваться не с чего).
+        openSentTarget()
         await notify()
     }
 

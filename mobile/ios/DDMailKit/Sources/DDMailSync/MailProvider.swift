@@ -34,7 +34,10 @@ public protocol MailProvider: AnyObject, Sendable {
     func prefetchBodies(constrained: Bool, allowed: @escaping @Sendable () async -> Bool) async throws -> Int
     func part(uid: Int64, cid: String) async throws -> Binary
     func attachment(uid: Int64, index: Int) async throws -> Binary
-    func send(_ request: SendRequest) async throws
+    /// Отправить; итог — Message-ID письма и статус доставки (ddmail —
+    /// `pending`, IMAP — `delivered`: SMTP провайдера принял).
+    @discardableResult
+    func send(_ request: SendRequest) async throws -> SendReceipt
 
     func markRead(_ c: Conversation) async throws
     func markUnread(_ c: Conversation) async throws

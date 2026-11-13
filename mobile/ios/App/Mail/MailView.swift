@@ -510,6 +510,7 @@ struct ConversationRow: View {
                         .font(.body.weight(unread ? .semibold : .regular))
                         .lineLimit(1)
                     Spacer(minLength: 8)
+                    DeliveryMark(state: c.lastDelivery, selected: selected)
                     Text(RowDate.format(c.lastDateTs))
                         .font(.footnote)
                         .foregroundStyle(selected ? .white.opacity(0.85) : .secondary)
@@ -546,6 +547,33 @@ struct ConversationRow: View {
         if ProcessInfo.processInfo.arguments.contains("-ddmail-uitest-ids") { return "conv.row:\(c.id)" }
         #endif
         return "conv.row"
+    }
+}
+
+/// Отметка доставки у времени строки (§5, `last_delivery_status`): последнее
+/// письмо беседы — наше и не доставлено (красный значок) или ещё в очереди
+/// (часы). Доставлено и неизвестно — ничего.
+struct DeliveryMark: View {
+    let state: DeliveryState
+    let selected: Bool
+
+    var body: some View {
+        switch state {
+        case .failed:
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.footnote)
+                .foregroundStyle(selected ? Color.white : Color.red)
+                .accessibilityLabel("Не доставлено")
+                .accessibilityIdentifier("conv.delivery.failed")
+        case .pending:
+            Image(systemName: "clock")
+                .font(.footnote)
+                .foregroundStyle(selected ? Color.white.opacity(0.85) : Color.secondary)
+                .accessibilityLabel("Отправляется")
+                .accessibilityIdentifier("conv.delivery.pending")
+        case .delivered, .unknown:
+            EmptyView()
+        }
     }
 }
 

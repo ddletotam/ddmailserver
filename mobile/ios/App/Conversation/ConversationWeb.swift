@@ -91,6 +91,18 @@ final class ConversationWeb: NSObject {
         }
     }
 
+    /// Выражение с ответом-флагом (умеет ли документ что-то): документ не
+    /// готов или выражение упало — `false`.
+    func ask(_ js: String) async -> Bool {
+        guard ready, let view else { return false }
+        do {
+            return try await view.evaluateJavaScript(js) as? Bool ?? false
+        } catch {
+            webLog.error("js failed: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
     /// Новая беседа: всё, что не успело уйти прежней, — уже не нужно.
     func reset() { pending.removeAll() }
 

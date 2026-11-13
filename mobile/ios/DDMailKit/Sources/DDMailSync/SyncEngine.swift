@@ -73,7 +73,8 @@ public actor SyncEngine: MailProvider, DialogFolderSource {
                     accountKey: account, id: r.id, label: r.label, receivedBy: r.receivedBy,
                     counterparts: r.counterparts, isGroup: r.isGroup, lastDateTs: r.lastDateTs,
                     lastSubject: r.lastSubject, unreadCount: r.unreadCount, totalCount: r.totalCount,
-                    messages: (s.refs[r.id] ?? []).map(\.ref), spam: isSpam
+                    messages: (s.refs[r.id] ?? []).map(\.ref), spam: isSpam,
+                    lastDelivery: DeliveryState(r.lastDeliveryStatus)
                 )
             }
         }
@@ -196,7 +197,11 @@ public actor SyncEngine: MailProvider, DialogFolderSource {
     /// показываем то, что есть; мёртвая сессия — наверх.
     public func bodies(_ refs: [MessageRef]) async throws -> [MessageBody] {
         guard !refs.isEmpty else { return [] }
-        let cached = try store.bodies(accountKey, uids: refs.map(\.uid))
+        let inCache = try store.bodies(accountKey, uids: refs.map(\.uid))
+        var cached = inCache
+        // Статус доставки сменился (дельта принесла его в ссылку), а тело в
+        // кэше — со старым: перезапросить.
+        for r in refs where Self.deliveryStale(r, cached[r.uid]) { cached[r.uid] = nil }
         let missing = refs.filter { cached[$0.uid] == nil }
         var fetched: [Int64: MessageBody] = [:]
         if !missing.isEmpty {
@@ -208,7 +213,23 @@ public actor SyncEngine: MailProvider, DialogFolderSource {
                 if case .unauthorized = e { throw e }
             }
         }
-        return refs.compactMap { cached[$0.uid] ?? fetched[$0.uid] }
+        // Нет связи — пусть лучше тело со старым статусом, чем пустое место.
+        return refs.compactMap { cached[$0.uid] ?? fetched[$0.uid] ?? inCache[$0.uid] }
+    }
+
+    /// Тело закэшировано со статусом доставки, которого у письма уже нет.
+    /// Пустой статус ссылки — «неизвестно» (кэш до миграции, старый
+    /// сервер): тело не трогаем.
+    static func deliveryStale(_ ref: MessageRef, _ body: MessageBody?) -> Bool {
+        guard let body, !ref.deliveryStatus.isEmpty else { return false }
+        return ref.deliveryStatus != body.deliveryStatus
+    }
+
+    /// Событие `delivery_status`: статус — в кэш сразу (пузырь и строка
+    /// обновятся без перезапроса); остальное принесёт синк.
+    @discardableResult
+    public func applyDelivery(_ d: DeliveryUpdate) throws -> [String] {
+        try store.applyDelivery(accountKey, d)
     }
 
     /// Докачка тел заранее (контракт §4): новые письма всех бесед — на диск до
@@ -258,8 +279,10 @@ public actor SyncEngine: MailProvider, DialogFolderSource {
         try await api.attachment(uid: uid, index: index)
     }
 
-    /// Поставить письмо в отправку (сервер ставит в очередь).
-    public func send(_ request: SendRequest) async throws {
+    /// Поставить письмо в отправку: сервер ставит в очередь и сразу кладёт
+    /// копию в «Отправленные» со статусом `pending` (десктоп §1).
+    @discardableResult
+    public func send(_ request: SendRequest) async throws -> SendReceipt {
         try await api.send(request)
     }
 

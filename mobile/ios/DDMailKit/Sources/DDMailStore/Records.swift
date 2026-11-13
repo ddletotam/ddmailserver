@@ -21,6 +21,8 @@ public struct ConversationRecord: Codable, Equatable, Sendable, FetchableRecord,
     public var unreadCount: Int
     public var totalCount: Int
     public var updatedAt: Int64
+    /// `last_delivery_status` (миграция `v3-delivery`).
+    public var lastDeliveryStatus: String
 
     public init(accountKey: String, dto: ConversationDTO) {
         self.accountKey = accountKey
@@ -35,6 +37,7 @@ public struct ConversationRecord: Codable, Equatable, Sendable, FetchableRecord,
         unreadCount = dto.unreadCount
         totalCount = dto.totalCount
         updatedAt = dto.updatedAt
+        lastDeliveryStatus = dto.lastDeliveryStatus
     }
 
     public var counterparts: [ContactInfo] {
@@ -51,6 +54,8 @@ public struct MessageRefRecord: Codable, Equatable, Sendable, FetchableRecord, P
     public var uid: Int64
     public var messageID: String
     public var seen: Bool
+    /// `delivery_status` ссылки (миграция `v3-delivery`).
+    public var deliveryStatus: String
 
     public init(accountKey: String, conversationID: String, ref: MessageRef) {
         self.accountKey = accountKey
@@ -59,9 +64,12 @@ public struct MessageRefRecord: Codable, Equatable, Sendable, FetchableRecord, P
         uid = ref.uid
         messageID = ref.messageID
         seen = ref.seen
+        deliveryStatus = ref.deliveryStatus
     }
 
-    public var ref: MessageRef { MessageRef(folder: folder, uid: uid, messageID: messageID, seen: seen) }
+    public var ref: MessageRef {
+        MessageRef(folder: folder, uid: uid, messageID: messageID, seen: seen, deliveryStatus: deliveryStatus)
+    }
 }
 
 /// Тело письма — целиком JSON (его форма — ответ сервера), плюс столбцы для
