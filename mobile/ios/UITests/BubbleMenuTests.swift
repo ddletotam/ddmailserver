@@ -39,9 +39,14 @@ final class BubbleMenuTests: XCTestCase {
         }
         #if os(iOS)
         // Одно меню: системного меню выделения поверх нет.
-        let system = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label IN %@", ["Найти", "Перевести", "Translate", "Look Up"])).firstMatch
-        XCTAssertFalse(system.exists, "вместе с меню письма открылось системное меню выделения")
+        // Клавиша поиска на клавиатуре iPad тоже подписана «Найти» — её не считаем.
+        let keyboard = app.keyboards.firstMatch
+        let keyboardFrame = keyboard.exists ? keyboard.frame : .null
+        let systemItems = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label IN %@", ["Найти", "Перевести", "Translate", "Look Up"]))
+            .allElementsBoundByIndex
+            .filter { $0.exists && !keyboardFrame.intersects($0.frame) }
+        XCTAssertTrue(systemItems.isEmpty, "вместе с меню письма открылось системное меню выделения")
         // Меню — у пузыря: его пункт по вертикали рядом с пузырём, а не
         // посреди колонки (на iPad меню висело над списком бесед).
         let bubble = text.frame
