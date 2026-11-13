@@ -7,6 +7,10 @@ public struct ServerEvent: Decodable, Equatable, Sendable {
     public static let messageSent = "message_sent"
     public static let deliveryStatus = "delivery_status"
     public static let calendarUpdated = "calendar_updated"
+    /// Не кадр сервера: `SessionAPI.events` сообщает так, что сокет открыт
+    /// (понг на пинг). Переподключение — повод к синку: пропущенное за обрыв
+    /// иначе приедет только со следующим событием.
+    public static let opened = "_opened"
 
     public var type: String
     /// Серверный id письма (у учётки ddmail — его `uid` в беседах).

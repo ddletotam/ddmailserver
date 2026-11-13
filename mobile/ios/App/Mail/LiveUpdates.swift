@@ -13,7 +13,10 @@ import Foundation
 /// приносит беседу.
 ///
 /// Обрыв — переподключение с растущей паузой (2 с … 1 мин). Сервер отверг
-/// токен — сначала синхронизация (она обменяет токен), потом снова.
+/// токен — сначала синхронизация (она обменяет токен), потом снова. Сокет
+/// открылся снова после обрыва — синк: пока его не было, события терялись
+/// (M-14). Первое открытие после `start()` синка не просит — его делает
+/// выход на экран.
 @MainActor
 final class LiveUpdates {
     private let api: SessionAPI
@@ -44,6 +47,7 @@ final class LiveUpdates {
 
     private func run() async {
         var attempt = 0
+        var wasOpen = false
         while !Task.isCancelled {
             if attempt > 0 {
                 let pause = min(60, 2 << min(attempt - 1, 5))
@@ -55,6 +59,11 @@ final class LiveUpdates {
                 for try await e in await api.events() {
                     mailLog.debug("ws: event \(e.type, privacy: .public)")
                     attempt = 0
+                    if e.type == ServerEvent.opened {
+                        if wasOpen { event() }
+                        wasOpen = true
+                        continue
+                    }
                     if e.type == ServerEvent.calendarUpdated {
                         onCalendar()
                         continue

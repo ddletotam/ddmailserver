@@ -183,6 +183,13 @@ extension SessionAPI {
         return AsyncThrowingStream { cont in
             let reader = Task {
                 task.resume()
+                // Сервер приветствия не шлёт; понг на пинг — сокет открыт
+                // (рукопожатие прошло): клиенту — повод догнать пропущенное.
+                let opened = Task {
+                    guard (try? await Self.ping(task)) != nil, !Task.isCancelled else { return }
+                    cont.yield(ServerEvent(type: ServerEvent.opened))
+                }
+                defer { opened.cancel() }
                 do {
                     while !Task.isCancelled {
                         let msg = try await task.receive()
@@ -203,6 +210,14 @@ extension SessionAPI {
             cont.onTermination = { _ in
                 reader.cancel()
                 task.cancel(with: .goingAway, reason: nil)
+            }
+        }
+    }
+
+    private static func ping(_ task: URLSessionWebSocketTask) async throws {
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+            task.sendPing { error in
+                if let error { c.resume(throwing: error) } else { c.resume() }
             }
         }
     }
