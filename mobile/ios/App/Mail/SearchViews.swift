@@ -70,6 +70,8 @@ struct SearchDropdown: View {
             ScrollView { content }
         }
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.searchCard))
+        // Прокрутка длинной выдачи не выходит за скруглённую карточку (M-05).
+        .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.secondary.opacity(0.18)))
         .shadow(color: .black.opacity(0.14), radius: 14, y: 4)
         .padding(.horizontal, 10)

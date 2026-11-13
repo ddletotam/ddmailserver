@@ -89,6 +89,16 @@ final class MailModel {
 
     /// Множественный выбор (§5): `ref` бесед.
     var picked: Set<String> = []
+    /// Идёт множественный выбор.
+    var picking = false
+
+    /// Выбор строки списка — открытая беседа. Пока идёт выбор (и в момент
+    /// смены списков), открытая беседа не трогается: прежний список, уходя,
+    /// сбрасывал свой выбор в `nil` — и беседа справа закрывалась (S-16).
+    var openRow: String? {
+        get { selectedID }
+        set { if !picking { selectedID = newValue } }
+    }
 
     /// Итог действия — короткая плашка внизу.
     var notice: String?
@@ -177,8 +187,18 @@ final class MailModel {
         // Список готов, когда отозвались все учётки (кэш читается сразу).
         loaded = byAccount.count >= workspace.links.count
         rebuild()
-        // Новые письма открытой беседы — дописать снизу.
-        if let c = selected { conversation.updated(c) }
+        if let c = selected {
+            if conversation.conversation?.ref == c.ref {
+                // Новые письма открытой беседы — дописать снизу.
+                conversation.updated(c)
+            } else {
+                // Беседу выбрали раньше, чем кэш отдал её строку (уведомление
+                // при холодном старте): лента открылась пустой — открыть заново,
+                // в её папке и с отметкой «прочитано» (S-09).
+                reveal(c)
+                openSelected()
+            }
+        }
         // Отправили новое письмо — открыть его беседу, как только появится.
         openSentTarget()
     }
@@ -281,16 +301,20 @@ final class MailModel {
     /// `folders_ui::reveal` десктопа): иначе открытие из уведомления молча
     /// ничего бы не показало.
     func open(_ ref: String?) {
-        if let ref, let c = all.first(where: { $0.ref == ref }) {
-            let d = visibleDoc
-            let fid = d.folderOf(c).map { d.folders[$0].id }
-            if fid != activeFolderID { activeFolderID = fid }
-        }
+        if let ref, let c = all.first(where: { $0.ref == ref }) { reveal(c) }
         selectedID = ref
     }
 
+    /// Таб папки беседы — выбран.
+    private func reveal(_ c: Conversation) {
+        let d = visibleDoc
+        let fid = d.folderOf(c).map { d.folders[$0].id }
+        if fid != activeFolderID { activeFolderID = fid }
+    }
+
     private func openSelected() {
-        compose.reset()
+        // Композер — этой беседы: неотправленное из неё вернётся сюда (S-17).
+        compose.enter(selectedID)
         conversation.open(selected)
         if let ref = selectedID, composingTo == nil { Notifier.clear(conversation: ref) }
         guard let c = selected, c.unreadCount > 0, let p = provider(c) else { return }

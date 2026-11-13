@@ -67,12 +67,14 @@ struct SectionBar<Content: View>: View {
 extension View {
     /// Первую строку раздела рисует сам раздел (`SectionBar`): системной
     /// панели навигации над ней нет. Экраны, открытые поверх (беседа, день
-    /// календаря, контакт), свою панель с «‹» сохраняют.
+    /// календаря, контакт), свою панель с «‹» сохраняют. На Маке кнопку
+    /// боковой панели убирает сама колонка: на `NavigationSplitView` снаружи
+    /// `toolbar(removing: .sidebarToggle)` на macOS 27 не действует (S-02).
     @ViewBuilder func sectionRoot() -> some View {
         #if os(iOS)
         toolbar(.hidden, for: .navigationBar)
         #else
-        self
+        toolbar(removing: .sidebarToggle)
         #endif
     }
 }

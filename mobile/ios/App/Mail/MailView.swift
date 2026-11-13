@@ -10,7 +10,11 @@ struct MailView: View {
     @Bindable var model: MailModel
     let app: AppModel
     let workspace: Workspace
-    @State private var picking = false
+    /// Режим выбора — состояние модели: от него зависит, что делает выбор строки.
+    private var picking: Bool {
+        get { model.picking }
+        nonmutating set { model.picking = newValue }
+    }
     @State private var confirmSpam: Set<String>?
     @State private var moving: Set<String>?
     /// Открытая настройка папки («Настроить…», «Новая папка»).
@@ -44,28 +48,14 @@ struct MailView: View {
                 }
             }
         }
-        // Колонки рядом всегда: ни скрыть список, ни отдельной кнопки панели.
+        // Колонки рядом всегда: ни скрыть список, ни отдельной кнопки панели
+        // (на Маке её убирает колонка списка — `sectionRoot()`).
         .navigationSplitViewStyle(.balanced)
         .toolbar(removing: .sidebarToggle)
         .tint(Palette.accent)
         .overlay(alignment: .bottom) { NoticeBanner(text: $model.notice) }
-        .confirmationDialog(deleteTitle, isPresented: present($model.confirmDelete), titleVisibility: .visible) {
-            Button("Удалить", role: .destructive) { if let ids = model.confirmDelete { model.delete(ids) } }
-        } message: {
-            Text("Письма будут удалены на сервере; у внешних ящиков — и в исходном ящике.")
-        }
-        .confirmationDialog("В спам?", isPresented: present($confirmSpam), titleVisibility: .visible) {
-            // ddmail блокирует адрес или домен правилом сервера; у внешних
-            // учёток правил нет — одна кнопка, письма уходят в Junk (§4).
-            if spamKind == .rules {
-                Button("Заблокировать адрес", role: .destructive) { if let ids = confirmSpam { model.reportSpam(ids, scope: "address") } }
-                Button("Заблокировать домен", role: .destructive) { if let ids = confirmSpam { model.reportSpam(ids, scope: "domain") } }
-            } else {
-                Button("В спам", role: .destructive) { if let ids = confirmSpam { model.reportSpam(ids, scope: "address") } }
-            }
-        } message: {
-            Text(spamMessage)
-        }
+        .modifier(DeleteConfirmation(model: model, ids: $model.confirmDelete))
+        .modifier(SpamConfirmation(model: model, ids: $confirmSpam))
         .confirmationDialog("В папку", isPresented: present($moving), titleVisibility: .visible) {
             Button("Во «Входящие»") { if let ids = moving { model.move(ids, to: nil) } }
             ForEach(model.folderTargets, id: \.id) { f in
@@ -137,7 +127,12 @@ struct MailView: View {
         let composingTo = model.composingTo
         let searchOpen = model.search.isOpen
         let syncing = model.syncing
-        let pickedCount = model.picked.count
+        let picked = model.picked
+        let pickedCount = picked.count
+        // «Нужен вход» — внизу колонки, под списком (S-01, Android §6): над
+        // строкой «бургер + поиск» ничего нет (mobile-layout.md).
+        let dead = workspace.dead.map { ($0.account.key, $0.account.title) }
+        let manyAccounts = workspace.links.count > 1
         let hiddenCount = model.foldersOn ? model.doc.hiddenCount : 0
         let showHidden = model.showHidden
         return VStack(spacing: 0) {
@@ -167,12 +162,16 @@ struct MailView: View {
             }
             Group {
                 if picking {
-                    List(selection: $model.picked) { rows(convs, colors: colors, selectedID: nil) }
+                    // Отметки — свои, без `List(selection:)`: непустой выбор
+                    // списка в свёрнутом сплите (iPhone) толкает колонку беседы —
+                    // «Выбрать» уводил на пустую беседу (B-01); `preferredCompactColumn`
+                    // этого не держит. Касание (клик) строки — отметить или снять.
+                    List { rows(convs, colors: colors, selectedID: nil, picked: picked, picking: true) }
                 } else {
                     ScrollViewReader { proxy in
-                        List(selection: $model.selectedID) {
+                        List(selection: $model.openRow) {
                             if let to = composingTo { NewConversationRow(address: to).tag(MailModel.newPrefix + to).id(MailModel.newPrefix + to) }
-                            rows(convs, colors: colors, selectedID: selectedID)
+                            rows(convs, colors: colors, selectedID: selectedID, picked: [], picking: false)
                         }
                         // Открытая беседа видна в списке: «Новая беседа» и беседа,
                         // которой её сменила отправка, встают сверху, а список
@@ -186,7 +185,6 @@ struct MailView: View {
                 }
             }
             .listStyle(.plain)
-            .pickingMode(picking)
             .overlay { if !searchOpen { emptyState } }
             .refreshable { await model.sync() }
             // Выпадашка поиска — поверх списка, как у десктопа.
@@ -194,17 +192,32 @@ struct MailView: View {
                 if searchOpen { SearchDropdown(search: model.search, avatars: model.avatars) }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                if picking { pickingActions }
+                VStack(spacing: 0) {
+                    ForEach(dead, id: \.0) { key, title in
+                        SessionDeadBanner(title: dead.count > 1 || manyAccounts ? title : nil) { app.relogin(key) }
+                    }
+                    if picking { pickingActions }
+                }
             }
         }
         .sectionRoot()
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxX } action: { listEdge = $0 }
         .onChange(of: model.list.active) { picking = false }
+        // Снята последняя отметка (или действие над выбором выполнено) — выбор
+        // закончен (Android §5, M-17).
+        .onChange(of: pickedCount) { _, n in if n == 0 { picking = false } }
     }
 
-    @ViewBuilder private func rows(_ convs: [Conversation], colors: IdentityColors, selectedID: String?) -> some View {
+    /// Отметить строку или снять отметку (режим выбора).
+    private func togglePick(_ ref: String) {
+        if model.picked.contains(ref) { model.picked.remove(ref) } else { model.picked.insert(ref) }
+    }
+
+    @ViewBuilder private func rows(_ convs: [Conversation], colors: IdentityColors, selectedID: String?, picked: Set<String>, picking: Bool) -> some View {
         ForEach(convs, id: \.ref) { c in
-            ConversationRow(conversation: c, colors: colors, selected: c.ref == selectedID, avatars: model.avatars)
+            ConversationRow(conversation: c, colors: colors, selected: c.ref == selectedID, picked: picked.contains(c.ref),
+                            avatars: model.avatars)
+                .pickable(picking) { togglePick(c.ref) }
                 .tag(c.ref)
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
                     if !c.spam {
@@ -297,24 +310,15 @@ struct MailView: View {
         }
     }
 
-    private var deleteTitle: String {
-        let s = model.summary(model.confirmDelete ?? [])
-        return "Удалить бесед: \(s.conversations), писем в них: \(s.messages)?"
-    }
-
-    private var spamKind: SpamSupport { model.spamSupport(confirmSpam ?? []) }
-
-    private var spamMessage: String {
-        let s = model.summary(confirmSpam ?? [])
-        if spamKind == .rules {
-            return "Бесед: \(s.conversations), писем в них: \(s.messages). Письма будут удалены, отправитель — заблокирован. Домен останавливает спам с меняющихся адресов одного домена."
-        }
-        return "Бесед: \(s.conversations), писем в них: \(s.messages). Письма будут перенесены в папку «Спам» почтового ящика."
-    }
-
-    /// На раскладке, где беседа видна сразу, — открыть ту, на которой закончили (§5).
+    /// На раскладке, где беседа видна сразу, — открыть ту, на которой закончили
+    /// (§5). На Маке колонки рядом всегда, а `horizontalSizeClass` там `nil` (S-03).
     private func restoreLast() {
-        guard sizeClass == .regular, model.selectedID == nil, model.loaded,
+        #if os(macOS)
+        let wide = true
+        #else
+        let wide = sizeClass == .regular
+        #endif
+        guard wide, model.selectedID == nil, model.loaded,
               let id = model.lastConversationID, model.all.contains(where: { $0.ref == id })
         else { return }
         model.open(id)
@@ -324,6 +328,65 @@ struct MailView: View {
         // Значение читается сразу (в теле), а не в ленивом замыкании.
         let shown = v.wrappedValue != nil
         return Binding(get: { shown }, set: { if !$0 { v.wrappedValue = nil } })
+    }
+}
+
+/// Подтверждение удаления бесед (§5): API восстановления нет. Общее у
+/// главного окна и окна беседы (Мак); `done` — после удаления.
+struct DeleteConfirmation: ViewModifier {
+    let model: MailModel
+    @Binding var ids: Set<String>?
+    var done: () -> Void = {}
+
+    func body(content: Content) -> some View {
+        // Значения — сразу, в теле (контракт §0).
+        let current = ids
+        let s = model.summary(current ?? [])
+        content.confirmationDialog("Удалить бесед: \(s.conversations), писем в них: \(s.messages)?",
+                                   isPresented: Binding(get: { current != nil }, set: { if !$0 { ids = nil } }),
+                                   titleVisibility: .visible) {
+            Button("Удалить", role: .destructive) {
+                if let current { model.delete(current) }
+                done()
+            }
+        } message: {
+            Text("Письма будут удалены на сервере; у внешних ящиков — и в исходном ящике.")
+        }
+    }
+}
+
+/// «В спам?» (§5): ddmail блокирует адрес или домен правилом сервера; у
+/// внешних учёток правил нет — одна кнопка, письма уходят в Junk (§4).
+/// Общее у главного окна и окна беседы (Мак).
+struct SpamConfirmation: ViewModifier {
+    let model: MailModel
+    @Binding var ids: Set<String>?
+    var done: () -> Void = {}
+
+    func body(content: Content) -> some View {
+        let current = ids
+        let kind = model.spamSupport(current ?? [])
+        let s = model.summary(current ?? [])
+        let message = kind == .rules
+            ? "Бесед: \(s.conversations), писем в них: \(s.messages). Письма будут удалены, отправитель — заблокирован. Домен останавливает спам с меняющихся адресов одного домена."
+            : "Бесед: \(s.conversations), писем в них: \(s.messages). Письма будут перенесены в папку «Спам» почтового ящика."
+        content.confirmationDialog("В спам?", isPresented: Binding(get: { current != nil }, set: { if !$0 { ids = nil } }),
+                                   titleVisibility: .visible) {
+            if kind == .rules {
+                Button("Заблокировать адрес", role: .destructive) { report(current, "address") }
+                Button("Заблокировать домен", role: .destructive) { report(current, "domain") }
+            } else {
+                Button("В спам", role: .destructive) { report(current, "address") }
+            }
+        } message: {
+            Text(message)
+        }
+    }
+
+    private func report(_ ids: Set<String>?, _ scope: String) {
+        guard let ids else { return }
+        model.reportSpam(ids, scope: scope)
+        done()
     }
 }
 
@@ -337,11 +400,13 @@ private struct PickingBar: View {
     var body: some View {
         HStack(spacing: 8) {
             Button("Готово", systemImage: "xmark", action: done)
+                .accessibilityIdentifier("picking.done")
                 .labelStyle(.iconOnly)
                 .font(.system(size: 17, weight: .medium))
                 .frame(width: 36, height: 36)
                 .contentShape(Rectangle())
             Text("Выбрано: \(count)").font(.headline)
+                .accessibilityIdentifier("picking.count")
             Spacer()
             Button("Выбрать все", action: selectAll)
         }
@@ -493,32 +558,51 @@ private struct FolderTabs: View {
 
 /// Строка беседы: аватар, имя, тема, дата, непрочитанное; фон — пастель
 /// группы адреса получателя (§5), открытая — зелёная с белым текстом.
+/// Отмеченная в режиме выбора — голубая с тёмным текстом и зелёным кружком
+/// с ✓ на месте аватара, как у Android §5.
 struct ConversationRow: View {
     let conversation: Conversation
     let colors: IdentityColors
     let selected: Bool
+    var picked = false
     let avatars: AvatarStore?
+
+    /// Отмеченная при выборе (Android `0xFFBFD8FF`).
+    static let pickedFill = Color(red: 0xBF / 255, green: 0xD8 / 255, blue: 0xFF / 255)
 
     var body: some View {
         let c = conversation
         let unread = c.unreadCount > 0
+        // Открытая беседа при выборе не подсвечивается: зелёное — только «открыта».
+        let onSel = selected && !picked
+        // Цвета текста — явные: системная подсветка выбранной строки (Мак)
+        // перекрашивает `.primary`/`.secondary` в белый, а фон у строки свой —
+        // белое на голубом не читалось (S-07).
+        let main: Color = onSel ? .white : picked ? Self.ink : .primary
+        let dim: Color = onSel ? .white.opacity(0.85) : picked ? Self.ink.opacity(0.6) : .secondary
         HStack(alignment: .top, spacing: 12) {
-            ConversationAvatar(name: c.label, email: c.counterparts.first?.addr ?? "", spam: c.spam, store: avatars)
+            if picked {
+                PickedMark()
+            } else {
+                ConversationAvatar(name: c.label, email: c.counterparts.first?.addr ?? "", spam: c.spam, store: avatars)
+            }
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline) {
+                    // Имя — жирное всегда, у непрочитанной — ещё жирнее (десктоп §4
+                    // «имя (bold) / тема», Android `SemiBold`/`Bold`, M-18).
                     Text(c.label.isEmpty ? (c.counterparts.first?.addr ?? "—") : c.label)
-                        .font(.body.weight(unread ? .semibold : .regular))
+                        .font(.body.weight(unread ? .bold : .semibold))
                         .lineLimit(1)
                     Spacer(minLength: 8)
-                    DeliveryMark(state: c.lastDelivery, selected: selected)
+                    DeliveryMark(state: c.lastDelivery, selected: onSel)
                     Text(RowDate.format(c.lastDateTs))
                         .font(.footnote)
-                        .foregroundStyle(selected ? .white.opacity(0.85) : .secondary)
+                        .foregroundStyle(dim)
                 }
                 HStack(alignment: .firstTextBaseline) {
                     Text(c.lastSubject.isEmpty ? "(без темы)" : c.lastSubject)
                         .font(.subheadline)
-                        .foregroundStyle(selected ? .white.opacity(0.9) : .secondary)
+                        .foregroundStyle(onSel ? .white.opacity(0.9) : dim)
                         .lineLimit(2)
                     Spacer(minLength: 8)
                     // Спам не зазывает: числа непрочитанных нет (§5).
@@ -528,17 +612,21 @@ struct ConversationRow: View {
                             .foregroundStyle(.white)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 2)
-                            .background(Capsule().fill(selected ? Color.white.opacity(0.3) : Palette.accent))
+                            .background(Capsule().fill(onSel ? Color.white.opacity(0.3) : Palette.accent))
                     }
                 }
             }
         }
-        .foregroundStyle(selected ? Color.white : Color.primary)
+        .foregroundStyle(main)
         .padding(.vertical, 4)
-        .listRowBackground(selected ? Palette.accent : Color(argb: colors.color(of: c.receivedBy)))
+        .listRowBackground(onSel ? Palette.accent : picked ? Self.pickedFill : Color(argb: colors.color(of: c.receivedBy)))
         .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(picked ? .isSelected : [])
         .accessibilityIdentifier(Self.identifier(c))
     }
+
+    /// Тёмный текст на голубом — как `onSurface` светлой темы.
+    private static let ink = Color(white: 0.11)
 
     /// Сквозной тест IMAP сверяет беседы по id: в отладочной сборке с
     /// `-ddmail-uitest-ids` id беседы — в идентификаторе строки (озвучку не меняет).
@@ -547,6 +635,17 @@ struct ConversationRow: View {
         if ProcessInfo.processInfo.arguments.contains("-ddmail-uitest-ids") { return "conv.row:\(c.id)" }
         #endif
         return "conv.row"
+    }
+}
+
+/// Отметка строки при выборе — на месте аватара (Android §5).
+private struct PickedMark: View {
+    var body: some View {
+        Circle()
+            .fill(Palette.accent)
+            .frame(width: 40, height: 40)
+            .overlay(Image(systemName: "checkmark").font(.system(size: 17, weight: .bold)).foregroundStyle(.white))
+            .accessibilityHidden(true)
     }
 }
 
@@ -657,13 +756,15 @@ extension Color {
 }
 
 private extension View {
-    /// Режим выбора: на iPhone и iPad — системный режим правки списка (кружки
-    /// у строк); на Маке список с множественным выбором выбирает Cmd/Shift-кликом сам.
-    @ViewBuilder func pickingMode(_ on: Bool) -> some View {
-        #if os(iOS)
-        environment(\.editMode, .constant(on ? .active : .inactive))
-        #else
-        self
-        #endif
+    /// Строка в режиме выбора: касание (клик) отмечает её или снимает отметку,
+    /// для озвучки — то же действием по умолчанию.
+    @ViewBuilder func pickable(_ on: Bool, toggle: @escaping () -> Void) -> some View {
+        if on {
+            contentShape(Rectangle())
+                .onTapGesture(perform: toggle)
+                .accessibilityAction(.default, toggle)
+        } else {
+            self
+        }
     }
 }

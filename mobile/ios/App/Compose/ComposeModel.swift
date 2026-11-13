@@ -57,6 +57,24 @@ final class ComposeModel {
     private(set) var carriedStubs: [String] = []
     private var stubSeq = 0
 
+    /// Где открыт композер: `ref` беседы или новая беседа (`MailModel.newPrefix`
+    /// + адрес). Композер один на все беседы окна — итог отправки должен
+    /// вернуться туда, откуда ушло письмо (S-17, десктоп §2).
+    private(set) var place: String?
+    /// Не ушедшее письмо, чья беседа уже закрыта: набранное и причина ждут,
+    /// когда её откроют снова.
+    private var returned: [String: Returned] = [:]
+    /// Беседа, на которую последней сменилась «Новая беседа» (`consumeTarget`):
+    /// новое письмо, ушедшее оттуда, продолжает жить в ней.
+    private var followed: (from: String?, to: SentTarget)?
+
+    private struct Returned {
+        let draft: Draft
+        let rich: AttributedString
+        let replyTo: MessageBody?
+        let error: String?
+    }
+
     init(workspace: Workspace, conversation: ConversationModel, syncSoon: @escaping (String) -> Void, onAuthDead: @escaping @MainActor (String) -> Void) {
         self.workspace = workspace
         self.conversation = conversation
@@ -117,9 +135,32 @@ final class ComposeModel {
         error = nil
     }
 
+    /// Открыли беседу (или новую): композер пуст; если письмо из неё не
+    /// ушло, пока она была закрыта, — набранное и причина возвращаются.
+    func enter(_ place: String?) {
+        reset()
+        self.place = place
+        guard let place, let r = returned.removeValue(forKey: place) else { return }
+        rich = r.rich
+        draft = r.draft
+        draft.html = ""
+        replyTo = r.replyTo
+        error = r.error
+    }
+
+    /// Отправка из `origin` ещё на экране: то же место или «Новая беседа»,
+    /// сменившаяся беседой своего же письма.
+    private func still(_ origin: String?, _ target: SentTarget? = nil) -> Bool {
+        if place == origin { return true }
+        guard let target, let f = followed, f.from == origin else { return false }
+        // Message-ID цель узнаёт по ходу — сравниваем без него.
+        return f.to.id == target.id && f.to.recipients == target.recipients
+    }
+
     func openForward(_ b: MessageBody) { sheet = Sheet(branch: .forward(b), draft: Draft()) }
     /// Беседа нашлась: цель снята, заглушки — ей.
     func consumeTarget() -> [String] {
+        if let t = sentTarget { followed = (place, t) }
         sentTarget = nil
         defer { carriedStubs = [] }
         return carriedStubs
@@ -188,6 +229,15 @@ final class ComposeModel {
         return d
     }
 
+    /// Не ушло, а беседа уже закрыта: вернётся при её открытии (`enter`).
+    /// Отказ SMTP IMAP-учётки там — красной строкой: заглушки в ленте уже нет.
+    private func stash(_ origin: String?, _ d: Draft, _ r: AttributedString, _ reply: MessageBody?, _ e: Error) {
+        guard let origin else { return }
+        var d = d
+        d.html = ""
+        returned[origin] = Returned(draft: d, rich: r, replyTo: reply, error: Self.sendError(e))
+    }
+
     /// Вернуть неотправленное в композер, если тот пуст.
     private func restore(_ d: Draft, _ r: AttributedString) {
         guard draft.isEmpty else { return }
@@ -218,6 +268,7 @@ final class ComposeModel {
             let sent = d
             let sentRich = rich
             let sentReply = replyTo
+            let origin = place
             stubSeq += 1
             let key = "s\(stubSeq)"
             clearFailedStubs()
@@ -226,9 +277,16 @@ final class ComposeModel {
             Task {
                 do {
                     let via = try await send(request)
-                    flash()
+                    // «✓ Отправлено» — над композером той беседы, откуда ушло.
+                    if still(origin) { flash() }
                     afterSend(via.account)
                 } catch {
+                    guard still(origin) else {
+                        // Ушли в другую беседу: её композер не трогаем, набранное
+                        // ждёт возвращения в эту (заглушки там уже нет).
+                        stash(origin, sent, sentRich, sentReply, error)
+                        return
+                    }
                     // Текст возвращается, если композер пуст (не затираем набранное заново).
                     restore(sent, sentRich)
                     if replyTo == nil { replyTo = sentReply }
@@ -252,6 +310,7 @@ final class ComposeModel {
             var sent = d
             sent.to = draft.to
             let sentRich = rich
+            let origin = place
             stubSeq += 1
             let key = "s\(stubSeq)"
             let stub = "ddm.stub(\(Self.stubJSON(key, sent)))"
@@ -266,11 +325,15 @@ final class ComposeModel {
                     let via = try await send(request)
                     // Копия уже в «Отправленных»: беседа узнается и по Message-ID.
                     noteSent(target, via.receipt)
-                    flash()
+                    if still(origin, target) { flash() }
                     afterSend(via.account)
                 } catch {
                     if sentTarget == target { sentTarget = nil }
                     carriedStubs = []
+                    guard still(origin, target) else {
+                        stash(origin, sent, sentRich, nil, error)
+                        return
+                    }
                     restore(sent, sentRich)
                     await failed(key, error)
                 }
