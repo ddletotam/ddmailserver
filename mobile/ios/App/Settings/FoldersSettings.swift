@@ -106,14 +106,17 @@ private struct FolderRow: View {
         case .group: parts.append("группы")
         case .any: break
         }
-        if !folder.include.isEmpty { parts.append("вручную: \(folder.include.count)") }
+        if !folder.include.isEmpty { parts.append("руками: \(folder.include.count)") }
+        if folder.autoRead { parts.append("сразу прочитаны") }
         return parts.joined(separator: " · ")
     }
 }
 
 /// Настройка одной папки (десктоп §4, `folder_edit`): имя и значок; правила
 /// «Получено на», «Домены», «Диалоги: все / 1:1 / группы» (между
-/// категориями «И», внутри списка «ИЛИ»); «Не показывать в списке».
+/// категориями «И», внутри списка «ИЛИ»); «Не показывать в списке»; «Письма
+/// сразу прочитаны» (`auto_read`: правится здесь, исполняет десктоп — §5);
+/// «Положено руками: N» и «Сбросить» (как Android `FolderEditor`).
 /// Поля правятся как обычный текст и уходят с паузой 800 мс (как дебаунс
 /// десктопа) — документ не пересоздаёт поля под пальцами.
 struct FolderEditorView: View {
@@ -133,6 +136,7 @@ struct FolderEditorView: View {
         var domains: String
         var kind: DialogKind
         var hidden: Bool
+        var autoRead: Bool
 
         init(_ f: DialogFolder) {
             name = f.name
@@ -141,6 +145,7 @@ struct FolderEditorView: View {
             domains = f.rules.domains.joined(separator: ", ")
             kind = f.rules.kind
             hidden = f.hidden
+            autoRead = f.autoRead
         }
     }
 
@@ -232,14 +237,28 @@ struct FolderEditorView: View {
             } footer: {
                 Text("Таба нет, диалоги папки не видны в списке и приходят без уведомлений. Вернуть — долгое нажатие на табы → «Показать скрытые».")
             }
-            if !folder.include.isEmpty || !folder.exclude.isEmpty {
-                Section {
-                    Button("Забыть ручные назначения (\(folder.include.count))", systemImage: "arrow.uturn.backward") {
-                        mail.updateFolder(folderID) { $0.include = []; $0.exclude = [] }
+            Section {
+                Toggle("Письма сразу прочитаны", isOn: bind.autoRead)
+                    .accessibilityIdentifier("folder.autoRead")
+            } footer: {
+                Text("Новые письма её диалогов помечаются прочитанными, уже лежащие — нет. Исполняет десктоп.")
+            }
+            Section {
+                // Число и «Сбросить» — как у Android и десктопа (`folder_edit`).
+                HStack {
+                    Text("Положено руками: \(folder.include.count)")
+                        .accessibilityIdentifier("folder.manual")
+                    Spacer()
+                    if !folder.include.isEmpty || !folder.exclude.isEmpty {
+                        Button("Сбросить") {
+                            mail.updateFolder(folderID) { $0.include = []; $0.exclude = [] }
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityIdentifier("folder.manual.reset")
                     }
-                } footer: {
-                    Text("Диалоги, положенные в папку руками, и исключённые из неё — снова по правилам.")
                 }
+            } footer: {
+                Text("Эти диалоги лежат здесь независимо от правил. «Сбросить» — положенные и исключённые руками снова по правилам.")
             }
             Section {
                 Button("Удалить папку", systemImage: "trash", role: .destructive) { confirmDelete = true }
@@ -272,11 +291,13 @@ struct FolderEditorView: View {
         let icon = clipFolderIcon(e.icon)
         let rules = FolderRules(identities: e.identities.map { $0.lowercased() }, domains: splitFolderList(e.domains), kind: e.kind)
         let hidden = e.hidden
+        let autoRead = e.autoRead
         mail.updateFolder(folderID) { f in
             f.name = name
             f.icon = icon
             f.rules = rules
             f.hidden = hidden
+            f.autoRead = autoRead
         }
     }
 }
