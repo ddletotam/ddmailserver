@@ -74,6 +74,16 @@ interface MailSource {
 
     suspend fun deleteConversations(convs: Collection<Conversation>)
 
+    /**
+     * Отдельные письма беседы [c] — меню пузыря «Удалить письмо» (десктоп,
+     * меню пузыря): из кэша сразу, на сервере следом; беседа без писем уходит
+     * целиком. Необратимо, как удаление беседы.
+     */
+    suspend fun deleteMessages(c: Conversation, refs: List<MessageRef>)
+
+    /** Письмо целиком (RFC 822) — «Показать → Заголовки / Исходник сообщения». */
+    suspend fun source(uid: Long): ByteArray
+
     /** «В спам»; [scope] (`address`/`domain`) значим только при [spamRules]. */
     suspend fun spam(convs: Collection<Conversation>, scope: String): SpamOutcome
 

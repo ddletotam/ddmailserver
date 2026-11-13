@@ -90,14 +90,23 @@ class SessionApi(
      * сервер читает только его, ещё и в query; в логи клиента URL не пишется.
      * [onEvent] получает тип события и кадр целиком (поля `delivery_status` —
      * [deliveryEvent]); [onClosed] — `true`, если сервер отверг токен (тогда
-     * сначала обменять его, потом переподключаться).
+     * сначала обменять его, потом переподключаться); [onOpen] — сокет
+     * установлен (после обрыва — повод к синку: события за обрыв потеряны).
      */
-    suspend fun openSocket(onEvent: (String, JsonObject) -> Unit, onClosed: (authFailed: Boolean) -> Unit): okhttp3.WebSocket {
+    suspend fun openSocket(
+        onEvent: (String, JsonObject) -> Unit,
+        onClosed: (authFailed: Boolean) -> Unit,
+        onOpen: () -> Unit = {},
+    ): okhttp3.WebSocket {
         val token = tokens.current()
         val wsUrl = baseUrl.replaceFirst("https://", "wss://") + "/api/desktop/v1/ws?token=" +
             java.net.URLEncoder.encode(token, "UTF-8")
         val req = Request.Builder().url(wsUrl).header("Authorization", "Bearer $token").build()
         return http.newWebSocket(req, object : okhttp3.WebSocketListener() {
+            override fun onOpen(webSocket: okhttp3.WebSocket, response: Response) {
+                onOpen()
+            }
+
             override fun onMessage(webSocket: okhttp3.WebSocket, text: String) {
                 val (type, frame) = wsFrame(text) ?: return
                 onEvent(type, frame)
@@ -279,6 +288,9 @@ class SessionApi(
 
     /** Вложение по индексу. */
     suspend fun attachment(uid: Long, index: Int): Binary = binary("/messages/$uid/attachments/$index")
+
+    /** Письмо целиком (RFC 822, `message/rfc822`) — меню пузыря «Показать → Заголовки / Исходник». */
+    suspend fun source(uid: Long): ByteArray = binary("/messages/$uid/source").bytes
 
     private suspend fun binary(path: String): Binary {
         suspend fun once(token: String): Binary {

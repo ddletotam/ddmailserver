@@ -144,6 +144,14 @@ data class ContactDto(
     val organization: String = "",
     val title: String = "",
     @SerialName("photo_url") val photoUrl: String = "",
+    /** Книга контакта (у внешних CardDAV — отрицательный id книги телефона). */
+    @SerialName("address_book_id") val addressBookId: Long = 0,
+    /**
+     * Можно ли править и удалять (контракт §15): `false` — книга только для
+     * чтения (корпоративная, LDAP). Старый сервер поля не шлёт — правка есть,
+     * отказ придёт 403 `address_book_read_only`.
+     */
+    @SerialName("can_write") val canWrite: Boolean = true,
 )
 
 /** Адресная книга — куда записать новый контакт (выбирает пользователь, не сервер). */

@@ -100,4 +100,48 @@ class SessionApiTest {
             assertTrue(e.serverMessage.contains("too old"))
         }
     }
+
+    @Test
+    fun readOnlyBookShowsHumanMessage() = runTest {
+        // 403 с машинным кодом: показываем `message` на языке пользователя, сессия жива.
+        server.enqueue(
+            MockResponse().setResponseCode(403)
+                .setBody("""{"error":"address book is read-only","code":"address_book_read_only","message":"Адресная книга только для чтения"}"""),
+        )
+        val api = SessionApi(server.url("/").toString().trimEnd('/'), http, Tokens("t"))
+        try {
+            api.patchContact(5, ContactWriteRequest("Имя", listOf("a@b.c"), emptyList()))
+            fail("должно было упасть")
+        } catch (e: ApiException.Server) {
+            assertEquals(403, e.code)
+            assertEquals("Адресная книга только для чтения", e.serverMessage)
+        }
+        // Без кода — как раньше, `error`.
+        assertEquals("boom", errorText("""{"error":"boom","message":"не то"}"""))
+    }
+
+    @Test
+    fun contactsCarryBookAndRights() = runTest {
+        server.enqueue(
+            MockResponse().setBody(
+                """[{"id":1,"full_name":"A","emails":["a1@x","a2@x","a3@x","a4@x"],"address_book_id":3,"can_write":false},""" +
+                    """{"id":2,"full_name":"B"}]""",
+            ),
+        )
+        val api = SessionApi(server.url("/").toString().trimEnd('/'), http, Tokens("t"))
+        val (a, b) = api.contacts(10)
+        assertEquals(4, a.emails.size)
+        assertEquals(3L, a.addressBookId)
+        assertEquals(false, a.canWrite)
+        // Старый сервер прав не шлёт — правка доступна, отказ придёт ответом.
+        assertEquals(true, b.canWrite)
+    }
+
+    @Test
+    fun sourceIsRawBytes() = runTest {
+        server.enqueue(MockResponse().setBody("From: a@x\r\nSubject: t\r\n\r\nтело").setHeader("Content-Type", "message/rfc822"))
+        val api = SessionApi(server.url("/").toString().trimEnd('/'), http, Tokens("t"))
+        assertEquals("From: a@x\r\nSubject: t\r\n\r\nтело", String(api.source(42)))
+        assertEquals("/api/desktop/v1/messages/42/source", server.takeRequest().path)
+    }
 }
