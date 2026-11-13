@@ -699,10 +699,18 @@ private fun FolderTabs(s: MailState, vm: MailViewModel) {
     val menuItems = @Composable { tab: FolderTab?, close: () -> Unit ->
         FolderMenuItems(tab, s, vm, close) { deleteAsk = it }
     }
+    // Долгое нажатие мимо табов — меню полосы. Таб своё долгое нажатие ловит
+    // сам, но полоса-родитель видит тот же жест: решаем чуть позже — если
+    // открылось меню таба, меню полосы не нужно.
+    var stripAsk by remember { mutableStateOf(0) }
+    LaunchedEffect(stripAsk) {
+        if (stripAsk == 0) return@LaunchedEffect
+        kotlinx.coroutines.delay(120)
+        if (menuFor == null) stripMenu = true
+    }
     Box(
         Modifier.fillMaxWidth().pointerInput(Unit) {
-            // Долгое нажатие мимо табов — меню полосы.
-            detectTapGestures(onLongPress = { stripMenu = true })
+            detectTapGestures(onLongPress = { stripAsk++ })
         },
     ) {
         LazyRow(
@@ -714,7 +722,7 @@ private fun FolderTabs(s: MailState, vm: MailViewModel) {
                     Tab(
                         "", s.inboxUnread, selected = false, icon = Icons.Filled.Inbox,
                         description = stringResource(R.string.tab_inbox_back),
-                        onLongClick = { stripMenu = true },
+                        onLongClick = { stripAsk++ },
                     ) { vm.selectFolder(null) }
                 }
             }
