@@ -129,17 +129,29 @@ final class NotificationRouter: NSObject, UNUserNotificationCenterDelegate, @unc
         }
     }
 
-    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+    /// Вариант с обработчиком завершения, а не `async`: асинхронный вызывает
+    /// завершение с фонового потока, а UIKit по нему сохраняет снимок сцены и
+    /// падает на проверке главного потока (`_performBlockAfterCATransactionCommitSynchronizes`)
+    /// — приложение закрывалось при каждом нажатии на уведомление.
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
         let action = response.actionIdentifier
-        if let key = ReminderPlanner.parseNotificationID(response.notification.request.identifier) {
-            await MainActor.run {
-                if let reminder { reminder(key, action) } else { pendingReminder = (key, action) }
+        let request = response.notification.request
+        let reminderKey = ReminderPlanner.parseNotificationID(request.identifier)
+        let conversation = reminderKey == nil ? Notifier.conversationRef(request) : nil
+        nonisolated(unsafe) let done = completionHandler
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                if let key = reminderKey {
+                    if let reminder = self.reminder { reminder(key, action) } else { self.pendingReminder = (key, action) }
+                } else if let id = conversation {
+                    if let open = self.open { open(id) } else { self.pending = id }
+                }
             }
-            return
-        }
-        guard let id = Notifier.conversationRef(response.notification.request) else { return }
-        await MainActor.run {
-            if let open { open(id) } else { pending = id }
+            done()
         }
     }
 
