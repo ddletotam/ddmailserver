@@ -55,16 +55,27 @@ struct EventDraft: Equatable {
 @MainActor @Observable
 final class CalendarModel {
     enum ViewMode: String, CaseIterable, Identifiable {
-        // Порядок переключателя — как в mobile-layout.md: «Месяц / Неделя / День».
-        case month, week, day
+        // Порядок переключателя — как в mobile-layout.md: «Месяц / Неделя / День»;
+        // «Год» (iPad, Мак; Android §12) — перед ними, по убыванию охвата.
+        case year, month, week, day
         var id: Self { self }
         var title: String {
             switch self {
             case .day: "День"
             case .week: "Неделя"
             case .month: "Месяц"
+            case .year: "Год"
             }
         }
+    }
+
+    /// Перенос повторяющегося вхождения ждёт выбора охвата — как в форме
+    /// («Все повторы» / «Это и следующие»).
+    struct SeriesMove: Identifiable {
+        let occ: Occ
+        let start: Int64
+        let end: Int64
+        var id: String { occ.id }
     }
 
     /// ddmail и CalDAV внешних учёток вместе (внешние учётки §8).
@@ -89,6 +100,7 @@ final class CalendarModel {
     var selected: Day
     var detail: Occ?
     var draft: EventDraft?
+    var seriesMove: SeriesMove?
     var notice: String?
     var myEmails: Set<String> = []
     /// Вызывается после перечитывания: напоминания пересеваются.
@@ -272,17 +284,59 @@ final class CalendarModel {
         }
     }
 
-    /// Перенос драгом: та же длительность, новое начало. Повторяющиеся — только через форму.
-    func move(_ o: Occ, toStart: Int64) {
-        guard o.event.editable, !o.recurring else { return }
-        let dur = o.end - o.start
+    /// Перенос или растяжение на шкале (Android §12, десктоп §5и; шаг и
+    /// кромки — `EventDrag`). Разовое событие сразу встаёт на новое место и
+    /// уходит на сервер; отказ — причина плашкой, перечитывание вернёт как
+    /// было. Повторяющееся — сперва выбор охвата, как в форме.
+    func drop(_ o: Occ, _ kind: EventDrag.Kind, minutes: Int, days: Int) {
+        guard o.event.editable, !o.allDay, minutes != 0 || days != 0 else { return }
+        let r = EventDrag.apply(kind, start: o.start, end: o.end, minutes: minutes, days: kind == .move ? days : 0, calendar: cal)
+        guard r.start != o.start || r.end != o.end else { return }
+        if o.recurring {
+            seriesMove = SeriesMove(occ: o, start: r.start, end: r.end)
+            return
+        }
+        placeLocally(o.event.id, start: r.start, end: r.end)
+        patchTimes(o, scope: "all", start: r.start, end: r.end, done: kind == .move ? "Перенесено" : "Время изменено")
+    }
+
+    /// Ответ на вопрос об охвате переноса повторяющегося: `all` сдвигает
+    /// мастер серии на ту же разницу, что и вхождение (как `save`); `future` —
+    /// это вхождение и следующие.
+    func confirmSeriesMove(scope: String) {
+        guard let m = seriesMove else { return }
+        seriesMove = nil
+        let shift = scope == "all" ? m.occ.event.dtstart - m.occ.start : 0
+        if scope == "all" {
+            // Мастер на новом месте сразу; развёртку пересчитает индекс.
+            placeLocally(m.occ.event.id, start: m.start + shift, end: m.end + shift)
+        }
+        patchTimes(m.occ, scope: scope, start: m.start + shift, end: m.end + shift, done: "Перенесено")
+    }
+
+    private func patchTimes(_ o: Occ, scope: String, start: Int64, end: Int64, done: String) {
         Task {
             await guarded {
-                try await api.patchEvent(id: o.event.id, EventPatchRequest(dtstart: toStart, dtend: toStart + dur))
-                notice = "Перенесено"
+                try await api.patchEvent(id: o.event.id, EventPatchRequest(
+                    scope: o.recurring ? scope : "all", recurrenceID: o.recurring ? o.start : 0, dtstart: start, dtend: end
+                ))
+                notice = done
             }
             await refresh()
         }
+    }
+
+    /// Новое время события в загруженных месяцах — до ответа сервера.
+    /// Событие кладётся во все месяцы: индекс месяца берёт только свои дни.
+    private func placeLocally(_ eventID: Int64, start: Int64, end: Int64) {
+        guard var ev = raw.values.lazy.flatMap({ $0 }).first(where: { $0.id == eventID }) else { return }
+        ev.dtstart = start
+        ev.dtend = end
+        for m in raw.keys {
+            raw[m]?.removeAll { $0.id == eventID }
+            raw[m]?.append(ev)
+        }
+        reindex()
     }
 
     func delete(_ o: Occ) {
