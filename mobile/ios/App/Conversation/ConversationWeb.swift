@@ -1,6 +1,9 @@
 import DDMailSync
 import Foundation
 import os
+#if os(iOS)
+import UIKit
+#endif
 import WebKit
 
 let webLog = Logger(subsystem: "ru.letotam.ddmail", category: "web")
@@ -43,6 +46,17 @@ final class ConversationWeb: NSObject {
     private var ready = false
     private var pending: [String] = []
     private let handler = DocSchemeHandler()
+    #if os(iOS)
+    /// Меню выделения, поставленного серией тапов (§8): WebKit рисует маркеры
+    /// выделения из скрипта, а меню «Скопировать» — нет.
+    private var selectionMenu: UIEditMenuInteraction?
+    /// Прямоугольник выделения в координатах веб-представления.
+    private var selectionRect = CGRect.zero
+    /// Открыта клавиатура (фокус в строке ввода): меню выделения при ней не
+    /// показывается — сначала её убрать.
+    private var keyboardShown = false
+    private var keyboardObservers: [NSObjectProtocol] = []
+    #endif
 
     /// Подготовить веб-представление: правила блокировки компилируются
     /// асинхронно, документ грузится сразу после них.
@@ -74,6 +88,20 @@ final class ConversationWeb: NSObject {
         #endif
         #if DEBUG
         v.isInspectable = true
+        #endif
+        #if os(iOS)
+        let menu = UIEditMenuInteraction(delegate: self)
+        v.addInteraction(menu)
+        selectionMenu = menu
+        let nc = NotificationCenter.default
+        keyboardObservers = [
+            nc.addObserver(forName: UIResponder.keyboardWillShowNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.keyboard(true) }
+            },
+            nc.addObserver(forName: UIResponder.keyboardWillHideNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.keyboard(false) }
+            },
+        ]
         #endif
         handler.owner = self
         view = v
@@ -131,6 +159,11 @@ final class ConversationWeb: NSObject {
             if let uid = int(0) { host.webAllowSender(uid: uid) }
         case "allowSpamImages":
             if let uid = int(0) { host.webAllowSpamImages(uid: uid) }
+        case "selectionMenu":
+            #if os(iOS)
+            let n = args.compactMap { ($0 as? NSNumber)?.doubleValue }
+            if n.count == 4 { showSelectionMenu(CGRect(x: n[0], y: n[1], width: n[2], height: n[3])) }
+            #endif
         default:
             webLog.debug("unknown bridge call \(name, privacy: .public)")
         }
@@ -153,6 +186,69 @@ final class ConversationWeb: NSObject {
         }
     }
 }
+
+#if os(iOS)
+extension ConversationWeb: @MainActor UIEditMenuInteractionDelegate {
+    /// Клавиатура — себе и документу: когда её убирает тап по письму,
+    /// WKWebView второй тап серии забирает себе и выделяет слово сам, без
+    /// меню, — документ замечает такое выделение и просит меню (`ddm.keyboard`).
+    private func keyboard(_ shown: Bool) {
+        keyboardShown = shown
+        run("ddm.keyboard && ddm.keyboard(\(shown))")
+    }
+
+    /// Меню над выделением. `rect` — в координатах документа (CSS px от
+    /// начала страницы): в содержимом прокрутки это они же, умноженные на
+    /// масштаб щипка.
+    fileprivate func showSelectionMenu(_ rect: CGRect) {
+        guard let view, selectionMenu != nil else { return }
+        guard keyboardShown else { return presentSelectionMenu(rect) }
+        // Клавиатура ещё открыта — при ней меню не показывается. Убрать её и
+        // показать меню, когда раскладка устоится, — над выделением, каким
+        // оно стало.
+        view.window?.endEditing(true)
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(600))
+            guard let web = self?.view else { return }
+            let r = try? await web.evaluateJavaScript("ddm.selectionRect()")
+            let n = (r as? [NSNumber])?.map(\.doubleValue) ?? []
+            self?.presentSelectionMenu(n.count == 4 ? CGRect(x: n[0], y: n[1], width: n[2], height: n[3]) : rect)
+        }
+    }
+
+    private func presentSelectionMenu(_ rect: CGRect) {
+        guard let view, let selectionMenu else { return }
+        let z = view.scrollView.zoomScale
+        let content = CGRect(x: rect.minX * z, y: rect.minY * z, width: rect.width * z, height: rect.height * z)
+        selectionRect = view.scrollView.convert(content, to: view)
+        // После ухода клавиатуры первым ответчиком может не остаться никто —
+        // тогда им становится содержимое веба (меню показывает ответчик).
+        if !view.isFirstResponder { view.becomeFirstResponder() }
+        let config = UIEditMenuConfiguration(identifier: nil, sourcePoint: CGPoint(x: selectionRect.midX, y: selectionRect.minY))
+        config.preferredArrowDirection = .automatic
+        selectionMenu.presentEditMenu(with: config)
+    }
+
+    /// Своё «Скопировать»: системные пункты WKWebView для выделения из
+    /// скрипта приходят выключенными (меню из них не показывается — проверено
+    /// на симуляторе iOS 26). Текст выделения отдаёт документ
+    /// (`ddm.selectedText()`) в момент нажатия — маркеры, сдвинутые после
+    /// показа меню, тоже учитываются.
+    func editMenuInteraction(_ interaction: UIEditMenuInteraction, menuFor configuration: UIEditMenuConfiguration,
+                             suggestedActions: [UIMenuElement]) -> UIMenu? {
+        let copy = UIAction(title: "Скопировать", image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in
+            self?.view?.evaluateJavaScript("ddm.selectedText()") { r, _ in
+                if let s = r as? String, !s.isEmpty { UIPasteboard.general.string = s }
+            }
+        }
+        return UIMenu(children: [copy])
+    }
+
+    func editMenuInteraction(_ interaction: UIEditMenuInteraction, targetRectFor configuration: UIEditMenuConfiguration) -> CGRect {
+        selectionRect
+    }
+}
+#endif
 
 extension ConversationWeb: WKNavigationDelegate {
     /// Документ грузится один раз; любая попытка уйти с него — ссылка наружу.

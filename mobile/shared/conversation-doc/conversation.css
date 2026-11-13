@@ -10,6 +10,9 @@
   --fail: #c62828;
 }
 html, body { margin: 0; padding: 0; background: var(--bg); }
+/* Двойной тап выделяет слово (conversation.js, wireTapSeries), а не
+   масштабирует; щипок масштабирует по-прежнему. */
+html { touch-action: manipulation; }
 body {
   font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   color: #0f1419;
@@ -84,3 +87,6 @@ body {
 /* iPhone/iPad: долгое нажатие на пузырь открывает наше меню (conversation.js,
    onLongPress), а не системную выноску. */
 .ddm-touch-webkit .ddm-row { -webkit-touch-callout: none; }
+/* Пока держат палец после долгого нажатия — без системного выделения
+   (conversation.js, holdNativeSelection). Наследуется и в shadow root писем. */
+.ddm-noselect, .ddm-noselect * { -webkit-user-select: none; user-select: none; }
