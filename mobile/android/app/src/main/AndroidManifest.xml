@@ -31,7 +31,7 @@
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:theme="@style/DDMailTheme">
         <!-- Смена состояния Mate XT (сложен / два / три экрана) — это смена
              размера окна. Activity её переживает сама, без пересоздания:
              контекст (беседа, черновик, позиция) не должен теряться

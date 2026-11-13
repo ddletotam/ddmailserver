@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Только светлое оформление, как у десктопа (desktop §5ж, docs/mobile-layout.md):
+         принудительное затемнение EMUI/Android делало текст белым на пастельных
+         подложках айдентик. -->
+    <style name="DDMailTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+</resources>

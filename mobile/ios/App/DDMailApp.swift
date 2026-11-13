@@ -20,6 +20,10 @@ struct DDMailApp: App {
         let model = AppModel()
         _app = State(initialValue: model)
         UNUserNotificationCenter.current().delegate = NotificationRouter.shared
+        #if os(macOS)
+        // Только светлое оформление, как у десктопа (на iOS — UIUserInterfaceStyle в Info.plist).
+        NSApplication.shared.appearance = NSAppearance(named: .aqua)
+        #endif
         Task { await ReminderService.registerCategory() }
         #if os(iOS)
         // Докачка тел — задача обработки: SwiftUI `.backgroundTask` её не

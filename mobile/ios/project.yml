@@ -68,6 +68,10 @@ targets:
       # Генерируется XcodeGen; ключи, которых нет у INFOPLIST_KEY_*.
       path: App/Info.plist
       properties:
+        # Только светлое оформление, как у десктопа (desktop §5ж, mobile-layout.md):
+        # цвета айдентик в списке — пастель под тёмный текст; системная тёмная
+        # тема делала текст белым на пастели — «ни хера не читается».
+        UIUserInterfaceStyle: Light
         BGTaskSchedulerPermittedIdentifiers:
           - ru.letotam.ddmail.refresh
           - ru.letotam.ddmail.prefetch
