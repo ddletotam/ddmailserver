@@ -122,6 +122,58 @@ class MailViewModel(
         bubbleMenu.value = conversation.body(uid)
     }
 
+    /** «Показать… → Заголовки / Исходник»: открытый просмотр; `null` — закрыт. */
+    val source = MutableStateFlow<SourceText?>(null)
+
+    /**
+     * Письмо целиком с сервера (IMAP — `BODY.PEEK[]`): заголовки — до первой
+     * пустой строки. Огромное письмо показывается началом, копируется целиком.
+     */
+    fun showSource(b: MessageBody, headersOnly: Boolean) {
+        val title = (if (headersOnly) "Заголовки" else "Исходник") + " — " + b.subject.ifBlank { "(без темы)" }
+        viewModelScope.launch {
+            try {
+                val text = conversation.source(b.uid, headersOnly)
+                source.value = SourceText(title, text)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException || !e.isMailError()) throw e
+                notice.value = "Не удалось получить письмо: ${e.errorText()}"
+            }
+        }
+    }
+
+    /** «Исходник тела (HTML)» — то, что уже пришло в теле письма. */
+    fun showBodySource(b: MessageBody) {
+        source.value = SourceText("Исходник тела — " + b.subject.ifBlank { "(без темы)" }, b.html.orEmpty())
+    }
+
+    /** «Удалить письмо» ждёт подтверждения (удаление необратимо). */
+    val deleteMessageAsk = MutableStateFlow<MessageBody?>(null)
+
+    /**
+     * «Удалить письмо» (подтверждено): пузырь уходит сразу, кэш и сервер —
+     * следом. Последнее письмо беседы — беседа уходит целиком, и она
+     * закрывается, как после удаления беседы.
+     */
+    fun deleteMessage(b: MessageBody) {
+        deleteMessageAsk.value = null
+        val c = conversation.current ?: return
+        if (c.messages.none { it.uid != b.uid }) {
+            // Беседа из одного письма: удаляем беседу (то же на сервере), лента закрывается.
+            open(null)
+            viewModelScope.launch {
+                val r = runCatching { hub.deleteMessages(c, c.messages) }
+                notice.value = r.fold({ "✓ Письмо удалено" }, { "Не удалось удалить письмо: ${it.errorText()}" })
+                sync()
+            }
+            return
+        }
+        conversation.delete(b) { msg ->
+            notice.value = msg
+            sync()
+        }
+    }
+
     /** Полный список (не только видимая папка): открытая беседа ищется в нём. */
     private var all: List<Conversation> = emptyList()
     private var doc: FoldersDoc = FoldersDoc()
@@ -205,7 +257,13 @@ class MailViewModel(
             hub.conversations.collect { list ->
                 all = list
                 tryRestore()
-                selected.value?.let { ref -> list.firstOrNull { it.ref == ref }?.let(conversation::updated) }
+                selected.value?.let { ref ->
+                    val c = list.firstOrNull { it.ref == ref } ?: return@let
+                    // Открыли раньше, чем пришёл список (уведомление при
+                    // холодном старте: кэш ещё не прочитан): лента пуста,
+                    // папка не та — открыть по-настоящему, когда беседа есть.
+                    if (conversation.current?.ref != ref) reveal(c) else conversation.updated(c)
+                }
                 openSentTarget()
             }
         }
@@ -440,14 +498,14 @@ class MailViewModel(
         clearSearch()
         clearPicks()
         open(null)
-        compose.reset()
+        compose.enter(compose.newPlace(addr))
         newChat.value = addr
     }
 
     fun closeNew() {
         if (newChat.value == null) return
         newChat.value = null
-        compose.reset()
+        compose.enter(null)
     }
 
     fun pickSearchConv(ref: String) {
@@ -503,18 +561,32 @@ class MailViewModel(
         if (id != null) newChat.value = null
         if (id == selected.value) return
         val c = id?.let { i -> all.firstOrNull { it.ref == i } }
-        if (c != null) {
-            val f = doc.folderOf(c)
-            val fid = f?.let { doc.folders[it].id }
-            if (fid != activeId.value) selectFolder(fid)
-        }
+        if (c != null) showFolderOf(c)
         selected.value = id
         app.openConversation = id
         id?.let { ru.letotam.ddmail.background.MailNotifier.cancel(app, it) }
-        compose.reset()
+        compose.enter(id)
         conversation.open(c)
         id?.let { v -> viewModelScope.launch { app.uiPrefs.edit { it[LAST_CONV] = v } } }
     }
+
+    /** Беседа в другой папке — переключиться на её папку (`folders_ui::reveal` десктопа). */
+    private fun showFolderOf(c: Conversation) {
+        val fid = doc.folderOf(c)?.let { doc.folders[it].id }
+        if (fid != activeId.value) selectFolder(fid)
+    }
+
+    /**
+     * Выбранная беседа появилась в списке позже выбора: показать её (папка,
+     * лента, прочитано). Композер не трогается — в нём уже могли начать писать.
+     */
+    private fun reveal(c: Conversation) {
+        showFolderOf(c)
+        conversation.open(c)
+    }
+
+    /** Беседа по `ref` во всём списке (не только в видимой папке). */
+    fun find(ref: String?): Conversation? = ref?.let { r -> all.firstOrNull { it.ref == r } }
 
     private var wide = false
 
@@ -610,6 +682,9 @@ class MailViewModel(
         }
     }
 }
+
+/** Текст для просмотра «Заголовки / Исходник»: [text] — целиком (копируется всё). */
+data class SourceText(val title: String, val text: String)
 
 /** Строк «Диалоги» в выпадашке — больше на телефоне не просмотреть. */
 private const val MAX_CONV_HITS = 30

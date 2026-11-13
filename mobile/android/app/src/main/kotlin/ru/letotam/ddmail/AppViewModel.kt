@@ -96,6 +96,7 @@ class AppViewModel(private val app: DdmailApp) : ViewModel() {
             val left = app.sessions.load() != null || app.accounts.list().isNotEmpty()
             if (!left) {
                 app.db.dao().clearAll()
+                app.settings.clearImageSenders()
                 ru.letotam.ddmail.background.SyncWorker.cancel(app)
                 androidx.core.app.NotificationManagerCompat.from(app).cancelAll()
             }

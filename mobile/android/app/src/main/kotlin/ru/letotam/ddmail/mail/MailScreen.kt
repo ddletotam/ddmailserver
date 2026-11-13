@@ -83,6 +83,9 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -135,7 +138,9 @@ fun MailScreen(
     val wide = width >= 600
     // Открытая беседа ищется по id в полном видимом списке: дельта могла
     // переставить строки.
-    val selected = s.conversations.firstOrNull { it.ref == selectedId }
+    // Не нашлась в видимой папке (папку ещё не переключили, беседу перенесли
+    // с другого устройства) — во всём списке: открытая беседа не пропадает.
+    val selected = s.conversations.firstOrNull { it.ref == selectedId } ?: vm.find(selectedId)
 
     // Синхронизация на возврат и WebSocket — в оболочке (AppShell): они нужны
     // и пока на экране календарь.
@@ -173,6 +178,7 @@ fun MailScreen(
                 vm.attachmentMenu.value = uid to index
             }
             override fun onAllowSender(uid: Long) = vm.conversation.allowSender(uid)
+            override fun onRestarted() = vm.conversation.restarted()
         }
         // Пропуск внешних картинок (спам — только по нажатию); не снимается
         // на уходе экрана: WebView живёт дольше него.
@@ -187,6 +193,8 @@ fun MailScreen(
     ComposeSheetDialog(vm.compose)
     BubbleMenu(vm)
     AttachmentMenu(vm)
+    DeleteMessageDialog(vm)
+    SourceDialog(vm)
     val app = context.applicationContext as DdmailApp
     ru.letotam.ddmail.settings.PrefetchQuestion(app.settings)
     // Открытие беседы из уведомления.
@@ -1075,18 +1083,22 @@ private fun ConversationPane(c: Conversation?, web: ConversationWeb, vm: MailVie
             if (!c.spam) IconButton(onClick = { vm.askSpam(c.ref) }) { Icon(Icons.Filled.Report, "В спам") }
         }
         HorizontalDivider()
-        AndroidView(
-            // Тот же WebView переезжает между раскладками (сложили/разложили):
-            // из прежнего родителя его надо вынуть.
-            factory = { web.view.also { (it.parent as? ViewGroup)?.removeView(it) } },
-            modifier = Modifier.fillMaxWidth().weight(1f),
-        )
+        // Поколение WebView: упал процесс отрисовки — вид новый, вставляем его.
+        val generation by web.generation.collectAsState()
+        androidx.compose.runtime.key(generation) {
+            AndroidView(
+                // Тот же WebView переезжает между раскладками (сложили/разложили):
+                // из прежнего родителя его надо вынуть.
+                factory = { web.view.also { (it.parent as? ViewGroup)?.removeView(it) } },
+                modifier = Modifier.fillMaxWidth().weight(1f),
+            )
+        }
         HorizontalDivider()
         ComposerBar(vm.compose, c)
     }
 }
 
-/** Долгое нажатие на вложение: открыть или сохранить в «Загрузки». */
+/** Долгое нажатие на вложение: открыть, поделиться, сохранить в «Загрузки». */
 @Composable
 private fun AttachmentMenu(vm: MailViewModel) {
     val m by vm.attachmentMenu.collectAsState()
@@ -1099,6 +1111,9 @@ private fun AttachmentMenu(vm: MailViewModel) {
         text = {
             Column {
                 MenuRow(Icons.AutoMirrored.Filled.OpenInNew, "Открыть", close) { vm.conversation.openAttachment(uid, index, name) }
+                MenuRow(Icons.Filled.Share, "Поделиться", close) {
+                    vm.conversation.shareAttachment(uid, index, name) { msg -> vm.notice.value = msg }
+                }
                 MenuRow(Icons.Filled.Download, "В «Загрузки»", close) { vm.conversation.saveAttachment(uid, index) { msg -> vm.notice.value = msg } }
             }
         },
@@ -1106,34 +1121,120 @@ private fun AttachmentMenu(vm: MailViewModel) {
     )
 }
 
-/** Долгое нажатие на пузырь: ответить именно на это письмо, переслать, копировать. */
+/**
+ * Долгое нажатие на пузырь — пункты как у меню пузыря десктопа
+ * (`app.slint`): «Ответить», «Переслать», «Копировать текст», «Копировать
+ * адрес», «Показать…» (заголовки, исходник сообщения, исходник тела, текстовая
+ * или HTML-версия), «Удалить письмо». «Показать…» раскрывается на месте — у
+ * диалога вложенного меню нет.
+ */
 @Composable
 private fun BubbleMenu(vm: MailViewModel) {
     val b by vm.bubbleMenu.collectAsState()
     val body = b ?: return
     val clipboard = LocalClipboardManager.current
     val close = { vm.bubbleMenu.value = null }
+    var more by remember(body.uid) { mutableStateOf(false) }
+    val hasHtml = !body.html.isNullOrBlank()
+    val hasText = !body.text.isNullOrBlank()
+    val asText = vm.conversation.showsText(body.uid)
     AlertDialog(
         onDismissRequest = close,
         title = { Text(body.subject.ifBlank { stringResource(R.string.no_subject) }, maxLines = 2, overflow = TextOverflow.Ellipsis) },
         text = {
-            Column {
+            Column(Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState())) {
                 MenuRow(Icons.AutoMirrored.Filled.Reply, "Ответить", close) { vm.compose.replyTo(body) }
                 MenuRow(Icons.AutoMirrored.Filled.Forward, "Переслать", close) { vm.compose.openForward(body) }
-                MenuRow(Icons.Filled.ContentCopy, "Копировать", close) {
+                MenuRow(Icons.Filled.ContentCopy, "Копировать текст", close) {
                     val plain = body.text?.takeIf { it.isNotBlank() }
                         ?: android.text.Html.fromHtml(body.html.orEmpty(), android.text.Html.FROM_HTML_MODE_COMPACT).toString()
                     clipboard.setText(AnnotatedString(plain.trim()))
                 }
+                if (body.fromAddr.isNotBlank()) MenuRow(Icons.Filled.AlternateEmail, "Копировать адрес", close) {
+                    clipboard.setText(AnnotatedString(body.fromAddr))
+                }
+                HorizontalDivider()
+                MenuRow(Icons.Filled.Visibility, "Показать…", close = {}, trailing = if (more) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore) { more = !more }
+                if (more) Column(Modifier.padding(start = 40.dp)) {
+                    MenuRow(Icons.AutoMirrored.Filled.List, "Заголовки", close) { vm.showSource(body, headersOnly = true) }
+                    MenuRow(Icons.Filled.Code, "Исходник сообщения", close) { vm.showSource(body, headersOnly = false) }
+                    if (hasHtml && !asText) MenuRow(Icons.Filled.DataObject, "Исходник тела (HTML)", close) { vm.showBodySource(body) }
+                    if (hasHtml && hasText && !asText) MenuRow(Icons.Filled.Notes, "Текстовую версию", close) { vm.conversation.view(body.uid, asText = true) }
+                    if (hasHtml && asText) MenuRow(Icons.Filled.Html, "HTML-версию", close) { vm.conversation.view(body.uid, asText = false) }
+                }
+                HorizontalDivider()
+                MenuRow(Icons.Filled.Delete, "Удалить письмо", close, tint = MaterialTheme.colorScheme.error) { vm.deleteMessageAsk.value = body }
             }
         },
         confirmButton = { IconButton(onClick = close) { Icon(Icons.Filled.Close, "Отмена") } },
     )
 }
 
-/** Пункт меню-диалога: иконка и короткое слово. */
+/** «Удалить письмо» — с подтверждением до: API восстановления нет (§5). */
 @Composable
-private fun MenuRow(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, close: () -> Unit, action: () -> Unit) {
+private fun DeleteMessageDialog(vm: MailViewModel) {
+    val b by vm.deleteMessageAsk.collectAsState()
+    val body = b ?: return
+    val close = { vm.deleteMessageAsk.value = null }
+    AlertDialog(
+        onDismissRequest = close,
+        title = { Text("Удалить письмо?") },
+        text = { Text("«${body.subject.ifBlank { stringResource(R.string.no_subject) }}» удалится с сервера; у внешних ящиков — и в исходном ящике. Вернуть его будет нельзя.") },
+        confirmButton = {
+            TextButton(onClick = { vm.deleteMessage(body) }) { Text("Удалить", color = MaterialTheme.colorScheme.error) }
+        },
+        dismissButton = { IconButton(onClick = close) { Icon(Icons.Filled.Close, "Отмена") } },
+    )
+}
+
+/**
+ * «Показать… → Заголовки / Исходник» (окно исходника десктопа): моноширинный
+ * текст с выделением; «Скопировать» берёт всё письмо, даже если показано
+ * только начало.
+ */
+@Composable
+private fun SourceDialog(vm: MailViewModel) {
+    val src by vm.source.collectAsState()
+    val s = src ?: return
+    val clipboard = LocalClipboardManager.current
+    val close = { vm.source.value = null }
+    val shown = remember(s) { ru.letotam.ddmail.sync.MessageSource.preview(s.text) }
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = close,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+    ) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Column(Modifier.fillMaxSize().systemBarsPadding()) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = close) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Закрыть") }
+                    Text(s.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    IconButton(onClick = {
+                        clipboard.setText(AnnotatedString(s.text))
+                        vm.notice.value = "Скопировано"
+                    }) { Icon(Icons.Filled.ContentCopy, "Скопировать") }
+                }
+                HorizontalDivider()
+                androidx.compose.foundation.text.selection.SelectionContainer(
+                    Modifier.fillMaxSize().verticalScroll(androidx.compose.foundation.rememberScrollState())
+                        .horizontalScroll(androidx.compose.foundation.rememberScrollState()).padding(12.dp),
+                ) {
+                    Text(shown, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, fontSize = 12.sp, softWrap = false)
+                }
+            }
+        }
+    }
+}
+
+/** Пункт меню-диалога: иконка и короткое слово; [trailing] — стрелка раскрытия. */
+@Composable
+private fun MenuRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    close: () -> Unit,
+    tint: Color = Accent,
+    trailing: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    action: () -> Unit,
+) {
     Row(
         Modifier.fillMaxWidth().clickable {
             action()
@@ -1141,9 +1242,10 @@ private fun MenuRow(icon: androidx.compose.ui.graphics.vector.ImageVector, title
         }.padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, null, tint = Accent)
+        Icon(icon, null, tint = tint)
         Spacer(Modifier.width(16.dp))
-        Text(title, style = MaterialTheme.typography.bodyLarge)
+        Text(title, style = MaterialTheme.typography.bodyLarge, color = if (tint == Accent) Color.Unspecified else tint, modifier = Modifier.weight(1f))
+        if (trailing != null) Icon(trailing, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

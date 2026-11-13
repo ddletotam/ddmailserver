@@ -40,6 +40,8 @@ class ConversationWeb(context: Context, private val proxyHttp: OkHttpClient) {
         fun onBubbleMenu(uid: Long)
         fun onAttachmentMenu(uid: Long, index: Int)
         fun onAllowSender(uid: Long)
+        /** Документ создан заново после падения процесса отрисовки: показать текущую беседу снова. */
+        fun onRestarted()
         /** Часть письма `cid:` — блокирующе, вызывается не с главного потока. */
         fun loadPart(uid: Long, cid: String): Pair<ByteArray, String>?
     }
@@ -60,7 +62,21 @@ class ConversationWeb(context: Context, private val proxyHttp: OkHttpClient) {
         .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
         .build()
 
-    val view: WebView = WebView(context).apply {
+    /**
+     * Сам WebView. Меняется, только если процесс отрисовки упал (память, ОС
+     * выгрузила): тогда старый уничтожается, создаётся новый, а [generation]
+     * растёт — экран вставляет новый вид.
+     */
+    var view: WebView = create(context)
+        private set
+
+    /** Поколение WebView: экран пересоздаёт `AndroidView`, когда оно меняется. */
+    val generation = kotlinx.coroutines.flow.MutableStateFlow(0)
+
+    /** Документ грузится после перезапуска — на его `ready` хозяин заново откроет беседу. */
+    private var restarting = false
+
+    private fun create(context: Context): WebView = WebView(context).apply {
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         settings.apply {
             javaScriptEnabled = true
@@ -93,6 +109,10 @@ class ConversationWeb(context: Context, private val proxyHttp: OkHttpClient) {
             ready = true
             while (pending.isNotEmpty()) view.evaluateJavascript(pending.removeFirst(), null)
             host?.onReady()
+            if (restarting) {
+                restarting = false
+                host?.onRestarted()
+            }
         }
 
         @JavascriptInterface
@@ -125,6 +145,23 @@ class ConversationWeb(context: Context, private val proxyHttp: OkHttpClient) {
     }
 
     private inner class Client : WebViewClient() {
+        /**
+         * Процесс отрисовки упал или его выгрузила ОС. Без обработки Android
+         * завершает всё приложение; здесь — новый WebView с тем же документом,
+         * беседа открывается в нём заново ([Host.onRestarted]).
+         */
+        override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
+            if (view !== this@ConversationWeb.view) return true
+            (view.parent as? android.view.ViewGroup)?.removeView(view)
+            view.destroy()
+            ready = false
+            pending.clear()
+            restarting = true
+            this@ConversationWeb.view = create(view.context)
+            generation.value++
+            return true
+        }
+
         /** Документ никуда не уходит: переходы — только во внешний браузер. */
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
             openExternal(view.context, request.url.toString())

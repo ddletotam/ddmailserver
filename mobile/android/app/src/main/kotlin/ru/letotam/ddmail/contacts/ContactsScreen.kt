@@ -98,7 +98,10 @@ import ru.letotam.ddmail.api.ContactWriteRequest
 import ru.letotam.ddmail.api.PimApi
 import ru.letotam.ddmail.mail.Avatars
 
-/** Форма контакта: новый ([id] = null) или правка. Сервер хранит до трёх адресов и телефонов. */
+/**
+ * Форма контакта: новый ([id] = null) или правка. Адресов и телефонов —
+ * сколько есть (§15): урезанный список сервер принял бы как удаление лишних.
+ */
 data class ContactDraft(
     val id: Long?,
     val name: String = "",
@@ -161,6 +164,8 @@ class ContactsViewModel(private val app: ru.letotam.ddmail.DdmailApp, private va
     }
 
     fun edit(c: ContactDto) {
+        // Книга только для чтения — правки нет (кнопки скрыты, это на всякий случай).
+        if (!c.canWrite) return
         draft.value = ContactDraft(
             id = c.id, name = c.fullName, org = c.organization, title = c.title,
             emails = c.emails.ifEmpty { listOf("") }, phones = c.phones.ifEmpty { listOf("") },
@@ -179,7 +184,7 @@ class ContactsViewModel(private val app: ru.letotam.ddmail.DdmailApp, private va
         if (d.id == null && d.bookId == 0L) return draft.update { it?.copy(error = "Выберите адресную книгу") }
         draft.update { it?.copy(busy = true) }
         viewModelScope.launch {
-            val req = ContactWriteRequest(name, emails.take(3), phones.take(3), d.org.trim(), d.title.trim(), addressBookId = if (d.id == null) d.bookId else 0)
+            val req = ContactWriteRequest(name, emails, phones, d.org.trim(), d.title.trim(), addressBookId = if (d.id == null) d.bookId else 0)
             try {
                 if (d.id == null) api.createContact(req) else api.patchContact(d.id, req)
                 draft.value = null
@@ -206,9 +211,13 @@ class ContactsViewModel(private val app: ru.letotam.ddmail.DdmailApp, private va
     private fun errorText(e: ApiException) = when (e) {
         is ApiException.Unauthorized -> "Нужно войти заново"
         is ApiException.Network -> "Нет связи с сервером"
-        is ApiException.Server -> if (e.code == 403) "Адресная книга только для чтения" else e.serverMessage.ifBlank { "Ошибка сервера (${e.code})" }
+        // 403 `address_book_read_only`: `message` сервера — уже на языке пользователя.
+        is ApiException.Server -> e.serverMessage.ifBlank { if (e.code == 403) "Адресная книга только для чтения" else "Ошибка сервера (${e.code})" }
     }
 }
+
+/** Выбранная строка — как открытая беседа в почте (`#10b981`, белый текст). */
+private val SelectedRow = Color(0xFF10B981)
 
 private fun ContactDto.display(): String = fullName.ifBlank { emails.firstOrNull() ?: phones.firstOrNull() ?: "(без имени)" }
 
@@ -291,18 +300,23 @@ private fun ContactList(vm: ContactsViewModel, avatars: Avatars, modifier: Modif
                                 )
                             }
                             items(items, key = { it.id }) { c ->
+                                // Выбранная — сплошной зелёный с белым текстом, как открытая беседа.
+                                val on = selected?.id == c.id
                                 Row(
                                     Modifier.fillMaxWidth()
-                                        .background(if (selected?.id == c.id) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+                                        .background(if (on) SelectedRow else Color.Transparent)
                                         .clickable { vm.selected.value = c }.padding(horizontal = 16.dp, vertical = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     ContactAvatar(c, avatars, 36.dp)
                                     Spacer(Modifier.width(12.dp))
                                     Column(Modifier.weight(1f)) {
-                                        Text(c.display(), fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text(c.display(), fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = if (on) Color.White else Color.Unspecified)
                                         val sub = c.organization.ifBlank { c.emails.firstOrNull().orEmpty().takeIf { c.fullName.isNotBlank() }.orEmpty() }
-                                        if (sub.isNotBlank()) Text(sub, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        if (sub.isNotBlank()) Text(
+                                            sub, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                            color = if (on) Color.White.copy(alpha = 0.85f) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
                                     }
                                 }
                             }
@@ -337,8 +351,17 @@ private fun ContactCard(c: ContactDto, vm: ContactsViewModel, avatars: Avatars, 
         Row(Modifier.fillMaxWidth().padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
             if (onBack != null) IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") }
             Spacer(Modifier.weight(1f))
-            IconButton(onClick = { vm.edit(c) }) { Icon(Icons.Filled.Edit, "Изменить") }
-            IconButton(onClick = { askDelete = true }) { Icon(Icons.Filled.Delete, "Удалить", tint = MaterialTheme.colorScheme.error) }
+            // Книга только для чтения (корпоративная, LDAP) — ни правки, ни удаления (§15).
+            if (c.canWrite) {
+                IconButton(onClick = { vm.edit(c) }) { Icon(Icons.Filled.Edit, "Изменить") }
+                IconButton(onClick = { askDelete = true }) { Icon(Icons.Filled.Delete, "Удалить контакт", tint = MaterialTheme.colorScheme.error) }
+            } else {
+                Row(Modifier.padding(end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Lock, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.outline)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Только чтение", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
         }
         Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             ContactAvatar(c, avatars, 88.dp)
@@ -413,10 +436,13 @@ private fun ContactEditor(vm: ContactsViewModel, wide: Boolean) {
     }
 }
 
-/** До трёх значений: пустое последнее поле добавляет следующее, как в iOS. */
+/**
+ * Все значения, без предела (§15); заполненное последнее поле добавляет
+ * пустое следующее, как в iOS.
+ */
 @Composable
 private fun MultiField(values: List<String>, icon: ImageVector, hint: String, type: KeyboardType, onChange: (List<String>) -> Unit) {
-    val shown = if (values.size < 3 && values.lastOrNull()?.isNotBlank() == true) values + "" else values
+    val shown = if (values.lastOrNull()?.isNotBlank() == true) values + "" else values
     shown.forEachIndexed { i, v ->
         OutlinedTextField(
             v, { nv -> onChange(shown.toMutableList().also { it[i] = nv }) }, Modifier.fillMaxWidth(),
