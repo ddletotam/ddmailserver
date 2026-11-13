@@ -165,11 +165,13 @@ final class SendFlowTests: XCTestCase {
         let selectAll = app.menuItems.matching(NSPredicate(format: "label IN %@", ["Выбрать все", "Select All"])).firstMatch
         if selectAll.waitForExistence(timeout: 3) { selectAll.tap() } else { body.typeKey("a", modifierFlags: .command) }
         sleep(1)
-        // «Формат» → «Жирный» системного меню выделения — так делает владелец.
-        // Пункт «Жирный» в панели «Форматирование» тест пока не находит
-        // (подпись не выяснена) — тогда ⌘B; жирный проверяется по снимку.
+        // «Форматирование» → «Жирный шрифт» системного меню выделения — так
+        // делает владелец; не нашлось — ⌘B. Жирный проверяется по снимку.
         if !UIFlow.formatBold(app) { body.typeKey("b", modifierFlags: .command) }
         sleep(1)
+        // Открытое меню выделения забирает следующий тап себе (им и
+        // закрывается) — «Отправить» тогда не нажимается.
+        UIFlow.dismissEditMenu(app)
         #else
         body.typeKey("a", modifierFlags: .command)
         sleep(1)
@@ -314,7 +316,8 @@ enum UIFlow {
     static func formatBold(_ app: XCUIApplication) -> Bool {
         // Пункты меню выделения бывают и `menuItem`, и `button` — ищем по подписи.
         let format = app.descendants(matching: .any).matching(NSPredicate(format: "label IN %@", ["Форматирование", "Формат", "Format"])).firstMatch
-        let bold = app.descendants(matching: .any).matching(NSPredicate(format: "label IN %@", ["Жирный", "Bold", "Полужирный"])).firstMatch
+        // iOS 26 по-русски — «Жирный шрифт».
+        let bold = app.descendants(matching: .any).matching(NSPredicate(format: "label IN %@", ["Жирный шрифт", "Жирный", "Полужирный", "Bold"])).firstMatch
         for _ in 0..<4 {
             if bold.exists { bold.tap(); return true }
             if format.exists {
@@ -329,6 +332,17 @@ enum UIFlow {
             sleep(1)
         }
         return bold.exists
+    }
+
+    /// Закрыть меню выделения, если оно ещё открыто: тап по заголовку
+    /// навигации — нейтральное место.
+    @MainActor
+    static func dismissEditMenu(_ app: XCUIApplication) {
+        let item = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label IN %@", ["Вырезать", "Форматирование", "Cut", "Format"])).firstMatch
+        guard item.exists else { return }
+        app.navigationBars.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        sleep(1)
     }
     #endif
 
