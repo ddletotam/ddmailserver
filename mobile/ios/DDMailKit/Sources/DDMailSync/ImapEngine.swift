@@ -324,6 +324,44 @@ public actor ImapEngine: MailProvider {
         try store.replaceAll(spamKey, ConversationBuilder.build(spam, ours: ours, own: own, idPrefix: "spam:", spam: true))
     }
 
+    // MARK: Поиск
+
+    /// «Сообщения» поиска (Android §5, десктоп `search_impl`): `UID SEARCH OR
+    /// OR SUBJECT FROM BODY` во «Входящих» и «Отправленных», из каждой папки —
+    /// последние `limit` совпадений. Возвращаются только письма из кэша
+    /// заголовков — те, что лежат в беседах списка; id — тот же, что у письма
+    /// в беседе, поэтому касание открывает её.
+    public func searchMessages(_ query: String, limit: Int) async throws -> [MessageSearchHit] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty, limit > 0 else { return [] }
+        let folders = try store.imapFolders(accountKey)
+        let wanted: [(role: ImapRole, name: String)] = [ImapRole.inbox, .sent].compactMap { r in
+            folders[r.rawValue].map { (r, $0.name) }
+        }
+        guard !wanted.isEmpty else { return [] }
+        let found: [(role: ImapRole, uids: [UInt32])] = try await mapped {
+            try await opsChannel.run { c in
+                var out: [(ImapRole, [UInt32])] = []
+                for (role, name) in wanted {
+                    _ = try await c.select(name, readOnly: true)
+                    out.append((role, Array(try await c.searchText(q).sorted().suffix(limit))))
+                }
+                return out
+            }
+        }
+        var hits: [MessageSearchHit] = []
+        for (role, uids) in found where !uids.isEmpty {
+            guard let f = try store.imapFolders(accountKey)[role.rawValue] else { continue }
+            for r in try store.imapHeaders(accountKey, role: role.rawValue, uids: uids.map(Int64.init)) {
+                hits.append(MessageSearchHit(
+                    id: ImapUID.make(role, epoch: f.epoch, uid: r.uid), subject: r.subject,
+                    from: r.fromName.isEmpty ? r.fromAddr : r.fromName, date: r.dateTs, messageID: r.messageID
+                ))
+            }
+        }
+        return Array(hits.sorted { $0.date > $1.date }.prefix(limit))
+    }
+
     // MARK: Тела
 
     /// Имя папки по id письма.

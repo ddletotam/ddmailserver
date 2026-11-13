@@ -184,6 +184,18 @@ struct IMAPClientTests {
         #expect(sent.contains("{18}\r\nSubject: x\r\n\r\nhi\r\n\r\n"))
     }
 
+    /// «Сообщения» поиска: тема, отправитель или текст; кириллица — `CHARSET UTF-8` и литералы.
+    @Test func searchTextQuotesAsciiAndSendsUtf8Literals() async throws {
+        let server = "* OK [CAPABILITY IMAP4rev1 LITERAL+] hi\r\n* SEARCH 4 9\r\nD1 OK done\r\n* SEARCH 2\r\nD2 OK done\r\n"
+        let sock = ScriptedSocket(server)
+        let c = try await IMAPClient.connect(MailEndpoint(host: "h", port: 993, security: .tls), connector: ScriptedConnector(socket: sock))
+        #expect(try await c.searchText("invoice") == [4, 9])
+        #expect(try await c.searchText("счёт") == [2])
+        let sent = sock.sent
+        #expect(sent.contains("D1 UID SEARCH OR OR SUBJECT \"invoice\" FROM \"invoice\" BODY \"invoice\"\r\n"))
+        #expect(sent.contains("D2 UID SEARCH CHARSET UTF-8 OR OR SUBJECT {8+}\r\nсчёт FROM {8+}\r\nсчёт BODY {8+}\r\nсчёт\r\n"))
+    }
+
     @Test func idleReturnsOnNewMail() async throws {
         let server = "* OK [CAPABILITY IMAP4rev1 IDLE] hi\r\n+ idling\r\n* 5 EXISTS\r\nD1 OK IDLE done\r\n"
         let sock = ScriptedSocket(server)

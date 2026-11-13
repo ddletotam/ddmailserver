@@ -241,6 +241,13 @@ final class FakeIMAPSocket: MailSocket, @unchecked Sendable {
             let hits = msgs.filter { $0.raw.contains("Message-ID: \(id)") }.map { String($0.uid) }
             push("* SEARCH \(hits.joined(separator: " "))\r\n".replacingOccurrences(of: "SEARCH \r", with: "SEARCH\r"))
             ok()
+        } else if upper.hasPrefix("UID SEARCH OR OR SUBJECT") {
+            // Поиск «Сообщений»: строка в кавычках (ASCII) — по всему письму.
+            let q = (cmd.components(separatedBy: "\"").dropFirst().first ?? "").lowercased()
+            let msgs = server.with { $0.folders[selected!]!.messages }
+            let hits = msgs.filter { !q.isEmpty && $0.raw.lowercased().contains(q) }.map { String($0.uid) }
+            push(hits.isEmpty ? "* SEARCH\r\n" : "* SEARCH \(hits.joined(separator: " "))\r\n")
+            ok()
         } else if upper.hasPrefix("UID SEARCH UID") {
             let range = parseRange(String(cmd.split(separator: " ")[3]))
             let msgs = server.with { $0.folders[selected!]!.messages }

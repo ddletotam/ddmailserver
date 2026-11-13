@@ -6,7 +6,8 @@ import Observation
 /// Поиск почты — выпадашка под полем в первой строке списка (десктоп §4
 /// «Поиск», `docs/mobile-layout.md`). Секции по порядку: «Написать по
 /// адресу…», «Диалоги», «Контакты», «Сообщения». Диалоги и контакты ищутся
-/// на устройстве на каждое нажатие, сообщения — сервером ddmail с паузой.
+/// на устройстве на каждое нажатие, сообщения — сервером ddmail или IMAP
+/// учётки с паузой.
 /// Это же единственный путь к новому письму.
 @MainActor @Observable
 final class MailSearch {
@@ -109,14 +110,21 @@ final class MailSearch {
         return out
     }
 
-    /// «Сообщения» — серверный поиск ddmail-учёток, после паузы в наборе.
-    /// У внешних IMAP-учёток серверного поиска нет — секция их не касается.
+    /// Поиск писем одной учётки: запрос и предел — совпадения.
+    typealias MessageSearcher = @Sendable (String, Int) async throws -> [MessageSearchHit]
+
+    /// «Сообщения» — после паузы в наборе: у ddmail-учёток — поиск сервера
+    /// (`GET /search`), у IMAP-учёток — `UID SEARCH` во «Входящих» и
+    /// «Отправленных» (`ImapEngine.searchMessages`, Android §5, десктоп
+    /// `search_impl`). Учётка, у которой поиск не удался, просто ничего не даёт.
     private func searchMessages() {
         messageTask?.cancel()
         let q = trimmed
-        let sources: [(String, SessionAPI)] = mail?.workspace.links.compactMap { l in
-            guard l.status != .dead, let api = l.api else { return nil }
-            return (l.account.key, api)
+        let sources: [(String, MessageSearcher)] = mail?.workspace.links.compactMap { l in
+            guard l.status != .dead else { return nil }
+            if let api = l.api { return (l.account.key, { try await api.searchMessages($0, limit: $1) }) }
+            if let imap = l.imap { return (l.account.key, { try await imap.searchMessages($0, limit: $1) }) }
+            return nil
         } ?? []
         guard !q.isEmpty, !sources.isEmpty else {
             messages = []
@@ -130,10 +138,10 @@ final class MailSearch {
             guard !Task.isCancelled else { return }
             var found: [MessageHit] = []
             await withTaskGroup(of: [MessageHit].self) { group in
-                for (key, api) in sources {
+                for (key, search) in sources {
                     group.addTask {
                         do {
-                            return try await api.searchMessages(q, limit: limit).map { MessageHit(accountKey: key, hit: $0) }
+                            return try await search(q, limit).map { MessageHit(accountKey: key, hit: $0) }
                         } catch {
                             mailLog.error("search messages: \(String(describing: error), privacy: .public)")
                             return []

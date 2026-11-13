@@ -180,6 +180,25 @@ struct ImapEngineTests {
         #expect(server.with { $0.log.filter { $0.hasPrefix("LOGIN") }.count } == 2)
     }
 
+    /// «Сообщения» поиска у IMAP-учётки (Android §5): «Входящие» и
+    /// «Отправленные», id — как у письма в беседе.
+    @Test func searchMessagesInInboxAndSent() async throws {
+        let server = FakeIMAPServer()
+        server.deliver("INBOX", from: "Боб <bob@example.net>", to: me, subject: "Invoice 42", date: "Thu, 12 Nov 2026 10:00:00 +0300")
+        server.deliver("INBOX", from: "ann@example.net", to: me, subject: "другое", body: "nothing")
+        server.deliver("Sent", from: me, to: "bob@example.net", subject: "Re: invoice 42", date: "Fri, 13 Nov 2026 10:00:00 +0300")
+        server.deliver("Junk", from: "spam@bad.example", to: me, subject: "invoice")
+        let (e, _) = try engine(server)
+        try await e.sync()
+        let hits = try await e.searchMessages("invoice", limit: 12)
+        #expect(hits.map(\.subject) == ["Re: invoice 42", "Invoice 42"])
+        #expect(hits.last?.from == "Боб")
+        let uids = Set(try e.currentConversations().filter { !$0.spam }.flatMap(\.messages).map(\.uid))
+        #expect(hits.allSatisfy { uids.contains($0.id) })
+        #expect(try await e.searchMessages("missing-word", limit: 12).isEmpty)
+        #expect(try await e.searchMessages("  ", limit: 12).isEmpty)
+    }
+
     @Test func idleStopsOnWrongPassword() async throws {
         let server = FakeIMAPServer()
         server.with { $0.password = "other" }

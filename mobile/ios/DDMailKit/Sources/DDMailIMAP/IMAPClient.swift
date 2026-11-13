@@ -190,6 +190,19 @@ public actor IMAPClient {
         try await run("UID SEARCH \(criteria)").searchUIDs
     }
 
+    /// Письма, где `query` есть в теме, отправителе или тексте (секция
+    /// «Сообщения» поиска, как `search_impl` десктопа и `searchText`
+    /// Android): `UID SEARCH OR OR SUBJECT … FROM … BODY …`. Не-ASCII — с
+    /// `CHARSET UTF-8`, строка уходит литералом.
+    public func searchText(_ query: String) async throws -> [UInt32] {
+        let ascii = query.utf8.allSatisfy { $0 < 128 }
+        let r = try await run([
+            .raw(ascii ? "UID SEARCH OR OR SUBJECT " : "UID SEARCH CHARSET UTF-8 OR OR SUBJECT "), .string(query),
+            .raw(" FROM "), .string(query), .raw(" BODY "), .string(query),
+        ])
+        return r.searchUIDs
+    }
+
     /// `UID SEARCH HEADER Message-ID <id>` — есть ли письмо в папке.
     public func searchMessageID(_ id: String) async throws -> [UInt32] {
         let r = try await run([.raw("UID SEARCH HEADER Message-ID "), .string("<\(normalizeMessageID(id))>")])
