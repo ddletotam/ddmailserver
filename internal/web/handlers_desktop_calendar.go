@@ -300,6 +300,9 @@ type DesktopCalendar struct {
 	CanWrite    bool   `json:"can_write"`
 	Enabled     bool   `json:"enabled"`
 	Timezone    string `json:"timezone,omitempty"`
+	// Components — что коллекция принимает: "VEVENT", "VTODO" или оба.
+	// По нему клиент выбирает, куда можно создать задачу.
+	Components []string `json:"components"`
 }
 
 // DesktopCalendarAttendee is the trimmed attendee shape; matches what the
@@ -573,6 +576,7 @@ func (s *Server) HandleDesktopCalendars(w http.ResponseWriter, r *http.Request) 
 			CanWrite:    c.CanWrite,
 			Enabled:     c.Enabled,
 			Timezone:    c.Timezone,
+			Components:  c.ComponentList(),
 		})
 	}
 

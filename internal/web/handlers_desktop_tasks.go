@@ -61,7 +61,11 @@ type DesktopTask struct {
 // have no due date, so windowing would quietly hide the bulk of a reminders
 // list. `include_completed=1` adds the finished ones.
 func (s *Server) HandleDesktopTasks(w http.ResponseWriter, r *http.Request) {
-	user := s.GetUserFromContext(r.Context())
+	s.taskAPI().list(w, r)
+}
+
+func (a taskAPI) list(w http.ResponseWriter, r *http.Request) {
+	user := userFromContext(r.Context())
 	if user == nil {
 		respondError(w, http.StatusUnauthorized, "unauthorized")
 		return
@@ -70,7 +74,7 @@ func (s *Server) HandleDesktopTasks(w http.ResponseWriter, r *http.Request) {
 	// Enabled calendars only, and the gate belongs here: it covers both the
 	// explicit-ids case and the no-ids case, so a disabled calendar cannot leak
 	// tasks to a client that still remembers its id.
-	allCals, err := s.database.GetEnabledCalendarsByUserID(user.ID)
+	allCals, err := a.store.GetEnabledCalendarsByUserID(user.ID)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to load calendars")
 		return
@@ -104,7 +108,7 @@ func (s *Server) HandleDesktopTasks(w http.ResponseWriter, r *http.Request) {
 
 	includeCompleted := r.URL.Query().Get("include_completed") == "1"
 
-	todos, err := s.database.GetTodosForCalendars(ids, includeCompleted)
+	todos, err := a.store.GetTodosForCalendars(ids, includeCompleted)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to load tasks")
 		return
@@ -112,37 +116,43 @@ func (s *Server) HandleDesktopTasks(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]DesktopTask, 0, len(todos))
 	for _, t := range todos {
-		task := DesktopTask{
-			ID:              t.ID,
-			CalendarID:      t.CalendarID,
-			UID:             t.UID,
-			Summary:         t.Summary,
-			Description:     t.Description,
-			Due:             t.Due,
-			AllDay:          t.AllDay,
-			Status:          t.Status,
-			Completed:       t.IsCompleted(),
-			CompletedAt:     t.CompletedAt,
-			PercentComplete: t.PercentComplete,
-			Priority:        t.Priority,
-			RRule:           t.RRule,
-		}
-		// DTSTART is stored as a plain int64 and zero means "absent" for a
-		// task, where it would mean the epoch for an event.
-		if t.DTStart != 0 {
-			start := t.DTStart
-			task.Start = &start
-		}
-		if cal := calByID[t.CalendarID]; cal != nil {
-			task.Color = cal.Color
-			task.CanWrite = cal.CanWrite
-			task.IdentityEmail = cal.IdentityEmail
-			task.CalendarName = cal.Name
-		}
-		out = append(out, task)
+		out = append(out, desktopTaskFrom(t, calByID[t.CalendarID]))
 	}
 
 	respondJSON(w, http.StatusOK, out)
+}
+
+// desktopTaskFrom собирает задачу так, как её слышит клиент; cal — её
+// коллекция (nil — поля коллекции остаются пустыми).
+func desktopTaskFrom(t *models.CalendarEvent, cal *models.Calendar) DesktopTask {
+	task := DesktopTask{
+		ID:              t.ID,
+		CalendarID:      t.CalendarID,
+		UID:             t.UID,
+		Summary:         t.Summary,
+		Description:     t.Description,
+		Due:             t.Due,
+		AllDay:          t.AllDay,
+		Status:          t.Status,
+		Completed:       t.IsCompleted(),
+		CompletedAt:     t.CompletedAt,
+		PercentComplete: t.PercentComplete,
+		Priority:        t.Priority,
+		RRule:           t.RRule,
+	}
+	// DTSTART is stored as a plain int64 and zero means "absent" for a
+	// task, where it would mean the epoch for an event.
+	if t.DTStart != 0 {
+		start := t.DTStart
+		task.Start = &start
+	}
+	if cal != nil {
+		task.Color = cal.Color
+		task.CanWrite = taskWritable(cal)
+		task.IdentityEmail = cal.IdentityEmail
+		task.CalendarName = cal.Name
+	}
+	return task
 }
 
 // TaskCompletionRequest is the body of the completion toggle.
@@ -160,7 +170,11 @@ type TaskCompletionRequest struct {
 // no meaning there. Mixing them would put a `completed` field on every event
 // edit that no event can honour.
 func (s *Server) HandleDesktopTaskCompletion(w http.ResponseWriter, r *http.Request) {
-	user := s.GetUserFromContext(r.Context())
+	s.taskAPI().completion(w, r)
+}
+
+func (a taskAPI) completion(w http.ResponseWriter, r *http.Request) {
+	user := userFromContext(r.Context())
 	if user == nil {
 		respondError(w, http.StatusUnauthorized, "unauthorized")
 		return
@@ -176,23 +190,12 @@ func (s *Server) HandleDesktopTaskCompletion(w http.ResponseWriter, r *http.Requ
 	// An empty body is legitimate: it means "toggle".
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	task, err := s.database.GetEventByID(taskID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "task not found")
+	task, cal, ok := a.ownedTask(w, user, taskID)
+	if !ok {
 		return
 	}
-	if !task.IsTodo() {
-		respondError(w, http.StatusBadRequest, "not a task")
-		return
-	}
-
-	cal, err := s.database.GetCalendarByID(task.CalendarID)
-	if err != nil || cal.UserID != user.ID {
-		respondError(w, http.StatusNotFound, "calendar not found")
-		return
-	}
-	if !cal.CanWrite || cal.SourceType == "ics_url" || cal.SourceType == "ics_import" {
-		respondError(w, http.StatusBadRequest, "calendar is read-only")
+	if !taskWritable(cal) {
+		respondError(w, http.StatusForbidden, "calendar is read-only")
 		return
 	}
 
@@ -217,13 +220,13 @@ func (s *Server) HandleDesktopTaskCompletion(w http.ResponseWriter, r *http.Requ
 	// tells it there is something new to send.
 	task.LocalModified = true
 
-	if err := s.database.UpdateCalendarEvent(task); err != nil {
+	if err := a.store.UpdateCalendarEvent(task); err != nil {
 		log.Printf("task completion: failed to update task %d: %v", taskID, err)
 		respondError(w, http.StatusInternalServerError, "failed to update task")
 		return
 	}
 
-	s.queueEventReverseSync(cal, task, "update")
+	a.queueSync(cal, task, "update")
 
 	log.Printf("task completion: task %d (%s) → completed=%t", taskID, task.UID, completed)
 

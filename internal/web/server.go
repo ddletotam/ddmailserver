@@ -254,6 +254,11 @@ func (s *Server) setupRoutes() {
 	// is shaped around recurrence scope and start/end, which a task has no use
 	// for.
 	desktopAuthAPI.HandleFunc("/tasks/{id}/completion", s.HandleDesktopTaskCompletion).Methods("POST")
+	// Создание, правка и удаление задач — как у событий: правка уходит во
+	// внешний CalDAV-источник через очередь обратной синхронизации.
+	desktopAuthAPI.HandleFunc("/tasks", s.HandleDesktopTaskCreate).Methods("POST")
+	desktopAuthAPI.HandleFunc("/tasks/{id}", s.HandleDesktopTaskPatch).Methods("PATCH")
+	desktopAuthAPI.HandleFunc("/tasks/{id}", s.HandleDesktopTaskDelete).Methods("DELETE")
 	desktopAuthAPI.HandleFunc("/events/{id}/rsvp", s.HandleDesktopEventRSVP).Methods("POST")
 	desktopAuthAPI.HandleFunc("/events/{id}", s.HandleDesktopEventPatch).Methods("PATCH")
 	desktopAuthAPI.HandleFunc("/events/{id}", s.HandleDesktopEventDelete).Methods("DELETE")
