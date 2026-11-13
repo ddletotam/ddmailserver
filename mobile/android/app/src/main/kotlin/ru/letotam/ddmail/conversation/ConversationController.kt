@@ -17,6 +17,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import ru.letotam.ddmail.api.ApiException
+import ru.letotam.ddmail.api.DeliveryEvent
 import ru.letotam.ddmail.api.MessageBody
 import ru.letotam.ddmail.api.MessageRef
 import ru.letotam.ddmail.sync.Conversation
@@ -104,24 +105,48 @@ class ConversationController(
         }
     }
 
-    /** Беседа обновилась дельтой: новые письма — снизу, без перерисовки. */
+    /**
+     * Беседа обновилась дельтой: новые письма — снизу, без перерисовки; у
+     * показанных своих писем, чей статус доставки сменился, — пометка на
+     * месте (`ddm.delivery`; тело перечитывается — в нём причина словами).
+     */
     fun updated(c: Conversation) {
         if (conv?.ref != c.ref) return
         conv = c
         scope.launch {
             lock.withLock {
                 if (conv?.ref != c.ref) return@launch
-                val known = pages.map { it.uid }.toSet()
-                val fresh = c.messages.filter { it.uid !in known }
+                val before = pages.associateBy { it.uid }
+                val fresh = c.messages.filter { it.uid !in before }
+                val changed = c.messages.filter { r -> r.uid in shown && before[r.uid]?.let { it.deliveryStatus != r.deliveryStatus } == true }
+                if (fresh.isEmpty() && changed.isEmpty()) return@launch
+                pages = newestFirst(c.messages)
+                for (b in load(changed)) js.send("ddm.delivery(${b.uid},${deliveryJson(b)})")
                 if (fresh.isEmpty()) return@launch
                 gate.extend(fresh.map { it.uid })
-                pages = newestFirst(c.messages).filter { it.uid in known || fresh.contains(it) }
                 loaded += fresh.size
                 val bodies = load(fresh)
                 js.send("ddm.append(${batch(c, bodies, null)})")
             }
             if (c.messages.any { !it.seen }) runCatching { hub.markRead(c) }
         }
+    }
+
+    /**
+     * Событие `delivery_status` (WS): пузырь письма в открытой беседе — сразу,
+     * без запроса; в событии те же поля, что в теле. Письма нет на экране —
+     * нечего делать: кэш уже поправлен, откроют — покажется верно.
+     */
+    fun delivery(ev: DeliveryEvent) {
+        val c = conv ?: return
+        if (c.accountKey != hub.ddmail?.accountKey) return
+        val uid = ev.messageId.takeIf { it > 0 }
+            ?: loadedBodies.values.firstOrNull { it.messageId == ev.rfcMessageId && ev.rfcMessageId.isNotEmpty() }?.uid
+            ?: return
+        val b = loadedBodies[uid] ?: return
+        val now = b.copy(deliveryStatus = ev.status, deliveryReason = ev.reason, deliveryError = ev.error, deliveryFailed = ev.failed)
+        loadedBodies[uid] = now
+        js.trySend("ddm.delivery($uid,${deliveryJson(now)})")
     }
 
     /** Часть `cid:` для документа — блокирующе, с потока перехватчика WebView. */
@@ -251,6 +276,8 @@ class ConversationController(
                     )
                     // В группе подписываем входящие именем отправителя.
                     put("showFrom", JsonPrimitive(c.isGroup))
+                    // Статус доставки своего письма; нет статуса — нет и поля.
+                    if (b.deliveryStatus.isNotEmpty()) put("delivery", deliveryJson(b))
                 },
             )
         }
@@ -279,3 +306,18 @@ class ConversationController(
             name.replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_").trim().trimEnd('.').ifEmpty { "attachment" }
     }
 }
+
+/**
+ * Поле `delivery` письма в документе ленты (общий JS API с iOS):
+ * `{status, error, failed}` — статус (`pending` / `delivered` / `failed`),
+ * причина словами (пусто — нет) и кому не доставлено.
+ */
+internal fun deliveryJson(status: String, error: String, failed: List<String>): JsonObject = JsonObject(
+    mapOf(
+        "status" to JsonPrimitive(status),
+        "error" to JsonPrimitive(error),
+        "failed" to JsonArray(failed.map { JsonPrimitive(it) }),
+    ),
+)
+
+internal fun deliveryJson(b: MessageBody): JsonObject = deliveryJson(b.deliveryStatus, b.deliveryError, b.deliveryFailed)

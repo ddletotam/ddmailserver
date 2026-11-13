@@ -15,7 +15,7 @@ import ru.letotam.ddmail.db.ConversationEntity
 import ru.letotam.ddmail.db.MessageBodyEntity
 import ru.letotam.ddmail.db.MessageRefEntity
 
-/** Строки кэша ↔ доменные типы — общее для источников, кроме SyncEngine (у него свои). */
+/** Строки кэша ↔ доменные типы — общее для источников (ddmail и IMAP). */
 internal object CacheRows {
     val json = Json { ignoreUnknownKeys = true }
     val contacts = ListSerializer(ContactInfo.serializer())
@@ -49,7 +49,8 @@ internal object CacheRows {
         lastSubject = lastSubject,
         unreadCount = unreadCount,
         totalCount = totalCount,
-        messages = refs.map { MessageRef(it.folder, it.uid, it.messageId, it.seen) },
+        messages = refs.map { MessageRef(it.folder, it.uid, it.messageId, it.seen, it.deliveryStatus) },
+        lastDeliveryStatus = lastDeliveryStatus,
     )
 
     fun ConversationDto.toEntity(accountKey: String) = ConversationEntity(
@@ -65,7 +66,11 @@ internal object CacheRows {
         unreadCount = unreadCount,
         totalCount = totalCount,
         updatedAt = updatedAt,
+        lastDeliveryStatus = lastDeliveryStatus,
     )
+
+    fun MessageRef.toEntity(accountKey: String, conversationId: String) =
+        MessageRefEntity(accountKey, conversationId, folder, uid, messageId, seen, deliveryStatus)
 
     fun MessageBody.toEntity(accountKey: String) = MessageBodyEntity(
         accountKey = accountKey,
@@ -84,6 +89,10 @@ internal object CacheRows {
         isOutgoing = isOutgoing,
         inReplyTo = inReplyTo,
         referencesJson = json.encodeToString(strings, references),
+        deliveryStatus = deliveryStatus,
+        deliveryReason = deliveryReason,
+        deliveryError = deliveryError,
+        deliveryFailedJson = json.encodeToString(strings, deliveryFailed),
     )
 
     fun MessageBodyEntity.toDomain() = MessageBody(
@@ -102,5 +111,9 @@ internal object CacheRows {
         messageId = messageId,
         inReplyTo = inReplyTo,
         references = runCatching { json.decodeFromString(strings, referencesJson) }.getOrDefault(emptyList()),
+        deliveryStatus = deliveryStatus,
+        deliveryReason = deliveryReason,
+        deliveryError = deliveryError,
+        deliveryFailed = runCatching { json.decodeFromString(strings, deliveryFailedJson) }.getOrDefault(emptyList()),
     )
 }

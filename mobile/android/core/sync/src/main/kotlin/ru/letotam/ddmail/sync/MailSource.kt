@@ -96,11 +96,20 @@ interface MailSource {
     fun close() {}
 }
 
+/**
+ * Письмо IMAP-учётки не ушло: свой SMTP отказал или недоступен. Статус
+ * доставки у таких учёток определяет клиент (контракт Android §5): SMTP принял
+ * — доставлено, отказал — «Не доставлено» с причиной [reason].
+ */
+class SmtpFailed(val reason: Throwable) : Exception(reason.message, reason)
+
 /** Отказ входа: ретраи не лечат, нужен вход (контракт §7). */
-fun Throwable.isAuthError(): Boolean = this is ApiException.Unauthorized || this is MailException.Auth
+fun Throwable.isAuthError(): Boolean =
+    this is ApiException.Unauthorized || this is MailException.Auth || (this is SmtpFailed && reason.isAuthError())
 
 /** Ошибка, которую можно показать человеку. */
 fun Throwable.errorText(): String = when (this) {
+    is SmtpFailed -> reason.errorText()
     is MailException -> humanText()
     is ApiException.Unauthorized -> "сессия истекла — войдите заново"
     is ApiException.Network -> "нет соединения с сервером"
@@ -109,4 +118,4 @@ fun Throwable.errorText(): String = when (this) {
 }
 
 /** Ошибка источника почты, а не программы. */
-fun Throwable.isMailError(): Boolean = this is ApiException || this is MailException
+fun Throwable.isMailError(): Boolean = this is ApiException || this is MailException || this is SmtpFailed

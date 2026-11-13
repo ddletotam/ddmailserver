@@ -100,7 +100,11 @@ class MailViewModel(
 
     val compose = ComposeController(app, hub, conversation, viewModelScope, ::sync)
 
-    val live = LiveUpdates(hub, viewModelScope, ::sync) { app.calendarChanged.tryEmit(Unit) }
+    val live = LiveUpdates(
+        hub, viewModelScope, ::sync,
+        onCalendar = { app.calendarChanged.tryEmit(Unit) },
+        onDelivery = conversation::delivery,
+    )
     val avatars = Avatars(app, hub)
 
     /** Учётки и их состояния — для шапки и плашек «нужен вход». */
@@ -202,17 +206,23 @@ class MailViewModel(
                 all = list
                 tryRestore()
                 selected.value?.let { ref -> list.firstOrNull { it.ref == ref }?.let(conversation::updated) }
-                // Отправили новое письмо — перейти в его беседу, как только она появилась.
-                compose.sentTarget?.let { target ->
-                    val own = compose.identities.value.map { it.email.lowercase() }.toSet()
-                    list.firstOrNull { c -> matchesTarget(c, target, own) }?.let { c ->
-                        compose.consumeTarget()
-                        open(c.ref)
-                    }
-                }
+                openSentTarget()
             }
         }
+        // Цель могла появиться позже беседы: сервер ddmail кладёт копию при
+        // приёме, и синк по WS `message_sent` иногда успевает до ответа `/send`.
+        viewModelScope.launch { compose.sentTarget.collect { if (it != null) openSentTarget() } }
         sync()
+    }
+
+    /** Отправили новое письмо — перейти в его беседу, как только она есть в списке. */
+    private fun openSentTarget() {
+        val target = compose.sentTarget.value ?: return
+        val own = compose.identities.value.map { it.email.lowercase() }.toSet()
+        all.firstOrNull { c -> matchesTarget(c, target, own) }?.let { c ->
+            compose.consumeTarget()
+            open(c.ref)
+        }
     }
 
     /** Обновление жестом «потянуть»: индикатор — только для него. */

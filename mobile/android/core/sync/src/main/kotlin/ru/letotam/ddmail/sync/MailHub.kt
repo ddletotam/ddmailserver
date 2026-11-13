@@ -177,15 +177,26 @@ class MailHub(
     /**
      * Отправка — учёткой-владельцем адреса From (`owner_for` десктопа); нет
      * владельца — «Не через что отправить» (контракт §5).
+     *
+     * `true` — письмо принял сервер ddmail: копия в «Отправленных» уже есть,
+     * доставку он сообщит сам (`delivery_status`). `false` — ушло через SMTP
+     * IMAP-учётки: доставлено. Отказ SMTP — [SmtpFailed].
      */
-    suspend fun send(req: SendRequest, owners: List<Pair<String, Identity>>, prefer: String? = null) {
+    suspend fun send(req: SendRequest, owners: List<Pair<String, Identity>>, prefer: String? = null): Boolean {
         val from = bareAddr(req.from)
         val candidates = owners.filter { it.second.email.equals(from, ignoreCase = true) }.map { it.first }
         // Адрес есть у нескольких учёток (ящик подключён и через ddmail, и по
         // IMAP) — отвечаем той, где беседа.
         val key = (candidates.firstOrNull { it == prefer } ?: candidates.firstOrNull())
             ?: throw MailException.Rejected("Не через что отправить: адрес $from не принадлежит ни одной учётке")
-        tracked(key) { (source(key) ?: throw MailException.Rejected("Не через что отправить")).send(req) }
+        val src = source(key) ?: throw MailException.Rejected("Не через что отправить")
+        try {
+            tracked(key) { src.send(req) }
+        } catch (e: Exception) {
+            if (src !is SyncEngine && e.isMailError()) throw SmtpFailed(e)
+            throw e
+        }
+        return src is SyncEngine
     }
 
     /** Документ папок в кэше (до ответа сервера) — для правок. */

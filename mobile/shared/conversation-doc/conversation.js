@@ -4,9 +4,15 @@
 // Нативный → документ:  ddm.set(batch), ddm.prepend(batch), ddm.append(batch)
 //   batch = { messages: [Msg], hasOlder: bool, focusUid?: number }
 //   Msg   = { uid, outgoing, fromName, fromAddr, dateTs (сек), html?, text?,
-//             attachments: [{index, filename, size}], showFrom }
+//             attachments: [{index, filename, size}], showFrom, delivery? }
 //                       ddm.stub(Stub), ddm.unstub(key)  — optimistic send
 //   Stub  = { key, html?, text, attachments: [{filename, size}] } — html есть, если композер с разметкой
+//                       ddm.delivery(uid, Delivery)       — статус письма сменился (на месте)
+//                       ddm.stubDelivery(key, Delivery)   — статус заглушки (IMAP: SMTP отказал)
+//   Delivery = { status, error?, failed?: [адрес] } — доставка своего исходящего:
+//     status `pending` («Отправляется…»; с error — «Не удалось отправить,
+//     повторяем: …»), `failed` (красное «Не доставлено: …», failed — кому),
+//     `delivered`, пусто или нет поля — обычное письмо, без пометки.
 // Документ → нативный:  ready(), openLink(url), requestOlder(),
 //   openAttachment(uid, index), attachmentMenu(uid, index), bubbleMenu(uid),
 //   allowSender(uid), allowSpamImages(uid)
@@ -38,6 +44,8 @@ const olderEl = document.getElementById('older');
 const ICONS = {
   image: 'M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z',
   trust: 'M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z',
+  schedule: 'M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z',
+  error: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z',
   attach: 'M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z',
 };
 
@@ -446,6 +454,62 @@ function fit(entry) {
   }
 }
 
+// ── Статус доставки своего письма (контракт Android §5) ──────────────────
+
+/** Причина посреди фразы: «…: почтовый сервер не отвечает» (аббревиатуры не трогаем). */
+function reasonText(s) {
+  const t = (s || '').trim();
+  if (t.length > 1 && t[0] !== t[0].toLowerCase() && t[1] === t[1].toLowerCase()) return t[0].toLowerCase() + t.slice(1);
+  return t;
+}
+
+/**
+ * Пометка доставки в пузыре: `pending` — «Отправляется…» (с причиной —
+ * «Не удалось отправить, повторяем: …»), `failed` — красное «Не доставлено:
+ * …» и, если сервер назвал, кому. `delivered` и пусто — пометки нет.
+ * Пузырь с отказом обведён красным (`ddm-failed` на строке).
+ */
+function renderDelivery(el, row, d) {
+  const status = (d && d.status) || '';
+  const error = reasonText(d && d.error);
+  const failed = (d && Array.isArray(d.failed)) ? d.failed.filter(Boolean) : [];
+  el.replaceChildren();
+  el.className = 'ddm-dl';
+  el.hidden = status !== 'pending' && status !== 'failed';
+  row.classList.toggle('ddm-failed', status === 'failed');
+  if (el.hidden) return;
+  const line = document.createElement('div');
+  line.className = 'ddm-dl-line';
+  const text = document.createElement('span');
+  if (status === 'failed') {
+    el.classList.add('ddm-dl-failed');
+    text.textContent = error ? `Не доставлено: ${error}` : 'Не доставлено';
+    line.append(icon('error'), text);
+  } else if (error) {
+    el.classList.add('ddm-dl-retry');
+    text.textContent = `Не удалось отправить, повторяем: ${error}`;
+    line.append(icon('schedule'), text);
+  } else {
+    el.classList.add('ddm-dl-pending');
+    text.textContent = 'Отправляется…';
+    line.append(icon('schedule'), text);
+  }
+  el.appendChild(line);
+  if (status === 'failed' && failed.length) {
+    const who = document.createElement('div');
+    who.className = 'ddm-dl-who';
+    who.textContent = failed.join(', ');
+    el.appendChild(who);
+  }
+}
+
+/** Пометка поменяла высоту пузыря — кто был внизу ленты, остаётся внизу. */
+function keepBottom(change) {
+  const atBottom = scroller.scrollHeight - scroller.scrollTop - window.innerHeight < 80;
+  change();
+  if (atBottom) scroller.scrollTop = scroller.scrollHeight;
+}
+
 function makeRow(msg) {
   const row = document.createElement('div');
   row.className = 'ddm-row' + (msg.outgoing ? ' ddm-out' : '');
@@ -500,6 +564,9 @@ function makeRow(msg) {
     }
     b.appendChild(box);
   }
+  const deliveryEl = document.createElement('div');
+  renderDelivery(deliveryEl, row, msg.delivery);
+  b.appendChild(deliveryEl);
   const meta = document.createElement('div');
   meta.className = 'ddm-meta';
   meta.textContent = msg.dateTs ? timeFmt.format(new Date(msg.dateTs * 1000)) : '';
@@ -512,7 +579,7 @@ function makeRow(msg) {
     native('bubbleMenu', msg.uid);
   });
 
-  const entry = { msg, host, shadow, root: null, imagesAllowed: !!msg.imagesAllowed, imagesBtn, imagesBox, row };
+  const entry = { msg, host, shadow, root: null, imagesAllowed: !!msg.imagesAllowed, imagesBtn, imagesBox, row, deliveryEl };
   // «Показать» — на это письмо до закрытия беседы; «Всегда» — запоминает
   // нативный код для отправителя (политика по отправителю, как у десктопа).
   imagesBtn.addEventListener('click', () => allowImages(entry));
@@ -565,7 +632,11 @@ function fitAll() {
 
 // ── Optimistic send (§2 десктопа) ─────────────────────────────────────────
 
-/** key → { row, norm } — заглушки отправляемых писем. */
+/**
+ * key → { row, norm, failed } — заглушки отправляемых писем. `failed` —
+ * письмо не ушло (IMAP: SMTP отказал): заглушка остаётся с пометкой, пока
+ * нативный код её не уберёт, и с настоящим письмом не сверяется.
+ */
 const stubs = new Map();
 const STUB_TTL_MS = 120000;
 
@@ -621,10 +692,27 @@ function makeStub(st) {
   return row;
 }
 
+/** Статус заглушки: пометка — вместо «Отправляется…» в подвале. */
+function stubDelivery(st, d) {
+  const meta = st.row.querySelector('.ddm-meta');
+  let el = st.row.querySelector('.ddm-dl');
+  if (!el) {
+    el = document.createElement('div');
+    meta.parentNode.insertBefore(el, meta);
+  }
+  renderDelivery(el, st.row, d);
+  st.failed = !!d && d.status === 'failed';
+  st.row.classList.toggle('ddm-pending', !st.failed);
+  // Время отказа — вместо «Отправляется…»: письмо уже никуда не отправляется.
+  meta.textContent = st.failed ? timeFmt.format(new Date()) : 'Отправляется…';
+}
+
 const ddm = {
   /** Новая беседа: всё заново. */
   set(batch) {
     bubbles.clear();
+    // Заглушки принадлежат прежней беседе: иначе append() вернул бы их в новую.
+    stubs.clear();
     order = [...batch.messages].sort(byDate);
     feed.replaceChildren(build(order, null));
     setOlder(batch.hasOlder);
@@ -665,7 +753,7 @@ const ddm = {
       if (!m.outgoing) continue;
       const norm = normText(plainOf(m));
       for (const [key, st] of stubs) {
-        if (st.norm && norm.startsWith(st.norm)) {
+        if (!st.failed && st.norm && norm.startsWith(st.norm)) {
           ddm.unstub(key);
           break;
         }
@@ -688,10 +776,29 @@ const ddm = {
     if (norm && order.some((m) => m.outgoing && now - (m.dateTs || 0) < 600 && normText(plainOf(m)).startsWith(norm))) return;
     const row = makeStub(st);
     feed.appendChild(row);
-    stubs.set(st.key, { row, norm: normText(st.text) });
-    // Против «призраков»: письмо так и не пришло — заглушка уходит сама.
-    setTimeout(() => ddm.unstub(st.key), STUB_TTL_MS);
+    const entry = { row, norm: normText(st.text), failed: false };
+    stubs.set(st.key, entry);
+    // Против «призраков»: письмо так и не пришло — заглушка уходит сама
+    // (кроме не ушедшей: её пометка «Не доставлено» должна остаться).
+    setTimeout(() => {
+      if (stubs.get(st.key) === entry && !entry.failed) ddm.unstub(st.key);
+    }, STUB_TTL_MS);
     scroller.scrollTop = scroller.scrollHeight;
+  },
+
+  /** Статус доставки письма сменился — пометка в пузыре на месте, без перерисовки письма. */
+  delivery(uid, d) {
+    const e = bubbles.get(uid);
+    if (!e) return;
+    e.msg.delivery = d;
+    keepBottom(() => renderDelivery(e.deliveryEl, e.row, d));
+  },
+
+  /** Статус заглушки (IMAP: SMTP отказал — `failed` с причиной). */
+  stubDelivery(key, d) {
+    const st = stubs.get(key);
+    if (!st) return;
+    keepBottom(() => stubDelivery(st, d));
   },
 
   /** Отправка не удалась — заглушку убрать: не врём, что ушло. */

@@ -2,6 +2,7 @@ package ru.letotam.ddmail.db
 
 import android.content.Context
 import androidx.room.AutoMigration
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
@@ -35,6 +36,8 @@ data class ConversationEntity(
     val totalCount: Int,
     /** Миллисекунды, часы сервера. */
     val updatedAt: Long,
+    /** Статус доставки последнего письма, если оно наше (`last_delivery_status`); пусто — нет. */
+    @ColumnInfo(defaultValue = "") val lastDeliveryStatus: String = "",
 )
 
 /** Ссылка на письмо беседы. Тела — отдельно (следующий шаг). */
@@ -46,11 +49,15 @@ data class MessageRefEntity(
     val uid: Long,
     val messageId: String,
     val seen: Boolean,
+    /** Статус доставки своего исходящего (`delivery_status` ссылки); пусто — нет. */
+    @ColumnInfo(defaultValue = "") val deliveryStatus: String = "",
 )
 
 /**
  * Тело письма. Тела в кэше неизменны (по письму не перезапрашиваются) — кроме
- * пустых: ни HTML, ни текста, ни вложений значит сбойный фетч (§4а десктопа).
+ * пустых: ни HTML, ни текста, ни вложений значит сбойный фетч (§4а десктопа),
+ * и кроме своих исходящих, у которых сменился статус доставки (статус ссылки
+ * беседы ≠ статус тела; событие WS правит тело на месте — [setBodyDelivery]).
  */
 @Entity(tableName = "message_bodies", primaryKeys = ["accountKey", "uid"])
 data class MessageBodyEntity(
@@ -71,6 +78,11 @@ data class MessageBodyEntity(
     val isOutgoing: Boolean,
     val inReplyTo: String,
     val referencesJson: String,
+    /** Доставка своего исходящего: статус, код причины, причина словами, JSON-массив адресов отказа. */
+    @ColumnInfo(defaultValue = "") val deliveryStatus: String = "",
+    @ColumnInfo(defaultValue = "") val deliveryReason: String = "",
+    @ColumnInfo(defaultValue = "") val deliveryError: String = "",
+    @ColumnInfo(defaultValue = "[]") val deliveryFailedJson: String = "[]",
 )
 
 /**
@@ -225,6 +237,33 @@ abstract class CacheDao {
     /** Какие тела уже в кэше (непустые) — для докачки; сами тела не читаем. */
     @Query("SELECT uid FROM message_bodies WHERE accountKey = :account AND (html IS NOT NULL OR text IS NOT NULL OR attachmentsJson != '[]')")
     abstract suspend fun cachedBodyUids(account: String): List<Long>
+
+    /**
+     * Событие `delivery_status`: статус письма на ссылках и в теле — сразу, до
+     * синка. Письмо — по id ([uid] > 0) или по Message-ID ([messageId] непуст).
+     */
+    @Query(
+        "UPDATE conversation_messages SET deliveryStatus = :status WHERE accountKey = :account AND " +
+            "((:uid > 0 AND uid = :uid) OR (:messageId != '' AND messageId = :messageId))",
+    )
+    protected abstract suspend fun setRefDelivery(account: String, uid: Long, messageId: String, status: String)
+
+    @Query(
+        "UPDATE message_bodies SET deliveryStatus = :status, deliveryReason = :reason, deliveryError = :error, " +
+            "deliveryFailedJson = :failedJson WHERE accountKey = :account AND " +
+            "((:uid > 0 AND uid = :uid) OR (:messageId != '' AND messageId = :messageId))",
+    )
+    protected abstract suspend fun setBodyDelivery(
+        account: String, uid: Long, messageId: String, status: String, reason: String, error: String, failedJson: String,
+    )
+
+    @Transaction
+    open suspend fun applyDelivery(
+        account: String, uid: Long, messageId: String, status: String, reason: String, error: String, failedJson: String,
+    ) {
+        setRefDelivery(account, uid, messageId, status)
+        setBodyDelivery(account, uid, messageId, status, reason, error, failedJson)
+    }
 
     @Query("UPDATE conversation_messages SET seen = 1 WHERE accountKey = :account AND conversationId = :conv")
     protected abstract suspend fun seeRefs(account: String, conv: String)
@@ -465,9 +504,13 @@ abstract class CacheDao {
         ConversationEntity::class, MessageRefEntity::class, MetaEntity::class, MessageBodyEntity::class, ReminderEntity::class,
         ImapFolderEntity::class, ImapHeaderEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true,
-    autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3), AutoMigration(from = 3, to = 4)],
+    autoMigrations = [
+        AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3), AutoMigration(from = 3, to = 4),
+        // 5: статус доставки исходящих (ссылки, тела, строка беседы).
+        AutoMigration(from = 4, to = 5),
+    ],
 )
 abstract class CacheDb : RoomDatabase() {
     abstract fun dao(): CacheDao

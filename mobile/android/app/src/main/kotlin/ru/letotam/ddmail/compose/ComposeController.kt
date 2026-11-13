@@ -20,7 +20,10 @@ import kotlinx.serialization.json.JsonPrimitive
 import ru.letotam.ddmail.api.ApiException
 import ru.letotam.ddmail.api.Identity
 import ru.letotam.ddmail.api.MessageBody
+import ru.letotam.ddmail.api.Delivery
 import ru.letotam.ddmail.conversation.ConversationController
+import ru.letotam.ddmail.conversation.deliveryJson
+import ru.letotam.ddmail.sync.SmtpFailed
 import ru.letotam.ddmail.sync.Conversation
 import ru.letotam.ddmail.sync.MailHub
 import ru.letotam.ddmail.sync.errorText
@@ -46,17 +49,25 @@ data class ComposerUi(
     val pendingNew: List<PendingNew> = emptyList(),
 )
 
-/** Пузырь письма в новой беседе: [sent] — сервер принял, ждём саму беседу. */
-data class PendingNew(val key: String, val text: String, val sent: Boolean = false)
+/**
+ * Пузырь письма в новой беседе: [sent] — сервер принял, ждём саму беседу;
+ * [failed] — не ушло (SMTP IMAP-учётки отказал), причина словами: пузырь
+ * остаётся с красной пометкой «Не доставлено», текст — снова в композере.
+ */
+data class PendingNew(val key: String, val text: String, val sent: Boolean = false, val failed: String? = null)
 
 /**
  * Отправка (контракт §5, десктопный §1–2): ветки, optimistic-заглушка в
  * ленте, сверка с настоящим письмом, «✓ Отправлено», при ошибке — заглушка
  * убирается, текст возвращается в композер.
  *
- * Отправка асинхронная: сервер ставит письмо в очередь, копия в
- * «Отправленных» (и сама беседа) появляется после доставки — поэтому после
- * отправки синхронизируемся ещё несколько раз, пока нет WebSocket-пуша.
+ * Сервер ddmail кладёт копию в «Отправленные» при приёме письма (с 2026-11-13):
+ * беседа есть сразу, после отправки хватает синка и WS `message_sent`;
+ * доставку сервер сообщает статусом на самом письме (`delivery_status`).
+ * IMAP-учётка шлёт через свой SMTP: принял — доставлено, отказал — заглушка
+ * остаётся с пометкой «Не доставлено»; копия в «Отправленных» появляется
+ * через 5–20 с (её кладёт сервер или мы), поэтому после отправки
+ * синхронизируемся ещё несколько раз.
  */
 class ComposeController(
     private val app: Context,
@@ -75,9 +86,15 @@ class ComposeController(
         .map { l -> l.map { it.second }.distinctBy { it.email.lowercase() } }
         .stateIn(scope, SharingStarted.Eagerly, emptyList())
 
-    /** После нового письма — открыть беседу с этими адресатами, когда появится. */
-    var sentTarget: Set<String>? = null
-        private set
+    /**
+     * После нового письма — открыть беседу с этими адресатами, когда появится.
+     * Поток, а не поле: беседа могла прийти (WS `message_sent` → синк) раньше
+     * ответа на отправку — тогда переход делается по самой цели.
+     */
+    val sentTarget = MutableStateFlow<Set<String>?>(null)
+
+    /** Заглушки ответов, которые не ушли (IMAP): уходят со следующей отправкой. */
+    private val failedStubs = mutableListOf<String>()
 
     private var stubSeq = 0
 
@@ -99,7 +116,7 @@ class ComposeController(
     fun closeSheet() = ui.update { it.copy(sheet = null) }
 
     fun consumeTarget() {
-        sentTarget = null
+        sentTarget.value = null
     }
 
     /** Файлы из системного выбора; общий размер — в пределах лимита сервера. */
@@ -137,24 +154,36 @@ class ComposeController(
             is Built.Ok -> {
                 val draft = u.draft
                 val key = "s${++stubSeq}"
+                // Новая попытка заменяет пузыри прежних неудач (их текст и так был в композере).
+                failedStubs.forEach { conversation.js.trySend("ddm.unstub(\"$it\")") }
+                failedStubs.clear()
                 conversation.js.trySend("ddm.stub(${stubJson(key, draft, built.request.html)})")
                 ui.update { ComposerUi(sheet = it.sheet) }
                 scope.launch {
                     try {
-                        hub.send(built.request, owners.value, prefer = c.accountKey)
+                        val viaServer = hub.send(built.request, owners.value, prefer = c.accountKey)
                         ui.update { it.copy(sentFlash = true) }
-                        afterSend()
+                        afterSend(viaServer)
                         delay(2000)
                         ui.update { it.copy(sentFlash = false) }
                     } catch (e: Exception) {
                         if (!e.isMailError()) throw e
-                        conversation.js.trySend("ddm.unstub(\"$key\")")
+                        // SMTP своей учётки отказал — пузырь остаётся, красным
+                        // «Не доставлено»; прочие ошибки (сервер ddmail не
+                        // принял) — пузырь убирается, причина плашкой.
+                        val smtp = e is SmtpFailed
+                        if (smtp) {
+                            failedStubs += key
+                            conversation.js.trySend("ddm.stubDelivery(\"$key\",${deliveryJson(Delivery.FAILED, e.errorText(), emptyList())})")
+                        } else {
+                            conversation.js.trySend("ddm.unstub(\"$key\")")
+                        }
                         // Текст возвращается, если композер пуст (не затираем набранное заново).
                         ui.update { cur ->
                             cur.copy(
                                 draft = if (cur.draft.isBlank()) draft.reloaded() else cur.draft,
                                 replyTo = cur.replyTo ?: u.replyTo,
-                                error = sendError(e),
+                                error = if (smtp) null else sendError(e),
                             )
                         }
                     }
@@ -178,25 +207,37 @@ class ComposeController(
                     (u.draft.inline.map { "Картинка" } + u.draft.attachments.map { it.name }).joinToString(", ")
                 }
                 val key = "n${++stubSeq}"
-                // Текст и вложения уходят, переопределения адресата/темы остаются.
-                ui.update { it.copy(draft = it.draft.bodyCleared(), pendingNew = it.pendingNew + PendingNew(key, text), error = null) }
+                // Текст и вложения уходят, переопределения адресата/темы остаются;
+                // пузыри прежних неудач заменяет эта попытка.
+                ui.update { cur ->
+                    cur.copy(
+                        draft = cur.draft.bodyCleared(),
+                        pendingNew = cur.pendingNew.filter { it.failed == null } + PendingNew(key, text),
+                        error = null,
+                    )
+                }
                 scope.launch {
                     try {
-                        hub.send(built.request, owners.value)
+                        val viaServer = hub.send(built.request, owners.value)
                         // Беседа нового письма — набор адресатов: «Кому» и «Копия»
                         // (§4 десктопа: bcc в набор не входит).
-                        sentTarget = targetOf(built.request)
+                        sentTarget.value = targetOf(built.request)
                         ui.update { cur -> cur.copy(sentFlash = true, pendingNew = cur.pendingNew.map { if (it.key == key) it.copy(sent = true) else it }) }
-                        afterSend()
+                        afterSend(viaServer)
                         delay(2000)
                         ui.update { it.copy(sentFlash = false) }
                     } catch (e: Exception) {
                         if (!e.isMailError()) throw e
+                        val smtp = e is SmtpFailed
                         ui.update { cur ->
                             cur.copy(
                                 draft = if (cur.draft.isBlank()) u.draft.reloaded() else cur.draft,
-                                pendingNew = cur.pendingNew.filter { it.key != key },
-                                error = sendError(e),
+                                pendingNew = if (smtp) {
+                                    cur.pendingNew.map { if (it.key == key) it.copy(failed = e.errorText()) else it }
+                                } else {
+                                    cur.pendingNew.filter { it.key != key }
+                                },
+                                error = if (smtp) null else sendError(e),
                             )
                         }
                     }
@@ -228,9 +269,9 @@ class ComposeController(
             when (val built = build(sheet.branch, sheet.draft, identities.value, fwdHtml, fwdText, extra)) {
                 is Built.Refused -> ui.update { u -> u.copy(sheet = u.sheet?.copy(busy = false, error = built.reason)) }
                 is Built.Ok -> try {
-                    hub.send(built.request, owners.value, prefer = fwdBranch?.accountKey)
+                    val viaServer = hub.send(built.request, owners.value, prefer = fwdBranch?.accountKey)
                     ui.update { it.copy(sheet = null, sentFlash = true) }
-                    afterSend()
+                    afterSend(viaServer)
                     delay(2000)
                     ui.update { it.copy(sentFlash = false) }
                 } catch (e: Exception) {
@@ -242,16 +283,17 @@ class ComposeController(
     }
 
     /**
-     * Копия в «Отправленных» (и беседа нового письма) появится после
-     * доставки — подтягиваем её: сразу и с затухающими паузами, как
-     * `schedule_post_send_refetch` десктопа (2.5 с → 7 → 15 → 30 → 60).
-     * Основной сигнал — WS `message_sent` (его ловит `LiveUpdates`); это
-     * подстраховка без сокета и для IMAP-учёток.
+     * Подтянуть копию в «Отправленных» (и беседу нового письма). Сервер ddmail
+     * кладёт её при приёме ([viaServer]): она есть уже к ответу на `/send`, и
+     * хватает синка сразу; основной сигнал — WS `message_sent` (его ловит
+     * `LiveUpdates`), пара повторов — подстраховка без сокета. IMAP-учётке
+     * копию кладёт её сервер или мы через 5–20 с — там повторы с затухающими
+     * паузами, как `schedule_post_send_refetch` десктопа (2.5 с → 7 → 15 → 30 → 60).
      */
-    private fun afterSend() {
+    private fun afterSend(viaServer: Boolean) {
         syncSoon()
         scope.launch {
-            for (d in POST_SEND_REFETCH_MS) {
+            for (d in if (viaServer) SERVER_REFETCH_MS else POST_SEND_REFETCH_MS) {
                 delay(d)
                 syncSoon()
             }
@@ -259,9 +301,11 @@ class ComposeController(
     }
 
     private fun sendError(e: Exception): String = when (e) {
-        is ApiException.Server -> if (e.code == 413) "вложения больше лимита сервера" else "сервер ответил ошибкой ${e.code}"
-        else -> e.errorText()
-    }.let { "Не отправлено: $it." }
+        // SMTP IMAP-учётки отказал — тем же словом, что пометка на пузыре.
+        is SmtpFailed -> "Не доставлено: ${e.errorText()}."
+        is ApiException.Server -> "Не отправлено: ${if (e.code == 413) "вложения больше лимита сервера" else "сервер ответил ошибкой ${e.code}"}."
+        else -> "Не отправлено: ${e.errorText()}."
+    }
 
     /**
      * Заглушка выглядит как письмо (десктоп §2): тот же HTML, что уходит на
@@ -283,8 +327,11 @@ class ComposeController(
         /** Лимит сервера — 30 МБ на запрос в base64; сырых байт — около 22. */
         const val MAX_TOTAL = 22L shl 20
 
-        /** Паузы между повторными синками после отправки (накопительно ~2 мин). */
+        /** Паузы между повторными синками после отправки через IMAP-учётку (накопительно ~2 мин). */
         val POST_SEND_REFETCH_MS = listOf(2_500L, 7_000L, 15_000L, 30_000L, 60_000L)
+
+        /** После приёма сервером ddmail: копия уже есть — повторы только на случай без сокета. */
+        val SERVER_REFETCH_MS = listOf(2_500L, 7_000L)
     }
 }
 
