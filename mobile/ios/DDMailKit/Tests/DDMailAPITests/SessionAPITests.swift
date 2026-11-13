@@ -110,6 +110,16 @@ struct SessionAPITests {
         #expect(ids == [Identity(email: "a@b.ru")])
     }
 
+    @Test func searchSkipsDeletedAndCalendar() async throws {
+        let t = FakeTransport { _ in
+            (200, #"[{"id":5,"subject":"Отчёт","from":"Иван <i@x.ru>","date":1700000000,"message_id":"<a@x>","type":"email"},"#
+                + #"{"id":6,"type":"calendar"},{"id":7,"type":"email","soft_deleted":true}]"#)
+        }
+        let hits = try await SessionAPI(baseURL: base, transport: t, tokens: MemoryTokens("T")).searchMessages("отчёт")
+        #expect(hits == [MessageSearchHit(id: 5, subject: "Отчёт", from: "Иван <i@x.ru>", date: 1700000000, messageID: "<a@x>")])
+        #expect(t.log.withLock { $0 }.first?.hasPrefix("GET /api/desktop/v1/search") == true)
+    }
+
     @Test func wellKnownProbe() async {
         let yes = FakeTransport { _ in (200, #"{"ddmail":true,"version":"x"}"#) }
         let no = FakeTransport { _ in (200, "<html>") }

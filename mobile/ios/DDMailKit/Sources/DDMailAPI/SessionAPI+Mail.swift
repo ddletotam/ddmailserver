@@ -13,6 +13,13 @@ extension SessionAPI {
         try await get("/conversations?spam=1&limit=\(limit)", as: [ConversationDTO].self).filter(\.spam)
     }
 
+    /// Серверный поиск писем (секция «Сообщения» выпадашки поиска). Удалённые
+    /// и события календаря индекс тоже отдаёт — они отсеиваются здесь.
+    public func searchMessages(_ query: String, limit: Int = 12) async throws -> [MessageSearchHit] {
+        try await get("/search?q=\(queryEscaped(query))&limit=\(limit)", as: [MessageSearchHit].self)
+            .filter { $0.type == "email" && !$0.softDeleted }
+    }
+
     public func changes(since: Int64) async throws -> ChangesResponse {
         try await get("/changes?since=\(max(since, 0))", as: ChangesResponse.self)
     }

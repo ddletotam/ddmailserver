@@ -8,8 +8,11 @@ import UniformTypeIdentifiers
 /// На iPhone Enter — новая строка; на Маке Enter — отправить, Shift+Enter —
 /// новая строка (как десктоп); с клавиатурой у iPad — Cmd+Enter.
 struct ComposerBar: View {
-    let conversation: Conversation
     @Bindable var model: ComposeModel
+    /// Фокус в строку сразу (новая беседа: адрес выбран — пишем).
+    var autofocus = false
+    /// Ответ в беседе или первое письмо новой беседы.
+    let onSend: () -> Void
     @State private var importing = false
     @State private var photos: [PhotosPickerItem] = []
     @FocusState private var focused: Bool
@@ -83,9 +86,10 @@ struct ComposerBar: View {
             if case let .success(urls) = r { model.attach(urls, toSheet: false) }
         }
         .onChange(of: photos) { loadPhotos(into: model, toSheet: false) }
+        .onAppear { if autofocus { focused = true } }
     }
 
-    private func send() { model.sendReply(conversation) }
+    private func send() { onSend() }
 
     private func loadPhotos(into model: ComposeModel, toSheet: Bool) {
         let items = photos

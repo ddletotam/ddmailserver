@@ -8,83 +8,107 @@ import SwiftUI
 struct CalendarScreen: View {
     @Bindable var model: CalendarModel
     @Environment(\.horizontalSizeClass) private var sizeClass
-    @State private var calendarsShown = false
     @State private var dayShown = false
+    /// Месяц ленты iPhone — смещение от текущего (позиция прокрутки).
+    @State private var feedPosition: Int? = 0
 
     var body: some View {
         let formOpen = model.draft != nil
+        let compact = sizeClass == .compact
         return NavigationStack {
-            Group {
-                if sizeClass == .compact {
-                    MonthsFeed(model: model) { d in
-                        model.select(d)
-                        dayShown = true
-                    }
-                    .navigationDestination(isPresented: $dayShown) { DayScreen(model: model) }
-                } else {
-                    switch model.mode {
-                    case .month:
-                        ScrollView {
-                            MonthGrid(model: model, month: model.selected.month1, large: true) { model.select($0) }
+            VStack(spacing: 0) {
+                // Первая строка — как у десктопа: бургер, ‹ Сегодня ›, период, «+ Событие».
+                SectionBar { topBar(compact: compact) }
+                Divider()
+                Group {
+                    if compact {
+                        MonthsFeed(model: model, position: $feedPosition) { d in
+                            model.select(d)
+                            dayShown = true
                         }
-                    case .week: WeekTimeline(model: model)
-                    case .day: DayScreen(model: model)
+                    } else {
+                        switch model.mode {
+                        case .month:
+                            ScrollView {
+                                MonthGrid(model: model, month: model.selected.month1, large: true) { model.select($0) }
+                            }
+                        case .week: WeekTimeline(model: model)
+                        case .day: DayScreen(model: model)
+                        }
                     }
                 }
+                .frame(maxHeight: .infinity)
             }
-            .navigationTitle(title)
-            .toolbarTitleDisplayMode(.inline)
-            .toolbar { toolbar }
+            .navigationDestination(isPresented: $dayShown) { DayScreen(model: model) }
+            .sectionRoot()
         }
         .sheet(item: $model.detail) { o in EventDetailView(model: model, occ: o) }
         .sheet(isPresented: Binding(get: { formOpen }, set: { if !$0 { model.draft = nil } })) {
             EventFormView(model: model)
         }
-        .sheet(isPresented: $calendarsShown) { CalendarsListView(model: model) }
         .overlay(alignment: .bottom) { NoticeBanner(text: $model.notice) }
         .task { await model.start() }
     }
 
-    private var title: String {
-        if sizeClass == .compact { return "Календарь" }
-        let d = model.selected.start(model.cal)
+    @ViewBuilder private func topBar(compact: Bool) -> some View {
+        HStack(spacing: 2) {
+            Button("Назад", systemImage: "chevron.left") { step(-1, compact: compact) }
+                .labelStyle(.iconOnly)
+                .frame(width: 32, height: 34)
+            Button("Сегодня") {
+                model.select(model.today)
+                feedPosition = 0
+            }
+            .fontWeight(.semibold)
+            Button("Вперёд", systemImage: "chevron.right") { step(1, compact: compact) }
+                .labelStyle(.iconOnly)
+                .frame(width: 32, height: 34)
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.primary)
+        Text(title(compact: compact))
+            .font(.headline)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .padding(.leading, 4)
+        Spacer(minLength: 4)
+        if !compact {
+            Picker("Вид", selection: $model.mode) {
+                ForEach(CalendarModel.ViewMode.allCases) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 240)
+        }
+        Button("Новое событие", systemImage: "plus") { model.newEvent() }
+            .labelStyle(.iconOnly)
+            .font(.title3)
+            .buttonStyle(.borderless)
+            .frame(width: 36, height: 36)
+            .disabled(model.calendars.isEmpty)
+    }
+
+    private func title(compact: Bool) -> String {
+        let cal = model.cal
+        if compact {
+            let m = model.today.month1.adding(feedPosition ?? 0)
+            return "\(cal.standaloneMonthSymbols[m.month - 1].capitalized) \(m.year)"
+        }
+        let d = model.selected.start(cal)
         let m = model.selected.month1
         return switch model.mode {
-        case .month, .week: "\(model.cal.standaloneMonthSymbols[m.month - 1].capitalized) \(m.year)"
+        case .month, .week: "\(cal.standaloneMonthSymbols[m.month - 1].capitalized) \(m.year)"
         case .day: d.formatted(.dateTime.weekday(.wide).day().month(.wide))
         }
     }
 
-    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .navigation) {
-            Button("Календари", systemImage: "calendar.badge.checkmark") { calendarsShown = true }
-        }
-        if sizeClass != .compact {
-            ToolbarItem(placement: .principal) {
-                Picker("Вид", selection: $model.mode) {
-                    ForEach(CalendarModel.ViewMode.allCases) { Text($0.title).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 260)
-            }
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button("Назад", systemImage: "chevron.left") { step(-1) }
-                Button("Сегодня") { model.select(model.today) }
-                Button("Вперёд", systemImage: "chevron.right") { step(1) }
-            }
-        } else {
-            ToolbarItem(placement: .primaryAction) {
-                Button("Сегодня") { model.select(model.today) }
-            }
-        }
-        ToolbarItem(placement: .primaryAction) {
-            Button("Новое событие", systemImage: "plus") { model.newEvent() }
-                .disabled(model.calendars.isEmpty)
-        }
-    }
-
-    private func step(_ n: Int) {
+    private func step(_ n: Int, compact: Bool) {
         let cal = model.cal
+        if compact {
+            // Лента месяцев: соседний месяц.
+            feedPosition = MonthsFeed.clamp((feedPosition ?? 0) + n)
+            return
+        }
         switch model.mode {
         case .day: model.select(model.selected.adding(n, cal))
         case .week: model.select(model.selected.adding(7 * n, cal))
@@ -101,9 +125,13 @@ struct CalendarScreen: View {
 /// дни недели закреплены сверху; открывается на текущем месяце.
 private struct MonthsFeed: View {
     let model: CalendarModel
+    /// Смещение показанного месяца от текущего — общее с первой строкой (‹ ›).
+    @Binding var position: Int?
     let onDay: (Day) -> Void
-    private let span = 18
-    @State private var position: Int? = 0
+    static let span = 18
+    private var span: Int { Self.span }
+
+    static func clamp(_ i: Int) -> Int { min(max(i, -span), span) }
 
     var body: some View {
         let current = model.today.month1
@@ -507,13 +535,13 @@ struct EventChip: View {
 
 // MARK: Списки календарей
 
-/// Видимость — только на этом устройстве; звезда — календарь для новых событий.
-private struct CalendarsListView: View {
+/// Видимость — только на этом устройстве; звезда — календарь для новых
+/// событий. Живёт в «Настройках → Календари», как список календарей десктопа.
+struct CalendarsListView: View {
     @Bindable var model: CalendarModel
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
+        Group {
             List {
                 ForEach(model.calendars) { c in
                     HStack {
@@ -545,9 +573,7 @@ private struct CalendarsListView: View {
             }
             .navigationTitle("Календари")
             .toolbarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) { Button("Готово", systemImage: "checkmark") { dismiss() } }
-            }
         }
+        .task { if model.calendars.isEmpty { await model.start() } }
     }
 }

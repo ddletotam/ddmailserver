@@ -354,3 +354,44 @@ public struct SendRequest: Encodable, Equatable, Sendable {
         self.text = text; self.inReplyTo = inReplyTo; self.references = references; self.attachments = attachments
     }
 }
+
+/// Письмо из серверного поиска (`GET /search`, `search.IndexDocument`):
+/// секция «Сообщения» выпадашки поиска, как `search_messages` десктопа.
+public struct MessageSearchHit: Decodable, Equatable, Identifiable, Sendable {
+    /// Серверный id письма — он же `uid` в беседах учётки ddmail.
+    public var id: Int64
+    public var subject: String
+    public var from: String
+    /// Секунды.
+    public var date: Int64
+    public var messageID: String
+    /// `email` или `calendar`.
+    public var type: String
+    public var softDeleted: Bool
+    public var spamStatus: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, subject, from, date, type
+        case messageID = "message_id"
+        case softDeleted = "soft_deleted"
+        case spamStatus = "spam_status"
+    }
+
+    public init(id: Int64, subject: String = "", from: String = "", date: Int64 = 0, messageID: String = "",
+                type: String = "email", softDeleted: Bool = false, spamStatus: String = "") {
+        self.id = id; self.subject = subject; self.from = from; self.date = date; self.messageID = messageID
+        self.type = type; self.softDeleted = softDeleted; self.spamStatus = spamStatus
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.value(.id, 0)
+        subject = try c.value(.subject, "")
+        from = try c.value(.from, "")
+        date = try c.value(.date, 0)
+        messageID = try c.value(.messageID, "")
+        type = try c.value(.type, "email")
+        softDeleted = try c.value(.softDeleted, false)
+        spamStatus = try c.value(.spamStatus, "")
+    }
+}

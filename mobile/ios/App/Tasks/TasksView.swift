@@ -66,32 +66,40 @@ struct TasksView: View {
     @Bindable var model: TasksModel
 
     var body: some View {
+        let showDone = model.prefs.showCompleted
         NavigationStack {
-            List {
-                ForEach(model.tasks) { t in
-                    TaskRow(task: t) { model.toggle(t) }
-                }
-            }
-            .overlay {
-                if !model.loaded {
-                    ProgressView()
-                } else if model.tasks.isEmpty {
-                    ContentUnavailableView(model.prefs.showCompleted ? "Задач нет" : "Невыполненных задач нет", systemImage: "checklist")
-                }
-            }
-            .refreshable { await model.load() }
-            .navigationTitle("Задачи")
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Toggle(isOn: Binding(get: { model.prefs.showCompleted }, set: {
+            VStack(spacing: 0) {
+                // Первая строка — как у десктопа: бургер, «Задачи», «выполненные».
+                SectionBar {
+                    Text("Задачи").font(.title3.bold())
+                    Spacer(minLength: 8)
+                    Toggle(isOn: Binding(get: { showDone }, set: {
                         model.prefs.showCompleted = $0
                         Task { await model.load() }
                     })) {
-                        Label("Показывать выполненные", systemImage: "checkmark.circle")
+                        Label("Показать выполненные", systemImage: showDone ? "checkmark.square.fill" : "square")
                     }
                     .toggleStyle(.button)
+                    .buttonStyle(.borderless)
+                    .font(.subheadline.weight(.semibold))
                 }
+                Divider()
+                List {
+                    ForEach(model.tasks) { t in
+                        TaskRow(task: t) { model.toggle(t) }
+                    }
+                }
+                .listStyle(.plain)
+                .overlay {
+                    if !model.loaded {
+                        ProgressView()
+                    } else if model.tasks.isEmpty {
+                        ContentUnavailableView(showDone ? "Задач нет" : "Невыполненных задач нет", systemImage: "checklist")
+                    }
+                }
+                .refreshable { await model.load() }
             }
+            .sectionRoot()
             .overlay(alignment: .bottom) { NoticeBanner(text: $model.notice) }
             .task { await model.load() }
         }

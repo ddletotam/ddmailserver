@@ -2,8 +2,10 @@ import DDMailAPI
 import DDMailSync
 import SwiftUI
 
-/// Почта (контракт §5–§6): список и беседа рядом на широком окне, стек на
-/// узком — `NavigationSplitView` складывается сам по ширине.
+/// Почта (контракт §5–§6, `docs/mobile-layout.md`): левая колонка — строка
+/// «бургер + поиск», полоса табов папок, диалоги; справа беседа. На узком
+/// экране колонка — весь экран, беседа открывается поверх.
+/// `NavigationSplitView` складывается сам по ширине; третьей колонки нет.
 struct MailView: View {
     @Bindable var model: MailModel
     let app: AppModel
@@ -11,7 +13,6 @@ struct MailView: View {
     @State private var picking = false
     @State private var confirmSpam: Set<String>?
     @State private var moving: Set<String>?
-    @State private var settingsShown = false
     /// Правый край колонки списка в координатах окна (Мак, см. `detailColumn`).
     @State private var listEdge: CGFloat = 0
     @Bindable private var settings = AppSettings.shared
@@ -21,14 +22,19 @@ struct MailView: View {
     var body: some View {
         // Условия показа окон — читаем здесь, в теле: замыкание `Binding(get:)`
         // SwiftUI вызывает лениво, вне отслеживания `@Observable` (см. контракт §0).
-        let askPrefetch = model.loaded && settings.prefetch == nil && !settingsShown
+        let askPrefetch = model.loaded && settings.prefetch == nil
         let composeOpen = model.compose.sheet != nil
-        return NavigationSplitView {
+        let selected = model.selected
+        let composingTo = model.composingTo
+        return NavigationSplitView(columnVisibility: .constant(.all)) {
             listPane
                 .navigationSplitViewColumnWidth(min: 320, ideal: 380, max: 480)
         } detail: {
             detailColumn {
-                if let c = model.selected {
+                if let to = composingTo {
+                    NewConversationView(address: to, model: model.conversation, compose: model.compose)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let c = selected {
                     ConversationView(conversation: c, model: model.conversation, compose: model.compose) { confirmSpam = [c.ref] }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -36,6 +42,9 @@ struct MailView: View {
                 }
             }
         }
+        // Колонки рядом всегда: ни скрыть список, ни отдельной кнопки панели.
+        .navigationSplitViewStyle(.balanced)
+        .toolbar(removing: .sidebarToggle)
         .tint(Palette.accent)
         .overlay(alignment: .bottom) { NoticeBanner(text: $model.notice) }
         .confirmationDialog(deleteTitle, isPresented: present($model.confirmDelete), titleVisibility: .visible) {
@@ -61,13 +70,9 @@ struct MailView: View {
                 Button(f.icon.isEmpty ? f.name : "\(f.icon) \(f.name)") { if let ids = moving { model.move(ids, to: f.id) } }
             }
         }
+        // Пересылка — отдельным окном, как раньше (новое письмо — через поиск).
         .sheet(isPresented: Binding(get: { composeOpen }, set: { if !$0 { model.compose.sheet = nil } })) {
             ComposeSheetView(model: model.compose)
-        }
-        .sheet(isPresented: $settingsShown) {
-            SettingsView(app: app, workspace: workspace) {
-                Task { await workspace.reminders?.refresh() }
-            }
         }
         // Один вопрос после первого входа: ответа по умолчанию нет (§4).
         .alert("Загружать письма заранее?", isPresented: Binding(get: { askPrefetch }, set: { _ in })) {
@@ -84,11 +89,11 @@ struct MailView: View {
         .onChange(of: model.loaded) { restoreLast() }
     }
 
-    /// Колонка беседы. На macOS 27 `NavigationSplitView` внутри
-    /// `TabView(.sidebarAdaptable)` тянет колонку под все панели и считает
-    /// отступ слева с лишней шириной боковой панели разделов (замер: колонка
-    /// с x=770, лента — с 914). Отступ берём из измерения — правого края
-    /// колонки списка, — а не из безопасной области.
+    /// Колонка беседы. На macOS `NavigationSplitView` тянет колонку под
+    /// боковую и считал отступ слева с лишней шириной (замер при прежней
+    /// боковой панели разделов: колонка с x=770, лента — с 914). Отступ
+    /// берём из измерения — правого края колонки списка, — а не из
+    /// безопасной области; без лишней панели он нулевой.
     @ViewBuilder private func detailColumn(@ViewBuilder _ content: () -> some View) -> some View {
         #if os(macOS)
         let body = content()
@@ -109,29 +114,52 @@ struct MailView: View {
         // `@Observable`, — прочитанное в них не перерисовывало бы экран
         // (так и было: цвета и табы, пришедшие после первого кадра, не появлялись).
         let colors = model.colors
-        let tabs = model.list.searching ? [] : model.list.tabs
+        let tabs = model.list.tabs
+        let activeID = model.activeFolderID
+        let inboxUnread = model.list.inboxUnread
         let convs = model.list.conversations
         let selectedID = model.selectedID
-        return Group {
+        let composingTo = model.composingTo
+        let searchOpen = model.search.isOpen
+        let syncing = model.syncing
+        let pickedCount = model.picked.count
+        return VStack(spacing: 0) {
             if picking {
-                List(selection: $model.picked) { rows(convs, colors: colors, selectedID: nil) }
+                PickingBar(count: pickedCount,
+                           selectAll: { model.picked = Set(model.list.conversations.map(\.ref)) },
+                           done: { model.picked.removeAll(); picking = false })
             } else {
-                List(selection: $model.selectedID) { rows(convs, colors: colors, selectedID: selectedID) }
+                SectionBar {
+                    MailSearchField(search: model.search, syncing: syncing)
+                }
             }
-        }
-        .listStyle(.plain)
-        .pickingMode(picking)
-        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxX } action: { listEdge = $0 }
-        .safeAreaInset(edge: .top, spacing: 0) {
             if !tabs.isEmpty {
-                FolderTabs(tabs: tabs, active: $model.activeFolderID)
+                FolderTabs(tabs: tabs, active: activeID, inboxUnread: inboxUnread) { model.activeFolderID = $0 }
+            }
+            Group {
+                if picking {
+                    List(selection: $model.picked) { rows(convs, colors: colors, selectedID: nil) }
+                } else {
+                    List(selection: $model.selectedID) {
+                        if let to = composingTo { NewConversationRow(address: to).tag(MailModel.newPrefix + to) }
+                        rows(convs, colors: colors, selectedID: selectedID)
+                    }
+                }
+            }
+            .listStyle(.plain)
+            .pickingMode(picking)
+            .overlay { if !searchOpen { emptyState } }
+            .refreshable { await model.sync() }
+            // Выпадашка поиска — поверх списка, как у десктопа.
+            .overlay(alignment: .top) {
+                if searchOpen { SearchDropdown(search: model.search, avatars: model.avatars) }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if picking { pickingActions }
             }
         }
-        .overlay { emptyState }
-        .refreshable { await model.sync() }
-        .searchable(text: $model.query, prompt: "Имя, адрес или тема")
-        .navigationTitle(title)
-        .toolbar { listToolbar }
+        .sectionRoot()
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxX } action: { listEdge = $0 }
         .onChange(of: model.list.active) { picking = false }
     }
 
@@ -160,6 +188,8 @@ struct MailView: View {
         }
     }
 
+    /// Меню строки (долгое нажатие, правый клик) — как меню строки десктопа;
+    /// здесь же вход в множественный выбор.
     @ViewBuilder private func contextMenu(_ c: Conversation, spamOK: Bool) -> some View {
         if c.spam {
             Button("Не спам", systemImage: "tray.and.arrow.down") { model.notSpam([c.ref], trust: false) }
@@ -179,74 +209,46 @@ struct MailView: View {
             }
             Button("Удалить…", systemImage: "trash", role: .destructive) { model.confirmDelete = [c.ref] }
         }
-    }
-
-    @ToolbarContentBuilder private var listToolbar: some ToolbarContent {
-        if picking {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Готово", systemImage: "xmark") { model.picked.removeAll(); picking = false }
-            }
-            ToolbarItem(placement: .principal) {
-                Text("Выбрано: \(model.picked.count)").font(.headline)
-            }
-            ToolbarItemGroup(placement: Self.actionsPlacement) { pickingActions }
-        } else {
-            ToolbarItem(placement: .primaryAction) {
-                Button("Новое письмо", systemImage: "square.and.pencil") { model.compose.openNew() }
-                    .keyboardShortcut("n", modifiers: .command)
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Menu("Ещё", systemImage: "ellipsis.circle") {
-                    Button("Выбрать", systemImage: "checkmark.circle") { picking = true }
-                    Button("Спам", systemImage: "hand.raised") { model.openSpam() }
-                    Divider()
-                    Button("Настройки", systemImage: "gear") { settingsShown = true }
-                }
-            }
-            if model.syncing {
-                ToolbarItem(placement: .status) { ProgressView().controlSize(.small) }
-            }
+        Divider()
+        Button("Выбрать", systemImage: "checkmark.circle") {
+            model.picked = [c.ref]
+            picking = true
         }
     }
 
-    /// Панель множественного выбора (§5): иконки, подписи — для озвучки.
+    /// Панель множественного выбора (§5) под списком: иконки, подписи — для озвучки.
     @ViewBuilder private var pickingActions: some View {
         let ids = model.picked
-        Button("Выбрать все", systemImage: "checklist") { model.picked = Set(model.list.conversations.map(\.ref)) }
-        Spacer()
-        if model.list.inSpam {
-            Button("Не спам", systemImage: "tray.and.arrow.down") { model.notSpam(ids, trust: false); picking = false }
-                .disabled(ids.isEmpty)
-            Button("Не спам и доверять отправителю", systemImage: "checkmark.shield") { model.notSpam(ids, trust: true); picking = false }
-                .disabled(ids.isEmpty || !model.canTrust(ids))
-        } else {
-            Button("Прочитано", systemImage: "envelope.open") { model.markRead(ids, read: true); picking = false }
-                .disabled(ids.isEmpty)
-            Button("Непрочитано", systemImage: "envelope.badge") { model.markRead(ids, read: false); picking = false }
-                .disabled(ids.isEmpty)
-            Button("В папку", systemImage: "folder") { moving = ids }
-                .disabled(ids.isEmpty)
-            Button("В спам", systemImage: "hand.raised") { confirmSpam = ids }
-                .disabled(ids.isEmpty || model.spamSupport(ids) == .none)
-            Button("Удалить", systemImage: "trash", role: .destructive) { model.confirmDelete = ids }
-                .disabled(ids.isEmpty)
+        HStack(spacing: 22) {
+            if model.list.inSpam {
+                Button("Не спам", systemImage: "tray.and.arrow.down") { model.notSpam(ids, trust: false); picking = false }
+                    .disabled(ids.isEmpty)
+                Button("Не спам и доверять отправителю", systemImage: "checkmark.shield") { model.notSpam(ids, trust: true); picking = false }
+                    .disabled(ids.isEmpty || !model.canTrust(ids))
+            } else {
+                Button("Прочитано", systemImage: "envelope.open") { model.markRead(ids, read: true); picking = false }
+                    .disabled(ids.isEmpty)
+                Button("Непрочитано", systemImage: "envelope.badge") { model.markRead(ids, read: false); picking = false }
+                    .disabled(ids.isEmpty)
+                Button("В папку", systemImage: "folder") { moving = ids }
+                    .disabled(ids.isEmpty)
+                Button("В спам", systemImage: "hand.raised") { confirmSpam = ids }
+                    .disabled(ids.isEmpty || model.spamSupport(ids) == .none)
+                Button("Удалить", systemImage: "trash", role: .destructive) { model.confirmDelete = ids }
+                    .disabled(ids.isEmpty)
+            }
         }
-    }
-
-    /// Действия выбора: на iPhone и iPad — нижняя панель, на Маке — панель окна.
-    private static var actionsPlacement: ToolbarItemPlacement {
-        #if os(iOS)
-        .bottomBar
-        #else
-        .automatic
-        #endif
+        .labelStyle(.iconOnly)
+        .font(.title3)
+        .buttonStyle(.borderless)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10)
+        .background(.bar)
     }
 
     @ViewBuilder private var emptyState: some View {
-        if model.loaded && model.list.conversations.isEmpty {
-            if model.list.searching {
-                ContentUnavailableView.search(text: model.query)
-            } else if model.list.inSpam {
+        if model.loaded && model.list.conversations.isEmpty && model.composingTo == nil {
+            if model.list.inSpam {
                 ContentUnavailableView("Спама нет", systemImage: "hand.raised")
             } else {
                 ContentUnavailableView(model.list.active == nil ? "Входящих нет" : "В папке пусто", systemImage: "tray")
@@ -254,11 +256,6 @@ struct MailView: View {
         } else if !model.loaded {
             ProgressView()
         }
-    }
-
-    private var title: String {
-        guard let i = model.list.active, model.doc.folders.indices.contains(i) else { return "Входящие" }
-        return model.doc.folders[i].name
     }
 
     private var deleteTitle: String {
@@ -291,45 +288,112 @@ struct MailView: View {
     }
 }
 
-/// Табы папок над списком (§5): ничего не выбрано = «Входящие»; повторное
-/// касание выбранного таба возвращает во «Входящие».
+/// Строка множественного выбора на месте строки поиска: «Готово», сколько
+/// выбрано, «Выбрать все».
+private struct PickingBar: View {
+    let count: Int
+    let selectAll: () -> Void
+    let done: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button("Готово", systemImage: "xmark", action: done)
+                .labelStyle(.iconOnly)
+                .font(.system(size: 17, weight: .medium))
+                .frame(width: 36, height: 36)
+                .contentShape(Rectangle())
+            Text("Выбрано: \(count)").font(.headline)
+            Spacer()
+            Button("Выбрать все", action: selectAll)
+        }
+        .buttonStyle(.borderless)
+        .padding(.leading, 8)
+        .padding(.trailing, 12)
+        .frame(minHeight: 52)
+    }
+}
+
+/// Строка новой беседы над диалогами, пока письмо не ушло (десктоп
+/// `refresh_sidebar` с синтетической строкой).
+private struct NewConversationRow: View {
+    let address: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Circle()
+                .fill(Color.white.opacity(0.25))
+                .frame(width: 40, height: 40)
+                .overlay(Image(systemName: "square.and.pencil").foregroundStyle(.white))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(address).font(.body.weight(.semibold)).lineLimit(1)
+                Text("Новая беседа").font(.subheadline).opacity(0.9)
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.vertical, 4)
+        .listRowBackground(Palette.accent)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("conv.new")
+    }
+}
+
+/// Табы папок над списком — как у десктопа (§5, десктоп §4 «Папки диалогов»):
+/// текст, выбранный — зелёный с подчёркиванием; счётчик у выбранного зелёный,
+/// у остальных серый. Ничего не выбрано — «Входящие»; пока выбрана папка,
+/// первым стоит «← Входящие» со счётчиком инбокса; повторное касание
+/// выбранного таба — тоже во «Входящие». «Спам» — таб этой полосы.
 private struct FolderTabs: View {
     let tabs: [FolderTab]
-    @Binding var active: String?
+    let active: String?
+    let inboxUnread: Int
+    let select: (String?) -> Void
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
+            HStack(spacing: 18) {
+                if active != nil {
+                    tab(icon: "", name: "← Входящие", unread: inboxUnread, on: false) { select(nil) }
+                }
                 ForEach(tabs) { t in
                     let on = t.id == active
-                    Button {
-                        active = on ? nil : t.id
-                    } label: {
-                        HStack(spacing: 6) {
-                            if !t.icon.isEmpty { Text(t.icon) }
-                            Text(t.name).lineLimit(1)
-                            if t.unread > 0 {
-                                Text("\(t.unread)")
-                                    .font(.caption.weight(.semibold))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 1)
-                                    .background(Capsule().fill(on ? Color.white.opacity(0.3) : Palette.accent.opacity(0.18)))
-                            }
-                        }
-                        .font(.subheadline.weight(on ? .semibold : .regular))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
-                        .foregroundStyle(on ? Color.white : Color.primary)
-                        .background(Capsule().fill(on ? Palette.accent : Color.secondary.opacity(0.12)))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(on ? .isSelected : [])
+                    tab(icon: t.icon, name: t.name, unread: t.unread, on: on) { select(on ? nil : t.id) }
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 14)
         }
-        .background(.bar)
+        .frame(height: 40)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private func tab(icon: String, name: String, unread: Int, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+                HStack(spacing: 5) {
+                    if !icon.isEmpty { Text(icon) }
+                    Text(name).lineLimit(1)
+                    if unread > 0 {
+                        Text("\(unread)")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(on ? Palette.accent : Color.secondary.opacity(0.6)))
+                    }
+                }
+                .font(.subheadline.weight(on ? .semibold : .regular))
+                .foregroundStyle(on ? Palette.accent : Color.primary)
+                Spacer(minLength: 0)
+                Capsule()
+                    .fill(on ? Palette.accent : Color.clear)
+                    .frame(height: 2.5)
+            }
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(on ? .isSelected : [])
+        .accessibilityIdentifier("folder.tab")
     }
 }
 

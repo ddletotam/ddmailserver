@@ -44,15 +44,14 @@ final class LoginFlowTests: XCTestCase {
         app.buttons["connect.login"].tap()
         // Раздел восстанавливается из прошлого запуска (@SceneStorage). Если после
         // входа не видно ни списка, ни вопроса о загрузке — идём в «Почту». Нажать
-        // таб поверх алерта нельзя: XCTest сам «закроет помеху» последней кнопкой.
+        // бургер поверх алерта нельзя: XCTest сам «закроет помеху» последней кнопкой.
         let anyRow = app.descendants(matching: .any).matching(identifier: "conv.row").firstMatch
         let question = app.buttons["Только по Wi-Fi"].firstMatch
         let deadline = Date().addingTimeInterval(30)
         while Date() < deadline && !anyRow.exists && !question.exists { sleep(1) }
-        if !anyRow.exists && !question.exists { section("Почта", app).tap() }
+        if !anyRow.exists && !question.exists { Nav.go("Почта", app) }
 
         // Вход прошёл, синк лёг в кэш — в списке появились беседы.
-        // Строка беседы — по идентификатору: на Маке первая «ячейка» — раздел в боковой панели.
         let firstRow = app.descendants(matching: .any).matching(identifier: "conv.row").firstMatch
         XCTAssertTrue(firstRow.waitForExistence(timeout: 60), "список бесед пуст")
         shot(app, "3-list-raw")
@@ -68,7 +67,59 @@ final class LoginFlowTests: XCTestCase {
         XCTAssertTrue(wifiOnly.waitForExistence(timeout: 10), "нет вопроса о загрузке заранее")
         shot(app, "3a-prefetch")
         wifiOnly.tap()
+        sleep(2)
         shot(app, "3-list")
+
+        // Раскладка как у десктопа (mobile-layout.md): первая строка — бургер и
+        // поиск; «Спам» — таб полосы папок; ни «Написать», ни «Ещё», ни таб-бара.
+        XCTAssertTrue(Nav.burger(app).exists, "нет бургера")
+        let search = app.textFields["search.field"].firstMatch
+        XCTAssertTrue(search.exists, "нет поля поиска")
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS 'Спам'")).firstMatch.exists, "нет таба «Спам»")
+        XCTAssertFalse(app.buttons["Новое письмо"].exists, "кнопка «Новое письмо» осталась")
+        XCTAssertFalse(app.buttons["Ещё"].exists, "меню «Ещё» осталось")
+        #if os(iOS)
+        XCTAssertFalse(app.tabBars.firstMatch.exists, "таб-бар остался")
+        #endif
+        // Бургер раскрыт — все разделы и «Настройки».
+        Nav.open(app)
+        for name in ["Почта", "Календарь", "Контакты", "Задачи", "Настройки"] {
+            XCTAssertTrue(Nav.item(name, app).waitForExistence(timeout: 5), "в меню бургера нет «\(name)»")
+        }
+        shot(app, "3b-burger")
+        Nav.item("Почта", app).tap()
+
+        // Поиск: свой домен находит беседы (адрес получателя — мой).
+        let domain = String(email.split(separator: "@").last ?? "")
+        search.tap()
+        search.typeText(domain)
+        let convHit = app.descendants(matching: .any).matching(identifier: "search.conv").firstMatch
+        XCTAssertTrue(convHit.waitForExistence(timeout: 10), "поиск не нашёл диалогов")
+        sleep(2)
+        shot(app, "3c-search")
+        clear(search, app)
+
+        // Новое письмо — только через поиск: адрес → «Написать по адресу…» →
+        // пустая беседа с композером. Не отправляем.
+        search.tap()
+        search.typeText("proverka.adresa@example.org")
+        let composeRow = app.descendants(matching: .any).matching(identifier: "search.compose").firstMatch
+        XCTAssertTrue(composeRow.waitForExistence(timeout: 5), "нет строки «Написать по адресу…»")
+        shot(app, "3d-compose-row")
+        composeRow.tap()
+        let newRow = app.descendants(matching: .any).matching(identifier: "conv.new").firstMatch
+        let fresh = app.staticTexts["Новая беседа"].firstMatch
+        XCTAssertTrue(fresh.waitForExistence(timeout: 10), "новая беседа не открылась")
+        let draftField = app.textViews["Сообщение"].exists ? app.textViews["Сообщение"] : app.textFields["Сообщение"]
+        XCTAssertTrue(draftField.waitForExistence(timeout: 5), "у новой беседы нет строки ввода")
+        sleep(1)
+        shot(app, "3e-new-conversation")
+        _ = newRow
+
+        // Обычная беседа.
+        let back = app.navigationBars.buttons.firstMatch
+        if !firstRow.isHittable, back.exists { back.tap() }
+        XCTAssertTrue(firstRow.waitForExistence(timeout: 10))
         firstRow.tap()
         sleep(3)
         shot(app, "4a-tapped")
@@ -100,34 +151,46 @@ final class LoginFlowTests: XCTestCase {
         sleep(3)
         shot(app, "5b-window")
         app.typeKey("w", modifierFlags: .command)
-        // Меню приложения: команды на месте.
+        // Меню приложения: команды на месте; ⌘N — фокус в поиск.
         XCTAssertTrue(app.menuBars.menuItems["Новое письмо"].exists, "нет команды «Новое письмо»")
         XCTAssertTrue(app.menuBars.menuBarItems["Письмо"].exists, "нет меню «Письмо»")
+        app.typeKey("n", modifierFlags: .command)
+        app.typeText("x")
+        XCTAssertEqual(search.value as? String, "x", "⌘N не поставил фокус в поиск")
+        clear(search, app)
         #endif
 
-        // Календарь: лента месяцев с событиями с сервера.
-        // В беседе на iPhone таб-бар скрыт (§6): назад к списку — первой кнопкой
-        // панели. На iPad и Маке разделы видны всегда.
-        if !section("Календарь", app).exists, app.navigationBars.buttons.count > 0 {
-            app.navigationBars.buttons.element(boundBy: 0).tap()
-        }
-        let calTab = section("Календарь", app)
-        XCTAssertTrue(calTab.waitForExistence(timeout: 10), "нет раздела «Календарь»")
-        calTab.tap()
+        // Календарь: через бургер.
+        Nav.go("Календарь", app)
         XCTAssertTrue(app.buttons["Сегодня"].waitForExistence(timeout: 10), "календарь не открылся")
+        XCTAssertTrue(Nav.burger(app).exists, "в календаре нет бургера")
         sleep(4)
         shot(app, "6-calendar")
 
-        section("Задачи", app).tap()
+        Nav.go("Задачи", app)
         sleep(3)
         shot(app, "7-tasks")
 
-        section("Контакты", app).tap()
+        Nav.go("Контакты", app)
         // На Маке имя — часть объединённого элемента строки: ищем по любому типу.
         let contact = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS 'Абай' OR value CONTAINS 'Абай' OR title CONTAINS 'Абай'")).firstMatch
         XCTAssertTrue(contact.waitForExistence(timeout: 20), "контакты не загрузились")
+        XCTAssertTrue(app.textFields["contacts.search"].exists, "нет поля «Поиск контактов»")
         shot(app, "8-contacts")
+
+        // Настройки — пункт бургера; «Добавить учётку» — в них.
+        Nav.go("Настройки", app)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "account.add").firstMatch.waitForExistence(timeout: 10),
+                      "в настройках нет «Добавить учётку»")
+        shot(app, "9-settings")
+    }
+
+    /// Стереть поле поиска кнопкой «Очистить».
+    @MainActor
+    private func clear(_ field: XCUIElement, _ app: XCUIApplication) {
+        let x = app.buttons["Очистить"].firstMatch
+        if x.exists { x.tap() }
     }
 
     /// Печать только после появления клавиатуры: иначе первые символы теряются.
@@ -163,19 +226,6 @@ final class LoginFlowTests: XCTestCase {
 
 #endif
 
-    /// Раздел: кнопка таб-бара (iPhone) или строка боковой панели (iPad, Мак).
-    @MainActor
-    private func section(_ name: String, _ app: XCUIApplication) -> XCUIElement {
-        let button = app.tabBars.buttons[name].firstMatch
-        if button.exists { return button }
-        let any = app.buttons[name].firstMatch
-        if any.exists { return any }
-        // Мак: строка боковой панели — ячейка со статическим текстом.
-        let text = app.staticTexts[name].firstMatch
-        if text.exists { return text }
-        return app.cells.containing(.staticText, identifier: name).firstMatch
-    }
-
     @MainActor
     private func shot(_ app: XCUIApplication, _ name: String) {
         let a = XCTAttachment(screenshot: app.screenshot())
@@ -184,9 +234,3 @@ final class LoginFlowTests: XCTestCase {
         add(a)
     }
 }
-
-#if os(macOS)
-extension XCUIElement {
-    func tap() { click() }
-}
-#endif
