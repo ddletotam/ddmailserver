@@ -365,7 +365,11 @@ type ContactSyncEntry struct {
 	RemoteID      string `json:"remote_id"`
 	VCardData     string `json:"-"`
 	Operation     string `json:"operation"`
-	CreatedAt     int64  `json:"created_at"`
+	// Patch — правка из API (JSON vcardedit.Patch, только изменённые поля).
+	// Пусто — в очереди целая карточка VCardData (создание, PUT через наш
+	// CardDAV-сервер).
+	Patch     string `json:"-"`
+	CreatedAt int64  `json:"created_at"`
 }
 
 // CalendarEventSyncEntry represents a pending event change to sync to remote CalDAV server

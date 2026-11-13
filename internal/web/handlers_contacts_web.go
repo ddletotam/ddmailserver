@@ -492,6 +492,9 @@ func (s *Server) syncContactSource(ctx context.Context, source *models.ContactSo
 			log.Printf("Created new address book: %s", book.Name)
 		} else {
 			book = existingBook
+			if err := s.database.RefreshAddressBookCanWrite(book, remoteBook); err != nil {
+				log.Printf("Failed to update can_write of address book %s: %v", book.Name, err)
+			}
 		}
 
 		if err := client.SyncAddressBook(ctx, book); err != nil {

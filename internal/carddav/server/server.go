@@ -213,10 +213,11 @@ func (s *Server) propfindAddressBookHome(user *models.User, depth string) string
           <C:address-data-type content-type="text/vcard" version="3.0"/>
           <C:address-data-type content-type="text/vcard" version="4.0"/>
         </C:supported-address-data>
+        %s
       </D:prop>
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
-  </D:response>`, bookURL, xmlEscape(book.Name))
+  </D:response>`, bookURL, xmlEscape(book.Name), privilegeSet(book))
 			}
 		}
 	}
@@ -254,10 +255,11 @@ func (s *Server) propfindAddressBook(user *models.User, bookID int64, depth stri
           <C:address-data-type content-type="text/vcard" version="3.0"/>
           <C:address-data-type content-type="text/vcard" version="4.0"/>
         </C:supported-address-data>
+        %s
       </D:prop>
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
-  </D:response>`, bookURL, xmlEscape(book.Name))
+  </D:response>`, bookURL, xmlEscape(book.Name), privilegeSet(book))
 
 	// If depth > 0, include contacts
 	if depth != "0" {
@@ -373,10 +375,8 @@ func extractLower(re *regexp.Regexp, s string) []string {
 func filterContactsByTerms(contacts []*models.Contact, terms []string) []*models.Contact {
 	var out []*models.Contact
 	for _, c := range contacts {
-		hay := strings.ToLower(strings.Join([]string{
-			c.FullName, c.GivenName, c.FamilyName, c.Nickname,
-			c.Email, c.Email2, c.Email3, c.Organization,
-		}, " "))
+		fields := append([]string{c.FullName, c.GivenName, c.FamilyName, c.Nickname, c.Organization}, c.ListEmails()...)
+		hay := strings.ToLower(strings.Join(fields, " "))
 		for _, t := range terms {
 			if strings.Contains(hay, t) {
 				out = append(out, c)
@@ -466,6 +466,12 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, user *models.
 		http.Error(w, "Address book not found", http.StatusNotFound)
 		return
 	}
+	if !book.Writable() {
+		// Книга только для чтения (корпоративный каталог и т.п.): правка
+		// осела бы локально и вечно падала бы в обратной синхронизации.
+		http.Error(w, "Address book is read-only", http.StatusForbidden)
+		return
+	}
 
 	// Parse vCard
 	decoder := vcard.NewDecoder(r.Body)
@@ -551,6 +557,10 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, user *mode
 	book, err := s.database.GetAddressBookByID(bookID)
 	if err != nil || book.UserID != user.ID {
 		http.Error(w, "Address book not found", http.StatusNotFound)
+		return
+	}
+	if !book.Writable() {
+		http.Error(w, "Address book is read-only", http.StatusForbidden)
 		return
 	}
 
@@ -692,6 +702,23 @@ func (s *Server) ensureLocalAddressBook(user *models.User) {
 
 // Helper functions
 
+// privilegeSet — DAV:current-user-privilege-set книги (RFC 3744 §5.4): по
+// нему клиенты (Контакты iOS/macOS) показывают книгу только для чтения и не
+// предлагают правку, которую сервер всё равно отвергнет.
+func privilegeSet(book *models.AddressBook) string {
+	privs := []string{"read"}
+	if book.Writable() {
+		privs = append(privs, "write", "write-content", "bind", "unbind")
+	}
+	var b strings.Builder
+	b.WriteString("<D:current-user-privilege-set>")
+	for _, p := range privs {
+		b.WriteString("<D:privilege><D:" + p + "/></D:privilege>")
+	}
+	b.WriteString("</D:current-user-privilege-set>")
+	return b.String()
+}
+
 func xmlEscape(s string) string {
 	s = strings.ReplaceAll(s, "&", "&amp;")
 	s = strings.ReplaceAll(s, "<", "&lt;")
@@ -728,29 +755,9 @@ func parseVCardFields(card vcard.Card, contact *models.Contact) {
 		contact.Nickname = nn.Value
 	}
 
-	// Parse emails
-	emails := card.Values(vcard.FieldEmail)
-	if len(emails) > 0 {
-		contact.Email = emails[0]
-	}
-	if len(emails) > 1 {
-		contact.Email2 = emails[1]
-	}
-	if len(emails) > 2 {
-		contact.Email3 = emails[2]
-	}
-
-	// Parse phones
-	phones := card.Values(vcard.FieldTelephone)
-	if len(phones) > 0 {
-		contact.Phone = phones[0]
-	}
-	if len(phones) > 1 {
-		contact.Phone2 = phones[1]
-	}
-	if len(phones) > 2 {
-		contact.Phone3 = phones[2]
-	}
+	// Все адреса и телефоны, без предела в три (миграция 057).
+	contact.SetEmails(card.Values(vcard.FieldEmail))
+	contact.SetPhones(card.Values(vcard.FieldTelephone))
 
 	// Parse organization
 	if org := card.Get(vcard.FieldOrganization); org != nil {

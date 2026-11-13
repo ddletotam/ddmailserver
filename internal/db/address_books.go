@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/ddletotam/ddmailserver/internal/models"
@@ -174,6 +175,26 @@ func (db *DB) UpdateAddressBook(book *models.AddressBook) error {
 		return fmt.Errorf("failed to update address book: %w", err)
 	}
 
+	return nil
+}
+
+// RefreshAddressBookCanWrite переносит на известную книгу права, которые
+// сервер сообщил при обнаружении (remote.CanWriteKnown). Права меняются:
+// каталог стал только для чтения, дали доступ на запись; а до проверки прав
+// у всех CardDAV-книг стояло предположенное true. Без ответа сервера ничего
+// не трогает.
+func (db *DB) RefreshAddressBookCanWrite(book, remote *models.AddressBook) error {
+	if !remote.CanWriteKnown || book.CanWrite == remote.CanWrite {
+		return nil
+	}
+	now := timeutil.Now()
+	if _, err := db.Exec(`UPDATE address_books SET can_write = $1, updated_at = $2 WHERE id = $3`,
+		remote.CanWrite, now, book.ID); err != nil {
+		return fmt.Errorf("update can_write: %w", err)
+	}
+	log.Printf("Address book %d (%s): can_write %v -> %v (server privileges)", book.ID, book.Name, book.CanWrite, remote.CanWrite)
+	book.CanWrite = remote.CanWrite
+	book.UpdatedAt = now
 	return nil
 }
 

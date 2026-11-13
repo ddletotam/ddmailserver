@@ -298,6 +298,8 @@
   "contacts.organization": "Organization",
   "contacts.no_sources": "No contact sources configured",
   "contacts.no_sources_hint": "Add a CardDAV source to sync contacts from iCloud, Google, or other services",
+  "contacts.error.read_only": "This address book is read-only: its contacts cannot be changed or deleted.",
+  "contacts.error.no_writable_book": "There is no address book you can write to for this address. Choose a book for the new contact.",
   "contacts.no_address_books": "No address books yet",
   "contacts.no_address_books_hint": "Create a local address book or add a CardDAV source to sync address books",
   "contacts.no_contacts": "No contacts found",

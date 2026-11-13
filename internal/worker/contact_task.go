@@ -125,6 +125,9 @@ func (t *ContactSyncTask) doSync(ctx context.Context) error {
 			log.Printf("Created new address book: %s", book.Name)
 		} else {
 			book = existingBook
+			if err := t.database.RefreshAddressBookCanWrite(book, remoteBook); err != nil {
+				log.Printf("Failed to update can_write of address book %s: %v", book.Name, err)
+			}
 		}
 
 		// Sync contacts

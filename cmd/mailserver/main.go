@@ -14,6 +14,7 @@ import (
 
 	"github.com/ddletotam/ddmailserver/internal/authlimit"
 	"github.com/ddletotam/ddmailserver/internal/caldav/importer"
+	"github.com/ddletotam/ddmailserver/internal/carddav/vcardedit"
 	"github.com/ddletotam/ddmailserver/internal/clientip"
 	"github.com/ddletotam/ddmailserver/internal/config"
 	"github.com/ddletotam/ddmailserver/internal/db"
@@ -152,6 +153,23 @@ func main() {
 		}
 		if n > 0 {
 			log.Printf("BackfillEncodedHeaders: decoded %d messages", n)
+		}
+	}()
+
+	// Адреса и телефоны контактов сверх трёх, отброшенные до миграции 057:
+	// перечитываются из vcard_data. Дёшево на каждом старте (трогает только
+	// строки, где карточка расходится с колонками).
+	go func() {
+		n, err := database.BackfillContactValues(func(data string) ([]string, []string, error) {
+			f, err := vcardedit.Read(data)
+			return f.Emails, f.Phones, err
+		})
+		if err != nil {
+			log.Printf("BackfillContactValues: %v", err)
+			return
+		}
+		if n > 0 {
+			log.Printf("BackfillContactValues: restored all emails/phones of %d contacts", n)
 		}
 	}()
 

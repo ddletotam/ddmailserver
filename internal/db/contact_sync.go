@@ -9,12 +9,14 @@ import (
 
 // QueueContactSync adds or updates a contact sync entry
 func (db *DB) QueueContactSync(contactID, addressBookID, sourceID int64, uid, remoteID, vcardData, operation string) error {
+	// Целая карточка отменяет накопленную правку по полям: patch = NULL.
 	query := `
 		INSERT INTO contact_sync_queue (contact_id, address_book_id, source_id, uid, remote_id, vcard_data, operation, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (contact_id) DO UPDATE SET
 			vcard_data = EXCLUDED.vcard_data,
 			operation = EXCLUDED.operation,
+			patch = NULL,
 			created_at = EXCLUDED.created_at
 	`
 
@@ -25,10 +27,38 @@ func (db *DB) QueueContactSync(contactID, addressBookID, sourceID int64, uid, re
 	return nil
 }
 
+// QueueContactPatch ставит в очередь правку контакта по полям (patch — JSON
+// vcardedit.Patch). Воркер применит её к свежей карточке с сервера, поэтому
+// поля, которых правка не касалась, на сервере не перезаписываются.
+//
+// Несколько правок до отправки сливаются: поздняя перекрывает раннюю по
+// каждому полю (jsonb ||). Если в очереди уже лежит целая карточка (создание
+// или PUT через наш CardDAV-сервер), правка в неё и так вошла — vcard_data
+// обновляется, запись остаётся целой карточкой, «create» остаётся созданием.
+func (db *DB) QueueContactPatch(contactID, addressBookID, sourceID int64, uid, remoteID, vcardData, patch string) error {
+	query := `
+		INSERT INTO contact_sync_queue (contact_id, address_book_id, source_id, uid, remote_id, vcard_data, operation, patch, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, 'update', $7::jsonb, $8)
+		ON CONFLICT (contact_id) DO UPDATE SET
+			vcard_data = EXCLUDED.vcard_data,
+			operation = CASE WHEN contact_sync_queue.operation = 'create' THEN 'create' ELSE 'update' END,
+			patch = CASE WHEN contact_sync_queue.operation = 'update' AND contact_sync_queue.patch IS NOT NULL
+			             THEN contact_sync_queue.patch || EXCLUDED.patch
+			             ELSE NULL END,
+			created_at = EXCLUDED.created_at
+	`
+	_, err := db.Exec(query, contactID, addressBookID, sourceID, uid, remoteID, vcardData, patch, timeutil.Now())
+	if err != nil {
+		return fmt.Errorf("failed to queue contact patch: %w", err)
+	}
+	return nil
+}
+
 // GetPendingContactSync retrieves pending contact sync entries for a source
 func (db *DB) GetPendingContactSync(sourceID int64, limit int) ([]*models.ContactSyncEntry, error) {
 	query := `
-		SELECT id, contact_id, address_book_id, source_id, uid, COALESCE(remote_id, ''), COALESCE(vcard_data, ''), operation, created_at
+		SELECT id, contact_id, address_book_id, source_id, uid, COALESCE(remote_id, ''), COALESCE(vcard_data, ''), operation,
+		       COALESCE(patch::text, ''), created_at
 		FROM contact_sync_queue
 		WHERE source_id = $1
 		ORDER BY created_at ASC
@@ -46,7 +76,7 @@ func (db *DB) GetPendingContactSync(sourceID int64, limit int) ([]*models.Contac
 		e := &models.ContactSyncEntry{}
 		err := rows.Scan(
 			&e.ID, &e.ContactID, &e.AddressBookID, &e.SourceID,
-			&e.UID, &e.RemoteID, &e.VCardData, &e.Operation, &e.CreatedAt,
+			&e.UID, &e.RemoteID, &e.VCardData, &e.Operation, &e.Patch, &e.CreatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan contact sync entry: %w", err)

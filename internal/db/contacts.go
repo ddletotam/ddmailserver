@@ -8,6 +8,7 @@ import (
 
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
+	"github.com/lib/pq"
 )
 
 // CreateContact creates a new contact
@@ -26,8 +27,8 @@ func (db *DB) CreateContact(contact *models.Contact) error {
 			full_name, given_name, family_name, nickname,
 			email, email2, email3, phone, phone2, phone3,
 			organization, title, department, address, notes, photo_url, birthday,
-			etag, local_modified, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+			etag, local_modified, created_at, updated_at, emails, phones
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
 		RETURNING id
 	`
 
@@ -38,6 +39,7 @@ func (db *DB) CreateContact(contact *models.Contact) error {
 		contact.Email, contact.Email2, contact.Email3, contact.Phone, contact.Phone2, contact.Phone3,
 		contact.Organization, contact.Title, contact.Department, contact.Address, contact.Notes, contact.PhotoURL, birthday,
 		contact.ETag, contact.LocalModified, contact.CreatedAt, contact.UpdatedAt,
+		pq.Array(contact.ListEmails()), pq.Array(contact.ListPhones()),
 	).Scan(&contact.ID)
 
 	if err != nil {
@@ -54,6 +56,7 @@ func (db *DB) GetContactsByAddressBookID(addressBookID int64) ([]*models.Contact
 		       COALESCE(full_name, ''), COALESCE(given_name, ''), COALESCE(family_name, ''), COALESCE(nickname, ''),
 		       COALESCE(email, ''), COALESCE(email2, ''), COALESCE(email3, ''),
 		       COALESCE(phone, ''), COALESCE(phone2, ''), COALESCE(phone3, ''),
+		       emails, phones,
 		       COALESCE(organization, ''), COALESCE(title, ''), COALESCE(department, ''),
 		       COALESCE(address, ''), COALESCE(notes, ''), COALESCE(photo_url, ''), birthday,
 		       COALESCE(etag, ''), local_modified, created_at, updated_at
@@ -78,6 +81,7 @@ func (db *DB) GetContactsByUserID(userID int64, limit, offset int) ([]*models.Co
 		       COALESCE(full_name, ''), COALESCE(given_name, ''), COALESCE(family_name, ''), COALESCE(nickname, ''),
 		       COALESCE(email, ''), COALESCE(email2, ''), COALESCE(email3, ''),
 		       COALESCE(phone, ''), COALESCE(phone2, ''), COALESCE(phone3, ''),
+		       emails, phones,
 		       COALESCE(organization, ''), COALESCE(title, ''), COALESCE(department, ''),
 		       COALESCE(address, ''), COALESCE(notes, ''), COALESCE(photo_url, ''), birthday,
 		       COALESCE(etag, ''), local_modified, created_at, updated_at
@@ -103,6 +107,7 @@ func (db *DB) GetContactByID(id int64) (*models.Contact, error) {
 		       COALESCE(full_name, ''), COALESCE(given_name, ''), COALESCE(family_name, ''), COALESCE(nickname, ''),
 		       COALESCE(email, ''), COALESCE(email2, ''), COALESCE(email3, ''),
 		       COALESCE(phone, ''), COALESCE(phone2, ''), COALESCE(phone3, ''),
+		       emails, phones,
 		       COALESCE(organization, ''), COALESCE(title, ''), COALESCE(department, ''),
 		       COALESCE(address, ''), COALESCE(notes, ''), COALESCE(photo_url, ''), birthday,
 		       COALESCE(etag, ''), local_modified, created_at, updated_at
@@ -117,6 +122,7 @@ func (db *DB) GetContactByID(id int64) (*models.Contact, error) {
 		&contact.FullName, &contact.GivenName, &contact.FamilyName, &contact.Nickname,
 		&contact.Email, &contact.Email2, &contact.Email3,
 		&contact.Phone, &contact.Phone2, &contact.Phone3,
+		pq.Array(&contact.Emails), pq.Array(&contact.Phones),
 		&contact.Organization, &contact.Title, &contact.Department,
 		&contact.Address, &contact.Notes, &contact.PhotoURL, &birthday,
 		&contact.ETag, &contact.LocalModified, &contact.CreatedAt, &contact.UpdatedAt,
@@ -144,6 +150,7 @@ func (db *DB) GetContactByUID(addressBookID int64, uid string) (*models.Contact,
 		       COALESCE(full_name, ''), COALESCE(given_name, ''), COALESCE(family_name, ''), COALESCE(nickname, ''),
 		       COALESCE(email, ''), COALESCE(email2, ''), COALESCE(email3, ''),
 		       COALESCE(phone, ''), COALESCE(phone2, ''), COALESCE(phone3, ''),
+		       emails, phones,
 		       COALESCE(organization, ''), COALESCE(title, ''), COALESCE(department, ''),
 		       COALESCE(address, ''), COALESCE(notes, ''), COALESCE(photo_url, ''), birthday,
 		       COALESCE(etag, ''), local_modified, created_at, updated_at
@@ -158,6 +165,7 @@ func (db *DB) GetContactByUID(addressBookID int64, uid string) (*models.Contact,
 		&contact.FullName, &contact.GivenName, &contact.FamilyName, &contact.Nickname,
 		&contact.Email, &contact.Email2, &contact.Email3,
 		&contact.Phone, &contact.Phone2, &contact.Phone3,
+		pq.Array(&contact.Emails), pq.Array(&contact.Phones),
 		&contact.Organization, &contact.Title, &contact.Department,
 		&contact.Address, &contact.Notes, &contact.PhotoURL, &birthday,
 		&contact.ETag, &contact.LocalModified, &contact.CreatedAt, &contact.UpdatedAt,
@@ -179,7 +187,7 @@ func (db *DB) GetContactByUID(addressBookID int64, uid string) (*models.Contact,
 }
 
 // GetContactByEmail finds a contact in any of the user's address books by
-// matching the lowercased email against email/email2/email3. Returns nil with
+// matching the lowercased email against every address of the contact. Returns nil with
 // no error when nothing matches (avatar fetcher uses that to fall through to
 // the next source).
 func (db *DB) GetContactByEmail(userID int64, email string) (*models.Contact, error) {
@@ -193,12 +201,13 @@ func (db *DB) GetContactByEmail(userID int64, email string) (*models.Contact, er
 		       COALESCE(full_name, ''), COALESCE(given_name, ''), COALESCE(family_name, ''), COALESCE(nickname, ''),
 		       COALESCE(email, ''), COALESCE(email2, ''), COALESCE(email3, ''),
 		       COALESCE(phone, ''), COALESCE(phone2, ''), COALESCE(phone3, ''),
+		       emails, phones,
 		       COALESCE(organization, ''), COALESCE(title, ''), COALESCE(department, ''),
 		       COALESCE(address, ''), COALESCE(notes, ''), COALESCE(photo_url, ''), birthday,
 		       COALESCE(etag, ''), local_modified, created_at, updated_at
 		FROM contacts
 		WHERE user_id = $1
-		  AND (LOWER(email) = $2 OR LOWER(email2) = $2 OR LOWER(email3) = $2)
+		  AND EXISTS (SELECT 1 FROM unnest(emails) e WHERE LOWER(e) = $2)
 		LIMIT 1
 	`
 
@@ -209,6 +218,7 @@ func (db *DB) GetContactByEmail(userID int64, email string) (*models.Contact, er
 		&contact.FullName, &contact.GivenName, &contact.FamilyName, &contact.Nickname,
 		&contact.Email, &contact.Email2, &contact.Email3,
 		&contact.Phone, &contact.Phone2, &contact.Phone3,
+		pq.Array(&contact.Emails), pq.Array(&contact.Phones),
 		&contact.Organization, &contact.Title, &contact.Department,
 		&contact.Address, &contact.Notes, &contact.PhotoURL, &birthday,
 		&contact.ETag, &contact.LocalModified, &contact.CreatedAt, &contact.UpdatedAt,
@@ -240,7 +250,7 @@ func (db *DB) UpdateContact(contact *models.Contact) error {
 			vcard_data = $1, full_name = $2, given_name = $3, family_name = $4, nickname = $5,
 			email = $6, email2 = $7, email3 = $8, phone = $9, phone2 = $10, phone3 = $11,
 			organization = $12, title = $13, department = $14, address = $15, notes = $16, photo_url = $17, birthday = $18,
-			etag = $19, local_modified = $20, updated_at = $21
+			etag = $19, local_modified = $20, updated_at = $21, emails = $23, phones = $24
 		WHERE id = $22
 	`
 
@@ -250,7 +260,7 @@ func (db *DB) UpdateContact(contact *models.Contact) error {
 		contact.Email, contact.Email2, contact.Email3, contact.Phone, contact.Phone2, contact.Phone3,
 		contact.Organization, contact.Title, contact.Department, contact.Address, contact.Notes, contact.PhotoURL, birthday,
 		contact.ETag, contact.LocalModified, contact.UpdatedAt,
-		contact.ID,
+		contact.ID, pq.Array(contact.ListEmails()), pq.Array(contact.ListPhones()),
 	)
 
 	if err != nil {
@@ -287,6 +297,7 @@ func (db *DB) SearchContacts(userID int64, query string, limit int) ([]*models.C
 		       COALESCE(full_name, ''), COALESCE(given_name, ''), COALESCE(family_name, ''), COALESCE(nickname, ''),
 		       COALESCE(email, ''), COALESCE(email2, ''), COALESCE(email3, ''),
 		       COALESCE(phone, ''), COALESCE(phone2, ''), COALESCE(phone3, ''),
+		       emails, phones,
 		       COALESCE(organization, ''), COALESCE(title, ''), COALESCE(department, ''),
 		       COALESCE(address, ''), COALESCE(notes, ''), COALESCE(photo_url, ''), birthday,
 		       COALESCE(etag, ''), local_modified, created_at, updated_at
@@ -295,10 +306,8 @@ func (db *DB) SearchContacts(userID int64, query string, limit int) ([]*models.C
 			full_name ILIKE $2 OR
 			given_name ILIKE $2 OR
 			family_name ILIKE $2 OR
-			email ILIKE $2 OR
-			email2 ILIKE $2 OR
-			email3 ILIKE $2 OR
-			phone ILIKE $2 OR
+			EXISTS (SELECT 1 FROM unnest(emails) e WHERE e ILIKE $2) OR
+			EXISTS (SELECT 1 FROM unnest(phones) p WHERE p ILIKE $2) OR
 			organization ILIKE $2
 		)
 		ORDER BY COALESCE(full_name, email, '') ASC
@@ -322,6 +331,7 @@ func (db *DB) GetLocallyModifiedContacts(addressBookID int64) ([]*models.Contact
 		       COALESCE(full_name, ''), COALESCE(given_name, ''), COALESCE(family_name, ''), COALESCE(nickname, ''),
 		       COALESCE(email, ''), COALESCE(email2, ''), COALESCE(email3, ''),
 		       COALESCE(phone, ''), COALESCE(phone2, ''), COALESCE(phone3, ''),
+		       emails, phones,
 		       COALESCE(organization, ''), COALESCE(title, ''), COALESCE(department, ''),
 		       COALESCE(address, ''), COALESCE(notes, ''), COALESCE(photo_url, ''), birthday,
 		       COALESCE(etag, ''), local_modified, created_at, updated_at
@@ -387,6 +397,7 @@ func (db *DB) GetAllUserContacts(userID int64, limit int) ([]*models.Contact, er
 		       COALESCE(full_name, ''), COALESCE(given_name, ''), COALESCE(family_name, ''), COALESCE(nickname, ''),
 		       COALESCE(email, ''), COALESCE(email2, ''), COALESCE(email3, ''),
 		       COALESCE(phone, ''), COALESCE(phone2, ''), COALESCE(phone3, ''),
+		       emails, phones,
 		       COALESCE(organization, ''), COALESCE(title, ''), COALESCE(department, ''),
 		       COALESCE(address, ''), COALESCE(notes, ''), COALESCE(photo_url, ''), birthday,
 		       COALESCE(etag, ''), local_modified, created_at, updated_at
@@ -416,6 +427,7 @@ func scanContacts(rows *sql.Rows) ([]*models.Contact, error) {
 			&contact.FullName, &contact.GivenName, &contact.FamilyName, &contact.Nickname,
 			&contact.Email, &contact.Email2, &contact.Email3,
 			&contact.Phone, &contact.Phone2, &contact.Phone3,
+			pq.Array(&contact.Emails), pq.Array(&contact.Phones),
 			&contact.Organization, &contact.Title, &contact.Department,
 			&contact.Address, &contact.Notes, &contact.PhotoURL, &birthday,
 			&contact.ETag, &contact.LocalModified, &contact.CreatedAt, &contact.UpdatedAt,
@@ -486,14 +498,15 @@ func (db *DB) ApplyContactSyncChanges(addressBookID int64, changes *SyncContactC
 				full_name, given_name, family_name, nickname,
 				email, email2, email3, phone, phone2, phone3,
 				organization, title, department, address, notes, photo_url, birthday,
-				etag, local_modified, created_at, updated_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+				etag, local_modified, created_at, updated_at, emails, phones
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
 			ON CONFLICT (address_book_id, uid) DO UPDATE SET
 				remote_id = EXCLUDED.remote_id, vcard_data = EXCLUDED.vcard_data,
 				full_name = EXCLUDED.full_name, given_name = EXCLUDED.given_name,
 				family_name = EXCLUDED.family_name, nickname = EXCLUDED.nickname,
 				email = EXCLUDED.email, email2 = EXCLUDED.email2, email3 = EXCLUDED.email3,
 				phone = EXCLUDED.phone, phone2 = EXCLUDED.phone2, phone3 = EXCLUDED.phone3,
+				emails = EXCLUDED.emails, phones = EXCLUDED.phones,
 				organization = EXCLUDED.organization, title = EXCLUDED.title,
 				department = EXCLUDED.department, address = EXCLUDED.address,
 				notes = EXCLUDED.notes, photo_url = EXCLUDED.photo_url,
@@ -510,6 +523,7 @@ func (db *DB) ApplyContactSyncChanges(addressBookID int64, changes *SyncContactC
 			contact.Email, contact.Email2, contact.Email3, contact.Phone, contact.Phone2, contact.Phone3,
 			contact.Organization, contact.Title, contact.Department, contact.Address, contact.Notes, contact.PhotoURL, birthday,
 			contact.ETag, false, contact.CreatedAt, contact.UpdatedAt,
+			pq.Array(contact.ListEmails()), pq.Array(contact.ListPhones()),
 		).Scan(&contact.ID)
 
 		if errors.Is(err, sql.ErrNoRows) {
@@ -535,7 +549,7 @@ func (db *DB) ApplyContactSyncChanges(addressBookID int64, changes *SyncContactC
 				vcard_data = $1, full_name = $2, given_name = $3, family_name = $4, nickname = $5,
 				email = $6, email2 = $7, email3 = $8, phone = $9, phone2 = $10, phone3 = $11,
 				organization = $12, title = $13, department = $14, address = $15, notes = $16, photo_url = $17, birthday = $18,
-				etag = $19, local_modified = false, updated_at = $20
+				etag = $19, local_modified = false, updated_at = $20, emails = $22, phones = $23
 			WHERE id = $21
 		`
 
@@ -545,7 +559,7 @@ func (db *DB) ApplyContactSyncChanges(addressBookID int64, changes *SyncContactC
 			contact.Email, contact.Email2, contact.Email3, contact.Phone, contact.Phone2, contact.Phone3,
 			contact.Organization, contact.Title, contact.Department, contact.Address, contact.Notes, contact.PhotoURL, birthday,
 			contact.ETag, contact.UpdatedAt,
-			contact.ID,
+			contact.ID, pq.Array(contact.ListEmails()), pq.Array(contact.ListPhones()),
 		)
 
 		if err != nil {
