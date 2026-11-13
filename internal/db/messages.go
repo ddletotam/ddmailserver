@@ -110,6 +110,37 @@ func (db *DB) GetMessagesByFolder(folderID int64, limit, offset int) ([]*models.
 	return scanMessages(rows)
 }
 
+// GetRecentMessagesByFolder — последние `limit` писем папки (самые свежие по
+// UID), в порядке возрастания UID. Для списка бесед: GetMessagesByFolder с
+// ORDER BY uid ASC LIMIT отдаёт САМЫЕ СТАРЫЕ письма, и как только папка
+// перерастает лимит (5000 у /conversations), новые письма перестают попадать
+// в беседы вовсе. Порядок по возрастанию сохранён — вызывающие на него
+// рассчитывают так же, как с GetMessagesByFolder.
+func (db *DB) GetRecentMessagesByFolder(folderID int64, limit int) ([]*models.Message, error) {
+	query := `
+		SELECT * FROM (
+		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
+		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
+		       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
+		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at,
+		       delivery_status, delivery_reason, delivery_failed
+		FROM messages
+		WHERE folder_id = $1 AND deleted = false AND (soft_deleted = false OR soft_deleted IS NULL)
+		      AND (is_spam = false OR is_spam IS NULL)
+		ORDER BY uid DESC
+		LIMIT $2
+		) recent ORDER BY uid ASC
+	`
+
+	rows, err := db.Query(query, folderID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get recent messages: %w", err)
+	}
+	defer rows.Close()
+
+	return scanMessages(rows)
+}
+
 // GetMessagesByFolderMeta is like GetMessagesByFolder but DOES NOT load the
 // heavy body/body_html columns (they come back as empty strings). Use it for
 // anything that only needs metadata — sequence-number mapping, flag updates,

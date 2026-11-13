@@ -1206,7 +1206,9 @@ func (s *Server) HandleDesktopConversations(w http.ResponseWriter, r *http.Reque
 		if q.quota <= 0 {
 			continue
 		}
-		batch, err := s.database.GetMessagesByFolder(q.id, q.quota, 0)
+		// Самые свежие письма папки, а не самые старые: иначе папка больше
+		// квоты перестаёт приносить новые беседы (GetRecentMessagesByFolder).
+		batch, err := s.database.GetRecentMessagesByFolder(q.id, q.quota)
 		if err != nil {
 			log.Printf("HandleDesktopConversations: GetMessagesByFolder %d: %v", q.id, err)
 			continue
