@@ -9,6 +9,9 @@
 	<array>
 		<string>$(DDMAIL_APP_GROUP)</string>
 	</array>
+	<!-- Вложения: «Сохранить в Загрузки» и «Открыть программой по умолчанию» (§5, десктоп §4а). -->
+	<key>com.apple.security.files.downloads.read-write</key>
+	<true/>
 	<key>keychain-access-groups</key>
 	<array>
 		<string>$(AppIdentifierPrefix)ru.letotam.ddmail</string>

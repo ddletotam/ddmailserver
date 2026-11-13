@@ -46,13 +46,15 @@ final class DeliveryStatusTests: XCTestCase {
             UIFlow.contextMenu(bubble)
             let copy = UIFlow.menuItem("Копировать текст", app)
             if copy.waitForExistence(timeout: 5) {
-                let menuText = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Не доставлено")).firstMatch
+                let menuText = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", "Не доставлено")).firstMatch
                 XCTAssertTrue(menuText.waitForExistence(timeout: 5), "в меню пузыря нет «Не доставлено»")
             }
             UIFlow.shot(app, "delivery-3-bubble-menu", self)
+            // Контекстное меню закрывается касанием мимо (Мак — Esc).
             #if os(iOS)
-            let cancel = app.buttons.matching(NSPredicate(format: "label IN %@", ["Отменить", "Cancel"])).firstMatch
-            if cancel.exists { cancel.tap() } else { app.tap() }
+            app.navigationBars.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            #else
+            app.typeKey(.escape, modifierFlags: [])
             #endif
             sleep(1)
         }
