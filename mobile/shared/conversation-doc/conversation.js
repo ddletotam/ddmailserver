@@ -15,7 +15,11 @@
 //     `delivered`, пусто или нет поля — обычное письмо, без пометки.
 // Документ → нативный:  ready(), openLink(url), requestOlder(),
 //   openAttachment(uid, index), attachmentMenu(uid, index), bubbleMenu(uid),
-//   allowSender(uid), allowSpamImages(uid)
+//   allowSender(uid), allowSpamImages(uid),
+//   selectionMenu(x, y, w, h) — только WKWebView: показать меню над выделением
+//     (прямоугольник в CSS px от начала документа)
+// Нативный → документ (выделение): ddm.keyboard(on), ddm.selectedText(),
+//   ddm.selectionRect()
 //   Msg.imagesAllowed — картинки этого отправителя разрешены всегда.
 //   Msg.spam — письмо из «Спама»: картинки только по нажатию на этот показ
 //     (нативный пропуск — allowSpamImages), «Всегда от отправителя» нет,
@@ -43,8 +47,27 @@ const native = (() => {
  */
 const touchWebKit = !window.ddmNative && !!(window.webkit && window.webkit.messageHandlers) &&
   ('ontouchstart' in window);
+const LONG_PRESS_MS = 450;
 function onLongPress(el, handler) {
-  el.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); handler(); });
+  // Chromium шлёт `contextmenu` и на тап по уже выделенному тексту (меню
+  // «Копировать»): это не долгое нажатие — палец уже поднят или опущен
+  // только что. Тогда меню системы, а не письма.
+  let downAt = 0;
+  if (!touchWebKit && 'ontouchstart' in window) {
+    el.addEventListener('touchstart', () => { downAt = Date.now(); }, { passive: true, capture: true });
+    el.addEventListener('touchend', () => { downAt = 0; }, { passive: true, capture: true });
+    el.addEventListener('touchcancel', () => { downAt = 0; }, { passive: true, capture: true });
+  }
+  el.addEventListener('contextmenu', (e) => {
+    const sel = window.getSelection();
+    if ('ontouchstart' in window && !touchWebKit && sel && sel.toString() &&
+        (!downAt || Date.now() - downAt < LONG_PRESS_MS - 100)) return;
+    e.preventDefault(); e.stopPropagation();
+    // Chromium при активном выделении переносит его на слово под пальцем —
+    // меню письма открывается без выделения, как на iPhone.
+    if (sel && sel.toString()) sel.removeAllRanges();
+    handler();
+  });
   if (!touchWebKit) return;
   let timer = null, x = 0, y = 0, fired = false;
   const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
@@ -54,23 +77,412 @@ function onLongPress(el, handler) {
     fired = false;
     x = e.touches[0].clientX; y = e.touches[0].clientY;
     cancel();
+    // Палец на маркере выделения — его тянут, это не долгое нажатие.
+    if (nearSelectionHandle(x, y)) return;
     timer = setTimeout(() => {
       timer = null; fired = true;
-      const sel = window.getSelection && window.getSelection();
-      if (sel) sel.removeAllRanges();
+      holdNativeSelection(true);
       handler();
-    }, 450);
+    }, LONG_PRESS_MS);
   }, { passive: true });
   el.addEventListener('touchmove', (e) => {
     const t = e.touches[0];
     if (t && Math.hypot(t.clientX - x, t.clientY - y) > 10) cancel();
   }, { passive: true });
-  el.addEventListener('touchend', cancel, { passive: true });
-  el.addEventListener('touchcancel', cancel, { passive: true });
+  const up = () => { cancel(); if (fired) holdNativeSelection(false); };
+  el.addEventListener('touchend', up, { passive: true });
+  el.addEventListener('touchcancel', up, { passive: true });
   // Палец отпущен после срабатывания — клик не должен открыть вложение/ссылку.
   el.addEventListener('click', (e) => { if (fired) { fired = false; e.preventDefault(); e.stopPropagation(); } }, true);
 }
 if (touchWebKit) document.documentElement.classList.add('ddm-touch-webkit');
+
+/**
+ * Долгое нажатие сработало (меню письма), а WebKit чуть позже начинает своё
+ * выделение слова с системным меню «Скопировать / Найти» — поверх нашего.
+ * Пока палец держат (не дольше 1,5 с) и полсекунды после — текст не выделяется
+ * (`user-select: none` на документе), а то, что всё же выделилось, снимается.
+ */
+let nativeSelectionHeld = 0;
+function holdNativeSelection(on) {
+  const root = document.documentElement;
+  if (on) {
+    nativeSelectionHeld = Infinity;
+    root.classList.add('ddm-noselect');
+    const sel = window.getSelection();
+    if (sel) sel.removeAllRanges();
+    // Нативное меню забирает палец себе — `touchend` может не прийти.
+    setTimeout(() => { if (nativeSelectionHeld === Infinity) holdNativeSelection(false); }, 1500);
+    return;
+  }
+  const until = Date.now() + 500;
+  nativeSelectionHeld = until;
+  setTimeout(() => {
+    if (nativeSelectionHeld !== until) return;
+    nativeSelectionHeld = 0;
+    root.classList.remove('ddm-noselect');
+  }, 500);
+}
+document.addEventListener('selectionchange', () => {
+  if (Date.now() >= nativeSelectionHeld) return;
+  const sel = window.getSelection();
+  if (sel && sel.rangeCount) sel.removeAllRanges();
+});
+
+// ── Выделение текста двойным и тройным тапом ──────────────────────────────
+//
+// Долгое нажатие занято меню письма (onLongPress), поэтому выделение
+// начинается как у десктопа серией касаний (контракт десктопа §4в): второй
+// тап — слово, третий — фраза (предложение; без сегментатора — строка до
+// переноса, то есть абзац или строка письма). Дальше — системные маркеры и
+// «Скопировать». Мышь и трекпад (Мак, iPad с трекпадом) этим не заняты:
+// там двойной и тройной клик выделяют сами.
+//
+// Тело письма — в закрытом shadow root пузыря: точку в текст переводит
+// `caretPositionFromPoint` с `shadowRoots`, где его нет — свой поиск символа
+// под пальцем по прямоугольникам (`elementFromPoint` у shadow root есть
+// везде). Границы слова и предложения — `Intl.Segmenter`.
+
+const TAP_SLOP = 10;        // px: дальше — это уже прокрутка, не тап
+const TAP_MAX_MS = 350;     // дольше — не тап (а к 450 мс — долгое нажатие)
+const SERIES_GAP_MS = 400;  // пауза между тапами серии
+const SERIES_SLOP = 30;     // px: тапы серии — в одно место
+
+const segmenter = (granularity) => {
+  try { return new Intl.Segmenter('ru', { granularity }); } catch (_) { return null; }
+};
+const wordSegmenter = segmenter('word');
+const sentenceSegmenter = segmenter('sentence');
+
+/** Расстояние от точки до прямоугольника (0 — внутри). */
+function rectDistance(r, x, y) {
+  const dx = x < r.left ? r.left - x : x > r.right ? x - r.right : 0;
+  const dy = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+  return Math.hypot(dx, dy);
+}
+
+/** Видимый текстовый узел: в свёрнутой цитате текст есть, но не нарисован. */
+function renderedText(t) {
+  const p = t.parentElement;
+  return !!p && p.getClientRects().length > 0;
+}
+
+/**
+ * Символ под точкой среди текста `scope` (узел и номер символа): ближайший
+ * по прямоугольникам. Тап между строк или у края — ближайший символ.
+ */
+function charNear(scope, x, y) {
+  const range = document.createRange();
+  let best = null;
+  let bestD = Infinity;
+  let budget = 20000;
+  const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+  for (let t = walker.nextNode(); t && budget > 0; t = walker.nextNode()) {
+    if (!t.nodeValue.trim() || !renderedText(t)) continue;
+    range.selectNodeContents(t);
+    let nodeD = Infinity;
+    for (const r of range.getClientRects()) nodeD = Math.min(nodeD, rectDistance(r, x, y));
+    if (nodeD > bestD) continue;
+    const n = t.nodeValue.length;
+    budget -= n;
+    for (let i = 0; i < n; i++) {
+      range.setStart(t, i);
+      range.setEnd(t, i + 1);
+      const r = range.getBoundingClientRect();
+      if (!r.width && !r.height) continue;
+      const d = rectDistance(r, x, y);
+      if (d < bestD) {
+        bestD = d;
+        best = { node: t, offset: i };
+        if (d === 0) return best;
+      }
+    }
+  }
+  return best;
+}
+
+/** Символ под пальцем в письме или null (тап мимо текста). */
+function charAt(shadow, x, y) {
+  if (document.caretPositionFromPoint) {
+    try {
+      const p = document.caretPositionFromPoint(x, y, { shadowRoots: [shadow] });
+      const n = p && p.offsetNode;
+      if (n && n.nodeType === Node.TEXT_NODE && shadow.contains(n)) {
+        // Каретка — между символами: символ под пальцем — тот, чей
+        // прямоугольник ближе (справа или слева от каретки).
+        const c = charNear(n.parentNode, x, y);
+        if (c) return c;
+      }
+    } catch (_) { /* старый движок: shadowRoots не понимает */ }
+  }
+  const el = shadow.elementFromPoint(x, y);
+  if (!el || !shadow.contains(el)) return null;
+  return charNear(el, x, y);
+}
+
+const INLINE_DISPLAY = /^(inline|contents|ruby)/;
+
+/** Блок, в котором ищутся границы: ближайший не-строчный предок. */
+function blockOf(node, root) {
+  let el = node.parentElement;
+  while (el && el !== root) {
+    if (!INLINE_DISPLAY.test(getComputedStyle(el).display)) return el;
+    el = el.parentElement;
+  }
+  return root;
+}
+
+/**
+ * Текст блока строкой и куски — какой узел какой отрезок строки дал.
+ * `<br>`, вложенные блоки и скрытый текст — перенос строки: границы
+ * выделения через них не идут.
+ */
+function blockText(block) {
+  let s = '';
+  const pieces = [];
+  const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if (n.nodeType === Node.ELEMENT_NODE) {
+      if (n.tagName === 'BR' || !INLINE_DISPLAY.test(getComputedStyle(n).display)) s += '\n';
+      continue;
+    }
+    if (!renderedText(n)) { s += '\n'; continue; }
+    pieces.push({ node: n, start: s.length, end: s.length + n.nodeValue.length });
+    s += n.nodeValue;
+  }
+  return { s, pieces };
+}
+
+/** Позиция в строке блока → точка DOM (`atEnd` — конец отрезка, а не начало). */
+function domPoint(pieces, pos, atEnd) {
+  for (const p of pieces) {
+    if (atEnd ? (pos > p.start && pos <= p.end) : (pos >= p.start && pos < p.end)) {
+      return { node: p.node, offset: pos - p.start };
+    }
+  }
+  return null;
+}
+
+/** Отрезок сегмента, в который попала позиция `i` строки `s`. */
+function segmentAt(seg, s, i) {
+  for (const x of seg.segment(s)) {
+    if (i >= x.index && i < x.index + x.segment.length) return [x.index, x.index + x.segment.length, x];
+  }
+  return null;
+}
+
+/**
+ * Границы выделения в строке `line` вокруг символа `i`: слово (без
+ * сегментатора — буквы и цифры подряд) или предложение (без сегментатора —
+ * вся строка). Пробелы по краям не берём.
+ */
+function boundsIn(line, i, kind) {
+  let a = 0, b = line.length;
+  if (kind === 'word') {
+    if (wordSegmenter) {
+      const hit = segmentAt(wordSegmenter, line, i);
+      if (hit) [a, b] = hit;
+    } else {
+      const w = /[\p{L}\p{N}_]/u;
+      a = i; b = i + 1;
+      if (w.test(line[i])) {
+        while (a > 0 && w.test(line[a - 1])) a--;
+        while (b < line.length && w.test(line[b])) b++;
+      }
+    }
+  } else if (sentenceSegmenter) {
+    const hit = segmentAt(sentenceSegmenter, line, i);
+    if (hit) [a, b] = hit;
+  }
+  while (a < b && /\s/.test(line[a])) a++;
+  while (b > a && /\s/.test(line[b - 1])) b--;
+  return b > a ? [a, b] : null;
+}
+
+/** Последнее письмо, в котором выделяли серией тапов (для маркеров). */
+let selectionShadow = null;
+
+/**
+ * Выделить слово (`word`) или фразу (`sentence`) под точкой в письме.
+ * Ответ — выделенный Range или null (тап мимо текста).
+ */
+function selectAt(shadow, root, x, y, kind) {
+  const c = charAt(shadow, x, y);
+  if (!c) return null;
+  const { s, pieces } = blockText(blockOf(c.node, root));
+  const piece = pieces.find((p) => p.node === c.node);
+  if (!piece) return null;
+  const i = piece.start + c.offset;
+  const ls = s.lastIndexOf('\n', i - 1) + 1;
+  const le = s.indexOf('\n', i) < 0 ? s.length : s.indexOf('\n', i);
+  const b = boundsIn(s.slice(ls, le), i - ls, kind);
+  if (!b) return null;
+  const from = domPoint(pieces, ls + b[0], false);
+  const to = domPoint(pieces, ls + b[1], true);
+  if (!from || !to) return null;
+  const r = document.createRange();
+  r.setStart(from.node, from.offset);
+  r.setEnd(to.node, to.offset);
+  const sel = window.getSelection();
+  try {
+    sel.setBaseAndExtent(from.node, from.offset, to.node, to.offset);
+  } catch (_) {
+    sel.removeAllRanges();
+    sel.addRange(r);
+  }
+  selectionShadow = shadow;
+  return r;
+}
+
+/**
+ * Выделение внутри письма — как Range (для его прямоугольников) или null.
+ * Письмо — то, где выделяли серией тапов, иначе любое из ленты (выделение
+ * мог поставить и сам движок).
+ */
+function selectionRange() {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || typeof sel.getComposedRanges !== 'function') return null;
+  const roots = [];
+  if (selectionShadow && selectionShadow.host.isConnected) roots.push(selectionShadow);
+  for (const e of bubbles.values()) if (e.shadow !== selectionShadow) roots.push(e.shadow);
+  if (!roots.length) return null;
+  const inside = (n) => roots.find((r) => r.contains(n));
+  let ranges = null;
+  try { ranges = sel.getComposedRanges({ shadowRoots: roots }); } catch (_) { /* старая подпись */ }
+  if (!ranges || !ranges.length || !inside(ranges[0].startContainer)) {
+    try { ranges = sel.getComposedRanges(...roots); } catch (_) { return null; }
+  }
+  const sr = ranges && ranges[0];
+  if (!sr || sr.collapsed) return null;
+  const root = inside(sr.startContainer);
+  if (!root) return null;
+  const r = document.createRange();
+  try {
+    r.setStart(sr.startContainer, sr.startOffset);
+    r.setEnd(sr.endContainer, sr.endOffset);
+  } catch (_) { return null; }
+  selectionShadow = root;
+  return r;
+}
+
+/**
+ * Клавиатура открыта (фокус в строке ввода; говорит нативная часть,
+ * `ddm.keyboard`). Тогда WKWebView второй тап серии документу не отдаёт и
+ * выделяет слово сам — без меню. Такое выделение документ замечает по
+ * `selectionchange` и просит меню у нативной части, как для своего.
+ */
+let keyboardUp = false;
+let selectionMenuTimer = 0;
+if (touchWebKit) {
+  document.addEventListener('selectionchange', () => {
+    if (!keyboardUp) return;
+    clearTimeout(selectionMenuTimer);
+    selectionMenuTimer = setTimeout(() => {
+      const r = selectionRange();
+      if (!r || r.collapsed) return;
+      const b = r.getBoundingClientRect();
+      native('selectionMenu', b.left + scrollX, b.top + scrollY, b.width, b.height);
+    }, 300);
+  });
+}
+
+/**
+ * Палец у маркера выделения (начало или конец): долгое нажатие тогда не
+ * перехватываем — маркер тянут. Где выделение не узнать (нет
+ * `getComposedRanges`), любое непустое выделение отдаёт палец системе.
+ */
+function nearSelectionHandle(x, y) {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed && !sel.toString()) return false;
+  const r = selectionRange();
+  if (!r) return !!sel.toString();
+  if (r.collapsed) return false;
+  const rects = [...r.getClientRects()].filter((q) => q.width || q.height);
+  if (!rects.length) return false;
+  const first = rects[0];
+  const last = rects[rects.length - 1];
+  const R = 36;
+  return Math.hypot(x - first.left, y - (first.top + first.bottom) / 2) < R ||
+    Math.hypot(x - last.right, y - (last.top + last.bottom) / 2) < R;
+}
+
+/**
+ * Серия тапов по телу письма: второй тап — слово, третий — предложение.
+ *
+ * WKWebView (iPhone/iPad): тап серии гасим на `touchend` (`preventDefault`:
+ * ни клика по ссылке, ни масштаба) и выделяем сами — маркеры и меню WebKit
+ * показывает и для выделения из скрипта.
+ *
+ * Chromium (Android WebView): выделение из скрипта он рисует без маркеров и
+ * меню, а тап по уже выделенному тексту показывает их (и шлёт `contextmenu`,
+ * его пропускает onLongPress). Поэтому выделяем на `touchstart` тапа серии —
+ * сам тап приходится уже на выделение. Сорвался тап в прокрутку — снимаем.
+ *
+ * Клики серии (по ссылкам в том числе) не проходят: открывает только
+ * одиночный тап.
+ */
+function wireTapSeries(host, shadow, root) {
+  if (!('ontouchstart' in window)) return;
+  let count = 0, lastEnd = 0, lx = 0, ly = 0;
+  let sx = 0, sy = 0, st = 0, moved = true, early = false, swallowClickUntil = 0;
+  const inSeries = (now) => now - lastEnd < SERIES_GAP_MS && Math.hypot(sx - lx, sy - ly) < SERIES_SLOP;
+  const kindOf = (n) => (n === 2 ? 'word' : 'sentence');
+  host.addEventListener('touchstart', (e) => {
+    early = false;
+    moved = e.touches.length !== 1;
+    if (moved) { count = 0; return; }
+    sx = e.touches[0].clientX; sy = e.touches[0].clientY; st = Date.now();
+    if (!touchWebKit && count >= 1 && inSeries(st)) {
+      early = !!selectAt(shadow, root(), sx, sy, kindOf(count + 1));
+      if (early) swallowClickUntil = st + TAP_MAX_MS + SERIES_GAP_MS;
+    }
+  }, { passive: true });
+  host.addEventListener('touchmove', (e) => {
+    const t = e.touches[0];
+    if (moved || !t || Math.hypot(t.clientX - sx, t.clientY - sy) <= TAP_SLOP) return;
+    moved = true;
+    if (early) { window.getSelection().removeAllRanges(); early = false; }
+  }, { passive: true });
+  host.addEventListener('touchcancel', () => { moved = true; count = 0; }, { passive: true });
+  host.addEventListener('touchend', (e) => {
+    const now = Date.now();
+    if (moved || now - st > TAP_MAX_MS) { count = 0; return; }
+    count = inSeries(now) ? count + 1 : 1;
+    lastEnd = now; lx = sx; ly = sy;
+    if (count < 2) return;
+    swallowClickUntil = now + SERIES_GAP_MS;
+    if (early) return;
+    if (e.cancelable) e.preventDefault();
+    const x = sx, y = sy, kind = kindOf(count);
+    const select = () => {
+      const r = selectAt(shadow, root(), x, y, kind);
+      // Меню «Скопировать» у выделения из скрипта WebKit не показывает —
+      // его показывает нативная часть (ConversationWeb.swift) над выделением.
+      if (r && touchWebKit) {
+        const b = r.getBoundingClientRect();
+        native('selectionMenu', b.left + scrollX, b.top + scrollY, b.width, b.height);
+      }
+      return r;
+    };
+    if (!select() || !touchWebKit) return;
+    // Была открыта клавиатура (фокус в строке ввода): WebKit, забирая фокус
+    // после первого тапа, следом снимает выделение, а уход клавиатуры
+    // закрывает меню — тогда ставим их ещё раз, пока фокус не устоится.
+    // Следующий тап серии (лишнее касание) отменяет повтор.
+    const at = lastEnd;
+    let redone = false;
+    for (const ms of [350, 900]) {
+      setTimeout(() => {
+        if (lastEnd !== at) return;
+        if (!ddm.selectedText()) redone = true;
+        if (redone) select();
+      }, ms);
+    }
+  }, { passive: false });
+  host.addEventListener('click', (e) => {
+    if (Date.now() < swallowClickUntil) { e.preventDefault(); e.stopPropagation(); }
+  }, true);
+}
 
 const feed = document.getElementById('feed');
 const olderEl = document.getElementById('older');
@@ -611,6 +1023,8 @@ function makeRow(msg) {
   onLongPress(row, () => native('bubbleMenu', msg.uid));
 
   const entry = { msg, host, shadow, root: null, imagesAllowed: !!msg.imagesAllowed, imagesBtn, imagesBox, row, deliveryEl };
+  // Двойной тап — слово, тройной — фраза; дальше системные маркеры.
+  wireTapSeries(host, shadow, () => entry.root);
   // «Показать» — на это письмо до закрытия беседы; «Всегда» — запоминает
   // нативный код для отправителя (политика по отправителю, как у десктопа).
   imagesBtn.addEventListener('click', () => allowImages(entry));
@@ -838,6 +1252,44 @@ const ddm = {
     if (!s) return;
     s.row.remove();
     stubs.delete(key);
+  },
+
+  /**
+   * Текст выделения для «Скопировать» нативной части. WebKit для выделения
+   * внутри shadow root отдаёт из `getSelection().toString()` пустую строку —
+   * текст берётся из составного диапазона письма.
+   */
+  selectedText() {
+    const r = selectionRange();
+    const t = r ? r.toString() : '';
+    return t || String(window.getSelection() || '');
+  },
+
+  /** Клавиатура открылась/закрылась (WKWebView, см. keyboardUp). */
+  keyboard(on) {
+    const was = keyboardUp;
+    keyboardUp = !!on;
+    if (!was || keyboardUp || !touchWebKit) return;
+    // Первый тап по письму убрал клавиатуру, второй WebKit забрал себе и
+    // выделил слово сам — без меню и без `selectionchange`. Секунду смотрим,
+    // не появилось ли выделение, и просим к нему меню.
+    let tries = 12;
+    const poll = setInterval(() => {
+      const r = selectionRange();
+      if (r && !r.collapsed) {
+        clearInterval(poll);
+        const b = r.getBoundingClientRect();
+        native('selectionMenu', b.left + scrollX, b.top + scrollY, b.width, b.height);
+      } else if (--tries <= 0) clearInterval(poll);
+    }, 100);
+  },
+
+  /** Прямоугольник выделения в CSS px документа `[x, y, w, h]` или null. */
+  selectionRect() {
+    const r = selectionRange();
+    if (!r || r.collapsed) return null;
+    const b = r.getBoundingClientRect();
+    return [b.left + scrollX, b.top + scrollY, b.width, b.height];
   },
 
   version: NORMALIZER_VERSION,

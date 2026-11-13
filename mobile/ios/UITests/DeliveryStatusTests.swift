@@ -61,9 +61,12 @@ final class DeliveryStatusTests: XCTestCase {
         // поверх списка — назад к нему.
         let row = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier ENDSWITH %@", "|loko@\(deadDomain)")).firstMatch
-        if !row.waitForExistence(timeout: 3) || !row.isHittable {
-            let back = app.navigationBars.buttons.firstMatch
-            if back.exists { back.tap() }
+        // «Назад» панели (первой кнопкой бывает не она); первый тап после
+        // закрытия меню пузыря может уйти в его анимацию — до трёх попыток.
+        let back = app.navigationBars.buttons.matching(NSPredicate(format: "identifier == 'BackButton' OR label == 'Назад'")).firstMatch
+        for _ in 0..<3 where !(row.waitForExistence(timeout: 3) && row.isHittable) {
+            if back.exists { back.tap() } else if app.navigationBars.buttons.firstMatch.exists { app.navigationBars.buttons.firstMatch.tap() }
+            sleep(1)
         }
         XCTAssertTrue(row.waitForExistence(timeout: 10), "нет строки беседы с \(deadDomain)")
         XCTAssertTrue(row.label.contains("Не доставлено"), "у строки нет отметки «Не доставлено»: \(row.label)")
