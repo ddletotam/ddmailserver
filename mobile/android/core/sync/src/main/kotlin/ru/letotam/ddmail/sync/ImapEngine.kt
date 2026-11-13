@@ -438,6 +438,28 @@ class ImapEngine(
         rebuild()
     }
 
+    /**
+     * Отдельные письма — как беседы: `\Deleted` и `EXPUNGE`. Пузырь лента уже
+     * убрала; кэш заголовков — после ответа сервера, беседы пересобираются.
+     */
+    override suspend fun deleteMessages(c: Conversation, refs: List<MessageRef>) {
+        if (refs.isEmpty()) return
+        val groups = byRole(refs)
+        edit { client, r ->
+            for ((role, uids) in groups) {
+                val name = r[role] ?: continue
+                client.select(name)
+                client.delete(uids)
+            }
+        }
+        groups.forEach { (role, uids) -> dao.dropImapMessages(accountKey, role.code, uids, role.pack(0)) }
+        refs.forEach { raw.remove(it.uid) }
+        rebuild()
+    }
+
+    /** Письмо целиком: из кэша сырых писем или `BODY.PEEK[]`. */
+    override suspend fun source(uid: Long): ByteArray = rawOf(uid)
+
     /** «В спам» — перенос в Junk (`UID MOVE`, без MOVE — копия и удаление). Правил нет. */
     override suspend fun spam(convs: Collection<Conversation>, scope: String): SpamOutcome {
         val ham = convs.filter { !it.spam }
@@ -698,6 +720,10 @@ internal class RawCache(private val dir: File) {
                 if (total > LIMIT) f.delete()
             }
         }
+    }
+
+    fun remove(packed: Long) {
+        File(dir, "$packed.eml").delete()
     }
 
     fun clear() {

@@ -297,9 +297,10 @@ private fun WideCalendar(vm: CalendarViewModel, yearCols: Int) {
             Text(title, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             // Переключатель вида узкий: на 712 dp заголовку периода нужно место.
             SingleChoiceSegmentedButtonRow(Modifier.width(184.dp)) {
+                // По убыванию охвата, как у десктопа (mobile-layout.md): Год / Месяц / Неделя / День.
                 val opts = listOf(
-                    CalView.Day to Icons.Filled.CalendarViewDay, CalView.Week to Icons.Filled.CalendarViewWeek,
-                    CalView.Month to Icons.Filled.CalendarViewMonth, CalView.Year to Icons.Filled.GridView,
+                    CalView.Year to Icons.Filled.GridView, CalView.Month to Icons.Filled.CalendarViewMonth,
+                    CalView.Week to Icons.Filled.CalendarViewWeek, CalView.Day to Icons.Filled.CalendarViewDay,
                 )
                 val names = mapOf(CalView.Day to "День", CalView.Week to "Неделя", CalView.Month to "Месяц", CalView.Year to "Год")
                 opts.forEachIndexed { i, (v, icon) ->

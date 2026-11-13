@@ -277,6 +277,22 @@ abstract class CacheDao {
     @Query("DELETE FROM conversations WHERE accountKey = :account AND id IN (:ids)")
     protected abstract suspend fun dropConversations(account: String, ids: List<String>)
 
+    @Query("DELETE FROM conversation_messages WHERE accountKey = :account AND uid IN (:uids)")
+    protected abstract suspend fun dropRefsByUid(account: String, uids: List<Long>)
+
+    @Query("DELETE FROM message_bodies WHERE accountKey = :account AND uid IN (:uids)")
+    protected abstract suspend fun dropBodiesByUid(account: String, uids: List<Long>)
+
+    /** Отдельные письма удалены (меню пузыря): из бесед сразу, пустые беседы — целиком. */
+    @Transaction
+    open suspend fun deleteMessages(account: String, uids: List<Long>) {
+        uids.chunked(500).forEach {
+            dropRefsByUid(account, it)
+            dropBodiesByUid(account, it)
+        }
+        deleteEmptyConversations(account)
+    }
+
     /** Беседы удалены целиком (оптимистично, до ответа журнала). */
     @Transaction
     open suspend fun deleteConversations(account: String, ids: List<String>) {

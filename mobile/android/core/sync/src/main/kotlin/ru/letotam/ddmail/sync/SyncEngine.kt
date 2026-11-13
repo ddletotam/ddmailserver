@@ -243,6 +243,19 @@ class SyncEngine(
     }
 
     /**
+     * Отдельные письма: из кэша сразу (беседа без писем уходит, как по
+     * надгробиям журнала), на сервере — тем же `/messages/delete`. Строку
+     * беседы (тему, счётчик) поправит следующий синк.
+     */
+    override suspend fun deleteMessages(c: Conversation, refs: List<MessageRef>) {
+        if (refs.isEmpty()) return
+        dao.deleteMessages(cacheKey(c), refs.map { it.uid })
+        refs.chunked(200).forEach { api.delete(it) }
+    }
+
+    override suspend fun source(uid: Long): ByteArray = api.source(uid)
+
+    /**
      * Положить беседы в папку руками (`null` — во «Входящие») одной правкой
      * документа (§5). Чужая правка между чтением и записью (`409`) — правка
      * повторяется поверх свежего документа: назначение диалогов с чужими
@@ -323,7 +336,11 @@ class SyncEngine(
         emptyList()
     }
 
-    suspend fun openSocket(onEvent: (String, kotlinx.serialization.json.JsonObject) -> Unit, onClosed: (Boolean) -> Unit) = api.openSocket(onEvent, onClosed)
+    suspend fun openSocket(
+        onEvent: (String, kotlinx.serialization.json.JsonObject) -> Unit,
+        onClosed: (Boolean) -> Unit,
+        onOpen: () -> Unit = {},
+    ) = api.openSocket(onEvent, onClosed, onOpen)
 
     suspend fun avatar(email: String): Binary? = api.avatar(email)
 

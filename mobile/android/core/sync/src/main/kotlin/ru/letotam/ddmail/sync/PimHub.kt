@@ -203,6 +203,7 @@ class PimHub(
         if (id >= 0) return ddmail?.deleteEvent(id) ?: noServer()
         val r = lock.withLock { events[id] } ?: throw ApiException.Server(404, "Событие не найдено — обновите календарь")
         write(r.col.account) { c ->
+            DavPim.requireWrite(r.col.col)
             val etag = runCatching { c.get(r.href).second }.getOrNull() ?: r.etag
             c.delete(r.href, etag)
         }
@@ -218,14 +219,15 @@ class PimHub(
         val server = async { ddmail?.contacts(limit).orEmpty() }
         ensureBooks()
         val cols = lock.withLock { books.entries.toList() }
-        val dav = cols.map { (_, c) ->
+        val dav = cols.map { (bookId, c) ->
             async {
                 try {
                     val client = client(c.account) ?: return@async emptyList()
                     DavPim.contacts(client, c.col.url).map { ct ->
                         val id = negId(c.account.key + "\n" + c.col.url + "\n" + ct.href)
                         lock.withLock { contactRefs[id] = CtRef(c, ct.href, ct.etag, ct.uid) }
-                        ct.contact.copy(id = id)
+                        // Права — у книги (`current-user-privilege-set`): только чтение — без правки (§15).
+                        ct.contact.copy(id = id, addressBookId = bookId, canWrite = c.col.canWrite)
                     }
                 } catch (e: MailException) {
                     noted(c.account, e)
@@ -257,9 +259,19 @@ class PimHub(
         if (id >= 0) return ddmail?.patchContact(id, req) ?: noServer()
         val r = lock.withLock { contactRefs[id] } ?: throw ApiException.Server(404, "Контакт не найден — обновите")
         write(r.col.account) { c ->
-            val etag = runCatching { c.get(r.href).second }.getOrNull() ?: r.etag
-            val card = VCard.build(r.uid.ifEmpty { UUID.randomUUID().toString() }, req.fullName, req.emails, req.phones, req.organization, req.title)
-            c.put(r.href, card, "text/vcard; charset=utf-8", etag?.let { Precondition.IfMatch(it) } ?: Precondition.None)
+            DavPim.requireWrite(r.col.col)
+            // Правка по строкам (§15): фото, дни рождения, адреса, заметки и
+            // X-свойства карточки остаются; ETag — против чужой правки между
+            // чтением и записью. Пересборка из полей формы стирала всё это.
+            val (raw, etag) = c.get(r.href)
+            val patch = ru.letotam.ddmail.dav.VCardEdit.Patch(req.fullName, req.emails, req.phones, req.organization, req.title)
+            val edited = try {
+                ru.letotam.ddmail.dav.VCardEdit.apply(raw, patch)
+            } catch (e: ru.letotam.ddmail.dav.VCardEdit.NoVCard) {
+                throw MailException.Rejected("Карточка контакта на сервере повреждена — правка не сохранена")
+            }
+            if (edited.changed.isEmpty()) return@write
+            c.put(r.href, edited.data, "text/vcard; charset=utf-8", (etag ?: r.etag)?.let { Precondition.IfMatch(it) } ?: Precondition.None)
         }
     }
 
@@ -267,6 +279,7 @@ class PimHub(
         if (id >= 0) return ddmail?.deleteContact(id) ?: noServer()
         val r = lock.withLock { contactRefs[id] } ?: throw ApiException.Server(404, "Контакт не найден — обновите")
         write(r.col.account) { c ->
+            DavPim.requireWrite(r.col.col)
             val etag = runCatching { c.get(r.href).second }.getOrNull() ?: r.etag
             c.delete(r.href, etag)
         }

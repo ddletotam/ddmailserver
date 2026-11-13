@@ -128,9 +128,16 @@ internal suspend fun Call.awaitBody(): String = suspendCancellableCoroutine { co
     })
 }
 
-/** Сервер отвечает ошибкой `{"error": "..."}`; не JSON — текст как есть. */
-private fun errorText(body: String): String = try {
-    DdmailApi.json.parseToJsonElement(body).jsonObject["error"]?.jsonPrimitive?.content ?: body
+/**
+ * Сервер отвечает ошибкой `{"error": "..."}`; не JSON — текст как есть.
+ * Отказ с машинным кодом (`{"error", "code", "message"}`, например 403
+ * `address_book_read_only`) несёт `message` — текст на языке пользователя:
+ * его и показываем.
+ */
+internal fun errorText(body: String): String = try {
+    val o = DdmailApi.json.parseToJsonElement(body).jsonObject
+    val human = o["message"]?.jsonPrimitive?.content?.takeIf { o["code"] != null && it.isNotBlank() }
+    human ?: o["error"]?.jsonPrimitive?.content ?: body
 } catch (_: Exception) {
     body
 }.trim()

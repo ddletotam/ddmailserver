@@ -92,6 +92,7 @@ class MainActivity : ComponentActivity() {
         intent.getLongExtra(EXTRA_EVENT_ID, 0).takeIf { it != 0L }?.let { app.eventRequests.value = it to occ }
         intent.getLongExtra(EXTRA_SNOOZE_EVENT, 0).takeIf { it != 0L }?.let { app.snoozeRequests.value = it to occ }
         // Повторная доставка того же интента (поворот, возврат) не должна снова открывать.
+        intent.removeExtra(EXTRA_OPEN)
         intent.removeExtra(EXTRA_EVENT_ID)
         intent.removeExtra(EXTRA_SNOOZE_EVENT)
     }

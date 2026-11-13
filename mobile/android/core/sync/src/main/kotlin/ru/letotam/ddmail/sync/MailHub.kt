@@ -143,6 +143,11 @@ class MailHub(
     suspend fun deleteConversations(convs: Collection<Conversation>) =
         convs.groupBy { it.accountKey }.forEach { (k, list) -> tracked(k) { of(list[0]).deleteConversations(list) } }
 
+    suspend fun deleteMessages(c: Conversation, refs: List<MessageRef>) = tracked(c.accountKey) { of(c).deleteMessages(c, refs) }
+
+    suspend fun source(accountKey: String, uid: Long): ByteArray =
+        tracked(accountKey) { (source(accountKey) ?: throw MailException.Rejected("нет учётки")).source(uid) }
+
     suspend fun restoreSpam(convs: Collection<Conversation>, trust: Boolean): Int =
         convs.groupBy { it.accountKey }.entries.sumOf { (k, list) -> tracked(k) { of(list[0]).restoreSpam(list, trust) } }
 

@@ -123,6 +123,9 @@ fun SettingsDialog(
     }
     val prefetch by settings.prefetch.collectAsState(initial = null)
     val notify by settings.notifications.collectAsState(initial = true)
+    val senders by settings.imageSendersFlow.collectAsState(initial = emptySet())
+    var externalOpen by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    if (externalOpen) ExternalContentDialog(settings) { externalOpen = false }
     val scope = rememberCoroutineScope()
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -174,6 +177,24 @@ fun SettingsDialog(
                         }
                         Switch(checked = notify, onCheckedChange = { v -> scope.launch { settings.setNotifications(v) } })
                     }
+                    NotificationsBlocked(notify)
+                    HorizontalDivider()
+                    // Десктоп §5г, вкладка «Внешний контент»: от кого картинки — всегда.
+                    Row(
+                        Modifier.fillMaxWidth().clickable { externalOpen = true }.padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Внешний контент", style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                if (senders.isEmpty()) "Картинки в письмах — по нажатию «Показать картинки»"
+                                else "Картинки всегда показываются от отправителей: ${senders.size}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     HorizontalDivider()
                     folders?.let {
                         Section("Папки")
@@ -214,6 +235,99 @@ fun SettingsDialog(
                     }
                     Section("О приложении")
                     Text("ddmail для Android, версия ${BuildConfig.VERSION_NAME}")
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Уведомления включены здесь, но запрещены системой (Android 13+: разрешение
+ * не дали, или канал выключен в настройках телефона) — сказать об этом и
+ * открыть системный экран уведомлений приложения: выключатель «включено»
+ * иначе врёт.
+ */
+@Composable
+private fun NotificationsBlocked(on: Boolean) {
+    if (!on) return
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var allowed by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf(androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled())
+    }
+    // Вернулись из системных настроек — проверить заново.
+    androidx.lifecycle.compose.LifecycleResumeEffect(Unit) {
+        allowed = androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled()
+        onPauseOrDispose { }
+    }
+    if (allowed) return
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(Icons.Filled.NotificationsOff, null, tint = MaterialTheme.colorScheme.error)
+        Spacer(Modifier.width(8.dp))
+        Text(
+            "Уведомления запрещены в настройках телефона",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(onClick = {
+            val i = android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            runCatching { context.startActivity(i) }
+        }) { Text("Разрешить") }
+    }
+}
+
+/**
+ * «Настройки → Внешний контент» (десктоп §5г, вкладка 1): от кого картинки
+ * показываются всегда (кнопка «Всегда от <адрес>» под письмом) — список с
+ * отзывом. Разрешения живут на телефоне; в «Спаме» они не действуют.
+ */
+@Composable
+private fun ExternalContentDialog(settings: AppSettings, onClose: () -> Unit) {
+    val senders by settings.imageSendersFlow.collectAsState(initial = emptySet())
+    val scope = rememberCoroutineScope()
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Column(Modifier.fillMaxSize().systemBarsPadding()) {
+                Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") }
+                    Text("Внешний контент", style = MaterialTheme.typography.titleLarge)
+                }
+                HorizontalDivider()
+                Column(
+                    Modifier.fillMaxWidth().widthIn(max = 640.dp).verticalScroll(rememberScrollState()).padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Section("Всегда показывать картинки от")
+                    val list = senders.sorted()
+                    if (list.isEmpty()) {
+                        Text(
+                            "Пока никого. Под письмом с картинками — «Всегда от <адрес>».",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    list.forEach { addr ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(addr, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                            IconButton(onClick = { scope.launch { settings.revokeImages(listOf(addr)) } }) {
+                                Icon(Icons.Filled.Close, "Отозвать: $addr", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                    if (list.size > 1) {
+                        OutlinedButton(onClick = { scope.launch { settings.revokeImages(list) } }) {
+                            Icon(Icons.Filled.Delete, null, tint = MaterialTheme.colorScheme.error)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Отозвать все", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                    Text(
+                        "Внешняя картинка сообщает отправителю, что письмо открыто, и раскрывает ваш IP-адрес. " +
+                            "Отозванным — снова по нажатию «Показать картинки». В «Спаме» разрешения не действуют.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }

@@ -32,6 +32,17 @@ class AppSettings(private val context: Context) {
         it[imageSendersKey] = it[imageSendersKey].orEmpty() + addr.trim().lowercase()
     }
 
+    /** Те же отправители потоком — для «Настройки → Внешний контент». */
+    val imageSendersFlow: Flow<Set<String>> = context.settingsStore.data.map { it[imageSendersKey].orEmpty() }
+
+    /** Отозвать: картинки этих отправителей — снова по нажатию «Показать картинки». */
+    suspend fun revokeImages(addrs: Collection<String>) = context.settingsStore.edit {
+        it[imageSendersKey] = it[imageSendersKey].orEmpty() - addrs.map { a -> a.trim().lowercase() }.toSet()
+    }
+
+    /** Ушла последняя учётка: разрешения прежнего владельца на телефоне не остаются. */
+    suspend fun clearImageSenders() = context.settingsStore.edit { it.remove(imageSendersKey) }
+
     /** `null` — ещё не спрашивали: после первого входа спросить. */
     val prefetch: Flow<Prefetch?> = context.settingsStore.data.map { p ->
         p[prefetchKey]?.let { v -> Prefetch.entries.firstOrNull { it.name == v } }

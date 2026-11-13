@@ -22,6 +22,8 @@ import ru.letotam.ddmail.api.MessageBody
 import ru.letotam.ddmail.api.MessageRef
 import ru.letotam.ddmail.sync.Conversation
 import ru.letotam.ddmail.sync.MailHub
+import ru.letotam.ddmail.sync.MessageSource
+import ru.letotam.ddmail.sync.errorText
 import ru.letotam.ddmail.sync.isAuthError
 import ru.letotam.ddmail.sync.isMailError
 import java.io.File
@@ -54,6 +56,17 @@ class ConversationController(
     private var loaded = 0
     private val shown = mutableSetOf<Long>()
 
+    /** Письма, показанные текстовой версией (`ddm.view`, «Показать… → Текстовую версию»). */
+    private val textView = mutableSetOf<Long>()
+
+    /** Скачанные для просмотра вложения; каталог чистится на запуске. */
+    private val attachDir = File(app.cacheDir, "attachments")
+
+    init {
+        // Остатки прошлых сеансов (просмотр, «Поделиться») — прочь: иначе каталог только растёт.
+        scope.launch(Dispatchers.IO) { runCatching { attachDir.deleteRecursively() } }
+    }
+
     /** Тела показанных писем — для веток ответа и меню пузыря. */
     private val loadedBodies = java.util.concurrent.ConcurrentHashMap<Long, MessageBody>()
 
@@ -71,6 +84,7 @@ class ConversationController(
         conv = c
         shown.clear()
         loadedBodies.clear()
+        textView.clear()
         // До документа новой беседы: прежние разрешения ей не достаются.
         gate.open(c?.spam == true, c?.messages.orEmpty().map { it.uid })
         if (c == null) return
@@ -119,8 +133,13 @@ class ConversationController(
                 val before = pages.associateBy { it.uid }
                 val fresh = c.messages.filter { it.uid !in before }
                 val changed = c.messages.filter { r -> r.uid in shown && before[r.uid]?.let { it.deliveryStatus != r.deliveryStatus } == true }
+                // Письма, которых в беседе больше нет (удалены здесь или на
+                // другом устройстве), — пузыри прочь.
+                val (gone, keep) = feedRemoved(pages, loaded, c.messages)
+                loaded = keep
+                dropFromFeed(gone)
+                if (c.messages.isNotEmpty()) pages = newestFirst(c.messages)
                 if (fresh.isEmpty() && changed.isEmpty()) return@launch
-                pages = newestFirst(c.messages)
                 for (b in load(changed)) js.send("ddm.delivery(${b.uid},${deliveryJson(b)})")
                 if (fresh.isEmpty()) return@launch
                 gate.extend(fresh.map { it.uid })
@@ -149,6 +168,69 @@ class ConversationController(
         js.trySend("ddm.delivery($uid,${deliveryJson(now)})")
     }
 
+    /** Убрать письма из ленты (удалены): пузыри, тела, отметки. */
+    private fun dropFromFeed(uids: List<Long>) {
+        if (uids.isEmpty()) return
+        uids.forEach {
+            shown.remove(it)
+            loadedBodies.remove(it)
+            textView.remove(it)
+        }
+        js.trySend("ddm.remove && ddm.remove(${JsonArray(uids.map { JsonPrimitive(it) })})")
+    }
+
+    /**
+     * «Удалить письмо» (меню пузыря): пузырь уходит сразу, кэш и сервер —
+     * источником учётки. Не вышло — беседа открывается заново такой, какой
+     * её видит кэш; итог словами — в [onDone].
+     */
+    fun delete(b: MessageBody, onDone: (String) -> Unit) {
+        val c = conv ?: return
+        val ref = c.messages.firstOrNull { it.uid == b.uid } ?: MessageRef(folder = b.folder, uid = b.uid, messageId = b.messageId)
+        scope.launch {
+            lock.withLock {
+                if (conv?.ref != c.ref) return@withLock
+                if (pages.take(loaded).any { it.uid == b.uid }) loaded--
+                pages = pages.filter { it.uid != b.uid }
+                dropFromFeed(listOf(b.uid))
+            }
+            try {
+                hub.deleteMessages(c, listOf(ref))
+                onDone("✓ Письмо удалено")
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException || !e.isMailError()) throw e
+                onDone("Не удалось удалить письмо: ${e.errorText()}")
+                if (conv?.ref == c.ref) open(conv)
+            }
+        }
+    }
+
+    /** Письмо показано текстовой версией — для пунктов «Текстовую версию» / «HTML-версию». */
+    fun showsText(uid: Long): Boolean = uid in textView
+
+    /** «Показать… → Текстовую версию» и обратно — на месте, в ленте. */
+    fun view(uid: Long, asText: Boolean) {
+        if (asText) textView.add(uid) else textView.remove(uid)
+        js.trySend("ddm.view && ddm.view($uid, '${if (asText) "text" else "html"}')")
+    }
+
+    /**
+     * «Показать… → Заголовки / Исходник сообщения»: письмо целиком с
+     * сервера (IMAP — `BODY.PEEK[]`), заголовки — до первой пустой строки.
+     */
+    suspend fun source(uid: Long, headersOnly: Boolean): String {
+        val key = conv?.accountKey ?: throw ru.letotam.ddmail.imap.MailException.Rejected("беседа закрыта")
+        val raw = hub.source(key, uid)
+        return withContext(Dispatchers.Default) {
+            MessageSource.text(if (headersOnly) MessageSource.headers(raw) else raw)
+        }
+    }
+
+    /** Документ ленты создан заново (упал процесс отрисовки WebView): текущую беседу — заново. */
+    fun restarted() {
+        conv?.let { open(it) }
+    }
+
     /** Часть `cid:` для документа — блокирующе, с потока перехватчика WebView. */
     fun part(uid: Long, cid: String): Pair<ByteArray, String>? =
         conv?.accountKey?.let { key -> blocking { hub.part(key, uid, cid) } }?.let { it.bytes to it.contentType }
@@ -159,21 +241,7 @@ class ConversationController(
      */
     fun openAttachment(uid: Long, index: Int, filename: String?) {
         scope.launch {
-            val key = conv?.accountKey ?: return@launch
-            val bin = try {
-                hub.attachment(key, uid, index)
-            } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                return@launch
-            }
-            val file = withContext(Dispatchers.IO) {
-                val dir = File(app.cacheDir, "attachments/$uid").apply { mkdirs() }
-                File(dir, safeName(filename ?: "attachment-$index")).apply { writeBytes(bin.bytes) }
-            }
-            val type = bin.contentType.substringBefore(';').trim().ifEmpty {
-                MimeTypeMap.getSingleton().getMimeTypeFromExtension(file.extension) ?: "application/octet-stream"
-            }
-            val uri = FileProvider.getUriForFile(app, "${app.packageName}.files", file)
+            val (uri, type) = download(uid, index, filename) ?: return@launch
             val intent = Intent(Intent.ACTION_VIEW).setDataAndType(uri, type)
                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
             try {
@@ -181,6 +249,52 @@ class ConversationController(
             } catch (_: ActivityNotFoundException) {
             }
         }
+    }
+
+    /**
+     * «Поделиться» вложением (как iOS §5 «Вложения»): системный выбор
+     * получателя, файл — через content:// с правом на чтение.
+     */
+    fun shareAttachment(uid: Long, index: Int, filename: String?, onError: (String) -> Unit) {
+        scope.launch {
+            val (uri, type) = download(uid, index, filename) ?: return@launch onError("Не удалось скачать вложение.")
+            val send = Intent(Intent.ACTION_SEND).setType(type)
+                .putExtra(Intent.EXTRA_STREAM, uri)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                // Право на чтение доходит до выбранного приложения через ClipData.
+                .apply { clipData = android.content.ClipData.newRawUri(filename.orEmpty(), uri) }
+            try {
+                app.startActivity(
+                    Intent.createChooser(send, null)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                )
+            } catch (_: ActivityNotFoundException) {
+                onError("Некуда отправить вложение.")
+            }
+        }
+    }
+
+    /**
+     * Вложение — в кэш (`attachments/<учётка>/<uid>/имя`) и content:// для
+     * чужих приложений. Каталог учётки — стабильный хеш: uid разных учёток
+     * пересекаются. `null` — не скачалось.
+     */
+    private suspend fun download(uid: Long, index: Int, filename: String?): Pair<android.net.Uri, String>? {
+        val key = conv?.accountKey ?: return null
+        val bin = try {
+            hub.attachment(key, uid, index)
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            return null
+        }
+        val file = withContext(Dispatchers.IO) {
+            val dir = File(attachDir, "${fnv(key)}/$uid").apply { mkdirs() }
+            File(dir, safeName(filename ?: "attachment-$index")).apply { writeBytes(bin.bytes) }
+        }
+        val type = bin.contentType.substringBefore(';').trim().ifEmpty {
+            MimeTypeMap.getSingleton().getMimeTypeFromExtension(file.extension) ?: "application/octet-stream"
+        }
+        return FileProvider.getUriForFile(app, "${app.packageName}.files", file) to type
     }
 
     private var senders: Set<String> = emptySet()
@@ -301,6 +415,16 @@ class ConversationController(
         fun newestFirst(refs: List<MessageRef>): List<MessageRef> =
             if (refs.any { (it.uid ushr 32) != 0L }) refs.reversed() else refs.sortedByDescending { it.uid }
 
+        /** FNV-1a 64 в hex — стабильное имя каталога учётки. */
+        fun fnv(s: String): String {
+            var h = -0x340d631b7bdddcdbL
+            for (b in s.toByteArray()) {
+                h = h xor (b.toLong() and 0xff)
+                h *= 0x100000001b3L
+            }
+            return java.lang.Long.toHexString(h)
+        }
+
         /** Имя файла без разделителей пути и управляющих символов. */
         fun safeName(name: String): String =
             name.replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_").trim().trimEnd('.').ifEmpty { "attachment" }
@@ -321,3 +445,16 @@ internal fun deliveryJson(status: String, error: String, failed: List<String>): 
 )
 
 internal fun deliveryJson(b: MessageBody): JsonObject = deliveryJson(b.deliveryStatus, b.deliveryError, b.deliveryFailed)
+
+/**
+ * Письма, пропавшие из беседы: какие из показанных убрать из ленты и сколько
+ * их теперь показано ([loaded] — первые в [pages], от нового к старому).
+ * Пустая беседа — не удаление всего: так выглядит и пересборка кэша, а ушедшую
+ * беседу закрывает список.
+ */
+internal fun feedRemoved(pages: List<MessageRef>, loaded: Int, now: List<MessageRef>): Pair<List<Long>, Int> {
+    if (now.isEmpty()) return emptyList<Long>() to loaded
+    val ids = now.mapTo(HashSet()) { it.uid }
+    val gone = pages.take(loaded).map { it.uid }.filter { it !in ids }
+    return gone to loaded - gone.size
+}

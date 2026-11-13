@@ -109,6 +109,44 @@ class ComposeController(
     /** Сменилась беседа — явный ответ и переопределения не переезжают в другую. */
     fun reset() = ui.update { ComposerUi(sheet = it.sheet) }
 
+    /**
+     * Где открыт композер: `ref` беседы, `new:<адрес>` — новая беседа, `null`
+     * — нигде. Композер один на все беседы, а итог отправки должен вернуться
+     * туда, откуда ушло письмо (десктоп §2).
+     */
+    private var place: String? = null
+
+    /** Не ушедшее письмо, чья беседа уже закрыта: ждёт, когда её откроют снова. */
+    private val returned = mutableMapOf<String, Returned>()
+
+    /** Новая беседа (откуда) → беседа её письма (куда), последняя такая смена. */
+    private var follow: Pair<String?, String?>? = null
+    private var followFrom: String? = null
+
+    /** Композер всё ещё там, откуда ушло письмо (или в беседе, сменившей «Новую беседу»). */
+    private fun here(origin: String?): Boolean =
+        place == origin || (origin != null && follow?.first == origin && follow?.second == place)
+
+    private class Returned(val draft: Draft, val replyTo: MessageBody?, val error: String?)
+
+    /**
+     * Открыли беседу (или новую): композер пуст; если письмо из неё не ушло,
+     * пока она была закрыта, — набранное (со стилями и картинками), явный
+     * ответ и причина возвращаются.
+     */
+    fun enter(where: String?) {
+        reset()
+        place = where
+        // «Новая беседа» сменилась беседой своего письма — итог его отправки — туда.
+        follow = followFrom?.let { it to where }
+        followFrom = null
+        val r = where?.let { returned.remove(it) } ?: return
+        ui.update { it.copy(draft = r.draft.reloaded(), replyTo = r.replyTo, error = r.error) }
+    }
+
+    /** Место новой беседы с адресатом [to] — для [enter]. */
+    fun newPlace(to: String) = "new:$to"
+
     fun openForward(b: MessageBody) = ui.update { it.copy(sheet = ComposeSheet(Branch.Forward(b, conversation.current?.accountKey.orEmpty()), Draft())) }
 
     fun editSheet(f: (Draft) -> Draft) = ui.update { u -> u.copy(sheet = u.sheet?.let { it.copy(draft = f(it.draft), error = null) }) }
@@ -117,6 +155,7 @@ class ComposeController(
 
     fun consumeTarget() {
         sentTarget.value = null
+        followFrom = place
     }
 
     /** Файлы из системного выбора; общий размер — в пределах лимита сервера. */
@@ -159,15 +198,21 @@ class ComposeController(
                 failedStubs.clear()
                 conversation.js.trySend("ddm.stub(${stubJson(key, draft, built.request.html)})")
                 ui.update { ComposerUi(sheet = it.sheet) }
+                val origin = place
                 scope.launch {
                     try {
                         val viaServer = hub.send(built.request, owners.value, prefer = c.accountKey)
-                        ui.update { it.copy(sentFlash = true) }
                         afterSend(viaServer)
-                        delay(2000)
-                        ui.update { it.copy(sentFlash = false) }
+                        // «✓ Отправлено» — над композером той беседы, откуда ушло.
+                        if (here(origin)) flash()
                     } catch (e: Exception) {
                         if (!e.isMailError()) throw e
+                        if (!here(origin)) {
+                            // Ушли в другую беседу: её композер не трогаем,
+                            // набранное ждёт возвращения в эту (заглушки там уже нет).
+                            stash(origin, draft, u.replyTo, e)
+                            return@launch
+                        }
                         // SMTP своей учётки отказал — пузырь остаётся, красным
                         // «Не доставлено»; прочие ошибки (сервер ddmail не
                         // принял) — пузырь убирается, причина плашкой.
@@ -216,18 +261,24 @@ class ComposeController(
                         error = null,
                     )
                 }
+                val origin = place
                 scope.launch {
                     try {
                         val viaServer = hub.send(built.request, owners.value)
                         // Беседа нового письма — набор адресатов: «Кому» и «Копия»
                         // (§4 десктопа: bcc в набор не входит).
                         sentTarget.value = targetOf(built.request)
-                        ui.update { cur -> cur.copy(sentFlash = true, pendingNew = cur.pendingNew.map { if (it.key == key) it.copy(sent = true) else it }) }
+                        if (here(origin)) {
+                            ui.update { cur -> cur.copy(pendingNew = cur.pendingNew.map { if (it.key == key) it.copy(sent = true) else it }) }
+                        }
                         afterSend(viaServer)
-                        delay(2000)
-                        ui.update { it.copy(sentFlash = false) }
+                        if (here(origin)) flash()
                     } catch (e: Exception) {
                         if (!e.isMailError()) throw e
+                        if (!here(origin)) {
+                            stash(origin, u.draft, null, e)
+                            return@launch
+                        }
                         val smtp = e is SmtpFailed
                         ui.update { cur ->
                             cur.copy(
@@ -298,6 +349,23 @@ class ComposeController(
                 syncSoon()
             }
         }
+    }
+
+    /** «✓ Отправлено» ~2 с над композером. */
+    private suspend fun flash() {
+        ui.update { it.copy(sentFlash = true) }
+        delay(2000)
+        ui.update { it.copy(sentFlash = false) }
+    }
+
+    /**
+     * Не ушло, а беседа уже закрыта: набранное и причина вернутся при её
+     * открытии ([enter]). Отказ SMTP IMAP-учётки там — строкой «Не доставлено»:
+     * красной заглушки в ленте уже нет.
+     */
+    private fun stash(origin: String?, d: Draft, reply: MessageBody?, e: Exception) {
+        if (origin == null) return
+        returned[origin] = Returned(d, reply, sendError(e))
     }
 
     private fun sendError(e: Exception): String = when (e) {
