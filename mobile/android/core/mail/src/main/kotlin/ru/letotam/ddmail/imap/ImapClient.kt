@@ -168,6 +168,20 @@ class ImapClient(val conn: ImapConnection) : Closeable {
         return out
     }
 
+    /**
+     * Письма, где [query] есть в теме, отправителе или тексте (секция
+     * «Сообщения» поиска). Не-ASCII — с `CHARSET UTF-8`, строка уходит
+     * литералом.
+     */
+    fun searchText(query: String): List<Long> {
+        val out = mutableListOf<Long>()
+        val head = if (query.all { it.code < 128 }) "UID SEARCH OR OR SUBJECT" else "UID SEARCH CHARSET UTF-8 OR OR SUBJECT"
+        conn.command(Arg.Raw(head), Arg.Str(query), Arg.Raw("FROM"), Arg.Str(query), Arg.Raw("BODY"), Arg.Str(query)) { d ->
+            if (d.kind == "SEARCH") d.items.drop(1).forEach { v -> v.long?.let { out += it } }
+        }
+        return out
+    }
+
     /** Письмо по Message-ID (копия в «Отправленных», §5). */
     fun searchMessageId(messageId: String): List<Long> {
         val out = mutableListOf<Long>()

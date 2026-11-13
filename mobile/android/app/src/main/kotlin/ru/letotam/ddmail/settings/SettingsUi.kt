@@ -98,6 +98,10 @@ fun SettingsDialog(
     sources: List<MailSource>,
     statuses: Map<String, AccountStatus>,
     accounts: AccountActions,
+    /** Список календарей (видимость, по умолчанию) — как «Настройки → Календарь» десктопа. */
+    calendars: (@Composable () -> Unit)? = null,
+    /** Адресные книги (книга по умолчанию для новых контактов). */
+    addressBooks: (@Composable () -> Unit)? = null,
     onClose: () -> Unit,
 ) {
     var removeAsk by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<MailSource?>(null) }
@@ -190,7 +194,17 @@ fun SettingsDialog(
                         })
                     }
                     ru.letotam.ddmail.reminders.BackgroundWorkSteps()
+                    calendars?.let {
+                        Text("Календари", style = MaterialTheme.typography.bodyLarge)
+                        it()
+                    }
                     HorizontalDivider()
+                    addressBooks?.let {
+                        Section("Контакты")
+                        Text("Адресные книги", style = MaterialTheme.typography.bodyLarge)
+                        it()
+                        HorizontalDivider()
+                    }
                     Section("О приложении")
                     Text("ddmail для Android, версия ${BuildConfig.VERSION_NAME}")
                 }

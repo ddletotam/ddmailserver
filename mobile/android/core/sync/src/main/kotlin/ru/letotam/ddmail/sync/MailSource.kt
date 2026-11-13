@@ -21,6 +21,21 @@ sealed interface SpamOutcome {
 }
 
 /**
+ * Письмо, найденное поиском на источнике (секция «Сообщения»). [folder]
+ * пустой — источник папку не сообщает (ddmail: `uid` уникален сам по себе).
+ */
+data class MessageHit(
+    val accountKey: String,
+    val folder: String,
+    val uid: Long,
+    val messageId: String,
+    val from: String,
+    val subject: String,
+    /** Секунды. */
+    val dateTs: Long,
+)
+
+/**
  * Источник почты одной учётки (mobile-external-accounts §1). Сервер ddmail
  * ([SyncEngine]) и внешний IMAP ([ImapEngine]) — две реализации; экран не
  * знает, откуда пришла беседа: все правки идут через [MailHub] по
@@ -66,6 +81,9 @@ interface MailSource {
     suspend fun restoreSpam(convs: Collection<Conversation>, trust: Boolean): Int
 
     suspend fun send(req: SendRequest)
+
+    /** Поиск писем на источнике; поиска у источника нет — пусто. */
+    suspend fun searchMessages(query: String, limit: Int): List<MessageHit> = emptyList()
 
     suspend fun part(uid: Long, cid: String): Binary
 

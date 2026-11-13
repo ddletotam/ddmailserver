@@ -1,26 +1,20 @@
 package ru.letotam.ddmail
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.ChecklistRtl
 import androidx.compose.material.icons.filled.Contacts
 import androidx.compose.material.icons.filled.Mail
-import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationRail
-import androidx.compose.material3.NavigationRailItem
-import androidx.compose.material3.VerticalDivider
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -28,42 +22,49 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.launch
 import ru.letotam.ddmail.auth.Session
+import ru.letotam.ddmail.calendar.CalendarList
 import ru.letotam.ddmail.calendar.CalendarScreen
 import ru.letotam.ddmail.calendar.CalendarViewModel
 import ru.letotam.ddmail.calendar.SnoozeDialog
+import ru.letotam.ddmail.contacts.AddressBookList
 import ru.letotam.ddmail.contacts.ContactsScreen
 import ru.letotam.ddmail.contacts.ContactsViewModel
 import ru.letotam.ddmail.conversation.ConversationWeb
+import ru.letotam.ddmail.mail.AccountActions
 import ru.letotam.ddmail.mail.MailScreen
 import ru.letotam.ddmail.mail.MailViewModel
-import ru.letotam.ddmail.mail.AccountActions
 import ru.letotam.ddmail.reminders.BackgroundWork
 import ru.letotam.ddmail.reminders.BackgroundWorkDialog
+import ru.letotam.ddmail.settings.SettingsDialog
 import ru.letotam.ddmail.tasks.TasksScreen
 import ru.letotam.ddmail.tasks.TasksViewModel
+import ru.letotam.ddmail.ui.BurgerButton
+import ru.letotam.ddmail.ui.BurgerItem
+import ru.letotam.ddmail.ui.BurgerMenu
+import ru.letotam.ddmail.ui.LocalBurger
 
 enum class Section(val icon: ImageVector, val label: String) {
     Mail(Icons.Filled.Mail, "Почта"),
     Calendar(Icons.Filled.CalendarMonth, "Календарь"),
-    Tasks(Icons.Filled.ChecklistRtl, "Задачи"),
     Contacts(Icons.Filled.Contacts, "Контакты"),
+    Tasks(Icons.Filled.ChecklistRtl, "Задачи"),
 }
 
 /**
- * Разделы приложения (контракт §16): почта, календарь, задачи, контакты.
- * Сложен — панель иконок снизу, как таб-бар iOS; она уходит, когда открыта
- * беседа (у беседы своя шапка) или клавиатура. Разложен — колонка иконок
- * слева, как в iPadOS.
+ * Разделы приложения (контракт §16, docs/mobile-layout.md): почта,
+ * календарь, контакты, задачи. Навигация между ними — только бургер в первой
+ * строке каждого раздела, как у десктопа: ни нижней панели, ни боковой
+ * колонки иконок нет ни сложенным, ни разложенным.
  */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AppShell(
     app: DdmailApp,
@@ -82,6 +83,8 @@ fun AppShell(
     val tasksVm = api?.let { viewModel(key = "tasks-$key") { TasksViewModel(app, it, onDead) } }
     val contactsVm = pim?.let { viewModel(key = "contacts-$key") { ContactsViewModel(app, it, onDead) } }
     var section by rememberSaveable { mutableStateOf(Section.Mail) }
+    var menuOpen by remember { mutableStateOf(false) }
+    var settingsOpen by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     // WebView беседы живёт всё время работы приложения: уход в календарь и обратно ленту не теряет.
     val web = remember { ConversationWeb(context, ConversationWeb.proxyClient(app.http)) }
@@ -97,6 +100,10 @@ fun AppShell(
         if (pim != null) app.calendarChanged.collect { launch { runCatching { app.reminders.refresh(pim) } } }
     }
     LaunchedEffect(key) { if (pim != null) runCatching { app.reminders.refresh(pim) } }
+    // Адресная книга — в секцию «Контакты» поиска почты.
+    LaunchedEffect(contactsVm) {
+        contactsVm?.contacts?.collect { list -> mailVm.setAddressBook(list.orEmpty()) }
+    }
 
     // Из уведомления-напоминания: открыть событие в календаре.
     val eventReq by app.eventRequests.collectAsState()
@@ -121,54 +128,55 @@ fun AppShell(
     }
     if (askBattery) BackgroundWorkDialog { askBattery = false }
 
-    val wide = LocalConfiguration.current.screenWidthDp >= 600
-    val selectedConv by mailVm.selected.collectAsState()
-    val ime = WindowInsets.isImeVisible
-    val barVisible = !wide && !ime && !(section == Section.Mail && selectedConv != null)
-    val pick = { s: Section ->
-        // Повторный тап по «Почте» в открытой беседе — к списку, как в iOS.
-        if (s == section && s == Section.Mail && !wide) mailVm.open(null)
-        section = s
+    if (settingsOpen) {
+        val sources by mailVm.sources.collectAsState()
+        val statuses by mailVm.statuses.collectAsState()
+        SettingsDialog(
+            app.settings, sources, statuses, accounts.closing { settingsOpen = false },
+            calendars = calVm?.let { vm -> { CalendarList(vm) } },
+            addressBooks = contactsVm?.let { vm -> { AddressBookList(vm) } },
+        ) { settingsOpen = false }
     }
 
-    Row(modifier.fillMaxSize()) {
-        if (wide) {
-            NavigationRail {
-                Section.entries.forEach { s ->
-                    NavigationRailItem(selected = section == s, onClick = { pick(s) }, icon = { Icon(s.icon, s.label) })
-                }
-            }
-            VerticalDivider()
-        }
-        Column(Modifier.weight(1f).fillMaxHeight()) {
-            val content = Modifier.weight(1f)
+    Box(modifier.fillMaxSize()) {
+        CompositionLocalProvider(LocalBurger provides { menuOpen = true }) {
+            val content = Modifier.fillMaxSize()
             when (section) {
                 Section.Mail -> MailScreen(mailVm, accounts, web, content)
                 Section.Calendar -> if (calVm != null) CalendarScreen(calVm, content) else NoServer(content)
                 Section.Tasks -> if (tasksVm != null) TasksScreen(tasksVm, content) else NoServer(content)
                 Section.Contacts -> if (contactsVm != null) {
                     ContactsScreen(contactsVm, mailVm.avatars, onMail = { addr ->
+                        // «Написать» из карточки — та же новая беседа, что из поиска.
                         section = Section.Mail
-                        mailVm.compose.openNewTo(addr)
+                        mailVm.startNew(addr)
                     }, content)
                 } else NoServer(content)
             }
-            if (barVisible) NavigationBar {
-                Section.entries.forEach { s ->
-                    NavigationBarItem(selected = section == s, onClick = { pick(s) }, icon = { Icon(s.icon, s.label) })
-                }
-            }
+        }
+        if (menuOpen) {
+            BurgerMenu(
+                Section.entries.map { s -> BurgerItem(s.icon, s.label, selected = s == section) { section = s } } +
+                    BurgerItem(Icons.Filled.Settings, "Настройки", selected = false) { settingsOpen = true },
+                onDismiss = { menuOpen = false },
+            )
         }
     }
 }
 
-/** Раздел без источника: календарь и контакты внешних учёток — через CalDAV/CardDAV. */
+/**
+ * Раздел без источника: календарь и контакты внешних учёток — через
+ * CalDAV/CardDAV. Бургер есть и здесь — иначе из раздела не уйти.
+ */
 @Composable
 private fun NoServer(modifier: Modifier) {
-    androidx.compose.foundation.layout.Box(modifier.fillMaxSize(), contentAlignment = androidx.compose.ui.Alignment.Center) {
-        androidx.compose.material3.Text(
-            "Нет источника: подключите сервер ddmail или адрес CalDAV/CardDAV в настройках учётки.",
-            modifier = androidx.compose.ui.Modifier.padding(24.dp),
-        )
+    Column(modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth().padding(start = 4.dp, top = 4.dp)) { BurgerButton() }
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text(
+                "Нет источника: подключите сервер ddmail или адрес CalDAV/CardDAV в настройках учётки.",
+                modifier = Modifier.padding(24.dp),
+            )
+        }
     }
 }

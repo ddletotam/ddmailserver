@@ -157,6 +157,24 @@ class MailHub(
     }
 
     /**
+     * «Сообщения» поиска — со всех учёток разом, новые сверху. Учётка, у
+     * которой поиск не удался (нет сети, нет поиска), просто ничего не даёт:
+     * выпадашка не должна ломаться из-за одной учётки.
+     */
+    suspend fun searchMessages(query: String, limit: Int): List<MessageHit> = coroutineScope {
+        _sources.value.map { s ->
+            async {
+                try {
+                    s.searchMessages(query, limit)
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException || !e.isMailError()) throw e
+                    emptyList()
+                }
+            }
+        }.awaitAll().flatten().sortedByDescending { it.dateTs }
+    }
+
+    /**
      * Отправка — учёткой-владельцем адреса From (`owner_for` десктопа); нет
      * владельца — «Не через что отправить» (контракт §5).
      */

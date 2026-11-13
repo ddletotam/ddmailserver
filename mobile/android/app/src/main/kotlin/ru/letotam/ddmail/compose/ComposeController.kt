@@ -26,7 +26,7 @@ import ru.letotam.ddmail.sync.MailHub
 import ru.letotam.ddmail.sync.errorText
 import ru.letotam.ddmail.sync.isMailError
 
-/** Отдельное окно письма: новое или пересылка. */
+/** Отдельное окно письма — пересылка (новое пишется в новой беседе, из поиска). */
 data class ComposeSheet(val branch: Branch, val draft: Draft, val error: String? = null, val busy: Boolean = false)
 
 data class ComposerUi(
@@ -39,6 +39,11 @@ data class ComposerUi(
     val sentFlash: Boolean = false,
     val error: String? = null,
     val sheet: ComposeSheet? = null,
+    /**
+     * Новая беседа (из поиска): тексты ушедших писем — пузыри в пустой ленте,
+     * пока беседа не пришла с сервера и не открылась вместо заготовки.
+     */
+    val pendingNew: List<String> = emptyList(),
 )
 
 /**
@@ -79,11 +84,6 @@ class ComposeController(
 
     /** Сменилась беседа — явный ответ и переопределения не переезжают в другую. */
     fun reset() = ui.update { ComposerUi(sheet = it.sheet) }
-
-    fun openNew() = ui.update { it.copy(sheet = ComposeSheet(Branch.New, Draft())) }
-
-    /** Новое письмо на адрес — из карточки контакта. */
-    fun openNewTo(addr: String) = ui.update { it.copy(sheet = ComposeSheet(Branch.New, Draft(to = addr))) }
 
     fun openForward(b: MessageBody) = ui.update { it.copy(sheet = ComposeSheet(Branch.Forward(b, conversation.current?.accountKey.orEmpty()), Draft())) }
 
@@ -156,7 +156,44 @@ class ComposeController(
         }
     }
 
-    /** Новое письмо или пересылка (ветки 0–1) — из отдельного окна. */
+    /**
+     * Новое письмо из новой беседы (ветка 1): адресат — [target], которого
+     * ввели в поиск; непустое «Кому» под «@» его заменяет (§1 десктопа).
+     * После отправки беседа с адресатами откроется сама, как только придёт.
+     */
+    fun sendNew(target: String) {
+        val u = ui.value
+        val draft = if (u.draft.to.isBlank()) u.draft.copy(to = target) else u.draft
+        when (val built = build(Branch.New, draft, identities.value)) {
+            is Built.Refused -> ui.update { it.copy(error = built.reason) }
+            is Built.Ok -> {
+                val text = u.draft.text.ifBlank { u.draft.attachments.joinToString(", ") { it.name } }
+                // Текст и вложения уходят, переопределения адресата/темы остаются.
+                ui.update { it.copy(draft = it.draft.copy(text = "", attachments = emptyList()), pendingNew = it.pendingNew + text, error = null) }
+                scope.launch {
+                    try {
+                        hub.send(built.request, owners.value)
+                        sentTarget = built.to.map { it.lowercase() }.toSet()
+                        ui.update { it.copy(sentFlash = true) }
+                        afterSend()
+                        delay(2000)
+                        ui.update { it.copy(sentFlash = false) }
+                    } catch (e: Exception) {
+                        if (!e.isMailError()) throw e
+                        ui.update { cur ->
+                            cur.copy(
+                                draft = if (cur.draft.text.isEmpty() && cur.draft.attachments.isEmpty()) u.draft else cur.draft,
+                                pendingNew = cur.pendingNew - text,
+                                error = sendError(e),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** Пересылка (ветка 0) — из отдельного окна. */
     fun sendSheet() {
         val sheet = ui.value.sheet ?: return
         if (sheet.busy) return
@@ -180,7 +217,6 @@ class ComposeController(
                 is Built.Refused -> ui.update { u -> u.copy(sheet = u.sheet?.copy(busy = false, error = built.reason)) }
                 is Built.Ok -> try {
                     hub.send(built.request, owners.value, prefer = fwdBranch?.accountKey)
-                    if (sheet.branch is Branch.New) sentTarget = built.to.map { it.lowercase() }.toSet()
                     ui.update { it.copy(sheet = null, sentFlash = true) }
                     afterSend()
                     delay(2000)

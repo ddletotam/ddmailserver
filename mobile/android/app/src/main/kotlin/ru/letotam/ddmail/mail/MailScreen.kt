@@ -77,6 +77,12 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.ui.zIndex
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import ru.letotam.ddmail.ui.BurgerButton
 import ru.letotam.ddmail.sync.AccountStatus
 import ru.letotam.ddmail.sync.Conversation
 import ru.letotam.ddmail.sync.MailSource
@@ -100,9 +106,11 @@ private fun imeCrowds(): Boolean {
 private val SelectedRow = Color(0xFF10B981)
 
 /**
- * Почта (контракт §5–6). Раскладка — по ширине окна: Compact (Mate XT
- * сложен, 350 dp) — список, беседа поверх; шире (712 / 1107 dp) — список и
- * беседа рядом. Табы папок наверху во всех состояниях.
+ * Почта (контракт §5–6, docs/mobile-layout.md). Колонка списка — как левая
+ * колонка десктопа, сверху вниз и ничего больше: бургер + поле поиска, полоса
+ * табов папок, диалоги. Раскладка — по ширине окна: Compact (Mate XT сложен,
+ * 350 dp) — колонка на весь экран, беседа поверх; шире (712 / 1107 dp) —
+ * колонка слева, беседа справа.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -117,6 +125,7 @@ fun MailScreen(
     val s by vm.state.collectAsState()
     val syncing by vm.syncing.collectAsState()
     val selectedId by vm.selected.collectAsState()
+    val newChat by vm.newChat.collectAsState()
     val width = LocalConfiguration.current.screenWidthDp
     val wide = width >= 600
     // Открытая беседа ищется по id в полном видимом списке: дельта могла
@@ -126,8 +135,9 @@ fun MailScreen(
     // Синхронизация на возврат и WebSocket — в оболочке (AppShell): они нужны
     // и пока на экране календарь.
     val picked by vm.picked.collectAsState()
-    BackHandler(enabled = picked.isNotEmpty()) { vm.clearPicks() }
     BackHandler(enabled = picked.isEmpty() && !wide && selectedId != null) { vm.open(null) }
+    BackHandler(enabled = newChat != null) { vm.closeNew() }
+    BackHandler(enabled = picked.isNotEmpty()) { vm.clearPicks() }
     val snack = vm.snackHost
     val notice by vm.notice.collectAsState()
     LaunchedEffect(notice) {
@@ -168,13 +178,12 @@ fun MailScreen(
         for (js in vm.conversation.js) web.eval(js)
     }
 
+    // Окно пересылки; новое письмо пишется в новой беседе (из поиска).
     ComposeSheetDialog(vm.compose)
     BubbleMenu(vm)
     AttachmentMenu(vm)
     val app = context.applicationContext as DdmailApp
     ru.letotam.ddmail.settings.PrefetchQuestion(app.settings)
-    var settingsOpen by remember { mutableStateOf(false) }
-    if (settingsOpen) ru.letotam.ddmail.settings.SettingsDialog(app.settings, sources, statuses, accounts.closing { settingsOpen = false }) { settingsOpen = false }
     // Открытие беседы из уведомления.
     val openReq by app.openRequests.collectAsState()
     LaunchedEffect(openReq) {
@@ -184,94 +193,255 @@ fun MailScreen(
         }
     }
 
-    // Клавиатура EMUI на разложенном Mate XT занимает ~85% высоты: пока она
-    // открыта, прячем всё, кроме строки ввода, иначе композера не видно.
-    val ime = imeCrowds()
     // Один хост уведомлений на весь экран: в сложенном виде список не виден,
-    // а «Сохранено в Загрузки» приходит из открытой беседы. Над FAB/строкой ввода.
+    // а «Сохранено в Загрузки» приходит из открытой беседы. Над строкой ввода.
     Box(modifier.fillMaxSize().imePadding()) {
-    SnackbarHost(snackHost(vm), Modifier.align(Alignment.BottomCenter).padding(bottom = 84.dp).zIndex(1f))
-    Column(Modifier.fillMaxSize()) {
-        val q by vm.query.collectAsState()
-        // Поле поиска видно и с открытой клавиатурой — в него и печатают.
-        // Узкое окно с открытой беседой: у неё своя шапка со стрелкой назад,
-        // шапка приложения и поиск только съедали бы высоту (§6).
-        val convOnly = !wide && selected != null
-        if (q != null && !convOnly) SearchBar(q!!, onChange = { vm.query.value = it }, onClose = { vm.query.value = null })
-        else if (!ime) {
-            if (!convOnly) TopBar(sources, statuses, syncing, onSearch = { vm.query.value = "" }, onSpam = vm::openSpam, onSettings = { settingsOpen = true }, onAdd = accounts.add)
-            // «Нужен вход» — у каждой учётки своя плашка (mobile-external-accounts §7).
-            sources.filter { statuses[it.accountKey] == AccountStatus.NeedsLogin }.forEach { src ->
-                DeadSessionBanner(src.title) { accounts.relogin(src.accountKey) }
-            }
+        SnackbarHost(snackHost(vm), Modifier.align(Alignment.BottomCenter).padding(bottom = 84.dp).zIndex(1f))
+        val needsLogin = sources.filter { statuses[it.accountKey] == AccountStatus.NeedsLogin }
+        val column = @Composable { m: Modifier ->
+            MailColumn(s, syncing, selectedId, picked, vm, needsLogin, accounts, { folderPicker = true }, { deleteAsk = true }, m)
+        }
+        val right = @Composable { onBack: (() -> Unit)?, m: Modifier ->
+            val to = newChat
+            if (to != null) NewChatPane(to, vm, onBack, m)
+            else ConversationPane(selected, web, vm, onBack, m)
         }
         if (wide) {
             Row(Modifier.fillMaxSize()) {
-                ListPane(s, syncing, selectedId, picked, vm, { folderPicker = true }, { deleteAsk = true }, Modifier.width(if (width >= 840) 400.dp else 340.dp).fillMaxHeight())
+                column(Modifier.width(if (width >= 840) 400.dp else 340.dp).fillMaxHeight())
                 VerticalDivider()
-                ConversationPane(selected, web, vm, onBack = null, Modifier.weight(1f).fillMaxHeight())
+                right(null, Modifier.weight(1f).fillMaxHeight())
             }
+        } else if (newChat != null) {
+            right({ vm.closeNew() }, Modifier.fillMaxSize())
         } else if (selected != null) {
-            ConversationPane(selected, web, vm, onBack = { vm.open(null) }, Modifier.fillMaxSize())
+            right({ vm.open(null) }, Modifier.fillMaxSize())
         } else {
-            ListPane(s, syncing, selectedId, picked, vm, { folderPicker = true }, { deleteAsk = true }, Modifier.fillMaxSize())
+            column(Modifier.fillMaxSize())
         }
     }
+}
+
+/**
+ * Левая колонка: бургер + поиск, табы, диалоги. Выпадашка поиска — поверх
+ * табов и списка, как у десктопа. Клавиатура EMUI на разложенном Mate XT
+ * занимает ~85% высоты: пока пишут в беседе справа, первая строка и табы
+ * прячутся — но не когда печатают в сам поиск.
+ */
+@Composable
+private fun MailColumn(
+    s: MailState,
+    syncing: Boolean,
+    selectedId: String?,
+    picked: Set<String>,
+    vm: MailViewModel,
+    needsLogin: List<MailSource>,
+    accounts: AccountActions,
+    onMove: () -> Unit,
+    onDelete: () -> Unit,
+    modifier: Modifier,
+) {
+    val q by vm.query.collectAsState()
+    val results by vm.search.collectAsState()
+    var searchFocused by remember { mutableStateOf(false) }
+    val ime = imeCrowds()
+    val head = !ime || searchFocused
+    BackHandler(enabled = results.open) { vm.clearSearch() }
+    Box(modifier) {
+        Column(Modifier.fillMaxSize()) {
+            if (head) SearchRow(q, onChange = { vm.query.value = it }, onSubmit = vm::submitSearch, onFocus = { searchFocused = it })
+            ListPane(s, syncing, selectedId, picked, vm, onMove, onDelete, showTabs = head, Modifier.weight(1f))
+            // «Нужен вход» — у каждой учётки своя несмываемая плашка (§2,
+            // mobile-external-accounts §7); внизу колонки, а не над поиском.
+            needsLogin.forEach { src -> DeadSessionBanner(src.title) { accounts.relogin(src.accountKey) } }
+        }
+        if (results.open && head) {
+            SearchDropdown(results, vm, Modifier.padding(top = SEARCH_ROW_HEIGHT).zIndex(2f))
+        }
+    }
+}
+
+/** Высота первой строки (бургер + поиск) — под ней открывается выпадашка. */
+private val SEARCH_ROW_HEIGHT = 56.dp
+
+/**
+ * Первая строка экрана: бургер и круглое поле поиска на всю оставшуюся
+ * ширину (сайдбар десктопа). Enter — первая строка выпадашки: адрес —
+ * новая беседа с ним.
+ */
+@Composable
+private fun SearchRow(q: String, onChange: (String) -> Unit, onSubmit: () -> Unit, onFocus: (Boolean) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().height(SEARCH_ROW_HEIGHT).padding(start = 4.dp, end = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        BurgerButton()
+        Spacer(Modifier.width(4.dp))
+        androidx.compose.foundation.text.BasicTextField(
+            value = q,
+            onValueChange = onChange,
+            singleLine = true,
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = Color(0xFF0F1419)),
+            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                imeAction = androidx.compose.ui.text.input.ImeAction.Go,
+                autoCorrectEnabled = false,
+            ),
+            keyboardActions = androidx.compose.foundation.text.KeyboardActions(onGo = { onSubmit() }),
+            cursorBrush = androidx.compose.ui.graphics.SolidColor(Accent),
+            modifier = Modifier
+                .weight(1f)
+                .height(40.dp)
+                .onFocusChanged { onFocus(it.isFocused) }
+                .onPreviewKeyEvent { e ->
+                    // Аппаратный Enter (и `adb input keyevent ENTER`) — то же, что «Перейти».
+                    val enter = e.key == androidx.compose.ui.input.key.Key.Enter || e.key == androidx.compose.ui.input.key.Key.NumPadEnter
+                    if (enter && e.type == androidx.compose.ui.input.key.KeyEventType.KeyUp) onSubmit()
+                    enter
+                },
+            decorationBox = { inner ->
+                Row(
+                    Modifier.fillMaxSize().clip(RoundedCornerShape(20.dp)).background(Color(0xFFECEEF0)).padding(start = 16.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.weight(1f)) {
+                        if (q.isEmpty()) Text("Поиск или новый адресат…", color = Color(0xFF8B95A1), style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        inner()
+                    }
+                    if (q.isNotEmpty()) IconButton(onClick = { onChange("") }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Filled.Close, "Очистить поиск", tint = Color(0xFF6B7480), modifier = Modifier.size(18.dp))
+                    }
+                }
+            },
+        )
+    }
+}
+
+/**
+ * Выпадашка поиска (§4 «Поиск» десктопа): «Написать по адресу …»,
+ * «Диалоги», «Контакты», «Сообщения». Карточка поверх табов и списка.
+ */
+@Composable
+private fun SearchDropdown(r: SearchResults, vm: MailViewModel, modifier: Modifier) {
+    Surface(
+        modifier = modifier.padding(horizontal = 10.dp).fillMaxWidth().heightIn(max = 420.dp),
+        shape = RoundedCornerShape(10.dp),
+        color = Color.White,
+        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFD8DDE6)),
+        shadowElevation = 8.dp,
+    ) {
+        LazyColumn(contentPadding = androidx.compose.foundation.layout.PaddingValues(4.dp)) {
+            if (r.composeEmail.isNotEmpty()) item(key = "compose") {
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+                        .clickable { vm.startNew(r.composeEmail) }.padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.Edit, null, tint = SelectedRow, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(10.dp))
+                    // Адрес — своей строкой: в колонке 340 dp «Написать по
+                    // адресу:» съедала его целиком.
+                    Column {
+                        Text("Написать по адресу:", color = SelectedRow, style = MaterialTheme.typography.bodyLarge, maxLines = 1)
+                        Text(r.composeEmail, color = SelectedRow, fontWeight = FontWeight.Medium, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+            if (r.total == 0) item(key = "empty") {
+                if (r.loading || r.composeEmail.isEmpty()) Text(
+                    if (r.loading) "Ищу…" else "Ничего не найдено",
+                    color = Color(0xFF8B95A1),
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
+                )
+            }
+            if (r.convs.isNotEmpty()) {
+                item(key = "h-convs") { DropdownHeader("ДИАЛОГИ") }
+                items(r.convs, key = { "c" + it.conv.ref }) { h ->
+                    DropdownRow(h.conv.label.ifBlank { h.conv.counterparts.firstOrNull()?.addr.orEmpty() }, h.detail) { vm.pickSearchConv(h.conv.ref) }
+                }
+            }
+            if (r.contacts.isNotEmpty()) {
+                item(key = "h-contacts") { DropdownHeader("КОНТАКТЫ") }
+                items(r.contacts, key = { "p" + it.email }) { c ->
+                    DropdownRow(c.name.ifEmpty { c.email }, if (c.name.isEmpty()) "" else c.email) { vm.pickSearchContact(c.email) }
+                }
+            }
+            if (r.messages.isNotEmpty()) {
+                item(key = "h-msgs") { DropdownHeader("СООБЩЕНИЯ") }
+                items(r.messages, key = { "m" + it.ref + it.dateTs + it.subject }) { m ->
+                    DropdownRow(m.from, m.subject.ifBlank { stringResource(R.string.no_subject) }, trailing = formatListDate(m.dateTs)) { vm.pickSearchConv(m.ref) }
+                }
+            }
+        }
     }
 }
 
 @Composable
-private fun TopBar(
-    sources: List<MailSource>,
-    statuses: Map<String, AccountStatus>,
-    syncing: Boolean,
-    onSearch: () -> Unit,
-    onSpam: () -> Unit,
-    onSettings: () -> Unit,
-    onAdd: () -> Unit,
-) {
-    val offline = sources.mapNotNull { src -> (statuses[src.accountKey] as? AccountStatus.Offline)?.let { src.title } }
-    var menu by remember { mutableStateOf(false) }
-    Row(
-        Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
+private fun DropdownHeader(title: String) {
+    Text(
+        title,
+        color = Color(0xFF8B95A1),
+        fontSize = 11.sp,
+        fontWeight = FontWeight.Bold,
+        letterSpacing = 0.5.sp,
+        modifier = Modifier.padding(start = 12.dp, top = 8.dp, bottom = 2.dp),
+    )
+}
+
+@Composable
+private fun DropdownRow(title: String, detail: String, trailing: String = "", onClick: () -> Unit) {
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 6.dp),
     ) {
-        Column(Modifier.weight(1f)) {
-            Text(stringResource(R.string.mail_title), style = MaterialTheme.typography.titleLarge)
-            val sub = when {
-                offline.isNotEmpty() && offline.size == sources.size -> stringResource(R.string.status_offline)
-                offline.isNotEmpty() -> "Нет связи: " + offline.joinToString(", ")
-                syncing -> stringResource(R.string.status_syncing)
-                else -> sources.joinToString(", ") { it.title }
-            }
-            Text(
-                sub,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (offline.isNotEmpty()) MaterialTheme.colorScheme.error
-                else MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(title, color = Color(0xFF0F1419), fontWeight = FontWeight.Medium, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            if (trailing.isNotEmpty()) Text(trailing, color = Color(0xFF8B95A1), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 8.dp))
         }
-        IconButton(onClick = onSearch) { Icon(Icons.Filled.Search, "Поиск") }
-        Box {
-            IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "Меню") }
-            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                // Папка «Спам» скрыта всегда (таба нет) — вход только отсюда.
-                DropdownMenuItem(leadingIcon = { Icon(Icons.Filled.Report, null) }, text = { Text("Спам") }, onClick = {
-                    menu = false
-                    onSpam()
-                })
-                DropdownMenuItem(leadingIcon = { Icon(Icons.Filled.Settings, null) }, text = { Text("Настройки") }, onClick = {
-                    menu = false
-                    onSettings()
-                })
-                DropdownMenuItem(leadingIcon = { Icon(Icons.Filled.PersonAdd, null) }, text = { Text("Добавить учётку") }, onClick = {
-                    menu = false
-                    onAdd()
-                })
+        if (detail.isNotEmpty()) Text(detail, color = Color(0xFF8B95A1), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/**
+ * Новая беседа (compose-режим десктопа): шапка с адресатом, пустая лента —
+ * в ней только ушедшие отсюда письма, композер внизу. Когда беседа придёт с
+ * сервера, она откроется вместо заготовки.
+ */
+@Composable
+private fun NewChatPane(to: String, vm: MailViewModel, onBack: (() -> Unit)?, modifier: Modifier) {
+    val ime = imeCrowds()
+    val u by vm.compose.ui.collectAsState()
+    Column(modifier) {
+        if (!ime) Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (onBack != null) IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "К списку") }
+            Box(Modifier.padding(start = if (onBack == null) 8.dp else 0.dp).size(40.dp).clip(CircleShape).background(SelectedRow), contentAlignment = Alignment.Center) {
+                Text(to.take(1).uppercase(), color = Color.White, fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(to, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("Новая беседа", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
+        HorizontalDivider()
+        LazyColumn(
+            Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp, Alignment.Bottom),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp),
+        ) {
+            items(u.pendingNew) { text ->
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                    Text(
+                        text,
+                        modifier = Modifier.widthIn(max = 480.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xFFDCF8C6)).padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                }
+            }
+        }
+        HorizontalDivider()
+        val focus = remember { androidx.compose.ui.focus.FocusRequester() }
+        LaunchedEffect(to) { runCatching { focus.requestFocus() } }
+        ComposerBar(vm.compose, conversation = null, newTo = to, focus = focus)
     }
 }
 
@@ -410,24 +580,6 @@ private fun SpamDialog(vm: MailViewModel) {
     )
 }
 
-/** Поиск по диалогам: поле вместо шапки; результаты — вместо списка папки. */
-@Composable
-private fun SearchBar(q: String, onChange: (String) -> Unit, onClose: () -> Unit) {
-    val focus = remember { androidx.compose.ui.focus.FocusRequester() }
-    LaunchedEffect(Unit) { focus.requestFocus() }
-    BackHandler(onBack = onClose)
-    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Закрыть поиск") }
-        androidx.compose.material3.OutlinedTextField(
-            value = q,
-            onValueChange = onChange,
-            placeholder = { Text("Имя, адрес или тема") },
-            singleLine = true,
-            modifier = Modifier.weight(1f).focusRequester(focus),
-        )
-    }
-}
-
 /** Несмываемая плашка (контракт §2): кэш виден, но почта не обновляется. */
 @Composable
 private fun DeadSessionBanner(title: String, onRelogin: () -> Unit) {
@@ -449,22 +601,22 @@ private fun ListPane(
     vm: MailViewModel,
     onMove: () -> Unit,
     onDelete: () -> Unit,
+    showTabs: Boolean,
     modifier: Modifier,
 ) {
     Column(modifier) {
         // На время выбора панель действий заменяет полосу табов (§5).
-        if (picked.isEmpty()) FolderTabs(s, vm::selectFolder)
+        if (picked.isEmpty()) { if (showTabs) FolderTabs(s, vm::selectFolder) }
         else if (s.inSpam) SpamSelectionBar(picked.size, vm)
         else SelectionBar(picked.size, vm, onMove, onDelete)
         HorizontalDivider()
-        // Крутится только по жесту: фоновые синки показывает строка под заголовком.
+        // Крутится только по жесту: фоновый синк индикатора не имеет.
         val pulling by vm.pulling.collectAsState()
         val identColors by vm.identityColors.collectAsState()
         PullToRefreshBox(isRefreshing = pulling, onRefresh = vm::pullRefresh, modifier = Modifier.fillMaxSize()) {
             if (s.loaded && s.conversations.isEmpty() && !syncing) {
                 Text(
                     when {
-                        vm.query.value != null -> "Ничего не нашлось."
                         s.inSpam -> "Спама нет."
                         else -> stringResource(if (s.active == null) R.string.list_empty_inbox else R.string.list_empty_folder)
                     },
@@ -497,12 +649,6 @@ private fun ListPane(
                     }
                 }
             }
-            if (picked.isEmpty()) androidx.compose.material3.FloatingActionButton(
-                onClick = vm.compose::openNew,
-                containerColor = Accent,
-                contentColor = Color.White,
-                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-            ) { Icon(Icons.Filled.Edit, "Написать") }
         }
     }
 }
