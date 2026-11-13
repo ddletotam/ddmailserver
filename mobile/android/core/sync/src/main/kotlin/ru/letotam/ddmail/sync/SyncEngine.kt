@@ -69,7 +69,7 @@ class SyncEngine(
         if (deletes.isNotEmpty()) dao.applyDeletions(accountKey, deletes)
 
         val lastFull = dao.meta(K_FULL_TS)?.toLongOrNull() ?: 0
-        val epochStale = dao.meta(K_EPOCH) != CONV_ID_EPOCH
+        val epochStale = dao.meta(K_EPOCH) != CONV_ID_EPOCH || dao.meta(K_FIELDS) != FIELDS_EPOCH
         val since = if (forceFull || epochStale || now() - lastFull > FULL_EVERY_S) {
             0
         } else {
@@ -84,6 +84,7 @@ class SyncEngine(
             dao.replaceAll(accountKey, convs, refs)
             dao.setMeta(K_FULL_TS, now().toString())
             dao.setMeta(K_EPOCH, CONV_ID_EPOCH)
+            dao.setMeta(K_FIELDS, FIELDS_EPOCH)
         }
         if (delta.serverNowMs > 0) dao.setMeta(K_SINCE, delta.serverNowMs.toString())
         // Курсор журнала — только после того, как дельта легла: упади она,
@@ -348,12 +349,23 @@ class SyncEngine(
          * иначе старые ключи висели бы рядом с новыми (§4 десктопа).
          */
         const val CONV_ID_EPOCH = "2"
+
+        /**
+         * Версия набора полей бесед в кэше. Поднимать, когда сервер начинает
+         * отдавать новое поле у уже существующих бесед: дельта приносит только
+         * изменившиеся беседы, и старые остались бы без поля навсегда. Так было
+         * со статусом доставки (0.0.30): письмо, ставшее «не доставлено» до
+         * обновления, не получало ни значка, ни пометки. Сменилась — следующий
+         * синк полный; тела с другим статусом перезапрашиваются (`bodyStale`).
+         */
+        const val FIELDS_EPOCH = "delivery-1"
         const val FULL_EVERY_S = 24 * 3600L
 
         private const val K_SEQ = "journal_seq"
         private const val K_SINCE = "conv_since"
         private const val K_FULL_TS = "conv_full_ts"
         private const val K_EPOCH = "conv_id_epoch"
+        private const val K_FIELDS = "conv_fields_epoch"
         private const val K_FOLDERS = "dialog_folders"
         private const val K_FOLDERS_VERSION = "dialog_folders_version"
         private const val K_IDENTITIES = "identities"
