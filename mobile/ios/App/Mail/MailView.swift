@@ -169,9 +169,19 @@ struct MailView: View {
                 if picking {
                     List(selection: $model.picked) { rows(convs, colors: colors, selectedID: nil) }
                 } else {
-                    List(selection: $model.selectedID) {
-                        if let to = composingTo { NewConversationRow(address: to).tag(MailModel.newPrefix + to) }
-                        rows(convs, colors: colors, selectedID: selectedID)
+                    ScrollViewReader { proxy in
+                        List(selection: $model.selectedID) {
+                            if let to = composingTo { NewConversationRow(address: to).tag(MailModel.newPrefix + to).id(MailModel.newPrefix + to) }
+                            rows(convs, colors: colors, selectedID: selectedID)
+                        }
+                        // Открытая беседа видна в списке: «Новая беседа» и беседа,
+                        // которой её сменила отправка, встают сверху, а список
+                        // держит позицию по прежней первой строке — строка
+                        // оказывалась выше края (так «пропадала» беседа на Android).
+                        .onChange(of: selectedID) { _, id in
+                            guard let id else { return }
+                            withAnimation { proxy.scrollTo(id) }
+                        }
                     }
                 }
             }

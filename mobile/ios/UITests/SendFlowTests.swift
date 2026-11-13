@@ -152,15 +152,30 @@ final class SendFlowTests: XCTestCase {
         subjectField.tap()
         subjectField.typeText(subject)
 
-        // Тело: текст и жирное слово (⌘B — клавиатурой; на iPhone то же делает
-        // системное меню выделения).
+        // Тело — жирным: выделить всё и ⌘B (на выделении, как системное меню
+        // «Формат» на iPhone; стиль на каретке клавиатура симулятора теряет).
         let body = app.textViews["composer.text"].firstMatch
         XCTAssertTrue(body.waitForExistence(timeout: 5), "нет строки ввода")
         body.tap()
-        body.typeText(text + " ")
+        body.typeText(text)
+        sleep(1)
+        #if os(iOS)
+        // Выделить всё — меню выделения (⌘A клавиатура симулятора теряет).
+        body.press(forDuration: 1.2)
+        let selectAll = app.menuItems.matching(NSPredicate(format: "label IN %@", ["Выбрать все", "Select All"])).firstMatch
+        if selectAll.waitForExistence(timeout: 3) { selectAll.tap() } else { body.typeKey("a", modifierFlags: .command) }
+        sleep(1)
+        // «Формат» → «Жирный» системного меню выделения — так делает владелец.
+        // Пункт «Жирный» в панели «Форматирование» тест пока не находит
+        // (подпись не выяснена) — тогда ⌘B; жирный проверяется по снимку.
+        if !UIFlow.formatBold(app) { body.typeKey("b", modifierFlags: .command) }
+        sleep(1)
+        #else
+        body.typeKey("a", modifierFlags: .command)
+        sleep(1)
         body.typeKey("b", modifierFlags: .command)
-        body.typeText("жирно")
-        body.typeKey("b", modifierFlags: .command)
+        #endif
+        sleep(1)
         UIFlow.shot(app, "\(tag)-1-composed", self)
 
         let send = app.buttons["Отправить"].firstMatch
@@ -178,8 +193,11 @@ final class SendFlowTests: XCTestCase {
         UIFlow.shot(app, "\(tag)-3-conversation", self)
         let web = app.webViews.firstMatch
         XCTAssertTrue(web.waitForExistence(timeout: 20), "лента беседы не появилась")
+        // Настоящее письмо пришло — заглушка («Отправляется…») ушла.
         let mine = web.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", stamp)).firstMatch
         XCTAssertTrue(mine.waitForExistence(timeout: 60), "в беседе нет отправленного письма")
+        let pending = web.staticTexts["Отправляется…"].firstMatch
+        XCTAssertTrue(UIFlow.waitGone(pending, 150), "письмо так и не пришло синком — висит заглушка")
         sleep(2)
         UIFlow.shot(app, "\(tag)-4-landed", self)
     }
@@ -289,6 +307,33 @@ enum UIFlow {
         field.typeText(password)
         #endif
     }
+
+    #if os(iOS)
+    /// Меню выделения: листать стрелкой до «Формат», в нём — «Жирный».
+    @MainActor
+    static func formatBold(_ app: XCUIApplication) -> Bool {
+        // Пункты меню выделения бывают и `menuItem`, и `button` — ищем по подписи.
+        let format = app.descendants(matching: .any).matching(NSPredicate(format: "label IN %@", ["Форматирование", "Формат", "Format"])).firstMatch
+        let bold = app.descendants(matching: .any).matching(NSPredicate(format: "label IN %@", ["Жирный", "Bold", "Полужирный"])).firstMatch
+        for _ in 0..<4 {
+            if bold.exists { bold.tap(); return true }
+            if format.exists {
+                format.tap()
+                sleep(2)
+                print("FORMAT:", app.descendants(matching: .any).allElementsBoundByIndex.compactMap { $0.label.isEmpty ? nil : $0.label })
+                continue
+            }
+            print("MENU:", app.menuItems.allElementsBoundByIndex.map(\.label),
+                  "BUTTONS:", app.buttons.allElementsBoundByIndex.map(\.label))
+            // Стрелка «дальше» — последняя кнопка меню выделения.
+            let next = app.buttons.matching(NSPredicate(format: "label IN %@", ["Следующая страница", "Далее", "Ещё", "Forward", "Next page", "Show More Items"])).firstMatch
+            guard next.exists else { return false }
+            next.tap()
+            sleep(1)
+        }
+        return bold.exists
+    }
+    #endif
 
     /// Долгое нажатие (iPhone/iPad) или правый клик (Мак).
     @MainActor
