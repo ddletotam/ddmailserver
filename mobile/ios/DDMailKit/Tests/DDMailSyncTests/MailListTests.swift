@@ -48,13 +48,14 @@ struct MailListTests {
             c("3", "c", "c@q.ru", "", unread: 1),
             c("s", "s", "s@s.ru", "", unread: 1, spam: true),
         ]
+        // «Спам» — таб полосы всегда (mobile-layout.md), без счётчика.
         let inbox = buildMailList(convs, doc: doc, activeID: nil, query: nil)
-        #expect(inbox.tabs.map(\.id) == ["w"])
+        #expect(inbox.tabs.map(\.id) == ["w", "spam"])
+        #expect(inbox.tabs[1].unread == 0)
         #expect(inbox.tabs[0].unread == 1)
         #expect(inbox.inboxUnread == 1)
         #expect(inbox.conversations.map(\.id) == ["3"])
 
-        // В «Спам» привели из меню — его таб виден, но без счётчика.
         let spam = buildMailList(convs, doc: doc, activeID: "spam", query: nil)
         #expect(spam.inSpam)
         #expect(spam.tabs.map(\.id) == ["w", "spam"])
@@ -63,5 +64,27 @@ struct MailListTests {
 
         // Удалённая папка — снова инбокс.
         #expect(buildMailList(convs, doc: doc, activeID: "gone", query: nil).active == nil)
+    }
+
+    @Test func hitsSayWhatMatched() {
+        let hits = searchConversationHits(all, "отчёт")
+        #expect(hits.map(\.conversation.id) == ["1", "3"])
+        #expect(hits.map(\.matched) == ["bot@x.ru", "Квартальный ОТЧЁТ"])
+        #expect(searchConversationHits(all, "otchet").map(\.matched) == ["otchet@y.ru"])
+        #expect(searchConversationHits(all, "  ").isEmpty)
+        let bare = c("9", "Bob@X.ru", "bob@x.ru", "")
+        #expect(searchConversationHits([bare], "bob").map(\.matched) == [""])
+    }
+
+    /// Векторы `parse_email_like` десктопа.
+    @Test func emailLike() {
+        #expect(parseEmailLike(" Ivan@Mail.RU ") == "ivan@mail.ru")
+        #expect(parseEmailLike("ivan@mail") == nil)
+        #expect(parseEmailLike("ivan@.ru") == nil)
+        #expect(parseEmailLike("ivan@mail.") == nil)
+        #expect(parseEmailLike("@mail.ru") == nil)
+        #expect(parseEmailLike("ivan petrov@mail.ru") == nil)
+        #expect(parseEmailLike("<ivan@mail.ru>") == nil)
+        #expect(parseEmailLike("иван") == nil)
     }
 }

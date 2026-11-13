@@ -2,7 +2,8 @@ import DDMailAuth
 import SwiftUI
 import UserNotifications
 
-/// Настройки (Android «Настройки»): учётки, загрузка писем, уведомления.
+/// Настройки (Android «Настройки», модалка десктопа): учётки, загрузка писем,
+/// уведомления, календари. Открываются из бургера любого раздела.
 struct SettingsView: View {
     @Bindable var settings = AppSettings.shared
     @Bindable var calPrefs = CalendarPrefs.shared
@@ -48,6 +49,17 @@ struct SettingsView: View {
                         .onChange(of: calPrefs.reminders) { onRemindersChanged() }
                 } footer: {
                     Text("Каскад напоминаний события; смахнули уведомление — по этому событию больше не напомнит.")
+                }
+                if let cal = workspace.calendar {
+                    Section {
+                        NavigationLink {
+                            CalendarsListView(model: cal)
+                        } label: {
+                            Label("Календари", systemImage: "calendar")
+                        }
+                    } footer: {
+                        Text("Какие календари видны на этом устройстве и в какой попадают новые события.")
+                    }
                 }
             }
             .formStyle(.grouped)

@@ -136,44 +136,58 @@ final class ContactsModel {
 struct ContactsView: View {
     @Bindable var model: ContactsModel
     let avatars: AvatarStore?
-    /// «Написать» — новое письмо на адрес (переход в почту).
+    /// «Написать» — беседа с адресом в почте (есть — она, нет — новая).
     let write: (String) -> Void
 
     var body: some View {
         let formOpen = model.form != nil
-        return NavigationSplitView {
-            let sections = model.sections
-            List(selection: $model.selectedID) {
-                ForEach(sections, id: \.letter) { s in
-                    Section(s.letter) {
-                        ForEach(s.items) { c in
-                            HStack(spacing: 12) {
-                                ConversationAvatar(name: c.fullName, email: c.emails.first ?? "", spam: false, store: avatars)
-                                VStack(alignment: .leading) {
-                                    Text(c.fullName.isEmpty ? (c.emails.first ?? "—") : c.fullName)
-                                    if !c.organization.isEmpty { Text(c.organization).font(.caption).foregroundStyle(.secondary) }
+        let sections = model.sections
+        let loaded = model.loaded
+        let empty = model.filtered.isEmpty
+        let query = model.query
+        return NavigationSplitView(columnVisibility: .constant(.all)) {
+            VStack(spacing: 0) {
+                // Первая строка — как у десктопа: бургер, «Контакты», «+»;
+                // ниже — поле «Поиск контактов», ниже — список.
+                SectionBar {
+                    Text("Контакты").font(.title3.bold())
+                    Spacer(minLength: 8)
+                    Button("Новый контакт", systemImage: "plus") { model.newContact() }
+                        .labelStyle(.iconOnly)
+                        .font(.title3)
+                        .buttonStyle(.borderless)
+                        .frame(width: 36, height: 36)
+                }
+                ContactSearchField(query: $model.query)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 8)
+                List(selection: $model.selectedID) {
+                    ForEach(sections, id: \.letter) { s in
+                        Section(s.letter) {
+                            ForEach(s.items) { c in
+                                HStack(spacing: 12) {
+                                    ConversationAvatar(name: c.fullName, email: c.emails.first ?? "", spam: false, store: avatars)
+                                    VStack(alignment: .leading) {
+                                        Text(c.fullName.isEmpty ? (c.emails.first ?? "—") : c.fullName)
+                                        if !c.organization.isEmpty { Text(c.organization).font(.caption).foregroundStyle(.secondary) }
+                                    }
                                 }
+                                .tag(c.id)
                             }
-                            .tag(c.id)
                         }
                     }
                 }
-            }
-            .overlay {
-                if !model.loaded { ProgressView() } else if model.filtered.isEmpty {
-                    if model.query.isEmpty { ContentUnavailableView("Контактов нет", systemImage: "person.crop.circle") }
-                    else { ContentUnavailableView.search(text: model.query) }
+                .listStyle(.plain)
+                .overlay {
+                    if !loaded { ProgressView() } else if empty {
+                        if query.isEmpty { ContentUnavailableView("Контактов нет", systemImage: "person.crop.circle") }
+                        else { ContentUnavailableView.search(text: query) }
+                    }
                 }
+                .refreshable { await model.load() }
             }
+            .sectionRoot()
             .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 460)
-            .searchable(text: $model.query, prompt: "Имя, адрес, телефон")
-            .refreshable { await model.load() }
-            .navigationTitle("Контакты")
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button("Новый контакт", systemImage: "plus") { model.newContact() }
-                }
-            }
         } detail: {
             if let c = model.selected {
                 ContactCard(model: model, contact: c, avatars: avatars, write: write)
@@ -181,12 +195,41 @@ struct ContactsView: View {
                 ContentUnavailableView("Контакт не выбран", systemImage: "person.crop.circle")
             }
         }
+        .navigationSplitViewStyle(.balanced)
+        .toolbar(removing: .sidebarToggle)
         .tint(Palette.accent)
         .sheet(isPresented: Binding(get: { formOpen }, set: { if !$0 { model.form = nil } })) {
             ContactFormView(model: model)
         }
         .overlay(alignment: .bottom) { NoticeBanner(text: $model.notice) }
         .task { await model.load() }
+    }
+}
+
+/// «Поиск контактов» — круглое поле, как поиск почты.
+private struct ContactSearchField: View {
+    @Binding var query: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary).accessibilityHidden(true)
+            TextField("Поиск контактов", text: $query)
+                .textFieldStyle(.plain)
+                .autocorrectionDisabled()
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                #endif
+                .accessibilityIdentifier("contacts.search")
+            if !query.isEmpty {
+                Button("Очистить", systemImage: "xmark.circle.fill") { query = "" }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 36)
+        .background(Capsule().fill(Color.secondary.opacity(0.12)))
     }
 }
 

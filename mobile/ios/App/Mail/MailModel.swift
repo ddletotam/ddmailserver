@@ -44,15 +44,27 @@ final class MailModel {
         }
     }
 
-    var query = "" { didSet { rebuild() } }
+    /// Поиск — выпадашка над списком, сам список им не фильтруется (десктоп §4 «Поиск»).
+    @ObservationIgnored private(set) var search: MailSearch!
 
-    /// Открытая беседа (`Conversation.ref`: дельта не сбивает выбор).
+    /// Открытая беседа (`Conversation.ref`: дельта не сбивает выбор) или
+    /// новая беседа с адресом из поиска (`newPrefix` + адрес).
     var selectedID: String? {
         didSet {
             guard oldValue != selectedID else { return }
-            if let id = selectedID { UserDefaults.standard.set(id, forKey: Self.lastKey) }
+            if let id = selectedID, !id.hasPrefix(Self.newPrefix) { UserDefaults.standard.set(id, forKey: Self.lastKey) }
             openSelected()
         }
+    }
+
+    /// Новая беседа (десктоп `enter_compose_mode`): строка над списком и
+    /// пустая лента с композером, пока письмо не ушло и беседа не пришла.
+    static let newPrefix = "new:"
+
+    /// Адрес новой беседы, если открыта она.
+    var composingTo: String? {
+        guard let id = selectedID, id.hasPrefix(Self.newPrefix) else { return nil }
+        return String(id.dropFirst(Self.newPrefix.count))
     }
 
     /// Множественный выбор (§5): `ref` бесед.
@@ -75,6 +87,7 @@ final class MailModel {
         let dead: @MainActor (String) -> Void = { [weak workspace] key in workspace?.link(key)?.report(.dead) }
         conversation = ConversationModel(provider: resolve, onAuthDead: dead)
         avatars = AvatarStore(api: workspace.primary?.api)
+        search = MailSearch(mail: self)
         compose = ComposeModel(
             workspace: workspace, conversation: conversation,
             syncSoon: { [weak self] key in Task { await self?.sync(only: key) } },
@@ -150,7 +163,8 @@ final class MailModel {
     }
 
     private func rebuild() {
-        list = buildMailList(all, doc: doc, activeID: activeFolderID, query: query)
+        list = buildMailList(all, doc: doc, activeID: activeFolderID, query: nil)
+        search?.refresh()
     }
 
     var selected: Conversation? { selectedID.flatMap { ref in all.first { $0.ref == ref } } }
@@ -229,16 +243,32 @@ final class MailModel {
     private func openSelected() {
         compose.reset()
         conversation.open(selected)
-        if let ref = selectedID { Notifier.clear(conversation: ref) }
+        if let ref = selectedID, composingTo == nil { Notifier.clear(conversation: ref) }
         guard let c = selected, c.unreadCount > 0, let p = provider(c) else { return }
         Task {
             do { try await p.markRead(c) } catch { self.fail("Не удалось отметить прочитанным", error, c.accountKey) }
         }
     }
 
-    /// Папка «Спам» скрыта всегда; попасть в неё — из меню.
-    func openSpam() {
-        if let i = doc.spamIndex { activeFolderID = doc.folders[i].id }
+    /// Новая беседа с адресом — «Написать по адресу…» выпадашки поиска.
+    func startNew(to address: String) {
+        let addr = address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !addr.isEmpty else { return }
+        search.clear()
+        selectedID = Self.newPrefix + addr
+    }
+
+    /// «Написать» на адрес (контакт в выпадашке, карточка контакта): есть
+    /// беседа с этим собеседником — открыть самую свежую, нет — новая (как
+    /// `search-select-contact` десктопа).
+    func write(to address: String) {
+        let addr = address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let c = all.first(where: { !$0.spam && $0.counterparts.first?.addr.lowercased() == addr }) {
+            search.clear()
+            open(c.ref)
+        } else {
+            startNew(to: addr)
+        }
     }
 
     // MARK: Действия

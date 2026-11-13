@@ -54,7 +54,7 @@ struct DDMailApp: App {
         }
         .commands { MailCommands() }
         #if os(macOS)
-        // Три колонки (разделы, список, беседа) — окну нужен простор.
+        // Две колонки (список и беседа) — как окно десктопа.
         .defaultSize(width: 1280, height: 820)
         #endif
         .onChange(of: scenePhase) {

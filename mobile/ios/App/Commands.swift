@@ -3,20 +3,23 @@ import SwiftUI
 /// Действия окна для меню приложения (Мак, клавиатура iPad): команды берут их
 /// у окна в фокусе, поэтому в каждом окне действуют на своё.
 struct MailActions {
+    /// ⌘N: нового письма вне поиска нет — фокус в поле поиска (mobile-layout.md).
     var newMail: () -> Void
     var reply: (() -> Void)?
     var forward: (() -> Void)?
     var delete: (() -> Void)?
     var refresh: () -> Void
     var go: (AppSection) -> Void
+    var settings: () -> Void
 }
 
 extension FocusedValues {
     @Entry var mailActions: MailActions?
 }
 
-/// Меню как у Apple Mail: ⌘N — новое, ⌘R — ответить, ⇧⌘F — переслать,
-/// ⇧⌘N — проверить почту, ⌘⌫ — удалить, ⌘1…⌘4 — разделы.
+/// Меню как у Apple Mail: ⌘N — новое (фокус в поиск: адрес там же), ⌘R —
+/// ответить, ⇧⌘F — переслать, ⇧⌘N — проверить почту, ⌘⌫ — удалить, ⌘1…⌘4 —
+/// разделы, ⌘, — настройки. Ведут туда же, куда бургер.
 struct MailCommands: Commands {
     @FocusedValue(\.mailActions) private var actions
 
@@ -40,6 +43,11 @@ struct MailCommands: Commands {
             Divider()
             Button("Проверить почту") { actions?.refresh() }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
+                .disabled(actions == nil)
+        }
+        CommandGroup(replacing: .appSettings) {
+            Button("Настройки…") { actions?.settings() }
+                .keyboardShortcut(",")
                 .disabled(actions == nil)
         }
         CommandGroup(after: .sidebar) {

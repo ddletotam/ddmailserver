@@ -95,7 +95,6 @@ final class ComposeModel {
         error = nil
     }
 
-    func openNew(to: String = "") { sheet = Sheet(branch: .new, draft: Draft(to: to)) }
     func openForward(_ b: MessageBody) { sheet = Sheet(branch: .forward(b), draft: Draft()) }
     func consumeTarget() { sentTarget = nil }
 
@@ -155,6 +154,38 @@ final class ComposeModel {
                     // Текст возвращается, если композер пуст (не затираем набранное заново).
                     if draft.isEmpty { draft = sent }
                     if replyTo == nil { replyTo = sentReply }
+                    self.error = Self.sendError(error)
+                }
+            }
+        }
+    }
+
+    /// Первое письмо новой беседы из поиска (десктоп `enter_compose_mode`):
+    /// строка ввода под пустой лентой, ветка «новое письмо», адресат — адрес
+    /// беседы (явное «Кому» его побеждает, §1). Пузырь-заглушка — сразу;
+    /// беседа откроется, как только письмо придёт синком (`sentTarget`).
+    func sendNew(to address: String) {
+        var d = draft
+        if d.to.trimmingCharacters(in: .whitespaces).isEmpty { d.to = address }
+        switch buildOutgoing(.new, draft: d, identities: identities) {
+        case let .refused(reason):
+            error = reason
+        case let .ok(request, to):
+            let sent = draft
+            stubSeq += 1
+            let key = "s\(stubSeq)"
+            conversation.web.run("ddm.stub(\(Self.stubJSON(key, sent)))")
+            reset()
+            sentTarget = Set(to.map { $0.lowercased() })
+            Task {
+                do {
+                    let via = try await send(request)
+                    flash()
+                    afterSend(via)
+                } catch {
+                    conversation.web.run("ddm.unstub(\"\(key)\")")
+                    sentTarget = nil
+                    if draft.isEmpty { draft = sent }
                     self.error = Self.sendError(error)
                 }
             }

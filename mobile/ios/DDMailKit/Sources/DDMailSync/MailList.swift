@@ -26,7 +26,9 @@ public struct MailListState: Equatable, Sendable {
 ///
 /// - Поиск — по всем папкам, спам в поиск не попадает.
 /// - Удалённая папка — снова инбокс. Скрытая видна табом, только пока в неё
-///   привели (открытие беседы из неё, переход в «Спам» из меню).
+///   привели (открытие беседы из неё).
+/// - Системная «Спам» — всегда таб полосы, последним (`docs/mobile-layout.md`):
+///   у мобильных клиентов нет меню, откуда в неё прийти иначе.
 public func buildMailList(_ convs: [Conversation], doc: FoldersDoc, activeID: String?, query: String?) -> MailListState {
     var s = MailListState()
     if let q = query, !q.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -37,7 +39,7 @@ public func buildMailList(_ convs: [Conversation], doc: FoldersDoc, activeID: St
     let active = activeID.flatMap { id in doc.folders.firstIndex { $0.id == id } }
     let counts = doc.unreadCounts(convs)
     s.tabs = doc.folders.enumerated().compactMap { i, f in
-        if f.hidden && i != active { return nil }
+        if f.hidden && i != active && f.system != systemSpam { return nil }
         // Непрочитанный спам — не повод на него смотреть.
         return FolderTab(index: i, id: f.id, name: f.name, icon: f.icon, unread: f.system == systemSpam ? 0 : counts.folders[i])
     }
@@ -46,6 +48,50 @@ public func buildMailList(_ convs: [Conversation], doc: FoldersDoc, activeID: St
     s.conversations = doc.filter(convs, active: active)
     s.inSpam = active != nil && active == doc.spamIndex
     return s
+}
+
+/// Найденный диалог выпадашки поиска и что в нём совпало — вторая строка
+/// (десктоп §4 «Поиск»).
+public struct ConversationHit: Equatable, Sendable {
+    public let conversation: Conversation
+    /// Совпавшее: адрес участника или тема; пусто — совпало имя.
+    public let matched: String
+}
+
+/// Локальный поиск по диалогам с пояснением, что совпало: имя (вторая строка —
+/// адрес собеседника), адрес любого участника, тема. Порядок — как у
+/// `searchConversations`.
+public func searchConversationHits(_ convs: [Conversation], _ q: String) -> [ConversationHit] {
+    let needle = fold(q.trimmingCharacters(in: .whitespacesAndNewlines))
+    guard !needle.isEmpty else { return [] }
+    func has(_ s: String) -> Bool { fold(s).contains(needle) }
+    return searchConversations(convs, q).map { c in
+        if has(c.label) {
+            // Имя — сам адрес: второй строкой его не повторяем.
+            let addr = c.counterparts.first?.addr ?? ""
+            return ConversationHit(conversation: c, matched: addr.caseInsensitiveCompare(c.label) == .orderedSame ? "" : addr)
+        }
+        if let p = c.counterparts.first(where: { has($0.addr) || has($0.name) }) {
+            return ConversationHit(conversation: c, matched: p.addr)
+        }
+        if has(c.receivedBy) { return ConversationHit(conversation: c, matched: c.receivedBy) }
+        return ConversationHit(conversation: c, matched: c.lastSubject)
+    }
+}
+
+/// Строка поиска похожа на адрес — первая строка выпадашки «Написать по
+/// адресу…» (`parse_email_like` десктопа): без пробелов, кавычек, угловых
+/// скобок и запятых; непустая часть до `@`; в домене точка не первой и не
+/// последней. Возвращает адрес в нижнем регистре.
+public func parseEmailLike(_ q: String) -> String? {
+    let s = q.trimmingCharacters(in: .whitespacesAndNewlines)
+    if s.contains(where: { $0.isWhitespace || "<>\",".contains($0) }) { return nil }
+    guard let at = s.firstIndex(of: "@") else { return nil }
+    let local = s[..<at]
+    let domain = s[s.index(after: at)...]
+    guard !local.isEmpty, !domain.isEmpty, let dot = domain.firstIndex(of: ".") else { return nil }
+    if dot == domain.startIndex || domain.index(after: dot) == domain.endIndex { return nil }
+    return s.lowercased()
 }
 
 /// Локальный поиск по диалогам (Android §5): имя, адрес любого участника,

@@ -66,9 +66,13 @@ final class ImapFlowTests: XCTestCase {
         XCTAssertTrue(pw.waitForExistence(timeout: 30), "сервер ddmail не найден")
         enterPassword(password, into: pw, app)
         app.buttons["connect.login"].tap()
-        let viaDdmail = waitRows(app)
+        var viaDdmail = waitRows(app)
         XCTAssertFalse(viaDdmail.isEmpty, "через ddmail список пуст")
         shot(app, "lucky-1-ddmail")
+        // У ddmail-учётки папки диалогов с сервера: «Входящие» — не все беседы.
+        // У IMAP-учётки папок нет (локальный документ пуст) — сравниваем с
+        // объединением верха каждой папки (кроме «Спама»: его IMAP не видит).
+        viaDdmail += folderRows(app)
 
         // 2. Удалить учётку: Настройки → Учётки.
         openSettings(app)
@@ -103,14 +107,9 @@ final class ImapFlowTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(common.count, min(3, viaIMAP.count), "беседы по IMAP не совпали с ddmail по id")
 
         // 4. Календарь той же учётки — по CalDAV, найденному при подключении (§8).
-        // В беседе на iPhone таб-бар скрыт — назад к списку; на iPad и Маке разделы видны всегда.
-        if !section("Календарь", app).exists, app.navigationBars.buttons.count > 0 {
-            app.navigationBars.buttons.element(boundBy: 0).tap()
-        }
+        // Разделы — только из бургера (mobile-layout.md).
         settle(app)
-        let cal = section("Календарь", app)
-        XCTAssertTrue(cal.waitForExistence(timeout: 10), "нет раздела «Календарь»")
-        cal.tap()
+        Nav.go("Календарь", app)
         let today = app.buttons["Сегодня"].waitForExistence(timeout: 20)
         shot(app, "lucky-4a-calendar-tapped")
         XCTAssertTrue(today, "календарь CalDAV не открылся")
@@ -119,18 +118,6 @@ final class ImapFlowTests: XCTestCase {
     }
 
     // MARK: Помощники
-
-    /// Раздел: кнопка таб-бара (iPhone) или строка боковой панели (iPad, Мак).
-    @MainActor
-    private func section(_ name: String, _ app: XCUIApplication) -> XCUIElement {
-        let button = app.tabBars.buttons[name].firstMatch
-        if button.exists { return button }
-        let any = app.buttons[name].firstMatch
-        if any.exists { return any }
-        let text = app.staticTexts[name].firstMatch
-        if text.exists { return text }
-        return app.cells.containing(.staticText, identifier: name).firstMatch
-    }
 
     /// Ждём строки списка (и закрываем вопросы: уведомления, загрузка заранее); id видимых бесед.
     @MainActor
@@ -160,6 +147,25 @@ final class ImapFlowTests: XCTestCase {
         return []
     }
 
+    /// id верхних бесед каждой папки полосы табов, затем снова «Входящие».
+    @MainActor
+    private func folderRows(_ app: XCUIApplication) -> [String] {
+        settle(app)
+        let tabs = app.buttons.matching(identifier: "folder.tab")
+        let names = tabs.allElementsBoundByIndex.map(\.label).filter { !$0.contains("Спам") && !$0.contains("Входящие") }
+        var out: [String] = []
+        for name in names {
+            let tab = tabs.matching(NSPredicate(format: "label == %@", name)).firstMatch
+            guard tab.exists else { continue }
+            tab.tap()
+            sleep(2)
+            out += visibleIDs(app)
+        }
+        let inbox = tabs.matching(NSPredicate(format: "label CONTAINS 'Входящие'")).firstMatch
+        if inbox.exists { inbox.tap() }
+        return out
+    }
+
     /// id видимых бесед — одним снимком дерева: список обновляется синком, и
     /// поштучный доступ к строкам ловит исчезнувший элемент.
     @MainActor
@@ -177,12 +183,8 @@ final class ImapFlowTests: XCTestCase {
     @MainActor
     private func openSettings(_ app: XCUIApplication) {
         settle(app)
-        let more = app.buttons["Ещё"].firstMatch
-        XCTAssertTrue(more.waitForExistence(timeout: 10), "нет меню «Ещё»")
-        more.tap()
-        let item = app.buttons["Настройки"].exists ? app.buttons["Настройки"].firstMatch : app.menuItems["Настройки"].firstMatch
-        XCTAssertTrue(item.waitForExistence(timeout: 5), "нет пункта «Настройки»")
-        item.tap()
+        // «Настройки» — пункт бургера.
+        Nav.go("Настройки", app)
         shot(app, "settings-1-open")
     }
 

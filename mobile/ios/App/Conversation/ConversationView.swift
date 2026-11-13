@@ -12,7 +12,6 @@ struct ConversationView: View {
     let compose: ComposeModel
     let onSpam: () -> Void
     @State private var exportShown = false
-    @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
         WebViewContainer(web: model.web, ready: model.webPrepared)
@@ -55,9 +54,8 @@ struct ConversationView: View {
             .overlay(alignment: .bottom) { NoticeBanner(text: $model.notice) }
             // Ответа в спам нет: на спам не отвечают (§5).
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                if !conversation.spam { ComposerBar(conversation: conversation, model: compose) }
+                if !conversation.spam { ComposerBar(model: compose) { compose.sendReply(conversation) } }
             }
-            .hidingTabBar(sizeClass == .compact)
     }
 
     /// Имя беседы и её адреса: кто → на какой мой адрес пришло.
@@ -83,6 +81,34 @@ struct ConversationView: View {
         // Значение читается сразу (в теле), а не в ленивом замыкании.
         let shown = v.wrappedValue != nil
         return Binding(get: { shown }, set: { if !$0 { v.wrappedValue = nil } })
+    }
+}
+
+/// Новая беседа с адресом из поиска (десктоп `enter_compose_mode`): шапка —
+/// адрес, лента пустая, внизу строка ввода с фокусом. Отправленное встаёт
+/// пузырём-заглушкой; придёт письмо синком — откроется настоящая беседа.
+struct NewConversationView: View {
+    let address: String
+    let model: ConversationModel
+    let compose: ComposeModel
+
+    var body: some View {
+        WebViewContainer(web: model.web, ready: model.webPrepared)
+            .background(Color(white: 0.96))
+            .navigationTitle(address)
+            .toolbarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    VStack(spacing: 1) {
+                        Text(address).font(.headline).lineLimit(1)
+                        Text("Новая беседа").font(.caption).foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                ComposerBar(model: compose, autofocus: true) { compose.sendNew(to: address) }
+            }
     }
 }
 
@@ -188,18 +214,5 @@ enum PlainText {
         }
         return s.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-}
-
-private extension View {
-    /// Открытая беседа на узком экране — без таб-бара разделов (Android §16): у
-    /// неё своя шапка, а внизу место строке ввода. На широком (iPad, Мак)
-    /// разделы видны всегда (§6).
-    @ViewBuilder func hidingTabBar(_ hide: Bool) -> some View {
-        #if os(iOS)
-        toolbarVisibility(hide ? .hidden : .automatic, for: .tabBar)
-        #else
-        self
-        #endif
     }
 }
