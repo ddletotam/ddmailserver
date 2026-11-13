@@ -637,7 +637,22 @@ private fun ListPane(
                     modifier = Modifier.padding(24.dp),
                 )
             }
-            LazyColumn(Modifier.fillMaxSize()) {
+            // Новая беседа (письмо новому адресату, свежее входящее) встаёт
+            // первой строкой. LazyColumn держит позицию по ключу прежней первой
+            // строки, и новая оказывалась выше края экрана — «после отправки
+            // диалог не появился» (замер 2026-11-13). Был в самом верху — верх и
+            // остаётся; прокрутил вниз — позиция не трогается.
+            val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+            val topKey = s.conversations.firstOrNull()?.let { it.accountKey + "\u0000" + it.id }
+            var prevTop by remember { mutableStateOf<String?>(null) }
+            LaunchedEffect(topKey) {
+                val was = prevTop
+                prevTop = topKey
+                if (was == null || was == topKey) return@LaunchedEffect
+                val anchored = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.key == was
+                if (anchored && listState.firstVisibleItemScrollOffset == 0) listState.scrollToItem(0)
+            }
+            LazyColumn(Modifier.fillMaxSize(), state = listState) {
                 items(s.conversations, key = { it.accountKey + "\u0000" + it.id }) { c ->
                     val inPick = c.ref in picked
                     SwipeRow(

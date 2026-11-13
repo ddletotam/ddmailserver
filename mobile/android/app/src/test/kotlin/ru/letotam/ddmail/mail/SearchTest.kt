@@ -29,6 +29,9 @@ class SearchTest {
     fun matchesTargetForSelfChat() {
         val self = c("me@a.ru|self", "Я", "", "x").copy(counterparts = emptyList())
         assertTrue(matchesTarget(self, setOf("me@a.ru")))
+        // Так её отдаёт сервер ddmail: собеседник — свой же адрес (замер 2026-11-13).
+        val served = self.copy(counterparts = listOf(ContactInfo("", "me@a.ru")))
+        assertTrue(matchesTarget(served, setOf("me@a.ru"), own = setOf("me@a.ru")))
     }
 
     @Test
