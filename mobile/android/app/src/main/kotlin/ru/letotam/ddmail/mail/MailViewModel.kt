@@ -35,8 +35,20 @@ private val Context.uiPrefs by preferencesDataStore(name = "ui")
 private val ACTIVE_FOLDER = stringPreferencesKey("active_folder")
 private val LAST_CONV = stringPreferencesKey("last_conversation")
 
-/** Таб полосы папок: индекс в документе, название, иконка, счётчик. */
-data class FolderTab(val index: Int, val id: String, val name: String, val icon: String, val unread: Int)
+/**
+ * Таб полосы папок: индекс в документе, название, иконка, счётчик.
+ * [hidden] — скрытая папка, показанная по «Показать скрытые» (бледнее);
+ * [system] — «Спам»: без «Настроить…» и «Удалить».
+ */
+data class FolderTab(
+    val index: Int,
+    val id: String,
+    val name: String,
+    val icon: String,
+    val unread: Int,
+    val hidden: Boolean = false,
+    val system: Boolean = false,
+)
 
 data class MailState(
     val tabs: List<FolderTab> = emptyList(),
@@ -47,6 +59,10 @@ data class MailState(
     val loaded: Boolean = false,
     /** Выбрана папка «Спам»: смотреть и «Не спам», других действий нет. */
     val inSpam: Boolean = false,
+    /** Скрытых папок (кроме «Спама» — он табом всегда) — для «Показать скрытые (N)». */
+    val hiddenCount: Int = 0,
+    /** «Показать скрытые» включено (на сессию). */
+    val showHidden: Boolean = false,
 )
 
 /** Подтверждение «В спам»: беседы и что умеют их учётки. */
@@ -107,8 +123,17 @@ class MailViewModel(
     private var doc: FoldersDoc = FoldersDoc()
     private var lastConv: String? = null
 
+    /** «Показать скрытые» — на сессию, как у десктопа (не запоминается). */
+    private val showHidden = MutableStateFlow(false)
+
+    /** Документ папок — для раздела «Папки» настроек и редактора папки. */
+    val folders: StateFlow<FoldersDoc> = hub.folders.stateIn(viewModelScope, SharingStarted.Eagerly, FoldersDoc())
+
+    /** «Показывать папки» (локальный выключатель). */
+    val foldersOn: StateFlow<Boolean> = app.settings.foldersOn.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+
     val state: StateFlow<MailState> =
-        combine(hub.conversations, hub.folders, activeId) { convs, doc, id -> build(convs, doc, id) }
+        combine(hub.conversations, hub.folders, activeId, showHidden, foldersOn) { convs, doc, id, hidden, on -> build(convs, doc, id, hidden, on) }
             .stateIn(viewModelScope, SharingStarted.Eagerly, MailState())
 
     /** Адресная книга — для секции «Контакты» поиска (кладёт оболочка). */
@@ -179,7 +204,8 @@ class MailViewModel(
                 selected.value?.let { ref -> list.firstOrNull { it.ref == ref }?.let(conversation::updated) }
                 // Отправили новое письмо — перейти в его беседу, как только она появилась.
                 compose.sentTarget?.let { target ->
-                    list.firstOrNull { c -> matchesTarget(c, target) }?.let { c ->
+                    val own = compose.identities.value.map { it.email.lowercase() }.toSet()
+                    list.firstOrNull { c -> matchesTarget(c, target, own) }?.let { c ->
                         compose.consumeTarget()
                         open(c.ref)
                     }
@@ -499,19 +525,79 @@ class MailViewModel(
         if (all.any { it.ref == id }) open(id)
     }
 
-    private fun build(convs: List<Conversation>, doc: FoldersDoc, id: String?): MailState {
-        // Удалённая папка — снова инбокс. Скрытая видна табом, только пока
-        // в неё привели (открытие беседы из неё). «Спам» — таб полосы всегда
-        // (mobile-layout.md): меню, через которое в него входили, больше нет.
+    private fun build(convs: List<Conversation>, doc: FoldersDoc, id: String?, showHidden: Boolean, on: Boolean): MailState {
+        // Папки выключены («Показывать папки») или их нет — список ровно как
+        // без них: всё, кроме спама (десктоп `visible_view`).
+        if (!on || doc.folders.isEmpty()) {
+            return MailState(conversations = convs.filter { !it.spam }, loaded = true)
+        }
+        // Удалённая папка — снова инбокс. Скрытая видна табом, пока включено
+        // «Показать скрытые» или в неё привели (открытие беседы из неё).
+        // «Спам» — таб полосы всегда (mobile-layout.md): меню, через которое в
+        // него входили, больше нет.
         val active = doc.folders.indexOfFirst { it.id == id }.takeIf { it >= 0 }
         val (counts, inbox) = doc.unreadCounts(convs)
         val tabs = doc.folders.mapIndexedNotNull { i, f ->
             val spam = f.system == SYSTEM_SPAM
             // У «Спама» счётчика нет: непрочитанный спам — не повод на него смотреть.
-            if (f.hidden && !spam && i != active) null else FolderTab(i, f.id, f.name, f.icon, if (spam) 0 else counts[i])
+            if (f.hidden && !spam && !showHidden && i != active) null
+            else FolderTab(i, f.id, f.name, f.icon, if (spam) 0 else counts[i], hidden = f.hidden && !spam, system = f.isSystem)
         }
         val inSpam = active != null && active == doc.spamIndex
-        return MailState(tabs, active, inbox, doc.filter(convs, active), loaded = true, inSpam = inSpam)
+        val hiddenCount = doc.folders.count { it.hidden && !it.isSystem }
+        return MailState(tabs, active, inbox, doc.filter(convs, active), loaded = true, inSpam = inSpam, hiddenCount = hiddenCount, showHidden = showHidden)
+    }
+
+    // ── Папки: меню полосы табов и настройки (десктоп §4 «Папки диалогов») ──
+
+    fun toggleShowHidden() = showHidden.update { !it }
+
+    /** Открыт редактор папки (id); `null` — закрыт. Рисует его оболочка поверх всего. */
+    val folderEditor = MutableStateFlow<String?>(null)
+
+    fun setFoldersOn(v: Boolean) {
+        viewModelScope.launch { app.settings.setFoldersOn(v) }
+    }
+
+    /**
+     * «Все прочитаны»: всё непрочитанное в диалогах папки — локально сразу,
+     * на сервере следом (по учётке диалога).
+     */
+    fun markFolderRead(id: String) {
+        val d = folders.value
+        val i = d.indexOf(id) ?: return
+        val convs = all.filter { it.unreadCount > 0 && d.folderOf(it) == i }
+        if (convs.isEmpty()) return
+        viewModelScope.launch {
+            val r = runCatching { convs.forEach { hub.markRead(it) } }
+            notice.value = r.fold({ "Прочитано бесед: ${convs.size}" }, { "Не удалось: ${it.errorText()}" })
+        }
+    }
+
+    /** «Новая папка»: создаётся и сразу открывается редактор — назвать её. */
+    fun newFolder(): String {
+        val id = folders.value.newId()
+        editFolders { it.added(id) }
+        return id
+    }
+
+    fun deleteFolder(id: String) {
+        if (activeId.value == id) selectFolder(null)
+        editFolders { it.removed(id) }
+    }
+
+    fun saveFolder(f: ru.letotam.ddmail.sync.DialogFolder) = editFolders { d -> d.edited(f.id) { f } }
+
+    fun moveFolder(id: String, toId: String) = editFolders { it.moved(id, toId) }
+
+    /** Правка документа папок; отказ (сеть, правка с другого устройства) — сообщением. */
+    private fun editFolders(transform: (FoldersDoc) -> FoldersDoc) {
+        viewModelScope.launch {
+            runCatching { hub.editFolders(transform) }.onFailure { e ->
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                notice.value = if (e is ru.letotam.ddmail.sync.FoldersConflict) e.message else "Папки не сохранены: ${e.errorText()}"
+            }
+        }
     }
 }
 
@@ -536,9 +622,13 @@ internal fun spamText(o: SpamOutcome): String = when (o) {
     is SpamOutcome.Moved -> "✓ В спам: перенесено писем: ${o.messages}"
 }
 
-internal fun matchesTarget(c: Conversation, target: Set<String>): Boolean {
+internal fun matchesTarget(c: Conversation, target: Set<String>, own: Set<String> = emptySet()): Boolean {
+    if (c.spam) return false
     val cps = c.counterparts.map { it.addr.lowercase() }.filter { it.isNotEmpty() }.toSet()
-    if (cps.isNotEmpty()) return cps == target
+    // Свои адреса среди адресатов (письмо себе и ещё кому-то) в собеседники не
+    // входят — сверяем без них.
+    if (cps.isNotEmpty()) return cps == target - own
+    // Беседа без собеседников — письмо себе: сверяем по её id.
     val id = c.id.lowercase()
     return target.all { id.contains(it) }
 }

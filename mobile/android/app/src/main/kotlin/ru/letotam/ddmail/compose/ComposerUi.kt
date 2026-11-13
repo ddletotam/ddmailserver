@@ -60,6 +60,8 @@ import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import android.net.Uri
+import kotlinx.coroutines.launch
 import ru.letotam.ddmail.api.Identity
 import ru.letotam.ddmail.sync.Conversation
 
@@ -76,7 +78,7 @@ fun ComposerBar(
     conversation: Conversation?,
     newTo: String? = null,
     /** Фокус в поле ввода (новая беседа — сразу печатать, как `focus_composer` десктопа). */
-    focus: androidx.compose.ui.focus.FocusRequester? = null,
+    focusOnStart: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val u by cc.ui.collectAsState()
@@ -109,12 +111,11 @@ fun ComposerBar(
                 Overrides(d, ids, conversation?.receivedBy, autoTo, subjectHint = if (conversation != null) "Re: …" else "", onEdit = cc::edit)
             }
             Attachments(d.attachments) { a -> cc.edit { it.copy(attachments = it.attachments - a) } }
-            u.error?.let {
-                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(4.dp))
-            }
-            if (u.sentFlash) {
-                Icon(Icons.Filled.DoneAll, "Отправлено", tint = Accent, modifier = Modifier.padding(4.dp).size(20.dp))
-            }
+            // Ошибка отправки — amber-плашкой над композером (десктоп §2: заглушка
+            // убрана, текст возвращён, причина видна).
+            u.error?.let { SendPlaque(it, ok = false, onClose = cc::clearError) }
+            // «✓ Отправлено» ~2 с — плашка над композером, без тостов (§2).
+            if (u.sentFlash) SendPlaque("Отправлено", ok = true)
             Row(verticalAlignment = Alignment.Bottom) {
                 IconButton(onClick = { pick.launch(arrayOf("*/*")) }) { Icon(Icons.Filled.AttachFile, "Вложить файл") }
                 // Поля «Кому / Копия / Тема / От»: @ — про адреса.
@@ -125,20 +126,12 @@ fun ComposerBar(
                         tint = if (u.expanded) Accent else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                TextField(
-                    value = d.text,
-                    onValueChange = { t -> cc.edit { it.copy(text = t) } },
-                    placeholder = { Text("Сообщение") },
-                    maxLines = 6,
-                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                    colors = TextFieldDefaults.colors(
-                        focusedContainerColor = Color(0xFFF0F2F5),
-                        unfocusedContainerColor = Color(0xFFF0F2F5),
-                        focusedIndicatorColor = Color.Transparent,
-                        unfocusedIndicatorColor = Color.Transparent,
-                    ),
-                    shape = RoundedCornerShape(18.dp),
-                    modifier = Modifier.weight(1f).heightIn(min = 48.dp).then(if (focus != null) Modifier.focusRequester(focus) else Modifier),
+                RichField(
+                    draft = d,
+                    onEdit = cc::edit,
+                    focusOnStart = focusOnStart,
+                    onError = cc::showError,
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                 )
                 Spacer(Modifier.padding(2.dp))
                 androidx.compose.material3.FilledIconButton(
@@ -291,10 +284,11 @@ fun ComposeSheetDialog(cc: ComposeController) {
                         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Next),
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    OutlinedTextField(
-                        value = d.text, onValueChange = { v -> cc.editSheet { it.copy(text = v) } },
-                        label = { Text("Сообщение") },
-                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                    RichField(
+                        draft = d,
+                        onEdit = cc::editSheet,
+                        maxHeight = 360.dp,
+                        filled = false,
                         modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp),
                     )
                     Attachments(d.attachments) { a -> cc.editSheet { it.copy(attachments = it.attachments - a) } }
@@ -310,6 +304,188 @@ fun ComposeSheetDialog(cc: ComposeController) {
                 }
             }
           }
+        }
+    }
+}
+
+/** Номер картинки тела — для уникального cid в пределах сессии. */
+private val imageSeq = java.util.concurrent.atomic.AtomicInteger()
+
+/**
+ * Поле текста письма с форматированием (десктоп §3а) — [RichEditText] в
+ * Compose. Источник истины — сам редактор; черновик получает его plain-
+ * зеркало, HTML и картинки на каждую правку, а обратно в редактор текст
+ * идёт, только когда сменилось поколение черновика ([Draft.epoch]): сброс
+ * после отправки, возврат после ошибки, другая беседа.
+ */
+@Composable
+fun RichField(
+    draft: Draft,
+    onEdit: ((Draft) -> Draft) -> Unit,
+    modifier: Modifier = Modifier,
+    placeholder: String = "Сообщение",
+    /** Высота, за которой текст прокручивается. */
+    maxHeight: androidx.compose.ui.unit.Dp = 200.dp,
+    /** Фокус и клавиатура сразу (новая беседа — `focus_composer` десктопа). */
+    focusOnStart: Boolean = false,
+    filled: Boolean = true,
+    onError: (String) -> Unit = {},
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var editor by remember { mutableStateOf<RichEditText?>(null) }
+    var applied by remember { androidx.compose.runtime.mutableLongStateOf(-1L) }
+    var linkAsk by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    val latestEdit by androidx.compose.runtime.rememberUpdatedState(onEdit)
+    val latestError by androidx.compose.runtime.rememberUpdatedState(onError)
+
+    fun insertFrom(uri: Uri, mime: String) {
+        val v = editor ?: return
+        scope.launch {
+            val prepared = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching {
+                    val raw = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    raw?.let { RichEditText.prepareImage(it, mime) }
+                }.getOrNull()
+            }
+            if (prepared == null) {
+                latestError("Не удалось прочитать картинку.")
+                return@launch
+            }
+            val cid = "img${imageSeq.incrementAndGet()}.${System.currentTimeMillis()}@ddmail"
+            v.insertImage(prepared.first, prepared.second, cid)
+        }
+    }
+
+    val gallery = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) insertFrom(uri, context.contentResolver.getType(uri) ?: "image/jpeg")
+    }
+
+    linkAsk?.let { (s, e) ->
+        LinkDialog(
+            initial = clipboardUrl(context),
+            onDismiss = { linkAsk = null },
+        ) { url ->
+            linkAsk = null
+            editor?.applyLink(s, e, url)
+        }
+    }
+
+    val maxPx = with(androidx.compose.ui.platform.LocalDensity.current) { maxHeight.roundToPx() }
+    androidx.compose.ui.viewinterop.AndroidView(
+        factory = { ctx ->
+            RichEditText(ctx).apply {
+                hint = placeholder
+                textSize = 16f
+                setTextColor(android.graphics.Color.parseColor("#0F1419"))
+                setHintTextColor(android.graphics.Color.parseColor("#8B95A1"))
+                inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                    android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                    android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                isSingleLine = false
+                gravity = android.view.Gravity.CENTER_VERTICAL or android.view.Gravity.START
+                val px = { dp: Int -> (dp * resources.displayMetrics.density).toInt() }
+                minHeight = px(48)
+                this.maxHeight = maxPx
+                isVerticalScrollBarEnabled = true
+                setPadding(px(16), px(12), px(16), px(12))
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    cornerRadius = px(18).toFloat()
+                    if (filled) {
+                        setColor(android.graphics.Color.parseColor("#F0F2F5"))
+                    } else {
+                        setColor(android.graphics.Color.TRANSPARENT)
+                        setStroke(px(1), android.graphics.Color.parseColor("#C4C9D0"))
+                    }
+                }
+                editor = this
+                if (focusOnStart) post {
+                    requestFocus()
+                    context.getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+                        ?.showSoftInput(this, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+                }
+            }
+        },
+        update = { v ->
+            v.onChange = {
+                val segs = v.segments()
+                val inline = v.images().map { img ->
+                    val ext = when (img.mime) {
+                        "image/png" -> "png"
+                        "image/gif" -> "gif"
+                        "image/webp" -> "webp"
+                        else -> "jpg"
+                    }
+                    PendingAttachment("${img.cid.substringBefore('@')}.$ext", img.mime, img.bytes, img.cid)
+                }
+                val content = android.text.SpannableStringBuilder(v.text)
+                latestEdit { it.copy(text = RichBody.plain(segs), html = RichBody.html(segs), inline = inline, content = content) }
+            }
+            v.onLinkRequest = { s, e -> linkAsk = s to e }
+            v.onPickImage = { gallery.launch(androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+            v.onImageUri = { uri, mime -> insertFrom(uri, mime) }
+            if (draft.epoch != applied) {
+                applied = draft.epoch
+                val want: CharSequence = draft.content ?: draft.text
+                // Тот же текст без разметки и картинок — не трогать: каретка и
+                // выделение остаются где были.
+                if (want.toString() != v.text.toString() || draft.content != null || v.images().isNotEmpty()) v.load(want)
+            }
+        },
+        modifier = modifier,
+    )
+}
+
+/** Адрес из буфера обмена, если он похож на ссылку, — подставить в «Ссылку». */
+private fun clipboardUrl(context: android.content.Context): String {
+    val cm = context.getSystemService(android.content.ClipboardManager::class.java) ?: return ""
+    val t = runCatching { cm.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString() }.getOrNull()?.trim().orEmpty()
+    val whole = RichBody.findUrl(t)?.let { it.first == 0 && it.second == t.length } == true
+    return if (whole || t.startsWith("mailto:")) t else ""
+}
+
+@Composable
+private fun LinkDialog(initial: String, onDismiss: () -> Unit, onOk: (String) -> Unit) {
+    var url by remember { mutableStateOf(initial) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Ссылка") },
+        text = {
+            OutlinedTextField(
+                value = url, onValueChange = { url = it },
+                placeholder = { Text("https://…") }, singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = { TextButton(onClick = { if (url.isNotBlank()) onOk(url) }, enabled = url.isNotBlank()) { Text("Готово") } },
+        dismissButton = { IconButton(onClick = onDismiss) { Icon(Icons.Filled.Close, "Отмена") } },
+    )
+}
+
+/** Плашка над композером: «✓ Отправлено» (зелёная) или причина отказа (amber). */
+@Composable
+private fun SendPlaque(text: String, ok: Boolean, onClose: (() -> Unit)? = null) {
+    Row(
+        Modifier.fillMaxWidth().padding(bottom = 4.dp).clip(RoundedCornerShape(8.dp))
+            .background(if (ok) Color(0xFFD1FAE5) else Color(0xFFFEF3C7))
+            .padding(start = 10.dp, top = 6.dp, bottom = 6.dp, end = if (onClose == null) 10.dp else 0.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            if (ok) Icons.Filled.Check else Icons.Filled.ErrorOutline, null,
+            tint = if (ok) Accent else Color(0xFFB45309), modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text,
+            color = if (ok) Color(0xFF065F46) else Color(0xFF92400E),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = if (ok) FontWeight.SemiBold else FontWeight.Normal,
+            modifier = Modifier.weight(1f),
+        )
+        if (onClose != null) IconButton(onClick = onClose, modifier = Modifier.size(32.dp)) {
+            Icon(Icons.Filled.Close, "Скрыть", modifier = Modifier.size(16.dp))
         }
     }
 }

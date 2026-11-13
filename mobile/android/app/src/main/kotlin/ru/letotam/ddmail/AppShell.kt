@@ -135,8 +135,11 @@ fun AppShell(
             app.settings, sources, statuses, accounts.closing { settingsOpen = false },
             calendars = calVm?.let { vm -> { CalendarList(vm) } },
             addressBooks = contactsVm?.let { vm -> { AddressBookList(vm) } },
+            folders = { ru.letotam.ddmail.mail.FolderSettings(mailVm) },
         ) { settingsOpen = false }
     }
+    // Редактор папки — поверх всего: его открывают и меню полосы табов, и настройки.
+    ru.letotam.ddmail.mail.FolderEditorDialog(mailVm)
 
     Box(modifier.fillMaxSize()) {
         CompositionLocalProvider(LocalBurger provides { menuOpen = true }) {
