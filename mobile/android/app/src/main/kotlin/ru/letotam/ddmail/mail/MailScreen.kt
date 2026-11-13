@@ -1,6 +1,8 @@
 package ru.letotam.ddmail.mail
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.material.icons.outlined.Schedule
+import ru.letotam.ddmail.api.Delivery
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -441,7 +443,17 @@ private fun NewChatPane(to: String, vm: MailViewModel, onBack: (() -> Unit)?, mo
                         Text(p.text)
                         // Как заглушка в ленте: «Отправляется…», потом «Отправлено» — пока
                         // беседа не придёт с сервера и не откроется вместо заготовки.
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Не ушло (SMTP IMAP-учётки) — красное «Не доставлено» с причиной.
+                        if (p.failed != null) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.Error, null, tint = DeliveryFailed, modifier = Modifier.size(14.dp))
+                                Text(
+                                    " Не доставлено: ${p.failed}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = DeliveryFailed,
+                                )
+                            }
+                        } else Row(verticalAlignment = Alignment.CenterVertically) {
                             if (p.sent) Icon(Icons.Filled.Check, null, tint = Accent, modifier = Modifier.size(14.dp))
                             Text(
                                 if (p.sent) " Отправлено" else "Отправляется…",
@@ -957,6 +969,22 @@ private fun ConversationRow(
                     modifier = Modifier.weight(1f),
                 )
                 Spacer(Modifier.width(8.dp))
+                // Статус доставки последнего своего письма (сервер ddmail):
+                // не доставлено — красный значок, в очереди — часы.
+                when (c.lastDeliveryStatus) {
+                    Delivery.FAILED -> Icon(
+                        Icons.Filled.Error,
+                        "Не доставлено",
+                        tint = if (onSel) Color.White else DeliveryFailed,
+                        modifier = Modifier.padding(end = 4.dp).size(14.dp),
+                    )
+                    Delivery.PENDING -> Icon(
+                        Icons.Outlined.Schedule,
+                        "Отправляется",
+                        tint = dim,
+                        modifier = Modifier.padding(end = 4.dp).size(14.dp),
+                    )
+                }
                 Text(
                     formatListDate(c.lastDateTs),
                     style = MaterialTheme.typography.bodySmall,
@@ -1135,3 +1163,6 @@ class AccountActions(
         remove = { close(); remove(it) },
     )
 }
+
+/** «Не доставлено» — тот же красный, что в документе ленты (`--fail`). */
+private val DeliveryFailed = Color(0xFFC62828)

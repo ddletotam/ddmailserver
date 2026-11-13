@@ -5,6 +5,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.WebSocket
+import ru.letotam.ddmail.api.DeliveryEvent
+import ru.letotam.ddmail.api.deliveryEvent
 import ru.letotam.ddmail.sync.AccountStatus
 import ru.letotam.ddmail.sync.ImapEngine
 import ru.letotam.ddmail.sync.MailHub
@@ -16,7 +18,9 @@ import ru.letotam.ddmail.sync.isAuthError
  *
  * - сервер ddmail — WebSocket (контракт §7): любое событие — синк, слитый в
  *   один на пачку событий; обрыв — переподключение с паузой 2 с … 1 мин,
- *   отказ токена — сначала синк (он обменяет токен);
+ *   отказ токена — сначала синк (он обменяет токен). `delivery_status` ещё и
+ *   правит статус письма в кэше сразу и отдаётся [onDelivery] — пузырь
+ *   открытой беседы меняется, не дожидаясь синка;
  * - внешние IMAP-учётки — IDLE на INBOX, своё соединение на каждую
  *   (mobile-external-accounts §6): событие — синк; обрыв — переподключение
  *   с бэкоффом не чаще раза в 30 с; «нужен вход» — IDLE этой учётки стоит,
@@ -30,6 +34,8 @@ class LiveUpdates(
     private val sync: () -> Unit,
     /** `calendar_updated`: календарь, задачи и напоминания перечитываются, почта — нет. */
     private val onCalendar: () -> Unit = {},
+    /** `delivery_status`: статус доставки письма сменился (кэш уже поправлен). */
+    private val onDelivery: (DeliveryEvent) -> Unit = {},
 ) {
     private var socket: WebSocket? = null
     private var loop: Job? = null
@@ -97,7 +103,22 @@ class LiveUpdates(
             if (!wanted) return@launch
             socket = runCatching {
                 engine.openSocket(
-                    onEvent = { type -> if (type == "calendar_updated") onCalendar() else onEvent() },
+                    onEvent = { type, frame ->
+                        when (type) {
+                            "calendar_updated" -> onCalendar()
+                            "delivery_status" -> {
+                                deliveryEvent(frame)?.let { ev ->
+                                    scope.launch {
+                                        runCatching { engine.applyDelivery(ev) }
+                                        onDelivery(ev)
+                                    }
+                                }
+                                // Строку беседы (`last_delivery_status`) приносит синк.
+                                onEvent()
+                            }
+                            else -> onEvent()
+                        }
+                    },
                     onClosed = { authFailed ->
                         scope.launch {
                             if (!wanted) return@launch

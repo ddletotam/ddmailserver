@@ -1,20 +1,15 @@
 package ru.letotam.ddmail.sync
 
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.builtins.ListSerializer
-import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import ru.letotam.ddmail.api.ApiException
-import ru.letotam.ddmail.api.AttachmentDto
 import ru.letotam.ddmail.api.Binary
 import ru.letotam.ddmail.api.ChangeEntry
-import ru.letotam.ddmail.api.ContactInfo
-import ru.letotam.ddmail.api.ConversationDto
 import ru.letotam.ddmail.api.Identity
 import ru.letotam.ddmail.api.MessageBody
 import ru.letotam.ddmail.api.PurgeOutcome
@@ -22,9 +17,9 @@ import ru.letotam.ddmail.api.SendRequest
 import ru.letotam.ddmail.api.MessageRef
 import ru.letotam.ddmail.api.SessionApi
 import ru.letotam.ddmail.db.CacheDao
-import ru.letotam.ddmail.db.ConversationEntity
-import ru.letotam.ddmail.db.MessageBodyEntity
-import ru.letotam.ddmail.db.MessageRefEntity
+import ru.letotam.ddmail.api.DeliveryEvent
+import ru.letotam.ddmail.sync.CacheRows.toDomain
+import ru.letotam.ddmail.sync.CacheRows.toEntity
 
 /**
  * Синхронизация учётки ddmail (контракт §4) — модель десктопного
@@ -57,20 +52,7 @@ class SyncEngine(
     private val spamKey = "$accountKey#spam"
 
     /** Все беседы учётки, со спамом (`spam = true`); порядок — по дате. */
-    override val conversations: Flow<List<Conversation>> =
-        combine(
-            dao.observeConversations(accountKey),
-            dao.observeRefs(accountKey),
-            dao.observeConversations(spamKey),
-            dao.observeRefs(spamKey),
-        ) { convs, refs, spamConvs, spamRefs ->
-            val byConv = refs.groupBy { it.conversationId }
-            val bySpam = spamRefs.groupBy { it.conversationId }
-            val ham = convs.map { it.toDomain(byConv[it.id].orEmpty()) }
-            if (spamConvs.isEmpty()) return@combine ham
-            val spam = spamConvs.map { it.toDomain(bySpam[it.id].orEmpty()).copy(accountKey = accountKey, spam = true) }
-            (ham + spam).sortedByDescending { it.lastDateTs }
-        }
+    override val conversations: Flow<List<Conversation>> = CacheRows.conversations(dao, accountKey, spamKey)
 
     val folders: Flow<FoldersDoc> = dao.observeMeta(K_FOLDERS).map { s ->
         (s?.let { runCatching { FoldersDoc.parse(json.parseToJsonElement(it)) }.getOrNull() } ?: FoldersDoc()).withSpam()
@@ -94,8 +76,8 @@ class SyncEngine(
             dao.meta(K_SINCE)?.toLongOrNull() ?: 0
         }
         val delta = api.conversationsDelta(since)
-        val convs = delta.conversations.map { it.toEntity() }
-        val refs = delta.conversations.flatMap { c -> c.messages.map { it.toEntity(c.id) } }
+        val convs = delta.conversations.map { it.toEntity(accountKey) }
+        val refs = delta.conversations.flatMap { c -> c.messages.map { it.toEntity(accountKey, c.id) } }
         if (since > 0) {
             dao.upsert(accountKey, convs, refs)
         } else {
@@ -112,8 +94,8 @@ class SyncEngine(
         runCatching { api.spamConversations() }.getOrNull()?.let { list ->
             dao.replaceAll(
                 spamKey,
-                list.map { it.toEntity().copy(accountKey = spamKey) },
-                list.flatMap { c -> c.messages.map { MessageRefEntity(spamKey, c.id, it.folder, it.uid, it.messageId, it.seen) } },
+                list.map { it.toEntity(spamKey) },
+                list.flatMap { c -> c.messages.map { it.toEntity(spamKey, c.id) } },
             )
         }
 
@@ -130,26 +112,41 @@ class SyncEngine(
     }
 
     /**
-     * Тела писем: из кэша, недостающие и пустые — с сервера (и в кэш).
+     * Тела писем: из кэша, недостающие и устаревшие — с сервера (и в кэш).
+     * Устаревшее — пустое тело (сбойный фетч) или своё исходящее, у которого
+     * статус доставки в ссылке беседы уже другой ([bodyStale]). Нет связи —
+     * отдаём и устаревшее: письмо со старым статусом лучше, чем никакого.
      * Порядок результата — как у [refs]; чего нет нигде — пропущено.
      */
     override suspend fun bodies(refs: List<MessageRef>): List<MessageBody> {
         if (refs.isEmpty()) return emptyList()
-        val cached = dao.bodies(accountKey, refs.map { it.uid }).associateBy { it.uid }
-            .mapValues { it.value.toDomain() }
-            .filterValues { !it.isBlank }
-        val missing = refs.filter { it.uid !in cached }
+        val all = dao.bodies(accountKey, refs.map { it.uid }).associateBy { it.uid }.mapValues { it.value.toDomain() }
+        val missing = refs.filter { r -> all[r.uid]?.let { bodyStale(r, it) } ?: true }
+        val stale = missing.map { it.uid }.toSet()
+        val fresh = all.filterKeys { it !in stale }
         // Нет связи — показываем то, что есть в кэше; мёртвая сессия — наверх.
         val fetched = if (missing.isEmpty()) emptyMap() else try {
             val got = api.messages(missing)
-            dao.putBodies(got.map { it.toEntity() })
+            dao.putBodies(got.map { it.toEntity(accountKey) })
             got.associateBy { it.uid }
         } catch (e: ApiException.Unauthorized) {
             throw e
         } catch (e: ApiException) {
             emptyMap()
         }
-        return refs.mapNotNull { cached[it.uid] ?: fetched[it.uid] }
+        return refs.mapNotNull { r -> fresh[r.uid] ?: fetched[r.uid] ?: all[r.uid]?.takeIf { !it.isBlank } }
+    }
+
+    /**
+     * Событие WS `delivery_status`: статус письма — в ссылку беседы и в тело
+     * кэша сразу, без запроса (в событии те же поля, что в теле). Строку беседы
+     * (`last_delivery_status`) принесёт синк, который событие и так запускает.
+     */
+    suspend fun applyDelivery(ev: DeliveryEvent) {
+        dao.applyDelivery(
+            accountKey, ev.messageId, ev.rfcMessageId, ev.status, ev.reason, ev.error,
+            CacheRows.json.encodeToString(CacheRows.strings, ev.failed),
+        )
     }
 
     /**
@@ -175,7 +172,7 @@ class SyncEngine(
             } catch (e: ApiException) {
                 break
             }
-            dao.putBodies(got.map { it.toEntity() })
+            dao.putBodies(got.map { it.toEntity(accountKey) })
             n += got.size
         }
         return n
@@ -325,7 +322,7 @@ class SyncEngine(
         emptyList()
     }
 
-    suspend fun openSocket(onEvent: (String) -> Unit, onClosed: (Boolean) -> Unit) = api.openSocket(onEvent, onClosed)
+    suspend fun openSocket(onEvent: (String, kotlinx.serialization.json.JsonObject) -> Unit, onClosed: (Boolean) -> Unit) = api.openSocket(onEvent, onClosed)
 
     suspend fun avatar(email: String): Binary? = api.avatar(email)
 
@@ -345,75 +342,6 @@ class SyncEngine(
         for (k in listOf(K_SEQ, K_SINCE, K_FULL_TS, K_EPOCH, K_FOLDERS, K_FOLDERS_VERSION, K_IDENTITIES, K_IDENT_GROUPS)) dao.deleteMeta(k)
     }
 
-    private fun MessageBody.toEntity() = MessageBodyEntity(
-        accountKey = accountKey,
-        uid = uid,
-        messageId = messageId,
-        folder = folder,
-        subject = subject,
-        fromName = from,
-        fromAddr = fromAddr,
-        toJson = json.encodeToString(strings, to),
-        ccJson = json.encodeToString(strings, cc),
-        dateTs = dateTs,
-        html = html,
-        text = text,
-        attachmentsJson = json.encodeToString(atts, attachments),
-        isOutgoing = isOutgoing,
-        inReplyTo = inReplyTo,
-        referencesJson = json.encodeToString(strings, references),
-    )
-
-    private fun MessageBodyEntity.toDomain() = MessageBody(
-        uid = uid,
-        folder = folder,
-        subject = subject,
-        from = fromName,
-        fromAddr = fromAddr,
-        to = runCatching { json.decodeFromString(strings, toJson) }.getOrDefault(emptyList()),
-        cc = runCatching { json.decodeFromString(strings, ccJson) }.getOrDefault(emptyList()),
-        dateTs = dateTs,
-        html = html,
-        text = text,
-        attachments = runCatching { json.decodeFromString(atts, attachmentsJson) }.getOrDefault(emptyList()),
-        isOutgoing = isOutgoing,
-        messageId = messageId,
-        inReplyTo = inReplyTo,
-        references = runCatching { json.decodeFromString(strings, referencesJson) }.getOrDefault(emptyList()),
-    )
-
-    private fun ConversationDto.toEntity() = ConversationEntity(
-        accountKey = accountKey,
-        id = id,
-        label = label,
-        avatarHash = avatarHash,
-        receivedBy = receivedBy,
-        counterpartsJson = json.encodeToString(contacts, counterparts),
-        isGroup = isGroup,
-        lastDateTs = lastDateTs,
-        lastSubject = lastSubject,
-        unreadCount = unreadCount,
-        totalCount = totalCount,
-        updatedAt = updatedAt,
-    )
-
-    private fun MessageRef.toEntity(conversationId: String) =
-        MessageRefEntity(accountKey, conversationId, folder, uid, messageId, seen)
-
-    private fun ConversationEntity.toDomain(refs: List<MessageRefEntity>) = Conversation(
-        accountKey = accountKey,
-        id = id,
-        label = label,
-        receivedBy = receivedBy,
-        counterparts = runCatching { json.decodeFromString(contacts, counterpartsJson) }.getOrDefault(emptyList()),
-        isGroup = isGroup,
-        lastDateTs = lastDateTs,
-        lastSubject = lastSubject,
-        unreadCount = unreadCount,
-        totalCount = totalCount,
-        messages = refs.map { MessageRef(it.folder, it.uid, it.messageId, it.seen) },
-    )
-
     companion object {
         /**
          * Версия формата id бесед (сервер). Сменилась — следующий синк полный,
@@ -432,10 +360,15 @@ class SyncEngine(
         private const val K_IDENT_GROUPS = "identity_groups"
 
         private val json = Json { ignoreUnknownKeys = true }
-        private val contacts = ListSerializer(ContactInfo.serializer())
-        private val strings = ListSerializer(String.serializer())
-        private val atts = ListSerializer(AttachmentDto.serializer())
         private val idents = ListSerializer(Identity.serializer())
         const val SEEN = "\\Seen"
     }
 }
+
+/**
+ * Тело в кэше устарело: пустое (сбойный фетч, §4а десктопа) или статус
+ * доставки в ссылке беседы уже не тот, что в теле (дельта принесла смену,
+ * а событие WS до нас не дошло).
+ */
+internal fun bodyStale(ref: MessageRef, cached: MessageBody): Boolean =
+    cached.isBlank || ref.deliveryStatus != cached.deliveryStatus

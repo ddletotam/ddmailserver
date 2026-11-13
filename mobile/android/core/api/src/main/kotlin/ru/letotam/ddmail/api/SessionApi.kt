@@ -88,21 +88,19 @@ class SessionApi(
     /**
      * Пуш-канал сервера (`/ws`). Токен — заголовком (контракт §2) и, пока
      * сервер читает только его, ещё и в query; в логи клиента URL не пишется.
-     * [onEvent] получает тип события; [onClosed] — `true`, если сервер отверг
-     * токен (тогда сначала обменять его, потом переподключаться).
+     * [onEvent] получает тип события и кадр целиком (поля `delivery_status` —
+     * [deliveryEvent]); [onClosed] — `true`, если сервер отверг токен (тогда
+     * сначала обменять его, потом переподключаться).
      */
-    suspend fun openSocket(onEvent: (String) -> Unit, onClosed: (authFailed: Boolean) -> Unit): okhttp3.WebSocket {
+    suspend fun openSocket(onEvent: (String, JsonObject) -> Unit, onClosed: (authFailed: Boolean) -> Unit): okhttp3.WebSocket {
         val token = tokens.current()
         val wsUrl = baseUrl.replaceFirst("https://", "wss://") + "/api/desktop/v1/ws?token=" +
             java.net.URLEncoder.encode(token, "UTF-8")
         val req = Request.Builder().url(wsUrl).header("Authorization", "Bearer $token").build()
         return http.newWebSocket(req, object : okhttp3.WebSocketListener() {
             override fun onMessage(webSocket: okhttp3.WebSocket, text: String) {
-                val type = runCatching {
-                    (DdmailApi.json.parseToJsonElement(text) as JsonObject)["type"]
-                        ?.let { (it as JsonPrimitive).content }
-                }.getOrNull() ?: return
-                onEvent(type)
+                val (type, frame) = wsFrame(text) ?: return
+                onEvent(type, frame)
             }
 
             override fun onFailure(webSocket: okhttp3.WebSocket, t: Throwable, response: Response?) {
@@ -363,6 +361,20 @@ suspend fun fetchText(http: OkHttpClient, url: String): String? = try {
     http.newCall(Request.Builder().url(url).build()).awaitBody()
 } catch (e: ApiException) {
     null
+}
+
+/** Кадр WebSocket: тип события и сам объект; не JSON-объект или без типа — `null`. */
+fun wsFrame(text: String): Pair<String, JsonObject>? = runCatching {
+    val obj = DdmailApi.json.parseToJsonElement(text) as JsonObject
+    val type = (obj["type"] as JsonPrimitive).content
+    type to obj
+}.getOrNull()
+
+/** Поля события `delivery_status`; кадр другого типа или без письма — `null`. */
+fun deliveryEvent(frame: JsonObject): DeliveryEvent? {
+    if ((frame["type"] as? JsonPrimitive)?.content != "delivery_status") return null
+    val ev = runCatching { DdmailApi.json.decodeFromJsonElement(DeliveryEvent.serializer(), frame) }.getOrNull() ?: return null
+    return ev.takeIf { (it.messageId > 0 || it.rfcMessageId.isNotEmpty()) && it.status.isNotEmpty() }
 }
 
 /** Тело `POST /spam/restore`; `trust` шлётся только когда он нужен. */

@@ -19,6 +19,12 @@ data class Conversation(
     val messages: List<MessageRef>,
     /** Из спама: место — только системная папка «Спам» (её состав задаёт сервер). */
     val spam: Boolean = false,
+    /**
+     * Статус доставки последнего письма, если оно наше исходящее (сервер
+     * ddmail, `last_delivery_status`): `failed` / `pending` — значок у времени
+     * в строке списка; пусто и `delivered` — ничего.
+     */
+    val lastDeliveryStatus: String = "",
 ) {
     /**
      * Ключ беседы в интерфейсе: id уникален только внутри учётки, одинаковые

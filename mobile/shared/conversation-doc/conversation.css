@@ -7,6 +7,7 @@
   --out: #dff3ea;
   --muted: #6b7480;
   --line: #e3e8ee;
+  --fail: #c62828;
 }
 html, body { margin: 0; padding: 0; background: var(--bg); }
 body {
@@ -66,3 +67,16 @@ body {
   background: #fff4e5; border: 1px solid #f0c48a;
 }
 .ddm-spambar .ddm-images { margin-top: 0; color: #9a4a00; font-size: 13px; }
+/* Доставка своего письма: «Отправляется…», повтор с причиной, «Не доставлено». */
+.ddm-dl { margin-top: 6px; font-size: 12.5px; line-height: 1.35; }
+.ddm-dl[hidden] { display: none; }
+.ddm-dl-line { display: flex; gap: 5px; align-items: flex-start; }
+.ddm-dl .ddm-icon { width: 15px; height: 15px; margin-top: 1px; }
+.ddm-dl-pending { color: var(--muted); }
+.ddm-dl-retry { color: #9a4a00; }
+.ddm-dl-failed {
+  color: var(--fail); font-weight: 600;
+  padding: 4px 8px; border-radius: 8px; background: #fdecec; border: 1px solid #f3b4b4;
+}
+.ddm-dl-who { font-weight: 400; margin: 2px 0 0 20px; overflow-wrap: anywhere; }
+.ddm-out.ddm-failed .ddm-bubble { border-color: var(--fail); }

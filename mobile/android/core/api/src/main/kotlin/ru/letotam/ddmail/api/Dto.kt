@@ -18,7 +18,20 @@ data class MessageRef(
     /** Стабильный ключ письма (RFC Message-ID); uid — волатильный. */
     @SerialName("message_id") val messageId: String = "",
     val seen: Boolean = false,
+    /**
+     * Статус доставки своего исходящего: [Delivery.PENDING], [Delivery.DELIVERED],
+     * [Delivery.FAILED]; пусто — неизвестно (входящие, старые письма, IMAP) —
+     * считать доставленным. Смена статуса двигает `updated_at` беседы.
+     */
+    @SerialName("delivery_status") val deliveryStatus: String = "",
 )
+
+/** Статус доставки исходящего (десктоп §1, `delivery_status`). */
+object Delivery {
+    const val PENDING = "pending"
+    const val DELIVERED = "delivered"
+    const val FAILED = "failed"
+}
 
 @Serializable
 data class ConversationDto(
@@ -39,6 +52,8 @@ data class ConversationDto(
     @SerialName("updated_at") val updatedAt: Long = 0,
     /** Беседа из спама (`/conversations?spam=1`): место ей — только папка «Спам». */
     val spam: Boolean = false,
+    /** Статус доставки последнего письма беседы, если оно наше (см. [MessageRef.deliveryStatus]). */
+    @SerialName("last_delivery_status") val lastDeliveryStatus: String = "",
 )
 
 /** `/conversations?since=` — изменившиеся беседы и водяной знак часов сервера. */
@@ -103,10 +118,33 @@ data class MessageBody(
     @SerialName("message_id") val messageId: String = "",
     @SerialName("in_reply_to") val inReplyTo: String = "",
     val references: List<String> = emptyList(),
+    /** Доставка своего исходящего: статус ([Delivery]); пусто — считать доставленным. */
+    @SerialName("delivery_status") val deliveryStatus: String = "",
+    /** Код причины: у `failed` — почему не доставлено, у `pending` — почему не удалась последняя попытка. */
+    @SerialName("delivery_reason") val deliveryReason: String = "",
+    /** Причина словами на языке пользователя (готовый текст сервера). */
+    @SerialName("delivery_error") val deliveryError: String = "",
+    /** Кому не доставлено (частичный отказ — тоже `failed`). */
+    @SerialName("delivery_failed") val deliveryFailed: List<String> = emptyList(),
 ) {
     /** Ни HTML, ни текста, ни вложений — сбойный фетч, перезапросить (§4а десктопа). */
     val isBlank: Boolean get() = html.isNullOrBlank() && text.isNullOrBlank() && attachments.isEmpty()
 }
+
+/**
+ * WS-событие `delivery_status`: статус доставки письма сменился. [messageId] —
+ * id копии в «Отправленных» (он же `uid` в ссылках бесед), [rfcMessageId] —
+ * её Message-ID; остальные поля — как в [MessageBody].
+ */
+@Serializable
+data class DeliveryEvent(
+    @SerialName("message_id") val messageId: Long = 0,
+    @SerialName("rfc_message_id") val rfcMessageId: String = "",
+    @SerialName("delivery_status") val status: String = "",
+    @SerialName("delivery_reason") val reason: String = "",
+    @SerialName("delivery_error") val error: String = "",
+    @SerialName("delivery_failed") val failed: List<String> = emptyList(),
+)
 
 /** Свой адрес (`/identities`): от него можно отправлять. */
 @Serializable
