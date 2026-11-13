@@ -483,5 +483,22 @@
   "auth_rejected.action": "Обновите пароль — сервер сразу попробует снова.",
   "auth_rejected.dashboard_title": "Провайдеры не принимают пароль",
   "auth_rejected.dashboard_text": "Вход приостановлен до обновления пароля. Затронуто аккаунтов и источников:",
-  "auth_rejected.check": "Проверить аккаунты"
+  "auth_rejected.check": "Проверить аккаунты",
+  "delivery.status.pending": "Отправляется",
+  "delivery.status.delivered": "Доставлено",
+  "delivery.status.failed": "Не доставлено",
+  "delivery.reason.unreachable": "Почтовый сервер получателя не отвечает.",
+  "delivery.reason.domain_not_found": "Домен получателя не существует — проверьте адрес.",
+  "delivery.reason.no_mail_domain": "Домен получателя не принимает почту.",
+  "delivery.reason.mailbox_unavailable": "Такого адреса нет или ящик отключён — проверьте адрес.",
+  "delivery.reason.mailbox_full": "Ящик получателя переполнен.",
+  "delivery.reason.rejected": "Почтовый сервер получателя отклонил письмо.",
+  "delivery.reason.temporary": "Почтовый сервер получателя долго не принимал письмо, попытки доставки прекращены.",
+  "delivery.reason.relay_auth": "Почтовый сервис не принимает пароль учётки — письмо уйдёт, когда пароль будет обновлён.",
+  "delivery.reason.other": "Письмо не удалось доставить.",
+  "dsn.subject": "Письмо не доставлено",
+  "dsn.from_name": "Почтовая служба",
+  "dsn.intro": "Ваше письмо не удалось доставить следующим получателям:",
+  "dsn.server_reply": "Ответ сервера получателя",
+  "dsn.headers_attached": "Заголовки исходного письма приложены ниже."
 }

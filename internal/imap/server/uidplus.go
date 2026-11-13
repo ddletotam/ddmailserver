@@ -89,6 +89,12 @@ func (h *uidplusAppendHandler) Handle(conn imapserver.Conn) error {
 		}
 
 		log.Printf("UIDPLUS APPEND: uid=%d uidValidity=%d mailbox=%s", uid, uidValidity, h.Mailbox)
+		if uid == 0 {
+			// Deduplicated against a copy that lives in another folder
+			// (storeAppended): nothing was stored here, so there is no UID
+			// to report — APPENDUID with 0 would be invalid.
+			return nil
+		}
 		return &imap.ErrStatusResp{Resp: &imap.StatusResp{
 			Type: imap.StatusRespOk,
 			Code: imap.StatusRespCode(fmt.Sprintf("APPENDUID %d %d", uidValidity, uid)),

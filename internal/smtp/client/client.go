@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/smtp"
 	"strings"
+	"time"
 
 	"github.com/ddletotam/ddmailserver/internal/authfail"
 	"github.com/ddletotam/ddmailserver/internal/logmask"
@@ -72,9 +73,10 @@ func (a *xoauth2Auth) Next(fromServer []byte, more bool) ([]byte, error) {
 // Client wraps the SMTP client for external mail servers
 type Client struct {
 	account *models.Account
-	// authPassed: the last Send got past SMTP AUTH (TLS path only — the
-	// plain path goes through smtp.SendMail, which does not say).
+	// authPassed: the last Send got past SMTP AUTH.
 	authPassed bool
+	// timeouts bound the SMTP session (see DialTimeout).
+	timeouts timeouts
 }
 
 // AuthPassed reports whether the last Send was accepted at the AUTH step,
@@ -84,7 +86,8 @@ func (c *Client) AuthPassed() bool { return c.authPassed }
 // New creates a new SMTP client for an account
 func New(account *models.Account) *Client {
 	return &Client{
-		account: account,
+		account:  account,
+		timeouts: defaultTimeouts(),
 	}
 }
 
@@ -149,7 +152,7 @@ func (c *Client) Send(from string, to []string, message []byte) error {
 		err = c.sendTLS(addr, auth, from, to, message)
 	} else {
 		// Plain SMTP (usually port 25, not recommended)
-		err = smtp.SendMail(addr, auth, from, to, message)
+		err = c.sendPlain(addr, auth, from, to, message)
 	}
 
 	if err != nil {
@@ -172,36 +175,111 @@ func usesImplicitTLS(port int) bool {
 	return port == 465
 }
 
+// Timeouts of one SMTP session, both directions (relay and direct MX).
+//
+// net/smtp has none of its own: smtp.Dial and smtp.SendMail dial without a
+// timeout and never set a deadline, so a host that accepts the connection and
+// then says nothing — or a SYN silently dropped and left to the kernel — held
+// a worker for as long as the operating system cared to wait. Now the
+// connection (TCP and, for implicit TLS, the handshake) must be up within
+// DialTimeout, and the whole session — greeting to QUIT, DATA included —
+// must finish within SessionTimeout. RFC 5321 §4.5.3.2 suggests 5 minutes per
+// command and 10 for the end of DATA; one deadline for the session keeps the
+// worst case bounded and is generous for messages within our 10 MB limit.
+const (
+	DialTimeout    = 30 * time.Second
+	SessionTimeout = 10 * time.Minute
+)
+
+// timeouts are the limits of one SMTP session (shorter in tests).
+type timeouts struct {
+	dial    time.Duration
+	session time.Duration
+}
+
+func defaultTimeouts() timeouts {
+	return timeouts{dial: DialTimeout, session: SessionTimeout}
+}
+
+// dialSMTP connects to addr — over TLS from the first byte when implicitTLS
+// is set — reads the greeting and returns the client. The session deadline is
+// set on the connection before anything is read, so every later command is
+// bounded by it too (a STARTTLS upgrade wraps the same connection).
+func dialSMTP(addr, serverName string, implicitTLS *tls.Config, t timeouts) (*smtp.Client, error) {
+	dialer := &net.Dialer{Timeout: t.dial}
+	var conn net.Conn
+	var err error
+	if implicitTLS != nil {
+		conn, err = tls.DialWithDialer(dialer, "tcp", addr, implicitTLS)
+	} else {
+		conn, err = dialer.Dial("tcp", addr)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := conn.SetDeadline(time.Now().Add(t.session)); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("set session deadline: %w", err)
+	}
+	client, err := smtp.NewClient(conn, serverName)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("no SMTP greeting: %w", err)
+	}
+	return client, nil
+}
+
+// sendPlain is smtp.SendMail with timeouts: STARTTLS when the server offers
+// it, then AUTH, then the transaction.
+func (c *Client) sendPlain(addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
+	client, err := dialSMTP(addr, c.account.SMTPHost, nil, c.timeouts)
+	if err != nil {
+		return fmt.Errorf("failed to dial: %w", err)
+	}
+	defer client.Close()
+
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		if err := client.StartTLS(tlsverify.Config(c.account.SMTPHost)); err != nil {
+			return fmt.Errorf("failed to start TLS: %w", err)
+		}
+	}
+	if auth != nil {
+		if ok, _ := client.Extension("AUTH"); !ok {
+			return errors.New("smtp: server doesn't support AUTH")
+		}
+	}
+	return c.transact(client, auth, from, to, msg)
+}
+
 // sendTLS sends email over TLS, choosing implicit TLS or STARTTLS by port.
 func (c *Client) sendTLS(addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
 	tlsConfig := tlsverify.Config(c.account.SMTPHost)
 
-	var client *smtp.Client
-	var err error
-
 	if usesImplicitTLS(c.account.SMTPPort) {
 		// Handshake first, then speak SMTP inside it.
-		conn, dialErr := tls.Dial("tcp", addr, tlsConfig)
-		if dialErr != nil {
-			return fmt.Errorf("failed to dial with implicit TLS: %w", dialErr)
-		}
-		client, err = smtp.NewClient(conn, c.account.SMTPHost)
+		client, err := dialSMTP(addr, c.account.SMTPHost, tlsConfig, c.timeouts)
 		if err != nil {
-			conn.Close()
-			return fmt.Errorf("failed to start SMTP over TLS: %w", err)
+			return fmt.Errorf("failed to dial with implicit TLS: %w", err)
 		}
 		defer client.Close()
-	} else {
-		client, err = smtp.Dial(addr)
-		if err != nil {
-			return fmt.Errorf("failed to dial: %w", err)
-		}
-		defer client.Close()
-
-		if err = client.StartTLS(tlsConfig); err != nil {
-			return fmt.Errorf("failed to start TLS: %w", err)
-		}
+		return c.transact(client, auth, from, to, msg)
 	}
+
+	client, err := dialSMTP(addr, c.account.SMTPHost, nil, c.timeouts)
+	if err != nil {
+		return fmt.Errorf("failed to dial: %w", err)
+	}
+	defer client.Close()
+
+	if err := client.StartTLS(tlsConfig); err != nil {
+		return fmt.Errorf("failed to start TLS: %w", err)
+	}
+	return c.transact(client, auth, from, to, msg)
+}
+
+// transact authenticates and runs one mail transaction on a connected client.
+func (c *Client) transact(client *smtp.Client, auth smtp.Auth, from string, to []string, msg []byte) error {
+	var err error
 
 	// Authenticate
 	if auth != nil {
@@ -265,6 +343,11 @@ var lookupMX = net.LookupMX
 // even after one fails, so one unreachable domain does not hold back the rest
 // and the caller can bounce exactly the recipients that failed.
 func SendDirectEach(from string, to []string, message []byte, hostname string) map[string]error {
+	return sendDirectEach(defaultTimeouts(), from, to, message, hostname)
+}
+
+// sendDirectEach is SendDirectEach with explicit session limits.
+func sendDirectEach(t timeouts, from string, to []string, message []byte, hostname string) map[string]error {
 	// As in Send: the envelope takes addr-specs only. Here a stray display name
 	// also breaks the domain grouping below, since splitting "Имя <u@host>" on
 	// "@" yields "host>" and the MX lookup goes looking for that.
@@ -285,7 +368,7 @@ func SendDirectEach(from string, to []string, message []byte, hostname string) m
 	}
 
 	for domain, rcpts := range byDomain {
-		err := sendDirectDomain(domain, from, rcpts, message, hostname)
+		err := sendDirectDomain(t, domain, from, rcpts, message, hostname)
 		for _, rcpt := range rcpts {
 			results[rcpt] = err
 		}
@@ -296,7 +379,7 @@ func SendDirectEach(from string, to []string, message []byte, hostname string) m
 
 // sendDirectDomain delivers to the recipients of one domain, trying its MX
 // hosts in priority order.
-func sendDirectDomain(domain, from string, rcpts []string, message []byte, hostname string) error {
+func sendDirectDomain(t timeouts, domain, from string, rcpts []string, message []byte, hostname string) error {
 	mxRecords, err := lookupMX(domain)
 	if err != nil || len(mxRecords) == 0 {
 		// Fallback to A record (RFC 5321 §5.1, implicit MX)
@@ -315,7 +398,7 @@ func sendDirectDomain(domain, from string, rcpts []string, message []byte, hostn
 		addr := fmt.Sprintf("%s:25", host)
 		log.Printf("Direct delivery to %s via MX %s", domain, addr)
 
-		lastErr = sendDirectToHost(addr, hostname, from, rcpts, message)
+		lastErr = sendDirectToHost(t, addr, hostname, from, rcpts, message)
 		if lastErr == nil {
 			log.Printf("Direct delivery to %s successful via %s", domain, host)
 			return nil
@@ -336,17 +419,21 @@ func sendDirectDomain(domain, from string, rcpts []string, message []byte, hostn
 // means: redial from scratch and skip STARTTLS entirely.
 var errStartTLS = errors.New("starttls handshake failed")
 
-func sendDirectToHost(addr, hostname, from string, to []string, msg []byte) error {
-	err := sendDirectAttempt(addr, hostname, from, to, msg, true)
+func sendDirectToHost(t timeouts, addr, hostname, from string, to []string, msg []byte) error {
+	err := sendDirectAttempt(t, addr, hostname, from, to, msg, true)
 	if errors.Is(err, errStartTLS) {
 		log.Printf("STARTTLS with %s failed, redialing without TLS", addr)
-		err = sendDirectAttempt(addr, hostname, from, to, msg, false)
+		err = sendDirectAttempt(t, addr, hostname, from, to, msg, false)
 	}
 	return err
 }
 
-func sendDirectAttempt(addr, hostname, from string, to []string, msg []byte, tryTLS bool) error {
-	client, err := smtp.Dial(addr)
+func sendDirectAttempt(t timeouts, addr, hostname, from string, to []string, msg []byte, tryTLS bool) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("bad MX address %q: %w", addr, err)
+	}
+	client, err := dialSMTP(addr, host, nil, t)
 	if err != nil {
 		return fmt.Errorf("dial failed: %w", err)
 	}
@@ -360,7 +447,6 @@ func sendDirectAttempt(addr, hostname, from string, to []string, msg []byte, try
 	// connection is unusable) and the caller retries in plaintext.
 	if tryTLS {
 		if ok, _ := client.Extension("STARTTLS"); ok {
-			host := strings.Split(addr, ":")[0]
 			// Verification here is opportunistic in effect: a failed handshake
 			// makes the caller retry in plaintext. Completing the chain via AIA
 			// therefore only ever upgrades an MX that would have fallen back —

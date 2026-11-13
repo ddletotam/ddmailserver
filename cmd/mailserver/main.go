@@ -326,6 +326,8 @@ func main() {
 	smtpAddr := fmt.Sprintf("%s:%d", cfg.Server.WebHost, cfg.Server.SMTPPort)
 	smtpSrv := smtpserver.New(database, smtpAddr, hostname, !hasTLS)
 	smtpSrv.SetAuthLimiter(authLimiter)
+	smtpSrv.SetNotifyHub(notifyHub)
+	smtpSrv.SetOutboxTrigger(scheduler.TriggerOutbox)
 	go func() {
 		if err := smtpSrv.Start(); err != nil && !errors.Is(err, net.ErrClosed) {
 			log.Fatalf("SMTP server error: %v", err)
@@ -342,6 +344,8 @@ func main() {
 			log.Printf("Failed to create SMTP TLS server: %v", err)
 		} else {
 			smtpTLSSrv.SetAuthLimiter(authLimiter)
+			smtpTLSSrv.SetNotifyHub(notifyHub)
+			smtpTLSSrv.SetOutboxTrigger(scheduler.TriggerOutbox)
 			go func() {
 				if err := smtpTLSSrv.StartTLS(); err != nil {
 					log.Printf("SMTP TLS server error: %v", err)

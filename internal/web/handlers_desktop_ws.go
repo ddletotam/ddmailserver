@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/notify"
 	"github.com/gorilla/websocket"
 )
 
@@ -18,7 +19,7 @@ var wsUpgrader = websocket.Upgrader{
 
 // WSEvent is the JSON frame sent to the client over WebSocket.
 type WSEvent struct {
-	Type       string `json:"type"`                  // "new_message", "flags_changed", "expunge", "calendar_updated", "identities_changed", "auth_failed", "dialog_folders_changed", "identity_groups_changed"
+	Type       string `json:"type"`                  // "new_message", "message_sent", "delivery_status", "flags_changed", "expunge", "calendar_updated", "identities_changed", "auth_failed", "dialog_folders_changed", "identity_groups_changed"
 	UserID     int64  `json:"user_id"`               // For filtering
 	Folder     string `json:"folder,omitempty"`      // Mailbox name (mail events)
 	Count      uint32 `json:"count,omitempty"`       // Message count for EXISTS (mail events)
@@ -35,6 +36,16 @@ type WSEvent struct {
 	Service       string `json:"service,omitempty"`
 	Since         int64  `json:"since,omitempty"`
 	NextAttemptAt int64  `json:"next_attempt_at,omitempty"`
+	// message_sent / delivery_status: the Message-ID of the outgoing message
+	// (its stable identity, as message_id in conversation refs; message_id
+	// above is messages.id).
+	RFCMessageID string `json:"rfc_message_id,omitempty"`
+	// delivery_status: the message's delivery state now — the same fields as
+	// in the message body DTO (contract §1).
+	DeliveryStatus string   `json:"delivery_status,omitempty"`
+	DeliveryReason string   `json:"delivery_reason,omitempty"`
+	DeliveryError  string   `json:"delivery_error,omitempty"`
+	DeliveryFailed []string `json:"delivery_failed,omitempty"`
 }
 
 // wsToken returns the JWT of a WebSocket handshake. Native clients (desktop
@@ -131,6 +142,14 @@ func (s *Server) HandleDesktopWebSocket(w http.ResponseWriter, r *http.Request) 
 				Service:       event.Service,
 				Since:         event.Since,
 				NextAttemptAt: event.NextAttemptAt,
+
+				RFCMessageID:   event.RFCMessageID,
+				DeliveryStatus: event.DeliveryStatus,
+				DeliveryReason: event.DeliveryReason,
+				DeliveryFailed: event.DeliveryFailed,
+			}
+			if event.Type == notify.EventDeliveryStatus {
+				wsEvent.DeliveryError = s.deliveryErrorText(user, event.DeliveryReason)
 			}
 			data, _ := json.Marshal(wsEvent)
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))

@@ -21,6 +21,7 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/logmask"
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/notify"
+	"github.com/ddletotam/ddmailserver/internal/outbox"
 	"github.com/ddletotam/ddmailserver/internal/parser"
 	msgsvc "github.com/ddletotam/ddmailserver/internal/service/messages"
 	spamsvc "github.com/ddletotam/ddmailserver/internal/service/spam"
@@ -283,7 +284,7 @@ func (s *Server) HandleDesktopMessageSource(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", "message/rfc822")
 
 	// Prefer the original RFC-822 bytes (stored on receive in MX and on Sent
-	// copy in saveToSentFolder via migration 032). Fall back to a stitched
+	// copy by outbox.Service.SaveSentCopy). Fall back to a stitched
 	// reconstruction for legacy rows pre-dating that migration — at least
 	// the user sees the headers and plain body instead of an empty modal.
 	if raw, err := s.database.GetMessageRawEmail(msg.ID); err == nil && len(raw) > 0 {
@@ -936,44 +937,36 @@ func (s *Server) HandleDesktopSend(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// If threading headers or attachments are present, build full RawEmail.
-	// send_task sends RawEmail verbatim when non-empty (smtp/client/send_task.go:80),
-	// so this preserves both threading and attachments.
-	hasThreading := req.InReplyTo != "" || req.References != ""
-	hasAttachments := len(rawAtts) > 0
-	if hasThreading || hasAttachments {
-		outboxMsg.RawEmail = buildRawEmail(
-			req.From, outboxMsg.To, outboxMsg.Cc, req.Subject, req.Text, req.HTML,
-			req.InReplyTo, req.References, rawAtts,
-		)
-	}
+	// The wire form is built here, always: it carries the Message-ID that
+	// the copy in Sent, every send attempt and the provider's own Sent copy
+	// (for a relay) share — that id is what makes them one message.
+	outboxMsg.RawEmail = buildRawEmail(
+		req.From, outboxMsg.To, outboxMsg.Cc, req.Subject, req.Text, req.HTML,
+		req.InReplyTo, req.References, rawAtts,
+	)
 
 	if err := s.database.CreateOutboxMessage(outboxMsg); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to queue message")
 		return
 	}
 
-	// Also save attachments to outbox_attachments table (for fallback path
-	// when constructEmail is used instead of RawEmail).
-	for _, a := range rawAtts {
-		s.database.CreateOutboxAttachment(&models.OutboxAttachment{
-			OutboxMessageID: outboxMsg.ID,
-			Filename:        a.Filename,
-			ContentType:     a.MimeType,
-			Size:            len(a.Data),
-			Data:            a.Data,
-			ContentID:       a.ContentID,
-		})
-	}
+	// The copy in Sent goes in now, with delivery status «pending»: the
+	// conversation — a new one, for a new correspondent — exists from this
+	// moment, and message_sent tells the clients to fetch it. Delivery is
+	// reported on that copy later (delivery_status). The attachments travel
+	// inside RawEmail; outbox_attachments is only for rows without it.
+	s.acceptOutbox(outboxMsg)
 
-	// Send it now rather than on the next scheduler tick. After the attachments
-	// are stored: the send task loads them from the database, so an earlier
-	// trigger could race it into sending the message without them.
+	// Send it now rather than on the next scheduler tick.
 	s.kickOutbox()
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"status":     "queued",
 		"message_id": outboxMsg.ID,
+		// The copy's identity (Message-ID, as in conversation refs) and its
+		// delivery status, for matching the optimistic bubble.
+		"rfc_message_id":  outboxMsg.MessageID,
+		"delivery_status": outbox.StatusPending,
 	})
 }
 
@@ -1032,6 +1025,10 @@ type DesktopMessageRef struct {
 	// what to mark read on open — kept fresh by the ?since= delta (flag
 	// changes bump updated_at).
 	Seen bool `json:"seen"`
+	// DeliveryStatus of an outgoing message: "pending", "delivered",
+	// "failed"; absent = unknown (older messages, incoming) — treat as
+	// delivered. Status changes bump updated_at, so the delta carries them.
+	DeliveryStatus string `json:"delivery_status,omitempty"`
 }
 
 // resolveMsgRef maps a desktop message reference to its DB row, preferring the
@@ -1073,6 +1070,10 @@ type DesktopConversation struct {
 	// Беседа из спама (?spam=1). Её место — только системная папка «Спам»
 	// клиента; id таких бесед начинается с "spam:" и с обычными не пересекается.
 	Spam bool `json:"spam,omitempty"`
+	// LastDeliveryStatus — статус доставки последнего письма беседы, если оно
+	// наше исходящее со статусом (см. DesktopMessageRef.DeliveryStatus):
+	// строке списка хватает его, чтобы показать «не доставлено».
+	LastDeliveryStatus string `json:"last_delivery_status,omitempty"`
 }
 
 type msgEntry struct {
@@ -1371,6 +1372,15 @@ type DesktopMessageBody struct {
 	MessageID   string              `json:"message_id"`
 	InReplyTo   string              `json:"in_reply_to"`
 	References  []string            `json:"references"`
+	// Доставка исходящего (outbox): DeliveryStatus — "pending" (в очереди /
+	// отправляется), "delivered", "failed"; пусто — неизвестно, считать
+	// доставленным. DeliveryReason — код причины (у failed; у pending — почему
+	// последняя попытка не удалась), DeliveryError — она же словами на языке
+	// пользователя, DeliveryFailed — адреса, которым не доставлено.
+	DeliveryStatus string   `json:"delivery_status"`
+	DeliveryReason string   `json:"delivery_reason,omitempty"`
+	DeliveryError  string   `json:"delivery_error,omitempty"`
+	DeliveryFailed []string `json:"delivery_failed,omitempty"`
 }
 
 type DesktopAttachment struct {
@@ -1465,6 +1475,11 @@ func (s *Server) HandleDesktopConversationMessages(w http.ResponseWriter, r *htt
 			MessageID:   msg.MessageID,
 			InReplyTo:   msg.InReplyTo,
 			References:  msgRefs,
+
+			DeliveryStatus: msg.DeliveryStatus,
+			DeliveryReason: msg.DeliveryReason,
+			DeliveryError:  s.deliveryErrorText(user, msg.DeliveryReason),
+			DeliveryFailed: outbox.SplitFailed(msg.DeliveryFailed),
 		})
 	}
 
@@ -2020,10 +2035,11 @@ func groupConversations(messages []*models.Message, cc convContext) []DesktopCon
 		msgRefs := make([]DesktopMessageRef, 0, len(regular))
 		for _, e := range regular {
 			msgRefs = append(msgRefs, DesktopMessageRef{
-				Folder:    e.folderName,
-				UID:       e.msg.ID,
-				MessageID: e.msg.MessageID,
-				Seen:      e.msg.Seen,
+				Folder:         e.folderName,
+				UID:            e.msg.ID,
+				MessageID:      e.msg.MessageID,
+				Seen:           e.msg.Seen,
+				DeliveryStatus: e.msg.DeliveryStatus,
 			})
 		}
 
@@ -2056,6 +2072,8 @@ func groupConversations(messages []*models.Message, cc convContext) []DesktopCon
 			Messages:     msgRefs,
 			Draft:        draftRef,
 			UpdatedAt:    maxUpdated,
+
+			LastDeliveryStatus: regular[len(regular)-1].msg.DeliveryStatus,
 		}
 		convs = append(convs, conv)
 	}

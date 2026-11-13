@@ -13,6 +13,8 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/logmask"
 	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/notify"
+	"github.com/ddletotam/ddmailserver/internal/outbox"
 	"github.com/ddletotam/ddmailserver/internal/smtp/localdelivery"
 	"github.com/emersion/go-message/mail"
 	"github.com/emersion/go-sasl"
@@ -23,6 +25,11 @@ import (
 type Session struct {
 	database    *db.DB
 	authLimiter *authlimit.Limiter
+	// hub tells the user's clients about the accepted message (may be nil).
+	hub *notify.Hub
+	// kickOutbox sends queued mail now instead of at the next scheduler
+	// tick (may be nil).
+	kickOutbox func()
 	// senders overrides database for sender-ownership lookups (tests).
 	senders db.SenderStore
 	// directory overrides database for local recipient lookups (tests).
@@ -303,6 +310,18 @@ func (s *Session) Data(r io.Reader) error {
 	}
 
 	log.Printf("Message %d queued for sending from %s to %s", outboxMsg.ID, logmask.Addr(s.from), logmask.AddrSlice(s.to))
+
+	// The copy in Sent with delivery status «pending», now: the conversation
+	// exists from the moment we answer 250, not from delivery. The client's
+	// own APPEND to Sent, if it makes one, is the same message (same
+	// Message-ID) and is deduplicated. A failure leaves the message queued;
+	// the send task finishes the acceptance.
+	if err := outbox.New(s.database, s.hub).Accept(outboxMsg); err != nil {
+		log.Printf("Message %d queued, but accepting it failed (it is sent anyway): %v", outboxMsg.ID, err)
+	}
+	if s.kickOutbox != nil {
+		s.kickOutbox()
+	}
 
 	return nil
 }

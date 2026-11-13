@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/mail"
 	"strings"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/dkimsign"
 	"github.com/ddletotam/ddmailserver/internal/logmask"
 	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/outbox"
 	"github.com/ddletotam/ddmailserver/internal/parser"
 	"github.com/ddletotam/ddmailserver/internal/smtp/localdelivery"
 	"github.com/ddletotam/ddmailserver/internal/task"
@@ -37,30 +37,21 @@ type LocalDeliverer interface {
 // recipients on our own domains in-process, to everyone else via their MX.
 type DirectSendTask struct {
 	outboxMessage *models.OutboxMessage
-	database      *db.DB
 	store         outboxStore
 	hostname      string
 	signer        *dkimsign.Signer // nil → send unsigned
 	priority      int
-	messageID     string // Message-ID for Sent dedup (from raw or generated)
 
 	// local delivers to our own domains; nil sends everything through MX
 	// (which, for our own domains, dials ourselves and fails behind NAT).
 	local LocalDeliverer
+	// tracker keeps the sender's copy and its delivery status; nil in tests
+	// that do not look at them.
+	tracker DeliveryTracker
 	// sendExternal is SendDirectEach (replaceable in tests).
 	sendExternal func(from string, to []string, msg []byte, hostname string) map[string]error
-	// saveSent stores the sender's copy in Sent (replaceable in tests).
-	saveSent func(userID int64, emailData []byte, messageID string)
 	// now is the clock for DSN dates (tests).
 	now func() time.Time
-
-	// notifySent fires once the copy is in Sent — see SendTask.SetSentNotifyFunc.
-	notifySent func()
-}
-
-// SetSentNotifyFunc registers the «copy is in Sent» callback.
-func (t *DirectSendTask) SetSentNotifyFunc(fn func()) {
-	t.notifySent = fn
 }
 
 // SetLocalDeliverer enables in-process delivery to the domains this server
@@ -69,11 +60,21 @@ func (t *DirectSendTask) SetLocalDeliverer(d LocalDeliverer) {
 	t.local = d
 }
 
+// SetDeliveryTracker sets where the delivery outcome is recorded.
+func (t *DirectSendTask) SetDeliveryTracker(tr DeliveryTracker) {
+	t.tracker = tr
+}
+
+// SetExternalSender replaces delivery via MX (SendDirectEach) — for tests
+// that must not reach the network.
+func (t *DirectSendTask) SetExternalSender(fn func(from string, to []string, msg []byte, hostname string) map[string]error) {
+	t.sendExternal = fn
+}
+
 // NewDirectSendTask creates a new direct send task
 func NewDirectSendTask(outboxMessage *models.OutboxMessage, database *db.DB, hostname string, signer *dkimsign.Signer) *DirectSendTask {
 	t := &DirectSendTask{
 		outboxMessage: outboxMessage,
-		database:      database,
 		hostname:      hostname,
 		signer:        signer,
 		priority:      1,
@@ -82,9 +83,6 @@ func NewDirectSendTask(outboxMessage *models.OutboxMessage, database *db.DB, hos
 	}
 	if database != nil {
 		t.store = database
-		t.saveSent = func(userID int64, emailData []byte, messageID string) {
-			saveToSentFolder(database, userID, emailData, messageID)
-		}
 	}
 	return t
 }
@@ -155,7 +153,9 @@ func routeRecipients(local LocalDeliverer, senderUserID int64, recipients []stri
 			r.failed = append(r.failed, FailedRecipient{
 				Address:    addr,
 				Status:     reject.Status(),
+				Reason:     reasonFor(reject),
 				Diagnostic: fmt.Sprintf("smtp; %d %s %s", reject.Code, reject.Status(), reject.Message),
+				Detail:     reject.Error(),
 			})
 		default:
 			r.pending = append(r.pending, pendingRecipient{address: addr, err: err})
@@ -165,7 +165,8 @@ func routeRecipients(local LocalDeliverer, senderUserID int64, recipients []stri
 }
 
 func (t *DirectSendTask) Execute(ctx context.Context) error {
-	log.Printf("Direct sending message %d from %s", t.outboxMessage.ID, logmask.Addr(t.outboxMessage.From))
+	msg := t.outboxMessage
+	log.Printf("Direct sending message %d from %s", msg.ID, logmask.Addr(msg.From))
 
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -176,51 +177,50 @@ func (t *DirectSendTask) Execute(ctx context.Context) error {
 	// message used to go out twice. After the claim the send runs to the end
 	// even if ctx is cancelled — abandoning it mid-way is what strands rows
 	// in 'sending' and gets them re-sent on the next start.
-	claimed, err := t.store.ClaimOutboxMessage(t.outboxMessage.ID)
+	claimed, err := t.store.ClaimOutboxMessage(msg.ID)
 	if err != nil {
-		return fmt.Errorf("claim outbox message %d: %w", t.outboxMessage.ID, err)
+		return fmt.Errorf("claim outbox message %d: %w", msg.ID, err)
 	}
 	if !claimed {
-		log.Printf("Outbox message %d is not pending any more (taken by another task, sent or backing off) — skipping", t.outboxMessage.ID)
+		log.Printf("Outbox message %d is not pending any more (taken by another task, sent or backing off) — skipping", msg.ID)
 		return nil
 	}
 
-	recipients := parseRecipientsFromOutbox(t.outboxMessage)
+	// The wire form is fixed once (outbox.Service.Prepare): every attempt
+	// sends the same bytes under the same Message-ID, and the copy in Sent
+	// is that message. Failing to prepare is a database problem, not the
+	// message's: back to the queue without spending a retry.
+	if err := prepareOutbox(t.tracker, msg); err != nil {
+		if uerr := t.store.UpdateOutboxMessageStatus(msg.ID, "pending", err.Error()); uerr != nil {
+			log.Printf("Failed to mark message as pending: %v", uerr)
+		}
+		return fmt.Errorf("prepare outbox message %d: %w", msg.ID, err)
+	}
+	original := msg.RawEmail
+
+	recipients := parseRecipientsFromOutbox(msg)
 	if len(recipients) == 0 {
 		// Terminal validation error: mark failed explicitly, otherwise the
 		// row is stranded in status='sending' forever (the scheduler only
 		// picks up 'pending').
-		if err := t.store.UpdateOutboxMessageStatus(t.outboxMessage.ID, "failed", "no recipients"); err != nil {
+		if err := t.store.UpdateOutboxMessageStatus(msg.ID, "failed", "no recipients"); err != nil {
 			log.Printf("Failed to mark message as failed: %v", err)
 		}
+		record(t.tracker, msg, outbox.Delivery{Status: outbox.StatusFailed, Reason: outbox.ReasonOther})
 		return fmt.Errorf("no recipients found")
-	}
-
-	var emailData []byte
-	if len(t.outboxMessage.RawEmail) > 0 {
-		emailData = t.outboxMessage.RawEmail
-	} else {
-		// Плоское письмо (без threading-заголовков и вложений) приходит из
-		// desktop-хендлера без raw_email — собираем RFC 5322 из полей, как
-		// делает relay-путь. Раньше эта ветка возвращала ошибку ДО обновления
-		// статуса, и сообщение застревало в status='sending' навсегда.
-		emailData, t.messageID = constructOutboxEmail(t.database, t.outboxMessage)
 	}
 
 	// DKIM: sign with the From-domain key when one is configured. Without
 	// the signature Gmail/Yandex either junk or reject direct delivery.
-	emailData = t.signer.Sign(t.outboxMessage.From, emailData)
+	// Only the wire copy is signed; the copy in Sent stays as accepted.
+	emailData := t.signer.Sign(msg.From, original)
 
 	parsed, perr := parser.New().ParseBytes(emailData)
 	if perr != nil {
 		parsed = &parser.ParsedMessage{RawData: emailData, RawSize: int64(len(emailData))}
 	}
-	if t.messageID == "" {
-		// Message-ID for the Sent dedup.
-		t.messageID = parsed.GetMessageID()
-	}
 
-	route := routeRecipients(t.local, t.outboxMessage.UserID, recipients)
+	route := routeRecipients(t.local, msg.UserID, recipients)
 	delivered := route.self
 	failed := route.failed
 	pending := route.pending
@@ -229,7 +229,7 @@ func (t *DirectSendTask) Execute(ctx context.Context) error {
 	// re-runs this for every local recipient; those who already have the
 	// message come back as Duplicate and are not given a second copy.
 	if len(route.local) > 0 {
-		env := localdelivery.Envelope{From: envelopeAddress(t.outboxMessage.From), Trusted: true}
+		env := localdelivery.Envelope{From: envelopeAddress(msg.From), Trusted: true}
 		if _, d := localdelivery.SplitAddress(env.From); d != "" {
 			env.FromDomain = d
 		}
@@ -245,15 +245,14 @@ func (t *DirectSendTask) Execute(ctx context.Context) error {
 
 	// Everyone else: via MX.
 	if len(route.external) > 0 {
-		results := t.sendExternal(t.outboxMessage.From, route.external, emailData, t.hostname)
+		results := t.sendExternal(msg.From, route.external, emailData, t.hostname)
 		for _, addr := range route.external {
 			err := results[addr]
 			switch {
 			case err == nil:
 				delivered++
 			case IsPermanent(err):
-				status, diag := deliveryStatus(err)
-				failed = append(failed, FailedRecipient{Address: addr, Status: status, Diagnostic: diag})
+				failed = append(failed, failedRecipient(addr, err))
 			default:
 				pending = append(pending, pendingRecipient{address: addr, err: err})
 			}
@@ -262,192 +261,68 @@ func (t *DirectSendTask) Execute(ctx context.Context) error {
 
 	if len(pending) > 0 {
 		lastErr := pending[0].err
-		// The stored count decides when to give up: t.outboxMessage.Retries is
-		// a copy taken when the task was created.
-		retries, incErr := t.store.IncrementOutboxMessageRetries(t.outboxMessage.ID, lastErr.Error())
+		// The stored count decides when to give up: msg.Retries is a copy
+		// taken when the task was created.
+		retries, incErr := t.store.IncrementOutboxMessageRetries(msg.ID, lastErr.Error())
 		if incErr != nil {
 			log.Printf("Failed to increment retries: %v", incErr)
-			retries = t.outboxMessage.Retries + 1
+			retries = msg.Retries + 1
 		}
 		if retries < maxRetries {
-			if err := t.store.UpdateOutboxMessageStatus(t.outboxMessage.ID, "pending", lastErr.Error()); err != nil {
+			if err := t.store.UpdateOutboxMessageStatus(msg.ID, "pending", lastErr.Error()); err != nil {
 				log.Printf("Failed to mark message as pending: %v", err)
 			}
+			// Still pending; the reason tells the sender why it is taking
+			// long. Recipients already delivered to keep their copy, and a
+			// permanent failure of another recipient is reported when the
+			// message is final.
+			record(t.tracker, msg, pendingDelivery(lastErr))
 			return fmt.Errorf("direct send failed: %w", lastErr)
 		}
-		log.Printf("Message %d exceeded max retries, giving up on %d recipient(s)", t.outboxMessage.ID, len(pending))
+		log.Printf("Message %d exceeded max retries, giving up on %d recipient(s)", msg.ID, len(pending))
 		for _, p := range pending {
-			status, diag := deliveryStatus(p.err)
-			if !strings.HasPrefix(status, "5") {
-				status, diag = "4.4.7", "Delivery time expired: "+p.err.Error()
+			f := failedRecipient(p.address, p.err)
+			if !strings.HasPrefix(f.Status, "5") {
+				f.Status = "4.4.7"
 			}
-			failed = append(failed, FailedRecipient{Address: p.address, Status: status, Diagnostic: diag})
+			if f.Reason == outbox.ReasonOther && f.Diagnostic == "" {
+				// A local store error that never cleared up.
+				f.Reason = outbox.ReasonTemporary
+			}
+			failed = append(failed, f)
 		}
 	}
 
 	// Terminal: everyone is either delivered or definitely failed.
 	if len(failed) > 0 {
-		t.bounce(emailData, failed)
+		bounceToSender(t.local, t.hostname, msg, original, failed, t.now())
 	}
 	summary := failureSummary(failed)
 
 	if delivered == 0 {
-		log.Printf("Message %d could not be delivered to any recipient, marking as failed", t.outboxMessage.ID)
-		if err := t.store.UpdateOutboxMessageStatus(t.outboxMessage.ID, "failed", summary); err != nil {
+		log.Printf("Message %d could not be delivered to any recipient, marking as failed: %s", msg.ID, summary)
+		if err := t.store.UpdateOutboxMessageStatus(msg.ID, "failed", summary); err != nil {
 			log.Printf("Failed to mark message as failed: %v", err)
 		}
+		record(t.tracker, msg, failedDelivery(failed))
 		return fmt.Errorf("direct send failed: %s", summary)
 	}
 
-	if err := t.store.MarkOutboxMessageSent(t.outboxMessage.ID); err != nil {
+	if err := t.store.MarkOutboxMessageSent(msg.ID); err != nil {
 		log.Printf("Failed to mark message as sent: %v", err)
 		return err
 	}
 	if summary != "" {
-		// Sent to some, bounced for others: keep the reason on the row.
-		if err := t.store.UpdateOutboxMessageStatus(t.outboxMessage.ID, "sent", summary); err != nil {
+		// Sent to some, bounced for others: keep the reason on the row, and
+		// the sender sees «not delivered» with the addresses that failed.
+		if err := t.store.UpdateOutboxMessageStatus(msg.ID, "sent", summary); err != nil {
 			log.Printf("Failed to record partial failure: %v", err)
 		}
+		record(t.tracker, msg, failedDelivery(failed))
+	} else {
+		record(t.tracker, msg, outbox.Delivery{Status: outbox.StatusDelivered})
 	}
 
-	// Save to Sent folder — без копии диалог, начатый пользователем,
-	// не существует в списке бесед, пока собеседник не ответит
-	// (relay-путь через SendTask делает то же самое).
-	if t.saveSent != nil {
-		t.saveSent(t.outboxMessage.UserID, emailData, t.messageID)
-	}
-	if t.notifySent != nil {
-		t.notifySent()
-	}
-
-	log.Printf("Message %d delivered to %d recipient(s), %d failed", t.outboxMessage.ID, delivered, len(failed))
+	log.Printf("Message %d delivered to %d recipient(s), %d failed", msg.ID, delivered, len(failed))
 	return nil
-}
-
-// bounce puts a delivery status notification for failed into the sender's
-// own mailbox. The sender of a direct-send message is always a local
-// mailbox, so the DSN never leaves the server.
-func (t *DirectSendTask) bounce(original []byte, failed []FailedRecipient) {
-	if t.local == nil {
-		log.Printf("Message %d: no local deliverer, bounce for %d recipient(s) not generated", t.outboxMessage.ID, len(failed))
-		return
-	}
-	sender := envelopeAddress(t.outboxMessage.From)
-	dsn, _ := buildDSN(t.hostname, sender, original, failed, t.now())
-	parsed, err := parser.New().ParseBytes(dsn)
-	if err != nil {
-		log.Printf("Message %d: failed to parse own DSN: %v", t.outboxMessage.ID, err)
-		return
-	}
-	rcpt := &localdelivery.Recipient{
-		Email:   strings.ToLower(sender),
-		Mailbox: &models.Mailbox{UserID: t.outboxMessage.UserID},
-	}
-	env := localdelivery.Envelope{Trusted: true}
-	results, errs := t.local.Deliver(env, dsn, parsed, []*localdelivery.Recipient{rcpt})
-	if results[0] == localdelivery.Failed {
-		log.Printf("Message %d: failed to deliver bounce to sender: %v", t.outboxMessage.ID, errs[0])
-		return
-	}
-	log.Printf("Message %d: bounce for %d recipient(s) delivered to the sender", t.outboxMessage.ID, len(failed))
-}
-
-// failureSummary is the outbox last_error for permanently failed recipients.
-// Addresses are masked: last_error is shown in logs and the admin UI.
-func failureSummary(failed []FailedRecipient) string {
-	if len(failed) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(failed))
-	for _, f := range failed {
-		parts = append(parts, fmt.Sprintf("%s: %s (%s)", logmask.Addr(f.Address), f.Status, f.Diagnostic))
-	}
-	return "undeliverable: " + strings.Join(parts, "; ")
-}
-
-func parseRecipientsFromOutbox(msg *models.OutboxMessage) []string {
-	var recipients []string
-	for _, addr := range splitAddresses(msg.To) {
-		if addr != "" {
-			recipients = append(recipients, addr)
-		}
-	}
-	for _, addr := range splitAddresses(msg.Cc) {
-		if addr != "" {
-			recipients = append(recipients, addr)
-		}
-	}
-	for _, addr := range splitAddresses(msg.Bcc) {
-		if addr != "" {
-			recipients = append(recipients, addr)
-		}
-	}
-	return recipients
-}
-
-// splitAddresses reduces a header-style address list to the bare addr-specs the
-// SMTP envelope takes. Shared by both send paths — the relay (SendTask) and
-// direct MX (DirectSendTask).
-//
-// RCPT TO carries an address and nothing else. net/smtp writes what it is given
-// straight into `RCPT TO:<%s>`, so a display name surviving this far produces
-// nested angle brackets, and with a non-ASCII name a non-ASCII envelope on top
-// of that; receivers answer 555 5.5.2 Syntax error, as they should.
-//
-// mail.ParseAddressList goes first because it is the only thing here that gets
-// quoting right: a display name may legitimately contain a comma, and splitting
-// on commas alone turns `"Doe, John" <j@d>` into two recipients that do not
-// exist. It is all-or-nothing, though, so one malformed entry falls back to the
-// naive split rather than costing every recipient in the list.
-func splitAddresses(s string) []string {
-	if s == "" {
-		return nil
-	}
-
-	if parsed, err := mail.ParseAddressList(s); err == nil {
-		addrs := make([]string, 0, len(parsed))
-		for _, a := range parsed {
-			if a.Address != "" {
-				addrs = append(addrs, a.Address)
-			}
-		}
-		if len(addrs) > 0 {
-			return addrs
-		}
-	}
-
-	var addrs []string
-	for _, part := range splitComma(s) {
-		email := extractEmailAddr(part)
-		if email != "" {
-			addrs = append(addrs, email)
-		}
-	}
-	return addrs
-}
-
-func splitComma(s string) []string {
-	var parts []string
-	for _, p := range strings.Split(s, ",") {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			parts = append(parts, p)
-		}
-	}
-	return parts
-}
-
-func extractEmailAddr(s string) string {
-	s = strings.TrimSpace(s)
-	if idx := strings.Index(s, "<"); idx != -1 {
-		// Search for the closing bracket after the opening one, not from the
-		// start of the string.
-		if end := strings.Index(s[idx:], ">"); end > 0 {
-			return strings.TrimSpace(s[idx+1 : idx+end])
-		}
-	}
-	if strings.Contains(s, "@") {
-		return s
-	}
-	return ""
 }

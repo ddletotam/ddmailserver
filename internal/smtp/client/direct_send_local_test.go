@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/outbox"
 	"github.com/ddletotam/ddmailserver/internal/parser"
 	"github.com/ddletotam/ddmailserver/internal/smtp/localdelivery"
 )
@@ -92,18 +93,51 @@ const outMsg = "From: Alice <alice@ours.test>\r\n" +
 	"\r\n" +
 	"hi\r\n"
 
+// fakeTracker stands in for outbox.Service.
+type fakeTracker struct {
+	fresh   bool // the next Prepare reports a row accepted by an older version
+	copies  int  // SaveSentCopy calls
+	records []outbox.Delivery
+}
+
+func (f *fakeTracker) Prepare(msg *models.OutboxMessage) (bool, error) {
+	if msg.MessageID == "" {
+		msg.MessageID = "out1@ours.test"
+	}
+	fresh := f.fresh
+	f.fresh = false
+	return fresh, nil
+}
+
+func (f *fakeTracker) SaveSentCopy(*models.OutboxMessage) error {
+	f.copies++
+	return nil
+}
+
+func (f *fakeTracker) Record(_ *models.OutboxMessage, d outbox.Delivery) {
+	f.records = append(f.records, d)
+}
+
+// last is the most recent recorded status.
+func (f *fakeTracker) last() outbox.Delivery {
+	if len(f.records) == 0 {
+		return outbox.Delivery{}
+	}
+	return f.records[len(f.records)-1]
+}
+
 type harness struct {
 	task     *DirectSendTask
 	outbox   *fakeOutbox
 	local    *fakeLocal
+	tracker  *fakeTracker
 	external [][]string // recipients of each SendDirectEach call
-	sentCopy int
 }
 
 // newHarness builds a task for a message from alice@ours.test (user 7) to
 // rcpts; extResult decides the MX outcome per external recipient.
 func newHarness(rcpts string, extResult func(addr string) error) *harness {
-	h := &harness{outbox: &fakeOutbox{}, local: &fakeLocal{}}
+	h := &harness{outbox: &fakeOutbox{}, local: &fakeLocal{}, tracker: &fakeTracker{}}
 	msg := &models.OutboxMessage{
 		ID: 1, UserID: 7, From: "Alice <alice@ours.test>", To: rcpts,
 		RawEmail: []byte(fmt.Sprintf(outMsg, rcpts)),
@@ -124,7 +158,7 @@ func newHarness(rcpts string, extResult func(addr string) error) *harness {
 			}
 			return out
 		},
-		saveSent: func(int64, []byte, string) { h.sentCopy++ },
+		tracker: h.tracker,
 	}
 	return h
 }
@@ -140,8 +174,12 @@ func TestDirectSendLocalRecipientsSkipMX(t *testing.T) {
 	if strings.Join(h.local.delivered, ",") != "bob@ours.test,carol@ours.test" {
 		t.Fatalf("delivered locally: %v", h.local.delivered)
 	}
-	if !h.outbox.sent || h.sentCopy != 1 || len(h.local.dsns) != 0 {
-		t.Fatalf("outbox %+v, sent copies %d, dsns %d", h.outbox, h.sentCopy, len(h.local.dsns))
+	if !h.outbox.sent || h.tracker.last().Status != outbox.StatusDelivered || len(h.local.dsns) != 0 {
+		t.Fatalf("outbox %+v, delivery %+v, dsns %d", h.outbox, h.tracker.last(), len(h.local.dsns))
+	}
+	// The copy in Sent was made at acceptance; delivery must not add one.
+	if h.tracker.copies != 0 {
+		t.Fatalf("send task made %d copies in Sent", h.tracker.copies)
 	}
 }
 
@@ -156,8 +194,8 @@ func TestDirectSendMixedRecipients(t *testing.T) {
 	if strings.Join(h.local.delivered, ",") != "bob@ours.test" {
 		t.Fatalf("delivered locally: %v", h.local.delivered)
 	}
-	if !h.outbox.sent || h.sentCopy != 1 {
-		t.Fatalf("outbox %+v, sent copies %d", h.outbox, h.sentCopy)
+	if !h.outbox.sent || h.tracker.last().Status != outbox.StatusDelivered || h.tracker.copies != 0 {
+		t.Fatalf("outbox %+v, delivery %+v, copies %d", h.outbox, h.tracker.last(), h.tracker.copies)
 	}
 }
 
@@ -169,8 +207,8 @@ func TestDirectSendToOwnAddressUsesSentCopy(t *testing.T) {
 	if len(h.local.delivered) != 0 || len(h.external) != 0 {
 		t.Fatalf("self-send delivered %v / MX %v; the Sent copy is the user's copy", h.local.delivered, h.external)
 	}
-	if !h.outbox.sent || h.sentCopy != 1 {
-		t.Fatalf("outbox %+v, sent copies %d", h.outbox, h.sentCopy)
+	if !h.outbox.sent || h.tracker.last().Status != outbox.StatusDelivered || h.tracker.copies != 0 {
+		t.Fatalf("outbox %+v, delivery %+v, copies %d", h.outbox, h.tracker.last(), h.tracker.copies)
 	}
 }
 
@@ -185,8 +223,9 @@ func TestDirectSendUnknownLocalMailboxBounces(t *testing.T) {
 	if !strings.Contains(h.outbox.lastError, "5.1.1") || strings.Contains(h.outbox.lastError, "nobody@") {
 		t.Fatalf("last_error %q: want the status, with the address masked", h.outbox.lastError)
 	}
-	if h.sentCopy != 0 {
-		t.Fatal("nothing was delivered — no Sent copy")
+	if d := h.tracker.last(); d.Status != outbox.StatusFailed || d.Reason != outbox.ReasonMailboxUnavailable ||
+		strings.Join(d.Failed, ",") != "nobody@ours.test" {
+		t.Fatalf("delivery %+v: want failed, mailbox_unavailable, nobody@", d)
 	}
 	if len(h.local.dsns) != 1 {
 		t.Fatalf("got %d DSNs, want 1", len(h.local.dsns))
@@ -215,8 +254,8 @@ func TestDirectSendPartialFailureStillSent(t *testing.T) {
 	if !h.outbox.sent || h.outbox.status != "sent" || !strings.Contains(h.outbox.lastError, "5.1.1") {
 		t.Fatalf("outbox %+v: want sent with the failure recorded", h.outbox)
 	}
-	if h.sentCopy != 1 || len(h.local.dsns) != 1 {
-		t.Fatalf("sent copies %d, dsns %d", h.sentCopy, len(h.local.dsns))
+	if d := h.tracker.last(); d.Status != outbox.StatusFailed || strings.Join(d.Failed, ",") != "nobody@ours.test" || len(h.local.dsns) != 1 {
+		t.Fatalf("delivery %+v, dsns %d: want failed for nobody@ only", d, len(h.local.dsns))
 	}
 }
 
@@ -231,12 +270,15 @@ func TestDirectSendTransientExternalRetriesThenExpires(t *testing.T) {
 		if h.outbox.status != "pending" || h.outbox.retries != attempt || len(h.local.dsns) != 0 {
 			t.Fatalf("attempt %d: outbox %+v, dsns %d", attempt, h.outbox, len(h.local.dsns))
 		}
+		if d := h.tracker.last(); d.Status != outbox.StatusPending || d.Reason != outbox.ReasonUnreachable {
+			t.Fatalf("attempt %d: delivery %+v, want pending/unreachable", attempt, d)
+		}
 	}
 	// Last attempt: give up, bounce the external recipient; the local one
 	// got the message, so the row is sent (with the failure noted).
 	_ = h.task.Execute(context.Background())
-	if h.outbox.status != "sent" || h.sentCopy != 1 {
-		t.Fatalf("after %d attempts: outbox %+v, sent copies %d", maxRetries, h.outbox, h.sentCopy)
+	if h.outbox.status != "sent" || h.tracker.last().Status != outbox.StatusFailed {
+		t.Fatalf("after %d attempts: outbox %+v, delivery %+v", maxRetries, h.outbox, h.tracker.last())
 	}
 	if len(h.local.dsns) != 1 || !strings.Contains(h.local.dsnRaw[0], "Status: 4.4.7") {
 		t.Fatalf("want one DSN with 4.4.7, got %d", len(h.local.dsns))
