@@ -220,6 +220,7 @@ final class ComposeModel {
             let sentReply = replyTo
             stubSeq += 1
             let key = "s\(stubSeq)"
+            clearFailedStubs()
             conversation.web.run("ddm.stub(\(Self.stubJSON(key, sent)))")
             reset()
             Task {
@@ -228,11 +229,10 @@ final class ComposeModel {
                     flash()
                     afterSend(via.account)
                 } catch {
-                    conversation.web.run("ddm.unstub(\"\(key)\")")
                     // Текст возвращается, если композер пуст (не затираем набранное заново).
                     restore(sent, sentRich)
                     if replyTo == nil { replyTo = sentReply }
-                    self.error = Self.sendError(error)
+                    await failed(key, error)
                 }
             }
         }
@@ -255,6 +255,7 @@ final class ComposeModel {
             stubSeq += 1
             let key = "s\(stubSeq)"
             let stub = "ddm.stub(\(Self.stubJSON(key, sent)))"
+            clearFailedStubs()
             conversation.web.run(stub)
             reset()
             let target = target(of: request)
@@ -268,14 +269,41 @@ final class ComposeModel {
                     flash()
                     afterSend(via.account)
                 } catch {
-                    conversation.web.run("ddm.unstub(\"\(key)\")")
                     if sentTarget == target { sentTarget = nil }
                     carriedStubs = []
                     restore(sent, sentRich)
-                    self.error = Self.sendError(error)
+                    await failed(key, error)
                 }
             }
         }
+    }
+
+    /// Заглушки писем, которые SMTP IMAP-учётки не принял: висят красным до
+    /// следующей отправки (как Android §5).
+    private var failedStubs: [String] = []
+
+    private func clearFailedStubs() {
+        for k in failedStubs { conversation.web.run("ddm.unstub(\"\(k)\")") }
+        failedStubs.removeAll()
+    }
+
+    /// Отправка не удалась. Отказ SMTP IMAP-учётки — письмо не доставлено:
+    /// заглушка остаётся с красной плашкой «Не доставлено: причина»
+    /// (`ddm.stubDelivery`), строки над композером нет. Документ без
+    /// `stubDelivery` или отказ сервера ddmail (письмо не принято) — заглушка
+    /// убирается, причина — красной строкой над композером.
+    private func failed(_ key: String, _ e: Error) async {
+        let text = Self.sendError(e)
+        if let nd = e as? NotDelivered {
+            let d = FeedBatch.Delivery(status: DeliveryState.failed.rawValue, error: Self.reason(nd), failed: [])
+            let js = "(typeof ddm.stubDelivery==='function')?(ddm.stubDelivery(\"\(key)\",\(d.javaScriptLiteral())),true):false"
+            if await conversation.web.ask(js) {
+                failedStubs.append(key)
+                return
+            }
+        }
+        conversation.web.run("ddm.unstub(\"\(key)\")")
+        error = text
     }
 
     /// Беседа, в которую ляжет новое письмо: id по набору адресов и своим
@@ -375,17 +403,17 @@ final class ComposeModel {
         }
     }
 
-    static func sendError(_ e: Error) -> String {
-        if let nd = e as? NotDelivered {
-            // Отказ SMTP провайдера: письмо не ушло.
-            let why: String
-            switch nd.underlying {
-            case APIError.network: why = "нет соединения с SMTP-сервером"
-            case let APIError.server(_, message) where !message.isEmpty: why = message
-            default: why = nd.underlying.localizedDescription
-            }
-            return "Не доставлено: \(why)."
+    /// Почему SMTP IMAP-учётки не принял письмо — словами.
+    static func reason(_ nd: NotDelivered) -> String {
+        switch nd.underlying {
+        case APIError.network: "нет соединения с SMTP-сервером"
+        case let APIError.server(_, message) where !message.isEmpty: message
+        default: nd.underlying.localizedDescription
         }
+    }
+
+    static func sendError(_ e: Error) -> String {
+        if let nd = e as? NotDelivered { return "Не доставлено: \(reason(nd))." }
         let why: String
         switch e {
         case APIError.unauthorized: why = "нужен вход в учётку"

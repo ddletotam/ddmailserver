@@ -82,6 +82,15 @@ public struct FeedBatch: Encodable, Sendable {
         let status: String
         let error: String
         let failed: [String]
+
+        public init(status: String, error: String, failed: [String]) {
+            self.status = status
+            self.error = error
+            self.failed = failed
+        }
+
+        /// JSON для `ddm.delivery(…)` / `ddm.stubDelivery(…)`.
+        public func javaScriptLiteral() -> String { jsLiteral(self) }
     }
 
     public struct Message: Encodable, Sendable {
@@ -124,26 +133,27 @@ public struct FeedBatch: Encodable, Sendable {
     }
 
     /// Перерисовать уже показанные письма (сменился статус доставки) без
-    /// перезагрузки ленты: `ddm.update(batch)` — письма с теми же uid
-    /// заменяются на месте; документ без него, но с `ddm.delivery(uid, d)` —
-    /// по письму; ни того, ни другого (документ старше) — `ddm.set(full)`
+    /// перезагрузки ленты: `ddm.delivery(uid, d)` по письму — плашка пузыря
+    /// меняется на месте; документ старше (без `delivery`) — `ddm.set(full)`
     /// всем окном, иначе статус не дошёл бы до пузыря до переоткрытия беседы.
     public static func updateScript(_ changed: FeedBatch, orSet full: FeedBatch) -> String {
         """
-        (function(u,f){if(typeof ddm.update==='function'){ddm.update(u)}\
-        else if(typeof ddm.delivery==='function'){u.messages.forEach(function(m){ddm.delivery(m.uid,m.delivery)})}\
+        (function(u,f){if(typeof ddm.delivery==='function'){u.messages.forEach(function(m){ddm.delivery(m.uid,m.delivery)})}\
         else{ddm.set(f)}})(\(changed.javaScriptLiteral()),\(full.javaScriptLiteral()))
         """
     }
 
     /// JSON для вызова `ddm.*(…)`. JSON — подмножество литералов JS, кроме
     /// U+2028/U+2029 в строках: их экранируем, иначе старый разбор JS сломается.
-    public func javaScriptLiteral() -> String {
-        let e = JSONEncoder()
-        e.outputFormatting = [.withoutEscapingSlashes]
-        let s = String(decoding: (try? e.encode(self)) ?? Data("{}".utf8), as: UTF8.self)
-        return s.replacingOccurrences(of: "\u{2028}", with: "\\u2028").replacingOccurrences(of: "\u{2029}", with: "\\u2029")
-    }
+    public func javaScriptLiteral() -> String { jsLiteral(self) }
+}
+
+/// JSON как литерал JS: U+2028/U+2029 в строках экранируются.
+func jsLiteral(_ v: some Encodable) -> String {
+    let e = JSONEncoder()
+    e.outputFormatting = [.withoutEscapingSlashes]
+    let s = String(decoding: (try? e.encode(v)) ?? Data("{}".utf8), as: UTF8.self)
+    return s.replacingOccurrences(of: "\u{2028}", with: "\\u2028").replacingOccurrences(of: "\u{2029}", with: "\\u2029")
 }
 
 /// Окно отрисовки беседы (§8): сначала последние `page` писем, старые —
