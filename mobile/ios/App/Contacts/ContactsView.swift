@@ -52,6 +52,31 @@ final class ContactsModel {
 
     var writableBooks: [AddressBookDTO] { books.filter(\.canWrite) }
 
+    /// Сервер ddmail хранит у контакта три адреса и три телефона
+    /// (`internal/web/handlers_desktop_contacts.go`, `padTo3`): лишние он
+    /// отбросил бы молча. У CardDAV внешней учётки предела нет.
+    static let ddmailSlots = 3
+
+    /// Контакт или книга ddmail: id сервера положительные, у DAV — отрицательные (`davID`).
+    static func isDDMail(_ id: Int64) -> Bool { id > 0 }
+
+    /// Предел адресов и телефонов формы: у книги ddmail — три, иначе нет.
+    func slotLimit(_ f: ContactForm) -> Int? {
+        let ddmail = f.editing.map(Self.isDDMail) ?? (f.bookID != 0 && Self.isDDMail(f.bookID))
+        return ddmail ? Self.ddmailSlots : nil
+    }
+
+    /// Можно ли править и удалять контакт. CardDAV — по книге; ddmail
+    /// принадлежность к книге не отдаёт, поэтому — `can_write`, если сервер
+    /// его прислал, и «нельзя», когда у ddmail-учётки нет ни одной книги на
+    /// запись (книги загружены, все — только чтение).
+    func canEdit(_ c: ContactDTO) -> Bool {
+        guard c.canWrite else { return false }
+        guard Self.isDDMail(c.id) else { return true }
+        let own = books.filter { Self.isDDMail($0.id) }
+        return own.isEmpty || own.contains(where: \.canWrite)
+    }
+
     var filtered: [ContactDTO] {
         let q = query.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return contacts }
@@ -87,7 +112,9 @@ final class ContactsModel {
     func edit(_ c: ContactDTO) {
         form = ContactForm(
             editing: c.id, name: c.fullName, organization: c.organization, title: c.title,
-            emails: c.emails.isEmpty ? [""] : Array(c.emails.prefix(3)), phones: c.phones.isEmpty ? [""] : Array(c.phones.prefix(3))
+            // Все адреса и телефоны: урезанный список ушёл бы на сохранение и
+            // стёр хвост у контакта CardDAV (S-14).
+            emails: c.emails.isEmpty ? [""] : c.emails, phones: c.phones.isEmpty ? [""] : c.phones
         )
     }
 
@@ -98,6 +125,11 @@ final class ContactsModel {
         let phones = f.phones.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         if name.isEmpty && emails.isEmpty { form?.error = "Нужно имя или адрес"; return }
         if f.editing == nil && f.bookID == 0 { form?.error = "Выберите адресную книгу"; return }
+        // Сервер ddmail молча отбросил бы лишнее — не отправляем, а просим убрать.
+        if let limit = slotLimit(f), emails.count > limit || phones.count > limit {
+            form?.error = "Книга ddmail хранит до трёх адресов и трёх телефонов — уберите лишние"
+            return
+        }
         f.busy = true
         f.error = nil
         form = f
@@ -145,6 +177,7 @@ struct ContactsView: View {
         let loaded = model.loaded
         let empty = model.filtered.isEmpty
         let query = model.query
+        let selectedID = model.selectedID
         return NavigationSplitView(columnVisibility: .constant(.all)) {
             VStack(spacing: 0) {
                 // Первая строка — как у десктопа: бургер, «Контакты», «+»;
@@ -165,13 +198,20 @@ struct ContactsView: View {
                     ForEach(sections, id: \.letter) { s in
                         Section(s.letter) {
                             ForEach(s.items) { c in
+                                // Выбранная строка — зелёная с белым текстом, как
+                                // строка беседы; иначе Мак красит её системным синим.
+                                let on = c.id == selectedID
                                 HStack(spacing: 12) {
                                     ConversationAvatar(name: c.fullName, email: c.emails.first ?? "", spam: false, store: avatars)
                                     VStack(alignment: .leading) {
                                         Text(c.fullName.isEmpty ? (c.emails.first ?? "—") : c.fullName)
-                                        if !c.organization.isEmpty { Text(c.organization).font(.caption).foregroundStyle(.secondary) }
+                                        if !c.organization.isEmpty {
+                                            Text(c.organization).font(.caption).foregroundStyle(on ? Color.white.opacity(0.85) : .secondary)
+                                        }
                                     }
                                 }
+                                .foregroundStyle(on ? Color.white : Color.primary)
+                                .listRowBackground(on ? Palette.accent : Color.clear)
                                 .tag(c.id)
                             }
                         }
@@ -242,7 +282,8 @@ private struct ContactCard: View {
     @State private var confirmDelete = false
 
     var body: some View {
-        List {
+        let editable = model.canEdit(contact)
+        return List {
             Section {
                 VStack(spacing: 8) {
                     ConversationAvatar(name: contact.fullName, email: contact.emails.first ?? "", spam: false, store: avatars)
@@ -273,14 +314,21 @@ private struct ContactCard: View {
                     }
                 }
             }
-            Section {
-                Button("Удалить контакт", systemImage: "trash", role: .destructive) { confirmDelete = true }
+            // Книга только для чтения — ни правки, ни удаления (как задачи).
+            if editable {
+                Section {
+                    // Красный явно: роль `destructive` на Маке теряется под зелёным `.tint`.
+                    Button("Удалить контакт", systemImage: "trash", role: .destructive) { confirmDelete = true }
+                        .foregroundStyle(.red)
+                }
             }
         }
         .navigationTitle(contact.fullName)
         .toolbarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .primaryAction) { Button("Изменить", systemImage: "pencil") { model.edit(contact) } }
+            if editable {
+                ToolbarItem(placement: .primaryAction) { Button("Изменить", systemImage: "pencil") { model.edit(contact) } }
+            }
         }
         .confirmationDialog("Удалить контакт?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Удалить", role: .destructive) { model.delete(contact) }
@@ -288,13 +336,15 @@ private struct ContactCard: View {
     }
 }
 
-/// Форма контакта: до трёх адресов и телефонов (столько хранит сервер); книга
-/// нового контакта — только назначенная пользователем (§15).
+/// Форма контакта: все адреса и телефоны контакта; у книги ddmail — до трёх
+/// (столько хранит сервер), о чём форма предупреждает, ничего не стирая;
+/// книга нового контакта — только назначенная пользователем (§15).
 private struct ContactFormView: View {
     @Bindable var model: ContactsModel
 
     var body: some View {
         if let f = model.form {
+            let limit = model.slotLimit(f)
             NavigationStack {
                 Form {
                     Section {
@@ -302,24 +352,38 @@ private struct ContactFormView: View {
                         TextField("Организация", text: bind(\.organization))
                         TextField("Должность", text: bind(\.title))
                     }
-                    Section("Почта") {
+                    Section {
                         ForEach(f.emails.indices, id: \.self) { i in
-                            TextField("адрес@домен", text: Binding(get: { model.form?.emails[safe: i] ?? "" }, set: { model.form?.emails[i] = $0 }))
+                            TextField("адрес@домен", text: Binding(get: { model.form?.emails[safe: i] ?? "" }, set: { if model.form?.emails.indices.contains(i) == true { model.form?.emails[i] = $0 } }))
                                 #if os(iOS)
                                 .keyboardType(.emailAddress).textInputAutocapitalization(.never)
                                 #endif
                                 .autocorrectionDisabled()
                         }
-                        if f.emails.count < 3 { Button("Ещё адрес", systemImage: "plus") { model.form?.emails.append("") } }
+                        .onDelete { model.form?.emails.remove(atOffsets: $0) }
+                        if limit.map({ f.emails.count < $0 }) ?? true {
+                            Button("Ещё адрес", systemImage: "plus") { model.form?.emails.append("") }
+                        }
+                    } header: {
+                        Text("Почта")
+                    } footer: {
+                        SlotNote(count: f.emails.count, limit: limit, noun: "адресов")
                     }
-                    Section("Телефон") {
+                    Section {
                         ForEach(f.phones.indices, id: \.self) { i in
-                            TextField("+7 …", text: Binding(get: { model.form?.phones[safe: i] ?? "" }, set: { model.form?.phones[i] = $0 }))
+                            TextField("+7 …", text: Binding(get: { model.form?.phones[safe: i] ?? "" }, set: { if model.form?.phones.indices.contains(i) == true { model.form?.phones[i] = $0 } }))
                                 #if os(iOS)
                                 .keyboardType(.phonePad)
                                 #endif
                         }
-                        if f.phones.count < 3 { Button("Ещё телефон", systemImage: "plus") { model.form?.phones.append("") } }
+                        .onDelete { model.form?.phones.remove(atOffsets: $0) }
+                        if limit.map({ f.phones.count < $0 }) ?? true {
+                            Button("Ещё телефон", systemImage: "plus") { model.form?.phones.append("") }
+                        }
+                    } header: {
+                        Text("Телефон")
+                    } footer: {
+                        SlotNote(count: f.phones.count, limit: limit, noun: "телефонов")
                     }
                     if f.editing == nil {
                         Section {
@@ -363,6 +427,21 @@ private struct ContactFormView: View {
                 model.form?.error = nil
             }
         )
+    }
+}
+
+/// Подпись под адресами и телефонами формы: предел книги ddmail.
+private struct SlotNote: View {
+    let count: Int
+    let limit: Int?
+    let noun: String
+
+    var body: some View {
+        if let limit, count > limit {
+            Text("Книга ddmail хранит до трёх \(noun): уберите лишние, иначе сохранить нельзя.").foregroundStyle(.red)
+        } else if let limit, count == limit {
+            Text("Книга ddmail хранит до трёх \(noun).")
+        }
     }
 }
 

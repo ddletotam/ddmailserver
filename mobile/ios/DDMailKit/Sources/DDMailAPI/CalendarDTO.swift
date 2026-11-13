@@ -269,16 +269,22 @@ public struct ContactDTO: Decodable, Equatable, Identifiable, Sendable {
     public var organization: String
     public var title: String
     public var photoURL: String
+    /// Книга контакта принимает правку. CardDAV внешней учётки знает это по
+    /// книге; сервер ddmail членство в книгах не отдаёт — поле `can_write`
+    /// читается, если он его пришлёт, иначе `true` (отказ придёт 403).
+    public var canWrite: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, emails, phones, organization, title
         case fullName = "full_name"
         case photoURL = "photo_url"
+        case canWrite = "can_write"
     }
 
-    public init(id: Int64, fullName: String, emails: [String] = [], phones: [String] = [], organization: String = "", title: String = "", photoURL: String = "") {
+    public init(id: Int64, fullName: String, emails: [String] = [], phones: [String] = [], organization: String = "", title: String = "",
+                photoURL: String = "", canWrite: Bool = true) {
         self.id = id; self.fullName = fullName; self.emails = emails; self.phones = phones
-        self.organization = organization; self.title = title; self.photoURL = photoURL
+        self.organization = organization; self.title = title; self.photoURL = photoURL; self.canWrite = canWrite
     }
 
     public init(from decoder: Decoder) throws {
@@ -290,6 +296,7 @@ public struct ContactDTO: Decodable, Equatable, Identifiable, Sendable {
         organization = try c.value(.organization, "")
         title = try c.value(.title, "")
         photoURL = try c.value(.photoURL, "")
+        canWrite = try c.value(.canWrite, true)
     }
 }
 
