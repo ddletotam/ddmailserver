@@ -487,6 +487,26 @@ class ImapEngine(
      * по Message-ID (многие серверы кладут копию сами), не нашлось за ~15 с —
      * `APPEND` с `\Seen`. У Gmail не делаем — он кладёт сам.
      */
+    /**
+     * IMAP `SEARCH` во «Входящих» и «Отправленных» — как `search_impl`
+     * десктопа. Из каждой папки — последние [limit] совпадений.
+     */
+    override suspend fun searchMessages(query: String, limit: Int): List<MessageHit> {
+        val r = roles()
+        val wanted = listOf(FolderRole.Inbox, FolderRole.Sent).mapNotNull { role -> r[role]?.let { role to it } }
+        if (wanted.isEmpty()) return emptyList()
+        return withClient { c ->
+            wanted.flatMap { (role, name) ->
+                c.select(name)
+                val uids = c.searchText(query).sorted().takeLast(limit)
+                if (uids.isEmpty()) emptyList()
+                else c.fetchHeaders(uids).map { h ->
+                    MessageHit(accountKey, name, role.pack(h.uid), h.messageId, h.fromName.ifBlank { h.fromAddr }, h.subject, h.dateTs)
+                }
+            }
+        }
+    }
+
     override suspend fun send(req: SendRequest) {
         val cfg = smtp()
         val out = mime { Smtp.build(req) }

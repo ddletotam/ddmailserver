@@ -1,5 +1,6 @@
 package ru.letotam.ddmail.tasks
 
+import ru.letotam.ddmail.ui.BurgerButton
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -160,9 +161,12 @@ fun TasksScreen(vm: TasksViewModel, modifier: Modifier = Modifier) {
         onPauseOrDispose { }
     }
     Box(modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize().align(Alignment.TopCenter).widthIn(max = 720.dp)) {
-            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Задачи", fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+        // Во всю ширину: бургер — в левом верхнем углу раздела (mobile-layout.md).
+        Column(Modifier.fillMaxSize()) {
+            // Первая строка — как у десктопа: бургер, «Задачи», «выполненные», обновить.
+            Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                BurgerButton()
+                Text("Задачи", fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f).padding(start = 4.dp))
                 IconToggleButton(showDone, { vm.toggleShowDone() }) {
                     Icon(Icons.Filled.DoneAll, if (showDone) "Скрыть выполненные" else "Показать выполненные", tint = if (showDone) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
                 }

@@ -9,7 +9,10 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -61,12 +64,18 @@ class MailViewModel(
 ) : ViewModel() {
     private val activeId = MutableStateFlow<String?>(null)
 
-    /** Строка поиска; `null` — поиск закрыт. */
-    val query = MutableStateFlow<String?>(null)
+    /** Строка поиска (первая строка экрана); непустая — открыта выпадашка. */
+    val query = MutableStateFlow("")
     val syncing = MutableStateFlow(false)
 
     /** Открытая беседа — по `ref`, не по позиции: список меняется дельтами. */
     val selected = MutableStateFlow<String?>(null)
+
+    /**
+     * Новая беседа (compose-режим десктопа): адресат, введённый в поиск.
+     * Пустая лента с композером внизу; `null` — не открыта.
+     */
+    val newChat = MutableStateFlow<String?>(null)
 
     val conversation = ConversationController(app, app.settings, hub, viewModelScope)
 
@@ -99,8 +108,41 @@ class MailViewModel(
     private var lastConv: String? = null
 
     val state: StateFlow<MailState> =
-        combine(hub.conversations, hub.folders, activeId, query) { convs, doc, id, q -> build(convs, doc, id, q) }
+        combine(hub.conversations, hub.folders, activeId) { convs, doc, id -> build(convs, doc, id) }
             .stateIn(viewModelScope, SharingStarted.Eagerly, MailState())
+
+    /** Адресная книга — для секции «Контакты» поиска (кладёт оболочка). */
+    private val addressBook = MutableStateFlow<List<ru.letotam.ddmail.api.ContactDto>>(emptyList())
+
+    fun setAddressBook(list: List<ru.letotam.ddmail.api.ContactDto>) {
+        addressBook.value = list
+    }
+
+    /** Серверная часть поиска («Сообщения») — по последней строке, с паузой на набор. */
+    private val serverHits = MutableStateFlow<Pair<String, List<ru.letotam.ddmail.sync.MessageHit>>?>(null)
+
+    /**
+     * Выпадашка поиска: «Диалоги» и «Контакты» — локально на каждое нажатие,
+     * «Сообщения» — с источников (у кого поиск есть), когда ответят.
+     */
+    val search: StateFlow<SearchResults> =
+        combine(query, hub.conversations, addressBook, serverHits) { q, convs, book, server ->
+            val t = q.trim()
+            if (t.isEmpty()) return@combine SearchResults()
+            // Спам в поиск не попадает: он виден только в своей папке.
+            val ham = convs.filter { !it.spam }
+            val dialogs = searchConvHits(ham, t).take(MAX_CONV_HITS)
+            val hitAddrs = dialogs.flatMap { h -> h.conv.counterparts.map { it.addr.lowercase() } }.toSet()
+            val fresh = server?.first == t
+            SearchResults(
+                query = t,
+                composeEmail = parseEmailLike(t).orEmpty(),
+                convs = dialogs,
+                contacts = searchContacts(book, hitAddrs, t),
+                messages = if (fresh) mapMessageHits(server!!.second, ham) else emptyList(),
+                loading = !fresh,
+            )
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, SearchResults())
 
     init {
         viewModelScope.launch {
@@ -110,6 +152,17 @@ class MailViewModel(
             tryRestore()
         }
         viewModelScope.launch { hub.folders.collect { doc = it } }
+        // Серверный поиск — после паузы в наборе; новая строка отменяет прошлый запрос.
+        viewModelScope.launch {
+            @OptIn(kotlinx.coroutines.FlowPreview::class)
+            query.map { it.trim() }.distinctUntilChanged().debounce(350).collectLatest { q ->
+                if (q.length < 2) {
+                    serverHits.value = q to emptyList()
+                    return@collectLatest
+                }
+                serverHits.value = q to hub.searchMessages(q, MAX_MSG_HITS)
+            }
+        }
         // Добавили учётку (или поправили настройки) — сразу её первый синк.
         viewModelScope.launch {
             var known = emptySet<MailSource>()
@@ -334,9 +387,60 @@ class MailViewModel(
         }
     }
 
-    /** Папка «Спам» скрыта всегда; попасть в неё — из меню шапки. */
-    fun openSpam() {
-        doc.spamIndex?.let { selectFolder(doc.folders[it].id) }
+    // ── Поиск и новая беседа (docs/mobile-layout.md «Новое письмо») ──
+
+    fun clearSearch() {
+        query.value = ""
+    }
+
+    /**
+     * Новая беседа с [email] — «Написать по адресу …» и «Написать» из
+     * карточки контакта: пустая лента, композер внизу (как compose-режим
+     * десктопа). Открытая беседа закрывается, набранное не переезжает.
+     */
+    fun startNew(email: String) {
+        val addr = email.trim().lowercase()
+        if (addr.isEmpty()) return
+        clearSearch()
+        clearPicks()
+        open(null)
+        compose.reset()
+        newChat.value = addr
+    }
+
+    fun closeNew() {
+        if (newChat.value == null) return
+        newChat.value = null
+        compose.reset()
+    }
+
+    fun pickSearchConv(ref: String) {
+        clearSearch()
+        open(ref)
+    }
+
+    /**
+     * Контакт: есть беседа один на один с ним — открыть самую свежую (в
+     * любой папке); нет — новая беседа с его адресом. Как у десктопа.
+     */
+    fun pickSearchContact(email: String) {
+        val target = email.lowercase()
+        val best = all.filter { !it.spam && it.counterparts.firstOrNull()?.addr?.lowercase() == target }.maxByOrNull { it.lastDateTs }
+        if (best != null) pickSearchConv(best.ref) else startNew(email)
+    }
+
+    /**
+     * Enter в поле поиска: адрес — новая беседа с ним (первая строка
+     * выпадашки), иначе — первая найденная строка.
+     */
+    fun submitSearch() {
+        val r = search.value
+        when {
+            r.composeEmail.isNotEmpty() -> startNew(r.composeEmail)
+            r.convs.isNotEmpty() -> pickSearchConv(r.convs.first().conv.ref)
+            r.contacts.isNotEmpty() -> pickSearchContact(r.contacts.first().email)
+            r.messages.isNotEmpty() -> pickSearchConv(r.messages.first().ref)
+        }
     }
 
     /**
@@ -359,6 +463,8 @@ class MailViewModel(
      * отправки молча ничего бы не показало.
      */
     fun open(id: String?) {
+        // Открыли настоящую беседу — заготовка новой уходит.
+        if (id != null) newChat.value = null
         if (id == selected.value) return
         val c = id?.let { i -> all.firstOrNull { it.ref == i } }
         if (c != null) {
@@ -393,22 +499,27 @@ class MailViewModel(
         if (all.any { it.ref == id }) open(id)
     }
 
-    private fun build(convs: List<Conversation>, doc: FoldersDoc, id: String?, q: String?): MailState {
-        // Поиск — по всем папкам (как «Диалоги» десктопа, §5).
-        // Спам в поиск не попадает: он виден только в своей папке.
-        if (!q.isNullOrBlank()) return MailState(emptyList(), null, 0, searchConversations(convs.filter { !it.spam }, q), loaded = true)
+    private fun build(convs: List<Conversation>, doc: FoldersDoc, id: String?): MailState {
         // Удалённая папка — снова инбокс. Скрытая видна табом, только пока
-        // в неё привели (открытие беседы из неё).
+        // в неё привели (открытие беседы из неё). «Спам» — таб полосы всегда
+        // (mobile-layout.md): меню, через которое в него входили, больше нет.
         val active = doc.folders.indexOfFirst { it.id == id }.takeIf { it >= 0 }
         val (counts, inbox) = doc.unreadCounts(convs)
         val tabs = doc.folders.mapIndexedNotNull { i, f ->
+            val spam = f.system == SYSTEM_SPAM
             // У «Спама» счётчика нет: непрочитанный спам — не повод на него смотреть.
-            if (f.hidden && i != active) null else FolderTab(i, f.id, f.name, f.icon, if (f.system == SYSTEM_SPAM) 0 else counts[i])
+            if (f.hidden && !spam && i != active) null else FolderTab(i, f.id, f.name, f.icon, if (spam) 0 else counts[i])
         }
         val inSpam = active != null && active == doc.spamIndex
         return MailState(tabs, active, inbox, doc.filter(convs, active), loaded = true, inSpam = inSpam)
     }
 }
+
+/** Строк «Диалоги» в выпадашке — больше на телефоне не просмотреть. */
+private const val MAX_CONV_HITS = 30
+
+/** Писем в «Сообщениях» — как `limit: 12` у десктопа. */
+private const val MAX_MSG_HITS = 12
 
 /**
  * Беседа нового письма: набор собеседников совпал с адресатами. Письмо себе

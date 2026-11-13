@@ -138,6 +138,16 @@ class SessionApi(
         write("POST", "/events/$id/rsvp", JsonObject(mapOf("partstat" to JsonPrimitive(partstat))).toString())
     }
 
+    /**
+     * Серверный поиск писем (секция «Сообщения» выпадашки поиска, §4
+     * десктопа). Индекса на сервере нет — 503; это «поиска нет», не ошибка.
+     */
+    suspend fun searchMessages(query: String, limit: Int): List<SearchHitDto> =
+        get(
+            "/search?q=" + java.net.URLEncoder.encode(query, "UTF-8").replace("+", "%20") + "&limit=$limit",
+            ListSerializer(SearchHitDto.serializer()),
+        )
+
     suspend fun tasks(includeCompleted: Boolean): List<TaskDto> =
         get("/tasks" + if (includeCompleted) "?include_completed=1" else "", ListSerializer(TaskDto.serializer()))
 

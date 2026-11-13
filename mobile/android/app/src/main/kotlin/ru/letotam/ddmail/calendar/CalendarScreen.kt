@@ -1,5 +1,7 @@
 package ru.letotam.ddmail.calendar
 
+import androidx.compose.ui.text.style.TextOverflow
+import ru.letotam.ddmail.ui.BurgerButton
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -90,7 +92,6 @@ private const val CENTER = 5_000
 fun CalendarScreen(vm: CalendarViewModel, modifier: Modifier = Modifier) {
     val width = LocalConfiguration.current.screenWidthDp
     val wide = width >= 600
-    var calendarsOpen by remember { mutableStateOf(false) }
     val snack = remember { SnackbarHostState() }
     val notice by vm.notice.collectAsState()
     LaunchedEffect(notice) {
@@ -104,18 +105,14 @@ fun CalendarScreen(vm: CalendarViewModel, modifier: Modifier = Modifier) {
         onPauseOrDispose { }
     }
     Box(modifier.fillMaxSize()) {
-        if (wide) WideCalendar(vm, sidebar = width >= 840, yearCols = if (width >= 840) 4 else 3, onCalendars = { calendarsOpen = true })
-        else CompactCalendar(vm, onCalendars = { calendarsOpen = true })
+        // Список календарей — в «Настройках → Календарь», как у десктопа:
+        // первая строка раздела — только навигация по датам.
+        if (wide) WideCalendar(vm, yearCols = if (width >= 840) 4 else 3)
+        else CompactCalendar(vm)
         SnackbarHost(snack, Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp).zIndex(1f))
     }
     EventDetailSheet(vm)
     EventEditor(vm, wide)
-    if (calendarsOpen) AlertDialog(
-        onDismissRequest = { calendarsOpen = false },
-        icon = { Icon(Icons.Filled.Layers, null) },
-        text = { Column(Modifier.verticalScroll(rememberScrollState())) { CalendarList(vm) } },
-        confirmButton = { IconButton(onClick = { calendarsOpen = false }) { Icon(Icons.Filled.Close, "Закрыть") } },
-    )
 }
 
 /** Список календарей: галочка цвета календаря — видимость (только на этом телефоне). */
@@ -147,13 +144,13 @@ fun CalendarList(vm: CalendarViewModel) {
 // ── iPhone ──
 
 @Composable
-private fun CompactCalendar(vm: CalendarViewModel, onCalendars: () -> Unit) {
+private fun CompactCalendar(vm: CalendarViewModel) {
     val view by vm.view.collectAsState()
-    if (view == CalView.Day || view == CalView.Week) CompactDay(vm, onCalendars) else CompactMonths(vm, onCalendars)
+    if (view == CalView.Day || view == CalView.Week) CompactDay(vm) else CompactMonths(vm)
 }
 
 @Composable
-private fun CompactMonths(vm: CalendarViewModel, onCalendars: () -> Unit) {
+private fun CompactMonths(vm: CalendarViewModel) {
     val selected by vm.selected.collectAsState()
     val index by vm.index.collectAsState()
     val loading by vm.loading.collectAsState()
@@ -162,15 +159,17 @@ private fun CompactMonths(vm: CalendarViewModel, onCalendars: () -> Unit) {
     val visible by remember { derivedStateOf { base.plusMonths((list.firstVisibleItemIndex - CENTER).toLong()) } }
     val scope = rememberCoroutineScope()
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("${visible.year}", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = NowRed, modifier = Modifier.weight(1f))
-            IconButton(onClick = {
+        // Первая строка — как у десктопа: бургер, ‹ Сегодня ›, период, «Новое событие».
+        DateBar(
+            title = monthTitle(visible),
+            onPrev = { scope.launch { list.animateScrollToItem((list.firstVisibleItemIndex - 1).coerceAtLeast(0)) } },
+            onToday = {
                 vm.today()
                 scope.launch { list.animateScrollToItem(CENTER) }
-            }) { Icon(Icons.Filled.Today, "Сегодня") }
-            IconButton(onClick = onCalendars) { Icon(Icons.Filled.Layers, "Календари") }
-            IconButton(onClick = { vm.newEvent() }) { Icon(Icons.Filled.Add, "Новое событие", tint = NowRed) }
-        }
+            },
+            onNext = { scope.launch { list.animateScrollToItem(list.firstVisibleItemIndex + 1) } },
+            onNew = { vm.newEvent() },
+        )
         WeekdayHeader(Modifier.padding(horizontal = 4.dp))
         HorizontalDivider()
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp)) else Spacer(Modifier.height(2.dp))
@@ -187,7 +186,7 @@ private fun CompactMonths(vm: CalendarViewModel, onCalendars: () -> Unit) {
 }
 
 @Composable
-private fun CompactDay(vm: CalendarViewModel, onCalendars: () -> Unit) {
+private fun CompactDay(vm: CalendarViewModel) {
     val selected by vm.selected.collectAsState()
     val index by vm.index.collectAsState()
     val today = remember { LocalDate.now() }
@@ -208,17 +207,15 @@ private fun CompactDay(vm: CalendarViewModel, onCalendars: () -> Unit) {
     }
     androidx.activity.compose.BackHandler { vm.setView(CalView.Month) }
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(end = 4.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { vm.setView(CalView.Month) }) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, "К месяцам", tint = NowRed)
-                Spacer(Modifier.width(4.dp))
-                Text(MONTHS[selected.monthValue - 1], color = NowRed, fontSize = 17.sp)
-            }
-            Spacer(Modifier.weight(1f))
-            IconButton(onClick = { vm.today() }) { Icon(Icons.Filled.Today, "Сегодня") }
-            IconButton(onClick = onCalendars) { Icon(Icons.Filled.Layers, "Календари") }
-            IconButton(onClick = { vm.newEvent() }) { Icon(Icons.Filled.Add, "Новое событие", tint = NowRed) }
-        }
+        // Заголовок периода — месяц: касание (и «Назад») ведёт к месяцам.
+        DateBar(
+            title = monthTitle(YearMonth.from(selected)),
+            onTitle = { vm.setView(CalView.Month) },
+            onPrev = { vm.select(selected.minusDays(1)) },
+            onToday = { vm.today() },
+            onNext = { vm.select(selected.plusDays(1)) },
+            onNew = { vm.newEvent() },
+        )
         WeekdayHeader(Modifier.padding(horizontal = 4.dp))
         HorizontalPager(weeks, Modifier.fillMaxWidth().height(40.dp)) { p ->
             val ws = thisWeek.plusWeeks((p - CENTER).toLong())
@@ -270,7 +267,7 @@ private fun CompactDay(vm: CalendarViewModel, onCalendars: () -> Unit) {
 // ── iPad ──
 
 @Composable
-private fun WideCalendar(vm: CalendarViewModel, sidebar: Boolean, yearCols: Int, onCalendars: () -> Unit) {
+private fun WideCalendar(vm: CalendarViewModel, yearCols: Int) {
     val view by vm.view.collectAsState()
     val selected by vm.selected.collectAsState()
     val index by vm.index.collectAsState()
@@ -288,78 +285,90 @@ private fun WideCalendar(vm: CalendarViewModel, sidebar: Boolean, yearCols: Int,
         CalView.Week, CalView.Month -> monthTitle(YearMonth.from(selected))
         CalView.Year -> "${selected.year}"
     }
-    Row(Modifier.fillMaxSize()) {
-        if (sidebar) {
-            Column(Modifier.width(280.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(12.dp)) {
-                var mini by remember { mutableStateOf(YearMonth.from(selected)) }
-                LaunchedEffect(selected) { mini = YearMonth.from(selected) }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(monthTitle(mini), Modifier.weight(1f), fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                    IconButton(onClick = { mini = mini.minusMonths(1) }) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "Предыдущий месяц") }
-                    IconButton(onClick = { mini = mini.plusMonths(1) }) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "Следующий месяц") }
-                }
-                MiniMonth(mini, selected, { vm.select(it) }, title = false)
-                HorizontalDivider(Modifier.padding(vertical = 12.dp))
-                CalendarList(vm)
-            }
-            VerticalDivider()
-        }
-        Column(Modifier.weight(1f).fillMaxHeight()) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(title, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                Spacer(Modifier.width(8.dp))
-                IconButton(onClick = { step(-1) }) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "Назад") }
-                IconButton(onClick = { step(1) }) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "Вперёд") }
-                IconButton(onClick = { vm.today() }) { Icon(Icons.Filled.Today, "Сегодня") }
-                Spacer(Modifier.weight(1f))
-                SingleChoiceSegmentedButtonRow {
-                    val opts = listOf(
-                        CalView.Day to Icons.Filled.CalendarViewDay, CalView.Week to Icons.Filled.CalendarViewWeek,
-                        CalView.Month to Icons.Filled.CalendarViewMonth, CalView.Year to Icons.Filled.GridView,
-                    )
-                    val names = mapOf(CalView.Day to "День", CalView.Week to "Неделя", CalView.Month to "Месяц", CalView.Year to "Год")
-                    opts.forEachIndexed { i, (v, icon) ->
-                        SegmentedButton(view == v, { vm.setView(v) }, SegmentedButtonDefaults.itemShape(i, opts.size), icon = {}) {
-                            Icon(icon, names[v])
-                        }
+    Column(Modifier.fillMaxSize()) {
+        // Первая строка — как у десктопа: бургер, ‹ Сегодня ›, период; справа
+        // вид (день/неделя/месяц/год) и «Новое событие».
+        Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            BurgerButton()
+            IconButton(onClick = { step(-1) }) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "Назад") }
+            TextButton(onClick = { vm.today() }) { Text("Сегодня", fontWeight = FontWeight.Bold) }
+            IconButton(onClick = { step(1) }) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "Вперёд") }
+            Spacer(Modifier.width(8.dp))
+            Text(title, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            // Переключатель вида узкий: на 712 dp заголовку периода нужно место.
+            SingleChoiceSegmentedButtonRow(Modifier.width(184.dp)) {
+                val opts = listOf(
+                    CalView.Day to Icons.Filled.CalendarViewDay, CalView.Week to Icons.Filled.CalendarViewWeek,
+                    CalView.Month to Icons.Filled.CalendarViewMonth, CalView.Year to Icons.Filled.GridView,
+                )
+                val names = mapOf(CalView.Day to "День", CalView.Week to "Неделя", CalView.Month to "Месяц", CalView.Year to "Год")
+                opts.forEachIndexed { i, (v, icon) ->
+                    SegmentedButton(view == v, { vm.setView(v) }, SegmentedButtonDefaults.itemShape(i, opts.size), icon = {}) {
+                        Icon(icon, names[v])
                     }
                 }
-                Spacer(Modifier.width(8.dp))
-                if (!sidebar) IconButton(onClick = onCalendars) { Icon(Icons.Filled.Layers, "Календари") }
-                FloatingActionButton(onClick = { vm.newEvent() }, Modifier.size(44.dp), containerColor = NowRed, contentColor = Color.White) {
-                    Icon(Icons.Filled.Add, "Новое событие")
-                }
             }
-            if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp)) else Spacer(Modifier.height(2.dp))
-            HorizontalDivider()
-            val occsOf = { d: LocalDate -> index[YearMonth.from(d)]?.get(d).orEmpty() }
-            when (view) {
-                CalView.Day -> {
-                    LaunchedEffect(selected) { vm.ensure(YearMonth.from(selected)) }
-                    Timeline(listOf(selected), occsOf, vm::open, vm::move, { vm.newEvent(it) }, Modifier.fillMaxSize(), hourHeight = 52.dp, showDayHeader = true)
-                }
-                CalView.Week -> {
-                    val ws = weekStart(selected)
-                    val wd = (0..6).map { ws.plusDays(it.toLong()) }
-                    LaunchedEffect(ws) { wd.map { YearMonth.from(it) }.distinct().forEach(vm::ensure) }
-                    Timeline(wd, occsOf, vm::open, vm::move, { vm.newEvent(it) }, Modifier.fillMaxSize(), hourHeight = 48.dp, showDayHeader = true)
-                }
-                CalView.Month -> {
-                    val ym = YearMonth.from(selected)
-                    BigMonth(
-                        ym, vm, index[ym], selected,
-                        onDay = { d -> if (d == selected) vm.setView(CalView.Day) else vm.select(d) },
-                        onOpen = vm::open,
-                        onCreate = { d -> vm.select(d); vm.newEvent(LocalDateTime.of(d, java.time.LocalTime.of(9, 0))) },
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                }
-                CalView.Year -> YearView(
-                    selected.year, selected, yearCols,
-                    onDay = { d -> vm.select(d); vm.setView(CalView.Day) },
-                    onMonth = { ym -> vm.select(ym.atDay(1)); vm.setView(CalView.Month) },
-                )
+            Spacer(Modifier.width(8.dp))
+            FloatingActionButton(onClick = { vm.newEvent() }, Modifier.size(44.dp), containerColor = NowRed, contentColor = Color.White) {
+                Icon(Icons.Filled.Add, "Новое событие")
             }
         }
+        if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp)) else Spacer(Modifier.height(2.dp))
+        HorizontalDivider()
+        val occsOf = { d: LocalDate -> index[YearMonth.from(d)]?.get(d).orEmpty() }
+        when (view) {
+            CalView.Day -> {
+                LaunchedEffect(selected) { vm.ensure(YearMonth.from(selected)) }
+                Timeline(listOf(selected), occsOf, vm::open, vm::move, { vm.newEvent(it) }, Modifier.fillMaxSize(), hourHeight = 52.dp, showDayHeader = true)
+            }
+            CalView.Week -> {
+                val ws = weekStart(selected)
+                val wd = (0..6).map { ws.plusDays(it.toLong()) }
+                LaunchedEffect(ws) { wd.map { YearMonth.from(it) }.distinct().forEach(vm::ensure) }
+                Timeline(wd, occsOf, vm::open, vm::move, { vm.newEvent(it) }, Modifier.fillMaxSize(), hourHeight = 48.dp, showDayHeader = true)
+            }
+            CalView.Month -> {
+                val ym = YearMonth.from(selected)
+                BigMonth(
+                    ym, vm, index[ym], selected,
+                    onDay = { d -> if (d == selected) vm.setView(CalView.Day) else vm.select(d) },
+                    onOpen = vm::open,
+                    onCreate = { d -> vm.select(d); vm.newEvent(LocalDateTime.of(d, java.time.LocalTime.of(9, 0))) },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            CalView.Year -> YearView(
+                selected.year, selected, yearCols,
+                onDay = { d -> vm.select(d); vm.setView(CalView.Day) },
+                onMonth = { ym -> vm.select(ym.atDay(1)); vm.setView(CalView.Month) },
+            )
+        }
+    }
+}
+
+/**
+ * Первая строка календаря на узком экране: бургер, ‹ Сегодня ›, заголовок
+ * периода, «Новое событие» — та же, что у десктопа и разложенного экрана.
+ * Кнопки по 40 dp: на 350 dp сложенного Mate XT должно влезть всё.
+ */
+@Composable
+private fun DateBar(title: String, onPrev: () -> Unit, onToday: () -> Unit, onNext: () -> Unit, onNew: () -> Unit, onTitle: (() -> Unit)? = null) {
+    Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        BurgerButton(Modifier.size(40.dp))
+        IconButton(onClick = onPrev, modifier = Modifier.size(40.dp)) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "Назад") }
+        TextButton(onClick = onToday, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp)) {
+            Text("Сегодня", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+        }
+        IconButton(onClick = onNext, modifier = Modifier.size(40.dp)) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "Вперёд") }
+        Text(
+            title,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.Bold,
+            color = NowRed,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f).padding(start = 4.dp).then(if (onTitle != null) Modifier.clickable(onClick = onTitle) else Modifier),
+        )
+        IconButton(onClick = onNew, modifier = Modifier.size(40.dp)) { Icon(Icons.Filled.Add, "Новое событие", tint = NowRed) }
     }
 }

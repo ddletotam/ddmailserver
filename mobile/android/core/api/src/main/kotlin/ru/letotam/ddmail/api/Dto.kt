@@ -158,3 +158,19 @@ data class PurgeOutcome(
     @SerialName("rule_value") val ruleValue: String = "",
     @SerialName("rule_count") val ruleCount: Int = 0,
 )
+
+/**
+ * Письмо, найденное серверным поиском (`/search`, документ индекса
+ * Meilisearch). `id` — id письма на сервере, он же `uid` в ссылках бесед.
+ */
+@Serializable
+data class SearchHitDto(
+    val id: Long = 0,
+    val subject: String = "",
+    val from: String = "",
+    /** Секунды. */
+    val date: Long = 0,
+    @SerialName("message_id") val messageId: String = "",
+    /** `email` или `calendar`: события календаря поиску писем не нужны. */
+    val type: String = "",
+)

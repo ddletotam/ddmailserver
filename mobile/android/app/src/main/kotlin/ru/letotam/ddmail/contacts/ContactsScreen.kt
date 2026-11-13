@@ -1,5 +1,6 @@
 package ru.letotam.ddmail.contacts
 
+import ru.letotam.ddmail.ui.BurgerButton
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
@@ -47,7 +48,6 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -260,15 +260,15 @@ private fun ContactList(vm: ContactsViewModel, avatars: Avatars, modifier: Modif
     val selected by vm.selected.collectAsState()
     Box(modifier) {
         Column(Modifier.fillMaxSize()) {
-            var booksOpen by remember { mutableStateOf(false) }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Контакты", fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f).padding(start = 16.dp, top = 10.dp, bottom = 4.dp))
-                IconButton(onClick = { booksOpen = true }) { Icon(Icons.Filled.Layers, "Адресные книги") }
+            // Первая строка — как у десктопа: бургер, «Контакты», «+».
+            Row(Modifier.padding(start = 4.dp, end = 4.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                BurgerButton()
+                Text("Контакты", fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f).padding(start = 4.dp))
+                IconButton(onClick = vm::newContact) { Icon(Icons.Filled.Add, "Новый контакт") }
             }
-            if (booksOpen) BooksDialog(vm) { booksOpen = false }
             TextField(
                 q, { vm.query.value = it }, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                placeholder = { Text("Поиск") }, singleLine = true,
+                placeholder = { Text("Поиск контактов") }, singleLine = true,
                 leadingIcon = { Icon(Icons.Filled.Search, null) },
                 trailingIcon = { if (q.isNotEmpty()) IconButton(onClick = { vm.query.value = "" }) { Icon(Icons.Filled.Close, "Очистить") } },
                 shape = MaterialTheme.shapes.medium,
@@ -311,7 +311,6 @@ private fun ContactList(vm: ContactsViewModel, avatars: Avatars, modifier: Modif
                 }
             }
         }
-        FloatingActionButton(onClick = vm::newContact, Modifier.align(Alignment.BottomEnd).padding(16.dp)) { Icon(Icons.Filled.Add, "Новый контакт") }
     }
 }
 
@@ -450,35 +449,32 @@ private fun BookChips(vm: ContactsViewModel, draft: ContactDraft) {
 }
 
 /** Адресные книги: звезда — куда пишутся новые контакты. */
+/**
+ * Адресные книги: звезда — книга новых контактов. Живёт в «Настройках →
+ * Контакты»: первая строка раздела — только бургер, «Контакты» и «+».
+ */
 @Composable
-private fun BooksDialog(vm: ContactsViewModel, close: () -> Unit) {
+fun AddressBookList(vm: ContactsViewModel) {
     val books by vm.books.collectAsState()
     val default by vm.defaultBook.collectAsState()
-    AlertDialog(
-        onDismissRequest = close,
-        icon = { Icon(Icons.Filled.Layers, null) },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                if (books.isEmpty()) Text("Адресных книг нет", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                books.forEach { b ->
-                    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(b.label(), fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (b.identityEmail.isNotBlank()) Text(b.identityEmail, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-                        }
-                        if (!b.canWrite) Icon(Icons.Filled.Lock, "Только чтение", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.outline)
-                        else IconButton(onClick = { vm.setDefaultBook(b.id) }) {
-                            val on = default == b.id
-                            Icon(
-                                if (on) Icons.Filled.Star else Icons.Filled.StarBorder,
-                                if (on) "Книга по умолчанию" else "Сделать книгой по умолчанию",
-                                tint = if (on) Color(0xFFF59E0B) else MaterialTheme.colorScheme.outline,
-                            )
-                        }
-                    }
+    Column {
+        if (books.isEmpty()) Text("Адресных книг нет", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        books.forEach { b ->
+            Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(b.label(), fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (b.identityEmail.isNotBlank()) Text(b.identityEmail, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                }
+                if (!b.canWrite) Icon(Icons.Filled.Lock, "Только чтение", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.outline)
+                else IconButton(onClick = { vm.setDefaultBook(b.id) }) {
+                    val on = default == b.id
+                    Icon(
+                        if (on) Icons.Filled.Star else Icons.Filled.StarBorder,
+                        if (on) "Книга по умолчанию" else "Сделать книгой по умолчанию",
+                        tint = if (on) Color(0xFFF59E0B) else MaterialTheme.colorScheme.outline,
+                    )
                 }
             }
-        },
-        confirmButton = { IconButton(onClick = close) { Icon(Icons.Filled.Close, "Закрыть") } },
-    )
+        }
+    }
 }

@@ -42,6 +42,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -65,12 +66,19 @@ import ru.letotam.ddmail.sync.Conversation
 private val Accent = Color(0xFF047857)
 
 /**
- * Композер под лентой беседы. Enter — перенос строки, отправка — кнопкой
+ * Композер под лентой беседы (и новой беседы — [newTo] вместо [conversation]). Enter — перенос строки, отправка — кнопкой
  * (§9). Переопределения «Кому»/«Копия»/«Тема»/«От» — под «⌄»: пусто значит
  * «как выведет ветка» (§1 десктопа), подсказка показывает, что выйдет.
  */
 @Composable
-fun ComposerBar(cc: ComposeController, conversation: Conversation, modifier: Modifier = Modifier) {
+fun ComposerBar(
+    cc: ComposeController,
+    conversation: Conversation?,
+    newTo: String? = null,
+    /** Фокус в поле ввода (новая беседа — сразу печатать, как `focus_composer` десктопа). */
+    focus: androidx.compose.ui.focus.FocusRequester? = null,
+    modifier: Modifier = Modifier,
+) {
     val u by cc.ui.collectAsState()
     val ids by cc.identities.collectAsState()
     val d = u.draft
@@ -97,8 +105,8 @@ fun ComposerBar(cc: ComposeController, conversation: Conversation, modifier: Mod
                 Spacer(Modifier.padding(2.dp))
             }
             if (u.expanded) {
-                val autoTo = conversation.counterparts.joinToString(", ") { it.addr }
-                Overrides(d, ids, conversation.receivedBy, autoTo, onEdit = cc::edit)
+                val autoTo = conversation?.counterparts?.joinToString(", ") { it.addr } ?: newTo.orEmpty()
+                Overrides(d, ids, conversation?.receivedBy, autoTo, subjectHint = if (conversation != null) "Re: …" else "", onEdit = cc::edit)
             }
             Attachments(d.attachments) { a -> cc.edit { it.copy(attachments = it.attachments - a) } }
             u.error?.let {
@@ -130,11 +138,11 @@ fun ComposerBar(cc: ComposeController, conversation: Conversation, modifier: Mod
                         unfocusedIndicatorColor = Color.Transparent,
                     ),
                     shape = RoundedCornerShape(18.dp),
-                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp).then(if (focus != null) Modifier.focusRequester(focus) else Modifier),
                 )
                 Spacer(Modifier.padding(2.dp))
                 androidx.compose.material3.FilledIconButton(
-                    onClick = { cc.sendReply(conversation) },
+                    onClick = { if (conversation != null) cc.sendReply(conversation) else newTo?.let(cc::sendNew) },
                     enabled = d.canSend,
                     colors = androidx.compose.material3.IconButtonDefaults.filledIconButtonColors(containerColor = Accent),
                     modifier = Modifier.size(48.dp),
@@ -145,7 +153,7 @@ fun ComposerBar(cc: ComposeController, conversation: Conversation, modifier: Mod
 }
 
 @Composable
-private fun Overrides(d: Draft, ids: List<Identity>, receivedBy: String?, autoTo: String, onEdit: ((Draft) -> Draft) -> Unit) {
+private fun Overrides(d: Draft, ids: List<Identity>, receivedBy: String?, autoTo: String, subjectHint: String, onEdit: ((Draft) -> Draft) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(bottom = 4.dp)) {
         FromPicker(d, ids, receivedBy) { email -> onEdit { it.copy(from = email) } }
         OutlinedTextField(
@@ -162,7 +170,7 @@ private fun Overrides(d: Draft, ids: List<Identity>, receivedBy: String?, autoTo
         )
         OutlinedTextField(
             value = d.subject, onValueChange = { v -> onEdit { it.copy(subject = v) } },
-            label = { Text("Тема") }, placeholder = { Text("Re: …") }, singleLine = true,
+            label = { Text("Тема") }, placeholder = { if (subjectHint.isNotEmpty()) Text(subjectHint) }, singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
     }

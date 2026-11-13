@@ -289,6 +289,18 @@ class SyncEngine(
 
     override suspend fun send(req: SendRequest) = api.send(req)
 
+    override suspend fun searchMessages(query: String, limit: Int): List<MessageHit> = try {
+        api.searchMessages(query, limit)
+            .filter { it.type.isBlank() || it.type == "email" }
+            .map { MessageHit(accountKey, "", it.id, it.messageId, it.from, it.subject, it.date) }
+    } catch (e: ApiException.Server) {
+        // Индекса нет (503) — у учётки просто нет серверного поиска.
+        if (e.code == 503) emptyList() else throw e
+    } catch (e: kotlinx.serialization.SerializationException) {
+        // Ответ не того вида (старый сервер, `null` вместо списка) — тоже «поиска нет».
+        emptyList()
+    }
+
     suspend fun openSocket(onEvent: (String) -> Unit, onClosed: (Boolean) -> Unit) = api.openSocket(onEvent, onClosed)
 
     suspend fun avatar(email: String): Binary? = api.avatar(email)
