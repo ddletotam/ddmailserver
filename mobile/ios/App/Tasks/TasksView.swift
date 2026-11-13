@@ -89,9 +89,11 @@ final class TasksModel {
 
 struct TasksView: View {
     @Bindable var model: TasksModel
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
         let showDone = model.prefs.showCompleted
+        let compact = sizeClass == .compact
         NavigationStack {
             VStack(spacing: 0) {
                 // Первая строка — как у десктопа: бургер, «Задачи», «выполненные»;
@@ -99,15 +101,16 @@ struct TasksView: View {
                 SectionBar {
                     Text("Задачи").font(.title3.bold())
                     Spacer(minLength: 8)
-                    Toggle(isOn: Binding(get: { showDone }, set: {
-                        model.prefs.showCompleted = $0
-                        Task { await model.load() }
-                    })) {
-                        Label("Показать выполненные", systemImage: showDone ? "checkmark.square.fill" : "square")
+                    // На узком экране — иконкой (iOS §0 «иконки вместо надписей»):
+                    // надпись переносилась в две строки и раздвигала первую строку.
+                    if compact {
+                        showDoneToggle(showDone)
+                            .labelStyle(.iconOnly)
+                            .font(.title3)
+                            .frame(width: 36, height: 36)
+                    } else {
+                        showDoneToggle(showDone).font(.subheadline.weight(.semibold))
                     }
-                    .toggleStyle(.button)
-                    .buttonStyle(.borderless)
-                    .font(.subheadline.weight(.semibold))
                     Button("Новая задача", systemImage: "plus") { model.newTask() }
                         .labelStyle(.iconOnly)
                         .font(.title3)
@@ -137,6 +140,20 @@ struct TasksView: View {
         .sheet(isPresented: Binding(get: { model.draft != nil }, set: { if !$0 { model.draft = nil } })) {
             TaskFormView(model: model)
         }
+    }
+
+    /// «Показать выполненные» — тумблер-кнопка; надпись — и для VoiceOver.
+    private func showDoneToggle(_ on: Bool) -> some View {
+        Toggle(isOn: Binding(get: { on }, set: {
+            model.prefs.showCompleted = $0
+            Task { await model.load() }
+        })) {
+            Label("Показать выполненные", systemImage: on ? "checkmark.circle.fill" : "checkmark.circle")
+        }
+        .toggleStyle(.button)
+        .buttonStyle(.borderless)
+        .accessibilityLabel("Показать выполненные")
+        .accessibilityIdentifier("tasks.showDone")
     }
 }
 
@@ -273,3 +290,4 @@ private struct TaskFormView: View {
         )
     }
 }
+

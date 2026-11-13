@@ -185,7 +185,7 @@ public actor DAVContactsSource: ContactsSource {
                 let id = davID(accountKey, url.absoluteString)
                 resources[id] = (url, r.descendants("getetag").first?.text.trimmingCharacters(in: .whitespacesAndNewlines))
                 out.append(ContactDTO(id: id, fullName: card.fullName, emails: card.emails, phones: card.phones,
-                                      organization: card.organization, title: card.title))
+                                      organization: card.organization, title: card.title, canWrite: book.canWrite))
                 if out.count >= limit { return out }
             }
         }

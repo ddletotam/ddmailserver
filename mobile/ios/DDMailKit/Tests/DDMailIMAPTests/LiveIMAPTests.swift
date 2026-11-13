@@ -29,4 +29,22 @@ struct LiveIMAPTests {
         }
         await c.logout()
     }
+
+    /// «Сообщения» поиска на настоящем сервере: ASCII и кириллица
+    /// (`CHARSET UTF-8` литералом) принимаются, найденное — UID папки.
+    /// Запрос — `DDMAIL_LIVE_SEARCH` (по умолчанию «ddmail»).
+    @Test(.enabled(if: env["DDMAIL_LIVE_IMAP"] != nil))
+    func searchTextAsciiAndCyrillic() async throws {
+        let hp = Self.env["DDMAIL_LIVE_IMAP"]!.split(separator: ":")
+        let port = Int(hp[1])!
+        let c = try await IMAPClient.connect(MailEndpoint(host: String(hp[0]), port: port, security: .imap(port: port)), connector: SystemMailConnector())
+        try await c.login(user: Self.env["DDMAIL_LIVE_USER"]!, password: Self.env["DDMAIL_LIVE_PASSWORD"]!)
+        let s = try await c.select("INBOX", readOnly: true)
+        let q = Self.env["DDMAIL_LIVE_SEARCH"] ?? "ddmail"
+        let ascii = try await c.searchText(q)
+        let cyr = try await c.searchText("Проверка")
+        print("search «\(q)»: \(ascii.count), «Проверка»: \(cyr.count) из \(s.exists)")
+        #expect((ascii + cyr).allSatisfy { $0 > 0 && $0 < s.uidNext })
+        await c.logout()
+    }
 }
