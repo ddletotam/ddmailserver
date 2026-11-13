@@ -430,6 +430,10 @@ public actor ImapEngine: MailProvider {
         return Binary(data: a.data, contentType: a.mimeType)
     }
 
+    public func source(uid: Int64) async throws -> Data {
+        Data(try await rawMessage(uid))
+    }
+
     /// Докачка тел заранее (§3, «как у ddmail»): от свежей беседы к старой,
     /// порциями; своё соединение — открытие беседы его не ждёт.
     @discardableResult
@@ -530,7 +534,11 @@ public actor ImapEngine: MailProvider {
 
     /// Удаление: `\Deleted` и `UID EXPUNGE` (UIDPLUS), иначе `EXPUNGE`. Необратимо.
     public func deleteConversations(_ convs: [Conversation]) async throws {
-        let refs = convs.flatMap(\.messages)
+        try await deleteMessages(convs.flatMap(\.messages))
+    }
+
+    /// Отдельные письма — так же, как беседы: `\Deleted` и `EXPUNGE`.
+    public func deleteMessages(_ refs: [MessageRef]) async throws {
         try await optimisticRemove(refs) { groups, c in
             for (_, g) in groups {
                 _ = try await c.select(g.name)

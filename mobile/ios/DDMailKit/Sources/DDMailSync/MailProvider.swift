@@ -39,9 +39,15 @@ public protocol MailProvider: AnyObject, Sendable {
     @discardableResult
     func send(_ request: SendRequest) async throws -> SendReceipt
 
+    /// Письмо целиком (RFC 822) — меню пузыря «Показать → Заголовки / Исходник».
+    func source(uid: Int64) async throws -> Data
+
     func markRead(_ c: Conversation) async throws
     func markUnread(_ c: Conversation) async throws
     func deleteConversations(_ convs: [Conversation]) async throws
+    /// Отдельные письма (меню пузыря «Удалить письмо»): из кэша сразу, на
+    /// сервере — следом. Необратимо, как удаление беседы.
+    func deleteMessages(_ refs: [MessageRef]) async throws
     /// `scope` — `address`/`domain` у ddmail; IMAP его не знает.
     func reportSpam(_ convs: [Conversation], scope: String) async throws -> PurgeOutcome
     @discardableResult

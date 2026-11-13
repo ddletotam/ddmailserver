@@ -207,6 +207,44 @@ public struct FeedWindow: Sendable {
         }
         return changed
     }
+
+    /// Беседа обновилась: письма, которых в ней больше нет (удалены здесь или
+    /// на другом устройстве), — их пузыри убрать. Пустая беседа — не повод:
+    /// так выглядит и пересборка кэша, а ушедшую беседу закрывает список.
+    public mutating func removed(_ refs: [MessageRef]) -> [Int64] {
+        guard !refs.isEmpty else { return [] }
+        let now = Set(refs.map(\.uid))
+        let gone = order.prefix(loaded).map(\.uid).filter { !now.contains($0) }
+        let unloaded = order.dropFirst(loaded).filter { !now.contains($0.uid) }.count
+        guard !gone.isEmpty || unloaded > 0 else { return [] }
+        order.removeAll { !now.contains($0.uid) }
+        loaded -= gone.count
+        return gone
+    }
+}
+
+/// Письмо целиком (RFC 822) для «Показать → Заголовки / Исходник».
+public enum MessageSource {
+    /// Блок заголовков — до первой пустой строки (CRLF или LF).
+    public static func headers(_ raw: Data) -> Data {
+        let b = [UInt8](raw)
+        var i = 0
+        while i < b.count {
+            if b[i] == 0x0A, i + 1 < b.count, b[i + 1] == 0x0A || (i + 2 < b.count && b[i + 1] == 0x0D && b[i + 2] == 0x0A) {
+                // Конец строки — без своего CR.
+                return Data(b[..<(i > 0 && b[i - 1] == 0x0D ? i - 1 : i)])
+            }
+            i += 1
+        }
+        return raw
+    }
+
+    /// Текст для показа: UTF-8, а не вышло — Latin-1 (байт в символ, ничего
+    /// не теряется: заголовки 8-bit бывают в любой кодировке).
+    public static func text(_ raw: Data) -> String {
+        if let s = String(data: raw, encoding: .utf8) { return s }
+        return String(data: raw, encoding: .isoLatin1) ?? String(decoding: raw, as: UTF8.self)
+    }
 }
 
 /// Имя файла без разделителей пути и управляющих символов.
