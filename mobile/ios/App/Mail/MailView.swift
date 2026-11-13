@@ -13,6 +13,8 @@ struct MailView: View {
     @State private var picking = false
     @State private var confirmSpam: Set<String>?
     @State private var moving: Set<String>?
+    /// Открытая настройка папки («Настроить…», «Новая папка»).
+    @State private var editingFolder: FolderRef?
     /// Правый край колонки списка в координатах окна (Мак, см. `detailColumn`).
     @State private var listEdge: CGFloat = 0
     @Bindable private var settings = AppSettings.shared
@@ -70,6 +72,19 @@ struct MailView: View {
                 Button(f.icon.isEmpty ? f.name : "\(f.icon) \(f.name)") { if let ids = moving { model.move(ids, to: f.id) } }
             }
         }
+        .sheet(item: $editingFolder) { f in
+            NavigationStack {
+                FolderEditorView(mail: model, workspace: workspace, folderID: f.id)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Готово", systemImage: "checkmark") { editingFolder = nil }
+                        }
+                    }
+            }
+            #if os(macOS)
+            .frame(minWidth: 480, minHeight: 520)
+            #endif
+        }
         // Пересылка — отдельным окном, как раньше (новое письмо — через поиск).
         .sheet(isPresented: Binding(get: { composeOpen }, set: { if !$0 { model.compose.sheet = nil } })) {
             ComposeSheetView(model: model.compose)
@@ -123,6 +138,8 @@ struct MailView: View {
         let searchOpen = model.search.isOpen
         let syncing = model.syncing
         let pickedCount = model.picked.count
+        let hiddenCount = model.foldersOn ? model.doc.hiddenCount : 0
+        let showHidden = model.showHidden
         return VStack(spacing: 0) {
             if picking {
                 PickingBar(count: pickedCount,
@@ -133,16 +150,38 @@ struct MailView: View {
                     MailSearchField(search: model.search, syncing: syncing)
                 }
             }
-            if !tabs.isEmpty {
-                FolderTabs(tabs: tabs, active: activeID, inboxUnread: inboxUnread) { model.activeFolderID = $0 }
+            // Папок нет — полосы нет; все скрыты — полоса есть (пустая, с меню
+            // «Показать скрытые»), как у десктопа.
+            if !tabs.isEmpty || hiddenCount > 0 {
+                FolderTabs(
+                    tabs: tabs, active: activeID, inboxUnread: inboxUnread,
+                    menu: FolderTabMenu(
+                        hiddenCount: hiddenCount, showHidden: showHidden,
+                        markRead: { model.markFolderRead($0) },
+                        configure: { editingFolder = FolderRef(id: $0) },
+                        delete: { model.deleteFolder($0) },
+                        add: { Task { if let id = await model.addFolder() { editingFolder = FolderRef(id: id) } } },
+                        toggleHidden: { model.showHidden.toggle() }
+                    )
+                ) { model.activeFolderID = $0 }
             }
             Group {
                 if picking {
                     List(selection: $model.picked) { rows(convs, colors: colors, selectedID: nil) }
                 } else {
-                    List(selection: $model.selectedID) {
-                        if let to = composingTo { NewConversationRow(address: to).tag(MailModel.newPrefix + to) }
-                        rows(convs, colors: colors, selectedID: selectedID)
+                    ScrollViewReader { proxy in
+                        List(selection: $model.selectedID) {
+                            if let to = composingTo { NewConversationRow(address: to).tag(MailModel.newPrefix + to).id(MailModel.newPrefix + to) }
+                            rows(convs, colors: colors, selectedID: selectedID)
+                        }
+                        // Открытая беседа видна в списке: «Новая беседа» и беседа,
+                        // которой её сменила отправка, встают сверху, а список
+                        // держит позицию по прежней первой строке — строка
+                        // оказывалась выше края (так «пропадала» беседа на Android).
+                        .onChange(of: selectedID) { _, id in
+                            guard let id else { return }
+                            withAnimation { proxy.scrollTo(id) }
+                        }
                     }
                 }
             }
@@ -337,27 +376,58 @@ private struct NewConversationRow: View {
     }
 }
 
+/// Папка, чья настройка открыта окном.
+struct FolderRef: Identifiable, Hashable {
+    let id: String
+}
+
+/// Меню полосы табов (десктоп §4 «Папки диалогов»): на табе папки — «Все
+/// прочитаны», «Настроить…», «Удалить» (подменю — подтверждение); везде —
+/// «Новая папка» и «Показать скрытые (N)» / «Не показывать скрытые».
+struct FolderTabMenu {
+    let hiddenCount: Int
+    let showHidden: Bool
+    let markRead: (String) -> Void
+    let configure: (String) -> Void
+    let delete: (String) -> Void
+    let add: () -> Void
+    let toggleHidden: () -> Void
+}
+
 /// Табы папок над списком — как у десктопа (§5, десктоп §4 «Папки диалогов»):
 /// текст, выбранный — зелёный с подчёркиванием; счётчик у выбранного зелёный,
 /// у остальных серый. Ничего не выбрано — «Входящие»; пока выбрана папка,
 /// первым стоит «← Входящие» со счётчиком инбокса; повторное касание
-/// выбранного таба — тоже во «Входящие». «Спам» — таб этой полосы.
+/// выбранного таба — тоже во «Входящие». «Спам» — таб этой полосы. Скрытая
+/// папка, показанная по «Показать скрытые», — бледнее. Долгое нажатие (на
+/// Маке — правый клик) — меню полосы.
 private struct FolderTabs: View {
     let tabs: [FolderTab]
     let active: String?
     let inboxUnread: Int
+    let menu: FolderTabMenu
     let select: (String?) -> Void
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 18) {
                 if active != nil {
-                    tab(icon: "", name: "← Входящие", unread: inboxUnread, on: false) { select(nil) }
+                    tab(icon: "", name: "← Входящие", unread: inboxUnread, on: false, hidden: false) { select(nil) }
+                        .contextMenu { stripMenu }
                 }
                 ForEach(tabs) { t in
                     let on = t.id == active
-                    tab(icon: t.icon, name: t.name, unread: t.unread, on: on) { select(on ? nil : t.id) }
+                    tab(icon: t.icon, name: t.name, unread: t.unread, on: on, hidden: t.hidden) { select(on ? nil : t.id) }
+                        .contextMenu { tabMenu(t) }
                 }
+                // Пустое место полосы — то же меню без пунктов папки.
+                Color.clear
+                    .frame(minWidth: 40, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .contextMenu { stripMenu }
+                    .accessibilityElement()
+                    .accessibilityLabel("Полоса папок")
+                    .accessibilityIdentifier("folder.strip")
             }
             .padding(.horizontal, 14)
         }
@@ -365,7 +435,30 @@ private struct FolderTabs: View {
         .overlay(alignment: .bottom) { Divider() }
     }
 
-    private func tab(icon: String, name: String, unread: Int, on: Bool, action: @escaping () -> Void) -> some View {
+    @ViewBuilder private func tabMenu(_ t: FolderTab) -> some View {
+        Button("Все прочитаны", systemImage: "envelope.open") { menu.markRead(t.id) }
+        if !t.system {
+            Button("Настроить…", systemImage: "slider.horizontal.3") { menu.configure(t.id) }
+            // Подтверждение — подменю: у меню нет «нажми ещё раз».
+            Menu("Удалить", systemImage: "trash") {
+                Button("Удалить «\(t.name)» — диалоги вернутся во «Входящие»", systemImage: "trash", role: .destructive) {
+                    menu.delete(t.id)
+                }
+            }
+        }
+        Divider()
+        stripMenu
+    }
+
+    @ViewBuilder private var stripMenu: some View {
+        Button("Новая папка", systemImage: "folder.badge.plus", action: menu.add)
+        if menu.hiddenCount > 0 {
+            Button(menu.showHidden ? "Не показывать скрытые" : "Показать скрытые (\(menu.hiddenCount))",
+                   systemImage: menu.showHidden ? "eye.slash" : "eye", action: menu.toggleHidden)
+        }
+    }
+
+    private func tab(icon: String, name: String, unread: Int, on: Bool, hidden: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
@@ -383,6 +476,7 @@ private struct FolderTabs: View {
                 }
                 .font(.subheadline.weight(on ? .semibold : .regular))
                 .foregroundStyle(on ? Palette.accent : Color.primary)
+                .opacity(hidden && !on ? 0.5 : 1)
                 Spacer(minLength: 0)
                 Capsule()
                     .fill(on ? Palette.accent : Color.clear)

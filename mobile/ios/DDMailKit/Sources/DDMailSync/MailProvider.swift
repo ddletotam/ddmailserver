@@ -49,7 +49,21 @@ public protocol MailProvider: AnyObject, Sendable {
 public protocol DialogFolderSource: AnyObject, Sendable {
     func folders() -> AsyncStream<FoldersDoc>
     func currentFolders() -> FoldersDoc
-    func assignFolder(_ convs: [Conversation], folderID: String?) async throws
+    /// Правка документа: локально сразу, на сервер — следом. `edit` получает
+    /// текущий документ (после `409` — свежий чужой) и возвращает новый;
+    /// `nil` — править нечего.
+    func editFolders(_ edit: @escaping @Sendable (FoldersDoc) -> FoldersDoc?) async throws
+}
+
+extension DialogFolderSource {
+    /// «В папку» / «Убрать из папки» — одной правкой документа на весь набор.
+    public func assignFolder(_ convs: [Conversation], folderID: String?) async throws {
+        try await editFolders { doc in
+            let target = folderID.flatMap { doc.index(of: $0) }
+            if folderID != nil && target == nil { return nil }
+            return doc.assign(convs, to: target)
+        }
+    }
 }
 
 /// Без ddmail-учётки папки диалогов живут на устройстве — документ того же
@@ -75,11 +89,8 @@ public final class LocalDialogFolders: DialogFolderSource {
         SyncEngine.parseFolders((try? store.meta(Self.key)) ?? nil)
     }
 
-    public func assignFolder(_ convs: [Conversation], folderID: String?) async throws {
-        let doc = currentFolders()
-        let target = folderID.flatMap { id in doc.folders.firstIndex { $0.id == id } }
-        if folderID != nil && target == nil { return }
-        let edited = doc.assign(convs, to: target)
+    public func editFolders(_ edit: @escaping @Sendable (FoldersDoc) -> FoldersDoc?) async throws {
+        guard let edited = edit(currentFolders()) else { return }
         try store.setMeta(Self.key, String(decoding: edited.toJSON().data(), as: UTF8.self))
     }
 }

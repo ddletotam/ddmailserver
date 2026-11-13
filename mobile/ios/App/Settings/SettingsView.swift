@@ -18,6 +18,18 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 AccountsSection(app: app, workspace: workspace, close: { dismiss() })
+                if let mail = workspace.mail {
+                    Section {
+                        NavigationLink {
+                            FoldersSettingsView(mail: mail, workspace: workspace)
+                        } label: {
+                            Label("Папки", systemImage: "folder")
+                        }
+                        .accessibilityIdentifier("settings.folders")
+                    } footer: {
+                        Text("Табы папок над списком бесед: показывать ли их на этом устройстве, правила, порядок.")
+                    }
+                }
                 Section {
                     Picker("Загружать письма заранее", selection: $settings.prefetch) {
                         Text("Не выбрано").tag(AppSettings.Prefetch?.none)

@@ -2,16 +2,21 @@ import DDMailAPI
 import Foundation
 
 /// Файл, приложенный к письму в композере.
+/// Картинка в теле письма (`contentID`) уходит inline-частью, HTML ссылается
+/// на неё через `cid:` (десктоп §3а).
 public struct PendingAttachment: Equatable, Identifiable, Sendable {
     public let id = UUID()
     public var name: String
     public var mime: String
     public var data: Data
+    /// Есть — картинка в теле (`cid:`), нет — файл.
+    public var contentID: String?
 
-    public init(name: String, mime: String, data: Data) {
+    public init(name: String, mime: String, data: Data, contentID: String? = nil) {
         self.name = name
         self.mime = mime
         self.data = data
+        self.contentID = contentID
     }
 
     public var size: Int { data.count }
@@ -20,24 +25,41 @@ public struct PendingAttachment: Equatable, Identifiable, Sendable {
 /// Что набрано в композере. «Кому», «Копия», «Тема» — переопределения:
 /// пусто значит «как выведет ветка отправки» (десктопный контракт §1).
 public struct Draft: Equatable, Sendable {
+    /// Тело текстом (`text/plain`); с форматированием — ещё и `html`.
     public var text = ""
+    /// Тело HTML (`text/html`, десктоп §3а: `<div>`-абзацы, `<b>/<i>/<u>/<a>`,
+    /// картинки `cid:`); пусто — из `text`.
+    public var html = ""
     public var to = ""
     public var cc = ""
     public var subject = ""
     /// Адрес «От кого»; пусто — выбрать по беседе.
     public var from = ""
     public var attachments: [PendingAttachment] = []
+    /// Картинки в теле — отдельными блоками после текста (у каждой `contentID`).
+    public var images: [PendingAttachment] = []
 
-    public init(text: String = "", to: String = "", cc: String = "", subject: String = "", from: String = "", attachments: [PendingAttachment] = []) {
-        self.text = text; self.to = to; self.cc = cc; self.subject = subject; self.from = from; self.attachments = attachments
+    public init(
+        text: String = "", html: String = "", to: String = "", cc: String = "", subject: String = "", from: String = "",
+        attachments: [PendingAttachment] = [], images: [PendingAttachment] = []
+    ) {
+        self.text = text; self.html = html; self.to = to; self.cc = cc; self.subject = subject; self.from = from
+        self.attachments = attachments; self.images = images
     }
 
-    /// «Есть что отправлять»: текст или хотя бы одно вложение (§1).
+    /// «Есть что отправлять»: текст, картинка или хотя бы одно вложение (§1).
     public var canSend: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || !images.isEmpty
     }
 
-    public var isEmpty: Bool { text.isEmpty && attachments.isEmpty }
+    public var isEmpty: Bool { text.isEmpty && attachments.isEmpty && images.isEmpty }
+
+    /// Тело HTML: набранное с форматированием или текст, затем картинки
+    /// блоками — каждая своим `<div>`, как у редактора десктопа.
+    public var bodyHTML: String {
+        let base = html.isEmpty ? (text.isEmpty ? "" : textToHTML(text)) : html
+        return base + images.compactMap { i in i.contentID.map { "<div><img src=\"cid:\(escapeHTML($0))\" alt=\"\(escapeHTML(i.name))\"></div>" } }.joined()
+    }
 }
 
 /// Ветка отправки (§1 десктопа), в порядке проверки.
@@ -159,10 +181,12 @@ public func buildOutgoing(
         let th = threading(lastIncoming ?? last)
         (to, subject, irt, refs) = (t, subjectOverride ?? re(base), th.inReplyTo, th.references)
     }
-    let atts = (draft.attachments + extraAttachments).map { OutgoingAttachment(filename: $0.name, mimeType: $0.mime, content: $0.data) }
+    let atts = (draft.images + draft.attachments + extraAttachments).map {
+        OutgoingAttachment(filename: $0.name, mimeType: $0.mime, content: $0.data, contentID: $0.contentID)
+    }
     let request = SendRequest(
         from: fromHeader(from), to: to, cc: cc, subject: subject,
-        html: textToHTML(draft.text) + forwardHTML, text: draft.text + forwardText,
+        html: draft.bodyHTML + forwardHTML, text: draft.text + forwardText,
         inReplyTo: irt, references: refs, attachments: atts
     )
     return .ok(request, to: to)
@@ -189,13 +213,48 @@ public func forwardBlock(_ o: MessageBody, timeZone: TimeZone = .current) -> (te
     return (text, html)
 }
 
-/// Беседа нового письма: набор собеседников совпал с адресатами. Письмо себе
-/// сервер отдаёт беседой без собеседников — тогда сверяем по её id.
-public func matchesTarget(_ c: Conversation, _ target: Set<String>) -> Bool {
-    let cps = Set(c.counterparts.map { $0.addr.lowercased() }.filter { !$0.isEmpty })
-    if !cps.isEmpty { return cps == target }
-    let id = c.id.lowercased()
-    return target.allSatisfy { id.contains($0) }
+/// Беседа, которую ждём после отправки нового письма (десктоп
+/// `compose_sent_target` / `target_conversation_id`): её id считается по
+/// тому же правилу, что сервер и `ConversationBuilder` (набор From+To+Cc, мои
+/// адреса — слева от `|`). Набор собеседников — запасной признак: на случай,
+/// если сервер добавит к набору свой адрес иначе, чем мы ожидали.
+public struct SentTarget: Equatable, Sendable {
+    /// Ожидаемый id беседы.
+    public let id: String
+    /// Адресаты (To+Cc) в нижнем регистре.
+    public let recipients: Set<String>
+
+    public init(id: String, recipients: Set<String>) {
+        self.id = id
+        self.recipients = recipients
+    }
+
+    /// По письму: отправитель, адресаты, свои адреса учётки-отправителя.
+    public init(from: String, to: [String], cc: [String], own: [Identity]) {
+        let mineSet = Set(own.map { $0.email.lowercased() })
+        let sender = bareAddress(from)
+        let p = ConversationBuilder.participants(from: sender, to: to.map(bareAddress), cc: cc.map(bareAddress))
+        let mine = p.filter { mineSet.contains($0) || $0 == sender }
+        let others = p.filter { !mineSet.contains($0) && $0 != sender }
+        self.id = ConversationBuilder.conversationID(mine: mine, others: others, own: sender)
+        self.recipients = Set((to + cc).map(bareAddress).filter { !$0.isEmpty })
+    }
+
+    /// Пришла ли это беседа: id совпал (у IMAP-учётки и ddmail он один и
+    /// тот же), иначе набор собеседников равен адресатам (не спам).
+    public func matches(_ c: Conversation) -> Bool {
+        if c.spam { return false }
+        if c.id.lowercased() == id { return true }
+        let cps = Set(c.counterparts.map { $0.addr.lowercased() }.filter { !$0.isEmpty })
+        let others = recipients.subtracting(own)
+        return !others.isEmpty && cps == others
+    }
+
+    /// Свои адреса из id (`мои|…`): в наборе собеседников их нет.
+    private var own: Set<String> {
+        let left = id.split(separator: "|", maxSplits: 1).first.map(String.init) ?? ""
+        return Set(left.split(separator: "+").map(String.init))
+    }
 }
 
 /// Лимит сервера — 30 МБ на запрос в base64; сырых байт — около 22.

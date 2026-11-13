@@ -682,6 +682,10 @@ const ddm = {
   /** Мгновенный пузырь отправляемого письма. */
   stub(st) {
     ddm.unstub(st.key);
+    // Заглушка переехала в беседу, где письмо уже пришло, — не дублируем.
+    const norm = normText(st.text);
+    const now = Date.now() / 1000;
+    if (norm && order.some((m) => m.outgoing && now - (m.dateTs || 0) < 600 && normText(plainOf(m)).startsWith(norm))) return;
     const row = makeStub(st);
     feed.appendChild(row);
     stubs.set(st.key, { row, norm: normText(st.text) });

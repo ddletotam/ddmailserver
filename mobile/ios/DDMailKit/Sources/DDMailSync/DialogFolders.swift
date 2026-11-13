@@ -253,13 +253,120 @@ public struct FoldersDoc: Equatable, Sendable {
 }
 
 extension DialogFolder {
+    /// Все известные поля пишутся из модели (правка в настройках меняет их),
+    /// неизвестные — как пришли.
     func toJSON() -> JSONValue {
         func keys(_ l: [DialogKey]) -> JSONValue {
             .array(l.map { .object(["account": .string($0.account), "id": .string($0.id)]) })
         }
         var o = raw
+        o["id"] = .string(id)
+        o["name"] = .string(name)
+        o["icon"] = .string(icon)
+        var r = raw["rules"]?.object ?? [:]
+        r["identities"] = .array(rules.identities.map(JSONValue.string))
+        r["domains"] = .array(rules.domains.map(JSONValue.string))
+        r["kind"] = .string(rules.kind.json)
+        o["rules"] = .object(r)
         o["include"] = keys(include)
         o["exclude"] = keys(exclude)
+        o["hidden"] = .bool(hidden)
+        o["auto_read"] = .bool(autoRead)
+        if system.isEmpty { o["system"] = nil } else { o["system"] = .string(system) }
         return .object(o)
     }
+}
+
+extension DialogKind {
+    /// Как в документе (`Kind` десктопа, `rename_all = "lowercase"`).
+    var json: String {
+        switch self {
+        case .any: "any"
+        case .direct: "direct"
+        case .group: "group"
+        }
+    }
+}
+
+// MARK: Правка документа (раздел «Папки» настроек, меню полосы табов)
+
+extension FoldersDoc {
+    /// Скрытых папок — для «Показать скрытые (N)» (как `hidden-folders`
+    /// десктопа; «Спам» у мобильных — всегда таб, его не считаем).
+    public var hiddenCount: Int { folders.filter { $0.hidden && !$0.isSystem }.count }
+
+    /// Папки, которые настраивают руками (системные — нет).
+    public var userFolders: [DialogFolder] { folders.filter { !$0.isSystem } }
+
+    public func index(of id: String) -> Int? { folders.firstIndex { $0.id == id } }
+
+    /// Новый id: `f<мс hex><n>`, как `new_id` десктопа.
+    public func newID(now: Date = Date()) -> String {
+        let base = String(UInt64(max(0, now.timeIntervalSince1970) * 1000), radix: 16)
+        var n = 0
+        while index(of: "f\(base)\(n)") != nil { n += 1 }
+        return "f\(base)\(n)"
+    }
+
+    /// «Новая папка»: «Папка N» с 📁 в конец, как `folder_add` десктопа.
+    /// Возвращает документ и id новой папки.
+    public func adding(id: String? = nil, now: Date = Date()) -> (doc: FoldersDoc, id: String) {
+        let id = id ?? newID(now: now)
+        var f = DialogFolder(id: id, name: "Папка \(userFolders.count + 1)", icon: "📁")
+        f.raw = [:]
+        var doc = self
+        // Перед «Спамом»: системная папка остаётся последней.
+        let at = doc.spamIndex ?? doc.folders.count
+        doc.folders.insert(f, at: at)
+        return (doc, id)
+    }
+
+    /// Удалить папку (системную — нельзя). Диалоги, положенные в неё руками,
+    /// возвращаются во «Входящие» (или в папку по правилам).
+    public func removing(_ id: String) -> FoldersDoc {
+        var doc = self
+        doc.folders.removeAll { $0.id == id && !$0.isSystem }
+        return doc
+    }
+
+    /// Переставить папку на место `to` среди всех папок: порядок табов — это
+    /// и приоритет правил. Системные папки не двигаются.
+    public func moving(_ id: String, to: Int) -> FoldersDoc {
+        guard let from = index(of: id), !folders[from].isSystem else { return self }
+        var doc = self
+        let f = doc.folders.remove(at: from)
+        let limit = doc.spamIndex ?? doc.folders.count
+        doc.folders.insert(f, at: max(0, min(to, limit)))
+        return doc
+    }
+
+    /// Правка одной папки по id (системные не правятся). Нет такой — как было.
+    public func updating(_ id: String, _ edit: (inout DialogFolder) -> Void) -> FoldersDoc {
+        guard let i = index(of: id), !folders[i].isSystem else { return self }
+        var doc = self
+        edit(&doc.folders[i])
+        return doc
+    }
+
+    /// «Показывать папки» выключено (настройка устройства): список как без
+    /// папок — остаются только системные (у мобильных «Спам» — таб полосы).
+    public func onlySystem() -> FoldersDoc {
+        var doc = self
+        doc.folders = folders.filter(\.isSystem)
+        return doc
+    }
+}
+
+/// Список адресов или доменов из поля ввода: через запятую, точку с запятой,
+/// пробел или перевод строки; в нижнем регистре (`split_list` десктопа).
+public func splitFolderList(_ text: String) -> [String] {
+    text.split(whereSeparator: { ",; \n".contains($0) })
+        .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+        .filter { !$0.isEmpty }
+}
+
+/// Значок папки — не длиннее четырёх символов (графем), как `clip_icon`
+/// десктопа: эмодзи с модификаторами не режутся.
+public func clipFolderIcon(_ text: String) -> String {
+    String(text.trimmingCharacters(in: .whitespaces).prefix(4))
 }

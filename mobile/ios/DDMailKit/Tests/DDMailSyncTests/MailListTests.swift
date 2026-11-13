@@ -62,6 +62,12 @@ struct MailListTests {
         #expect(spam.tabs[1].unread == 0)
         #expect(spam.conversations.map(\.id) == ["s"])
 
+        // «Показать скрытые» — таб скрытой виден (бледнее).
+        let shown = buildMailList(convs, doc: doc, activeID: nil, query: nil, showHidden: true)
+        #expect(shown.tabs.map(\.id) == ["w", "h", "spam"])
+        #expect(shown.tabs[1].hidden)
+        #expect(!shown.tabs[2].hidden && shown.tabs[2].system)
+
         // Удалённая папка — снова инбокс.
         #expect(buildMailList(convs, doc: doc, activeID: "gone", query: nil).active == nil)
     }

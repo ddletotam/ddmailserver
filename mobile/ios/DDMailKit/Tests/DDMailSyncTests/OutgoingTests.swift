@@ -89,14 +89,54 @@ struct OutgoingTests {
         #expect(bareAddress("Bob <Bob@X.ru>") == "bob@x.ru")
     }
 
-    @Test func newMailFindsItsConversation() {
-        let c = conv()
-        #expect(matchesTarget(c, ["bob@x.ru"]))
-        #expect(!matchesTarget(c, ["bob@x.ru", "eve@z.ru"]))
-        var selfChat = c
-        selfChat.counterparts = []
-        selfChat.id = "me@a.ru|self"
-        #expect(matchesTarget(selfChat, ["me@a.ru"]))
+    @Test func newMailFindsItsConversationByID() {
+        // Новому адресату: id «мой|его», как у сервера и ConversationBuilder.
+        let t = SentTarget(from: "\"Я\" <me@a.ru>", to: ["Bob@X.ru"], cc: [], own: ids)
+        #expect(t.id == "me@a.ru|bob@x.ru")
+        var c = conv()
+        c.id = "me@a.ru|bob@x.ru"
+        #expect(t.matches(c))
+        // Тот же собеседник, но другой набор (группа) — не она.
+        var group = conv(group: true)
+        group.id = "me@a.ru|group:bob@x.ru,carol@y.ru"
+        #expect(!t.matches(group))
+        // Спам с тем же набором — не она.
+        c.spam = true
+        #expect(!t.matches(c))
+    }
+
+    @Test func newMailToOwnOtherAddressIsSelfConversation() {
+        // Письмо с одного своего адреса на другой: собеседник у сервера —
+        // отправитель, набор собеседников адресатам не равен; ловим по id.
+        let t = SentTarget(from: "me@a.ru", to: ["work@b.ru"], cc: [], own: ids)
+        #expect(t.id == "me@a.ru+work@b.ru|self")
+        let selfChat = Conversation(accountKey: "k", id: "me@a.ru+work@b.ru|self", counterparts: [ContactInfo(addr: "me@a.ru")])
+        #expect(t.matches(selfChat))
+        let same = SentTarget(from: "me@a.ru", to: ["me@a.ru"], cc: [], own: ids)
+        #expect(same.id == "me@a.ru|self")
+    }
+
+    @Test func newMailFallsBackToCounterparts() {
+        // id иной (сервер приписал другой свой адрес), собеседник тот же.
+        let t = SentTarget(from: "me@a.ru", to: ["bob@x.ru"], cc: [], own: ids)
+        var c = conv()
+        c.id = "work@b.ru|bob@x.ru"
+        #expect(t.matches(c))
+    }
+
+    @Test func richBodyAndInlineImages() throws {
+        let img = PendingAttachment(name: "a.png", mime: "image/png", data: Data([1, 2]), contentID: "img1@ddmail")
+        let d = Draft(text: "жирно", html: "<div><b>жирно</b></div>", images: [img])
+        #expect(d.canSend)
+        #expect(d.bodyHTML == "<div><b>жирно</b></div><div><img src=\"cid:img1@ddmail\" alt=\"a.png\"></div>")
+        let r = try ok(buildOutgoing(.implicit(conv(), lastIncoming: nil, last: nil), draft: d, identities: ids))
+        #expect(r.text == "жирно")
+        #expect(r.html.hasPrefix("<div><b>жирно</b></div>"))
+        #expect(r.attachments.first?.contentID == "img1@ddmail")
+        // Одна картинка без текста — тоже письмо.
+        #expect(Draft(images: [img]).canSend)
+        // Без форматирования — HTML из текста.
+        #expect(Draft(text: "a\nb").bodyHTML == "<div>a<br>b</div>")
     }
 
     @Test func forwardBlockHasHeaders() {

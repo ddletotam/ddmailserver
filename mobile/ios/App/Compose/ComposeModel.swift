@@ -2,6 +2,7 @@ import DDMailAPI
 import DDMailSync
 import Foundation
 import Observation
+import SwiftUI
 import UniformTypeIdentifiers
 
 /// Отправка (Android §5, десктоп §1–2): ветки, мгновенный пузырь-заглушка в
@@ -31,8 +32,14 @@ final class ComposeModel {
     private let syncSoon: (String) -> Void
     private let onAuthDead: @MainActor (String) -> Void
 
-    /// Черновик ответа в открытой беседе.
+    /// Черновик ответа в открытой беседе. Его `text` — зеркало `rich`.
     var draft = Draft()
+    /// Тело с форматированием (десктоп §3а) — источник истины строки ввода.
+    var rich = AttributedString() {
+        didSet { draft.text = RichText.plain(rich) }
+    }
+    /// Выделение в строке ввода: на него действуют ⌘B/⌘I/⌘U/⌘K.
+    var selection = AttributedTextSelection()
     /// Явный ответ на конкретное письмо («Ответ на …»).
     var replyTo: MessageBody?
     /// Показаны поля «Кому», «Копия», «Тема», «От».
@@ -42,8 +49,17 @@ final class ComposeModel {
     var error: String?
     var sheet: Sheet?
 
-    /// После нового письма — открыть беседу с этими адресатами, когда появится.
-    private(set) var sentTarget: Set<String>?
+    /// После нового письма — открыть его беседу, как только синк её принесёт
+    /// (десктоп `compose_sent_target`).
+    private(set) var sentTarget: SentTarget?
+    /// Заглушки нового письма: переезжают в беседу, на которую сменится
+    /// «Новая беседа», пока настоящее письмо не пришло (десктоп §2).
+    private(set) var carriedStubs: [String] = []
+    /// Сервер принял письмо, а беседы всё нет: ушло в очередь, но ещё не
+    /// доставлено (копия в «Отправленных» и беседа появятся после доставки;
+    /// адрес без MX или молчащий сервер получателя держат его в очереди с
+    /// повторами — так было с письмом владельца 2026-11-13).
+    private(set) var awaitingDelivery = false
     private var stubSeq = 0
 
     init(workspace: Workspace, conversation: ConversationModel, syncSoon: @escaping (String) -> Void, onAuthDead: @escaping @MainActor (String) -> Void) {
@@ -89,6 +105,8 @@ final class ComposeModel {
 
     /// Сменилась беседа — явный ответ и переопределения не переезжают в другую.
     func reset() {
+        rich = AttributedString()
+        selection = AttributedTextSelection()
         draft = Draft()
         replyTo = nil
         expanded = false
@@ -96,7 +114,13 @@ final class ComposeModel {
     }
 
     func openForward(_ b: MessageBody) { sheet = Sheet(branch: .forward(b), draft: Draft()) }
-    func consumeTarget() { sentTarget = nil }
+    /// Беседа нашлась: цель снята, заглушки — ей.
+    func consumeTarget() -> [String] {
+        sentTarget = nil
+        awaitingDelivery = false
+        defer { carriedStubs = [] }
+        return carriedStubs
+    }
 
     // MARK: Вложения
 
@@ -120,6 +144,55 @@ final class ComposeModel {
         if toSheet { sheet?.draft.attachments.append(a) } else { draft.attachments.append(a) }
     }
 
+    /// Картинка в тело письма — своим блоком после текста, уходит inline
+    /// (`cid:`, десктоп §3а). Из буфера обмена и из «Фото».
+    func addImage(data: Data, name: String, mime: String) {
+        let total = (draft.attachments + draft.images).reduce(data.count) { $0 + $1.size }
+        if total > maxOutgoingAttachmentBytes {
+            error = "Вложения больше \(maxOutgoingAttachmentBytes >> 20) МБ — сервер такое не примет."
+            return
+        }
+        let cid = "img\(UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""))@ddmail"
+        draft.images.append(PendingAttachment(name: name, mime: mime, data: data, contentID: cid))
+        error = nil
+    }
+
+    /// «Картинка из буфера».
+    func pasteImage() {
+        guard let png = Pasteboard.imagePNG else {
+            error = "В буфере обмена нет картинки."
+            return
+        }
+        addImage(data: png, name: "image-\(draft.images.count + 1).png", mime: "image/png")
+    }
+
+    /// ⌘K / «Ссылка из буфера»: адрес из буфера обмена — на выделение.
+    func linkFromPasteboard() {
+        if !RichText.link(text: &rich, selection: &selection, url: Pasteboard.url) {
+            error = "В буфере обмена нет адреса ссылки (http, https или mailto)."
+        }
+    }
+
+    func toggle(_ t: RichText.Toggle, _ ctx: Font.Context) {
+        RichText.toggle(t, text: &rich, selection: &selection, ctx)
+    }
+
+    /// Черновик к отправке: HTML-версия тела — из форматированного текста.
+    private func prepared(_ ctx: Font.Context) -> Draft {
+        var d = draft
+        d.text = RichText.plain(rich)
+        d.html = RichText.html(rich, ctx)
+        return d
+    }
+
+    /// Вернуть неотправленное в композер, если тот пуст.
+    private func restore(_ d: Draft, _ r: AttributedString) {
+        guard draft.isEmpty else { return }
+        rich = r
+        draft = d
+        draft.html = ""
+    }
+
     nonisolated private static func read(_ url: URL) -> PendingAttachment? {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
@@ -131,14 +204,16 @@ final class ComposeModel {
     // MARK: Отправка
 
     /// Ответ в открытой беседе (ветки 2–3).
-    func sendReply(_ c: Conversation) {
+    func sendReply(_ c: Conversation, _ ctx: Font.Context) {
         let branch: Branch = replyTo.map { .reply($0, isGroup: c.isGroup) }
             ?? .implicit(c, lastIncoming: conversation.lastIncoming, last: conversation.last)
-        switch buildOutgoing(branch, draft: draft, identities: identities) {
+        let d = prepared(ctx)
+        switch buildOutgoing(branch, draft: d, identities: identities) {
         case let .refused(reason):
             error = reason
         case let .ok(request, _):
-            let sent = draft
+            let sent = d
+            let sentRich = rich
             let sentReply = replyTo
             stubSeq += 1
             let key = "s\(stubSeq)"
@@ -152,7 +227,7 @@ final class ComposeModel {
                 } catch {
                     conversation.web.run("ddm.unstub(\"\(key)\")")
                     // Текст возвращается, если композер пуст (не затираем набранное заново).
-                    if draft.isEmpty { draft = sent }
+                    restore(sent, sentRich)
                     if replyTo == nil { replyTo = sentReply }
                     self.error = Self.sendError(error)
                 }
@@ -164,32 +239,49 @@ final class ComposeModel {
     /// строка ввода под пустой лентой, ветка «новое письмо», адресат — адрес
     /// беседы (явное «Кому» его побеждает, §1). Пузырь-заглушка — сразу;
     /// беседа откроется, как только письмо придёт синком (`sentTarget`).
-    func sendNew(to address: String) {
-        var d = draft
+    func sendNew(to address: String, _ ctx: Font.Context) {
+        var d = prepared(ctx)
         if d.to.trimmingCharacters(in: .whitespaces).isEmpty { d.to = address }
         switch buildOutgoing(.new, draft: d, identities: identities) {
         case let .refused(reason):
             error = reason
-        case let .ok(request, to):
-            let sent = draft
+        case let .ok(request, _):
+            var sent = d
+            sent.to = draft.to
+            let sentRich = rich
             stubSeq += 1
             let key = "s\(stubSeq)"
-            conversation.web.run("ddm.stub(\(Self.stubJSON(key, sent)))")
+            let stub = "ddm.stub(\(Self.stubJSON(key, sent)))"
+            conversation.web.run(stub)
             reset()
-            sentTarget = Set(to.map { $0.lowercased() })
+            let target = target(of: request)
+            sentTarget = target
+            carriedStubs = [stub]
+            awaitingDelivery = false
             Task {
                 do {
                     let via = try await send(request)
                     flash()
                     afterSend(via)
+                    try? await Task.sleep(for: .seconds(20))
+                    if sentTarget == target { awaitingDelivery = true }
                 } catch {
                     conversation.web.run("ddm.unstub(\"\(key)\")")
                     sentTarget = nil
-                    if draft.isEmpty { draft = sent }
+                    carriedStubs = []
+                    awaitingDelivery = false
+                    restore(sent, sentRich)
                     self.error = Self.sendError(error)
                 }
             }
         }
+    }
+
+    /// Беседа, в которую ляжет новое письмо: id по набору адресов и своим
+    /// адресам учётки, через которую оно уйдёт.
+    private func target(of r: SendRequest) -> SentTarget {
+        let own = owner(of: r)?.provider.identities() ?? identities
+        return SentTarget(from: r.from, to: r.to, cc: r.cc, own: own)
     }
 
     /// Новое письмо или пересылка (ветки 0–1) — из отдельного окна.
@@ -223,10 +315,10 @@ final class ComposeModel {
                                  forwardHTML: fwdHTML, forwardText: fwdText, extraAttachments: extra) {
             case let .refused(reason):
                 fail(reason)
-            case let .ok(request, to):
+            case let .ok(request, _):
                 do {
                     let via = try await send(request)
-                    if case .new = snapshot.branch { sentTarget = Set(to.map { $0.lowercased() }) }
+                    if case .new = snapshot.branch { sentTarget = target(of: request) }
                     sheet = nil
                     flash()
                     afterSend(via)
@@ -242,18 +334,26 @@ final class ComposeModel {
         }
     }
 
+    /// «✓ Отправлено» над композером ~2 с (десктоп §2). Повторная отправка
+    /// продлевает плашку, а не гасит её раньше времени.
+    private var flashSeq = 0
     private func flash() {
+        flashSeq += 1
+        let mine = flashSeq
         sentFlash = true
         Task {
             try? await Task.sleep(for: .seconds(2))
-            sentFlash = false
+            if flashSeq == mine { sentFlash = false }
         }
     }
 
-    /// Копия в «Отправленных» появится после доставки — подтягиваем её.
+    /// Копия в «Отправленных» появится после доставки — подтягиваем её:
+    /// сразу и затем с затухающими интервалами (как
+    /// `schedule_post_send_refetch` десктопа: 2.5 → 7 → 15 → 30 → 60 с).
     private func afterSend(_ key: String) {
+        syncSoon(key)
         Task {
-            for d in [2, 6, 15, 40] {
+            for d in [2.5, 4.5, 8, 15, 30] {
                 try? await Task.sleep(for: .seconds(d))
                 syncSoon(key)
             }
@@ -272,11 +372,18 @@ final class ComposeModel {
         return "Не отправлено: \(why)."
     }
 
-    /// Заглушка для документа ленты: `{key, text, attachments:[{filename,size}]}`.
+    /// Заглушка для документа ленты: `{key, text, html, attachments:[{filename,size}]}`.
+    /// Заглушка выглядит как письмо (десктоп §2): тот же HTML, картинки тела
+    /// вшиты `data:`-URI — `cid:` разрешается по частям, которых сервер ещё не видел.
     static func stubJSON(_ key: String, _ d: Draft) -> String {
         struct A: Encodable { let filename: String; let size: Int }
-        struct S: Encodable { let key: String; let text: String; let attachments: [A] }
-        let s = S(key: key, text: d.text, attachments: d.attachments.map { A(filename: $0.name, size: $0.size) })
+        struct S: Encodable { let key: String; let text: String; let html: String; let attachments: [A] }
+        var html = d.bodyHTML
+        for i in d.images {
+            guard let cid = i.contentID else { continue }
+            html = html.replacingOccurrences(of: "cid:\(cid)", with: "data:\(i.mime);base64,\(i.data.base64EncodedString())")
+        }
+        let s = S(key: key, text: d.text, html: html, attachments: d.attachments.map { A(filename: $0.name, size: $0.size) })
         let json = String(decoding: (try? JSONEncoder().encode(s)) ?? Data("{}".utf8), as: UTF8.self)
         return json.replacingOccurrences(of: "\u{2028}", with: "\\u2028").replacingOccurrences(of: "\u{2029}", with: "\\u2029")
     }

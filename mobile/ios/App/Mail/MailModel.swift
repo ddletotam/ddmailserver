@@ -44,6 +44,26 @@ final class MailModel {
         }
     }
 
+    /// «Показать скрытые» (меню полосы табов) — на сессию, как у десктопа:
+    /// таб папки «Не показывать в списке» виден, бледнее.
+    var showHidden = false {
+        didSet { if oldValue != showHidden { rebuild() } }
+    }
+
+    /// «Настройки → Папки → Показывать папки»: выключатель устройства (у
+    /// десктопа — `folders_enabled` локальных настроек), сами папки общие.
+    /// Выключено — список как без папок.
+    var foldersOn: Bool = UserDefaults.standard.object(forKey: MailModel.foldersOnKey) as? Bool ?? true {
+        didSet {
+            guard oldValue != foldersOn else { return }
+            UserDefaults.standard.set(foldersOn, forKey: Self.foldersOnKey)
+            rebuild()
+        }
+    }
+
+    /// Папки хранит сервер ddmail (общие для всех устройств) или устройство.
+    var foldersShared: Bool { folderSource is SyncEngine }
+
     /// Поиск — выпадашка над списком, сам список им не фильтруется (десктоп §4 «Поиск»).
     @ObservationIgnored private(set) var search: MailSearch!
 
@@ -79,6 +99,7 @@ final class MailModel {
     private var tasks: [Task<Void, Never>] = []
     private static let activeKey = "mail.activeFolder"
     private static let lastKey = "mail.lastConversation"
+    static let foldersOnKey = "settings.foldersOn"
 
     init(workspace: Workspace, cache: MailStore) {
         self.workspace = workspace
@@ -149,10 +170,20 @@ final class MailModel {
         // Новые письма открытой беседы — дописать снизу.
         if let c = selected { conversation.updated(c) }
         // Отправили новое письмо — открыть его беседу, как только появится.
-        if let target = compose.sentTarget, let c = all.first(where: { matchesTarget($0, target) }) {
-            compose.consumeTarget()
-            open(c.ref)
-        }
+        openSentTarget()
+    }
+
+    /// Новое письмо ушло — открыть его беседу, как только синк принёс её
+    /// строку (десктоп `compose_sent_target`): строка «Новая беседа»
+    /// заменяется настоящей. Ждём, только пока открыта новая беседа (или
+    /// ничего): ушёл в другую — переход не выдёргивает.
+    private func openSentTarget() {
+        guard let target = compose.sentTarget else { return }
+        guard let c = all.first(where: target.matches) else { return }
+        let stubs = compose.consumeTarget()
+        guard selectedID == nil || composingTo != nil else { return }
+        conversation.carry = stubs
+        open(c.ref)
     }
 
     func stop() {
@@ -163,9 +194,13 @@ final class MailModel {
     }
 
     private func rebuild() {
-        list = buildMailList(all, doc: doc, activeID: activeFolderID, query: nil)
+        list = buildMailList(all, doc: visibleDoc, activeID: activeFolderID, query: nil, showHidden: showHidden)
         search?.refresh()
     }
+
+    /// Документ папок для списка: при выключенном «Показывать папки» — только
+    /// системные («Спам» остаётся табом).
+    var visibleDoc: FoldersDoc { foldersOn ? doc : doc.onlySystem() }
 
     var selected: Conversation? { selectedID.flatMap { ref in all.first { $0.ref == ref } } }
 
@@ -234,7 +269,8 @@ final class MailModel {
     /// ничего бы не показало.
     func open(_ ref: String?) {
         if let ref, let c = all.first(where: { $0.ref == ref }) {
-            let fid = doc.folderOf(c).map { doc.folders[$0].id }
+            let d = visibleDoc
+            let fid = d.folderOf(c).map { d.folders[$0].id }
             if fid != activeFolderID { activeFolderID = fid }
         }
         selectedID = ref
@@ -325,6 +361,75 @@ final class MailModel {
                 try await folderSource.assignFolder(convs, folderID: folderID)
                 notice = "Перенесено в «\(name)»: \(convs.count)"
             } catch { fail("Не удалось перенести", error, workspace.primary?.account.key) }
+        }
+    }
+
+    // MARK: Папки (меню полосы табов, «Настройки → Папки»)
+
+    /// Правка документа папок: локально сразу, на сервер — следом (§4).
+    private func editFolders(_ what: String, _ edit: @escaping @Sendable (FoldersDoc) -> FoldersDoc?) async -> Bool {
+        do {
+            try await folderSource.editFolders(edit)
+            return true
+        } catch {
+            fail(what, error, workspace.primary?.account.key)
+            return false
+        }
+    }
+
+    /// «Новая папка»: «Папка N» в конец, id — чтобы сразу открыть её настройку.
+    func addFolder() async -> String? {
+        let id = doc.newID()
+        // id выбран заранее: после `409` правка повторится с тем же id.
+        let ok = await editFolders("Не удалось создать папку") { d in d.index(of: id) == nil ? d.adding(id: id).doc : nil }
+        return ok ? id : nil
+    }
+
+    /// «Удалить»: диалоги, положенные руками, возвращаются во «Входящие».
+    func deleteFolder(_ id: String) {
+        if activeFolderID == id { activeFolderID = nil }
+        let name = doc.folders.first { $0.id == id }?.name ?? ""
+        Task {
+            if await editFolders("Не удалось удалить папку", { $0.index(of: id) == nil ? nil : $0.removing(id) }) {
+                notice = "Папка «\(name)» удалена"
+            }
+        }
+    }
+
+    /// Порядок папок — он же приоритет правил.
+    func moveFolders(from: IndexSet, to: Int) {
+        let user = doc.userFolders.map(\.id)
+        var moved = user
+        moved.move(fromOffsets: from, toOffset: to)
+        let order = moved
+        Task {
+            _ = await editFolders("Не удалось переставить папки") { d in
+                var out = d
+                for (n, id) in order.enumerated() { out = out.moving(id, to: n) }
+                return out
+            }
+        }
+    }
+
+    /// Правка полей папки из её настройки (имя, значок, правила, скрытость).
+    func updateFolder(_ id: String, _ edit: @escaping @Sendable (inout DialogFolder) -> Void) {
+        Task {
+            _ = await editFolders("Не удалось сохранить папку") { d in d.index(of: id) == nil ? nil : d.updating(id, edit) }
+        }
+    }
+
+    /// «Все прочитаны»: всё непрочитанное в диалогах папки — локально сразу,
+    /// на сервере следом (по учётке диалога).
+    func markFolderRead(_ id: String) {
+        let d = visibleDoc
+        guard let i = d.index(of: id) else { return }
+        let convs = all.filter { $0.unreadCount > 0 && d.folderOf($0) == i }
+        Task {
+            for c in convs {
+                guard let p = provider(c) else { continue }
+                do { try await p.markRead(c) } catch { fail("Не удалось отметить прочитанным", error, c.accountKey) }
+            }
+            if !convs.isEmpty { notice = "Прочитано бесед: \(convs.count)" }
         }
     }
 

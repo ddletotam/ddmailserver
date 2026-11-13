@@ -4,20 +4,33 @@ import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Строка ответа под лентой (§5, §9): текст, вложения, отправка кнопкой.
-/// На iPhone Enter — новая строка; на Маке Enter — отправить, Shift+Enter —
-/// новая строка (как десктоп); с клавиатурой у iPad — Cmd+Enter.
+/// Строка ответа под лентой (§5, §9): текст с форматированием, картинки и
+/// вложения, отправка кнопкой. На iPhone Enter — новая строка; на Маке Enter
+/// — отправить, Shift+Enter — новая строка (как десктоп); с клавиатурой у
+/// iPad — Cmd+Enter.
+///
+/// Форматирование (десктоп §3а) — без своей строки кнопок: на iPhone и iPad
+/// системное меню выделения («Формат» поля `TextEditor` над
+/// `AttributedString`), на Маке и с клавиатурой — ⌘B/⌘I/⌘U, ссылка — ⌘K или
+/// «+» → «Ссылка из буфера». Картинки — «+» → «Картинка из буфера» или из
+/// «Фото»: своим блоком под текстом, уходят inline (`cid:`).
 struct ComposerBar: View {
     @Bindable var model: ComposeModel
     /// Фокус в строку сразу (новая беседа: адрес выбран — пишем).
     var autofocus = false
-    /// Ответ в беседе или первое письмо новой беседы.
-    let onSend: () -> Void
+    /// Ответ в беседе или первое письмо новой беседы; контекст шрифтов —
+    /// чтобы понять, где жирный и курсив.
+    let onSend: (Font.Context) -> Void
     @State private var importing = false
     @State private var photos: [PhotosPickerItem] = []
     @FocusState private var focused: Bool
+    @Environment(\.fontResolutionContext) private var fontContext
 
     var body: some View {
+        // Наблюдаемое — в теле (контракт §0): замыкания `overlay` ленивы.
+        let flash = model.sentFlash
+        let text = model.draft.text
+        let canSend = model.draft.canSend
         VStack(alignment: .leading, spacing: 6) {
             if let r = model.replyTo {
                 HStack(spacing: 6) {
@@ -31,6 +44,7 @@ struct ComposerBar: View {
                 .font(.footnote)
             }
             if model.expanded { OverrideFields(draft: $model.draft, identities: model.identities) }
+            InlineImages(images: $model.draft.images)
             AttachmentChips(attachments: $model.draft.attachments)
             if let e = model.error {
                 Label(e, systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(.red)
@@ -41,6 +55,8 @@ struct ComposerBar: View {
                     PhotosPicker(selection: $photos, matching: .any(of: [.images, .videos])) {
                         Label("Фото или видео", systemImage: "photo")
                     }
+                    Button("Картинка из буфера", systemImage: "photo.on.rectangle") { model.pasteImage() }
+                    Button("Ссылка из буфера", systemImage: "link") { model.linkFromPasteboard() }
                     Divider()
                     Button(model.expanded ? "Скрыть поля" : "Кому, копия, тема", systemImage: "list.bullet.rectangle") {
                         withAnimation { model.expanded.toggle() }
@@ -52,49 +68,158 @@ struct ComposerBar: View {
                 .fixedSize()
                 .accessibilityLabel("Вложить или поля письма")
 
-                TextField("Сообщение", text: $model.draft.text, axis: .vertical)
-                    .lineLimit(1...8)
-                    .textFieldStyle(.plain)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .focused($focused)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 18).fill(Color.secondary.opacity(0.12)))
-                    .onChange(of: model.draft.text) { model.error = nil }
-                    .macReturnSends { send() }
+                editor(text: text)
 
-                if model.sentFlash && !model.draft.canSend {
-                    Label("Отправлено", systemImage: "checkmark.circle.fill")
-                        .labelStyle(.iconOnly)
-                        .font(.title2)
-                        .foregroundStyle(Palette.accent)
-                        .transition(.scale.combined(with: .opacity))
-                } else {
-                    Button("Отправить", systemImage: "arrow.up.circle.fill", action: send)
-                        .labelStyle(.iconOnly)
-                        .font(.title2)
-                        .disabled(!model.draft.canSend)
-                        .keyboardShortcut(.return, modifiers: .command)
-                }
+                Button("Отправить", systemImage: "arrow.up.circle.fill") { onSend(fontContext) }
+                    .labelStyle(.iconOnly)
+                    .font(.title2)
+                    .disabled(!canSend)
+                    .keyboardShortcut(.return, modifiers: .command)
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.bar)
-        .animation(.default, value: model.sentFlash)
+        // «✓ Отправлено» над композером ~2 с, без тостов (десктоп §2).
+        .overlay(alignment: .top) {
+            if flash {
+                Label("Отправлено", systemImage: "checkmark.circle.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .frame(height: 32)
+                    .background(Capsule().fill(Palette.accent))
+                    // Над строкой ввода, не поверх неё.
+                    .offset(y: -40)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .accessibilityIdentifier("compose.sent")
+            }
+        }
+        .animation(.default, value: flash)
+        .focusedValue(\.composerFormat, format)
         .fileImporter(isPresented: $importing, allowedContentTypes: [.item], allowsMultipleSelection: true) { r in
             if case let .success(urls) = r { model.attach(urls, toSheet: false) }
         }
-        .onChange(of: photos) { loadPhotos(into: model, toSheet: false) }
+        .onChange(of: photos) { loadPhotos() }
         .onAppear { if autofocus { focused = true } }
     }
 
-    private func send() { onSend() }
+    /// Поле ввода растёт со строками до восьми, дальше прокручивается.
+    /// Высоту задаёт невидимый текст того же содержимого: у `TextEditor`
+    /// своего «по содержимому» нет.
+    private func editor(text: String) -> some View {
+        Text(text.isEmpty ? " " : text + " ")
+            .lineLimit(1...8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 8)
+            .hidden()
+            .overlay {
+                TextEditor(text: $model.rich, selection: $model.selection)
+                    .scrollContentBackground(.hidden)
+                    .focused($focused)
+                    .onChange(of: model.rich) { model.error = nil }
+                    .macReturnSends { onSend(fontContext) }
+                    .accessibilityLabel("Сообщение")
+                    .accessibilityIdentifier("composer.text")
+            }
+            .overlay(alignment: .topLeading) {
+                if text.isEmpty {
+                    Text("Сообщение")
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 8)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
+            .padding(.horizontal, 7)
+            .background(RoundedRectangle(cornerRadius: 18).fill(Color.secondary.opacity(0.12)))
+    }
 
-    private func loadPhotos(into model: ComposeModel, toSheet: Bool) {
+    /// Команды формата для меню приложения (⌘B/⌘I/⌘U/⌘K).
+    private var format: ComposerFormat {
+        let ctx = fontContext
+        let m = model
+        return ComposerFormat(
+            bold: { m.toggle(.bold, ctx) },
+            italic: { m.toggle(.italic, ctx) },
+            underline: { m.toggle(.underline, ctx) },
+            link: { m.linkFromPasteboard() }
+        )
+    }
+
+    /// Снимки — в тело письма картинками (HEIC — в JPEG: его понимают не все
+    /// почтовики), видео — вложениями.
+    private func loadPhotos() {
         let items = photos
         photos = []
-        PhotoLoader.load(items) { data, name, type in model.attach(data: data, name: name, type: type, toSheet: toSheet) }
+        let m = model
+        PhotoLoader.load(items) { data, name, type in
+            if let type, type.conforms(to: .image), let n = InlineImageData.normalize(data, type: type) {
+                let base = (name as NSString).deletingPathExtension
+                m.addImage(data: n.data, name: "\(base).\(n.ext)", mime: n.mime)
+            } else {
+                m.attach(data: data, name: name, type: type, toSheet: false)
+            }
+        }
+    }
+}
+
+/// Картинки тела письма: что понимает любой почтовик — как есть, прочее
+/// (HEIC и т. п.) — в JPEG.
+enum InlineImageData {
+    static func normalize(_ data: Data, type: UTType) -> (data: Data, mime: String, ext: String)? {
+        if type.conforms(to: .png) { return (data, "image/png", "png") }
+        if type.conforms(to: .jpeg) { return (data, "image/jpeg", "jpg") }
+        if type.conforms(to: .gif) { return (data, "image/gif", "gif") }
+        #if os(iOS)
+        guard let jpg = UIImage(data: data)?.jpegData(compressionQuality: 0.85) else { return nil }
+        #else
+        guard let rep = NSImage(data: data)?.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)),
+              let jpg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.85])
+        else { return nil }
+        #endif
+        return (jpg, "image/jpeg", "jpg")
+    }
+}
+
+/// Картинки тела: миниатюры блоками под текстом, «✕» — убрать.
+struct InlineImages: View {
+    @Binding var images: [PendingAttachment]
+
+    var body: some View {
+        if !images.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(images) { a in
+                        thumbnail(a.data)
+                            .frame(width: 64, height: 64)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .overlay(alignment: .topTrailing) {
+                                Button("Убрать картинку", systemImage: "xmark.circle.fill") {
+                                    images.removeAll { $0.id == a.id }
+                                }
+                                .labelStyle(.iconOnly)
+                                .foregroundStyle(.white, .black.opacity(0.55))
+                                .padding(2)
+                            }
+                            .accessibilityElement(children: .contain)
+                            .accessibilityLabel("Картинка \(a.name)")
+                            .accessibilityIdentifier("composer.image")
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func thumbnail(_ data: Data) -> some View {
+        #if os(iOS)
+        if let i = UIImage(data: data) { Image(uiImage: i).resizable().scaledToFill() } else { Color.secondary.opacity(0.2) }
+        #else
+        if let i = NSImage(data: data) { Image(nsImage: i).resizable().scaledToFill() } else { Color.secondary.opacity(0.2) }
+        #endif
     }
 }
 
@@ -207,7 +332,7 @@ private struct OverrideFields: View {
             field("Копия", $draft.cc, prompt: "")
             HStack {
                 Text("Тема").foregroundStyle(.secondary).frame(width: 56, alignment: .leading)
-                TextField("Re: …", text: $draft.subject)
+                TextField("Re: …", text: $draft.subject).accessibilityIdentifier("composer.subject")
             }
             FromPicker(selection: $draft.from, identities: identities)
         }

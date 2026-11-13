@@ -54,7 +54,7 @@ struct ConversationView: View {
             .overlay(alignment: .bottom) { NoticeBanner(text: $model.notice) }
             // Ответа в спам нет: на спам не отвечают (§5).
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                if !conversation.spam { ComposerBar(model: compose) { compose.sendReply(conversation) } }
+                if !conversation.spam { ComposerBar(model: compose) { compose.sendReply(conversation, $0) } }
             }
     }
 
@@ -93,6 +93,8 @@ struct NewConversationView: View {
     let compose: ComposeModel
 
     var body: some View {
+        // Наблюдаемое — в теле (контракт §0): `safeAreaInset` ленив.
+        let waiting = compose.awaitingDelivery
         WebViewContainer(web: model.web, ready: model.webPrepared)
             .background(Color(white: 0.96))
             .navigationTitle(address)
@@ -107,7 +109,20 @@ struct NewConversationView: View {
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                ComposerBar(model: compose, autofocus: true) { compose.sendNew(to: address) }
+                VStack(spacing: 0) {
+                    if waiting {
+                        Label("Сервер принял письмо, но ещё не доставил его. Беседа появится, когда письмо ляжет в «Отправленные».",
+                              systemImage: "clock")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.bar)
+                            .accessibilityIdentifier("compose.awaiting")
+                    }
+                    ComposerBar(model: compose, autofocus: true) { compose.sendNew(to: address, $0) }
+                }
             }
     }
 }

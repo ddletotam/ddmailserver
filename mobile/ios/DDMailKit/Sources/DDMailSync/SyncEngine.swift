@@ -321,16 +321,16 @@ public actor SyncEngine: MailProvider, DialogFolderSource {
         return try await api.blacklistAndPurge(scope: scope, messageIDs: ids, fallbackAddress: fallback)
     }
 
-    /// Положить беседы в папку руками (`nil` — во «Входящие») одной правкой
-    /// документа. Чужая правка между чтением и записью (`409`) — правка
-    /// повторяется поверх свежего документа.
-    public func assignFolder(_ convs: [Conversation], folderID: String?) async throws {
+    /// Правка документа папок («В папку», раздел «Папки» настроек, меню
+    /// табов): сразу в кэш, затем `PUT` с `base_version`. Чужая правка между
+    /// чтением и записью (`409`) — правка повторяется поверх свежего
+    /// документа: она описана замыканием, а не готовым документом, так что
+    /// чужое не затирается.
+    public func editFolders(_ edit: @escaping @Sendable (FoldersDoc) -> FoldersDoc?) async throws {
         var version = Int64(try store.meta(keys.foldersVersion) ?? "") ?? 0
         var doc = currentFolders()
         for _ in 0..<3 {
-            let target = folderID.flatMap { id in doc.folders.firstIndex { $0.id == id } }
-            if folderID != nil && target == nil { return }
-            let edited = doc.assign(convs, to: target)
+            guard let edited = edit(doc)?.withSpam() else { return }
             // Сразу в кэш: список перестроится, не дожидаясь сервера.
             try store.setMeta(keys.folders, String(decoding: edited.toJSON().data(), as: UTF8.self))
             do {
