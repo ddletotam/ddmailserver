@@ -627,7 +627,10 @@ internal fun matchesTarget(c: Conversation, target: Set<String>, own: Set<String
     val cps = c.counterparts.map { it.addr.lowercase() }.filter { it.isNotEmpty() }.toSet()
     // Свои адреса среди адресатов (письмо себе и ещё кому-то) в собеседники не
     // входят — сверяем без них.
-    if (cps.isNotEmpty()) return cps == target - own
+    // Ровно адресаты — да; без своих адресов (себе в копию) — тоже. Письмо
+    // себе сервер отдаёт беседой, где собеседник — свой же адрес: там
+    // вычитать свои нельзя, поэтому проверяются оба варианта.
+    if (cps.isNotEmpty()) return cps == target || cps == target - own
     // Беседа без собеседников — письмо себе: сверяем по её id.
     val id = c.id.lowercase()
     return target.all { id.contains(it) }
