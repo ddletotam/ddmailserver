@@ -298,6 +298,8 @@
   "contacts.organization": "Организация",
   "contacts.no_sources": "Источники контактов не настроены",
   "contacts.no_sources_hint": "Добавьте CardDAV источник для синхронизации контактов с iCloud, Google или других сервисов",
+  "contacts.error.read_only": "Эта адресная книга только для чтения: контакты в ней нельзя изменить или удалить.",
+  "contacts.error.no_writable_book": "Для этого адреса нет адресной книги с правом записи. Выберите книгу для нового контакта.",
   "contacts.no_address_books": "Адресных книг пока нет",
   "contacts.no_address_books_hint": "Создайте локальную адресную книгу или добавьте CardDAV источник",
   "contacts.no_contacts": "Контакты не найдены",

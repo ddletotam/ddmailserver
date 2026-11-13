@@ -1,6 +1,8 @@
 package models
 
 import (
+	"strings"
+
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
@@ -87,6 +89,21 @@ type AddressBook struct {
 
 	// Joined field
 	SourceType string `json:"source_type,omitempty"`
+
+	// CanWriteKnown — CanWrite взят из ответа сервера (current-user-privilege-set
+	// при обнаружении книг), а не предположен. Не колонка: только синк решает
+	// по нему, перезаписывать ли can_write у уже известной книги.
+	CanWriteKnown bool `json:"-"`
+}
+
+// Writable — принимает ли книга создание, правку и удаление контактов.
+// Каталоги LDAP и импортированные книги только для чтения, даже если флаг
+// can_write у них почему-то стоит (как taskWritable у календарей).
+func (b *AddressBook) Writable() bool {
+	if !b.CanWrite {
+		return false
+	}
+	return b.SourceType != "ldap" && !strings.HasSuffix(b.SourceType, "_import")
 }
 
 // Contact represents a contact entry
@@ -104,12 +121,18 @@ type Contact struct {
 	FamilyName string `json:"family_name"`
 	Nickname   string `json:"nickname,omitempty"`
 
-	// Multiple emails
+	// Все адреса и телефоны карточки в порядке vCard (contacts.emails /
+	// contacts.phones). Задаются через SetEmails / SetPhones: те же значения
+	// раскладываются и в три старых слота ниже.
+	Emails []string `json:"emails,omitempty"`
+	Phones []string `json:"phones,omitempty"`
+
+	// Первые три адреса и телефона — старые колонки. Их читают поиск,
+	// аватарки и прежний бинарник при откате; новым кодом не писать напрямую.
 	Email  string `json:"email,omitempty"`
 	Email2 string `json:"email2,omitempty"`
 	Email3 string `json:"email3,omitempty"`
 
-	// Multiple phones
 	Phone  string `json:"phone,omitempty"`
 	Phone2 string `json:"phone2,omitempty"`
 	Phone3 string `json:"phone3,omitempty"`
@@ -158,6 +181,60 @@ func (c *Contact) DisplayName() string {
 	return "Unknown"
 }
 
+// SetEmails задаёт все адреса контакта: пустые и пробельные выбрасываются,
+// остальные идут как есть, без лимита. Первые три попадают и в старые слоты.
+func (c *Contact) SetEmails(values []string) {
+	c.Emails = nonEmpty(values)
+	c.Email, c.Email2, c.Email3 = firstThree(c.Emails)
+}
+
+// SetPhones — то же для телефонов.
+func (c *Contact) SetPhones(values []string) {
+	c.Phones = nonEmpty(values)
+	c.Phone, c.Phone2, c.Phone3 = firstThree(c.Phones)
+}
+
+// ListEmails — все адреса контакта. Строка, прочитанная до заполнения
+// массива (или записанная прежним бинарником), отдаёт старые слоты.
+func (c *Contact) ListEmails() []string {
+	if len(c.Emails) > 0 {
+		return c.Emails
+	}
+	return nonEmpty([]string{c.Email, c.Email2, c.Email3})
+}
+
+// ListPhones — то же для телефонов.
+func (c *Contact) ListPhones() []string {
+	if len(c.Phones) > 0 {
+		return c.Phones
+	}
+	return nonEmpty([]string{c.Phone, c.Phone2, c.Phone3})
+}
+
+func nonEmpty(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func firstThree(values []string) (a, b, c string) {
+	if len(values) > 0 {
+		a = values[0]
+	}
+	if len(values) > 1 {
+		b = values[1]
+	}
+	if len(values) > 2 {
+		c = values[2]
+	}
+	return a, b, c
+}
+
 // PrimaryEmail returns the primary email address
 func (c *Contact) PrimaryEmail() string {
 	if c.Email != "" {
@@ -167,21 +244,6 @@ func (c *Contact) PrimaryEmail() string {
 		return c.Email2
 	}
 	return c.Email3
-}
-
-// AllEmails returns all non-empty email addresses
-func (c *Contact) AllEmails() []string {
-	var emails []string
-	if c.Email != "" {
-		emails = append(emails, c.Email)
-	}
-	if c.Email2 != "" {
-		emails = append(emails, c.Email2)
-	}
-	if c.Email3 != "" {
-		emails = append(emails, c.Email3)
-	}
-	return emails
 }
 
 // PrimaryPhone returns the primary phone number

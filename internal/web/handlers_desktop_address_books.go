@@ -50,7 +50,7 @@ func (s *Server) HandleDesktopAddressBooks(w http.ResponseWriter, r *http.Reques
 			SourceName:    sv.name,
 			SourceType:    b.SourceType,
 			IdentityEmail: sv.identity,
-			CanWrite:      b.CanWrite,
+			CanWrite:      b.Writable(),
 		})
 	}
 	respondJSON(w, http.StatusOK, out)

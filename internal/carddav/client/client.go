@@ -142,10 +142,23 @@ func (c *Client) DiscoverAddressBooks(ctx context.Context) ([]*models.AddressBoo
 			Description: ab.Description,
 			CanWrite:    true,
 		}
+		c.applyPrivileges(ctx, book)
 		result = append(result, book)
 	}
 
 	return result, nil
+}
+
+// applyPrivileges ставит книге CanWrite по current-user-privilege-set. Сервер,
+// который прав не сообщает, оставляет прежнее предположение «можно писать»:
+// отказ тогда придёт на PUT, как и раньше.
+func (c *Client) applyPrivileges(ctx context.Context, book *models.AddressBook) {
+	writable, known := c.BookWritable(ctx, book.RemoteID)
+	if !known {
+		return
+	}
+	book.CanWrite = writable
+	book.CanWriteKnown = true
 }
 
 // useDirectAddressBookURL creates an address book entry from a direct URL
@@ -160,6 +173,7 @@ func (c *Client) useDirectAddressBookURL(ctx context.Context) ([]*models.Address
 		Description: "Direct CardDAV Address Book",
 		CanWrite:    true,
 	}
+	c.applyPrivileges(ctx, book)
 
 	return []*models.AddressBook{book}, nil
 }
@@ -690,29 +704,9 @@ func (c *Client) parseVCard(card vcard.Card, book *models.AddressBook) (*models.
 		contact.Nickname = nn.Value
 	}
 
-	// Parse emails
-	emails := card.Values(vcard.FieldEmail)
-	if len(emails) > 0 {
-		contact.Email = emails[0]
-	}
-	if len(emails) > 1 {
-		contact.Email2 = emails[1]
-	}
-	if len(emails) > 2 {
-		contact.Email3 = emails[2]
-	}
-
-	// Parse phones
-	phones := card.Values(vcard.FieldTelephone)
-	if len(phones) > 0 {
-		contact.Phone = phones[0]
-	}
-	if len(phones) > 1 {
-		contact.Phone2 = phones[1]
-	}
-	if len(phones) > 2 {
-		contact.Phone3 = phones[2]
-	}
+	// Все адреса и телефоны, без предела в три (миграция 057).
+	contact.SetEmails(card.Values(vcard.FieldEmail))
+	contact.SetPhones(card.Values(vcard.FieldTelephone))
 
 	// Parse organization
 	if org := card.Get(vcard.FieldOrganization); org != nil {
@@ -876,10 +870,8 @@ func (c *Client) syncGoogleContacts(ctx context.Context, book *models.AddressBoo
 				existing.FullName = contact.FullName
 				existing.GivenName = contact.GivenName
 				existing.FamilyName = contact.FamilyName
-				existing.Email = contact.Email
-				existing.Email2 = contact.Email2
-				existing.Phone = contact.Phone
-				existing.Phone2 = contact.Phone2
+				existing.SetEmails(contact.Emails)
+				existing.SetPhones(contact.Phones)
 				existing.Organization = contact.Organization
 				existing.Title = contact.Title
 				existing.Notes = contact.Notes
@@ -959,18 +951,16 @@ func (p *googlePerson) toContact(userID, addressBookID int64) *models.Contact {
 		c.GivenName = p.Names[0].GivenName
 		c.FamilyName = p.Names[0].FamilyName
 	}
-	if len(p.EmailAddresses) > 0 {
-		c.Email = p.EmailAddresses[0].Value
+	emails := make([]string, 0, len(p.EmailAddresses))
+	for _, e := range p.EmailAddresses {
+		emails = append(emails, e.Value)
 	}
-	if len(p.EmailAddresses) > 1 {
-		c.Email2 = p.EmailAddresses[1].Value
+	c.SetEmails(emails)
+	phones := make([]string, 0, len(p.PhoneNumbers))
+	for _, ph := range p.PhoneNumbers {
+		phones = append(phones, ph.Value)
 	}
-	if len(p.PhoneNumbers) > 0 {
-		c.Phone = p.PhoneNumbers[0].Value
-	}
-	if len(p.PhoneNumbers) > 1 {
-		c.Phone2 = p.PhoneNumbers[1].Value
-	}
+	c.SetPhones(phones)
 	if len(p.Organizations) > 0 {
 		c.Organization = p.Organizations[0].Name
 		c.Title = p.Organizations[0].Title
@@ -988,14 +978,11 @@ func (p *googlePerson) toContact(userID, addressBookID int64) *models.Contact {
 	// Generate vCard
 	c.VCardData = fmt.Sprintf("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:%s\r\nFN:%s\r\nN:%s;%s;;;\r\n",
 		c.UID, c.FullName, c.FamilyName, c.GivenName)
-	if c.Email != "" {
-		c.VCardData += fmt.Sprintf("EMAIL:%s\r\n", c.Email)
+	for _, e := range c.Emails {
+		c.VCardData += fmt.Sprintf("EMAIL:%s\r\n", e)
 	}
-	if c.Email2 != "" {
-		c.VCardData += fmt.Sprintf("EMAIL:%s\r\n", c.Email2)
-	}
-	if c.Phone != "" {
-		c.VCardData += fmt.Sprintf("TEL:%s\r\n", c.Phone)
+	for _, ph := range c.Phones {
+		c.VCardData += fmt.Sprintf("TEL:%s\r\n", ph)
 	}
 	if c.Organization != "" {
 		c.VCardData += fmt.Sprintf("ORG:%s\r\n", c.Organization)
