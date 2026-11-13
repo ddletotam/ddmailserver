@@ -25,17 +25,22 @@ public struct MessageRef: Codable, Equatable, Hashable, Sendable {
     /// Стабильный ключ письма (RFC Message-ID); uid — волатильный.
     public var messageID: String
     public var seen: Bool
+    /// Статус доставки своего исходящего (`delivery_status`, контракт §5):
+    /// пусто — неизвестно (входящие, старые письма) = доставлено.
+    public var deliveryStatus: String
 
     enum CodingKeys: String, CodingKey {
         case folder, uid, seen
         case messageID = "message_id"
+        case deliveryStatus = "delivery_status"
     }
 
-    public init(folder: String = "", uid: Int64, messageID: String = "", seen: Bool = false) {
+    public init(folder: String = "", uid: Int64, messageID: String = "", seen: Bool = false, deliveryStatus: String = "") {
         self.folder = folder
         self.uid = uid
         self.messageID = messageID
         self.seen = seen
+        self.deliveryStatus = deliveryStatus
     }
 
     public init(from decoder: Decoder) throws {
@@ -44,7 +49,39 @@ public struct MessageRef: Codable, Equatable, Hashable, Sendable {
         uid = try c.value(.uid, 0)
         messageID = try c.value(.messageID, "")
         seen = try c.value(.seen, false)
+        deliveryStatus = try c.value(.deliveryStatus, "")
     }
+
+    /// Ссылка уходит и в запросы (`/conversations/messages`, флаги): статус —
+    /// только если он есть, форма запроса прежняя.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(folder, forKey: .folder)
+        try c.encode(uid, forKey: .uid)
+        try c.encode(messageID, forKey: .messageID)
+        try c.encode(seen, forKey: .seen)
+        if !deliveryStatus.isEmpty { try c.encode(deliveryStatus, forKey: .deliveryStatus) }
+    }
+}
+
+/// Статус доставки исходящего письма (`delivery_status` сервера, десктоп §1).
+/// Пустое и незнакомое значение — `.unknown`: считать доставленным, ничего
+/// не рисовать.
+public enum DeliveryState: String, Equatable, Sendable {
+    case unknown = ""
+    case pending
+    case delivered
+    case failed
+
+    public init(_ raw: String) {
+        self = DeliveryState(rawValue: raw.lowercased()) ?? .unknown
+    }
+}
+
+/// Message-ID без угловых скобок и регистра: сервер отдаёт его в событиях
+/// без скобок, а в ссылках писем — как в заголовке.
+public func normalizedMessageID(_ s: String) -> String {
+    s.trimmingCharacters(in: CharacterSet(charactersIn: "<> \t")).lowercased()
 }
 
 public struct ConversationDTO: Decodable, Equatable, Sendable {
@@ -65,16 +102,20 @@ public struct ConversationDTO: Decodable, Equatable, Sendable {
     public var updatedAt: Int64
     /// Беседа из спама (`/conversations?spam=1`).
     public var spam: Bool
+    /// Статус доставки последнего письма беседы, если оно наше исходящее
+    /// (`last_delivery_status`); пусто — показывать нечего.
+    public var lastDeliveryStatus: String
 
     public init(
         id: String, label: String = "", avatarHash: String = "", receivedBy: String = "", counterparts: [ContactInfo] = [],
         isGroup: Bool = false, lastDateTs: Int64 = 0, lastSubject: String = "", unreadCount: Int = 0, totalCount: Int = 0,
-        messages: [MessageRef] = [], updatedAt: Int64 = 0, spam: Bool = false
+        messages: [MessageRef] = [], updatedAt: Int64 = 0, spam: Bool = false, lastDeliveryStatus: String = ""
     ) {
         self.id = id; self.label = label; self.avatarHash = avatarHash; self.receivedBy = receivedBy
         self.counterparts = counterparts; self.isGroup = isGroup; self.lastDateTs = lastDateTs
         self.lastSubject = lastSubject; self.unreadCount = unreadCount; self.totalCount = totalCount
         self.messages = messages; self.updatedAt = updatedAt; self.spam = spam
+        self.lastDeliveryStatus = lastDeliveryStatus
     }
 
     enum CodingKeys: String, CodingKey {
@@ -87,6 +128,7 @@ public struct ConversationDTO: Decodable, Equatable, Sendable {
         case unreadCount = "unread_count"
         case totalCount = "total_count"
         case updatedAt = "updated_at"
+        case lastDeliveryStatus = "last_delivery_status"
     }
 
     public init(from decoder: Decoder) throws {
@@ -104,6 +146,7 @@ public struct ConversationDTO: Decodable, Equatable, Sendable {
         messages = try c.value(.messages, [])
         updatedAt = try c.value(.updatedAt, 0)
         spam = try c.value(.spam, false)
+        lastDeliveryStatus = try c.value(.lastDeliveryStatus, "")
     }
 }
 
@@ -224,6 +267,14 @@ public struct MessageBody: Codable, Equatable, Sendable {
     public var messageID: String
     public var inReplyTo: String
     public var references: [String]
+    /// Доставка своего исходящего (десктоп §1): `delivery_status` — `""`
+    /// (неизвестно = доставлено), `pending`, `delivered`, `failed`;
+    /// `delivery_reason` — код причины, `delivery_error` — она же словами на
+    /// языке пользователя, `delivery_failed` — кому не доставлено.
+    public var deliveryStatus: String
+    public var deliveryReason: String
+    public var deliveryError: String
+    public var deliveryFailed: [String]
 
     enum CodingKeys: String, CodingKey {
         case uid, folder, subject, from, to, cc, html, text, attachments, references
@@ -232,18 +283,25 @@ public struct MessageBody: Codable, Equatable, Sendable {
         case isOutgoing = "is_outgoing"
         case messageID = "message_id"
         case inReplyTo = "in_reply_to"
+        case deliveryStatus = "delivery_status"
+        case deliveryReason = "delivery_reason"
+        case deliveryError = "delivery_error"
+        case deliveryFailed = "delivery_failed"
     }
 
     public init(
         uid: Int64, folder: String = "", subject: String = "", from: String = "", fromAddr: String = "",
         to: [String] = [], cc: [String] = [], dateTs: Int64 = 0, html: String? = nil, text: String? = nil,
         attachments: [AttachmentDTO] = [], isOutgoing: Bool = false, messageID: String = "",
-        inReplyTo: String = "", references: [String] = []
+        inReplyTo: String = "", references: [String] = [],
+        deliveryStatus: String = "", deliveryReason: String = "", deliveryError: String = "", deliveryFailed: [String] = []
     ) {
         self.uid = uid; self.folder = folder; self.subject = subject; self.from = from
         self.fromAddr = fromAddr; self.to = to; self.cc = cc; self.dateTs = dateTs; self.html = html
         self.text = text; self.attachments = attachments; self.isOutgoing = isOutgoing
         self.messageID = messageID; self.inReplyTo = inReplyTo; self.references = references
+        self.deliveryStatus = deliveryStatus; self.deliveryReason = deliveryReason
+        self.deliveryError = deliveryError; self.deliveryFailed = deliveryFailed
     }
 
     public init(from decoder: Decoder) throws {
@@ -263,6 +321,20 @@ public struct MessageBody: Codable, Equatable, Sendable {
         messageID = try c.value(.messageID, "")
         inReplyTo = try c.value(.inReplyTo, "")
         references = try c.value(.references, [])
+        deliveryStatus = try c.value(.deliveryStatus, "")
+        deliveryReason = try c.value(.deliveryReason, "")
+        deliveryError = try c.value(.deliveryError, "")
+        deliveryFailed = try c.value(.deliveryFailed, [])
+    }
+
+    public var delivery: DeliveryState { DeliveryState(deliveryStatus) }
+
+    /// Статус доставки из события сервера — без перезапроса тела.
+    public mutating func apply(_ d: DeliveryUpdate) {
+        deliveryStatus = d.status
+        deliveryReason = d.reason
+        deliveryError = d.error
+        deliveryFailed = d.failed
     }
 
     /// Ни HTML, ни текста, ни вложений — сбойный фетч, перезапросить (§4а десктопа).
@@ -330,6 +402,32 @@ public struct OutgoingAttachment: Encodable, Equatable, Sendable {
         self.mimeType = mimeType
         self.content = content
         self.contentID = contentID
+    }
+}
+
+/// Итог отправки: ответ `/send` или SMTP IMAP-учётки. `rfcMessageID` —
+/// Message-ID копии в «Отправленных» (по нему узнаётся беседа нового
+/// письма), `deliveryStatus` — у ddmail `pending` (принято в очередь), у
+/// IMAP-учётки `delivered` (SMTP провайдера принял). Старый сервер полей
+/// не отдаёт — пусто.
+public struct SendReceipt: Decodable, Equatable, Sendable {
+    public var rfcMessageID: String
+    public var deliveryStatus: String
+
+    enum CodingKeys: String, CodingKey {
+        case rfcMessageID = "rfc_message_id"
+        case deliveryStatus = "delivery_status"
+    }
+
+    public init(rfcMessageID: String = "", deliveryStatus: String = "") {
+        self.rfcMessageID = rfcMessageID
+        self.deliveryStatus = deliveryStatus
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        rfcMessageID = try c.value(.rfcMessageID, "")
+        deliveryStatus = try c.value(.deliveryStatus, "")
     }
 }
 

@@ -216,17 +216,23 @@ public func forwardBlock(_ o: MessageBody, timeZone: TimeZone = .current) -> (te
 /// Беседа, которую ждём после отправки нового письма (десктоп
 /// `compose_sent_target` / `target_conversation_id`): её id считается по
 /// тому же правилу, что сервер и `ConversationBuilder` (набор From+To+Cc, мои
-/// адреса — слева от `|`). Набор собеседников — запасной признак: на случай,
-/// если сервер добавит к набору свой адрес иначе, чем мы ожидали.
+/// адреса — слева от `|`). Надёжнее всего — Message-ID из ответа отправки
+/// (сервер кладёт копию в «Отправленные» при приёме и отдаёт его): беседа,
+/// в которой лежит письмо, — та самая. Набор собеседников — запасной
+/// признак: на случай, если сервер добавит к набору свой адрес иначе, чем мы
+/// ожидали.
 public struct SentTarget: Equatable, Sendable {
     /// Ожидаемый id беседы.
     public let id: String
     /// Адресаты (To+Cc) в нижнем регистре.
     public let recipients: Set<String>
+    /// Message-ID отправленного (из `SendReceipt`); пусто — ещё не знаем.
+    public var messageID: String = ""
 
-    public init(id: String, recipients: Set<String>) {
+    public init(id: String, recipients: Set<String>, messageID: String = "") {
         self.id = id
         self.recipients = recipients
+        self.messageID = messageID
     }
 
     /// По письму: отправитель, адресаты, свои адреса учётки-отправителя.
@@ -244,6 +250,10 @@ public struct SentTarget: Equatable, Sendable {
     /// тот же), иначе набор собеседников равен адресатам (не спам).
     public func matches(_ c: Conversation) -> Bool {
         if c.spam { return false }
+        if !messageID.isEmpty {
+            let mid = normalizedMessageID(messageID)
+            if c.messages.contains(where: { normalizedMessageID($0.messageID) == mid }) { return true }
+        }
         if c.id.lowercased() == id { return true }
         let cps = Set(c.counterparts.map { $0.addr.lowercased() }.filter { !$0.isEmpty })
         let others = recipients.subtracting(own)

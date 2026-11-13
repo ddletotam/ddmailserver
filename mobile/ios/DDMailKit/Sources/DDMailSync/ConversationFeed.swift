@@ -75,6 +75,15 @@ public struct FeedBatch: Encodable, Sendable {
         let size: Int64
     }
 
+    /// Доставка своего исходящего — для отрисовки пузыря документом
+    /// (договорённость мобильных клиентов): `status` — `delivery_status`
+    /// (`""` = доставлено), `error` — `delivery_error`, `failed` — `delivery_failed`.
+    public struct Delivery: Encodable, Equatable, Sendable {
+        let status: String
+        let error: String
+        let failed: [String]
+    }
+
     public struct Message: Encodable, Sendable {
         let uid: Int64
         let outgoing: Bool
@@ -89,6 +98,7 @@ public struct FeedBatch: Encodable, Sendable {
         let attachments: [Attachment]
         /// В группе подписываем входящие именем отправителя.
         let showFrom: Bool
+        let delivery: Delivery
     }
 
     public let messages: [Message]
@@ -105,11 +115,25 @@ public struct FeedBatch: Encodable, Sendable {
                 html: b.html.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 },
                 text: b.text,
                 attachments: b.attachments.map { Attachment(index: $0.index, filename: $0.filename, size: $0.size) },
-                showFrom: c.isGroup
+                showFrom: c.isGroup,
+                delivery: Delivery(status: b.deliveryStatus, error: b.deliveryError, failed: b.deliveryFailed)
             )
         }
         self.hasOlder = hasOlder
         self.focusUid = focusUid
+    }
+
+    /// Перерисовать уже показанные письма (сменился статус доставки) без
+    /// перезагрузки ленты: `ddm.update(batch)` — письма с теми же uid
+    /// заменяются на месте; документ без него, но с `ddm.delivery(uid, d)` —
+    /// по письму; ни того, ни другого (документ старше) — `ddm.set(full)`
+    /// всем окном, иначе статус не дошёл бы до пузыря до переоткрытия беседы.
+    public static func updateScript(_ changed: FeedBatch, orSet full: FeedBatch) -> String {
+        """
+        (function(u,f){if(typeof ddm.update==='function'){ddm.update(u)}\
+        else if(typeof ddm.delivery==='function'){u.messages.forEach(function(m){ddm.delivery(m.uid,m.delivery)})}\
+        else{ddm.set(f)}})(\(changed.javaScriptLiteral()),\(full.javaScriptLiteral()))
+        """
     }
 
     /// JSON для вызова `ddm.*(…)`. JSON — подмножество литералов JS, кроме
@@ -157,6 +181,21 @@ public struct FeedWindow: Sendable {
         order = (new + order).sorted { $0.uid > $1.uid }
         loaded += new.count
         return new
+    }
+
+    /// Беседа обновилась: уже известные письма, у которых сменился статус
+    /// доставки, — их пузыри перерисовать. Пустой статус («неизвестно»,
+    /// кэш до миграции) сменой не считается.
+    public mutating func redelivered(_ refs: [MessageRef]) -> [MessageRef] {
+        let now = Dictionary(refs.map { ($0.uid, $0) }, uniquingKeysWith: { a, _ in a })
+        var changed: [MessageRef] = []
+        for i in order.indices {
+            guard let r = now[order[i].uid], !r.deliveryStatus.isEmpty,
+                  r.deliveryStatus != order[i].deliveryStatus else { continue }
+            order[i].deliveryStatus = r.deliveryStatus
+            changed.append(r)
+        }
+        return changed
     }
 }
 

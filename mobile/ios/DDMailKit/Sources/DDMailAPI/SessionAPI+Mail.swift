@@ -158,17 +158,23 @@ func pathEscaped(_ s: String) -> String {
 extension SessionAPI {
     /// Поставить письмо в отправку. 413 — вложения больше лимита сервера.
     /// JSON с base64 собирается вне главного потока вызывающего: вложения бывают по 20 МБ.
-    public func send(_ request: SendRequest) async throws {
-        try await send("POST", "/send", body: request)
+    /// Ответ — Message-ID копии в «Отправленных» и статус `pending`
+    /// (десктоп §1); его нет или он не разобрался — пустой итог: письмо
+    /// принято, а беседа узнается по набору адресов.
+    @discardableResult
+    public func send(_ request: SendRequest) async throws -> SendReceipt {
+        let data = try await send("POST", "/send", body: request)
+        return (try? decode(SendReceipt.self, from: data)) ?? SendReceipt()
     }
 }
 
 extension SessionAPI {
-    /// Пуш-канал сервера (`/ws`), пока приложение на экране (§7): поток типов
-    /// событий (`new_message`, `flags_changed`, `calendar_updated`, …).
-    /// Токен — только заголовком `Authorization` (§2): в URL он осел бы в
-    /// журналах nginx. Отказ рукопожатия 401/403 — `APIError.unauthorized`.
-    public func events(session: URLSession = .shared) async -> AsyncThrowingStream<String, Error> {
+    /// Пуш-канал сервера (`/ws`), пока приложение на экране (§7): поток
+    /// событий (`new_message`, `message_sent`, `delivery_status`,
+    /// `calendar_updated`, …). Токен — только заголовком `Authorization` (§2):
+    /// в URL он осел бы в журналах nginx. Отказ рукопожатия 401/403 —
+    /// `APIError.unauthorized`.
+    public func events(session: URLSession = .shared) async -> AsyncThrowingStream<ServerEvent, Error> {
         let token = await currentToken()
         let wsURL = URL(string: baseURL.replacingOccurrences(of: "https://", with: "wss://") + "/api/desktop/v1/ws")!
         var req = URLRequest(url: wsURL)
@@ -186,7 +192,7 @@ extension SessionAPI {
                         case let .data(d): data = d
                         @unknown default: continue
                         }
-                        if case let .string(type)? = JSONValue.parse(data)?["type"] { cont.yield(type) }
+                        if let event = ServerEvent.parse(data) { cont.yield(event) }
                     }
                     cont.finish()
                 } catch {

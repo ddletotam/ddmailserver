@@ -574,7 +574,11 @@ public actor ImapEngine: MailProvider {
 
     // MARK: Отправка (контракт §5)
 
-    public func send(_ request: SendRequest) async throws {
+    /// SMTP провайдера принял письмо — для клиента оно доставлено
+    /// (`delivered`): дальнейший отказ провайдер пришлёт письмом во
+    /// «Входящие». Ошибка SMTP — исключение, письмо не ушло.
+    @discardableResult
+    public func send(_ request: SendRequest) async throws -> SendReceipt {
         guard let pw = password(), !pw.isEmpty else { throw APIError.unauthorized("нет пароля") }
         let from = MailAddress.parseList(request.from).first ?? MailAddress(email: config.email)
         let msg = OutgoingMessage(
@@ -598,8 +602,10 @@ public actor ImapEngine: MailProvider {
             }
             await c.quit()
         }
-        guard !config.isGmail else { return }
+        let receipt = SendReceipt(rfcMessageID: mid, deliveryStatus: DeliveryState.delivered.rawValue)
+        guard !config.isGmail else { return receipt }
         Task { await self.ensureSentCopy(messageID: mid, data: data) }
+        return receipt
     }
 
     /// Копия в «Отправленные» (у десктопа нет): через ~5 с ищем письмо по

@@ -81,10 +81,22 @@ final class ConversationModel {
         }
     }
 
-    /// Беседа обновилась дельтой: новые письма — снизу, без перерисовки.
+    /// Беседа обновилась (дельта, событие доставки): новые письма — снизу,
+    /// у показанных со сменившимся статусом доставки пузырь перерисовывается
+    /// на месте — без перезагрузки ленты.
     func updated(_ c: Conversation) {
         guard conversation?.ref == c.ref else { return }
         conversation = c
+        let redelivered = window.redelivered(c.messages).filter { shown.contains($0.uid) }
+        if !redelivered.isEmpty {
+            Task {
+                // Тело — из кэша (событие уже положило статус) или с сервера
+                // (статус пришёл дельтой, `SyncEngine.bodies` перезапросит).
+                let loaded = await load(redelivered, of: c)
+                guard conversation?.ref == c.ref else { return }
+                refresh(c, loaded)
+            }
+        }
         let fresh = window.fresh(c.messages)
         guard !fresh.isEmpty else { return }
         gate.extend(fresh.map(\.uid))
@@ -124,7 +136,29 @@ final class ConversationModel {
     private func send(_ op: String, _ c: Conversation, _ list: [MessageBody], focus: Int64?) {
         let fresh = list.filter { shown.insert($0.uid).inserted }
         let batch = FeedBatch(conversation: c, bodies: fresh, hasOlder: window.hasOlder, focusUid: focus, imageSenders: ImageSenders.all)
+        logDelivery(op, fresh)
         web.run("ddm.\(op)(\(batch.javaScriptLiteral()))")
+    }
+
+    /// Перерисовать показанные письма с новым статусом доставки
+    /// (`FeedBatch.updateScript`: на месте, если документ умеет).
+    private func refresh(_ c: Conversation, _ list: [MessageBody]) {
+        let changed = list.filter { shown.contains($0.uid) }
+        guard !changed.isEmpty else { return }
+        let senders = ImageSenders.all
+        let all = bodies.values.filter { shown.contains($0.uid) }
+        let update = FeedBatch(conversation: c, bodies: changed, hasOlder: window.hasOlder, focusUid: nil, imageSenders: senders)
+        let full = FeedBatch(conversation: c, bodies: all, hasOlder: window.hasOlder, focusUid: nil, imageSenders: senders)
+        logDelivery("update", changed)
+        web.run(FeedBatch.updateScript(update, orSet: full))
+    }
+
+    /// Что ушло в документ о доставке своих писем: так видно, что поле
+    /// `delivery` дошло до ленты, даже если документ его ещё не рисует.
+    private func logDelivery(_ op: String, _ list: [MessageBody]) {
+        for b in list where b.isOutgoing && !b.deliveryStatus.isEmpty {
+            webLog.notice("feed \(op, privacy: .public): uid \(b.uid) delivery=\(b.deliveryStatus, privacy: .public) error=\(b.deliveryError, privacy: .public) failed=\(b.deliveryFailed.count)")
+        }
     }
 
     // MARK: Вложения

@@ -6,6 +6,12 @@ import Foundation
 /// любое событие сервера — синхронизация, слитая в одну на пачку событий.
 /// В фоне канала нет: там — push и фоновая синхронизация.
 ///
+/// `delivery_status` (§5) несёт сам статус: он ложится в кэш сразу
+/// (`onDelivery`), и пузырь со строкой меняются, не дожидаясь синка; синк —
+/// следом, как на любое событие (он же доносит то, чего в кэше ещё нет).
+/// `message_sent` — копия своего письма легла в «Отправленные»: синк
+/// приносит беседу.
+///
 /// Обрыв — переподключение с растущей паузой (2 с … 1 мин). Сервер отверг
 /// токен — сначала синхронизация (она обменяет токен), потом снова.
 @MainActor
@@ -13,13 +19,16 @@ final class LiveUpdates {
     private let api: SessionAPI
     private let sync: () async -> Void
     private let onCalendar: () -> Void
+    private let onDelivery: (DeliveryUpdate) -> Void
     private var loop: Task<Void, Never>?
     private var debounce: Task<Void, Never>?
 
-    init(api: SessionAPI, sync: @escaping () async -> Void, onCalendar: @escaping () -> Void = {}) {
+    init(api: SessionAPI, sync: @escaping () async -> Void, onCalendar: @escaping () -> Void = {},
+         onDelivery: @escaping (DeliveryUpdate) -> Void = { _ in }) {
         self.api = api
         self.sync = sync
         self.onCalendar = onCalendar
+        self.onDelivery = onDelivery
     }
 
     func start() {
@@ -43,10 +52,18 @@ final class LiveUpdates {
             }
             do {
                 mailLog.debug("ws: connecting (attempt \(attempt))")
-                for try await type in await api.events() {
-                    mailLog.debug("ws: event \(type, privacy: .public)")
+                for try await e in await api.events() {
+                    mailLog.debug("ws: event \(e.type, privacy: .public)")
                     attempt = 0
-                    if type == "calendar_updated" { onCalendar() } else { event() }
+                    if e.type == ServerEvent.calendarUpdated {
+                        onCalendar()
+                        continue
+                    }
+                    if let d = e.delivery {
+                        mailLog.notice("ws: delivery \(d.uid) → \(d.status, privacy: .public)")
+                        onDelivery(d)
+                    }
+                    event()
                 }
             } catch APIError.unauthorized {
                 mailLog.notice("ws: token refused, syncing")

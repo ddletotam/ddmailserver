@@ -9,9 +9,9 @@ import UniformTypeIdentifiers
 /// ленте, «✓ Отправлено» без тостов, при ошибке — заглушка убирается, текст
 /// возвращается в композер.
 ///
-/// Отправка асинхронная: сервер ставит письмо в очередь, копия в
-/// «Отправленных» (и сама беседа) появляется после доставки — поэтому после
-/// отправки синхронизируемся ещё несколько раз, пока нет WebSocket.
+/// Отправка асинхронная: сервер ставит письмо в очередь и сразу кладёт копию
+/// в «Отправленные» (беседа есть сразу, статус доставки — на письме, §5);
+/// синк — сразу и ещё несколько раз, на случай, если WebSocket нет.
 @MainActor @Observable
 final class ComposeModel {
     /// Отдельное окно: новое письмо или пересылка.
@@ -55,11 +55,6 @@ final class ComposeModel {
     /// Заглушки нового письма: переезжают в беседу, на которую сменится
     /// «Новая беседа», пока настоящее письмо не пришло (десктоп §2).
     private(set) var carriedStubs: [String] = []
-    /// Сервер принял письмо, а беседы всё нет: ушло в очередь, но ещё не
-    /// доставлено (копия в «Отправленных» и беседа появятся после доставки;
-    /// адрес без MX или молчащий сервер получателя держат его в очереди с
-    /// повторами — так было с письмом владельца 2026-11-13).
-    private(set) var awaitingDelivery = false
     private var stubSeq = 0
 
     init(workspace: Workspace, conversation: ConversationModel, syncSoon: @escaping (String) -> Void, onAuthDead: @escaping @MainActor (String) -> Void) {
@@ -88,19 +83,28 @@ final class ComposeModel {
     }
 
     /// Отправить через учётку-владельца адреса From; нет владельца — отказ.
-    private func send(_ request: SendRequest) async throws -> String {
+    /// Ответ — учётка и итог отправки (Message-ID письма).
+    private func send(_ request: SendRequest) async throws -> (account: String, receipt: SendReceipt) {
         guard let link = owner(of: request) else { throw SendRefused() }
         do {
-            try await link.provider.send(request)
+            let receipt = try await link.provider.send(request)
+            return (link.account.key, receipt)
         } catch {
             if isAuthFailure(error) { onAuthDead(link.account.key) }
+            // IMAP-учётка отправляет сама (SMTP провайдера): отказ SMTP —
+            // письмо не доставлено, а не «сервер не принял в очередь».
+            if link.imap != nil, !isAuthFailure(error) { throw NotDelivered(underlying: error) }
             throw error
         }
-        return link.account.key
     }
 
     struct SendRefused: Error, LocalizedError {
         var errorDescription: String? { "Не через что отправить: адрес «От» не принадлежит ни одной учётке" }
+    }
+
+    /// Ошибка SMTP IMAP-учётки — «Не доставлено» с причиной.
+    struct NotDelivered: Error {
+        let underlying: Error
     }
 
     /// Сменилась беседа — явный ответ и переопределения не переезжают в другую.
@@ -117,7 +121,6 @@ final class ComposeModel {
     /// Беседа нашлась: цель снята, заглушки — ей.
     func consumeTarget() -> [String] {
         sentTarget = nil
-        awaitingDelivery = false
         defer { carriedStubs = [] }
         return carriedStubs
     }
@@ -223,7 +226,7 @@ final class ComposeModel {
                 do {
                     let via = try await send(request)
                     flash()
-                    afterSend(via)
+                    afterSend(via.account)
                 } catch {
                     conversation.web.run("ddm.unstub(\"\(key)\")")
                     // Текст возвращается, если композер пуст (не затираем набранное заново).
@@ -257,19 +260,17 @@ final class ComposeModel {
             let target = target(of: request)
             sentTarget = target
             carriedStubs = [stub]
-            awaitingDelivery = false
             Task {
                 do {
                     let via = try await send(request)
+                    // Копия уже в «Отправленных»: беседа узнается и по Message-ID.
+                    noteSent(target, via.receipt)
                     flash()
-                    afterSend(via)
-                    try? await Task.sleep(for: .seconds(20))
-                    if sentTarget == target { awaitingDelivery = true }
+                    afterSend(via.account)
                 } catch {
                     conversation.web.run("ddm.unstub(\"\(key)\")")
-                    sentTarget = nil
+                    if sentTarget == target { sentTarget = nil }
                     carriedStubs = []
-                    awaitingDelivery = false
                     restore(sent, sentRich)
                     self.error = Self.sendError(error)
                 }
@@ -282,6 +283,14 @@ final class ComposeModel {
     private func target(of r: SendRequest) -> SentTarget {
         let own = owner(of: r)?.provider.identities() ?? identities
         return SentTarget(from: r.from, to: r.to, cc: r.cc, own: own)
+    }
+
+    /// Письмо принято: ждём беседу ещё и по его Message-ID — если ждём всё
+    /// ту же (за это время могли отправить другое или уйти).
+    private func noteSent(_ target: SentTarget, _ r: SendReceipt) {
+        guard !r.rfcMessageID.isEmpty, var t = sentTarget, t == target else { return }
+        t.messageID = r.rfcMessageID
+        sentTarget = t
     }
 
     /// Новое письмо или пересылка (ветки 0–1) — из отдельного окна.
@@ -318,10 +327,14 @@ final class ComposeModel {
             case let .ok(request, _):
                 do {
                     let via = try await send(request)
-                    if case .new = snapshot.branch { sentTarget = target(of: request) }
+                    if case .new = snapshot.branch {
+                        var t = target(of: request)
+                        t.messageID = via.receipt.rfcMessageID
+                        sentTarget = t
+                    }
                     sheet = nil
                     flash()
-                    afterSend(via)
+                    afterSend(via.account)
                 } catch {
                     fail(Self.sendError(error))
                 }
@@ -347,9 +360,11 @@ final class ComposeModel {
         }
     }
 
-    /// Копия в «Отправленных» появится после доставки — подтягиваем её:
-    /// сразу и затем с затухающими интервалами (как
-    /// `schedule_post_send_refetch` десктопа: 2.5 → 7 → 15 → 30 → 60 с).
+    /// Подтянуть копию в «Отправленных» и статус доставки: сразу и затем с
+    /// затухающими интервалами (как `schedule_post_send_refetch` десктопа:
+    /// 2.5 → 7 → 15 → 30 → 60 с) — подстраховка, если WebSocket нет. У
+    /// ddmail копия ложится при приёме, у IMAP-учётки — когда клиент найдёт
+    /// или положит её сам (`ensureSentCopy`, 5–20 с).
     private func afterSend(_ key: String) {
         syncSoon(key)
         Task {
@@ -361,6 +376,16 @@ final class ComposeModel {
     }
 
     static func sendError(_ e: Error) -> String {
+        if let nd = e as? NotDelivered {
+            // Отказ SMTP провайдера: письмо не ушло.
+            let why: String
+            switch nd.underlying {
+            case APIError.network: why = "нет соединения с SMTP-сервером"
+            case let APIError.server(_, message) where !message.isEmpty: why = message
+            default: why = nd.underlying.localizedDescription
+            }
+            return "Не доставлено: \(why)."
+        }
         let why: String
         switch e {
         case APIError.unauthorized: why = "нужен вход в учётку"
