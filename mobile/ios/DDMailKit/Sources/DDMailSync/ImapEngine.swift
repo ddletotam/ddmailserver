@@ -583,7 +583,7 @@ public actor ImapEngine: MailProvider {
             cc: request.cc.flatMap { MailAddress.parseList($0) },
             subject: request.subject, text: request.text, html: request.html,
             inReplyTo: request.inReplyTo, references: request.references,
-            attachments: request.attachments.map { .init(filename: $0.filename, mimeType: $0.mimeType, data: $0.content) }
+            attachments: request.attachments.map { .init(filename: $0.filename, mimeType: $0.mimeType, data: $0.content, contentID: $0.contentID) }
         )
         let (data, mid) = MIMEBuilder.build(msg)
         let recipients = (msg.to + msg.cc).map(\.email)

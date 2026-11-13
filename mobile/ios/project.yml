@@ -15,8 +15,8 @@ settings:
     SWIFT_VERSION: "6.0"
     SWIFT_STRICT_CONCURRENCY: complete
     # Версия бампается при любой правке клиента (контракт §1).
-    MARKETING_VERSION: "0.0.4"
-    CURRENT_PROJECT_VERSION: "4"
+    MARKETING_VERSION: "0.0.5"
+    CURRENT_PROJECT_VERSION: "5"
     # Команда подписи не в git: mac.sh берёт её из ~/.config/ddmail-ios/team
     # станции (или из учётки Xcode на Маке).
     CODE_SIGN_STYLE: Automatic

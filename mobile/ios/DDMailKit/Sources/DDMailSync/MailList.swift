@@ -7,6 +7,11 @@ public struct FolderTab: Equatable, Identifiable, Sendable {
     public let name: String
     public let icon: String
     public let unread: Int
+    /// «Не показывать в списке», а таб виден («Показать скрытые» или в
+    /// папку привели) — рисуется бледнее.
+    public var hidden = false
+    /// Системная («Спам»): ни «Настроить…», ни «Удалить».
+    public var system = false
 }
 
 /// Что видно в списке: табы, выбранная папка, строки.
@@ -26,10 +31,11 @@ public struct MailListState: Equatable, Sendable {
 ///
 /// - Поиск — по всем папкам, спам в поиск не попадает.
 /// - Удалённая папка — снова инбокс. Скрытая видна табом, только пока в неё
-///   привели (открытие беседы из неё).
+///   привели (открытие беседы из неё) или включено «Показать скрытые»
+///   (`showHidden`, на сессию — десктоп §4).
 /// - Системная «Спам» — всегда таб полосы, последним (`docs/mobile-layout.md`):
 ///   у мобильных клиентов нет меню, откуда в неё прийти иначе.
-public func buildMailList(_ convs: [Conversation], doc: FoldersDoc, activeID: String?, query: String?) -> MailListState {
+public func buildMailList(_ convs: [Conversation], doc: FoldersDoc, activeID: String?, query: String?, showHidden: Bool = false) -> MailListState {
     var s = MailListState()
     if let q = query, !q.trimmingCharacters(in: .whitespaces).isEmpty {
         s.searching = true
@@ -39,9 +45,11 @@ public func buildMailList(_ convs: [Conversation], doc: FoldersDoc, activeID: St
     let active = activeID.flatMap { id in doc.folders.firstIndex { $0.id == id } }
     let counts = doc.unreadCounts(convs)
     s.tabs = doc.folders.enumerated().compactMap { i, f in
-        if f.hidden && i != active && f.system != systemSpam { return nil }
+        let spam = f.system == systemSpam
+        if f.hidden && i != active && !spam && !showHidden { return nil }
         // Непрочитанный спам — не повод на него смотреть.
-        return FolderTab(index: i, id: f.id, name: f.name, icon: f.icon, unread: f.system == systemSpam ? 0 : counts.folders[i])
+        return FolderTab(index: i, id: f.id, name: f.name, icon: f.icon, unread: spam ? 0 : counts.folders[i],
+                         hidden: f.hidden && !spam, system: f.isSystem)
     }
     s.active = active
     s.inboxUnread = counts.inbox

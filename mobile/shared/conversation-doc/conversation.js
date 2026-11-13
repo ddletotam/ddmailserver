@@ -593,7 +593,9 @@ function makeStub(st) {
   link.href = 'bubble.css';
   const root = document.createElement('div');
   root.className = 'ddm-root';
-  root.innerHTML = textToHtml(st.text || '');
+  // HTML — тот, что уходит на сервер (форматирование, картинки тела
+  // `data:`-URI); старые клиенты шлют только текст.
+  root.innerHTML = st.html ? st.html : textToHtml(st.text || '');
   shadow.append(link, root);
   b.appendChild(host);
   if (st.attachments && st.attachments.length) {
@@ -680,6 +682,10 @@ const ddm = {
   /** Мгновенный пузырь отправляемого письма. */
   stub(st) {
     ddm.unstub(st.key);
+    // Заглушка переехала в беседу, где письмо уже пришло, — не дублируем.
+    const norm = normText(st.text);
+    const now = Date.now() / 1000;
+    if (norm && order.some((m) => m.outgoing && now - (m.dateTs || 0) < 600 && normText(plainOf(m)).startsWith(norm))) return;
     const row = makeStub(st);
     feed.appendChild(row);
     stubs.set(st.key, { row, norm: normText(st.text) });

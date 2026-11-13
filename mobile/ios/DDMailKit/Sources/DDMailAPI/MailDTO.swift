@@ -316,16 +316,20 @@ public struct OutgoingAttachment: Encodable, Equatable, Sendable {
     public var filename: String
     public var mimeType: String
     public var content: Data
+    /// Картинка в теле (`cid:`) — сервер кладёт её inline в `multipart/related`.
+    public var contentID: String?
 
     enum CodingKeys: String, CodingKey {
         case filename, content
         case mimeType = "mime_type"
+        case contentID = "content_id"
     }
 
-    public init(filename: String, mimeType: String, content: Data) {
+    public init(filename: String, mimeType: String, content: Data, contentID: String? = nil) {
         self.filename = filename
         self.mimeType = mimeType
         self.content = content
+        self.contentID = contentID
     }
 }
 

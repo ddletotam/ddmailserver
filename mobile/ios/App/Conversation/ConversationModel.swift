@@ -23,6 +23,9 @@ final class ConversationModel {
     /// Тела показанных писем — для веток ответа и меню пузыря.
     private(set) var bodies: [Int64: MessageBody] = [:]
     private var loading: Task<Void, Never>?
+    /// Заглушки, которые встанут в ленту следующей открытой беседы (новое
+    /// письмо ушло, «Новая беседа» сменилась настоящей до его прихода).
+    var carry: [String] = []
 
     /// Меню пузыря (долгое нажатие): письмо.
     var bubbleMenu: MessageBody?
@@ -64,6 +67,8 @@ final class ConversationModel {
         // До документа новой беседы: прежние разрешения ей не достаются.
         gate.open(spam: c?.spam == true, uids: c?.messages.map(\.uid) ?? [])
         web.run("ddm.set({messages:[],hasOlder:false})")
+        let stubs = carry
+        carry = []
         guard let c else { return }
         window = FeedWindow(c.messages)
         let first = window.first
@@ -72,6 +77,7 @@ final class ConversationModel {
             let loaded = await load(first, of: c)
             guard !Task.isCancelled, conversation?.ref == c.ref else { return }
             send("set", c, loaded, focus: focus)
+            stubs.forEach { web.run($0) }
         }
     }
 

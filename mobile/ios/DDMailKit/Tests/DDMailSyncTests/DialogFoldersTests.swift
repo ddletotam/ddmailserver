@@ -151,6 +151,48 @@ struct DialogFoldersTests {
         #expect(clash.folders[1].id != "spam")
         #expect(clash.folderOf(conv("x", "me@a", ["x@y"])) == nil)
     }
+
+    // Правка документа из настроек и меню полосы табов (`folders_ui.rs`).
+    @Test func addMoveUpdateRemoveKeepSpamLast() throws {
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        var (doc, id) = FoldersDoc(folders: [folder("a")]).withSpam().adding(now: t0)
+        #expect(id == "f18bcfe568000")
+        #expect(doc.folders.map(\.id) == ["a", id, "spam"])
+        #expect(doc.folders[1].name == "Папка 2")
+        #expect(doc.folders[1].icon == "📁")
+        // Второй в ту же миллисекунду — другой id.
+        #expect(doc.newID(now: t0) == "f18bcfe568001")
+
+        doc = doc.moving(id, to: 0)
+        #expect(doc.folders.map(\.id) == [id, "a", "spam"])
+        // Дальше «Спама» не уезжает, сам «Спам» не двигается.
+        doc = doc.moving(id, to: 99)
+        #expect(doc.folders.map(\.id) == ["a", id, "spam"])
+        #expect(doc.moving("spam", to: 0).folders.map(\.id) == ["a", id, "spam"])
+
+        doc = doc.updating(id) {
+            $0.name = "Работа"
+            $0.rules = FolderRules(identities: ["me@a"], domains: splitFolderList("Acme.com; x.ru"), kind: .direct)
+            $0.hidden = true
+        }
+        #expect(doc.updating("spam") { $0.name = "x" }.folders[2].name == "Спам")
+        #expect(doc.hiddenCount == 1)
+
+        // Через JSON — всё, что поправили.
+        let back = FoldersDoc.parse(JSONValue.parse(doc.toJSON().data())).withSpam()
+        let f = try #require(back.folders.first { $0.id == id })
+        #expect(f.name == "Работа")
+        #expect(f.rules.domains == ["acme.com", "x.ru"])
+        #expect(f.rules.kind == .direct)
+        #expect(f.hidden)
+        #expect(back.folders[0].toJSON()["system"] == nil)
+        #expect(back.spamIndex == 2)
+
+        doc = doc.removing(id).removing("spam")
+        #expect(doc.folders.map(\.id) == ["a", "spam"])
+        #expect(doc.onlySystem().folders.map(\.id) == ["spam"])
+        #expect(clipFolderIcon(" 👨‍👩‍👧‍👦🇷🇺abc ") == "👨‍👩‍👧‍👦🇷🇺ab")
+    }
 }
 
 struct IdentityColorsTests {
