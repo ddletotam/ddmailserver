@@ -12,16 +12,26 @@ public struct CalendarDTO: Decodable, Equatable, Identifiable, Sendable {
     public var canWrite: Bool
     public var enabled: Bool
     public var timezone: String
+    /// Что коллекция принимает: VEVENT, VTODO или оба. Пусто — старый сервер, только события.
+    public var components: [String]
 
     enum CodingKeys: String, CodingKey {
-        case id, name, description, color, enabled, timezone
+        case id, name, description, color, enabled, timezone, components
         case sourceType = "source_type"
         case canWrite = "can_write"
     }
 
-    public init(id: Int64, name: String = "", color: String = "", canWrite: Bool = false, enabled: Bool = true) {
-        self.id = id; self.name = name; description = ""; self.color = color; sourceType = ""
-        self.canWrite = canWrite; self.enabled = enabled; timezone = ""
+    public init(id: Int64, name: String = "", color: String = "", sourceType: String = "", canWrite: Bool = false,
+                enabled: Bool = true, components: [String] = []) {
+        self.id = id; self.name = name; description = ""; self.color = color; self.sourceType = sourceType
+        self.canWrite = canWrite; self.enabled = enabled; timezone = ""; self.components = components
+    }
+
+    /// Можно ли создать здесь задачу: пишется и принимает VTODO (списки
+    /// Напоминаний Apple — только VTODO).
+    public var acceptsTasks: Bool {
+        canWrite && sourceType != "ics_url" && sourceType != "ics_import"
+            && components.contains { $0.uppercased() == "VTODO" }
     }
 
     public init(from decoder: Decoder) throws {
@@ -34,6 +44,7 @@ public struct CalendarDTO: Decodable, Equatable, Identifiable, Sendable {
         canWrite = try c.value(.canWrite, false)
         enabled = try c.value(.enabled, true)
         timezone = try c.value(.timezone, "")
+        components = try c.value(.components, [])
     }
 }
 
@@ -218,6 +229,17 @@ public struct TaskDTO: Decodable, Equatable, Identifiable, Sendable {
         case completedAt = "completed_at"
         case canWrite = "can_write"
         case calendarName = "calendar_name"
+    }
+
+    public init(
+        id: Int64, calendarID: Int64 = 0, summary: String = "", description: String = "", due: Int64? = nil,
+        allDay: Bool = false, status: String = "NEEDS-ACTION", completed: Bool = false, priority: Int? = nil,
+        color: String = "", canWrite: Bool = false, calendarName: String = ""
+    ) {
+        self.id = id; self.calendarID = calendarID; self.summary = summary; self.description = description
+        start = nil; self.due = due; self.allDay = allDay; self.status = status; self.completed = completed
+        completedAt = nil; self.priority = priority; self.color = color; self.canWrite = canWrite
+        self.calendarName = calendarName
     }
 
     public init(from decoder: Decoder) throws {

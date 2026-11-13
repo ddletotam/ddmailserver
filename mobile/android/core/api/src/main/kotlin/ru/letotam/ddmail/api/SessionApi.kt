@@ -36,7 +36,7 @@ class SessionApi(
     private val baseUrl: String,
     private val http: OkHttpClient,
     private val tokens: TokenSource,
-) : PimApi {
+) : PimApi, TaskApi {
     private val raw = DdmailApi(baseUrl, http)
     private val refreshLock = Mutex()
 
@@ -148,11 +148,27 @@ class SessionApi(
             ListSerializer(SearchHitDto.serializer()),
         )
 
-    suspend fun tasks(includeCompleted: Boolean): List<TaskDto> =
+    override suspend fun tasks(includeCompleted: Boolean): List<TaskDto> =
         get("/tasks" + if (includeCompleted) "?include_completed=1" else "", ListSerializer(TaskDto.serializer()))
 
-    suspend fun setTaskCompleted(id: Long, completed: Boolean) {
+    override suspend fun setTaskCompleted(id: Long, completed: Boolean) {
         write("POST", "/tasks/$id/completion", JsonObject(mapOf("completed" to JsonPrimitive(completed))).toString())
+    }
+
+    override suspend fun createTask(req: TaskCreateRequest): TaskDto =
+        DdmailApi.json.decodeFromString(
+            TaskDto.serializer(),
+            write("POST", "/tasks", DdmailApi.json.encodeToString(TaskCreateRequest.serializer(), req)),
+        )
+
+    override suspend fun patchTask(id: Long, req: TaskPatchRequest): TaskDto =
+        DdmailApi.json.decodeFromString(
+            TaskDto.serializer(),
+            write("PATCH", "/tasks/$id", taskPatchBody(req)),
+        )
+
+    override suspend fun deleteTask(id: Long) {
+        write("DELETE", "/tasks/$id", null)
     }
 
     override suspend fun contacts(limit: Int): List<ContactDto> =
@@ -360,6 +376,20 @@ internal fun restoreSpamBody(refs: List<MessageRef>, trust: Boolean): String {
 }
 
 /** Тело `POST /spam/blacklist-and-purge` — как у десктопа (`native_provider.rs`). */
+/**
+ * Тело PATCH /tasks/{id}: только заданные поля. Собрано руками, а не
+ * сериализатором: «не трогать» здесь — отсутствие поля, и это не должно
+ * зависеть от настроек `encodeDefaults`/`explicitNulls` общего `json`.
+ */
+internal fun taskPatchBody(req: TaskPatchRequest): String = JsonObject(
+    buildMap {
+        req.summary?.let { put("summary", JsonPrimitive(it)) }
+        req.description?.let { put("description", JsonPrimitive(it)) }
+        req.due?.let { put("due", JsonPrimitive(it)) }
+        req.allDay?.let { put("all_day", JsonPrimitive(it)) }
+    },
+).toString()
+
 internal fun blacklistAndPurgeBody(scope: String, messageIds: List<Long>, fallbackAddress: String): String =
     JsonObject(
         mapOf(
