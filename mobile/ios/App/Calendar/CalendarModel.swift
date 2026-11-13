@@ -55,7 +55,8 @@ struct EventDraft: Equatable {
 @MainActor @Observable
 final class CalendarModel {
     enum ViewMode: String, CaseIterable, Identifiable {
-        case day, week, month
+        // Порядок переключателя — как в mobile-layout.md: «Месяц / Неделя / День».
+        case month, week, day
         var id: Self { self }
         var title: String {
             switch self {
