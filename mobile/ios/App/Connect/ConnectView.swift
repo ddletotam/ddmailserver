@@ -37,6 +37,10 @@ struct ConnectView: View {
             .formStyle(.grouped)
             .frame(maxWidth: 560)
             .frame(maxWidth: .infinity)
+            #if os(iOS)
+            // Фон формы — на всё окно, а не только в колонке 560 pt (iPad).
+            .background(Color(uiColor: .systemGroupedBackground))
+            #endif
             .navigationTitle(model.title)
             .toolbar {
                 if let onCancel {

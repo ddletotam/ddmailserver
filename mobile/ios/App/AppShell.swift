@@ -30,6 +30,8 @@ struct AppShell: View {
                 SettingsView(app: app, workspace: workspace) {
                     Task { await workspace.reminders?.refresh() }
                 }
+                // Лист не наследует акцент окна — зелёный десктопа и здесь.
+                .tint(Palette.accent)
                 #if os(macOS)
                 .frame(minWidth: 520, minHeight: 560)
                 #endif
