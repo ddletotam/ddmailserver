@@ -16,7 +16,14 @@ data class CalendarDto(
     @SerialName("can_write") val canWrite: Boolean = false,
     val enabled: Boolean = true,
     val timezone: String = "",
-)
+    /** Что коллекция принимает: VEVENT, VTODO или оба. Пусто — старый сервер, только события. */
+    val components: List<String> = emptyList(),
+) {
+    /** Можно ли создать здесь задачу: пишется и принимает VTODO (списки Напоминаний Apple — только VTODO). */
+    val acceptsTasks: Boolean
+        get() = canWrite && sourceType != "ics_url" && sourceType != "ics_import" &&
+            components.any { it.equals("VTODO", ignoreCase = true) }
+}
 
 @Serializable
 data class AttendeeDto(
@@ -103,6 +110,30 @@ data class TaskDto(
     @SerialName("identity_email") val identityEmail: String = "",
     @SerialName("calendar_name") val calendarName: String = "",
 )
+
+/** Новая задача (POST /tasks). [due] — мс; при [allDay] — полночь UTC нужной даты. */
+@Serializable
+data class TaskCreateRequest(
+    @SerialName("calendar_id") val calendarId: Long,
+    val summary: String,
+    val description: String = "",
+    val due: Long? = null,
+    @SerialName("all_day") val allDay: Boolean = false,
+)
+
+/**
+ * Правка задачи (PATCH /tasks/{id}): `null` — поле не трогать (в JSON не
+ * пишется), `due = 0` — снять срок. Коллекцию правкой не меняют.
+ */
+@Serializable
+data class TaskPatchRequest(
+    val summary: String? = null,
+    val description: String? = null,
+    val due: Long? = null,
+    @SerialName("all_day") val allDay: Boolean? = null,
+) {
+    val isEmpty: Boolean get() = summary == null && description == null && due == null && allDay == null
+}
 
 @Serializable
 data class ContactDto(
