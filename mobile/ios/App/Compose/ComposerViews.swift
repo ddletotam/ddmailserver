@@ -334,7 +334,14 @@ private struct OverrideFields: View {
                 Text("Тема").foregroundStyle(.secondary).frame(width: 56, alignment: .leading)
                 TextField("Re: …", text: $draft.subject).accessibilityIdentifier("composer.subject")
             }
-            FromPicker(selection: $draft.from, identities: identities)
+            // Подпись — как у «Кому / Копия / Тема»: без неё «Автоматически ⇕»
+            // висело без объяснения, что это.
+            HStack {
+                Text("От").foregroundStyle(.secondary).frame(width: 56, alignment: .leading)
+                FromPicker(selection: $draft.from, identities: identities)
+                    .labelsHidden()
+                Spacer(minLength: 0)
+            }
         }
         .font(.subheadline)
         .textFieldStyle(.roundedBorder)

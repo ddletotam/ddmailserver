@@ -31,6 +31,16 @@ struct SettingsView: View {
                     }
                 }
                 Section {
+                    NavigationLink {
+                        ExternalContentView()
+                    } label: {
+                        Label("Внешний контент", systemImage: "photo.badge.checkmark")
+                    }
+                    .accessibilityIdentifier("settings.external")
+                } footer: {
+                    Text("От кого картинки в письмах показываются сразу — посмотреть и отозвать.")
+                }
+                Section {
                     Picker("Загружать письма заранее", selection: $settings.prefetch) {
                         Text("Не выбрано").tag(AppSettings.Prefetch?.none)
                         ForEach(AppSettings.Prefetch.allCases) { Text($0.title).tag(Optional($0)) }
