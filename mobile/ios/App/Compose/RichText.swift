@@ -100,7 +100,7 @@ enum RichText {
         ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "")
     }
 
-    nonisolated(unsafe) private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+    private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
 
     private static func hasURL(_ s: String) -> Bool {
         guard let d = detector else { return false }
