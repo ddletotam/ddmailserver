@@ -34,6 +34,44 @@ const native = (() => {
   return () => {};
 })();
 
+/**
+ * Долгое нажатие → меню. Android WebView и Мак (правый клик) присылают
+ * `contextmenu`; WKWebView на iPhone/iPad при долгом нажатии его не шлёт, а
+ * начинает выделение текста — меню пузыря и вложения были недостижимы.
+ * Поэтому на сенсорном WebKit долгое нажатие считаем сами: 450 мс без
+ * сдвига пальца дальше 10 px, затем гасим начатое выделение и следующий клик.
+ */
+const touchWebKit = !window.ddmNative && !!(window.webkit && window.webkit.messageHandlers) &&
+  ('ontouchstart' in window);
+function onLongPress(el, handler) {
+  el.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); handler(); });
+  if (!touchWebKit) return;
+  let timer = null, x = 0, y = 0, fired = false;
+  const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  el.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) { cancel(); return; }
+    e.stopPropagation();
+    fired = false;
+    x = e.touches[0].clientX; y = e.touches[0].clientY;
+    cancel();
+    timer = setTimeout(() => {
+      timer = null; fired = true;
+      const sel = window.getSelection && window.getSelection();
+      if (sel) sel.removeAllRanges();
+      handler();
+    }, 450);
+  }, { passive: true });
+  el.addEventListener('touchmove', (e) => {
+    const t = e.touches[0];
+    if (t && Math.hypot(t.clientX - x, t.clientY - y) > 10) cancel();
+  }, { passive: true });
+  el.addEventListener('touchend', cancel, { passive: true });
+  el.addEventListener('touchcancel', cancel, { passive: true });
+  // Палец отпущен после срабатывания — клик не должен открыть вложение/ссылку.
+  el.addEventListener('click', (e) => { if (fired) { fired = false; e.preventDefault(); e.stopPropagation(); } }, true);
+}
+if (touchWebKit) document.documentElement.classList.add('ddm-touch-webkit');
+
 const feed = document.getElementById('feed');
 const olderEl = document.getElementById('older');
 
@@ -555,11 +593,7 @@ function makeRow(msg) {
       chip.append(icon('attach'), name, size);
       chip.addEventListener('click', () => native('openAttachment', msg.uid, a.index));
       // Долгое нажатие на чип — «Открыть» / «Сохранить в Загрузки».
-      chip.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        native('attachmentMenu', msg.uid, a.index);
-      });
+      onLongPress(chip, () => native('attachmentMenu', msg.uid, a.index));
       box.appendChild(chip);
     }
     b.appendChild(box);
@@ -574,10 +608,7 @@ function makeRow(msg) {
   row.appendChild(b);
 
   // Долгое нажатие на пузырь — нативное меню (ответить, переслать, …).
-  row.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    native('bubbleMenu', msg.uid);
-  });
+  onLongPress(row, () => native('bubbleMenu', msg.uid));
 
   const entry = { msg, host, shadow, root: null, imagesAllowed: !!msg.imagesAllowed, imagesBtn, imagesBox, row, deliveryEl };
   // «Показать» — на это письмо до закрытия беседы; «Всегда» — запоминает

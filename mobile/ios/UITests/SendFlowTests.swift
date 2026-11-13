@@ -320,11 +320,8 @@ enum UIFlow {
             if format.exists {
                 format.tap()
                 sleep(2)
-                print("FORMAT:", app.descendants(matching: .any).allElementsBoundByIndex.compactMap { $0.label.isEmpty ? nil : $0.label })
                 continue
             }
-            print("MENU:", app.menuItems.allElementsBoundByIndex.map(\.label),
-                  "BUTTONS:", app.buttons.allElementsBoundByIndex.map(\.label))
             // Стрелка «дальше» — последняя кнопка меню выделения.
             let next = app.buttons.matching(NSPredicate(format: "label IN %@", ["Следующая страница", "Далее", "Ещё", "Forward", "Next page", "Show More Items"])).firstMatch
             guard next.exists else { return false }

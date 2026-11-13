@@ -80,3 +80,7 @@ body {
 }
 .ddm-dl-who { font-weight: 400; margin: 2px 0 0 20px; overflow-wrap: anywhere; }
 .ddm-out.ddm-failed .ddm-bubble { border-color: var(--fail); }
+
+/* iPhone/iPad: долгое нажатие на пузырь открывает наше меню (conversation.js,
+   onLongPress), а не системную выноску. */
+.ddm-touch-webkit .ddm-row { -webkit-touch-callout: none; }
