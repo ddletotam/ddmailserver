@@ -161,4 +161,48 @@ class DialogFoldersTest {
         assertTrue(clash.folders[1].id != "spam")
         assertNull(clash.folderOf(conv("x", "me@a", listOf("x@y"))))
     }
+
+    @Test
+    fun editorFieldsRoundtripAndUnknownSurvive() {
+        val src = """{"x":1,"folders":[{"id":"a","name":"A","icon":"","rules":{"domains":["acme.com"],"future":true},"later":"keep"}]}"""
+        val doc = FoldersDoc.parse(Json.parseToJsonElement(src))
+        val edited = doc.edited("a") {
+            it.copy(
+                name = "Работа", icon = "💼",
+                rules = it.rules.copy(identities = splitRuleList("Me@A.ru, me@b.ru"), kind = DialogKind.Direct),
+                hidden = true, autoRead = true,
+            )
+        }
+        val json = edited.toJson()
+        val back = FoldersDoc.parse(Json.parseToJsonElement(json.toString()))
+        val f = back.folders.single()
+        assertEquals("Работа", f.name)
+        assertEquals("💼", f.icon)
+        assertEquals(listOf("me@a.ru", "me@b.ru"), f.rules.identities)
+        assertEquals(listOf("acme.com"), f.rules.domains)
+        assertEquals(DialogKind.Direct, f.rules.kind)
+        assertTrue(f.hidden && f.autoRead)
+        // Неизвестные поля документа, папки и правил переживают правку.
+        assertEquals(1, json["x"]!!.jsonPrimitive.int)
+        val fo = json["folders"]!!.jsonArray[0].jsonObject
+        assertEquals("keep", fo["later"]!!.jsonPrimitive.content)
+        assertTrue(fo["rules"]!!.jsonObject["future"]!!.jsonPrimitive.content == "true")
+        // У обычной папки `system` не пишется.
+        assertNull(fo["system"])
+    }
+
+    @Test
+    fun addMoveRemove() {
+        val doc = FoldersDoc().withSpam().added("f1").added("f2")
+        assertEquals(listOf("spam", "f1", "f2"), doc.folders.map { it.id })
+        assertEquals("Папка 2", doc.folders[1].name)
+        assertEquals("📁", doc.folders[1].icon)
+        assertEquals(listOf("f2", "spam", "f1"), doc.moved("f2", "spam").folders.map { it.id })
+        assertEquals(listOf("spam", "f2"), doc.removed("f1").folders.map { it.id })
+        // Системную не удалить и не настроить.
+        assertEquals(3, doc.removed("spam").folders.size)
+        assertEquals("Спам", doc.edited("spam") { it.copy(name = "x") }.folders[0].name)
+        val id = doc.newId(0x10)
+        assertTrue(id.startsWith("f10"))
+    }
 }

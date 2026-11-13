@@ -73,6 +73,9 @@ data class DialogFolder(
     val isSystem get() = system.isNotEmpty()
 }
 
+/** Папки правили на другой станции: своя правка не записана, документ — с сервера. */
+class FoldersConflict : Exception("Папки изменены на другой станции — правка не сохранена")
+
 /** `system` папки «Спам». */
 const val SYSTEM_SPAM = "spam"
 
@@ -193,6 +196,56 @@ data class FoldersDoc(
         return out.toList() to inbox
     }
 
+    /** Индекс папки по id. */
+    fun indexOf(id: String): Int? = folders.indexOfFirst { it.id == id }.takeIf { it >= 0 }
+
+    /** Свежий id папки — как `new_id` десктопа: `f<мс hex><n>`. */
+    fun newId(now: Long = System.currentTimeMillis()): String {
+        val base = java.lang.Long.toHexString(now)
+        var n = 0
+        while (true) {
+            val id = "f$base$n"
+            if (indexOf(id) == null) return id
+            n++
+        }
+    }
+
+    /** «Новая папка»: в конец, имя «Папка N», иконка 📁 (как `folder_add` десктопа). */
+    fun added(id: String = newId()): FoldersDoc {
+        val n = folders.size + 1
+        return copy(
+            folders = folders + DialogFolder(
+                id = id, name = "Папка $n", icon = "📁", rules = FolderRules(),
+                include = emptyList(), exclude = emptyList(), hidden = false, autoRead = false,
+            ),
+        )
+    }
+
+    /** Правка обычной папки; системные не настраиваются. */
+    fun edited(id: String, f: (DialogFolder) -> DialogFolder): FoldersDoc {
+        val i = indexOf(id) ?: return this
+        if (folders[i].isSystem) return this
+        return copy(folders = folders.toMutableList().also { it[i] = f(folders[i]) })
+    }
+
+    /** Удалить папку (системную — нельзя); её диалоги возвращаются во «Входящие». */
+    fun removed(id: String): FoldersDoc = copy(folders = folders.filter { it.isSystem || it.id != id })
+
+    /**
+     * Переставить папку [id] на место папки [toId] — по id, а не по номерам:
+     * номера в полосе табов и в документе расходятся (скрытых в полосе нет).
+     * Порядок папок — это и порядок табов, и приоритет правил.
+     */
+    fun moved(id: String, toId: String): FoldersDoc {
+        val from = indexOf(id) ?: return this
+        val to = indexOf(toId) ?: return this
+        if (from == to) return this
+        val list = folders.toMutableList()
+        val f = list.removeAt(from)
+        list.add(to, f)
+        return copy(folders = list)
+    }
+
     fun toJson(): JsonObject {
         val list = JsonArray(folders.map { it.toJson() })
         return JsonObject(raw + ("folders" to list))
@@ -231,17 +284,46 @@ data class FoldersDoc(
     }
 }
 
+/**
+ * Запись папки: все известные поля — из модели (их правит редактор), прочее —
+ * как было в исходном JSON (`#[serde(flatten)] extra` десктопа). Правила тоже
+ * сливаются с исходными: неизвестные ключи `rules` переживают правку.
+ */
 private fun DialogFolder.toJson(): JsonObject {
     fun keys(l: List<DialogKey>) = JsonArray(
         l.map { JsonObject(mapOf("account" to JsonPrimitive(it.account), "id" to JsonPrimitive(it.id))) },
     )
-    return JsonObject(
-        raw + mapOf(
-            "include" to keys(include),
-            "exclude" to keys(exclude),
+    val rawRules = raw["rules"] as? JsonObject ?: JsonObject(emptyMap())
+    val rulesJson = JsonObject(
+        rawRules + mapOf(
+            "identities" to JsonArray(rules.identities.map(::JsonPrimitive)),
+            "domains" to JsonArray(rules.domains.map(::JsonPrimitive)),
+            "kind" to JsonPrimitive(
+                when (rules.kind) {
+                    DialogKind.Any -> "any"
+                    DialogKind.Direct -> "direct"
+                    DialogKind.Group -> "group"
+                },
+            ),
         ),
     )
+    val out = raw + mapOf(
+        "id" to JsonPrimitive(id),
+        "name" to JsonPrimitive(name),
+        "icon" to JsonPrimitive(icon),
+        "rules" to rulesJson,
+        "include" to keys(include),
+        "exclude" to keys(exclude),
+        "hidden" to JsonPrimitive(hidden),
+        "auto_read" to JsonPrimitive(autoRead),
+    )
+    // `system` у обычной папки не пишется (`skip_serializing_if` десктопа).
+    return JsonObject(if (system.isEmpty()) out - "system" else out + ("system" to JsonPrimitive(system)))
 }
+
+/** Список правила из поля ввода: через запятую, точку с запятой, пробел; в нижнем регистре. */
+fun splitRuleList(text: String): List<String> =
+    text.split(',', ';', ' ', '\n').map { it.trim().lowercase() }.filter { it.isNotEmpty() }
 
 private fun JsonObject.str(k: String) = (this[k] as? JsonPrimitive)?.contentOrNull.orEmpty()
 private fun JsonObject.bool(k: String) = (this[k] as? JsonPrimitive)?.booleanOrNull ?: false

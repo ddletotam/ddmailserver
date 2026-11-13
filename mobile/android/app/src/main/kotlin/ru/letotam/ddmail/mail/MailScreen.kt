@@ -77,6 +77,9 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.ui.zIndex
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.key
@@ -429,19 +432,29 @@ private fun NewChatPane(to: String, vm: MailViewModel, onBack: (() -> Unit)?, mo
             verticalArrangement = Arrangement.spacedBy(6.dp, Alignment.Bottom),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp),
         ) {
-            items(u.pendingNew) { text ->
+            items(u.pendingNew, key = { it.key }) { p ->
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-                    Text(
-                        text,
-                        modifier = Modifier.widthIn(max = 480.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xFFDCF8C6)).padding(horizontal = 12.dp, vertical = 8.dp),
-                    )
+                    Column(
+                        Modifier.widthIn(max = 480.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xFFDCF8C6)).padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalAlignment = Alignment.End,
+                    ) {
+                        Text(p.text)
+                        // Как заглушка в ленте: «Отправляется…», потом «Отправлено» — пока
+                        // беседа не придёт с сервера и не откроется вместо заготовки.
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (p.sent) Icon(Icons.Filled.Check, null, tint = Accent, modifier = Modifier.size(14.dp))
+                            Text(
+                                if (p.sent) " Отправлено" else "Отправляется…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFF6B7480),
+                            )
+                        }
+                    }
                 }
             }
         }
         HorizontalDivider()
-        val focus = remember { androidx.compose.ui.focus.FocusRequester() }
-        LaunchedEffect(to) { runCatching { focus.requestFocus() } }
-        ComposerBar(vm.compose, conversation = null, newTo = to, focus = focus)
+        ComposerBar(vm.compose, conversation = null, newTo = to, focusOnStart = true)
     }
 }
 
@@ -606,7 +619,7 @@ private fun ListPane(
 ) {
     Column(modifier) {
         // На время выбора панель действий заменяет полосу табов (§5).
-        if (picked.isEmpty()) { if (showTabs) FolderTabs(s, vm::selectFolder) }
+        if (picked.isEmpty()) { if (showTabs) FolderTabs(s, vm) }
         else if (s.inSpam) SpamSelectionBar(picked.size, vm)
         else SelectionBar(picked.size, vm, onMove, onDelete)
         HorizontalDivider()
@@ -657,28 +670,133 @@ private fun ListPane(
  * Табы папок, как в Telegram (§4 десктопа): текст, выбранный — акцентом с
  * подчёркиванием; таба «Все» нет — ничего не выбрано значит «Входящие». Пока
  * выбрана папка, первым стоит иконка «Входящих» со счётчиком — путь назад.
+ *
+ * Долгое нажатие — меню полосы, как правый клик десктопа: на табе — «Все
+ * прочитаны», «Настроить…», «Удалить» (у «Спама» — только первое); везде —
+ * «Новая папка» и «Показать скрытые (N)» / «Не показывать скрытые».
  */
 @Composable
-private fun FolderTabs(s: MailState, onSelect: (String?) -> Unit) {
+private fun FolderTabs(s: MailState, vm: MailViewModel) {
     if (s.tabs.isEmpty()) return
-    LazyRow(
-        Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    // Меню открыто: на табе (`tab != null`) или на полосе.
+    var menuFor by remember { mutableStateOf<FolderTab?>(null) }
+    var stripMenu by remember { mutableStateOf(false) }
+    var deleteAsk by remember { mutableStateOf<FolderTab?>(null) }
+    deleteAsk?.let { t ->
+        AlertDialog(
+            onDismissRequest = { deleteAsk = null },
+            title = { Text("Удалить папку «${t.name.ifBlank { "без названия" }}»?") },
+            text = { Text("На всех устройствах. Диалоги вернутся во «Входящие», положенные в папку руками — тоже.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    deleteAsk = null
+                    vm.deleteFolder(t.id)
+                }) { Text("Удалить", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { IconButton(onClick = { deleteAsk = null }) { Icon(Icons.Filled.Close, "Отмена") } },
+        )
+    }
+    val menuItems = @Composable { tab: FolderTab?, close: () -> Unit ->
+        FolderMenuItems(tab, s, vm, close) { deleteAsk = it }
+    }
+    // Долгое нажатие мимо табов — меню полосы. Таб своё долгое нажатие ловит
+    // сам, но полоса-родитель видит тот же жест: решаем чуть позже — если
+    // открылось меню таба, меню полосы не нужно.
+    var stripAsk by remember { mutableStateOf(0) }
+    LaunchedEffect(stripAsk) {
+        if (stripAsk == 0) return@LaunchedEffect
+        kotlinx.coroutines.delay(120)
+        if (menuFor == null) stripMenu = true
+    }
+    Box(
+        Modifier.fillMaxWidth().pointerInput(Unit) {
+            detectTapGestures(onLongPress = { stripAsk++ })
+        },
     ) {
-        if (s.active != null) {
-            item(key = "inbox") {
-                Tab("", s.inboxUnread, selected = false, icon = Icons.Filled.Inbox, description = stringResource(R.string.tab_inbox_back)) { onSelect(null) }
+        LazyRow(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            if (s.active != null) {
+                item(key = "inbox") {
+                    Tab(
+                        "", s.inboxUnread, selected = false, icon = Icons.Filled.Inbox,
+                        description = stringResource(R.string.tab_inbox_back),
+                        onLongClick = { stripAsk++ },
+                    ) { vm.selectFolder(null) }
+                }
+            }
+            items(s.tabs, key = { it.id }) { t ->
+                val selected = t.index == s.active
+                val title = if (t.icon.isBlank()) t.name else "${t.icon} ${t.name}"
+                Box {
+                    // Повторное касание выбранного таба — назад во «Входящие».
+                    Tab(title, t.unread, selected, dim = t.hidden, onLongClick = { menuFor = t }) { vm.selectFolder(if (selected) null else t.id) }
+                    DropdownMenu(expanded = menuFor?.id == t.id, onDismissRequest = { menuFor = null }) {
+                        menuItems(t) { menuFor = null }
+                    }
+                }
             }
         }
-        items(s.tabs, key = { it.id }) { t ->
-            val selected = t.index == s.active
-            val title = if (t.icon.isBlank()) t.name else "${t.icon} ${t.name}"
-            // Повторное касание выбранного таба — назад во «Входящие».
-            Tab(title, t.unread, selected) { onSelect(if (selected) null else t.id) }
+        DropdownMenu(expanded = stripMenu, onDismissRequest = { stripMenu = false }) {
+            menuItems(null) { stripMenu = false }
         }
     }
 }
 
+/** Пункты меню полосы табов; [tab] — таб под пальцем (`null` — полоса). */
+@Composable
+private fun FolderMenuItems(tab: FolderTab?, s: MailState, vm: MailViewModel, close: () -> Unit, askDelete: (FolderTab) -> Unit) {
+    if (tab != null) {
+        DropdownMenuItem(
+            text = { Text("Все прочитаны") },
+            leadingIcon = { Icon(Icons.Filled.DoneAll, null) },
+            onClick = {
+                close()
+                vm.markFolderRead(tab.id)
+            },
+        )
+        if (!tab.system) {
+            DropdownMenuItem(
+                text = { Text("Настроить…") },
+                leadingIcon = { Icon(Icons.Filled.Tune, null) },
+                onClick = {
+                    close()
+                    vm.folderEditor.value = tab.id
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("Удалить") },
+                leadingIcon = { Icon(Icons.Filled.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                onClick = {
+                    close()
+                    askDelete(tab)
+                },
+            )
+        }
+    }
+    DropdownMenuItem(
+        text = { Text("Новая папка") },
+        leadingIcon = { Icon(Icons.Filled.CreateNewFolder, null) },
+        onClick = {
+            close()
+            // И сразу в редактор — назвать её (как десктоп открывает настройки).
+            vm.folderEditor.value = vm.newFolder()
+        },
+    )
+    if (s.hiddenCount > 0) {
+        DropdownMenuItem(
+            text = { Text(if (s.showHidden) "Не показывать скрытые" else "Показать скрытые (${s.hiddenCount})") },
+            leadingIcon = { Icon(if (s.showHidden) Icons.Filled.VisibilityOff else Icons.Filled.Visibility, null) },
+            onClick = {
+                close()
+                vm.toggleShowHidden()
+            },
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun Tab(
     title: String,
@@ -686,10 +804,15 @@ private fun Tab(
     selected: Boolean,
     icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
     description: String? = null,
+    /** Скрытая папка, показанная по «Показать скрытые», — бледнее. */
+    dim: Boolean = false,
+    onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     Column(
-        Modifier.clip(RoundedCornerShape(6.dp)).clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 8.dp),
+        Modifier.clip(RoundedCornerShape(6.dp)).combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .alpha(if (dim) 0.5f else 1f),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {

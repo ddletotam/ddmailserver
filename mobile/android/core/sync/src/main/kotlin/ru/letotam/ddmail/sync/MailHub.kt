@@ -214,6 +214,16 @@ class MailHub(
         }
     }
 
+    /**
+     * Правка документа папок (контракт §5, десктоп §4): на сервере ddmail, если
+     * такая учётка есть, иначе — локальный документ телефона.
+     */
+    suspend fun editFolders(transform: (FoldersDoc) -> FoldersDoc) {
+        ddmail?.let { return it.editFolders(transform) }
+        val doc = parseDoc(dao.meta(K_LOCAL_FOLDERS)).withSpam()
+        dao.setMeta(K_LOCAL_FOLDERS, transform(doc).withSpam().toJson().toString())
+    }
+
     private fun parseDoc(s: String?): FoldersDoc =
         s?.let { runCatching { FoldersDoc.parse(Json.parseToJsonElement(it)) }.getOrNull() } ?: FoldersDoc()
 

@@ -102,6 +102,8 @@ fun SettingsDialog(
     calendars: (@Composable () -> Unit)? = null,
     /** Адресные книги (книга по умолчанию для новых контактов). */
     addressBooks: (@Composable () -> Unit)? = null,
+    /** Раздел «Папки» (десктоп §5г): «Показывать папки», список, правка, порядок. */
+    folders: (@Composable () -> Unit)? = null,
     onClose: () -> Unit,
 ) {
     var removeAsk by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<MailSource?>(null) }
@@ -173,6 +175,11 @@ fun SettingsDialog(
                         Switch(checked = notify, onCheckedChange = { v -> scope.launch { settings.setNotifications(v) } })
                     }
                     HorizontalDivider()
+                    folders?.let {
+                        Section("Папки")
+                        it()
+                        HorizontalDivider()
+                    }
                     Section("Календарь")
                     val app = androidx.compose.ui.platform.LocalContext.current.applicationContext as ru.letotam.ddmail.DdmailApp
                     val remind by app.calendarPrefs.remindersOn.collectAsState(initial = true)
