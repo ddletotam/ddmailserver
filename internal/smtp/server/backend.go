@@ -5,6 +5,7 @@ import (
 
 	"github.com/ddletotam/ddmailserver/internal/authlimit"
 	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/notify"
 	"github.com/emersion/go-smtp"
 )
 
@@ -13,6 +14,9 @@ type Backend struct {
 	database *db.DB
 	// authLimiter throttles failed AUTH attempts; nil disables throttling.
 	authLimiter *authlimit.Limiter
+	// hub and kickOutbox: see Server.SetNotifyHub / SetOutboxTrigger.
+	hub        *notify.Hub
+	kickOutbox func()
 }
 
 // NewBackend creates a new SMTP backend
@@ -28,6 +32,8 @@ func (b *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	return &Session{
 		database:    b.database,
 		authLimiter: b.authLimiter,
+		hub:         b.hub,
+		kickOutbox:  b.kickOutbox,
 		conn:        c,
 	}, nil
 }

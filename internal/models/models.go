@@ -242,6 +242,13 @@ type Message struct {
 	// Remote IMAP tracking
 	RemoteUID    uint32 `json:"remote_uid"`
 	RemoteFolder string `json:"remote_folder"`
+
+	// Доставка исходящего (только у копии в «Отправленных», миграция 056):
+	// статус и код причины — константы пакета outbox; пусто — неизвестно.
+	DeliveryStatus string `json:"delivery_status"`
+	DeliveryReason string `json:"delivery_reason"`
+	// DeliveryFailed — адреса, которым доставить не удалось, через запятую.
+	DeliveryFailed string `json:"delivery_failed"`
 }
 
 // DateAsTime returns the message date as time.Time (for IMAP/CalDAV compatibility).
@@ -306,6 +313,11 @@ type OutboxMessage struct {
 	CreatedAt int64  `json:"created_at"`
 	UpdatedAt int64  `json:"updated_at"`
 	SentAt    int64  `json:"sent_at"`
+	// MessageID — Message-ID письма (с угловыми скобками или без — как
+	// вернул парсер). Связывает строку очереди с копией в «Отправленных».
+	// Пусто у строк, принятых до миграции 056, пока их не подготовили к
+	// отправке (outbox.Service.Prepare).
+	MessageID string `json:"message_id"`
 }
 
 // Domain represents a local domain that the MX server accepts mail for

@@ -16,8 +16,8 @@ func (db *DB) CreateOutboxMessage(msg *models.OutboxMessage) error {
 	query := `
 		INSERT INTO outbox_messages (
 			user_id, account_id, from_addr, to_addr, cc, bcc, subject, body, body_html,
-			raw_email, status, retries, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			raw_email, status, retries, created_at, updated_at, message_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		RETURNING id
 	`
 
@@ -31,7 +31,7 @@ func (db *DB) CreateOutboxMessage(msg *models.OutboxMessage) error {
 		query,
 		msg.UserID, accountID, msg.From, msg.To, msg.Cc, msg.Bcc,
 		msg.Subject, msg.Body, msg.BodyHTML, msg.RawEmail,
-		msg.Status, msg.Retries, msg.CreatedAt, msg.UpdatedAt,
+		msg.Status, msg.Retries, msg.CreatedAt, msg.UpdatedAt, msg.MessageID,
 	).Scan(&msg.ID)
 
 	if err != nil {
@@ -48,7 +48,7 @@ func (db *DB) CreateOutboxMessage(msg *models.OutboxMessage) error {
 func (db *DB) GetPendingOutboxMessages(limit int) ([]*models.OutboxMessage, error) {
 	query := `
 		SELECT id, user_id, COALESCE(account_id, 0), from_addr, to_addr, cc, bcc, subject, body, body_html,
-		       raw_email, status, retries, last_error, created_at, updated_at, sent_at
+		       raw_email, status, retries, last_error, created_at, updated_at, sent_at, message_id
 		FROM outbox_messages
 		WHERE status = 'pending' AND COALESCE(next_attempt_at, 0) <= $2
 		ORDER BY created_at ASC
@@ -68,10 +68,11 @@ func (db *DB) GetPendingOutboxMessages(limit int) ([]*models.OutboxMessage, erro
 func (db *DB) GetOutboxMessageByID(id int64) (*models.OutboxMessage, error) {
 	msg := &models.OutboxMessage{}
 	var sentAt sql.NullInt64
+	var lastError sql.NullString
 
 	query := `
 		SELECT id, user_id, COALESCE(account_id, 0), from_addr, to_addr, cc, bcc, subject, body, body_html,
-		       raw_email, status, retries, last_error, created_at, updated_at, sent_at
+		       raw_email, status, retries, last_error, created_at, updated_at, sent_at, message_id
 		FROM outbox_messages
 		WHERE id = $1
 	`
@@ -79,7 +80,7 @@ func (db *DB) GetOutboxMessageByID(id int64) (*models.OutboxMessage, error) {
 	err := db.QueryRow(query, id).Scan(
 		&msg.ID, &msg.UserID, &msg.AccountID, &msg.From, &msg.To, &msg.Cc, &msg.Bcc,
 		&msg.Subject, &msg.Body, &msg.BodyHTML, &msg.RawEmail,
-		&msg.Status, &msg.Retries, &msg.LastError, &msg.CreatedAt, &msg.UpdatedAt, &sentAt,
+		&msg.Status, &msg.Retries, &lastError, &msg.CreatedAt, &msg.UpdatedAt, &sentAt, &msg.MessageID,
 	)
 
 	if err == sql.ErrNoRows {
@@ -92,8 +93,58 @@ func (db *DB) GetOutboxMessageByID(id int64) (*models.OutboxMessage, error) {
 	if sentAt.Valid {
 		msg.SentAt = sentAt.Int64
 	}
+	if lastError.Valid {
+		msg.LastError = lastError.String
+	}
 
 	return msg, nil
+}
+
+// SetOutboxPrepared stores the final wire form of a queued message and its
+// Message-ID — once: from then on every attempt sends the same bytes under
+// the same Message-ID, and the row is linked to the sender's copy in Sent by
+// that id. It happens when the message is accepted, or, for rows queued
+// before migration 056, on their first attempt after it.
+//
+// The handler and a send task can race for a fresh row (the periodic tick
+// sees it as soon as it is inserted), and for a row without a wire form each
+// would compose its own, with its own Message-ID. Only the first write
+// lands; won=false means another caller prepared the row first, and raw /
+// messageID are what it stored — the caller must use those.
+func (db *DB) SetOutboxPrepared(id int64, raw []byte, messageID string) (storedRaw []byte, storedID string, won bool, err error) {
+	err = db.QueryRow(`
+		UPDATE outbox_messages
+		SET raw_email = $1, message_id = $2, updated_at = $3
+		WHERE id = $4 AND message_id = ''
+		RETURNING id
+	`, raw, messageID, timeutil.Now(), id).Scan(&id)
+	if err == nil {
+		return raw, messageID, true, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, "", false, fmt.Errorf("failed to store prepared outbox message %d: %w", id, err)
+	}
+	err = db.QueryRow(`SELECT raw_email, message_id FROM outbox_messages WHERE id = $1`, id).Scan(&storedRaw, &storedID)
+	if err != nil {
+		return nil, "", false, fmt.Errorf("failed to read prepared outbox message %d: %w", id, err)
+	}
+	return storedRaw, storedID, false, nil
+}
+
+// OutboxMessageIDQueued reports whether the user already has a message with
+// this Message-ID in the outbox (any status).
+func (db *DB) OutboxMessageIDQueued(userID int64, messageID string) (bool, error) {
+	if messageID == "" {
+		return false, nil
+	}
+	var exists bool
+	err := db.QueryRow(`
+		SELECT EXISTS(SELECT 1 FROM outbox_messages WHERE user_id = $1 AND message_id = $2)
+	`, userID, messageID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("failed to look up outbox message id: %w", err)
+	}
+	return exists, nil
 }
 
 // ClaimOutboxMessage atomically moves a due message from 'pending' to
@@ -262,7 +313,7 @@ func scanOutboxMessages(rows *sql.Rows) ([]*models.OutboxMessage, error) {
 		err := rows.Scan(
 			&msg.ID, &msg.UserID, &msg.AccountID, &msg.From, &msg.To, &msg.Cc, &msg.Bcc,
 			&msg.Subject, &msg.Body, &msg.BodyHTML, &msg.RawEmail,
-			&msg.Status, &msg.Retries, &lastError, &msg.CreatedAt, &msg.UpdatedAt, &sentAt,
+			&msg.Status, &msg.Retries, &lastError, &msg.CreatedAt, &msg.UpdatedAt, &sentAt, &msg.MessageID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan outbox message: %w", err)

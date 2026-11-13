@@ -6,6 +6,7 @@ import (
 
 	"github.com/ddletotam/ddmailserver/internal/authlimit"
 	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/notify"
 	"github.com/emersion/go-smtp"
 )
 
@@ -80,6 +81,18 @@ func NewWithTLS(database *db.DB, addr string, hostname string, certFile, keyFile
 // SetAuthLimiter enables failed-AUTH throttling. Call before Start.
 func (s *Server) SetAuthLimiter(l *authlimit.Limiter) {
 	s.backend.authLimiter = l
+}
+
+// SetNotifyHub lets submission tell the user's clients that an accepted
+// message is in Sent (message_sent). Call before Start.
+func (s *Server) SetNotifyHub(hub *notify.Hub) {
+	s.backend.hub = hub
+}
+
+// SetOutboxTrigger makes submission send a queued message right away
+// instead of at the next scheduler tick. Call before Start.
+func (s *Server) SetOutboxTrigger(fn func()) {
+	s.backend.kickOutbox = fn
 }
 
 // Start starts the SMTP server

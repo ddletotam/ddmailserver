@@ -3,8 +3,6 @@ package client
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"strings"
@@ -14,9 +12,8 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/logmask"
 	"github.com/ddletotam/ddmailserver/internal/models"
-	"github.com/ddletotam/ddmailserver/internal/parser"
+	"github.com/ddletotam/ddmailserver/internal/outbox"
 	"github.com/ddletotam/ddmailserver/internal/task"
-	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
 // maxRetries is the total number of delivery attempts before an outbox
@@ -32,22 +29,31 @@ type SendTask struct {
 	account       *models.Account
 	database      *db.DB
 	priority      int
-	messageID     string // Generated Message-ID for Sent dedup
 
-	// notifySent fires once the copy is in Sent, so clients can refresh their
-	// conversation list at the moment there is something new to see. Optional.
-	notifySent func()
+	// tracker keeps the sender's copy in Sent and its delivery status.
+	tracker DeliveryTracker
+	// local puts the bounce (DSN) into the sender's mailbox; nil — no bounce.
+	local LocalDeliverer
+	// hostname names this server in the bounce (MAILER-DAEMON@hostname).
+	hostname string
 }
 
-// SetSentNotifyFunc registers the «copy is in Sent» callback.
+// SetDeliveryTracker sets where the delivery outcome is recorded.
 //
-// Sending is asynchronous: the client is told «отправлено» when the message is
-// queued, but the copy in Sent — and therefore the conversation it belongs to —
-// appears only after delivery succeeds. Without this signal a client has to
-// guess when to refetch, and guessing is what broke the post-send jump for a
-// reply sent from a different address (contract §1).
-func (t *SendTask) SetSentNotifyFunc(fn func()) {
-	t.notifySent = fn
+// Sending is asynchronous: the client is told «отправлено» when the message
+// is queued. The copy in Sent — and with it the conversation — exists from
+// that moment (outbox.Service.Accept); the tracker is how the outcome reaches
+// that copy and the user's clients (contract §1).
+func (t *SendTask) SetDeliveryTracker(tr DeliveryTracker) {
+	t.tracker = tr
+}
+
+// SetBounce enables the delivery status notification into the sender's own
+// mailbox when the relay refuses the message or cannot be reached until the
+// retries run out.
+func (t *SendTask) SetBounce(local LocalDeliverer, hostname string) {
+	t.local = local
+	t.hostname = hostname
 }
 
 // NewSendTask creates a new SMTP send task
@@ -79,7 +85,8 @@ func (t *SendTask) String() string {
 
 // Execute runs the send operation
 func (t *SendTask) Execute(ctx context.Context) error {
-	log.Printf("Sending message %d via account %s", t.outboxMessage.ID, t.account.Email)
+	msg := t.outboxMessage
+	log.Printf("Sending message %d via account %s", msg.ID, t.account.Email)
 
 	// Check context cancellation
 	if ctx.Err() != nil {
@@ -98,19 +105,29 @@ func (t *SendTask) Execute(ctx context.Context) error {
 		return nil
 	}
 
-	// Update status to sending
 	// Claim the row before anything else. Losing the claim means another
 	// task already has it (or it is no longer due): sending anyway is how one
 	// message used to go out twice. After the claim the send runs to the end
 	// even if ctx is cancelled — abandoning it mid-way is what strands rows
 	// in 'sending' and gets them re-sent on the next start.
-	claimed, err := t.database.ClaimOutboxMessage(t.outboxMessage.ID)
+	claimed, err := t.database.ClaimOutboxMessage(msg.ID)
 	if err != nil {
-		return fmt.Errorf("claim outbox message %d: %w", t.outboxMessage.ID, err)
+		return fmt.Errorf("claim outbox message %d: %w", msg.ID, err)
 	}
 	if !claimed {
-		log.Printf("Outbox message %d is not pending any more (taken by another task, sent or backing off) — skipping", t.outboxMessage.ID)
+		log.Printf("Outbox message %d is not pending any more (taken by another task, sent or backing off) — skipping", msg.ID)
 		return nil
+	}
+
+	// The wire form is fixed once (outbox.Service.Prepare): every attempt
+	// sends the same bytes under the same Message-ID — the one the copy in
+	// Sent has, and the one the provider's own Sent copy comes back with on
+	// sync, which is what glues the two into one message.
+	if err := prepareOutbox(t.tracker, msg); err != nil {
+		if uerr := t.database.UpdateOutboxMessageStatus(msg.ID, "pending", err.Error()); uerr != nil {
+			log.Printf("Failed to mark message as pending: %v", uerr)
+		}
+		return fmt.Errorf("prepare outbox message %d: %w", msg.ID, err)
 	}
 
 	// Create SMTP client
@@ -119,32 +136,20 @@ func (t *SendTask) Execute(ctx context.Context) error {
 	// Prepare recipients. Shared with the direct-MX path: both need addr-specs
 	// with the display names stripped, and this used to be the one place that
 	// handed RCPT TO the whole "Name <addr>" string.
-	recipients := parseRecipientsFromOutbox(t.outboxMessage)
+	recipients := parseRecipientsFromOutbox(msg)
 	if len(recipients) == 0 {
 		// Terminal validation error: without the explicit failed status the
 		// message would be stranded in status='sending' forever (the
 		// scheduler only picks up 'pending').
-		if err := t.database.UpdateOutboxMessageStatus(t.outboxMessage.ID, "failed", "no recipients"); err != nil {
+		if err := t.database.UpdateOutboxMessageStatus(msg.ID, "failed", "no recipients"); err != nil {
 			log.Printf("Failed to mark message as failed: %v", err)
 		}
+		record(t.tracker, msg, outbox.Delivery{Status: outbox.StatusFailed, Reason: outbox.ReasonOther})
 		return fmt.Errorf("no recipients found")
 	}
 
-	// Use raw email if available, otherwise construct from fields
-	var emailData []byte
-	if len(t.outboxMessage.RawEmail) > 0 {
-		emailData = t.outboxMessage.RawEmail
-		// Extract Message-ID from raw email for Sent dedup
-		p := parser.New()
-		if parsed, err := p.ParseBytes(emailData); err == nil {
-			t.messageID = parsed.GetMessageID()
-		}
-	} else {
-		emailData, t.messageID = constructOutboxEmail(t.database, t.outboxMessage)
-	}
-
 	// Send email
-	err = client.Send(t.outboxMessage.From, recipients, emailData)
+	err = client.Send(msg.From, recipients, msg.RawEmail)
 
 	if err == nil || client.AuthPassed() {
 		guard.Accepted(sub)
@@ -157,249 +162,72 @@ func (t *SendTask) Execute(ctx context.Context) error {
 		guard.Rejected(sub, err)
 		reason := "deferred: the provider rejected the SMTP password of this account; " +
 			"the message will be sent once the password is updated (" + err.Error() + ")"
-		if dbErr := t.database.UpdateOutboxMessageStatus(t.outboxMessage.ID, "pending", reason); dbErr != nil {
+		if dbErr := t.database.UpdateOutboxMessageStatus(msg.ID, "pending", reason); dbErr != nil {
 			log.Printf("Failed to mark message as deferred: %v", dbErr)
 		}
+		record(t.tracker, msg, outbox.Delivery{Status: outbox.StatusPending, Reason: outbox.ReasonRelayAuth})
 		return fmt.Errorf("failed to send: %w", err)
 	}
 
 	if err != nil {
 		// Increment retries. The stored count decides when to give up —
-		// t.outboxMessage.Retries is a copy taken when the task was created and
-		// says nothing about attempts made since.
-		retries, incErr := t.database.IncrementOutboxMessageRetries(t.outboxMessage.ID, err.Error())
+		// msg.Retries is a copy taken when the task was created and says
+		// nothing about attempts made since.
+		retries, incErr := t.database.IncrementOutboxMessageRetries(msg.ID, err.Error())
 		if incErr != nil {
 			log.Printf("Failed to increment retries: %v", incErr)
-			retries = t.outboxMessage.Retries + 1
+			retries = msg.Retries + 1
 		}
 
 		// Give up now on a permanent refusal (5xx after AUTH, e.g. "555
 		// syntax error" or "550 message blocked"): five more attempts over
 		// 17 hours would get the same answer.
 		if retries >= maxRetries || IsPermanent(err) {
-			log.Printf("Message %d exceeded max retries, marking as failed", t.outboxMessage.ID)
-			if err := t.database.UpdateOutboxMessageStatus(t.outboxMessage.ID, "failed", err.Error()); err != nil {
-				log.Printf("Failed to mark message as failed: %v", err)
+			log.Printf("Message %d exceeded max retries or was refused, marking as failed: %v", msg.ID, err)
+			if uerr := t.database.UpdateOutboxMessageStatus(msg.ID, "failed", err.Error()); uerr != nil {
+				log.Printf("Failed to mark message as failed: %v", uerr)
 			}
+			// The relay took the message from nobody: one refusal (a
+			// recipient, the sender, the content) ends the transaction, so
+			// every recipient failed for the same reason.
+			failed := make([]FailedRecipient, 0, len(recipients))
+			for _, rcpt := range envelopeAddresses(recipients) {
+				f := failedRecipient(rcpt, err)
+				if !strings.HasPrefix(f.Status, "5") {
+					f.Status = "4.4.7"
+				}
+				failed = append(failed, f)
+			}
+			bounceToSender(t.local, t.hostname, msg, msg.RawEmail, failed, time.Now())
+			record(t.tracker, msg, failedDelivery(failed))
 		} else {
 			// Mark as pending for retry
-			if err := t.database.UpdateOutboxMessageStatus(t.outboxMessage.ID, "pending", err.Error()); err != nil {
-				log.Printf("Failed to mark message as pending: %v", err)
+			if uerr := t.database.UpdateOutboxMessageStatus(msg.ID, "pending", err.Error()); uerr != nil {
+				log.Printf("Failed to mark message as pending: %v", uerr)
 			}
+			record(t.tracker, msg, pendingDelivery(err))
 		}
 
 		return fmt.Errorf("failed to send: %w", err)
 	}
 
 	// Mark as sent
-	if err := t.database.MarkOutboxMessageSent(t.outboxMessage.ID); err != nil {
+	if err := t.database.MarkOutboxMessageSent(msg.ID); err != nil {
 		log.Printf("Failed to mark message as sent: %v", err)
 		return err
 	}
+	// «Delivered» here means the provider's SMTP took it; a failure further
+	// on comes back from the provider as an ordinary bounce letter into the
+	// external mailbox.
+	record(t.tracker, msg, outbox.Delivery{Status: outbox.StatusDelivered})
 
-	// Save to Sent folder
-	saveToSentFolder(t.database, t.outboxMessage.UserID, emailData, t.messageID)
-	if t.notifySent != nil {
-		t.notifySent()
-	}
-
-	log.Printf("Message %d sent successfully", t.outboxMessage.ID)
+	log.Printf("Message %d sent successfully", msg.ID)
 	return nil
 }
 
 // randomBoundary generates a random MIME boundary string.
 func randomBoundary() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	return fmt.Sprintf("----=_Part_%x", b)
-}
-
-// constructOutboxEmail builds an RFC 5322 email from outbox message fields.
-// If the database contains outbox_attachments for this message, they are
-// included as MIME parts inside a multipart/mixed envelope. Shared by the
-// relay (SendTask) and direct-MX (DirectSendTask) paths. Returns the wire
-// bytes and the generated Message-ID (used for Sent-folder dedup).
-func constructOutboxEmail(database *db.DB, msg *models.OutboxMessage) ([]byte, string) {
-	// Load attachments from DB
-	var attachments []*models.OutboxAttachment
-	if database != nil {
-		atts, err := database.GetOutboxAttachmentsByMessageID(msg.ID)
-		if err == nil {
-			attachments = atts
-		}
-	}
-
-	var email strings.Builder
-
-	// Generate Message-ID
-	domain := "localhost"
-	if parts := strings.SplitN(msg.From, "@", 2); len(parts) == 2 {
-		// Extract domain from "Name <user@domain>" or "user@domain"
-		d := parts[1]
-		d = strings.TrimRight(d, ">")
-		d = strings.TrimSpace(d)
-		if d != "" {
-			domain = d
-		}
-	}
-	randBytes := make([]byte, 8)
-	rand.Read(randBytes)
-	messageID := fmt.Sprintf("<%d.%s@%s>", time.Now().UnixNano(), hex.EncodeToString(randBytes), domain)
-
-	// Headers. Free-text (Subject) and display-names (From/To/Cc) are
-	// RFC 2047-encoded so the header section stays 7-bit ASCII — otherwise a
-	// Cyrillic Subject forces relays to require SMTPUTF8, which legacy
-	// receivers reject (see parser.EncodeHeaderWord).
-	email.WriteString(fmt.Sprintf("Message-ID: %s\r\n", messageID))
-	email.WriteString(fmt.Sprintf("Date: %s\r\n", time.Now().Format("Mon, 02 Jan 2006 15:04:05 -0700")))
-	email.WriteString(fmt.Sprintf("From: %s\r\n", parser.EncodeAddressHeader(msg.From)))
-	email.WriteString(fmt.Sprintf("To: %s\r\n", parser.EncodeAddressHeader(msg.To)))
-	if msg.Cc != "" {
-		email.WriteString(fmt.Sprintf("Cc: %s\r\n", parser.EncodeAddressHeader(msg.Cc)))
-	}
-	if msg.Subject != "" {
-		email.WriteString(fmt.Sprintf("Subject: %s\r\n", parser.EncodeHeaderWord(msg.Subject)))
-	}
-	email.WriteString("MIME-Version: 1.0\r\n")
-
-	// Build body part
-	var bodyBuf strings.Builder
-	hasPlain := msg.Body != ""
-	hasHTML := msg.BodyHTML != ""
-
-	if hasPlain && hasHTML {
-		altBoundary := randomBoundary()
-		bodyBuf.WriteString(fmt.Sprintf("Content-Type: multipart/alternative; boundary=\"%s\"\r\n\r\n", altBoundary))
-		bodyBuf.WriteString(fmt.Sprintf("--%s\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n", altBoundary, msg.Body))
-		bodyBuf.WriteString(fmt.Sprintf("--%s\r\nContent-Type: text/html; charset=utf-8\r\n\r\n%s\r\n", altBoundary, msg.BodyHTML))
-		bodyBuf.WriteString(fmt.Sprintf("--%s--\r\n", altBoundary))
-	} else if hasHTML {
-		bodyBuf.WriteString("Content-Type: text/html; charset=utf-8\r\n\r\n")
-		bodyBuf.WriteString(msg.BodyHTML)
-	} else {
-		bodyBuf.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
-		bodyBuf.WriteString(msg.Body)
-	}
-
-	if len(attachments) > 0 {
-		mixedBoundary := randomBoundary()
-		email.WriteString(fmt.Sprintf("Content-Type: multipart/mixed; boundary=\"%s\"\r\n\r\n", mixedBoundary))
-
-		// Body part
-		email.WriteString(fmt.Sprintf("--%s\r\n%s\r\n", mixedBoundary, bodyBuf.String()))
-
-		// Attachment parts
-		for _, att := range attachments {
-			email.WriteString(fmt.Sprintf("--%s\r\n", mixedBoundary))
-			email.WriteString(fmt.Sprintf("Content-Type: %s; name=\"%s\"\r\n", att.ContentType, att.Filename))
-			email.WriteString("Content-Transfer-Encoding: base64\r\n")
-			email.WriteString(fmt.Sprintf("Content-Disposition: attachment; filename=\"%s\"\r\n\r\n", att.Filename))
-			encoded := base64.StdEncoding.EncodeToString(att.Data)
-			for i := 0; i < len(encoded); i += 76 {
-				end := i + 76
-				if end > len(encoded) {
-					end = len(encoded)
-				}
-				email.WriteString(encoded[i:end])
-				email.WriteString("\r\n")
-			}
-		}
-		email.WriteString(fmt.Sprintf("--%s--\r\n", mixedBoundary))
-	} else {
-		// No attachments — write body directly
-		email.WriteString(bodyBuf.String())
-	}
-
-	return []byte(email.String()), messageID
-}
-
-// saveToSentFolder saves a copy of a sent email to the user's Sent folder
-func saveToSentFolder(database *db.DB, userID int64, emailData []byte, messageID string) {
-	sentFolder, err := database.GetLocalFolderByType(userID, "sent")
-	if err != nil || sentFolder == nil {
-		log.Printf("saveToSentFolder: no Sent folder for user %d", userID)
-		return
-	}
-
-	// Check dedup
-	exists, err := database.MessageExistsInFolder(sentFolder.ID, messageID)
-	if err == nil && exists {
-		log.Printf("saveToSentFolder: message %s already in Sent, skipping", messageID)
-		return
-	}
-
-	// Parse the email
-	p := parser.New()
-	parsed, err := p.ParseBytes(emailData)
-	if err != nil {
-		log.Printf("saveToSentFolder: failed to parse email: %v", err)
-		return
-	}
-
-	// Get next UID
-	nextUID, err := database.GetNextUIDForFolder(sentFolder.ID)
-	if err != nil {
-		log.Printf("saveToSentFolder: failed to get UID: %v", err)
-		return
-	}
-
-	// Convert addresses to strings
-	fromStr := ""
-	if parsed.From != nil {
-		fromStr = parsed.From.String()
-	}
-	toStrs := make([]string, 0, len(parsed.To))
-	for _, a := range parsed.To {
-		toStrs = append(toStrs, a.String())
-	}
-	ccStrs := make([]string, 0, len(parsed.Cc))
-	for _, a := range parsed.Cc {
-		ccStrs = append(ccStrs, a.String())
-	}
-
-	msg := &models.Message{
-		UserID:    userID,
-		FolderID:  sentFolder.ID,
-		MessageID: parsed.GetMessageID(),
-		Subject:   parsed.Subject,
-		From:      fromStr,
-		To:        strings.Join(toStrs, ", "),
-		Cc:        strings.Join(ccStrs, ", "),
-		Date:      timeutil.ToMs(parsed.Date),
-		Body:      parsed.Body,
-		BodyHTML:  parsed.BodyHTML,
-		RawEmail:  emailData, // store the real RFC-822 so View Source isn't a stitched fake
-		Size:      int64(len(emailData)),
-		UID:       nextUID,
-		Seen:      true, // Sent messages are always read
-		CreatedAt: timeutil.Now(),
-		UpdatedAt: timeutil.Now(),
-	}
-
-	if err := database.CreateMessage(msg); err != nil {
-		log.Printf("saveToSentFolder: failed to save to Sent: %v", err)
-		return
-	}
-
-	// Save attachments (including inline images with Content-ID)
-	for _, att := range parsed.Attachments {
-		contentID := strings.Trim(att.ContentID, "<>")
-		attachment := &models.Attachment{
-			MessageID:   msg.ID,
-			ContentID:   contentID,
-			Filename:    att.Filename,
-			ContentType: att.ContentType,
-			Size:        int(att.Size),
-			IsInline:    att.IsInline,
-			Data:        att.Data,
-		}
-		if err := database.CreateAttachment(attachment); err != nil {
-			log.Printf("saveToSentFolder: failed to save attachment %s: %v", att.Filename, err)
-		}
-	}
-	if len(parsed.Attachments) > 0 {
-		database.UpdateMessageAttachmentCount(msg.ID, len(parsed.Attachments))
-	}
-
-	log.Printf("saveToSentFolder: saved message %s to Sent folder (attachments: %d)", messageID, len(parsed.Attachments))
 }

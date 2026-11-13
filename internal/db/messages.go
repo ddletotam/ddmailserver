@@ -26,8 +26,9 @@ func (db *DB) CreateMessage(msg *models.Message) error {
 			account_id, user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 			date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 			in_reply_to, message_references, spam_score, spam_status, spam_reasons,
-			is_spam, spam_rule_id, remote_uid, remote_folder, raw_email, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
+			is_spam, spam_rule_id, remote_uid, remote_folder, raw_email, created_at, updated_at,
+			delivery_status
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34)
 		ON CONFLICT (user_id, message_id) WHERE COALESCE(message_id, '') <> '' DO NOTHING
 		RETURNING id
 	`
@@ -68,6 +69,7 @@ func (db *DB) CreateMessage(msg *models.Message) error {
 		msg.UID, msg.Seen, msg.Flagged, msg.Answered, msg.Draft, msg.Deleted,
 		msg.InReplyTo, msg.MessageReferences, msg.SpamScore, msg.SpamStatus, msg.SpamReasons,
 		msg.IsSpam, spamRuleID, remoteUID, remoteFolder, msg.RawEmail, msg.CreatedAt, msg.UpdatedAt,
+		msg.DeliveryStatus,
 	).Scan(&msg.ID)
 
 	// ON CONFLICT DO NOTHING returns no row when (user_id, message_id) already
@@ -90,7 +92,8 @@ func (db *DB) GetMessagesByFolder(folderID int64, limit, offset int) ([]*models.
 		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 		       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
-		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at
+		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at,
+		       delivery_status, delivery_reason, delivery_failed
 		FROM messages
 		WHERE folder_id = $1 AND deleted = false AND (soft_deleted = false OR soft_deleted IS NULL)
 		      AND (is_spam = false OR is_spam IS NULL)
@@ -118,7 +121,8 @@ func (db *DB) GetMessagesByFolderMeta(folderID int64, limit, offset int) ([]*mod
 		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, '' AS body, '' AS body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 		       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
-		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at
+		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at,
+		       delivery_status, delivery_reason, delivery_failed
 		FROM messages
 		WHERE folder_id = $1 AND deleted = false AND (soft_deleted = false OR soft_deleted IS NULL)
 		      AND (is_spam = false OR is_spam IS NULL)
@@ -161,7 +165,8 @@ func (db *DB) GetMessagesByUser(userID int64, limit, offset int) ([]*models.Mess
 		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 		       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
-		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at
+		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at,
+		       delivery_status, delivery_reason, delivery_failed
 		FROM messages
 		WHERE user_id = $1 AND deleted = false AND (soft_deleted = false OR soft_deleted IS NULL)
 		      AND (is_spam = false OR is_spam IS NULL)
@@ -208,7 +213,8 @@ func (db *DB) GetMessageByID(id int64) (*models.Message, error) {
 		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 		       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
-		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at
+		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at,
+		       delivery_status, delivery_reason, delivery_failed
 		FROM messages
 		WHERE id = $1
 	`
@@ -220,6 +226,7 @@ func (db *DB) GetMessageByID(id int64) (*models.Message, error) {
 		&msg.UID, &msg.Seen, &msg.Flagged, &msg.Answered, &msg.Draft, &msg.Deleted,
 		&msg.InReplyTo, &msg.MessageReferences, &msg.SpamScore, &msg.SpamStatus, &msg.SpamReasons,
 		&msg.RemoteUID, &msg.RemoteFolder, &msg.CreatedAt, &msg.UpdatedAt,
+		&msg.DeliveryStatus, &msg.DeliveryReason, &msg.DeliveryFailed,
 	)
 
 	if err == sql.ErrNoRows {
@@ -261,7 +268,8 @@ func (db *DB) SearchMessages(userID int64, query string, limit, offset int) ([]*
 		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 		       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
-		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at
+		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at,
+		       delivery_status, delivery_reason, delivery_failed
 		FROM messages
 		WHERE user_id = $1 AND deleted = false AND (soft_deleted = false OR soft_deleted IS NULL)
 		AND (is_spam = false OR is_spam IS NULL)
@@ -292,6 +300,7 @@ func scanMessages(rows *sql.Rows) ([]*models.Message, error) {
 			&msg.UID, &msg.Seen, &msg.Flagged, &msg.Answered, &msg.Draft, &msg.Deleted,
 			&msg.InReplyTo, &msg.MessageReferences, &msg.SpamScore, &msg.SpamStatus, &msg.SpamReasons,
 			&msg.RemoteUID, &msg.RemoteFolder, &msg.CreatedAt, &msg.UpdatedAt,
+			&msg.DeliveryStatus, &msg.DeliveryReason, &msg.DeliveryFailed,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan message: %w", err)
@@ -379,7 +388,8 @@ func (db *DB) GetMessageByMessageID(userID int64, messageID string) (*models.Mes
 		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 		       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
-		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at
+		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at,
+		       delivery_status, delivery_reason, delivery_failed
 		FROM messages
 		WHERE user_id = $1 AND message_id = $2
 		LIMIT 1
@@ -392,6 +402,7 @@ func (db *DB) GetMessageByMessageID(userID int64, messageID string) (*models.Mes
 		&msg.UID, &msg.Seen, &msg.Flagged, &msg.Answered, &msg.Draft, &msg.Deleted,
 		&msg.InReplyTo, &msg.MessageReferences, &msg.SpamScore, &msg.SpamStatus, &msg.SpamReasons,
 		&msg.RemoteUID, &msg.RemoteFolder, &msg.CreatedAt, &msg.UpdatedAt,
+		&msg.DeliveryStatus, &msg.DeliveryReason, &msg.DeliveryFailed,
 	)
 
 	if err == sql.ErrNoRows {
@@ -795,7 +806,8 @@ func (db *DB) GetVaultMessages(userID int64, limit, offset int) ([]*models.Messa
 		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 		       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
-		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at
+		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at,
+		       delivery_status, delivery_reason, delivery_failed
 		FROM messages
 		WHERE user_id = $1 AND soft_deleted = true
 		ORDER BY soft_deleted_at DESC
@@ -836,7 +848,8 @@ func (db *DB) GetDeletedMessagesByFolder(folderID int64) ([]*models.Message, err
 		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 		       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
-		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at
+		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at,
+		       delivery_status, delivery_reason, delivery_failed
 		FROM messages
 		WHERE folder_id = $1 AND deleted = true AND (soft_deleted = false OR soft_deleted IS NULL)
 		ORDER BY uid ASC
@@ -912,7 +925,8 @@ func (db *DB) GetMessagesByIDs(ids []int64) ([]*models.Message, error) {
 		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 		       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
-		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at
+		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at,
+		       delivery_status, delivery_reason, delivery_failed
 		FROM messages
 		WHERE id = ANY($1) AND deleted = false AND (soft_deleted = false OR soft_deleted IS NULL)
 		ORDER BY date DESC
@@ -933,7 +947,8 @@ func (db *DB) GetSoftDeletedMessages(userID int64, limit, offset int) ([]*models
 		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 		       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
-		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at
+		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at,
+		       delivery_status, delivery_reason, delivery_failed
 		FROM messages
 		WHERE user_id = $1 AND soft_deleted = true
 		ORDER BY soft_deleted_at DESC
@@ -999,7 +1014,8 @@ func (db *DB) GetMessageUIDByMessageID(folderID int64, messageID string) (uint32
 const selectColumns = `m.id, COALESCE(m.account_id, 0), m.user_id, m.folder_id, m.message_id, m.subject, m.from_addr, m.to_addr, m.cc, m.bcc, m.reply_to,
        m.date, m.body, m.body_html, m.attachments, m.size, m.uid, m.seen, m.flagged, m.answered, m.draft, m.deleted,
        m.in_reply_to, m.message_references, COALESCE(m.spam_score, 0), COALESCE(m.spam_status, 'clean'), COALESCE(m.spam_reasons, ''),
-       COALESCE(m.remote_uid, 0), COALESCE(m.remote_folder, 'INBOX'), m.created_at, m.updated_at`
+       COALESCE(m.remote_uid, 0), COALESCE(m.remote_folder, 'INBOX'), m.created_at, m.updated_at,
+       m.delivery_status, m.delivery_reason, m.delivery_failed`
 
 // notDeletedCondition filters out deleted, soft-deleted, and spam messages.
 const notDeletedCondition = `deleted = false AND (soft_deleted = false OR soft_deleted IS NULL) AND (is_spam = false OR is_spam IS NULL)`

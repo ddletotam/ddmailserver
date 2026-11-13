@@ -789,9 +789,13 @@ func (s *Server) HandleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Outbox message created: %d (from %s to %s)", outboxMsg.ID, logmask.Addr(outboxMsg.From), logmask.AddrList(outboxMsg.To))
 
-	// Send it now rather than on the next scheduler tick. Deliberately after the
-	// attachments are stored: the send task reads them from the database, and a
-	// trigger fired earlier could race it into sending the message without them.
+	// Accept after the attachments are stored: the wire form is composed from
+	// the row and its attachments, then the copy goes into Sent. Kicking the
+	// outbox only after that keeps the send task from composing it without
+	// them.
+	s.acceptOutbox(outboxMsg)
+
+	// Send it now rather than on the next scheduler tick.
 	s.kickOutbox()
 
 	w.Header().Set("Content-Type", "text/html")

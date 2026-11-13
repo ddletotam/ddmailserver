@@ -15,6 +15,7 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/notify"
 	"github.com/ddletotam/ddmailserver/internal/oauth"
+	"github.com/ddletotam/ddmailserver/internal/outbox"
 	"github.com/ddletotam/ddmailserver/internal/parser"
 	smtpclient "github.com/ddletotam/ddmailserver/internal/smtp/client"
 	"github.com/ddletotam/ddmailserver/internal/smtp/localdelivery"
@@ -540,27 +541,15 @@ func (s *Scheduler) scheduleSMTPSend() {
 
 		var sendTask taskpkg.Task
 
-		// Tell the user's clients the moment the copy lands in Sent. Queueing
-		// is not sending, so «отправлено» reaches the client long before the
-		// conversation the message belongs to exists — a quiet refresh signal
-		// is what closes that gap (see notify.EventMessageSent).
-		notifySent := func(userID int64) func() {
-			if s.notifyHub == nil {
-				return nil
-			}
-			return func() {
-				s.notifyHub.Publish(notify.Event{
-					UserID:  userID,
-					Type:    notify.EventMessageSent,
-					Mailbox: "Sent",
-				})
-			}
-		}(msg.UserID)
+		// The copy in Sent is made when the message is accepted (package
+		// outbox); the send task only records the delivery outcome on it and
+		// tells the user's clients (delivery_status).
+		tracker := outbox.New(s.database, s.notifyHub)
 
 		if msg.AccountID == 0 {
 			// Direct delivery for local domain senders
 			direct := smtpclient.NewDirectSendTask(msg, s.database, s.getHostname(), s.dkimSigner)
-			direct.SetSentNotifyFunc(notifySent)
+			direct.SetDeliveryTracker(tracker)
 			direct.SetLocalDeliverer(s.localDelivery)
 			sendTask = direct
 		} else {
@@ -571,7 +560,8 @@ func (s *Scheduler) scheduleSMTPSend() {
 				continue
 			}
 			relay := smtpclient.NewSendTask(msg, account, s.database)
-			relay.SetSentNotifyFunc(notifySent)
+			relay.SetDeliveryTracker(tracker)
+			relay.SetBounce(s.localDelivery, s.getHostname())
 			sendTask = relay
 		}
 

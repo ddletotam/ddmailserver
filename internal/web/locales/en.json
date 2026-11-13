@@ -483,5 +483,22 @@
   "auth_rejected.action": "Update the password — the server will try again right away.",
   "auth_rejected.dashboard_title": "Passwords rejected by providers",
   "auth_rejected.dashboard_text": "Logins are paused until the password is updated. Affected accounts and sources:",
-  "auth_rejected.check": "Check accounts"
+  "auth_rejected.check": "Check accounts",
+  "delivery.status.pending": "Sending",
+  "delivery.status.delivered": "Delivered",
+  "delivery.status.failed": "Not delivered",
+  "delivery.reason.unreachable": "The recipient's mail server does not respond.",
+  "delivery.reason.domain_not_found": "The recipient's domain does not exist — check the address.",
+  "delivery.reason.no_mail_domain": "The recipient's domain does not accept mail.",
+  "delivery.reason.mailbox_unavailable": "No such address, or the mailbox is disabled — check the address.",
+  "delivery.reason.mailbox_full": "The recipient's mailbox is full.",
+  "delivery.reason.rejected": "The recipient's mail server rejected the message.",
+  "delivery.reason.temporary": "The recipient's mail server kept deferring the message; delivery attempts have stopped.",
+  "delivery.reason.relay_auth": "The mail provider rejects the account password — the message will go out once the password is updated.",
+  "delivery.reason.other": "The message could not be delivered.",
+  "dsn.subject": "Undelivered Mail Returned to Sender",
+  "dsn.from_name": "Mail Delivery System",
+  "dsn.intro": "Your message could not be delivered to the following recipients:",
+  "dsn.server_reply": "Recipient server replied",
+  "dsn.headers_attached": "The headers of the original message are attached below."
 }

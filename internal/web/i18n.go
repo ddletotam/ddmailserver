@@ -1,15 +1,12 @@
 package web
 
 import (
-	"embed"
-	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
-)
 
-//go:embed locales/*.json
-var localesFS embed.FS
+	"github.com/ddletotam/ddmailserver/internal/web/locales"
+)
 
 // I18nManager manages i18n instances for different locales
 type I18nManager struct {
@@ -76,15 +73,11 @@ func NewI18n(locale string) (*I18n, error) {
 
 // loadLocale loads translations from JSON file
 func (i *I18n) loadLocale(locale string) error {
-	filename := fmt.Sprintf("locales/%s.json", locale)
-	data, err := localesFS.ReadFile(filename)
+	translations, err := locales.Load(locale)
 	if err != nil {
-		return fmt.Errorf("failed to read locale file %s: %w", filename, err)
+		return fmt.Errorf("failed to load locale file: %w", err)
 	}
-
-	if err := json.Unmarshal(data, &i.translations); err != nil {
-		return fmt.Errorf("failed to parse locale file %s: %w", filename, err)
-	}
+	i.translations = translations
 
 	i.locale = locale
 	return nil

@@ -443,14 +443,18 @@ func (m *Mailbox) storeAppended(flags []string, date time.Time, data []byte) (ui
 		parsed = &parser.ParsedMessage{}
 	}
 
-	// Dedup for Sent folder: if message with same Message-ID already exists,
-	// keep the copy we have (it came from our own submission, raw email and
-	// all) and report its UID.
-	if m.folderType == "sent" && parsed.GetMessageID() != "" {
-		exists, err := m.database.MessageExistsInFolder(m.folderID, parsed.GetMessageID())
+	// Dedup for Sent folders: if the user already has a message with this
+	// Message-ID, keep the copy we have — it is the one the server put into
+	// Sent when it accepted the submission (package outbox), raw email,
+	// delivery status and all — and report its UID. The client's Sent may be
+	// a different folder from ours ("Sent Items"); the copy is then not in
+	// this one, and the UID is 0 (APPEND answers OK without APPENDUID).
+	// Messages are unique per (user, Message-ID), so storing it would fail.
+	if m.folderType == "sent" && parsed.MessageID != "" {
+		exists, err := m.database.MessageExistsByMessageID(m.user.userID, parsed.MessageID)
 		if err == nil && exists {
-			log.Printf("storeAppended: dedup — message %s already in Sent, skipping", parsed.GetMessageID())
-			existingUID, _ := m.database.GetMessageUIDByMessageID(m.folderID, parsed.GetMessageID())
+			log.Printf("storeAppended: dedup — message %s already stored, skipping", parsed.MessageID)
+			existingUID, _ := m.database.GetMessageUIDByMessageID(m.folderID, parsed.MessageID)
 			return existingUID, true, nil
 		}
 	}

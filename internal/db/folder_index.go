@@ -99,7 +99,8 @@ func (db *DB) GetMessagesMetaByIDs(ids []int64) ([]*models.Message, error) {
 			SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 			       date, '' AS body, '' AS body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 			       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
-			       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at
+			       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at,
+		       delivery_status, delivery_reason, delivery_failed
 			FROM messages
 			WHERE id = ANY($1) AND deleted = false AND (soft_deleted = false OR soft_deleted IS NULL)
 			ORDER BY uid ASC

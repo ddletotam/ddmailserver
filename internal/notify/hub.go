@@ -16,12 +16,18 @@ const (
 	// EventMessageSent — our own outgoing message has landed in Sent.
 	//
 	// Deliberately not EventNewMessage: this must refresh the conversation list
-	// without a toast or a sound, since the user just pressed Send and knows.
-	// Sending is asynchronous, so the copy in Sent appears well after the client
-	// was told «отправлено» — without this the client could only guess when to
-	// look, and a reply sent from a different address had no conversation to
-	// jump to yet (contract §1).
+	// without a toast or a sound, since the user just pressed Send and knows
+	// (and new_message would also wake the phones with a push). The copy is
+	// put into Sent when the server accepts the message (package outbox), so
+	// this fires right after «Отправить», with MessageID set to the copy —
+	// delivery is reported separately, by EventDeliveryStatus (contract §1).
 	EventMessageSent EventType = "message_sent"
+
+	// EventDeliveryStatus — the delivery status of one of the user's outgoing
+	// messages changed (pending → delivered / failed, or the reason a pending
+	// message is still waiting). MessageID / RFCMessageID say which message,
+	// the Delivery* fields say what it is now.
+	EventDeliveryStatus EventType = "delivery_status"
 
 	EventCalendarUpdated EventType = "calendar_updated"
 
@@ -78,6 +84,14 @@ type Event struct {
 	// sends untagged EXPUNGE for them; without it the event only reaches the
 	// desktop.
 	SeqNums []uint32
+
+	// EventMessageSent / EventDeliveryStatus: the stable identity of the
+	// message (Message-ID header, no angle brackets).
+	RFCMessageID string
+	// EventDeliveryStatus fields (outbox.Status*, outbox.Reason*).
+	DeliveryStatus string
+	DeliveryReason string
+	DeliveryFailed []string
 
 	// Calendar fields
 	CalendarID int64 // Affected calendar (0 means "any calendar for this user")
