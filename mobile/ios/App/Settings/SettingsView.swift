@@ -46,6 +46,11 @@ struct SettingsView: View {
                         Button("Разрешить в настройках системы", systemImage: "gear") {
                             #if os(iOS)
                             if let u = URL(string: UIApplication.openNotificationSettingsURLString) { openURL(u) }
+                            #else
+                            // «Системные настройки → Уведомления» на строке приложения (M-13).
+                            if let u = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(Bundle.main.bundleIdentifier ?? "ru.letotam.ddmail")") {
+                                openURL(u)
+                            }
                             #endif
                         }
                     }

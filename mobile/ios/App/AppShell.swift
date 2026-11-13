@@ -13,8 +13,8 @@ struct AppShell: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        // Учётки, которым нужен вход, — читаем в теле (контракт §0).
-        let dead = workspace.dead.map { ($0.account.key, $0.account.title) }
+        // «Нужен вход» — плашкой внизу колонки почты (`MailView`, Android §6):
+        // над первой строкой раздела ничего (mobile-layout.md).
         let current = section
         content(current)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -35,17 +35,6 @@ struct AppShell: View {
                 #if os(macOS)
                 .frame(minWidth: 520, minHeight: 560)
                 #endif
-            }
-            // «Нужен вход» — несмываемая плашка над содержимым у каждой такой
-            // учётки, кэш виден (контракт §2, внешние учётки §7).
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if !dead.isEmpty {
-                    VStack(spacing: 0) {
-                        ForEach(dead, id: \.0) { key, title in
-                            SessionDeadBanner(title: dead.count > 1 || workspace.links.count > 1 ? title : nil) { app.relogin(key) }
-                        }
-                    }
-                }
             }
             // Синк на выход приложения на экран (§4), живые каналы — пока на экране (§7).
             .task(id: scenePhase) {

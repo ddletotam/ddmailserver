@@ -1,16 +1,20 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 /// Действия окна для меню приложения (Мак, клавиатура iPad): команды берут их
-/// у окна в фокусе, поэтому в каждом окне действуют на своё.
+/// у окна в фокусе, поэтому в каждом окне действуют на своё. У окна беседы
+/// (Мак) нет поиска и разделов — `nil`, пункты погашены.
 struct MailActions {
     /// ⌘N: нового письма вне поиска нет — фокус в поле поиска (mobile-layout.md).
-    var newMail: () -> Void
+    var newMail: (() -> Void)?
     var reply: (() -> Void)?
     var forward: (() -> Void)?
     var delete: (() -> Void)?
     var refresh: () -> Void
-    var go: (AppSection) -> Void
-    var settings: () -> Void
+    var go: ((AppSection) -> Void)?
+    var settings: (() -> Void)?
 }
 
 extension FocusedValues {
@@ -26,9 +30,9 @@ struct MailCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("Новое письмо") { actions?.newMail() }
+            Button("Новое письмо") { actions?.newMail?() }
                 .keyboardShortcut("n")
-                .disabled(actions == nil)
+                .disabled(actions?.newMail == nil)
         }
         CommandMenu("Письмо") {
             Button("Ответить") { actions?.reply?() }
@@ -38,7 +42,12 @@ struct MailCommands: Commands {
                 .keyboardShortcut("f", modifiers: [.command, .shift])
                 .disabled(actions?.forward == nil)
             Divider()
-            Button("Удалить беседу") { actions?.delete?() }
+            // ⌘⌫ в поле ввода — стандартное «стереть до начала строки», а не
+            // удаление беседы (B-02): клавиша меню перехватывала сочетание у поля.
+            Button("Удалить беседу") {
+                if TextInput.takeKey() { return }
+                actions?.delete?()
+            }
                 .keyboardShortcut(.delete)
                 .disabled(actions?.delete == nil)
             Divider()
@@ -67,16 +76,38 @@ struct MailCommands: Commands {
                 .disabled(format == nil)
         }
         CommandGroup(replacing: .appSettings) {
-            Button("Настройки…") { actions?.settings() }
+            Button("Настройки…") { actions?.settings?() }
                 .keyboardShortcut(",")
-                .disabled(actions == nil)
+                .disabled(actions?.settings == nil)
         }
         CommandGroup(after: .sidebar) {
             ForEach(Array(AppSection.allCases.enumerated()), id: \.offset) { i, s in
-                Button(s.title) { actions?.go(s) }
+                Button(s.title) { actions?.go?(s) }
                     .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")))
-                    .disabled(actions == nil)
+                    .disabled(actions?.go == nil)
             }
         }
+    }
+}
+
+/// Сочетание меню, нажатое, пока фокус в поле ввода (B-02). На Маке клавиша
+/// меню срабатывает раньше поля: ⌘⌫ поле само не получает. Если это нажатие
+/// клавиши (а не выбор пункта мышью) и в фокусе редактируемый текст, нажатие
+/// отдаётся полю — оно делает то, что задано системой (`deleteToBeginningOfLine:`),
+/// а команда не выполняется. На iPad системное поведение поля и так впереди
+/// сочетаний приложения (`wantsPriorityOverSystemBehavior` = false).
+@MainActor
+enum TextInput {
+    /// `true` — нажатие ушло в поле, команде ничего делать не нужно.
+    static func takeKey() -> Bool {
+        #if os(macOS)
+        guard let event = NSApp.currentEvent, event.type == .keyDown,
+              let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.isEditable
+        else { return false }
+        editor.interpretKeyEvents([event])
+        return true
+        #else
+        return false
+        #endif
     }
 }
