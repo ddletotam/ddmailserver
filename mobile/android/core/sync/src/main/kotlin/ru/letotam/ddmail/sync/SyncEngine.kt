@@ -274,6 +274,30 @@ class SyncEngine(
         }
     }
 
+    /**
+     * Правка документа папок из меню табов и настроек (создать, переименовать,
+     * правила, порядок, удалить). Сначала в кэш — табы перестраиваются сразу;
+     * затем `PUT` с версией. Чужая правка между чтением и записью (`409`) —
+     * как у десктопа: берётся документ сервера, своя правка отбрасывается
+     * ([FoldersConflict]) — затирать правку другой станции нельзя.
+     */
+    suspend fun editFolders(transform: (FoldersDoc) -> FoldersDoc) {
+        val version = dao.meta(K_FOLDERS_VERSION)?.toLongOrNull() ?: 0
+        val edited = transform(currentFolders())
+        dao.setMeta(K_FOLDERS, edited.toJson().toString())
+        try {
+            val r = api.saveDialogFolders(version, edited.toJson())
+            dao.setMeta(K_FOLDERS_VERSION, r.version.toString())
+        } catch (e: ApiException.Server) {
+            if (e.code != 409) throw e
+            val fresh = runCatching { json.decodeFromString(ru.letotam.ddmail.api.DialogFoldersResponse.serializer(), e.serverMessage) }.getOrNull()
+                ?: throw e
+            fresh.doc?.let { dao.setMeta(K_FOLDERS, it.toString()) }
+            dao.setMeta(K_FOLDERS_VERSION, fresh.version.toString())
+            throw FoldersConflict()
+        }
+    }
+
     private suspend fun currentFolders(): FoldersDoc =
         (dao.meta(K_FOLDERS)?.let { runCatching { FoldersDoc.parse(json.parseToJsonElement(it)) }.getOrNull() } ?: FoldersDoc()).withSpam()
 

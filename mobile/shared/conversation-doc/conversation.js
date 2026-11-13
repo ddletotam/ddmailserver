@@ -6,7 +6,7 @@
 //   Msg   = { uid, outgoing, fromName, fromAddr, dateTs (сек), html?, text?,
 //             attachments: [{index, filename, size}], showFrom }
 //                       ddm.stub(Stub), ddm.unstub(key)  — optimistic send
-//   Stub  = { key, html, text, attachments: [{filename, size}] }
+//   Stub  = { key, html?, text, attachments: [{filename, size}] } — html есть, если композер с разметкой
 // Документ → нативный:  ready(), openLink(url), requestOlder(),
 //   openAttachment(uid, index), attachmentMenu(uid, index), bubbleMenu(uid),
 //   allowSender(uid), allowSpamImages(uid)
@@ -593,9 +593,9 @@ function makeStub(st) {
   link.href = 'bubble.css';
   const root = document.createElement('div');
   root.className = 'ddm-root';
-  // HTML — тот, что уходит на сервер (форматирование, картинки тела
-  // `data:`-URI); старые клиенты шлют только текст.
-  root.innerHTML = st.html ? st.html : textToHtml(st.text || '');
+  // HTML — тот, что уходит на сервер (свой, из композера: текст экранирован,
+  // картинки — data:-URI); без него — текст, как раньше. Скрипты режет CSP.
+  root.innerHTML = st.html || textToHtml(st.text || '');
   shadow.append(link, root);
   b.appendChild(host);
   if (st.attachments && st.attachments.length) {

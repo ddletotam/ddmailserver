@@ -29,5 +29,19 @@ class SearchTest {
     fun matchesTargetForSelfChat() {
         val self = c("me@a.ru|self", "Я", "", "x").copy(counterparts = emptyList())
         assertTrue(matchesTarget(self, setOf("me@a.ru")))
+        // Так её отдаёт сервер ddmail: собеседник — свой же адрес (замер 2026-11-13).
+        val served = self.copy(counterparts = listOf(ContactInfo("", "me@a.ru")))
+        assertTrue(matchesTarget(served, setOf("me@a.ru"), own = setOf("me@a.ru")))
+    }
+
+    @Test
+    fun matchesTargetWithCcAndOwnAddress() {
+        val pair = c("me@a.ru|bob@x.ru|c@y.ru", "Bob", "bob@x.ru", "x")
+            .copy(counterparts = listOf(ContactInfo("", "bob@x.ru"), ContactInfo("", "c@y.ru")))
+        assertTrue(matchesTarget(pair, setOf("bob@x.ru", "c@y.ru")))
+        // Себе в копию — свой адрес в собеседники не входит.
+        assertTrue(matchesTarget(pair, setOf("bob@x.ru", "c@y.ru", "me@a.ru"), own = setOf("me@a.ru")))
+        assertTrue(!matchesTarget(pair, setOf("bob@x.ru")))
+        assertTrue(!matchesTarget(pair.copy(spam = true), setOf("bob@x.ru", "c@y.ru")))
     }
 }

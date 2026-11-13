@@ -40,11 +40,14 @@ data class ComposerUi(
     val error: String? = null,
     val sheet: ComposeSheet? = null,
     /**
-     * Новая беседа (из поиска): тексты ушедших писем — пузыри в пустой ленте,
+     * Новая беседа (из поиска): ушедшие письма — пузыри в пустой ленте,
      * пока беседа не пришла с сервера и не открылась вместо заготовки.
      */
-    val pendingNew: List<String> = emptyList(),
+    val pendingNew: List<PendingNew> = emptyList(),
 )
+
+/** Пузырь письма в новой беседе: [sent] — сервер принял, ждём саму беседу. */
+data class PendingNew(val key: String, val text: String, val sent: Boolean = false)
 
 /**
  * Отправка (контракт §5, десктопный §1–2): ветки, optimistic-заглушка в
@@ -79,6 +82,10 @@ class ComposeController(
     private var stubSeq = 0
 
     fun edit(f: (Draft) -> Draft) = ui.update { it.copy(draft = f(it.draft), error = null) }
+
+    fun clearError() = ui.update { it.copy(error = null) }
+
+    fun showError(msg: String) = ui.update { it.copy(error = msg) }
     fun toggleExpanded() = ui.update { it.copy(expanded = !it.expanded) }
     fun replyTo(b: MessageBody?) = ui.update { it.copy(replyTo = b) }
 
@@ -130,7 +137,7 @@ class ComposeController(
             is Built.Ok -> {
                 val draft = u.draft
                 val key = "s${++stubSeq}"
-                conversation.js.trySend("ddm.stub(${stubJson(key, draft)})")
+                conversation.js.trySend("ddm.stub(${stubJson(key, draft, built.request.html)})")
                 ui.update { ComposerUi(sheet = it.sheet) }
                 scope.launch {
                     try {
@@ -145,7 +152,7 @@ class ComposeController(
                         // Текст возвращается, если композер пуст (не затираем набранное заново).
                         ui.update { cur ->
                             cur.copy(
-                                draft = if (cur.draft.text.isEmpty() && cur.draft.attachments.isEmpty()) draft else cur.draft,
+                                draft = if (cur.draft.isBlank()) draft.reloaded() else cur.draft,
                                 replyTo = cur.replyTo ?: u.replyTo,
                                 error = sendError(e),
                             )
@@ -167,14 +174,19 @@ class ComposeController(
         when (val built = build(Branch.New, draft, identities.value)) {
             is Built.Refused -> ui.update { it.copy(error = built.reason) }
             is Built.Ok -> {
-                val text = u.draft.text.ifBlank { u.draft.attachments.joinToString(", ") { it.name } }
+                val text = u.draft.text.trim().ifBlank {
+                    (u.draft.inline.map { "Картинка" } + u.draft.attachments.map { it.name }).joinToString(", ")
+                }
+                val key = "n${++stubSeq}"
                 // Текст и вложения уходят, переопределения адресата/темы остаются.
-                ui.update { it.copy(draft = it.draft.copy(text = "", attachments = emptyList()), pendingNew = it.pendingNew + text, error = null) }
+                ui.update { it.copy(draft = it.draft.bodyCleared(), pendingNew = it.pendingNew + PendingNew(key, text), error = null) }
                 scope.launch {
                     try {
                         hub.send(built.request, owners.value)
-                        sentTarget = built.to.map { it.lowercase() }.toSet()
-                        ui.update { it.copy(sentFlash = true) }
+                        // Беседа нового письма — набор адресатов: «Кому» и «Копия»
+                        // (§4 десктопа: bcc в набор не входит).
+                        sentTarget = targetOf(built.request)
+                        ui.update { cur -> cur.copy(sentFlash = true, pendingNew = cur.pendingNew.map { if (it.key == key) it.copy(sent = true) else it }) }
                         afterSend()
                         delay(2000)
                         ui.update { it.copy(sentFlash = false) }
@@ -182,8 +194,8 @@ class ComposeController(
                         if (!e.isMailError()) throw e
                         ui.update { cur ->
                             cur.copy(
-                                draft = if (cur.draft.text.isEmpty() && cur.draft.attachments.isEmpty()) u.draft else cur.draft,
-                                pendingNew = cur.pendingNew - text,
+                                draft = if (cur.draft.isBlank()) u.draft.reloaded() else cur.draft,
+                                pendingNew = cur.pendingNew.filter { it.key != key },
                                 error = sendError(e),
                             )
                         }
@@ -229,10 +241,17 @@ class ComposeController(
         }
     }
 
-    /** Копия в «Отправленных» появится после доставки — подтягиваем её. */
+    /**
+     * Копия в «Отправленных» (и беседа нового письма) появится после
+     * доставки — подтягиваем её: сразу и с затухающими паузами, как
+     * `schedule_post_send_refetch` десктопа (2.5 с → 7 → 15 → 30 → 60).
+     * Основной сигнал — WS `message_sent` (его ловит `LiveUpdates`); это
+     * подстраховка без сокета и для IMAP-учёток.
+     */
     private fun afterSend() {
+        syncSoon()
         scope.launch {
-            for (d in listOf(2_000L, 6_000L, 15_000L, 40_000L)) {
+            for (d in POST_SEND_REFETCH_MS) {
                 delay(d)
                 syncSoon()
             }
@@ -244,10 +263,16 @@ class ComposeController(
         else -> e.errorText()
     }.let { "Не отправлено: $it." }
 
-    private fun stubJson(key: String, d: Draft) = JsonObject(
+    /**
+     * Заглушка выглядит как письмо (десктоп §2): тот же HTML, что уходит на
+     * сервер, картинки тела вшиты `data:`-URI — `cid:` у заглушки не к чему
+     * разрешать.
+     */
+    private fun stubJson(key: String, d: Draft, html: String) = JsonObject(
         mapOf(
             "key" to JsonPrimitive(key),
             "text" to JsonPrimitive(d.text),
+            "html" to JsonPrimitive(stubHtml(html, d.inline)),
             "attachments" to JsonArray(
                 d.attachments.map { JsonObject(mapOf("filename" to JsonPrimitive(it.name), "size" to JsonPrimitive(it.size))) },
             ),
@@ -257,5 +282,19 @@ class ComposeController(
     private companion object {
         /** Лимит сервера — 30 МБ на запрос в base64; сырых байт — около 22. */
         const val MAX_TOTAL = 22L shl 20
+
+        /** Паузы между повторными синками после отправки (накопительно ~2 мин). */
+        val POST_SEND_REFETCH_MS = listOf(2_500L, 7_000L, 15_000L, 30_000L, 60_000L)
     }
 }
+
+/** Набор адресатов нового письма — по нему узнаём его беседу (§2 десктопа). */
+internal fun targetOf(req: ru.letotam.ddmail.api.SendRequest): Set<String> =
+    (req.to + req.cc).map(::bareAddress).filter { it.isNotEmpty() }.toSet()
+
+/** HTML тела для заглушки: `cid:` картинок → `data:`-URI. */
+internal fun stubHtml(html: String, inline: List<PendingAttachment>): String =
+    inline.fold(html) { acc, a ->
+        val cid = a.cid ?: return@fold acc
+        acc.replace("cid:$cid", "data:${a.mime};base64," + java.util.Base64.getEncoder().encodeToString(a.bytes))
+    }

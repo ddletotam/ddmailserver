@@ -14,18 +14,15 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -39,13 +36,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -59,8 +55,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.letotam.ddmail.DdmailApp
-import ru.letotam.ddmail.api.ApiException
-import ru.letotam.ddmail.api.SessionApi
+import ru.letotam.ddmail.api.TaskApi
 import ru.letotam.ddmail.api.TaskDto
 import ru.letotam.ddmail.calendar.CalendarColors
 import ru.letotam.ddmail.calendar.MONTHS_GEN
@@ -71,15 +66,18 @@ import java.time.format.DateTimeFormatter
 
 /**
  * Задачи (VTODO, контракт §14; §5е десктопа): окна по времени нет — забираем
- * все; выполненные скрыты, тумблер меняет запрос к серверу; галочка
- * оптимистична — строка меняется сразу, отказ сервера откатывает.
+ * все; выполненные скрыты, тумблер меняет запрос к серверу. Галочка,
+ * создание, правка и удаление оптимистичны — [TaskBoard].
  */
-class TasksViewModel(private val app: DdmailApp, private val api: SessionApi, private val onDead: () -> Unit) : ViewModel() {
-    val tasks = MutableStateFlow<List<TaskDto>?>(null) // null — ещё грузится
+class TasksViewModel(private val app: DdmailApp, api: TaskApi, onDead: () -> Unit) : ViewModel() {
+    private val board = TaskBoard(api, onDead)
+    val tasks = board.tasks
+    val lists = board.lists
+    val notice = board.notice
     val showDone = MutableStateFlow(false)
     val loading = MutableStateFlow(false)
-    val notice = MutableStateFlow<String?>(null)
-    val open = MutableStateFlow<TaskDto?>(null)
+    /** Открытая форма задачи: новой или существующей. */
+    val draft = MutableStateFlow<TaskDraft?>(null)
 
     init {
         viewModelScope.launch {
@@ -91,11 +89,8 @@ class TasksViewModel(private val app: DdmailApp, private val api: SessionApi, pr
 
     fun refresh() = viewModelScope.launch {
         loading.value = true
-        try {
-            tasks.value = api.tasks(showDone.value)
-        } catch (e: ApiException) {
-            if (e is ApiException.Unauthorized) onDead() else notice.value = "Не удалось загрузить задачи"
-        }
+        launch { board.loadLists() }
+        board.load(showDone.value)
         loading.value = false
     }
 
@@ -106,18 +101,36 @@ class TasksViewModel(private val app: DdmailApp, private val api: SessionApi, pr
     }
 
     fun toggle(t: TaskDto) {
-        if (!t.canWrite) return
-        val done = !t.completed
-        tasks.update { l -> l?.map { if (it.id == t.id) it.copy(completed = done) else it } }
-        open.update { if (it?.id == t.id) it.copy(completed = done) else it }
-        viewModelScope.launch {
-            try {
-                api.setTaskCompleted(t.id, done)
-            } catch (e: ApiException) {
-                tasks.update { l -> l?.map { if (it.id == t.id) it.copy(completed = t.completed) else it } }
-                if (e is ApiException.Unauthorized) onDead() else notice.value = if (e is ApiException.Server && e.code == 403) "Список только для чтения" else "Не удалось сохранить"
-            }
+        viewModelScope.launch { board.toggle(t) }
+    }
+
+    fun newTask() {
+        draft.value = TaskDraft.new(lists.value)
+        // Списки могли не успеть загрузиться — форма подхватит первый, когда придут.
+        if (lists.value.isEmpty()) viewModelScope.launch {
+            board.loadLists()
+            draft.update { d -> if (d != null && d.original == null && d.calendarId == 0L) d.copy(calendarId = lists.value.firstOrNull()?.id ?: 0) else d }
         }
+    }
+
+    fun edit(t: TaskDto) {
+        if (t.id < 0) return // ещё не создана на сервере
+        draft.value = TaskDraft.of(t)
+    }
+
+    fun editDraft(f: (TaskDraft) -> TaskDraft) = draft.update { it?.let { d -> f(d).copy(error = null) } }
+
+    /** Форма закрывается сразу, строка меняется сразу; отказ сервера откатывает её. */
+    fun save() {
+        val d = draft.value ?: return
+        board.validate(d)?.let { err -> draft.update { it?.copy(error = err) }; return }
+        draft.value = null
+        viewModelScope.launch { board.save(d) }
+    }
+
+    fun delete(t: TaskDto) {
+        draft.value = null
+        viewModelScope.launch { board.delete(t) }
     }
 }
 
@@ -163,7 +176,7 @@ fun TasksScreen(vm: TasksViewModel, modifier: Modifier = Modifier) {
     Box(modifier.fillMaxSize()) {
         // Во всю ширину: бургер — в левом верхнем углу раздела (mobile-layout.md).
         Column(Modifier.fillMaxSize()) {
-            // Первая строка — как у десктопа: бургер, «Задачи», «выполненные», обновить.
+            // Первая строка — как у десктопа: бургер, «Задачи», «выполненные», обновить; «+» — как в «Контактах».
             Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 BurgerButton()
                 Text("Задачи", fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f).padding(start = 4.dp))
@@ -171,6 +184,7 @@ fun TasksScreen(vm: TasksViewModel, modifier: Modifier = Modifier) {
                     Icon(Icons.Filled.DoneAll, if (showDone) "Скрыть выполненные" else "Показать выполненные", tint = if (showDone) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
                 }
                 IconButton(onClick = { vm.refresh() }) { Icon(Icons.Filled.Refresh, "Обновить") }
+                IconButton(onClick = vm::newTask) { Icon(Icons.Filled.Add, "Новая задача") }
             }
             if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp)) else Spacer(Modifier.height(2.dp))
             val list = tasks
@@ -185,7 +199,7 @@ fun TasksScreen(vm: TasksViewModel, modifier: Modifier = Modifier) {
                     val sorted = list.sortedWith(compareBy<TaskDto>({ it.completed }, { it.due ?: Long.MAX_VALUE }, { it.priority?.takeIf { p -> p > 0 } ?: 10 }, { it.summary.lowercase() }))
                     LazyColumn(Modifier.fillMaxSize()) {
                         items(sorted, key = { it.id }) { t ->
-                            TaskRow(t, onCheck = { vm.toggle(t) }, onOpen = { vm.open.value = t })
+                            TaskRow(t, onCheck = { vm.toggle(t) }, onOpen = { vm.edit(t) })
                             HorizontalDivider(Modifier.padding(start = 56.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                         }
                     }
@@ -194,26 +208,7 @@ fun TasksScreen(vm: TasksViewModel, modifier: Modifier = Modifier) {
         }
         SnackbarHost(snack, Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp))
     }
-    val opened by vm.open.collectAsState()
-    opened?.let { t ->
-        AlertDialog(
-            onDismissRequest = { vm.open.value = null },
-            title = { Text(t.summary.ifBlank { "(без названия)" }) },
-            text = {
-                Column {
-                    Text(t.calendarName, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    dueOf(t)?.let { (txt, c) -> Text("Срок: $txt", color = c ?: Color.Unspecified, modifier = Modifier.padding(top = 6.dp)) }
-                    if (t.description.isNotBlank()) SelectionContainer { Text(t.description, Modifier.padding(top = 10.dp)) }
-                }
-            },
-            confirmButton = {
-                if (t.canWrite) IconButton(onClick = { vm.toggle(t) }) {
-                    Icon(Icons.Filled.Check, if (t.completed) "Не выполнено" else "Выполнено", tint = if (t.completed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
-                }
-            },
-            dismissButton = { IconButton(onClick = { vm.open.value = null }) { Icon(Icons.Filled.Close, "Закрыть") } },
-        )
-    }
+    TaskEditor(vm, LocalConfiguration.current.screenWidthDp >= 600)
 }
 
 @Composable

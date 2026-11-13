@@ -6,8 +6,11 @@ import ru.letotam.ddmail.api.OutgoingAttachment
 import ru.letotam.ddmail.api.SendRequest
 import ru.letotam.ddmail.sync.Conversation
 
-/** Файл, приложенный к письму в композере. */
-class PendingAttachment(val name: String, val mime: String, val bytes: ByteArray) {
+/**
+ * Файл, приложенный к письму в композере. [cid] — inline-картинка тела
+ * (`<img src="cid:…">`), уходит вложением с Content-ID; `null` — обычный файл.
+ */
+class PendingAttachment(val name: String, val mime: String, val bytes: ByteArray, val cid: String? = null) {
     val size: Int get() = bytes.size
 }
 
@@ -23,9 +26,41 @@ data class Draft(
     /** Адрес «От кого»; пусто — выбрать по беседе. */
     val from: String = "",
     val attachments: List<PendingAttachment> = emptyList(),
+    /**
+     * `text/html` тела из редактора (§3а десктопа); пусто — тело без
+     * разметки, HTML строится из [text]. [text] — его plain-зеркало.
+     */
+    val html: String = "",
+    /** Картинки тела — inline-вложения с `cid`, в порядке появления. */
+    val inline: List<PendingAttachment> = emptyList(),
+    /**
+     * Содержимое редактора со стилями и картинками — чтобы вернуть его в
+     * композер целиком, если отправка не удалась. `null` — только [text].
+     */
+    val content: CharSequence? = null,
+    /**
+     * Поколение черновика: сменилось — редактор берёт текст из черновика
+     * (сброс после отправки, возврат после ошибки). `copy()` его сохраняет,
+     * поэтому правки из самого редактора текст в нём не перезаписывают.
+     */
+    val epoch: Long = nextEpoch(),
 ) {
-    /** «Есть что отправлять»: текст или хотя бы одно вложение (§1). */
-    val canSend: Boolean get() = text.isNotBlank() || attachments.isNotEmpty()
+    /** «Есть что отправлять»: текст, картинка в теле или вложение (§1, §3а). */
+    val canSend: Boolean get() = text.isNotBlank() || inline.isNotEmpty() || attachments.isNotEmpty()
+
+    /** Тело пусто: ни текста, ни картинок, ни файлов. */
+    fun isBlank(): Boolean = text.isEmpty() && inline.isEmpty() && attachments.isEmpty()
+
+    /** Тот же черновик заново в редактор (возврат после неудачной отправки). */
+    fun reloaded(): Draft = copy(epoch = nextEpoch())
+
+    /** Тело ушло: текст, картинки и файлы — прочь, адресаты и тема остаются. */
+    fun bodyCleared(): Draft = copy(text = "", html = "", inline = emptyList(), content = null, attachments = emptyList(), epoch = nextEpoch())
+
+    companion object {
+        private val epochs = java.util.concurrent.atomic.AtomicLong()
+        fun nextEpoch(): Long = epochs.incrementAndGet()
+    }
 }
 
 /** Ветка отправки (§1 десктопа), в порядке проверки. */
@@ -151,9 +186,11 @@ fun build(
             Quad(t, draft.subject.ifBlank { re(base) }, i, r)
         }
     }
-    val html = textToHtml(draft.text) + forwardHtml
+    // Тело — две версии, как у десктопа (§3а): HTML редактора или, без
+    // разметки, тот же сериализатор по plain-тексту.
+    val html = draft.html.ifEmpty { RichBody.html(listOf(RichSeg.Text(draft.text))) } + forwardHtml
     val text = draft.text + forwardText
-    val atts = (draft.attachments + extraAttachments).map { OutgoingAttachment(it.name, it.mime, it.bytes) }
+    val atts = (draft.attachments + draft.inline + extraAttachments).map { OutgoingAttachment(it.name, it.mime, it.bytes, it.cid) }
     return Built.Ok(
         SendRequest(
             from = fromHeader(from),

@@ -22,6 +22,7 @@ class AppSettings(private val context: Context) {
     private val prefetchKey = stringPreferencesKey("prefetch")
     private val notifyKey = booleanPreferencesKey("notifications")
     private val notifiedKey = longPreferencesKey("notified_max_uid")
+    private val foldersOnKey = booleanPreferencesKey("folders_enabled")
     private val imageSendersKey = androidx.datastore.preferences.core.stringSetPreferencesKey("image_senders")
 
     /** Отправители, чьи внешние картинки показываем сразу. */
@@ -41,6 +42,14 @@ class AppSettings(private val context: Context) {
     suspend fun setPrefetch(v: Prefetch) = context.settingsStore.edit { it[prefetchKey] = v.name }
 
     suspend fun setNotifications(v: Boolean) = context.settingsStore.edit { it[notifyKey] = v }
+
+    /**
+     * «Настройки → Папки → Показывать папки» (десктоп §4, `folders_enabled`):
+     * выключатель локальный, сами папки общие для всех устройств.
+     */
+    val foldersOn: Flow<Boolean> = context.settingsStore.data.map { it[foldersOnKey] ?: true }
+
+    suspend fun setFoldersOn(v: Boolean) = context.settingsStore.edit { it[foldersOnKey] = v }
 
     private fun notifiedKey(account: String) = longPreferencesKey("notified_max_uid:$account")
 
