@@ -53,6 +53,28 @@ struct FeedTests {
         #expect(!w.hasOlder)
     }
 
+    @Test func removedDropsGoneFromWindow() {
+        var w = FeedWindow(refs(Array(1...25)))
+        // Показаны 6…25; удалили показанное 20 и непоказанное 3.
+        let now = refs(Array(1...25).filter { $0 != 20 && $0 != 3 })
+        #expect(w.removed(now) == [20])
+        #expect(w.first.map(\.uid) == Array((6...25).reversed()).filter { $0 != 20 })
+        #expect(w.older().map(\.uid) == [5, 4, 2, 1])
+        #expect(w.removed(now).isEmpty)
+        // Пустая беседа — пересборка кэша, а не удаление всего.
+        #expect(w.removed([]).isEmpty)
+        #expect(w.first.count == 23)
+    }
+
+    @Test func sourceHeadersEndAtBlankLine() {
+        let crlf = Data("From: a@x\r\nSubject: =?utf-8?B?0KLQtdC80LA=?=\r\n\r\nтело\r\n".utf8)
+        #expect(MessageSource.text(MessageSource.headers(crlf)) == "From: a@x\r\nSubject: =?utf-8?B?0KLQtdC80LA=?=")
+        let lf = Data("From: a@x\n\nbody".utf8)
+        #expect(MessageSource.text(MessageSource.headers(lf)) == "From: a@x")
+        // Без тела — всё письмо и есть заголовки; 8-bit не в UTF-8 — Latin-1.
+        #expect(MessageSource.text(MessageSource.headers(Data([0x58, 0x3A, 0x20, 0xE9]))) == "X: é")
+    }
+
     @Test func batchRespectsSpamAndSenders() throws {
         let ham = Conversation(accountKey: "a", id: "c", isGroup: true)
         var spam = ham

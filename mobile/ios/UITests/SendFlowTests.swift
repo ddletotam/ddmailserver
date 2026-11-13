@@ -362,7 +362,10 @@ enum UIFlow {
         #if os(macOS)
         return app.menuItems.matching(NSPredicate(format: "title == %@ OR label == %@", name, name)).firstMatch
         #else
-        return app.buttons.matching(NSPredicate(format: "label == %@", name)).firstMatch
+        // Пункты системного контекстного меню бывают и кнопками, и пунктами меню.
+        let types = [XCUIElement.ElementType.button.rawValue, XCUIElement.ElementType.menuItem.rawValue]
+        return app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@ AND elementType IN %@", name, types)).firstMatch
         #endif
     }
 

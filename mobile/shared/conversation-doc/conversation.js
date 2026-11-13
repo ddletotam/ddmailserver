@@ -18,8 +18,15 @@
 //   allowSender(uid), allowSpamImages(uid),
 //   selectionMenu(x, y, w, h) — только WKWebView: показать меню над выделением
 //     (прямоугольник в CSS px от начала документа)
+//   WKWebView к bubbleMenu и attachmentMenu добавляет ещё шесть чисел
+//     (x, y, w, h, px, py): прямоугольник пузыря (чипа) и точку нажатия в CSS
+//     px от начала документа — нативное меню встаёт у пузыря. Android их не
+//     получает: у `@JavascriptInterface` число аргументов — часть подписи.
 // Нативный → документ (выделение): ddm.keyboard(on), ddm.selectedText(),
 //   ddm.selectionRect()
+// Нативный → документ (меню пузыря): ddm.remove([uid]) — письма удалены,
+//   ddm.view(uid, 'text'|'html') — текстовая версия письма / снова HTML.
+//   Оба необязательны: нативный код проверяет их наличие.
 //   Msg.imagesAllowed — картинки этого отправителя разрешены всегда.
 //   Msg.spam — письмо из «Спама»: картинки только по нажатию на этот показ
 //     (нативный пропуск — allowSpamImages), «Всегда от отправителя» нет,
@@ -39,7 +46,8 @@ const native = (() => {
 })();
 
 /**
- * Долгое нажатие → меню. Android WebView и Мак (правый клик) присылают
+ * Долгое нажатие → меню; обработчик получает точку нажатия (client px).
+ * Android WebView и Мак (правый клик) присылают
  * `contextmenu`; WKWebView на iPhone/iPad при долгом нажатии его не шлёт, а
  * начинает выделение текста — меню пузыря и вложения были недостижимы.
  * Поэтому на сенсорном WebKit долгое нажатие считаем сами: 450 мс без
@@ -66,7 +74,7 @@ function onLongPress(el, handler) {
     // Chromium при активном выделении переносит его на слово под пальцем —
     // меню письма открывается без выделения, как на iPhone.
     if (sel && sel.toString()) sel.removeAllRanges();
-    handler();
+    handler(e.clientX, e.clientY);
   });
   if (!touchWebKit) return;
   let timer = null, x = 0, y = 0, fired = false;
@@ -82,7 +90,7 @@ function onLongPress(el, handler) {
     timer = setTimeout(() => {
       timer = null; fired = true;
       holdNativeSelection(true);
-      handler();
+      handler(x, y);
     }, LONG_PRESS_MS);
   }, { passive: true });
   el.addEventListener('touchmove', (e) => {
@@ -96,6 +104,20 @@ function onLongPress(el, handler) {
   el.addEventListener('click', (e) => { if (fired) { fired = false; e.preventDefault(); e.stopPropagation(); } }, true);
 }
 if (touchWebKit) document.documentElement.classList.add('ddm-touch-webkit');
+
+/**
+ * Просьба о нативном меню у элемента (пузыря, чипа вложения). Android — как
+ * было (`bubbleMenu(uid)`); WebKit — ещё прямоугольник элемента и точка
+ * нажатия в CSS px от начала документа (как `selectionMenu`): меню iPhone и
+ * iPad встаёт у пузыря, а не посреди колонки.
+ */
+function askMenu(name, args, el, x, y) {
+  if (window.ddmNative) { native(name, ...args); return; }
+  const r = el.getBoundingClientRect();
+  const px = typeof x === 'number' ? x : r.left + r.width / 2;
+  const py = typeof y === 'number' ? y : r.top + r.height / 2;
+  native(name, ...args, r.left + scrollX, r.top + scrollY, r.width, r.height, px + scrollX, py + scrollY);
+}
 
 /**
  * Долгое нажатие сработало (меню письма), а WebKit чуть позже начинает своё
@@ -514,6 +536,8 @@ const scroller = document.scrollingElement;
 
 /** uid → { msg, host, root, imagesAllowed } — для перерисовки и подгонки ширины. */
 const bubbles = new Map();
+/** Письма, показанные текстовой версией (меню «Показать… → Текстовую версию»). */
+const textViews = new Set();
 /** Письма в порядке ленты (старые → новые). */
 let order = [];
 let hasOlder = false;
@@ -827,7 +851,7 @@ function fill(entry) {
   const root = document.createElement('div');
   root.className = 'ddm-root';
   let remoteCount = 0;
-  if (msg.html) {
+  if (msg.html && !entry.viewText) {
     const s = sanitize(msg.html, msg.uid, entry.imagesAllowed, !!msg.spam);
     remoteCount = s.remoteCount;
     collapseQuotes(s.body);
@@ -1004,8 +1028,8 @@ function makeRow(msg) {
       size.textContent = formatSize(a.size || 0);
       chip.append(icon('attach'), name, size);
       chip.addEventListener('click', () => native('openAttachment', msg.uid, a.index));
-      // Долгое нажатие на чип — «Открыть» / «Сохранить в Загрузки».
-      onLongPress(chip, () => native('attachmentMenu', msg.uid, a.index));
+      // Долгое нажатие на чип — «Открыть» / «Поделиться» / «Сохранить».
+      onLongPress(chip, (x, y) => askMenu('attachmentMenu', [msg.uid, a.index], chip, x, y));
       box.appendChild(chip);
     }
     b.appendChild(box);
@@ -1019,10 +1043,14 @@ function makeRow(msg) {
   b.appendChild(meta);
   row.appendChild(b);
 
-  // Долгое нажатие на пузырь — нативное меню (ответить, переслать, …).
-  onLongPress(row, () => native('bubbleMenu', msg.uid));
+  // Долгое нажатие на пузырь — нативное меню (ответить, переслать, …),
+  // у самого пузыря.
+  onLongPress(row, (x, y) => askMenu('bubbleMenu', [msg.uid], b, x, y));
 
-  const entry = { msg, host, shadow, root: null, imagesAllowed: !!msg.imagesAllowed, imagesBtn, imagesBox, row, deliveryEl };
+  const entry = {
+    msg, host, shadow, root: null, imagesAllowed: !!msg.imagesAllowed, imagesBtn, imagesBox, row, deliveryEl,
+    viewText: textViews.has(msg.uid),
+  };
   // Двойной тап — слово, тройной — фраза; дальше системные маркеры.
   wireTapSeries(host, shadow, () => entry.root);
   // «Показать» — на это письмо до закрытия беседы; «Всегда» — запоминает
@@ -1156,6 +1184,7 @@ const ddm = {
   /** Новая беседа: всё заново. */
   set(batch) {
     bubbles.clear();
+    textViews.clear();
     // Заглушки принадлежат прежней беседе: иначе append() вернул бы их в новую.
     stubs.clear();
     order = [...batch.messages].sort(byDate);
@@ -1244,6 +1273,41 @@ const ddm = {
     const st = stubs.get(key);
     if (!st) return;
     keepBottom(() => stubDelivery(st, d));
+  },
+
+  /**
+   * Письма удалены (меню пузыря «Удалить письмо» или на другом устройстве):
+   * пузыри уходят, разделитель дня без писем — тоже.
+   */
+  remove(uids) {
+    const gone = new Set((uids || []).map(Number));
+    if (!gone.size) return;
+    for (const uid of gone) {
+      const e = bubbles.get(uid);
+      if (!e) continue;
+      const prev = e.row.previousElementSibling;
+      const next = e.row.nextElementSibling;
+      e.row.remove();
+      bubbles.delete(uid);
+      textViews.delete(uid);
+      const lonely = prev && prev.classList.contains('ddm-day') &&
+        (!next || next.classList.contains('ddm-day'));
+      if (lonely) prev.remove();
+    }
+    order = order.filter((m) => !gone.has(Number(m.uid)));
+  },
+
+  /** «Показать… → Текстовую версию» (`text`) / «HTML-версию» (`html`) — у одного письма. */
+  view(uid, mode) {
+    const e = bubbles.get(Number(uid));
+    if (!e) return;
+    const text = mode === 'text';
+    if (e.viewText === text) return;
+    e.viewText = text;
+    if (text) textViews.add(e.msg.uid); else textViews.delete(e.msg.uid);
+    holdAnchor(e.row);
+    fill(e);
+    keepAnchor();
   },
 
   /** Отправка не удалась — заглушку убрать: не врём, что ушло. */

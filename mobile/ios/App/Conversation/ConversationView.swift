@@ -33,26 +33,16 @@ struct ConversationView: View {
                 model.exporting = nil
             }
             .onChange(of: model.exporting) { exportShown = model.exporting != nil }
-            .confirmationDialog(bubbleTitle, isPresented: present($model.bubbleMenu), titleVisibility: .visible) {
-                if let b = model.bubbleMenu {
-                    if !conversation.spam {
-                        Button("Ответить", systemImage: "arrowshape.turn.up.left") { compose.replyTo = b }
-                        Button("Переслать", systemImage: "arrowshape.turn.up.right") { compose.openForward(b) }
-                    }
-                    Button("Копировать текст", systemImage: "doc.on.doc") { Clipboard.copy(PlainText.of(b)) }
-                    if !b.fromAddr.isEmpty {
-                        Button("Копировать адрес", systemImage: "at") { Clipboard.copy(b.fromAddr) }
-                    }
-                }
-            } message: {
-                if let b = model.bubbleMenu, let why = DeliveryText.of(b) { Text(why) }
+            // Меню пузыря и чипа — нативные, у пузыря (`ConversationWeb.showMenu`);
+            // ответ и пересылку делает композер этого экрана.
+            .onAppear { installActions() }
+            .alert("Удалить письмо?", isPresented: present($model.confirmDelete), presenting: pendingDelete) { b in
+                Button("Удалить", role: .destructive) { model.delete(b) }
+                Button("Отмена", role: .cancel) {}
+            } message: { b in
+                Text("«\(ConversationModel.subject(b))» удалится с сервера. Вернуть его будет нельзя.")
             }
-            .confirmationDialog(model.attachmentMenu?.name ?? "", isPresented: present($model.attachmentMenu), titleVisibility: .visible) {
-                if let a = model.attachmentMenu {
-                    Button("Открыть", systemImage: "eye") { model.openAttachment(uid: a.uid, index: a.index) }
-                    Button("Сохранить в «Файлы»", systemImage: "square.and.arrow.down") { model.saveAttachment(uid: a.uid, index: a.index) }
-                }
-            }
+            .sheet(item: $model.source) { SourceView(source: $0) }
             .overlay(alignment: .bottom) { NoticeBanner(text: $model.notice) }
             // Ответа в спам нет: на спам не отвечают (§5).
             .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -74,9 +64,12 @@ struct ConversationView: View {
         return conversation.receivedBy.isEmpty ? cps : "\(cps) → \(conversation.receivedBy)"
     }
 
-    private var bubbleTitle: String {
-        guard let b = model.bubbleMenu else { return "" }
-        return b.subject.isEmpty ? "(без темы)" : b.subject
+    /// Письмо, которое ждёт подтверждения удаления (читается в теле, §0).
+    private var pendingDelete: MessageBody? { model.confirmDelete }
+
+    private func installActions() {
+        let compose = compose
+        model.actions = .init(reply: { compose.replyTo = $0 }, forward: { compose.openForward($0) })
     }
 
     private func present<T>(_ v: Binding<T?>) -> Binding<Bool> {
@@ -183,6 +176,39 @@ struct WebViewContainer: NSViewRepresentable {
     }
 }
 #endif
+
+/// «Показать… → Заголовки / Исходник» (десктоп: окно исходника): моноширинный
+/// текст с выделением, «Скопировать» берёт всё письмо.
+struct SourceView: View {
+    let source: ConversationModel.SourceText
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(source.text)
+                    .font(.system(.footnote, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+            }
+            .navigationTitle(source.title)
+            .toolbarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Готово", systemImage: "checkmark") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Скопировать", systemImage: "doc.on.doc") { Clipboard.copy(source.full) }
+                }
+            }
+        }
+        #if os(macOS)
+        .frame(minWidth: 640, minHeight: 480)
+        #endif
+        .accessibilityIdentifier("source.view")
+    }
+}
 
 /// Ссылки — во внешнем приложении (браузер, почта, звонилка).
 enum LinkOpener {

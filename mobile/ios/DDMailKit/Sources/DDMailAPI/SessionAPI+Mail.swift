@@ -120,6 +120,11 @@ extension SessionAPI {
         try await binary("/messages/\(uid)/attachments/\(index)")
     }
 
+    /// Письмо целиком (RFC 822, `message/rfc822`): «Заголовки» и «Исходник».
+    public func source(uid: Int64) async throws -> Data {
+        try await binary("/messages/\(uid)/source").data
+    }
+
     func binary(_ path: String) async throws -> Binary {
         let (data, response) = try await authedResponse { URLRequest(url: url(path)).bearer($0) }
         return Binary(data: data, contentType: response.value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream")

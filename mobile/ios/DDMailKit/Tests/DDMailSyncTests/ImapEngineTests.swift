@@ -128,6 +128,23 @@ struct ImapEngineTests {
         #expect(server.uids("INBOX").count == 2)
     }
 
+    @Test func deleteOneMessageAndSource() async throws {
+        let server = FakeIMAPServer()
+        server.deliver("INBOX", from: "bob@example.net", to: me, subject: "x", body: "первое")
+        server.deliver("INBOX", from: "bob@example.net", to: me, subject: "y", body: "второе")
+        let (e, _) = try engine(server)
+        try await e.sync()
+        let c = try #require(try e.currentConversations().first)
+        #expect(c.messages.count == 2)
+        let first = try #require(c.messages.min { $0.uid < $1.uid })
+        let raw = String(decoding: try await e.source(uid: first.uid), as: UTF8.self)
+        #expect(raw.contains("Subject: x"))
+        #expect(raw.contains("первое"))
+        try await e.deleteMessages([first])
+        #expect(server.uids("INBOX") == [2])
+        #expect(try e.currentConversations().first?.messages.count == 1)
+    }
+
     @Test func refusedChangeRollsBack() async throws {
         let server = FakeIMAPServer()
         server.deliver("INBOX", from: "bob@example.net", to: me, subject: "x")

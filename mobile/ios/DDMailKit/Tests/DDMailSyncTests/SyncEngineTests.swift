@@ -114,6 +114,24 @@ struct SyncEngineTests {
         #expect(server.requests.contains("POST /messages/flags"))
     }
 
+    @Test func deleteMessageIsLocalFirstAndKeepsConversation() async throws {
+        server.on("/changes?since=0", #"{"entries":[],"latest_seq":1}"#)
+        server.on("/conversations?limit=5000&since=0", #"{"server_now_ms":1,"conversations":[\#(conv("bob", ts: 1, msgs: [(1, "<a@x>"), (2, "<b@x>")]))]}"#)
+        server.on("/messages/delete", "{}")
+        server.on("/messages/2/source", "From: bob@x.ru\r\n\r\nтело")
+        try await engine.sync()
+        let bob = try #require(engine.currentConversations().first { $0.id == "bob" })
+        let raw = try await engine.source(uid: 2)
+        #expect(String(decoding: raw, as: UTF8.self) == "From: bob@x.ru\r\n\r\nтело")
+        try await engine.deleteMessages([bob.messages.first { $0.uid == 2 }!])
+        let after = try #require(engine.currentConversations().first { $0.id == "bob" })
+        #expect(after.messages.map(\.uid) == [1])
+        #expect(server.requests.contains("POST /messages/delete"))
+        // Последнее письмо — беседа уходит целиком.
+        try await engine.deleteMessages(after.messages)
+        try #expect(engine.currentConversations().filter { !$0.spam }.isEmpty)
+    }
+
     @Test func bodiesComeFromCacheSecondTime() async throws {
         server.on("/conversations/messages", #"[{"uid":1,"subject":"Привет","text":"тело","message_id":"<a@x>"},{"uid":2,"message_id":"<b@x>"}]"#)
         let refs = [MessageRef(uid: 1, messageID: "<a@x>"), MessageRef(uid: 2, messageID: "<b@x>")]

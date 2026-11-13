@@ -279,6 +279,10 @@ public actor SyncEngine: MailProvider, DialogFolderSource {
         try await api.attachment(uid: uid, index: index)
     }
 
+    public func source(uid: Int64) async throws -> Data {
+        try await api.source(uid: uid)
+    }
+
     /// Поставить письмо в отправку: сервер ставит в очередь и сразу кладёт
     /// копию в «Отправленные» со статусом `pending` (десктоп §1).
     @discardableResult
@@ -309,6 +313,19 @@ public actor SyncEngine: MailProvider, DialogFolderSource {
     public func deleteConversations(_ convs: [Conversation]) async throws {
         try store.deleteConversations(accountKey, ids: convs.map(\.id))
         let refs = convs.flatMap(\.messages)
+        for chunk in stride(from: 0, to: refs.count, by: 200).map({ Array(refs[$0..<min($0 + 200, refs.count)]) }) {
+            try await api.delete(chunk)
+        }
+    }
+
+    /// Отдельные письма: из кэша сразу (беседа без писем уходит целиком, как
+    /// по надгробиям журнала), на сервере — тем же `/messages/delete`.
+    /// Письмо может лежать и в беседе спама — чистятся оба набора.
+    public func deleteMessages(_ refs: [MessageRef]) async throws {
+        guard !refs.isEmpty else { return }
+        let ids = refs.map(\.messageID)
+        try store.applyDeletions(accountKey, messageIDs: ids)
+        try store.applyDeletions(spamKey, messageIDs: ids)
         for chunk in stride(from: 0, to: refs.count, by: 200).map({ Array(refs[$0..<min($0 + 200, refs.count)]) }) {
             try await api.delete(chunk)
         }
