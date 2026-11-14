@@ -219,7 +219,7 @@ final class SendFlowTests: XCTestCase {
 enum UIFlow {
     @MainActor
     static func launch() -> XCUIApplication {
-        let app = XCUIApplication()
+        let app = XCUIApplication.ddmail()
         app.launchArguments += ["-ddmail-reset", "-ddmail-uitest-ids"]
         app.launch()
         return app

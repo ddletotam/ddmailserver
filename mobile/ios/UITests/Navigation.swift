@@ -58,6 +58,21 @@ extension XCUIElement {
 }
 #endif
 
+extension XCUIApplication {
+    /// Приложение под тестом. На Маке — без восстановления окон прошлого
+    /// сеанса (`-ApplePersistenceIgnoreState`): `-ddmail-reset` чистит данные,
+    /// но не состояние окон, и главное окно, оставленное во весь экран,
+    /// возвращалось во весь экран — окно беседы открывалось в своём Space, и
+    /// тесты видели одно окно («окно беседы не открылось»).
+    static func ddmail() -> XCUIApplication {
+        let app = XCUIApplication()
+        #if os(macOS)
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
+        #endif
+        return app
+    }
+}
+
 /// Видимый текст элемента. На iOS он в `label`; на Маке у `StaticText`
 /// (объединённых строк SwiftUI и текста в WKWebView) `label` пустой, а текст —
 /// в `value`. Тесты, сверявшие только `label`, на Маке не находили ни строк,

@@ -15,7 +15,7 @@ final class LoginFlowTests: XCTestCase {
         guard let email = env["DDMAIL_TEST_EMAIL"], let password = env["DDMAIL_TEST_PASSWORD"] else {
             throw XCTSkip("нет DDMAIL_TEST_EMAIL / DDMAIL_TEST_PASSWORD")
         }
-        let app = XCUIApplication()
+        let app = XCUIApplication.ddmail()
         app.launchArguments += ["-ddmail-reset"]
         app.launch()
 

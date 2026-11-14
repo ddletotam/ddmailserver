@@ -150,7 +150,7 @@ final class MailListTests: XCTestCase {
 
         // Перезапуск без сброса — беседа открыта сразу.
         app.terminate()
-        app = XCUIApplication()
+        app = XCUIApplication.ddmail()
         app.launchArguments += ["-ddmail-uitest-ids"]
         app.launch()
         XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 30), "на старте не открылась последняя беседа")

@@ -16,7 +16,7 @@ final class ImapFlowTests: XCTestCase {
         guard let email = env["DDMAIL_TEST_MAILRU_EMAIL"], let password = env["DDMAIL_TEST_MAILRU_PASSWORD"], !email.isEmpty else {
             throw XCTSkip("нет DDMAIL_TEST_MAILRU_EMAIL / DDMAIL_TEST_MAILRU_PASSWORD")
         }
-        let app = XCUIApplication()
+        let app = XCUIApplication.ddmail()
         app.launchArguments += ["-ddmail-reset", "-ddmail-uitest-ids"]
         app.launch()
 
@@ -53,7 +53,7 @@ final class ImapFlowTests: XCTestCase {
         }
         let host = "mail." + (email.split(separator: "@").last.map(String.init) ?? "")
         let login = String(email.split(separator: "@").first ?? "")
-        let app = XCUIApplication()
+        let app = XCUIApplication.ddmail()
         app.launchArguments += ["-ddmail-reset", "-ddmail-uitest-ids"]
         app.launch()
 
@@ -125,7 +125,7 @@ final class ImapFlowTests: XCTestCase {
     @MainActor
     func testAddDdmailToIMAP() throws {
         let (ddmail, mailru) = try bothAccounts()
-        let app = XCUIApplication()
+        let app = XCUIApplication.ddmail()
         app.launchArguments += ["-ddmail-reset", "-ddmail-uitest-ids"]
         app.launch()
 
@@ -148,7 +148,7 @@ final class ImapFlowTests: XCTestCase {
     @MainActor
     func testAddIMAPToDdmail() throws {
         let (ddmail, mailru) = try bothAccounts()
-        let app = XCUIApplication()
+        let app = XCUIApplication.ddmail()
         app.launchArguments += ["-ddmail-reset", "-ddmail-uitest-ids"]
         app.launch()
 
