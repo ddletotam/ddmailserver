@@ -22,6 +22,12 @@ struct AppShell: View {
             .tint(Palette.accent)
             .environment(\.sectionNav, SectionNav(current: current, go: { section = $0 }, settings: { settingsShown = true }))
             .focusedSceneValue(\.mailActions, mailActions)
+            .onAppear {
+                if workspace.startOnMail {
+                    workspace.startOnMail = false
+                    section = .mail
+                }
+            }
             #if os(macOS)
             // Окно без заголовка и без кнопки боковой панели: над разделом ничего (mobile-layout.md).
             .toolbar(removing: .title)

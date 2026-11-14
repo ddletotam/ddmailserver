@@ -34,7 +34,7 @@ final class CalendarDragTests: XCTestCase {
         } else {
             // iPhone: день из ленты месяцев.
             let d = cal.component(.day, from: tomorrow)
-            let cell = visible(NSPredicate(format: "label BEGINSWITH %@", "\(d), событий:"), app)
+            let cell = visible(Shown.begins("\(d), событий:"), app)
             XCTAssertNotNil(cell, "нет дня \(d) в ленте")
             cell?.tap()
         }
@@ -94,47 +94,47 @@ final class CalendarDragTests: XCTestCase {
         if segment("Год", app).waitForExistence(timeout: 3) {
             segment("Год", app).tap()
             XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "cal.year").firstMatch.waitForExistence(timeout: 5), "нет вида «Год»")
-            XCTAssertEqual(title.label, "\(year)")
+            XCTAssertEqual(title.shownText, "\(year)")
             sleep(1)
             UIFlow.shot(app, "year-1", self)
             app.buttons["Вперёд"].tap()
-            XCTAssertEqual(title.label, "\(year + 1)")
+            XCTAssertEqual(title.shownText, "\(year + 1)")
             app.buttons["Назад"].tap()
             let march = app.descendants(matching: .any).matching(identifier: "cal.year.month.3").firstMatch
             XCTAssertTrue(march.waitForExistence(timeout: 5))
             march.tap()
-            XCTAssertEqual(title.label, "Март \(year)")
-            XCTAssertTrue(segment("Месяц", app).isSelected, "касание месяца не открыло «Месяц»")
+            XCTAssertEqual(title.shownText, "Март \(year)")
+            XCTAssertTrue(chosen(segment("Месяц", app)), "касание месяца не открыло «Месяц»")
             sleep(1)
             UIFlow.shot(app, "year-2-march", self)
             // Месяц на всю высоту: последняя строка недель — у нижнего края.
             app.buttons["Сегодня"].tap()
             sleep(2)
             UIFlow.shot(app, "month-1-full-height", self)
-            let day = try XCTUnwrap(visible(NSPredicate(format: "label BEGINSWITH %@", "15, событий:"), app), "нет 15-го числа")
-            day.press(forDuration: 1.0)
+            let day = try XCTUnwrap(visible(Shown.begins("15, событий:"), app), "нет 15-го числа")
+            hold(day, 1.0)
         } else {
             // iPhone: лента без предела — 30 месяцев вперёд и назад кнопками.
             let now = Date()
             for _ in 0..<30 { app.buttons["Вперёд"].tap() }
             let ahead = Self.monthTitle(Calendar.current.date(byAdding: .month, value: 30, to: now)!)
-            XCTAssertEqual(title.label, ahead, "лента не дошла на 30 месяцев вперёд")
+            XCTAssertEqual(title.shownText, ahead, "лента не дошла на 30 месяцев вперёд")
             // Не только заголовок: лента и правда прокрутилась к этому месяцу.
-            XCTAssertNotNil(visible(NSPredicate(format: "label == %@ AND NOT identifier == 'cal.title'", ahead), app), "месяца +30 нет на экране")
+            XCTAssertNotNil(visible(NSCompoundPredicate(andPredicateWithSubpredicates: [Shown.equals(ahead), NSPredicate(format: "NOT identifier == 'cal.title'")]), app), "месяца +30 нет на экране")
             UIFlow.shot(app, "feed-1-plus30", self)
             for _ in 0..<60 { app.buttons["Назад"].tap() }
             let back = Self.monthTitle(Calendar.current.date(byAdding: .month, value: -30, to: now)!)
-            XCTAssertEqual(title.label, back, "лента не дошла на 30 месяцев назад")
-            XCTAssertNotNil(visible(NSPredicate(format: "label == %@ AND NOT identifier == 'cal.title'", back), app), "месяца −30 нет на экране")
+            XCTAssertEqual(title.shownText, back, "лента не дошла на 30 месяцев назад")
+            XCTAssertNotNil(visible(NSCompoundPredicate(andPredicateWithSubpredicates: [Shown.equals(back), NSPredicate(format: "NOT identifier == 'cal.title'")]), app), "месяца −30 нет на экране")
             UIFlow.shot(app, "feed-2-minus30", self)
             app.buttons["Сегодня"].tap()
             sleep(1)
-            let day = try XCTUnwrap(visible(NSPredicate(format: "label BEGINSWITH %@", "15, событий:"), app), "нет 15-го числа")
-            day.press(forDuration: 1.0)
+            let day = try XCTUnwrap(visible(Shown.begins("15, событий:"), app), "нет 15-го числа")
+            hold(day, 1.0)
         }
         // Долгое нажатие на день — форма нового события; без сохранения.
         XCTAssertTrue(app.navigationBars["Новое событие"].waitForExistence(timeout: 5)
-                      || app.staticTexts["Новое событие"].waitForExistence(timeout: 1), "долгое нажатие на день не открыло форму")
+                      || app.staticTexts.matching(Shown.equals("Новое событие")).firstMatch.waitForExistence(timeout: 1), "долгое нажатие на день не открыло форму")
         UIFlow.shot(app, "month-2-new-event", self)
         app.buttons["Отмена"].firstMatch.tap()
     }
@@ -166,6 +166,14 @@ final class CalendarDragTests: XCTestCase {
         #endif
     }
 
+    /// Выбран ли сегмент: на iOS — `isSelected`, у радиокнопки Мака — значение 1.
+    @MainActor
+    private func chosen(_ e: XCUIElement) -> Bool {
+        if e.isSelected { return true }
+        if let n = e.value as? NSNumber { return n.intValue == 1 }
+        return (e.value as? String) == "1"
+    }
+
     /// Первый видимый элемент: в ленте месяцев те же числа есть и у соседних месяцев.
     @MainActor
     private func visible(_ p: NSPredicate, _ app: XCUIApplication) -> XCUIElement? {
@@ -181,14 +189,32 @@ final class CalendarDragTests: XCTestCase {
     @MainActor
     private func event(_ title: String, _ app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: "cal.event")
-            .matching(NSPredicate(format: "label CONTAINS %@", title)).firstMatch
+            .matching(Shown.contains(title)).firstMatch
+    }
+
+    /// Долгое нажатие: на Маке — удержание кнопки мыши (`press(forDuration:)`
+    /// там — жест трекпада, `onLongPressGesture` его не видит).
+    @MainActor
+    private func hold(_ e: XCUIElement, _ seconds: TimeInterval) {
+        #if os(macOS)
+        let c = e.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        c.click(forDuration: seconds, thenDragTo: c)
+        #else
+        e.press(forDuration: seconds)
+        #endif
     }
 
     /// Долгое нажатие и ведение (на Маке — нажатие кнопки мыши и ведение).
     @MainActor
     private func drag(_ e: XCUIElement, from: CGVector, by: CGVector) {
         let start = e.coordinate(withNormalizedOffset: from)
+        #if os(macOS)
+        // На Маке `press(forDuration:thenDragTo:)` мышь не двигает (это жест
+        // трекпада) — плашка не получала ни одного события. Мышью — click-drag.
+        start.click(forDuration: 0.3, thenDragTo: start.withOffset(by), withVelocity: .slow, thenHoldForDuration: 0.4)
+        #else
         start.press(forDuration: 0.8, thenDragTo: start.withOffset(by), withVelocity: .slow, thenHoldForDuration: 0.4)
+        #endif
         sleep(1)
     }
 

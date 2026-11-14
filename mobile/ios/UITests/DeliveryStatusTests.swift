@@ -39,14 +39,14 @@ final class DeliveryStatusTests: XCTestCase {
         XCTAssertTrue(web.waitForExistence(timeout: 20), "лента беседы не появилась")
         sleep(3)
         UIFlow.shot(app, "delivery-2-conversation", self)
-        let bubble = web.staticTexts.allElementsBoundByIndex.last { $0.isHittable && !$0.label.isEmpty }
+        let bubble = web.staticTexts.allElementsBoundByIndex.last { $0.isHittable && !$0.shownText.isEmpty }
         // Меню пузыря открывает `contextmenu` документа; долгое нажатие
         // XCUITest его вызывает не везде — тогда проверка меню пропускается.
         if let bubble {
             UIFlow.contextMenu(bubble)
             let copy = UIFlow.menuItem("Копировать текст", app)
             if copy.waitForExistence(timeout: 5) {
-                let menuText = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", "Не доставлено")).firstMatch
+                let menuText = app.descendants(matching: .any).matching(Shown.begins("Не доставлено")).firstMatch
                 XCTAssertTrue(menuText.waitForExistence(timeout: 5), "в меню пузыря нет «Не доставлено»")
             }
             UIFlow.shot(app, "delivery-3-bubble-menu", self)
@@ -71,7 +71,7 @@ final class DeliveryStatusTests: XCTestCase {
             sleep(1)
         }
         XCTAssertTrue(row.waitForExistence(timeout: 10), "нет строки беседы с \(deadDomain)")
-        XCTAssertTrue(row.label.contains("Не доставлено"), "у строки нет отметки «Не доставлено»: \(row.label)")
+        XCTAssertTrue(row.shownText.contains("Не доставлено"), "у строки нет отметки «Не доставлено»: \(row.shownText)")
         UIFlow.shot(app, "delivery-4-row", self)
     }
 }

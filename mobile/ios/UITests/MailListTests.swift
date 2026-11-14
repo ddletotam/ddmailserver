@@ -53,8 +53,8 @@ final class MailListTests: XCTestCase {
 
         let count = app.staticTexts["picking.count"].firstMatch
         XCTAssertTrue(count.waitForExistence(timeout: 5), "нет строки «Выбрано: N»")
-        XCTAssertEqual(count.label, "Выбрано: 1")
-        XCTAssertFalse(app.staticTexts["Беседа не выбрана"].exists, "выбор увёл на «Беседа не выбрана»")
+        XCTAssertEqual(count.shownText, "Выбрано: 1")
+        XCTAssertFalse(app.staticTexts.matching(Shown.equals("Беседа не выбрана")).firstMatch.exists, "выбор увёл на «Беседа не выбрана»")
         if wide {
             XCTAssertTrue(app.webViews.firstMatch.exists, "выбор закрыл открытую беседу")
         }
@@ -62,14 +62,14 @@ final class MailListTests: XCTestCase {
         UIFlow.shot(app, "pick-1-started", self)
 
         togglePick(list.element(boundBy: 2))
-        XCTAssertTrue(waitLabel(count, "Выбрано: 2"), "вторая отметка не встала: «\(count.label)»")
+        XCTAssertTrue(waitLabel(count, "Выбрано: 2"), "вторая отметка не встала: «\(count.shownText)»")
         XCTAssertTrue(count.isHittable, "список выбора ушёл с экрана")
         sleep(1)
         UIFlow.shot(app, "pick-2-two", self)
 
         // Снять обе — выбор закончен сам, на месте — строка поиска.
         togglePick(list.element(boundBy: 2))
-        XCTAssertTrue(waitLabel(count, "Выбрано: 1"), "отметка не снялась: «\(count.label)»")
+        XCTAssertTrue(waitLabel(count, "Выбрано: 1"), "отметка не снялась: «\(count.shownText)»")
         togglePick(list.element(boundBy: 1))
         XCTAssertTrue(UIFlow.waitGone(count, 5), "снятие последней отметки не вышло из выбора")
         let search = app.textFields["search.field"].firstMatch
@@ -93,8 +93,9 @@ final class MailListTests: XCTestCase {
         let app = try start()
         rows(app).element(boundBy: 0).tap()
         XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 20), "беседа не открылась")
-        let dialog = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label BEGINSWITH %@", "Удалить бесед")).firstMatch
+        // Заголовок диалога «Удалить бесед: N…?» — на Маке текст в value; пункт
+        // «Удалить беседу» строки меню (он есть всегда) не в счёт.
+        let dialog = app.staticTexts.matching(Shown.begins("Удалить бесед")).firstMatch
 
         let composer = app.textViews["composer.text"].firstMatch
         XCTAssertTrue(composer.waitForExistence(timeout: 10), "нет строки ввода")
@@ -153,7 +154,7 @@ final class MailListTests: XCTestCase {
         app.launchArguments += ["-ddmail-uitest-ids"]
         app.launch()
         XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 30), "на старте не открылась последняя беседа")
-        XCTAssertFalse(app.staticTexts["Беседа не выбрана"].exists)
+        XCTAssertFalse(app.staticTexts.matching(Shown.equals("Беседа не выбрана")).firstMatch.exists)
         sleep(2)
         UIFlow.shot(app, "mac-2-restored", self)
 
@@ -175,7 +176,7 @@ final class MailListTests: XCTestCase {
         let spam = window.buttons["В спам"].firstMatch
         if spam.waitForExistence(timeout: 5) {
             spam.click()
-            let ask = app.staticTexts["В спам?"].firstMatch
+            let ask = app.staticTexts.matching(Shown.equals("В спам?")).firstMatch
             XCTAssertTrue(ask.waitForExistence(timeout: 5), "«В спам» в окне беседы ничего не спросил")
             UIFlow.shot(app, "mac-4-window-spam", self)
             app.typeKey(.escape, modifierFlags: [])
@@ -197,9 +198,9 @@ final class MailListTests: XCTestCase {
     private func waitLabel(_ e: XCUIElement, _ label: String, _ timeout: TimeInterval = 5) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if e.exists && e.label == label { return true }
+            if e.exists && e.shownText == label { return true }
             usleep(200_000)
         }
-        return e.exists && e.label == label
+        return e.exists && e.shownText == label
     }
 }

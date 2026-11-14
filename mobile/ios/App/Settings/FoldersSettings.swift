@@ -162,8 +162,11 @@ struct FolderEditorView: View {
         }
         .navigationTitle(edit.map { $0.name.isEmpty ? "Папка" : $0.name } ?? "Папка")
         .toolbarTitleDisplayMode(.inline)
-        .onAppear {
-            if edit == nil, let folder {
+        // Поля — как только папка есть в документе. Не только `onAppear`: новая
+        // папка («Новая папка») может появиться в документе позже, чем экран
+        // (на Маке — всегда), и тогда экран навсегда оставался с крутилкой.
+        .onChange(of: folder != nil, initial: true) {
+            if edit == nil, let folder = mail.doc.folders.first(where: { $0.id == folderID }) {
                 edit = Fields(folder)
                 saved = edit
             }

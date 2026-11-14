@@ -1,4 +1,7 @@
 import XCTest
+#if os(macOS)
+import AppKit
+#endif
 
 /// Сквозные сценарии отправки и папок (десктоп §2, §3а, §4) на настоящих
 /// серверах. Письма уходят **только себе**: на `info@help-it-audit.ru` —
@@ -69,11 +72,11 @@ final class SendFlowTests: XCTestCase {
         sleep(2)
         UIFlow.shot(app, "folders-1-editor", self)
         // Назад к списку папок, затем закрыть настройки.
-        app.navigationBars.buttons.firstMatch.tap()
-        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "identifier == 'folders.row' AND label CONTAINS %@", name))
+        UIFlow.back(app)
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "identifier == 'folders.row' AND (label CONTAINS %@ OR value CONTAINS %@)", name, name))
             .firstMatch.waitForExistence(timeout: 10), "папки нет в списке настроек")
         UIFlow.shot(app, "folders-2-list", self)
-        app.navigationBars.buttons.firstMatch.tap()
+        UIFlow.back(app)
         let done = app.buttons["Готово"].firstMatch
         XCTAssertTrue(done.waitForExistence(timeout: 5), "нет «Готово» настроек")
         done.tap()
@@ -112,7 +115,7 @@ final class SendFlowTests: XCTestCase {
         UIFlow.contextMenu(tab)
         UIFlow.menuItem("Удалить", app).tap()
         let confirm = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "(elementType == %d OR elementType == %d) AND label BEGINSWITH 'Удалить «'",
+            .matching(NSPredicate(format: "(elementType == %d OR elementType == %d) AND (label BEGINSWITH 'Удалить «' OR title BEGINSWITH 'Удалить «')",
                                   XCUIElement.ElementType.button.rawValue, XCUIElement.ElementType.menuItem.rawValue)).firstMatch
         XCTAssertTrue(confirm.waitForExistence(timeout: 5), "нет подтверждения удаления")
         confirm.tap()
@@ -137,11 +140,11 @@ final class SendFlowTests: XCTestCase {
         let composeRow = app.descendants(matching: .any).matching(identifier: "search.compose").firstMatch
         XCTAssertTrue(composeRow.waitForExistence(timeout: 10), "нет строки «Написать по адресу…»")
         composeRow.tap()
-        let fresh = app.staticTexts["Новая беседа"].firstMatch
+        let fresh = Shown.newConversation(app)
         XCTAssertTrue(fresh.waitForExistence(timeout: 10), "новая беседа не открылась")
 
         // Тема — полем «Тема» (меню «+» → «Кому, копия, тема»).
-        let plus = app.buttons["Вложить или поля письма"].firstMatch
+        let plus = UIFlow.composerPlus(app)
         XCTAssertTrue(plus.waitForExistence(timeout: 5), "нет «+» композера")
         plus.tap()
         let fields = UIFlow.menuItem("Кому, копия, тема", app)
@@ -150,14 +153,14 @@ final class SendFlowTests: XCTestCase {
         let subjectField = app.textFields["composer.subject"].firstMatch
         XCTAssertTrue(subjectField.waitForExistence(timeout: 5), "нет поля «Тема»")
         subjectField.tap()
-        subjectField.typeText(subject)
+        UIFlow.enter(subject, into: subjectField)
 
         // Тело — жирным: выделить всё и ⌘B (на выделении, как системное меню
         // «Формат» на iPhone; стиль на каретке клавиатура симулятора теряет).
         let body = app.textViews["composer.text"].firstMatch
         XCTAssertTrue(body.waitForExistence(timeout: 5), "нет строки ввода")
         body.tap()
-        body.typeText(text)
+        UIFlow.enter(text, into: body)
         sleep(1)
         #if os(iOS)
         // Выделить всё — меню выделения (⌘A клавиатура симулятора теряет).
@@ -196,9 +199,9 @@ final class SendFlowTests: XCTestCase {
         let web = app.webViews.firstMatch
         XCTAssertTrue(web.waitForExistence(timeout: 20), "лента беседы не появилась")
         // Настоящее письмо пришло — заглушка («Отправляется…») ушла.
-        let mine = web.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", stamp)).firstMatch
+        let mine = web.staticTexts.matching(Shown.contains(stamp)).firstMatch
         XCTAssertTrue(mine.waitForExistence(timeout: 60), "в беседе нет отправленного письма")
-        let pending = web.staticTexts["Отправляется…"].firstMatch
+        let pending = web.staticTexts.matching(Shown.equals("Отправляется…")).firstMatch
         XCTAssertTrue(UIFlow.waitGone(pending, 150), "письмо так и не пришло синком — висит заглушка")
         sleep(2)
         UIFlow.shot(app, "\(tag)-4-landed", self)
@@ -346,6 +349,50 @@ enum UIFlow {
     }
     #endif
 
+    /// Набрать текст в уже активное поле. На Маке кириллицу XCUITest печатает,
+    /// переключая раскладку на «Юникод (16-ричный ввод)»; macOS показывает у
+    /// каретки значок раскладки, и XCUITest принимает его за мешающий диалог —
+    /// ввод обрывается на полуслове. Поэтому не-ASCII на Маке — вставкой.
+    @MainActor
+    static func enter(_ text: String, into field: XCUIElement) {
+        #if os(macOS)
+        if text.allSatisfy(\.isASCII) {
+            field.typeText(text)
+            return
+        }
+        let board = NSPasteboard.general
+        board.clearContents()
+        board.setString(text, forType: .string)
+        field.typeKey("v", modifierFlags: .command)
+        board.clearContents()
+        #else
+        field.typeText(text)
+        #endif
+    }
+
+    /// «Назад» в стеке настроек: на iOS — первая кнопка панели навигации; на
+    /// Маке панели навигации нет — кнопка «Назад» (chevron) листа.
+    @MainActor
+    static func back(_ app: XCUIApplication) {
+        #if os(macOS)
+        let b = app.buttons.matching(NSPredicate(format: "label == 'Назад' OR identifier == 'chevron.backward'"))
+            .allElementsBoundByIndex.first { $0.isHittable }
+        XCTAssertNotNil(b, "нет кнопки «Назад»")
+        b?.click()
+        #else
+        app.navigationBars.buttons.firstMatch.tap()
+        #endif
+    }
+
+    /// «+» композера: на iOS — кнопка, на Маке — `MenuButton` (в `app.buttons` его нет).
+    @MainActor
+    static func composerPlus(_ app: XCUIApplication) -> XCUIElement {
+        let types = [XCUIElement.ElementType.button.rawValue, XCUIElement.ElementType.menuButton.rawValue]
+        return app.descendants(matching: .any)
+            .matching(NSPredicate(format: "(label == %@ OR title == %@) AND elementType IN %@", "Вложить или поля письма", "Вложить или поля письма", types))
+            .firstMatch
+    }
+
     /// Долгое нажатие (iPhone/iPad) или правый клик (Мак).
     @MainActor
     static func contextMenu(_ e: XCUIElement) {
@@ -360,7 +407,15 @@ enum UIFlow {
     @MainActor
     static func menuItem(_ name: String, _ app: XCUIApplication) -> XCUIElement {
         #if os(macOS)
-        return app.menuItems.matching(NSPredicate(format: "title == %@ OR label == %@", name, name)).firstMatch
+        // Те же названия бывают и в строке меню («Ответить», «Удалить…»): такой
+        // пункт существует всегда, но не нажимается — берём видимый (раскрытое меню).
+        let items = app.menuItems.matching(NSPredicate(format: "title == %@ OR label == %@", name, name))
+        let deadline = Date().addingTimeInterval(2)
+        repeat {
+            if let hit = items.allElementsBoundByIndex.first(where: { $0.isHittable }) { return hit }
+            usleep(200_000)
+        } while Date() < deadline
+        return items.firstMatch
         #else
         // Пункты системного контекстного меню бывают и кнопками, и пунктами меню.
         let types = [XCUIElement.ElementType.button.rawValue, XCUIElement.ElementType.menuItem.rawValue]
