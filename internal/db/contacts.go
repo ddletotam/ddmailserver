@@ -416,6 +416,34 @@ func (db *DB) GetAllUserContacts(userID int64, limit int) ([]*models.Contact, er
 	return scanContacts(rows)
 }
 
+// GetUserContactsPage — страница сводной книги пользователя: по имени, при
+// равных именах — по id (страницы не пересекаются и не теряют строк), с
+// пропуском offset первых.
+func (db *DB) GetUserContactsPage(userID int64, limit, offset int) ([]*models.Contact, error) {
+	query := `
+		SELECT id, user_id, address_book_id, uid, COALESCE(remote_id, ''), vcard_data,
+		       COALESCE(full_name, ''), COALESCE(given_name, ''), COALESCE(family_name, ''), COALESCE(nickname, ''),
+		       COALESCE(email, ''), COALESCE(email2, ''), COALESCE(email3, ''),
+		       COALESCE(phone, ''), COALESCE(phone2, ''), COALESCE(phone3, ''),
+		       emails, phones,
+		       COALESCE(organization, ''), COALESCE(title, ''), COALESCE(department, ''),
+		       COALESCE(address, ''), COALESCE(notes, ''), COALESCE(photo_url, ''), birthday,
+		       COALESCE(etag, ''), local_modified, created_at, updated_at
+		FROM contacts
+		WHERE user_id = $1
+		ORDER BY COALESCE(full_name, email, '') ASC, id ASC
+		LIMIT $2 OFFSET $3
+	`
+
+	rows, err := db.Query(query, userID, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get contacts page: %w", err)
+	}
+	defer rows.Close()
+
+	return scanContacts(rows)
+}
+
 // scanContacts scans multiple contact rows
 func scanContacts(rows *sql.Rows) ([]*models.Contact, error) {
 	var contacts []*models.Contact

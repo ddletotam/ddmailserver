@@ -46,7 +46,9 @@ struct ConversationView: View {
             .overlay(alignment: .bottom) { NoticeBanner(text: $model.notice) }
             // Ответа в спам нет: на спам не отвечают (§5).
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                if !conversation.spam { ComposerBar(model: compose) { compose.sendReply(conversation, $0) } }
+                if !conversation.spam {
+                    ComposerBar(model: compose, place: .conversation(conversation)) { compose.sendReply(conversation, $0) }
+                }
             }
     }
 
@@ -105,7 +107,9 @@ struct NewConversationView: View {
             // «Отправленных» ложится при приёме, беседа приходит сразу, а
             // статус доставки виден на самом письме (§5).
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                ComposerBar(model: compose, autofocus: true) { compose.sendNew(to: address, $0) }
+                ComposerBar(model: compose, autofocus: true, place: .new(address)) {
+                    compose.sendNew(to: address, $0)
+                }
             }
     }
 }

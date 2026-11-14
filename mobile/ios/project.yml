@@ -15,8 +15,8 @@ settings:
     SWIFT_VERSION: "6.0"
     SWIFT_STRICT_CONCURRENCY: complete
     # Версия бампается при любой правке клиента (контракт §1).
-    MARKETING_VERSION: "0.0.13"
-    CURRENT_PROJECT_VERSION: "13"
+    MARKETING_VERSION: "0.0.14"
+    CURRENT_PROJECT_VERSION: "14"
     # Команда подписи не в git: mac.sh берёт её из ~/.config/ddmail-ios/team
     # станции (или из учётки Xcode на Маке).
     CODE_SIGN_STYLE: Automatic
@@ -98,6 +98,10 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: DDMail
         # Иконка — рисунок десктопа (desktop/native/assets/ddmail_icon.png): облачко на зелёном.
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Акцент приложения — зелёный десктопа `#10b981` (Palette.accent) на
+        # каждом окне, листе и диалоге, в том числе на окне подключения, где
+        # ссылки были системно-синими (аудит 2026-11-14 №19).
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES

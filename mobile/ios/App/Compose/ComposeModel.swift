@@ -12,6 +12,14 @@ import UniformTypeIdentifiers
 /// Отправка асинхронная: сервер ставит письмо в очередь и сразу кладёт копию
 /// в «Отправленные» (беседа есть сразу, статус доставки — на письме, §5);
 /// синк — сразу и ещё несколько раз, на случай, если WebSocket нет.
+/// Подсказки пустых полей композера: что уйдёт, если их не трогать.
+struct ComposeHints: Equatable {
+    var to = ""
+    var subject = ""
+    /// Адрес, который выберет «Автоматически».
+    var from = ""
+}
+
 @MainActor @Observable
 final class ComposeModel {
     /// Отдельное окно: новое письмо или пересылка.
@@ -91,13 +99,40 @@ final class ComposeModel {
         return ordered.flatMap { $0.provider.identities() }.filter { seen.insert($0.email.lowercased()).inserted }
     }
 
+    /// «От кого» по учёткам: сверху — по адресу на учётку, ниже остальные
+    /// (аудит 2026-11-14 №4: адрес Mail.ru терялся в хвосте двадцати адресов
+    /// ddmail). Порядок учёток — как у `identities`.
+    var fromChoices: FromChoices {
+        let prefer = conversation.conversation?.accountKey
+        let ordered = workspace.links.sorted { ($0.account.key == prefer ? 0 : 1) < ($1.account.key == prefer ? 0 : 1) }
+        return FromChoices(ordered.map { $0.provider.identities() })
+    }
+
+    /// Подсказки полей «Кому», «Тема», «От» (десктоп §3, `refresh_composer_hints`):
+    /// что ветка отправки выведет сама, если поле оставить пустым. Новая
+    /// беседа — её адрес и пустая тема: автотемы у нового письма нет (№10).
+    func hints(for c: Conversation?, newTo: String? = nil) -> ComposeHints {
+        let ids = identities
+        let auto = { (receivedBy: String?) in pickFrom(Draft(), identities: ids, receivedBy: receivedBy)?.email ?? "" }
+        if let newTo { return ComposeHints(to: newTo, subject: "", from: auto(nil)) }
+        guard let c else { return ComposeHints() }
+        if let r = replyTo {
+            let d = derivedFields(.reply(r, isGroup: c.isGroup), identities: ids)
+            return ComposeHints(to: d.to.joined(separator: ", "), subject: d.subject, from: auto(nil))
+        }
+        let d = derivedFields(.implicit(c, lastIncoming: conversation.lastIncoming, last: conversation.last), identities: ids)
+        return ComposeHints(to: d.to.joined(separator: ", "), subject: d.subject, from: auto(c.receivedBy))
+    }
+
     /// Учётка для отправки — владелец адреса From (как `owner_for` десктопа):
     /// учётка открытой беседы, если адрес её; иначе первая владеющая.
     func owner(of request: SendRequest) -> AccountLink? {
         let from = bareAddress(request.from)
         let owners = workspace.links.filter { l in l.provider.identities().contains { $0.email.lowercased() == from } }
         if let prefer = conversation.conversation?.accountKey, let l = owners.first(where: { $0.account.key == prefer }) { return l }
-        return owners.first
+        // Адрес самой учётки — через неё: адрес Mail.ru, объявленный и
+        // сервером ddmail (внешний ящик на сервере), уходит SMTP Mail.ru.
+        return owners.first { $0.account.email.lowercased() == from } ?? owners.first
     }
 
     /// Отправить через учётку-владельца адреса From; нет владельца — отказ.

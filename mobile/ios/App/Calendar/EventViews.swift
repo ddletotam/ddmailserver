@@ -170,7 +170,14 @@ struct EventFormView: View {
     var body: some View {
         if let d = model.draft {
             NavigationStack {
+                ScrollViewReader { proxy in
                 Form {
+                    // Отказ сохранения — первой строкой формы и с прокруткой к
+                    // ней: внизу его на iPhone закрывала клавиатура, и
+                    // «Сохранить» выглядело бездействием (аудит 2026-11-14 №16,
+                    // десктоп §5б-бис «Ни один отказ сохранения не остаётся без
+                    // причины на экране»).
+                    FormErrorSection(error: d.error)
                     Section {
                         TextField("Название", text: binding(\.summary)).focused($titleFocused)
                         Picker("Календарь", selection: binding(\.calendarID)) {
@@ -201,11 +208,10 @@ struct EventFormView: View {
                         TextField("Место или ссылка на встречу", text: binding(\.location))
                         TextField("Описание", text: binding(\.description), axis: .vertical).lineLimit(3...10)
                     }
-                    if let e = d.error {
-                        Section { Label(e, systemImage: "exclamationmark.triangle").foregroundStyle(.red) }
-                    }
                 }
                 .formStyle(.grouped)
+                .revealsFormError(d.error, proxy)
+                }
                 .navigationTitle(d.original == nil ? "Новое событие" : "Изменить событие")
                 .toolbarTitleDisplayMode(.inline)
                 .toolbar {
@@ -238,5 +244,34 @@ struct EventFormView: View {
                 model.draft?.error = nil
             }
         )
+    }
+}
+
+/// Строка отказа сохранения формы — первой секцией (её видно над клавиатурой).
+struct FormErrorSection: View {
+    let error: String?
+
+    var body: some View {
+        if let error {
+            Section {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier("form.error")
+            }
+            .id(FormErrorSection.id)
+        }
+    }
+
+    static let id = "form.error"
+}
+
+extension View {
+    /// Появился отказ — форма прокручивается к нему: пользователь мог быть
+    /// внизу формы, а клавиатура — закрывать всё ниже поля ввода.
+    func revealsFormError(_ error: String?, _ proxy: ScrollViewProxy) -> some View {
+        onChange(of: error) { _, e in
+            guard e != nil else { return }
+            withAnimation { proxy.scrollTo(FormErrorSection.id, anchor: .top) }
+        }
     }
 }

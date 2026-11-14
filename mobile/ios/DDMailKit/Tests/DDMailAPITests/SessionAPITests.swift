@@ -120,6 +120,43 @@ struct SessionAPITests {
         #expect(t.log.withLock { $0 }.first?.hasPrefix("GET /api/desktop/v1/search") == true)
     }
 
+    /// Книга больше страницы: страницы по `offset`, короткая — последняя
+    /// (аудит 2026-11-14 №5: клиент брал одну страницу в 5000).
+    @Test func contactsArePaged() async throws {
+        let total = SessionAPI.contactsPage * 2 + 3
+        let t = FakeTransport { req in
+            let q = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let offset = Int(q.first { $0.name == "offset" }?.value ?? "0") ?? 0
+            let limit = Int(q.first { $0.name == "limit" }?.value ?? "0") ?? 0
+            let ids = offset < total ? Array(offset..<min(offset + limit, total)) : []
+            return (200, "[" + ids.map { #"{"id":\#($0 + 1),"full_name":"К\#($0)"}"# }.joined(separator: ",") + "]")
+        }
+        let got = try await SessionAPI(baseURL: base, transport: t, tokens: MemoryTokens("T")).contactPages()
+        #expect(got.contacts.count == total)
+        #expect(!got.truncated)
+        #expect(t.log.withLock { $0 }.count == 3)
+    }
+
+    /// Сервер без `offset` отдаёт ту же первую страницу — не зацикливаемся.
+    @Test func contactsOldServerStopsOnRepeat() async throws {
+        let page = (0..<SessionAPI.contactsPage).map { #"{"id":\#($0 + 1)}"# }.joined(separator: ",")
+        let t = FakeTransport { _ in (200, "[" + page + "]") }
+        let got = try await SessionAPI(baseURL: base, transport: t, tokens: MemoryTokens("T")).contactPages()
+        #expect(got.contacts.count == SessionAPI.contactsPage)
+        #expect(got.truncated)
+        #expect(t.log.withLock { $0 }.count == 2)
+    }
+
+    @Test func contactSearchAndCreateID() async throws {
+        let t = FakeTransport { req in
+            req.httpMethod == "POST" ? (201, #"{"id":42,"uid":"u"}"#) : (200, #"[{"id":7,"full_name":"Аудит"}]"#)
+        }
+        let api = SessionAPI(baseURL: base, transport: t, tokens: MemoryTokens("T"))
+        #expect(try await api.searchContacts("ауд").map(\.id) == [7])
+        #expect(try await api.createContact(ContactWriteRequest(fullName: "X", emails: [], phones: [], organization: "", title: "", addressBookID: 1)) == 42)
+        #expect(t.log.withLock { $0 }.first?.hasPrefix("GET /api/desktop/v1/contacts/search") == true)
+    }
+
     @Test func wellKnownProbe() async {
         let yes = FakeTransport { _ in (200, #"{"ddmail":true,"version":"x"}"#) }
         let no = FakeTransport { _ in (200, "<html>") }

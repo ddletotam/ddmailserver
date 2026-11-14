@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -50,6 +51,25 @@ func (m *memContactStore) GetAllUserContacts(userID int64, limit int) ([]*models
 		}
 	}
 	return out, nil
+}
+
+// GetUserContactsPage — как у базы: по имени, затем по id; offset, limit.
+func (m *memContactStore) GetUserContactsPage(userID int64, limit, offset int) ([]*models.Contact, error) {
+	all, _ := m.GetAllUserContacts(userID, 0)
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].FullName != all[j].FullName {
+			return all[i].FullName < all[j].FullName
+		}
+		return all[i].ID < all[j].ID
+	})
+	if offset >= len(all) {
+		return nil, nil
+	}
+	all = all[offset:]
+	if len(all) > limit {
+		all = all[:limit]
+	}
+	return all, nil
 }
 
 func (m *memContactStore) SearchContacts(userID int64, q string, limit int) ([]*models.Contact, error) {
@@ -406,5 +426,44 @@ func TestContactCreate_AllValues(t *testing.T) {
 	c, _ = store.GetContactByID(resp.ID)
 	if !strings.Contains(c.VCardData, "\r\nN:;Сосед;;;\r\n") && !strings.Contains(c.VCardData, "\r\nN:;;;;\r\n") {
 		t.Errorf("нет N:\n%s", c.VCardData)
+	}
+}
+
+// Книга больше одной страницы (GAL на 15 000 карточек): страницы по offset
+// идут подряд, без пересечений и пропусков; короткая — последняя.
+func TestContactList_Pages(t *testing.T) {
+	store := contactFixture()
+	for i := 0; i < 7; i++ {
+		// Одинаковые имена — порядок держит id.
+		store.addCard(t, 3, fmt.Sprintf("BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Имя %d\r\nEND:VCARD\r\n", i%3))
+	}
+	seen := map[int64]bool{}
+	var pages []int
+	for offset := 0; ; offset += 3 {
+		rec := contactCall(t, store, "GET", fmt.Sprintf("/api/desktop/v1/contacts?limit=3&offset=%d", offset), "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body)
+		}
+		var list []DesktopContact
+		if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+			t.Fatal(err)
+		}
+		pages = append(pages, len(list))
+		for _, c := range list {
+			if seen[c.ID] {
+				t.Fatalf("контакт %d на двух страницах", c.ID)
+			}
+			seen[c.ID] = true
+		}
+		if len(list) < 3 {
+			break
+		}
+	}
+	if len(seen) != 7 || fmt.Sprint(pages) != "[3 3 1]" {
+		t.Errorf("страницы %v, контактов %d — ждали [3 3 1] и 7", pages, len(seen))
+	}
+	// Мусор в offset — первая страница, а не ошибка.
+	if rec := contactCall(t, store, "GET", "/api/desktop/v1/contacts?limit=3&offset=-5", ""); rec.Code != http.StatusOK {
+		t.Errorf("offset=-5: %d", rec.Code)
 	}
 }

@@ -58,6 +58,10 @@ struct ConnectView: View {
             }
             .animation(.default, value: model.step)
         }
+        // Окно подключения — до рабочего пространства и листом поверх него:
+        // акцент окна (`AppShell`) сюда не доходит, ссылки «Я знаю все
+        // настройки» и «… вручную» были системно-синими (аудит 2026-11-14 №19).
+        .tint(Palette.accent)
         .onChange(of: model.step, initial: true) { _, step in
             switch step {
             case .email: focus = .email

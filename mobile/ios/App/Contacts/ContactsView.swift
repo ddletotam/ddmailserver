@@ -1,9 +1,22 @@
 import DDMailAPI
 import DDMailDAV
 import SwiftUI
+import os
 
-/// Контакты (Android §15): одна сводная книга, как её отдаёт сервер; поиск
-/// локальный — имя, организация, адреса, цифры телефона.
+let contactsLog = Logger(subsystem: "ru.letotam.ddmail", category: "contacts")
+
+/// Контакты (Android §15): одна сводная книга, как её отдаёт сервер, —
+/// целиком, страницами (`SessionAPI.contactPages`; до 0.0.14 — одна страница
+/// в 5000, у владельца 15 000 карточек, аудит 2026-11-14 №5). Поиск —
+/// локальный по свёрнутым строкам (имя, организация, адреса, цифры телефона)
+/// плюс поиск сервера по всей книге после паузы: найдётся и то, чего в списке
+/// нет (сервер без `offset`).
+///
+/// Кэша на устройстве у книги нет — сознательно: источник правды — сервер,
+/// книга целиком — три запроса по ~0,6 МБ и ~0,3 с; офлайн-контактов контракт
+/// не требует, а кэш в GRDB — ещё одна миграция и своя синхронизация правок.
+/// Тяжёлое (сортировка 15 000 имён, свёртка строк поиска, буквенные разделы)
+/// считается вне главного потока (`ContactIndex`), `List` ленив сам.
 @MainActor @Observable
 final class ContactsModel {
     /// ddmail и CardDAV внешних учёток вместе (внешние учётки §8).
@@ -12,11 +25,34 @@ final class ContactsModel {
     private(set) var contacts: [ContactDTO] = []
     private(set) var books: [AddressBookDTO] = []
     private(set) var loaded = false
-    var query = ""
+    /// Строка поиска: список и разделы пересчитываются сразу, поиск сервера —
+    /// после паузы.
+    var query = "" {
+        didSet {
+            guard oldValue != query else { return }
+            refilter()
+            searchServer()
+        }
+    }
     var selectedID: Int64?
+    /// Только что созданный: список прокручивается к нему, как только он на
+    /// экране (на iPhone список в это время под карточкой).
+    var revealID: Int64?
     var form: ContactForm?
     var notice: String?
     let prefs = CalendarPrefs.shared
+    /// Что показывает список: вся книга или найденное.
+    private(set) var filtered: [ContactDTO] = []
+    /// Буквенные разделы `filtered`.
+    private(set) var sections: [ContactSection] = []
+
+    @ObservationIgnored private var index = ContactIndex()
+    /// Найденное сервером, чего нет в загруженной книге (по текущей строке).
+    @ObservationIgnored private var remote: [ContactDTO] = []
+    /// Созданные здесь, которых нет в загруженной книге: остаются видны до
+    /// перезагрузки, в которой они пришли (сервер без `offset` их не отдаст).
+    @ObservationIgnored private var pinned: [Int64: ContactDTO] = [:]
+    @ObservationIgnored private var remoteTask: Task<Void, Never>?
 
     struct ContactForm: Equatable {
         var editing: Int64?
@@ -37,16 +73,59 @@ final class ContactsModel {
 
     func load() async {
         do {
-            async let c = api.contacts(limit: 5000)
+            async let c = api.contacts(limit: .max)
             async let b = api.addressBooks()
-            contacts = try await c.sorted { $0.fullName.localizedStandardCompare($1.fullName) == .orderedAscending }
+            let list = try await c
             books = (try? await b) ?? books
+            let built = await Task.detached(priority: .userInitiated) { ContactIndex(list) }.value
+            index = built
+            for id in pinned.keys where built.byID[id] != nil { pinned[id] = nil }
+            contacts = built.sorted
+            refilter()
             loaded = true
         } catch APIError.unauthorized {
             onDead()
         } catch is CancellationError {
         } catch {
+            contactsLog.error("load: \(String(describing: error), privacy: .public)")
             notice = error.localizedDescription
+        }
+    }
+
+    /// Контакты, подходящие под строку: загруженная книга, созданные здесь и
+    /// найденное сервером. Пустая строка — вся книга.
+    func matching(_ q: String) -> [ContactDTO] {
+        let q = q.trimmingCharacters(in: .whitespaces)
+        let folded = ContactIndex.Query(q)
+        let extra = pinned.values.filter { q.isEmpty || ContactIndex.matches($0, folded) }
+        guard !q.isEmpty else { return extra.isEmpty ? index.sorted : ContactIndex.sort(index.sorted + extra) }
+        let local = index.search(folded) + extra
+        let have = Set(local.map(\.id))
+        // Найденное сервером — по строке самого раздела, не по чужой.
+        let more = q == self.query.trimmingCharacters(in: .whitespaces) ? remote.filter { !have.contains($0.id) } : []
+        return more.isEmpty && extra.isEmpty ? local : ContactIndex.sort(local + more)
+    }
+
+    private func refilter() {
+        filtered = matching(query)
+        sections = ContactIndex.sections(filtered)
+    }
+
+    /// Поиск сервера по всей книге — через 300 мс после последней буквы.
+    private func searchServer() {
+        remoteTask?.cancel()
+        remote = []
+        let q = query.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return }
+        let api = api
+        remoteTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            let found = (try? await api.searchContacts(q, limit: 100)) ?? []
+            guard !Task.isCancelled, let self, self.query.trimmingCharacters(in: .whitespaces) == q else { return }
+            let known = self.index.byID
+            self.remote = found.filter { known[$0.id] == nil }
+            if !self.remote.isEmpty { self.refilter() }
         }
     }
 
@@ -77,31 +156,9 @@ final class ContactsModel {
         return own.isEmpty || own.contains(where: \.canWrite)
     }
 
-    var filtered: [ContactDTO] {
-        let q = query.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { return contacts }
-        let digits = q.filter(\.isNumber)
-        return contacts.filter { c in
-            c.fullName.localizedStandardContains(q) || c.organization.localizedStandardContains(q)
-                || c.emails.contains { $0.localizedStandardContains(q) }
-                || (!digits.isEmpty && c.phones.contains { $0.filter(\.isNumber).contains(digits) })
-        }
+    var selected: ContactDTO? {
+        selectedID.flatMap { id in index.byID[id] ?? pinned[id] ?? remote.first { $0.id == id } }
     }
-
-    /// Буквенные разделы списка.
-    var sections: [(letter: String, items: [ContactDTO])] {
-        let groups = Dictionary(grouping: filtered) { c -> String in
-            let first = c.fullName.trimmingCharacters(in: .whitespaces).first.map { String($0).uppercased() } ?? "#"
-            return first.first?.isLetter == true ? first : "#"
-        }
-        return groups.keys.sorted { a, b in
-            if a == "#" { return false }
-            if b == "#" { return true }
-            return a.localizedStandardCompare(b) == .orderedAscending
-        }.map { ($0, groups[$0] ?? []) }
-    }
-
-    var selected: ContactDTO? { selectedID.flatMap { id in contacts.first { $0.id == id } } }
 
     func newContact() {
         // Только назначенная книга; иначе выбор в форме обязателен.
@@ -137,9 +194,19 @@ final class ContactsModel {
                                       title: f.title, addressBookID: f.editing == nil ? f.bookID : nil)
         Task {
             do {
-                if let id = f.editing { try await api.patchContact(id: id, req) } else { try await api.createContact(req) }
+                var created: Int64?
+                if let id = f.editing { try await api.patchContact(id: id, req) } else { created = try await api.createContact(req) }
                 form = nil
                 notice = f.editing == nil ? "Контакт создан" : "Сохранено"
+                // Созданный виден сразу и открыт: в списке, в поиске, справа
+                // карточкой (аудит 2026-11-14 №5 — его не было ни там, ни там).
+                if let created {
+                    pinned[created] = ContactDTO(id: created, fullName: name, emails: emails, phones: phones,
+                                                 organization: f.organization, title: f.title)
+                    refilter()
+                    selectedID = created
+                    revealID = created
+                }
                 await load()
             } catch {
                 if case APIError.unauthorized = error { onDead() }
@@ -154,10 +221,15 @@ final class ContactsModel {
         Task {
             do {
                 try await api.deleteContact(id: c.id)
+                // Созданный здесь и найденный сервером живут вне книги —
+                // убрать и оттуда, иначе строка переживёт удаление.
+                pinned[c.id] = nil
+                remote.removeAll { $0.id == c.id }
                 selectedID = nil
                 notice = "Контакт удалён"
                 await load()
             } catch {
+                contactsLog.error("delete \(c.id): \(String(describing: error), privacy: .public)")
                 if case APIError.unauthorized = error { onDead() }
                 notice = error.localizedDescription
             }
@@ -178,6 +250,7 @@ struct ContactsView: View {
         let empty = model.filtered.isEmpty
         let query = model.query
         let selectedID = model.selectedID
+        let revealID = model.revealID
         return NavigationSplitView(columnVisibility: .constant(.all)) {
             VStack(spacing: 0) {
                 // Первая строка — как у десктопа: бургер, «Контакты», «+»;
@@ -194,8 +267,9 @@ struct ContactsView: View {
                 ContactSearchField(query: $model.query)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 8)
+                ScrollViewReader { proxy in
                 List(selection: $model.selectedID) {
-                    ForEach(sections, id: \.letter) { s in
+                    ForEach(sections) { s in
                         Section(s.letter) {
                             ForEach(s.items) { c in
                                 // Выбранная строка — зелёная с белым текстом, как
@@ -213,9 +287,28 @@ struct ContactsView: View {
                                 .foregroundStyle(on ? Color.white : Color.primary)
                                 .listRowBackground(on ? Palette.accent : Color.clear)
                                 .tag(c.id)
+                                .id(c.id)
+                                .accessibilityElement(children: .combine)
+                                .accessibilityIdentifier("contact.row")
                             }
                         }
                     }
+                }
+                // Открытый контакт (только что созданный — тоже) виден в списке.
+                .onChange(of: selectedID) { _, id in
+                    guard let id else { return }
+                    withAnimation { proxy.scrollTo(id, anchor: .center) }
+                }
+                .onChange(of: revealID) { _, id in
+                    guard let id else { return }
+                    withAnimation { proxy.scrollTo(id, anchor: .center) }
+                }
+                // iPhone: вернулись из карточки — список у созданного контакта.
+                .onAppear {
+                    guard let id = model.revealID else { return }
+                    model.revealID = nil
+                    DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) }
+                }
                 }
                 .listStyle(.plain)
                 .overlay {
@@ -341,12 +434,20 @@ private struct ContactCard: View {
 /// книга нового контакта — только назначенная пользователем (§15).
 private struct ContactFormView: View {
     @Bindable var model: ContactsModel
+    /// Поле в фокусе: «Ещё адрес» / «Ещё телефон» ставят фокус в новое поле —
+    /// набор идёт туда, а не в прежнее (аудит 2026-11-14 №18: на iPad два
+    /// номера слились в одно поле).
+    @FocusState private var focus: Slot?
+
+    enum Slot: Hashable { case email(Int), phone(Int) }
 
     var body: some View {
         if let f = model.form {
             let limit = model.slotLimit(f)
             NavigationStack {
+                ScrollViewReader { proxy in
                 Form {
+                    FormErrorSection(error: f.error)
                     Section {
                         TextField("Имя", text: bind(\.name))
                         TextField("Организация", text: bind(\.organization))
@@ -359,10 +460,16 @@ private struct ContactFormView: View {
                                 .keyboardType(.emailAddress).textInputAutocapitalization(.never)
                                 #endif
                                 .autocorrectionDisabled()
+                                .focused($focus, equals: .email(i))
+                                .id(Slot.email(i))
+                                .submitLabel(.next)
+                                .onSubmit { next(after: .email(i), limit: limit, proxy) }
+                                .accessibilityIdentifier("contact.email")
                         }
                         .onDelete { model.form?.emails.remove(atOffsets: $0) }
                         if limit.map({ f.emails.count < $0 }) ?? true {
-                            Button("Ещё адрес", systemImage: "plus") { model.form?.emails.append("") }
+                            Button("Ещё адрес", systemImage: "plus") { add(.email(f.emails.count), proxy) }
+                                .accessibilityIdentifier("contact.addEmail")
                         }
                     } header: {
                         Text("Почта")
@@ -375,10 +482,16 @@ private struct ContactFormView: View {
                                 #if os(iOS)
                                 .keyboardType(.phonePad)
                                 #endif
+                                .focused($focus, equals: .phone(i))
+                                .id(Slot.phone(i))
+                                .submitLabel(.next)
+                                .onSubmit { next(after: .phone(i), limit: limit, proxy) }
+                                .accessibilityIdentifier("contact.phone")
                         }
                         .onDelete { model.form?.phones.remove(atOffsets: $0) }
                         if limit.map({ f.phones.count < $0 }) ?? true {
-                            Button("Ещё телефон", systemImage: "plus") { model.form?.phones.append("") }
+                            Button("Ещё телефон", systemImage: "plus") { add(.phone(f.phones.count), proxy) }
+                                .accessibilityIdentifier("contact.addPhone")
                         }
                     } header: {
                         Text("Телефон")
@@ -401,11 +514,10 @@ private struct ContactFormView: View {
                             }
                         }
                     }
-                    if let e = f.error {
-                        Section { Label(e, systemImage: "exclamationmark.triangle").foregroundStyle(.red) }
-                    }
                 }
                 .formStyle(.grouped)
+                .revealsFormError(f.error, proxy)
+                }
                 .navigationTitle(f.editing == nil ? "Новый контакт" : "Изменить контакт")
                 .toolbarTitleDisplayMode(.inline)
                 .toolbar {
@@ -416,6 +528,37 @@ private struct ContactFormView: View {
                 }
             }
             .interactiveDismissDisabled(f.busy)
+        }
+    }
+
+    /// Return в адресе или телефоне: в последнем непустом — ещё одно поле
+    /// (на iPad «Ещё телефон» оказывается под клавиатурой), иначе — следующее.
+    private func next(after slot: Slot, limit: Int?, _ proxy: ScrollViewProxy) {
+        guard let f = model.form else { return }
+        let (list, i): ([String], Int) = switch slot {
+        case let .email(i): (f.emails, i)
+        case let .phone(i): (f.phones, i)
+        }
+        let following: Slot = switch slot {
+        case .email: .email(i + 1)
+        case .phone: .phone(i + 1)
+        }
+        if i + 1 < list.count {
+            focus = following
+        } else if !list[i].trimmingCharacters(in: .whitespaces).isEmpty, limit.map({ list.count < $0 }) ?? true {
+            add(following, proxy)
+        }
+    }
+
+    /// Новое пустое поле — и фокус в него (поле встаёт в форму следующим кадром).
+    private func add(_ slot: Slot, _ proxy: ScrollViewProxy) {
+        switch slot {
+        case .email: model.form?.emails.append("")
+        case .phone: model.form?.phones.append("")
+        }
+        Task { @MainActor in
+            focus = slot
+            withAnimation { proxy.scrollTo(slot, anchor: .center) }
         }
     }
 

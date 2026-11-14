@@ -147,4 +147,39 @@ struct OutgoingTests {
         #expect(f.text.hasSuffix("тело"))
         #expect(f.html.contains("Пересылаемое сообщение"))
     }
+
+    // MARK: Подсказки полей и «От кого» (аудит 2026-11-14 №4, №10)
+
+    @Test func hintsFollowTheBranch() {
+        let last = body("Вопрос", "bob@x.ru")
+        let implicit = derivedFields(.implicit(conv(), lastIncoming: last, last: last), identities: ids)
+        #expect(implicit.to == ["bob@x.ru"])
+        #expect(implicit.subject == "Re: Вопрос")
+        // Новое письмо: темы нет — «Re: …» не подсказывается.
+        let new = derivedFields(.new, identities: ids)
+        #expect(new.to.isEmpty)
+        #expect(new.subject == "")
+        let o = body("Тема", "bob@x.ru", to: ["me@a.ru", "carol@y.ru"])
+        let reply = derivedFields(.reply(o, isGroup: true), identities: ids)
+        #expect(reply.to == ["bob@x.ru", "carol@y.ru"])
+        #expect(reply.subject == "Re: Тема")
+    }
+
+    @Test func newMailWithoutSubjectHasNoAutoSubject() throws {
+        let r = try ok(buildOutgoing(.new, draft: Draft(text: "x", to: "bob@x.ru"), identities: ids))
+        #expect(r.subject == "")
+    }
+
+    @Test func fromChoicesPutEveryAccountOnTop() {
+        let ddmail = [Identity(email: "info@a.ru", isDefault: true)] + (1...20).map { Identity(email: "qa\($0)@a.ru") }
+        let mailru = [Identity(email: "me@mail.ru", isDefault: true)]
+        let c = FromChoices([ddmail, mailru])
+        #expect(c.accounts.map(\.email) == ["info@a.ru", "me@mail.ru"])
+        #expect(c.others.count == 20)
+        #expect(c.all.count == 22)
+        // Адрес в двух учётках — один раз, у первой.
+        let twice = FromChoices([[Identity(email: "x@a.ru")], [Identity(email: "X@a.ru"), Identity(email: "y@b.ru")]])
+        #expect(twice.accounts.map(\.email) == ["x@a.ru", "y@b.ru"])
+        #expect(twice.others.isEmpty)
+    }
 }

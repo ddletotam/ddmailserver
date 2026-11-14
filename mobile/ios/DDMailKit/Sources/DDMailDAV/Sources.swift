@@ -14,9 +14,16 @@ public protocol CalendarSource: Sendable {
 
 /// Источник контактов: сервер ddmail или CardDAV внешней учётки.
 public protocol ContactsSource: Sendable {
+    /// Книга целиком (до `limit`).
     func contacts(limit: Int) async throws -> [ContactDTO]
+    /// Поиск по книге на стороне источника: у ddmail — сервер (вся книга,
+    /// даже если список пришёл не весь); у CardDAV книга и так целиком на
+    /// устройстве — пусто.
+    func searchContacts(_ query: String, limit: Int) async throws -> [ContactDTO]
     func addressBooks() async throws -> [AddressBookDTO]
-    func createContact(_ r: ContactWriteRequest) async throws
+    /// Новый контакт; ответ — его id, если источник его знает.
+    @discardableResult
+    func createContact(_ r: ContactWriteRequest) async throws -> Int64?
     func patchContact(id: Int64, _ r: ContactWriteRequest) async throws
     func deleteContact(id: Int64) async throws
 }
@@ -192,12 +199,17 @@ public actor DAVContactsSource: ContactsSource {
         return out
     }
 
-    public func createContact(_ r: ContactWriteRequest) async throws {
+    public func searchContacts(_ query: String, limit: Int) async throws -> [ContactDTO] { [] }
+
+    @discardableResult
+    public func createContact(_ r: ContactWriteRequest) async throws -> Int64? {
         guard let id = r.address_book_id, let book = books[id] else { throw APIError.server(code: 404, message: "Адресная книга не найдена.") }
         let uid = UUID().uuidString.lowercased()
         let card = VCard.build(uid: uid, fullName: r.full_name, emails: r.emails, phones: r.phones, organization: r.organization, title: r.title)
-        _ = try await client.request("PUT", book.url.appending(path: "\(uid).vcf"), body: card,
+        let url = book.url.appending(path: "\(uid).vcf")
+        _ = try await client.request("PUT", url, body: card,
                                      contentType: "text/vcard; charset=utf-8", headers: ["If-None-Match": "*"])
+        return davID(accountKey, url.absoluteString)
     }
 
     public func patchContact(id: Int64, _ r: ContactWriteRequest) async throws {
@@ -322,15 +334,24 @@ public actor ContactsHub: ContactsSource {
         return got.flatMap(\.1)
     }
 
+    public func searchContacts(_ query: String, limit: Int) async throws -> [ContactDTO] {
+        let got = try await gather { try await $0.searchContacts(query, limit: limit) }
+        for (i, list) in got { for c in list { contactOwner[c.id] = i } }
+        return got.flatMap(\.1)
+    }
+
     public func addressBooks() async throws -> [AddressBookDTO] {
         let got = try await gather { try await $0.addressBooks() }
         for (i, list) in got { for b in list { bookOwner[b.id] = i } }
         return got.flatMap(\.1)
     }
 
-    public func createContact(_ r: ContactWriteRequest) async throws {
+    @discardableResult
+    public func createContact(_ r: ContactWriteRequest) async throws -> Int64? {
         guard let b = r.address_book_id, let i = bookOwner[b] else { throw APIError.server(code: 404, message: "Адресная книга не найдена.") }
-        try await sources[i].source.createContact(r)
+        let id = try await sources[i].source.createContact(r)
+        if let id { contactOwner[id] = i }
+        return id
     }
 
     public func patchContact(id: Int64, _ r: ContactWriteRequest) async throws {
@@ -339,7 +360,8 @@ public actor ContactsHub: ContactsSource {
     }
 
     public func deleteContact(id: Int64) async throws {
-        guard let i = contactOwner[id] else { return }
+        // Источник неизвестен — отказ словами, а не тихое «удалено».
+        guard let i = contactOwner[id] else { throw APIError.server(code: 404, message: "Контакт не найден — обновите список.") }
         try await sources[i].source.deleteContact(id: id)
     }
 }

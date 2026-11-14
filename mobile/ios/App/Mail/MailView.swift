@@ -92,6 +92,11 @@ struct MailView: View {
         }
         .onAppear(perform: restoreLast)
         .onChange(of: model.loaded) { restoreLast() }
+        // Первый вход: кэш пуст, список приходит синком уже после `loaded` —
+        // беседа открывается, как только появились строки.
+        .onChange(of: model.list.conversations.isEmpty) { _, empty in if !empty { restoreLast() } }
+        // Смена таба на широкой раскладке — справа беседа нового списка (десктоп §4).
+        .onChange(of: model.activeFolderID) { if wide && model.loaded { model.settleOpen() } }
     }
 
     /// Колонка беседы. На macOS `NavigationSplitView` тянет колонку под
@@ -180,6 +185,10 @@ struct MailView: View {
                         .onChange(of: selectedID) { _, id in
                             guard let id else { return }
                             withAnimation { proxy.scrollTo(id) }
+                            // Ещё раз, когда уйдёт клавиатура поиска (выбор в
+                            // выпадашке снимает фокус, №20): смена нижнего
+                            // отступа списка сбрасывала прокрутку к строке.
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { proxy.scrollTo(id) }
                         }
                     }
                 }
@@ -310,18 +319,28 @@ struct MailView: View {
         }
     }
 
-    /// На раскладке, где беседа видна сразу, — открыть ту, на которой закончили
-    /// (§5). На Маке колонки рядом всегда, а `horizontalSizeClass` там `nil` (S-03).
-    private func restoreLast() {
+    /// Беседа видна рядом со списком: iPad при `.regular`, Мак всегда (там
+    /// `horizontalSizeClass` — `nil`, S-03). На iPhone беседа открывается
+    /// поверх списка — сама она не открывается никогда.
+    private var wide: Bool {
         #if os(macOS)
-        let wide = true
+        true
         #else
-        let wide = sizeClass == .regular
+        sizeClass == .regular
         #endif
-        guard wide, model.selectedID == nil, model.loaded,
-              let id = model.lastConversationID, model.all.contains(where: { $0.ref == id })
-        else { return }
-        model.open(id)
+    }
+
+    /// На раскладке, где беседа видна сразу, — открыть ту, на которой
+    /// закончили (§5); её нет (первый вход, беседу удалили) — как при смене
+    /// таба: первую прочитанную (аудит 2026-11-14 №17: после входа справа
+    /// было «Беседа не выбрана»).
+    private func restoreLast() {
+        guard wide, model.selectedID == nil, model.loaded else { return }
+        if let id = model.lastConversationID, model.all.contains(where: { $0.ref == id }) {
+            model.open(id)
+        } else {
+            model.settleOpen()
+        }
     }
 
     private func present(_ v: Binding<Set<String>?>) -> Binding<Bool> {
@@ -474,17 +493,29 @@ private struct FolderTabs: View {
     let menu: FolderTabMenu
     let select: (String?) -> Void
 
+    /// Вся полоса: её передний край — начало («← Входящие» или первый таб).
+    private static let startID = "folder.strip.start"
+
     var body: some View {
+        HStack(spacing: 0) {
+        // «← Входящие» — явный путь назад (десктоп §4): пока выбрана папка, он
+        // стоит слева неподвижно, вне прокрутки — на iPhone с ним и выбранным
+        // табом полоса не влезала, и он уезжал за край (аудит 2026-11-14 №9).
+        if active != nil {
+            tab(icon: "", name: "← Входящие", unread: inboxUnread, on: false, hidden: false) { select(nil) }
+                .contextMenu { stripMenu }
+                .fixedSize()
+                .padding(.leading, 14)
+                .padding(.trailing, 4)
+        }
+        ScrollViewReader { proxy in
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 18) {
-                if active != nil {
-                    tab(icon: "", name: "← Входящие", unread: inboxUnread, on: false, hidden: false) { select(nil) }
-                        .contextMenu { stripMenu }
-                }
                 ForEach(tabs) { t in
                     let on = t.id == active
                     tab(icon: t.icon, name: t.name, unread: t.unread, on: on, hidden: t.hidden) { select(on ? nil : t.id) }
                         .contextMenu { tabMenu(t) }
+                        .id(t.id)
                 }
                 // Пустое место полосы — то же меню без пунктов папки.
                 Color.clear
@@ -495,15 +526,39 @@ private struct FolderTabs: View {
                     .accessibilityLabel("Полоса папок")
                     .accessibilityIdentifier("folder.strip")
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, active != nil ? 10 : 14)
+            .id(Self.startID)
+        }
+        // Выбранный таб — в видимой части полосы, и «← Входящие» рядом с ним,
+        // если оба влезают (аудит 2026-11-14 №9: после выбора «Спама» чип
+        // «Входящие» уезжал за левый край, на iPhone — сам выбранный таб за
+        // правый). Сначала — к началу полосы, затем ровно настолько, чтобы
+        // показался выбранный.
+        .onChange(of: active, initial: true) { _, id in reveal(id, proxy) }
+        .onChange(of: tabs.map(\.id)) { reveal(active, proxy) }
+        }
         }
         .frame(height: 40)
         .overlay(alignment: .bottom) { Divider() }
     }
 
+    private func reveal(_ id: String?, _ proxy: ScrollViewProxy) {
+        // Следующий кадр: таб, появившийся вместе со сменой (скрытый «Спам»,
+        // «← Входящие»), должен успеть встать в полосу.
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                proxy.scrollTo(Self.startID, anchor: .leading)
+                // Выбранный — не вплотную к краю: якорь чуть внутрь полосы.
+                if let id { proxy.scrollTo(id, anchor: UnitPoint(x: 0.85, y: 0.5)) }
+            }
+        }
+    }
+
     @ViewBuilder private func tabMenu(_ t: FolderTab) -> some View {
-        Button("Все прочитаны", systemImage: "envelope.open") { menu.markRead(t.id) }
+        // У «Спама» — только общие пункты (§5): счётчиков у него нет (десктоп
+        // §4), и «Все прочитаны» там нечего гасить (аудит 2026-11-14 №8).
         if !t.system {
+            Button("Все прочитаны", systemImage: "envelope.open") { menu.markRead(t.id) }
             Button("Настроить…", systemImage: "slider.horizontal.3") { menu.configure(t.id) }
             // Подтверждение — подменю: у меню нет «нажми ещё раз».
             Menu("Удалить", systemImage: "trash") {
@@ -543,6 +598,9 @@ private struct FolderTabs: View {
                 .font(.subheadline.weight(on ? .semibold : .regular))
                 .foregroundStyle(on ? Palette.accent : Color.primary)
                 .opacity(hidden && !on ? 0.5 : 1)
+                // Имя таба — целиком: полоса прокручивается, а не сжимает табы
+                // в «Сп…» (так было после прокрутки к выбранному).
+                .fixedSize()
                 Spacer(minLength: 0)
                 Capsule()
                     .fill(on ? Palette.accent : Color.clear)
