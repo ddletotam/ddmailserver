@@ -1186,9 +1186,11 @@ function stubDelivery(st, d) {
   }
   renderDelivery(el, st.row, d);
   st.failed = !!d && d.status === 'failed';
-  st.row.classList.toggle('ddm-pending', !st.failed);
-  // Время отказа — вместо «Отправляется…»: письмо уже никуда не отправляется.
-  meta.textContent = st.failed ? timeFmt.format(new Date()) : 'Отправляется…';
+  // Доставлено (событие `delivery_status` раньше дельты) или отказ — время
+  // вместо «Отправляется…»: письмо уже никуда не отправляется.
+  const done = !!d && (d.status === 'failed' || d.status === 'delivered');
+  st.row.classList.toggle('ddm-pending', !done);
+  meta.textContent = done ? timeFmt.format(new Date()) : 'Отправляется…';
 }
 
 const ddm = {

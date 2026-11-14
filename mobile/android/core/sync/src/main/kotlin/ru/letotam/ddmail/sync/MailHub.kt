@@ -98,6 +98,24 @@ class MailHub(
         if (e.isAuthError()) setStatus(accountKey, AccountStatus.NeedsLogin)
     }
 
+    /**
+     * Беседы учётки [accountKey] — сразу, мимо общего синка: после отправки
+     * письмо должно встать в ленту за время одного запроса дельты, а не ждать,
+     * пока закончится синк всех учёток (IMAP чужого провайдера — десятки
+     * секунд) и хвост прохода ddmail (спам, адреса, папки). У ddmail —
+     * только беседы ([SyncEngine.syncConversations]), у IMAP — обычный проход.
+     * Ошибки — в статус, наружу не летят.
+     */
+    suspend fun refreshConversations(accountKey: String) {
+        val s = source(accountKey) ?: return
+        try {
+            if (s is SyncEngine) s.syncConversations() else s.sync()
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            noteError(accountKey, e)
+        }
+    }
+
     /** Синк всех учёток разом; ошибки — в статусы, наружу не летят. */
     suspend fun syncAll(): Map<String, AccountStatus> = coroutineScope {
         _sources.value.map { s ->
@@ -183,23 +201,28 @@ class MailHub(
      * Отправка — учёткой-владельцем адреса From (`owner_for` десктопа); нет
      * владельца — «Не через что отправить» (контракт §5).
      *
-     * `true` — письмо принял сервер ddmail: копия в «Отправленных» уже есть,
-     * доставку он сообщит сам (`delivery_status`). `false` — ушло через SMTP
-     * IMAP-учётки: доставлено. Отказ SMTP — [SmtpFailed].
+     * [Sent.viaServer] — письмо принял сервер ddmail: копия в «Отправленных»
+     * уже есть (её Message-ID — [Sent.rfcMessageId]), доставку он сообщит сам
+     * (`delivery_status`). Иначе ушло через SMTP IMAP-учётки: доставлено.
+     * Отказ SMTP — [SmtpFailed].
      */
-    suspend fun send(req: SendRequest, owners: List<Pair<String, Identity>>, prefer: String? = null): Boolean {
+    suspend fun send(req: SendRequest, owners: List<Pair<String, Identity>>, prefer: String? = null): Sent {
         val from = bareAddr(req.from)
         val key = senderOf(req, owners, prefer)
             ?: throw MailException.Rejected("Не через что отправить: адрес $from не принадлежит ни одной учётке")
         val src = source(key) ?: throw MailException.Rejected("Не через что отправить")
         try {
+            if (src is SyncEngine) return Sent(true, tracked(key) { src.sendAcked(req) }.rfcMessageId)
             tracked(key) { src.send(req) }
         } catch (e: Exception) {
             if (src !is SyncEngine && e.isMailError()) throw SmtpFailed(e)
             throw e
         }
-        return src is SyncEngine
+        return Sent(false)
     }
+
+    /** Итог [send]: через сервер ddmail ли ушло и Message-ID его копии. */
+    data class Sent(val viaServer: Boolean, val rfcMessageId: String = "")
 
     /**
      * Учётка, через которую уйдёт письмо [req]: владелец адреса From. Адрес

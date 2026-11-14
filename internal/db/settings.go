@@ -57,7 +57,7 @@ func (db *DB) GetSecretSetting(key string) (string, error) {
 		return "", nil
 	}
 
-	decrypted, err := crypto.DecryptPassword(encrypted, db.encryptionKey)
+	decrypted, err := db.decryptSecret(encrypted)
 	if err != nil {
 		return "", fmt.Errorf("failed to decrypt setting %s: %w", key, err)
 	}

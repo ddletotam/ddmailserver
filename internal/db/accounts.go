@@ -345,7 +345,7 @@ func (db *DB) GetAllEnabledAccounts() ([]*models.Account, error) {
 func (db *DB) decryptAccountSecrets(account *models.Account) error {
 	// Decrypt IMAP password (if not OAuth)
 	if account.IMAPPassword != "" {
-		decryptedIMAP, err := crypto.DecryptPassword(account.IMAPPassword, db.encryptionKey)
+		decryptedIMAP, err := db.decryptSecret(account.IMAPPassword)
 		if err != nil {
 			return fmt.Errorf("failed to decrypt IMAP password: %w", err)
 		}
@@ -354,7 +354,7 @@ func (db *DB) decryptAccountSecrets(account *models.Account) error {
 
 	// Decrypt SMTP password (if not OAuth)
 	if account.SMTPPassword != "" {
-		decryptedSMTP, err := crypto.DecryptPassword(account.SMTPPassword, db.encryptionKey)
+		decryptedSMTP, err := db.decryptSecret(account.SMTPPassword)
 		if err != nil {
 			return fmt.Errorf("failed to decrypt SMTP password: %w", err)
 		}
@@ -363,7 +363,7 @@ func (db *DB) decryptAccountSecrets(account *models.Account) error {
 
 	// Decrypt OAuth access token
 	if account.OAuthAccessToken != "" {
-		decrypted, err := crypto.DecryptPassword(account.OAuthAccessToken, db.encryptionKey)
+		decrypted, err := db.decryptSecret(account.OAuthAccessToken)
 		if err != nil {
 			return fmt.Errorf("failed to decrypt OAuth access token: %w", err)
 		}
@@ -372,7 +372,7 @@ func (db *DB) decryptAccountSecrets(account *models.Account) error {
 
 	// Decrypt OAuth refresh token
 	if account.OAuthRefreshToken != "" {
-		decrypted, err := crypto.DecryptPassword(account.OAuthRefreshToken, db.encryptionKey)
+		decrypted, err := db.decryptSecret(account.OAuthRefreshToken)
 		if err != nil {
 			return fmt.Errorf("failed to decrypt OAuth refresh token: %w", err)
 		}

@@ -220,8 +220,11 @@ class ComposeController(
                 val origin = place
                 scope.launch {
                     try {
-                        val viaServer = hub.send(built.request, owners.value, prefer = c.accountKey)
-                        afterSend(viaServer)
+                        val sent = hub.send(built.request, owners.value, prefer = c.accountKey)
+                        // Заглушка узнаёт Message-ID копии: событие доставки
+                        // снимет с неё «Отправляется…», не дожидаясь дельты.
+                        if (sent.viaServer) conversation.stubSent(key, sent.rfcMessageId)
+                        afterSend(sent.viaServer, hub.senderOf(built.request, owners.value, prefer = c.accountKey))
                         // «✓ Отправлено» — над композером той беседы, откуда ушло.
                         if (here(origin)) flash()
                     } catch (e: Exception) {
@@ -283,7 +286,7 @@ class ComposeController(
                 val origin = place
                 scope.launch {
                     try {
-                        val viaServer = hub.send(built.request, owners.value)
+                        val viaServer = hub.send(built.request, owners.value).viaServer
                         // Беседа нового письма — набор адресатов: «Кому» и «Копия»
                         // (§4 десктопа: bcc в набор не входит) — в учётке, через
                         // которую письмо ушло: тот же собеседник в другой учётке
@@ -296,7 +299,7 @@ class ComposeController(
                         if (here(origin)) {
                             ui.update { cur -> cur.copy(pendingNew = cur.pendingNew.map { if (it.key == key) it.copy(sent = true) else it }) }
                         }
-                        afterSend(viaServer)
+                        afterSend(viaServer, hub.senderOf(built.request, owners.value))
                         if (here(origin)) flash()
                     } catch (e: Exception) {
                         if (!e.isMailError()) throw e
@@ -345,9 +348,9 @@ class ComposeController(
             when (val built = build(sheet.branch, sheet.draft, identities.value, fwdHtml, fwdText, extra)) {
                 is Built.Refused -> ui.update { u -> u.copy(sheet = u.sheet?.copy(busy = false, error = built.reason)) }
                 is Built.Ok -> try {
-                    val viaServer = hub.send(built.request, owners.value, prefer = fwdBranch?.accountKey)
+                    val viaServer = hub.send(built.request, owners.value, prefer = fwdBranch?.accountKey).viaServer
                     ui.update { it.copy(sheet = null, sentFlash = true) }
-                    afterSend(viaServer)
+                    afterSend(viaServer, hub.senderOf(built.request, owners.value, prefer = fwdBranch?.accountKey))
                     delay(2000)
                     ui.update { it.copy(sentFlash = false) }
                 } catch (e: Exception) {
@@ -365,9 +368,18 @@ class ComposeController(
      * `LiveUpdates`), пара повторов — подстраховка без сокета. IMAP-учётке
      * копию кладёт её сервер или мы через 5–20 с — там повторы с затухающими
      * паузами, как `schedule_post_send_refetch` десктопа (2.5 с → 7 → 15 → 30 → 60).
+     *
+     * Первый шаг у ddmail — только беседы учётки-отправителя [account]
+     * ([MailHub.refreshConversations]), мимо общего синка: тот ждёт все
+     * учётки (IMAP Mail.ru — до десятков секунд), и «Отправляется…» висело
+     * 10–20 с, хотя копия на сервере была уже к ответу `/send`.
      */
-    private fun afterSend(viaServer: Boolean) {
-        syncSoon()
+    private fun afterSend(viaServer: Boolean, account: String?) {
+        if (viaServer && account != null) {
+            scope.launch { hub.refreshConversations(account) }
+        } else {
+            syncSoon()
+        }
         scope.launch {
             for (d in if (viaServer) SERVER_REFETCH_MS else POST_SEND_REFETCH_MS) {
                 delay(d)
