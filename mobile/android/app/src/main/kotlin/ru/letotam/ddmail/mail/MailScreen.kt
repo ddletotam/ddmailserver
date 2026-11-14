@@ -667,14 +667,17 @@ private fun ListPane(
             // строки, и новая оказывалась выше края экрана — «после отправки
             // диалог не появился» (замер 2026-11-13). Был в самом верху — верх и
             // остаётся; прокрутил вниз — позиция не трогается.
-            val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+            val listState = vm.listState
             val topKey = s.conversations.firstOrNull()?.let { it.accountKey + "\u0000" + it.id }
-            var prevTop by remember { mutableStateOf<String?>(null) }
+            // Прежняя первая строка — тоже в модели: новая беседа, пришедшая,
+            // пока на сложенном была открыта беседа, видна после «Назад».
             LaunchedEffect(topKey) {
-                val was = prevTop
-                prevTop = topKey
+                val was = vm.listTopKey
+                vm.listTopKey = topKey
                 if (was == null || was == topKey) return@LaunchedEffect
-                val anchored = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.key == was
+                // Список только вернулся на экран и ещё не разложен — по индексу.
+                val first = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.key
+                val anchored = if (first != null) first == was else listState.firstVisibleItemIndex == 0
                 if (anchored && listState.firstVisibleItemScrollOffset == 0) listState.scrollToItem(0)
             }
             LazyColumn(Modifier.fillMaxSize(), state = listState) {

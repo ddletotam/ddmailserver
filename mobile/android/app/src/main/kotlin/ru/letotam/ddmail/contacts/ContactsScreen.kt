@@ -24,7 +24,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -146,6 +146,12 @@ class ContactsViewModel(private val app: ru.letotam.ddmail.DdmailApp, private va
     val draft = MutableStateFlow<ContactDraft?>(null)
     val loading = MutableStateFlow(false)
     val notice = MutableStateFlow<String?>(null)
+    /**
+     * Позиция списка — в модели, не в `remember`: на сложенном телефоне
+     * карточка заменяет список, и он уходил из композиции — «Назад» из
+     * карточки возвращал в начало книги в 15 000 (аудит 0.0.40 на Mate XT).
+     */
+    val listState = LazyListState()
     /** Только что созданный: список прокручивается к нему, как только он на экране. */
     val reveal = MutableStateFlow<Long?>(null)
     /**
@@ -336,7 +342,7 @@ private fun ContactList(vm: ContactsViewModel, avatars: Avatars, modifier: Modif
     val sections by vm.sections.collectAsState()
     val q by vm.query.collectAsState()
     val reveal by vm.reveal.collectAsState()
-    val listState = rememberLazyListState()
+    val listState = vm.listState
     // Только что созданный — прокрутить к нему, когда он есть в списке.
     LaunchedEffect(reveal, sections) {
         val id = reveal ?: return@LaunchedEffect

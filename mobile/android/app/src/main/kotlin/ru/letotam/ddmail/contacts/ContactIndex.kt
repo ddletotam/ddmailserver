@@ -14,8 +14,12 @@ internal fun ContactDto.display(): String =
 data class ContactSection(val letter: String, val items: List<ContactDto>)
 
 /**
- * Книга, приготовленная к показу и поиску (§15): сортировка по имени
- * (`Collator` ru, равные имена — по id, порядок не прыгает между загрузками),
+ * Книга, приготовленная к показу и поиску (§15): сортировка по имени —
+ * сначала кириллица, затем латиница, другие алфавиты, в конце «#» (не буква);
+ * внутри — `Collator` ru, равные имена — по id, порядок не прыгает между
+ * загрузками. Порядок алфавитов задан явно: у ICU устройства (локаль ru)
+ * кириллица идёт первой, у `Collator` JVM — латиница, и тест проверял не то,
+ * что видно на телефоне (аудит 0.0.40 на Mate XT).
  * свёрнутые строки поиска (без регистра и диакритики, «ё» = «е»), цифры
  * телефонов. Книга в 15–30 тыс. карточек — строится вне главного потока
  * ([ContactsViewModel] на `Dispatchers.Default`); поиск по готовым строкам —
@@ -26,15 +30,17 @@ class ContactIndex(list: List<ContactDto>) {
     val sorted: List<ContactDto>
     val byId: Map<Long, ContactDto>
     private val sortKeys: List<CollationKey>
+    private val scripts: IntArray
     private val keys: Array<String>
     private val digits: Array<String>
 
     init {
         val unique = LinkedHashMap<Long, ContactDto>(list.size * 2)
         for (c in list) unique.putIfAbsent(c.id, c)
-        val keyed = unique.values.map { Keyed(collationKey(it), it) }.sortedWith(KEYED_ORDER)
+        val keyed = unique.values.map { keyed(it) }.sortedWith(KEYED_ORDER)
         sorted = keyed.map { it.c }
         sortKeys = keyed.map { it.key }
+        scripts = IntArray(keyed.size) { keyed[it].script }
         byId = unique
         keys = Array(sorted.size) { key(sorted[it]) }
         digits = Array(sorted.size) { phoneDigits(sorted[it]) }
@@ -74,8 +80,8 @@ class ContactIndex(list: List<ContactDto>) {
         val q = Query(query)
         val add = extra.filter { byId[it.id] == null && matches(it, q) }.distinctBy { it.id }
         if (add.isEmpty()) return sections(search(q))
-        val a = hits(q).map { Keyed(sortKeys[it], sorted[it]) }
-        val b = add.map { Keyed(collationKey(it), it) }.sortedWith(KEYED_ORDER)
+        val a = hits(q).map { Keyed(scripts[it], sortKeys[it], sorted[it]) }
+        val b = add.map { keyed(it) }.sortedWith(KEYED_ORDER)
         val merged = ArrayList<ContactDto>(a.size + b.size)
         var i = 0
         var j = 0
@@ -85,13 +91,25 @@ class ContactIndex(list: List<ContactDto>) {
         return sections(merged)
     }
 
-    private class Keyed(val key: CollationKey, val c: ContactDto)
+    private class Keyed(val script: Int, val key: CollationKey, val c: ContactDto)
 
     companion object {
         private const val PHONE_CHARS = " +-()."
         private val DIACRITICS = Regex("\\p{Mn}+")
         private val collator: Collator = Collator.getInstance(Locale("ru")).apply { strength = Collator.SECONDARY }
-        private val KEYED_ORDER = Comparator<Keyed> { x, y -> x.key.compareTo(y.key).takeIf { it != 0 } ?: x.c.id.compareTo(y.c.id) }
+        private val KEYED_ORDER = Comparator<Keyed> { x, y ->
+            x.script.compareTo(y.script).takeIf { it != 0 } ?: x.key.compareTo(y.key).takeIf { it != 0 } ?: x.c.id.compareTo(y.c.id)
+        }
+
+        /** Место алфавита в списке: кириллица, латиница, прочие буквы, «#». */
+        private fun scriptRank(first: Char?): Int = when {
+            first == null || !first.isLetter() -> 3
+            Character.UnicodeScript.of(first.code) == Character.UnicodeScript.CYRILLIC -> 0
+            Character.UnicodeScript.of(first.code) == Character.UnicodeScript.LATIN -> 1
+            else -> 2
+        }
+
+        private fun keyed(c: ContactDto) = Keyed(scriptRank(c.display().firstOrNull()), collationKey(c), c)
 
         /** Без регистра и диакритики; «ё» → «е», «й» → «и» (как `diacriticInsensitive` у iOS). */
         fun fold(s: String): String {
@@ -111,8 +129,8 @@ class ContactIndex(list: List<ContactDto>) {
         private fun collationKey(c: ContactDto): CollationKey = synchronized(collator) { collator.getCollationKey(c.display()) }
 
         /**
-         * Разделы по первой букве имени (в порядке списка); не буква — «#» в
-         * конце, буквы — по алфавиту.
+         * Разделы по первой букве имени (в порядке списка); буквы — в порядке
+         * списка (кириллица, латиница, прочие), не буква — «#» в конце.
          */
         fun sections(list: List<ContactDto>): List<ContactSection> {
             val groups = LinkedHashMap<String, MutableList<ContactDto>>()
@@ -121,7 +139,9 @@ class ContactIndex(list: List<ContactDto>) {
                 val letter = if (first != null && first.isLetter()) first.uppercaseChar().toString() else "#"
                 groups.getOrPut(letter) { ArrayList() } += c
             }
-            val letters = groups.keys.filter { it != "#" }.sortedWith { x, y -> synchronized(collator) { collator.compare(x, y) } }
+            val letters = groups.keys.filter { it != "#" }.sortedWith { x, y ->
+                scriptRank(x.first()).compareTo(scriptRank(y.first())).takeIf { it != 0 } ?: synchronized(collator) { collator.compare(x, y) }
+            }
             return (letters + listOfNotNull("#".takeIf { it in groups })).map { ContactSection(it, groups.getValue(it)) }
         }
     }

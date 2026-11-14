@@ -40,10 +40,14 @@ class ContactIndexTest {
             listOf(ContactDto(3, "Борис"), ContactDto(2, "Анна"), ContactDto(1, "анна"), ContactDto(4, "1С Бот"), ContactDto(5, "Alice")),
         )
         // Равные имена — по id: порядок не прыгает между загрузками.
-        assertEquals(listOf(4L, 5L, 1L, 2L, 3L), book.sorted.map { it.id })
+        // Кириллица, затем латиница, «#» в конце — как у ICU телефона с
+        // локалью ru (у Collator JVM латиница была бы первой).
+        assertEquals(listOf(1L, 2L, 3L, 5L, 4L), book.sorted.map { it.id })
         val secs = ContactIndex.sections(book.sorted)
-        assertEquals(listOf("A", "А", "Б", "#"), secs.map { it.letter })
-        assertEquals(listOf(1L, 2L), secs[1].items.map { it.id })
+        assertEquals(listOf("А", "Б", "A", "#"), secs.map { it.letter })
+        assertEquals(listOf(1L, 2L), secs[0].items.map { it.id })
+        // Список и разделы — в одном порядке (прокрутка к созданному считает по разделам).
+        assertEquals(book.sorted.map { it.id }, ids(secs))
     }
 
     @Test
@@ -72,6 +76,8 @@ class ContactIndexTest {
         val book = ContactIndex(listOf(ContactDto(1, "Аудит Альфа"), ContactDto(3, "Аудит Гамма")))
         val remote = listOf(ContactDto(2, "Аудит Бета"))
         assertEquals(listOf(1L, 2L, 3L), ids(book.view("аудит", remote)))
+        // Латинский от сервера — после кириллицы, не в начале.
+        assertEquals(listOf(1L, 3L, 7L), ids(book.view("", listOf(ContactDto(7, "Audit Zeta")))))
     }
 
     /**
