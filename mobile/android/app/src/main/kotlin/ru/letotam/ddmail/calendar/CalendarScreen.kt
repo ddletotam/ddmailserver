@@ -335,6 +335,8 @@ private fun WideCalendar(vm: CalendarViewModel, yearCols: Int) {
                     onDay = { d -> if (d == selected) vm.setView(CalView.Day) else vm.select(d) },
                     onOpen = vm::open,
                     onCreate = { d -> vm.select(d); vm.newEvent(LocalDateTime.of(d, java.time.LocalTime.of(9, 0))) },
+                    // «ещё N» — сразу этот день целиком (вид «День»), а не только выбор дня.
+                    onMore = { d -> vm.select(d); vm.setView(CalView.Day) },
                     modifier = Modifier.fillMaxSize(),
                 )
             }

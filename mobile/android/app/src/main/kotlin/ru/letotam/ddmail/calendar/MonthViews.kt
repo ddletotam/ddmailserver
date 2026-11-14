@@ -31,6 +31,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.layout.SubcomposeLayout
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -186,10 +189,13 @@ fun MiniMonth(ym: YearMonth, selected: LocalDate?, onDay: (LocalDate) -> Unit, m
     }
 }
 
-/** Месяц iPad: сетка с названиями событий в ячейках. Долгое нажатие на дне — новое событие. */
+/**
+ * Месяц iPad: сетка с названиями событий в ячейках. Долгое нажатие на дне —
+ * новое событие; «ещё N» — [onMore] (весь день целиком).
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun BigMonth(ym: YearMonth, vm: CalendarViewModel, index: Map<LocalDate, List<Occ>>?, selected: LocalDate, onDay: (LocalDate) -> Unit, onOpen: (Occ) -> Unit, onCreate: (LocalDate) -> Unit, modifier: Modifier = Modifier) {
+fun BigMonth(ym: YearMonth, vm: CalendarViewModel, index: Map<LocalDate, List<Occ>>?, selected: LocalDate, onDay: (LocalDate) -> Unit, onOpen: (Occ) -> Unit, onCreate: (LocalDate) -> Unit, onMore: (LocalDate) -> Unit, modifier: Modifier = Modifier) {
     LaunchedEffect(ym) {
         vm.ensure(ym)
         vm.ensure(ym.minusMonths(1))
@@ -229,14 +235,70 @@ fun BigMonth(ym: YearMonth, vm: CalendarViewModel, index: Map<LocalDate, List<Oc
                                 )
                             }
                         }
-                        val max = 4
-                        occs.take(max).forEach { o -> MonthChip(o, onOpen) }
-                        if (occs.size > max) Text("ещё ${occs.size - max}", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 2.dp))
+                        DayChips(occs, onOpen, onMore = { onMore(d) }, Modifier.fillMaxWidth().weight(1f).clipToBounds())
                     }
                 }
             }
         }
     }
+}
+
+/**
+ * Сколько плашек дня показать в высоте [avail] (как `DayCell` iOS: «плашек в
+ * дне столько, сколько влезает, остальное — «ещё N»): влезают все — все;
+ * нет — столько, чтобы под ними целиком встала подпись высотой [moreHeight].
+ * Подпись видна всегда, даже если ради неё не остаётся ни одной плашки.
+ */
+internal fun monthChipsShown(chipHeights: List<Int>, moreHeight: Int, avail: Int): Int {
+    if (chipHeights.sum() <= avail) return chipHeights.size
+    var used = moreHeight
+    var shown = 0
+    while (shown < chipHeights.size && used + chipHeights[shown] <= avail) {
+        used += chipHeights[shown]
+        shown++
+    }
+    return shown
+}
+
+/**
+ * Плашки дня в ячейке месяца. Раньше их было «до четырёх» независимо от
+ * высоты ячейки, и в низкой строке недели «ещё N» уходила за край и
+ * срезалась. Теперь число плашек считается по высоте ([monthChipsShown]).
+ */
+@Composable
+private fun DayChips(occs: List<Occ>, onOpen: (Occ) -> Unit, onMore: () -> Unit, modifier: Modifier = Modifier) {
+    SubcomposeLayout(modifier) { c ->
+        val loose = c.copy(minHeight = 0, maxHeight = Constraints.Infinity)
+        val chips = occs.mapIndexed { i, o -> subcompose("chip$i") { MonthChip(o, onOpen) }.map { it.measure(loose) } }
+        val heights = chips.map { p -> p.sumOf { it.height } }
+        val shown = if (c.hasBoundedHeight) {
+            val probe = subcompose("probe") { MoreLabel(occs.size) {} }.map { it.measure(loose) }
+            monthChipsShown(heights, probe.maxOfOrNull { it.height } ?: 0, c.maxHeight)
+        } else {
+            occs.size
+        }
+        val more = if (shown < occs.size) {
+            subcompose("more") { MoreLabel(occs.size - shown, onMore) }.map { it.measure(loose) }
+        } else {
+            emptyList()
+        }
+        val content = heights.take(shown).sum() + more.sumOf { it.height }
+        val height = if (c.hasBoundedHeight) c.maxHeight else content
+        layout(c.maxWidth, height) {
+            var y = 0
+            chips.take(shown).forEach { parts -> parts.forEach { it.placeRelative(0, y); y += it.height } }
+            more.forEach { it.placeRelative(0, y); y += it.height }
+        }
+    }
+}
+
+/** «ещё N» под плашками дня; тап — [onClick]. */
+@Composable
+private fun MoreLabel(n: Int, onClick: () -> Unit) {
+    Text(
+        "ещё $n", fontSize = 10.sp, maxLines = 1, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(3.dp)).clickable(onClick = onClick).padding(horizontal = 2.dp),
+    )
 }
 
 @Composable
