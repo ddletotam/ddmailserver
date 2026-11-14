@@ -377,10 +377,11 @@ func main() {
 	if cfg.Server.SMTPMXPort > 0 {
 		log.Printf("Initializing MX server with IDLE notifications and calendar sync...")
 		mxAddr := fmt.Sprintf("%s:%d", cfg.Server.WebHost, cfg.Server.SMTPMXPort)
-		mxHostname := "localhost"
-		if cfg.Server.WebHost != "" && cfg.Server.WebHost != "0.0.0.0" {
-			mxHostname = cfg.Server.WebHost
-		}
+		// Баннер и ответ на EHLO — имя сервера (server.domain, как HELO
+		// исходящей почты и PTR), а не адрес прослушивания: web_host
+		// «0.0.0.0» давал «220 localhost», и проверки отправителя у
+		// получателей видели MX, представляющийся localhost.
+		mxHostname := hostname
 		// Pass scheduler's calendar sync trigger to MX server
 		mxSrv := smtpmx.NewWithHubAndCalendarSync(database, mxAddr, mxHostname, notifyHub, scheduler.TriggerCalendarSyncForUser)
 		go func() {

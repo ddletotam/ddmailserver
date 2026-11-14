@@ -68,15 +68,15 @@ func Compose(msg *models.OutboxMessage, attachments []*models.OutboxAttachment, 
 	if hasPlain && hasHTML {
 		altBoundary := randomBoundary()
 		bodyBuf.WriteString(fmt.Sprintf("Content-Type: multipart/alternative; boundary=\"%s\"\r\n\r\n", altBoundary))
-		bodyBuf.WriteString(fmt.Sprintf("--%s\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n", altBoundary, msg.Body))
-		bodyBuf.WriteString(fmt.Sprintf("--%s\r\nContent-Type: text/html; charset=utf-8\r\n\r\n%s\r\n", altBoundary, msg.BodyHTML))
+		bodyBuf.WriteString(fmt.Sprintf("--%s\r\n", altBoundary))
+		WriteTextPart(&bodyBuf, "text/plain", msg.Body)
+		bodyBuf.WriteString(fmt.Sprintf("--%s\r\n", altBoundary))
+		WriteTextPart(&bodyBuf, "text/html", msg.BodyHTML)
 		bodyBuf.WriteString(fmt.Sprintf("--%s--\r\n", altBoundary))
 	} else if hasHTML {
-		bodyBuf.WriteString("Content-Type: text/html; charset=utf-8\r\n\r\n")
-		bodyBuf.WriteString(msg.BodyHTML)
+		WriteTextPart(&bodyBuf, "text/html", msg.BodyHTML)
 	} else {
-		bodyBuf.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
-		bodyBuf.WriteString(msg.Body)
+		WriteTextPart(&bodyBuf, "text/plain", msg.Body)
 	}
 
 	if len(attachments) > 0 {
@@ -84,7 +84,8 @@ func Compose(msg *models.OutboxMessage, attachments []*models.OutboxAttachment, 
 		email.WriteString(fmt.Sprintf("Content-Type: multipart/mixed; boundary=\"%s\"\r\n\r\n", mixedBoundary))
 
 		// Body part
-		email.WriteString(fmt.Sprintf("--%s\r\n%s\r\n", mixedBoundary, bodyBuf.String()))
+		// bodyBuf всегда кончается CRLF (WriteTextPart, закрывающая граница).
+		email.WriteString(fmt.Sprintf("--%s\r\n%s", mixedBoundary, bodyBuf.String()))
 
 		// Attachment parts
 		for _, att := range attachments {

@@ -1647,17 +1647,15 @@ func buildRawEmail(from, to, cc, subject, text, html, inReplyTo, references stri
 		switch {
 		case hasText && hasHTML:
 			fmt.Fprintf(w, "Content-Type: multipart/alternative; boundary=\"%s\"\r\n\r\n", altBoundary)
-			fmt.Fprintf(w, "--%s\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n", altBoundary, text)
-			fmt.Fprintf(w, "--%s\r\nContent-Type: text/html; charset=utf-8\r\n\r\n%s\r\n", altBoundary, html)
+			fmt.Fprintf(w, "--%s\r\n", altBoundary)
+			outbox.WriteTextPart(w, "text/plain", text)
+			fmt.Fprintf(w, "--%s\r\n", altBoundary)
+			outbox.WriteTextPart(w, "text/html", html)
 			fmt.Fprintf(w, "--%s--\r\n", altBoundary)
 		case hasHTML:
-			w.WriteString("Content-Type: text/html; charset=utf-8\r\n\r\n")
-			w.WriteString(html)
-			w.WriteString("\r\n")
+			outbox.WriteTextPart(w, "text/html", html)
 		default:
-			w.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
-			w.WriteString(text)
-			w.WriteString("\r\n")
+			outbox.WriteTextPart(w, "text/plain", text)
 		}
 	}
 

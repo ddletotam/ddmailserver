@@ -221,6 +221,12 @@ func (t *DirectSendTask) Execute(ctx context.Context) error {
 	}
 
 	route := routeRecipients(t.local, msg.UserID, recipients)
+	if len(route.external) > 0 && !t.signer.Has(msg.From) {
+		// Без подписи (и без SPF у домена) Mail.ru отвечает «550 spam
+		// message rejected» (аудит 2026-11-14, №6) — пусть это будет видно
+		// в журнале, а не только в отказе.
+		log.Printf("DKIM: no key for the From domain of message %d — sent unsigned; external providers may reject it", msg.ID)
+	}
 	delivered := route.self
 	failed := route.failed
 	pending := route.pending

@@ -517,6 +517,36 @@ sudo userdel mailserver
 
 ---
 
+## Outgoing mail domain: SPF, DKIM, DMARC
+
+Every domain whose addresses send mail straight to other providers (direct
+delivery) needs all three, or Mail.ru / Gmail / Yandex junk or reject it
+(Mail.ru: `550 spam message rejected`). HELO is `server.domain`; its PTR must
+point back to it.
+
+```bash
+D=example.org                       # the From domain
+SEL=mf                              # dkim.selector from config.yaml
+sudo openssl genrsa -out /etc/mailserver/dkim/$D.key 2048
+sudo chown root:mailserver /etc/mailserver/dkim/$D.key
+sudo chmod 640 /etc/mailserver/dkim/$D.key      # mailserver must read it
+# p= value for the DNS record:
+sudo openssl rsa -in /etc/mailserver/dkim/$D.key -pubout -outform DER 2>/dev/null | base64 -w0; echo
+sudo systemctl restart mailserver   # keys load at start: "DKIM: loaded signing key for $D"
+```
+
+DNS (TTL as you like):
+
+| Name | Type | Value |
+|---|---|---|
+| `$D` | TXT | `v=spf1 ip4:<server IPv4> ~all` |
+| `$SEL._domainkey.$D` | TXT | `v=DKIM1; k=rsa; p=<base64 above>` |
+| `_dmarc.$D` | TXT | `v=DMARC1; p=none; rua=mailto:<mailbox>` (raise to `quarantine` once reports are clean) |
+
+A send from a domain without a key logs `DKIM: no key for the From domain`.
+
+---
+
 ## Getting Help
 
 - **GitHub Issues**: https://github.com/ddletotam/ddmailserver/issues

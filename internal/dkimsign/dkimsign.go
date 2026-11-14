@@ -86,6 +86,27 @@ func loadPrivateKey(path string) (crypto.Signer, error) {
 	return signer, nil
 }
 
+// signedHeaders — заголовки под подписью. Кроме адресов, темы и даты —
+// MIME-структура (без неё подмена тела с другим Content-Type проходит
+// проверку) и ветка переписки. Отсутствующий в письме заголовок тоже
+// подписывается — как пустой: добавить его по дороге нельзя.
+func signedHeaders() []string {
+	return []string{
+		"From", "To", "Cc", "Subject", "Date", "Message-Id",
+		"In-Reply-To", "References", "MIME-Version", "Content-Type",
+	}
+}
+
+// Has — есть ли ключ для домена адреса from (пустой Signer — нет ни для
+// какого).
+func (s *Signer) Has(from string) bool {
+	if s == nil {
+		return false
+	}
+	_, ok := s.keys[domainOf(from)]
+	return ok
+}
+
 // Sign returns msg with a DKIM-Signature header prepended when a key exists
 // for the From domain; the original msg otherwise. Never fails the send: a
 // signing error logs and returns the unsigned message.
@@ -99,12 +120,10 @@ func (s *Signer) Sign(from string, msg []byte) []byte {
 		return msg
 	}
 	opts := &dkim.SignOptions{
-		Domain:   domain,
-		Selector: s.selector,
-		Signer:   key,
-		HeaderKeys: []string{
-			"From", "To", "Subject", "Date", "Message-Id",
-		},
+		Domain:                 domain,
+		Selector:               s.selector,
+		Signer:                 key,
+		HeaderKeys:             signedHeaders(),
 		HeaderCanonicalization: dkim.CanonicalizationRelaxed,
 		BodyCanonicalization:   dkim.CanonicalizationRelaxed,
 	}
