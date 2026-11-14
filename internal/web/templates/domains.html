@@ -24,8 +24,8 @@
         </div>
     </div>
 
-    <!-- Add Mailbox -->
-    {{if .Domains}}
+    <!-- Add Mailbox (only on verified domains) -->
+    {{if .VerifiedDomains}}
     <div class="col-lg-6">
         <div class="card">
             <div class="card-header">
@@ -40,7 +40,7 @@
                         </div>
                         <div class="col">
                             <select name="domain_id" class="form-select" required>
-                                {{range .Domains}}
+                                {{range .VerifiedDomains}}
                                 <option value="{{.ID}}">@{{.Domain}}</option>
                                 {{end}}
                             </select>
@@ -84,7 +84,9 @@
                         </div>
                     </td>
                     <td>
-                        {{if .Enabled}}
+                        {{if not .Verified}}
+                        <span class="badge bg-warning-lt">{{t "domains.pending_verification"}}</span>
+                        {{else if .Enabled}}
                         <span class="badge bg-success-lt">{{t "domains.active"}}</span>
                         {{else}}
                         <span class="badge bg-secondary-lt">{{t "domains.disabled"}}</span>
@@ -93,12 +95,21 @@
                     <td class="text-muted">{{fmtTime .CreatedAt "2006-01-02"}}</td>
                     <td>
                         <div class="btn-list flex-nowrap">
+                            {{if not .Verified}}
+                            <button hx-post="/api/domains/{{.ID}}/verify"
+                                    hx-target="#domain-verify-error-{{.ID}}"
+                                    hx-swap="innerHTML"
+                                    class="btn btn-sm btn-primary">
+                                {{t "domains.verify"}}
+                            </button>
+                            {{else}}
                             <button hx-post="/api/domains/{{.ID}}/toggle"
                                     hx-target="closest tr"
                                     hx-swap="outerHTML"
                                     class="btn btn-sm btn-ghost-secondary">
                                 {{if .Enabled}}{{t "domains.disable"}}{{else}}{{t "domains.enable"}}{{end}}
                             </button>
+                            {{end}}
                             <button hx-delete="/api/domains/{{.ID}}"
                                     hx-confirm="{{t "domains.delete_confirm"}} {{.Domain}}?"
                                     hx-target="closest tr"
@@ -109,6 +120,16 @@
                         </div>
                     </td>
                 </tr>
+                {{if not .Verified}}
+                <tr>
+                    <td colspan="4" class="bg-light">
+                        <div class="text-muted small mb-1">{{t "domains.verify_instructions"}}</div>
+                        <pre class="mb-1 p-2 rounded bg-dark text-light"><code>{{.Domain}}.    TXT    "{{$.VerifyPrefix}}{{.VerifyToken}}"</code></pre>
+                        <div class="text-muted small">{{t "domains.verify_hint"}}</div>
+                        <div id="domain-verify-error-{{.ID}}" class="alert alert-danger mt-2 mb-0" style="display: none;"></div>
+                    </td>
+                </tr>
+                {{end}}
                 {{end}}
             </tbody>
         </table>
@@ -152,7 +173,9 @@
                         </div>
                     </td>
                     <td>
-                        {{if .Enabled}}
+                        {{if not .DomainVerified}}
+                        <span class="badge bg-warning-lt">{{t "domains.pending_verification"}}</span>
+                        {{else if .Enabled}}
                         <span class="badge bg-success-lt">{{t "domains.active"}}</span>
                         {{else}}
                         <span class="badge bg-secondary-lt">{{t "domains.disabled"}}</span>
@@ -207,7 +230,8 @@
         <pre class="bg-dark text-light p-3 rounded"><code>{{range .Domains}}# DNS records for {{.Domain}}
 {{.Domain}}.    MX    10    mail.{{.Domain}}.
 mail.{{.Domain}}.    A    YOUR_SERVER_IP
-{{end}}</code></pre>
+{{if not .Verified}}{{.Domain}}.    TXT    "{{$.VerifyPrefix}}{{.VerifyToken}}"
+{{end}}{{end}}</code></pre>
     </div>
 </div>
 {{end}}

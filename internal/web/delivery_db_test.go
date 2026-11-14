@@ -85,7 +85,7 @@ func newDeliveryEnv(t *testing.T) *deliveryEnv {
 	})
 
 	domain := tag + ".test"
-	d := &models.Domain{Domain: domain, UserID: user.ID, Enabled: true}
+	d := &models.Domain{Domain: domain, UserID: user.ID, Enabled: true, Verified: true}
 	if err := database.CreateDomain(d); err != nil {
 		t.Fatalf("CreateDomain: %v", err)
 	}

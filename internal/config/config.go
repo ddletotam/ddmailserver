@@ -259,6 +259,11 @@ type SecurityConfig struct {
 	// (nginx on the same host); an explicit empty list trusts nobody.
 	TrustedProxies []string `yaml:"trusted_proxies"`
 
+	// DisableRegistration closes self-service sign-up (web form and
+	// POST /api/register); accounts are then created by an administrator.
+	// Default false keeps registration open.
+	DisableRegistration bool `yaml:"disable_registration"`
+
 	// AuthLimit throttles failed logins on every protocol; unset fields use
 	// authlimit.DefaultConfig.
 	AuthLimit authlimit.Config `yaml:"auth_limit"`

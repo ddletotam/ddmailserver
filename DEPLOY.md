@@ -517,6 +517,39 @@ sudo userdel mailserver
 
 ---
 
+## Domains: ownership verification and registration
+
+Registration is open by default, so a domain added by a user is only a
+**claim**: until ownership is proven it takes no part in delivery — mail to it
+from other users still goes out through MX, the MX does not accept it, no
+mailboxes can be created on it and nobody can send "from" it. Before this
+check (migration 059) any user could add e.g. `gmail.com` and receive the
+mail other users sent there.
+
+- **User:** add the domain on `/domains` (or `POST /api/domains`), publish the
+  TXT record shown — `example.org. TXT "ddmail-verify=<token>"` — and press
+  "Verify" (`POST /api/domains/{id}/verify`). The record may be removed
+  afterwards. Several users may hold a pending claim to the same name; the
+  first to verify gets the domain and the other claims are dropped.
+- **Administrator:** a domain added by a user with `is_admin` is verified at
+  once (`verified_method = admin`).
+- `GET /api/domains` lists the user's domains with `status`
+  (`pending_verification` | `active` | `disabled`) and, while pending, the
+  `verification` record to publish.
+- Migration 059 marks every domain that existed before it as verified
+  (`legacy`), except well-known public mail domains (gmail.com, mail.ru,
+  yandex.ru, …), which stay pending.
+
+Self-service registration can be closed in `config.yaml`:
+
+```yaml
+security:
+  disable_registration: true   # default false: anyone can sign up
+```
+
+With it set, `POST /api/register` answers 403 and the login page has no
+"Register" tab; accounts are created by an administrator.
+
 ## Outgoing mail domain: SPF, DKIM, DMARC
 
 Every domain whose addresses send mail straight to other providers (direct

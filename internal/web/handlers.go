@@ -52,6 +52,10 @@ type LoginRequest struct {
 
 // HandleRegister handles user registration
 func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
+	if s.registrationDisabled {
+		respondHTMXError(w, r, http.StatusForbidden, s.i18n.T("auth.registration_disabled"))
+		return
+	}
 	// Parse form data (for htmx form submissions) or JSON (for API)
 	var req RegisterRequest
 

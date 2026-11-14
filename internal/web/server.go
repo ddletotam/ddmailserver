@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"log"
@@ -66,6 +67,14 @@ type Server struct {
 	// подменяет database для токенов устройств (тесты). См. SetPush.
 	push       *push.Dispatcher
 	pushTokens PushTokenStore
+
+	// lookupTXT resolves TXT records for domain verification; nil means the
+	// system resolver (tests substitute a fake).
+	lookupTXT func(ctx context.Context, name string) ([]string, error)
+
+	// registrationDisabled turns off self-service sign-up (POST /api/register
+	// and the tab on the login page). See SetRegistrationEnabled.
+	registrationDisabled bool
 }
 
 // New creates a new web server
@@ -408,7 +417,9 @@ func (s *Server) setupRoutes() {
 	// Domains API
 	domainsAPI := s.router.PathPrefix("/api/domains").Subrouter()
 	domainsAPI.Use(s.APIAuthMiddleware)
+	domainsAPI.HandleFunc("", s.HandleListDomains).Methods("GET")
 	domainsAPI.HandleFunc("", s.HandleCreateDomain).Methods("POST")
+	domainsAPI.HandleFunc("/{id}/verify", s.HandleVerifyDomain).Methods("POST")
 	domainsAPI.HandleFunc("/{id}/toggle", s.HandleToggleDomain).Methods("POST")
 	domainsAPI.HandleFunc("/{id}", s.HandleDeleteDomain).Methods("DELETE")
 
@@ -554,6 +565,12 @@ func (s *Server) wireDAVAuth() {
 // only from inside the host.
 func (s *Server) SetPublicEndpoints(p config.PublicEndpoints) {
 	s.publicEndpoints = p
+}
+
+// SetRegistrationEnabled turns self-service registration on (the default) or
+// off; with it off only an administrator creates accounts.
+func (s *Server) SetRegistrationEnabled(enabled bool) {
+	s.registrationDisabled = !enabled
 }
 
 // Stop stops the web server

@@ -203,19 +203,34 @@ func (db *DB) DeleteMailbox(id, userID int64) error {
 // MailboxWithDomain is a helper struct that includes domain info
 type MailboxWithDomain struct {
 	models.Mailbox
-	DomainName string `json:"domain_name"`
+	DomainName     string `json:"domain_name"`
+	DomainVerified bool   `json:"domain_verified"`
 }
 
-// GetMailboxesWithDomainByUserID returns mailboxes with domain names
+// GetMailboxesWithDomainByUserID returns the user's mailboxes on verified
+// domains — the addresses the user actually owns. Every identity consumer
+// (sender ownership, desktop /identities, IMAP METADATA, "is this me?")
+// reads this, so a mailbox on an unverified domain is never offered or
+// accepted as a sender.
 func (db *DB) GetMailboxesWithDomainByUserID(userID int64) ([]*MailboxWithDomain, error) {
+	return db.queryMailboxesWithDomain(userID, true)
+}
+
+// GetAllMailboxesWithDomainByUserID is GetMailboxesWithDomainByUserID
+// including mailboxes on unverified domains (the domains management page).
+func (db *DB) GetAllMailboxesWithDomainByUserID(userID int64) ([]*MailboxWithDomain, error) {
+	return db.queryMailboxesWithDomain(userID, false)
+}
+
+func (db *DB) queryMailboxesWithDomain(userID int64, verifiedOnly bool) ([]*MailboxWithDomain, error) {
 	query := `
-		SELECT m.id, m.user_id, m.domain_id, m.local_part, m.enabled, COALESCE(m.created_at, 0), d.domain
+		SELECT m.id, m.user_id, m.domain_id, m.local_part, m.enabled, COALESCE(m.created_at, 0), d.domain, d.verified
 		FROM mailboxes m
 		JOIN domains d ON m.domain_id = d.id
-		WHERE m.user_id = $1
+		WHERE m.user_id = $1 AND (d.verified OR NOT $2)
 		ORDER BY d.domain, m.local_part`
 
-	rows, err := db.Query(query, userID)
+	rows, err := db.Query(query, userID, verifiedOnly)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query mailboxes: %w", err)
 	}
@@ -232,11 +247,15 @@ func (db *DB) GetMailboxesWithDomainByUserID(userID int64) ([]*MailboxWithDomain
 			&m.Enabled,
 			&m.CreatedAt,
 			&m.DomainName,
+			&m.DomainVerified,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan mailbox: %w", err)
 		}
 		mailboxes = append(mailboxes, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to query mailboxes: %w", err)
 	}
 
 	return mailboxes, nil

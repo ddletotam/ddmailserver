@@ -57,7 +57,7 @@ func TestSubmission_CopyInSentAtAcceptance(t *testing.T) {
 		}
 	})
 	domain := tag + ".test"
-	d := &models.Domain{Domain: domain, UserID: user.ID, Enabled: true}
+	d := &models.Domain{Domain: domain, UserID: user.ID, Enabled: true, Verified: true}
 	if err := database.CreateDomain(d); err != nil {
 		t.Fatal(err)
 	}

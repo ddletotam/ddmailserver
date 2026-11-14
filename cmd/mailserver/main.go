@@ -413,6 +413,7 @@ func main() {
 	// this deployment binds 10993/10465 behind a firewall redirect from
 	// 993/465, so a profile built from the listen config would be unusable.
 	webSrv.SetPublicEndpoints(cfg.PublicWithDefaults())
+	webSrv.SetRegistrationEnabled(!cfg.Security.DisableRegistration)
 	// Queueing a message is not sending it: without this hook the outbox row
 	// waits for the next scheduler cycle, delaying every send by up to one
 	// interval.

@@ -95,6 +95,13 @@ func Lookup(dir Directory, email string) (*Recipient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("look up domain %s: %w", domainName, err)
 	}
+	if !domain.Verified {
+		// An unproven claim (any user can add any name) must not capture
+		// mail other users send to that domain, nor make the MX accept it:
+		// it is not ours until ownership is verified. The database lookup
+		// already skips such rows; this keeps the rule with the decision.
+		return nil, ErrNotLocal
+	}
 	if !domain.Enabled {
 		return nil, &RejectError{Code: 550, Enhanced: [3]int{5, 7, 1}, Message: "Relay access denied - domain disabled"}
 	}

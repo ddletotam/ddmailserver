@@ -111,7 +111,7 @@ func defaultIdentityEmail(q querier, userID int64) (string, error) {
 		SELECT COALESCE(
 			(SELECT m.local_part || '@' || d.domain
 			   FROM mailboxes m JOIN domains d ON m.domain_id = d.id
-			   WHERE m.user_id = $1 ORDER BY m.id LIMIT 1),
+			   WHERE m.user_id = $1 AND d.verified ORDER BY m.id LIMIT 1),
 			(SELECT a.email FROM accounts a
 			   WHERE a.user_id = $1 AND COALESCE(a.email, '') <> '' ORDER BY a.id LIMIT 1),
 			(SELECT u.username FROM users u WHERE u.id = $1),

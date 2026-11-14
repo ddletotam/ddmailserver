@@ -28,13 +28,16 @@ type fakeStore struct {
 func newFakeStore() *fakeStore {
 	return &fakeStore{
 		domains: map[string]*models.Domain{
-			"ours.test": {ID: 1, Domain: "ours.test", Enabled: true},
-			"off.test":  {ID: 2, Domain: "off.test", Enabled: false},
+			"ours.test": {ID: 1, Domain: "ours.test", Enabled: true, Verified: true},
+			// A claim nobody proved: any user can add any name.
+			"claimed.test": {ID: 3, Domain: "claimed.test", Enabled: true},
+			"off.test":     {ID: 2, Domain: "off.test", Enabled: false, Verified: true},
 		},
 		mailboxes: map[string]*models.Mailbox{
-			"1/bob":   {ID: 10, UserID: 20, DomainID: 1, LocalPart: "bob", Enabled: true},
-			"1/carol": {ID: 11, UserID: 21, DomainID: 1, LocalPart: "carol", Enabled: true},
-			"1/gone":  {ID: 12, UserID: 22, DomainID: 1, LocalPart: "gone", Enabled: false},
+			"1/bob":      {ID: 10, UserID: 20, DomainID: 1, LocalPart: "bob", Enabled: true},
+			"1/carol":    {ID: 11, UserID: 21, DomainID: 1, LocalPart: "carol", Enabled: true},
+			"1/gone":     {ID: 12, UserID: 22, DomainID: 1, LocalPart: "gone", Enabled: false},
+			"3/squatter": {ID: 13, UserID: 23, DomainID: 3, LocalPart: "squatter", Enabled: true},
 		},
 	}
 }
@@ -109,6 +112,10 @@ func TestLookup(t *testing.T) {
 		{addr: "gone@ours.test", status: "5.2.1"},
 		{addr: "bob@off.test", status: "5.7.1"},
 		{addr: "not-an-address", status: "5.1.3"},
+		// Unverified claim: still not ours — goes out through MX, neither
+		// delivered to the claimant nor bounced as "no such user".
+		{addr: "victim@claimed.test", local: false},
+		{addr: "squatter@claimed.test", local: false},
 	}
 	for _, c := range cases {
 		rcpt, err := Lookup(store, c.addr)

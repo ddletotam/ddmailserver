@@ -327,7 +327,22 @@ type Domain struct {
 	UserID    int64  `json:"user_id"`
 	Enabled   bool   `json:"enabled"`
 	CreatedAt int64  `json:"created_at"`
+	// Verified: ownership is proven (DNS TXT with VerifyToken, or added by an
+	// administrator). Only a verified domain is local — routing, MX
+	// acceptance and sending "from" it all ignore an unverified one, so a
+	// user cannot claim somebody else's domain (see migrations/059).
+	Verified       bool   `json:"verified"`
+	VerifyToken    string `json:"-"`
+	VerifiedAt     int64  `json:"verified_at,omitempty"`
+	VerifiedMethod string `json:"verified_method,omitempty"` // dns_txt | admin | legacy
 }
+
+// Ways a domain gets verified (domains.verified_method).
+const (
+	DomainVerifiedDNSTXT = "dns_txt"
+	DomainVerifiedAdmin  = "admin"
+	DomainVerifiedLegacy = "legacy"
+)
 
 // Mailbox represents a mailbox on a local domain
 type Mailbox struct {
