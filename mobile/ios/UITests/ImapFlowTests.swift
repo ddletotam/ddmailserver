@@ -117,7 +117,136 @@ final class ImapFlowTests: XCTestCase {
         shot(app, "lucky-4-caldav")
     }
 
+    /// Сначала Mail.ru по IMAP, затем «Добавить учётку» → ddmail `lucky`:
+    /// почта добавленной учётки синхронизируется сразу, без перезапуска —
+    /// её беседы в общем списке, её папки (Small, AppSec) в полосе табов.
+    /// 0.0.12: пространство пересобиралось, а синк и WebSocket запускались
+    /// только на выход приложения на экран — у ddmail ни одного `/conversations`.
+    @MainActor
+    func testAddDdmailToIMAP() throws {
+        let (ddmail, mailru) = try bothAccounts()
+        let app = XCUIApplication()
+        app.launchArguments += ["-ddmail-reset", "-ddmail-uitest-ids"]
+        app.launch()
+
+        connectMailRu(mailru, app)
+        let before = Set(waitRows(app))
+        XCTAssertFalse(before.isEmpty, "список Mail.ru пуст")
+        shot(app, "add-1-mailru")
+
+        addAccount(app)
+        connectDdmail(ddmail, app)
+        XCTAssertTrue(waitTabs(["Small", "AppSec"], app), "папки ddmail не появились в полосе табов")
+        let inbox = app.buttons.matching(identifier: "folder.tab").matching(Shown.contains("Входящие")).firstMatch
+        if inbox.exists { inbox.tap() }
+        let after = Set(waitRows(app)).union(folderRows(app))
+        shot(app, "add-2-ddmail")
+        XCTAssertFalse(after.subtracting(before).isEmpty, "бесед ddmail в списке нет")
+    }
+
+    /// Обратный порядок: сначала ddmail, затем «Добавить учётку» → Mail.ru.
+    @MainActor
+    func testAddIMAPToDdmail() throws {
+        let (ddmail, mailru) = try bothAccounts()
+        let app = XCUIApplication()
+        app.launchArguments += ["-ddmail-reset", "-ddmail-uitest-ids"]
+        app.launch()
+
+        connectDdmail(ddmail, app)
+        XCTAssertTrue(waitTabs(["Small", "AppSec"], app), "папки ddmail не появились в полосе табов")
+        let inbox = app.buttons.matching(identifier: "folder.tab").matching(Shown.contains("Входящие")).firstMatch
+        if inbox.exists { inbox.tap() }
+        let before = Set(waitRows(app))
+        XCTAssertFalse(before.isEmpty, "список ddmail пуст")
+        shot(app, "rev-1-ddmail")
+
+        addAccount(app)
+        connectMailRu(mailru, app)
+        // Беседы Mail.ru — во «Входящих» общего списка, рядом с ddmail.
+        var fresh: Set<String> = []
+        let deadline = Date().addingTimeInterval(120)
+        while fresh.isEmpty && Date() < deadline {
+            settle(app)
+            fresh = Set(visibleIDs(app)).subtracting(before)
+        }
+        shot(app, "rev-2-mailru")
+        XCTAssertFalse(fresh.isEmpty, "бесед Mail.ru в списке нет")
+        XCTAssertTrue(waitTabs(["Small", "AppSec"], app), "папки ddmail пропали из полосы")
+    }
+
     // MARK: Помощники
+
+    private typealias Creds = (email: String, password: String)
+
+    private func bothAccounts() throws -> (Creds, Creds) {
+        let env = ProcessInfo.processInfo.environment
+        guard let e = env["DDMAIL_TEST_EMAIL"], let p = env["DDMAIL_TEST_PASSWORD"], !e.isEmpty else {
+            throw XCTSkip("нет DDMAIL_TEST_EMAIL / DDMAIL_TEST_PASSWORD")
+        }
+        guard let me = env["DDMAIL_TEST_MAILRU_EMAIL"], let mp = env["DDMAIL_TEST_MAILRU_PASSWORD"], !me.isEmpty else {
+            throw XCTSkip("нет DDMAIL_TEST_MAILRU_EMAIL / DDMAIL_TEST_MAILRU_PASSWORD")
+        }
+        return ((e, p), (me, mp))
+    }
+
+    /// Вход ddmail в открытом окне подключения.
+    @MainActor
+    private func connectDdmail(_ c: Creds, _ app: XCUIApplication) {
+        let emailField = app.textFields["connect.email"]
+        XCTAssertTrue(emailField.waitForExistence(timeout: 15), "нет окна подключения")
+        type(c.email, into: emailField, app)
+        app.buttons["connect.find"].tap()
+        let pw = app.secureTextFields["connect.password"]
+        XCTAssertTrue(pw.waitForExistence(timeout: 30), "сервер ddmail не найден")
+        enterPassword(c.password, into: pw, app)
+        app.buttons["connect.login"].tap()
+        XCTAssertTrue(waitGone(emailField), "окно подключения не закрылось после входа ddmail")
+    }
+
+    /// Вход Mail.ru (автонастройка) в открытом окне подключения.
+    @MainActor
+    private func connectMailRu(_ c: Creds, _ app: XCUIApplication) {
+        let emailField = app.textFields["connect.email"]
+        XCTAssertTrue(emailField.waitForExistence(timeout: 15), "нет окна подключения")
+        type(c.email, into: emailField, app)
+        app.buttons["connect.find"].tap()
+        let pw = app.secureTextFields["connect.password"]
+        XCTAssertTrue(pw.waitForExistence(timeout: 90), "серверы IMAP/SMTP не найдены")
+        enterPassword(c.password, into: pw, app)
+        app.buttons["connect.login"].tap()
+        XCTAssertTrue(waitGone(emailField), "окно подключения не закрылось после входа Mail.ru")
+    }
+
+    /// Настройки → «Добавить учётку»: окно подключения поверх.
+    @MainActor
+    private func addAccount(_ app: XCUIApplication) {
+        openSettings(app)
+        let add = app.descendants(matching: .any).matching(identifier: "account.add").firstMatch
+        XCTAssertTrue(add.waitForExistence(timeout: 10), "в настройках нет «Добавить учётку»")
+        add.tap()
+        XCTAssertTrue(app.textFields["connect.email"].waitForExistence(timeout: 15), "окно подключения не открылось")
+    }
+
+    @MainActor
+    private func waitGone(_ e: XCUIElement) -> Bool {
+        let deadline = Date().addingTimeInterval(60)
+        while e.exists && Date() < deadline { sleep(1) }
+        return !e.exists
+    }
+
+    /// Табы с этими названиями появились в полосе (синк папок прошёл).
+    @MainActor
+    private func waitTabs(_ names: [String], _ app: XCUIApplication) -> Bool {
+        let tabs = app.buttons.matching(identifier: "folder.tab")
+        let deadline = Date().addingTimeInterval(90)
+        while Date() < deadline {
+            let labels = tabs.allElementsBoundByIndex.map(\.shownText)
+            if names.allSatisfy({ n in labels.contains { $0.contains(n) } }) { return true }
+            settle(app)
+        }
+        return false
+    }
+
 
     /// Ждём строки списка (и закрываем вопросы: уведомления, загрузка заранее); id видимых бесед.
     @MainActor

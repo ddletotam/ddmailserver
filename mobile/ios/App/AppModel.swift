@@ -183,6 +183,10 @@ final class AccountLink: Identifiable {
 /// контакты — у первой ddmail-учётки; внешние CalDAV/CardDAV — §8).
 @MainActor @Observable
 final class Workspace {
+    /// Сборка пространства: учётку добавили, удалили, вошли заново —
+    /// пространство новое, и всё, что запускалось на нём (синк и живые каналы
+    /// на выходе на экран, загрузка разделов), запускается заново (`AppShell`).
+    let id = UUID()
     let store: AccountStore
     let cache: MailStore?
     let links: [AccountLink]

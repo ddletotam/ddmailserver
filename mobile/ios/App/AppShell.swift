@@ -17,6 +17,11 @@ struct AppShell: View {
         // над первой строкой раздела ничего (mobile-layout.md).
         let current = section
         content(current)
+            // Пространство пересобрано (учётку добавили или удалили, §1) —
+            // разделы новые: их `.task` (загрузка календаря, задач, контактов)
+            // и восстановление беседы почты выполняются заново, а не остаются
+            // от прежних моделей.
+            .id(workspace.id)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             // Акцент один на все разделы — зелёный десктопа.
             .tint(Palette.accent)
@@ -43,7 +48,11 @@ struct AppShell: View {
                 #endif
             }
             // Синк на выход приложения на экран (§4), живые каналы — пока на экране (§7).
-            .task(id: scenePhase) {
+            // И на новое рабочее пространство: «Добавить учётку» пересобирает
+            // его, а окно и `scenePhase` остаются прежними — без пространства в
+            // ключе синк и WebSocket/IDLE новой почты не стартовали до
+            // следующего выхода на экран (0.0.12: ddmail к IMAP на Маке).
+            .task(id: Activation(phase: scenePhase, workspace: workspace.id)) {
                 guard scenePhase == .active else {
                     // Ушли с экрана — каналы закрыты: в фоне их держать нельзя (§7).
                     workspace.mail?.live.forEach { $0.stop() }
@@ -106,6 +115,12 @@ struct AppShell: View {
             }
         }
     }
+}
+
+/// Ключ запуска синка и живых каналов: выход на экран или новое пространство.
+private struct Activation: Equatable {
+    let phase: ScenePhase
+    let workspace: UUID
 }
 
 extension AppShell {
