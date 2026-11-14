@@ -1,4 +1,7 @@
 import XCTest
+#if os(macOS)
+import AppKit
+#endif
 
 /// Сквозные сценарии отправки и папок (десктоп §2, §3а, §4) на настоящих
 /// серверах. Письма уходят **только себе**: на `info@help-it-audit.ru` —
@@ -150,14 +153,14 @@ final class SendFlowTests: XCTestCase {
         let subjectField = app.textFields["composer.subject"].firstMatch
         XCTAssertTrue(subjectField.waitForExistence(timeout: 5), "нет поля «Тема»")
         subjectField.tap()
-        subjectField.typeText(subject)
+        UIFlow.enter(subject, into: subjectField)
 
         // Тело — жирным: выделить всё и ⌘B (на выделении, как системное меню
         // «Формат» на iPhone; стиль на каретке клавиатура симулятора теряет).
         let body = app.textViews["composer.text"].firstMatch
         XCTAssertTrue(body.waitForExistence(timeout: 5), "нет строки ввода")
         body.tap()
-        body.typeText(text)
+        UIFlow.enter(text, into: body)
         sleep(1)
         #if os(iOS)
         // Выделить всё — меню выделения (⌘A клавиатура симулятора теряет).
@@ -345,6 +348,27 @@ enum UIFlow {
         sleep(1)
     }
     #endif
+
+    /// Набрать текст в уже активное поле. На Маке кириллицу XCUITest печатает,
+    /// переключая раскладку на «Юникод (16-ричный ввод)»; macOS показывает у
+    /// каретки значок раскладки, и XCUITest принимает его за мешающий диалог —
+    /// ввод обрывается на полуслове. Поэтому не-ASCII на Маке — вставкой.
+    @MainActor
+    static func enter(_ text: String, into field: XCUIElement) {
+        #if os(macOS)
+        if text.allSatisfy(\.isASCII) {
+            field.typeText(text)
+            return
+        }
+        let board = NSPasteboard.general
+        board.clearContents()
+        board.setString(text, forType: .string)
+        field.typeKey("v", modifierFlags: .command)
+        board.clearContents()
+        #else
+        field.typeText(text)
+        #endif
+    }
 
     /// «Назад» в стеке настроек: на iOS — первая кнопка панели навигации; на
     /// Маке панели навигации нет — кнопка «Назад» (chevron) листа.

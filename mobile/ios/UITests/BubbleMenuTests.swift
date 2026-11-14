@@ -143,13 +143,13 @@ final class BubbleMenuTests: XCTestCase {
         let subject = app.textFields["composer.subject"].firstMatch
         XCTAssertTrue(subject.waitForExistence(timeout: 5), "нет поля «Тема»")
         subject.tap()
-        subject.typeText("Проверка ddmail удаление \(stamp)")
+        UIFlow.enter("Проверка ddmail удаление \(stamp)", into: subject)
         // Подпись «От» у поля отправителя (M-07).
         XCTAssertTrue(app.staticTexts.matching(Shown.equals("От")).firstMatch.exists, "у поля отправителя нет подписи «От»")
         UIFlow.shot(app, "delete-0-fields", self)
         let text = app.textViews["composer.text"].firstMatch
         text.tap()
-        text.typeText(body)
+        UIFlow.enter(body, into: text)
         app.buttons["Отправить"].firstMatch.tap()
         XCTAssertTrue(UIFlow.waitGone(fresh, 180), "после отправки беседа не появилась")
 
