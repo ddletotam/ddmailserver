@@ -121,3 +121,44 @@ internal fun displayFrom(raw: String): String {
     val name = if (lt > 0) raw.substring(0, lt).trim().trim('"').trim() else ""
     return name.ifEmpty { raw.trim().trimStart('<').trimEnd('>') }
 }
+
+/** Строка выпадашки поиска — в том порядке, в каком она стоит на экране. */
+sealed class DropRow(val key: String) {
+    data class Compose(val email: String) : DropRow("compose")
+    data class Status(val loading: Boolean) : DropRow("empty")
+    data class Header(val title: String) : DropRow("h-$title")
+    data class Conv(val hit: ConvHit) : DropRow("c" + hit.conv.ref)
+    data class Contact(val hit: ContactHit) : DropRow("p" + hit.email)
+    /** [nth] — какое по счёту такое же письмо (копии во «Входящих» и «Отправленных» совпадают и беседой, и датой, и темой). */
+    data class Msg(val hit: MsgHit, val nth: Int = 0) : DropRow("m" + hit.ref + hit.dateTs + hit.subject + if (nth > 0) "#$nth" else "")
+}
+
+/**
+ * Строки выпадашки по порядку (§4 «Поиск» десктопа, mobile-layout.md «Новое
+ * письмо»): «Написать по адресу …» — **всегда первая**, затем «Диалоги»,
+ * «Контакты», «Сообщения». Пусто и не адрес — «Ничего не найдено» / «Ищу…».
+ */
+internal fun dropdownRows(r: SearchResults): List<DropRow> = buildList {
+    if (r.composeEmail.isNotEmpty()) add(DropRow.Compose(r.composeEmail))
+    if (r.total == 0 && (r.loading || r.composeEmail.isEmpty())) add(DropRow.Status(r.loading))
+    if (r.convs.isNotEmpty()) {
+        add(DropRow.Header("ДИАЛОГИ"))
+        r.convs.forEach { add(DropRow.Conv(it)) }
+    }
+    if (r.contacts.isNotEmpty()) {
+        add(DropRow.Header("КОНТАКТЫ"))
+        r.contacts.forEach { add(DropRow.Contact(it)) }
+    }
+    if (r.messages.isNotEmpty()) {
+        add(DropRow.Header("СООБЩЕНИЯ"))
+        // Одинаковый ключ у двух строк LazyColumn — падение приложения
+        // (замер 2026-11-14: письмо и его копия в одной беседе).
+        val seen = HashMap<String, Int>()
+        r.messages.forEach { m ->
+            val base = DropRow.Msg(m).key
+            val n = seen.getOrDefault(base, 0)
+            seen[base] = n + 1
+            add(DropRow.Msg(m, n))
+        }
+    }
+}

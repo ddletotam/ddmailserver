@@ -3,6 +3,7 @@ package ru.letotam.ddmail
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
@@ -20,7 +21,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // Оформление только светлое (mobile-layout.md «Оформление — только
+        // светлое»): значки строки состояния и навигации — тёмные всегда.
+        // По умолчанию (`SystemBarStyle.auto`) они следуют системной теме и
+        // при тёмной становились белыми на светлом фоне (аудит 2026-11-14 №14).
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.light(LIGHT_SCRIM, LIGHT_SCRIM),
+        )
         handleOpen(intent)
         // Android 13+: уведомления — только с разрешения пользователя.
         if (android.os.Build.VERSION.SDK_INT >= 33 &&
@@ -33,6 +41,12 @@ class MainActivity : ComponentActivity() {
             DdmailTheme {
                 val appVm = viewModel { AppViewModel(app) }
                 val state by appVm.state.collectAsState()
+                // Раздел — выше оболочки: окно подключения (из «Настроек») её
+                // убирает, а вернуться надо туда же (аудит 2026-11-14 №13).
+                // Первое подключение (учёток нет) — снова «Почта».
+                val section = androidx.compose.runtime.saveable.rememberSaveable { androidx.compose.runtime.mutableStateOf(Section.Mail) }
+                val firstConnect = (state as? AppState.Connect)?.cancellable == false
+                androidx.compose.runtime.LaunchedEffect(firstConnect) { if (firstConnect) section.value = Section.Mail }
                 Scaffold { inner ->
                     val m = Modifier.padding(inner)
                     when (val s = state) {
@@ -60,6 +74,7 @@ class MainActivity : ComponentActivity() {
                                     edit = appVm::editImap,
                                     remove = appVm::removeAccount,
                                 ),
+                                sectionState = section,
                                 modifier = m,
                             )
                         }
@@ -113,5 +128,8 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_EVENT_ID = "event_id"
         const val EXTRA_OCC_START = "occ_start"
         const val EXTRA_SNOOZE_EVENT = "snooze_event"
+
+        /** Полупрозрачная белая подложка навигации (как у `enableEdgeToEdge` по умолчанию). */
+        private val LIGHT_SCRIM = android.graphics.Color.argb(0xe6, 0xFF, 0xFF, 0xFF)
     }
 }

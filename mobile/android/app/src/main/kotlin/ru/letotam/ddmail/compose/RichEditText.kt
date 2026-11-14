@@ -80,10 +80,22 @@ class RichEditText(context: Context) : EditText(context) {
         })
         customSelectionActionModeCallback = object : ActionMode.Callback {
             override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
-                menu.add(Menu.NONE, ID_BOLD, 100, styled("Ж", StyleSpan(Typeface.BOLD)))
-                menu.add(Menu.NONE, ID_ITALIC, 101, styled("К", StyleSpan(Typeface.ITALIC)))
-                menu.add(Menu.NONE, ID_UNDERLINE, 102, styled("Ч", UnderlineSpan()))
-                menu.add(Menu.NONE, ID_LINK, 103, "Ссылка")
+                // Первыми и на самой панели, а не в конце её «⋮»: у композера
+                // (внизу, над клавиатурой) список «⋮» на EMUI низкий, и «К»,
+                // «Ч», «Ссылка» уходили за его край (аудит 2026-11-14,
+                // «Не проверено»). Пункт без showAsAction — NEVER, такие
+                // плавающая панель кладёт в конец «⋮», что бы ни говорил order;
+                // ALWAYS с order 0 — перед системными. Замер на Mate XT: на
+                // панели «Выбрать все · Ж · К · Ч», в «⋮» первой — «Ссылка»,
+                // за ней «Вырезать / Копировать / Вставить».
+                listOf(
+                    ID_BOLD to styled("Ж", StyleSpan(Typeface.BOLD)),
+                    ID_ITALIC to styled("К", StyleSpan(Typeface.ITALIC)),
+                    ID_UNDERLINE to styled("Ч", UnderlineSpan()),
+                    ID_LINK to "Ссылка",
+                ).forEach { (id, title) ->
+                    menu.add(Menu.NONE, id, 0, title).setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+                }
                 return true
             }
             override fun onPrepareActionMode(mode: ActionMode, menu: Menu) = false
@@ -103,7 +115,8 @@ class RichEditText(context: Context) : EditText(context) {
         // Меню на каретке («Вставить»): плюс «Картинка» из галереи.
         customInsertionActionModeCallback = object : ActionMode.Callback {
             override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
-                menu.add(Menu.NONE, ID_IMAGE, 100, "Картинка")
+                // На панели, если есть место (без showAsAction — всегда в «⋮»).
+                menu.add(Menu.NONE, ID_IMAGE, 100, "Картинка").setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
                 return true
             }
             override fun onPrepareActionMode(mode: ActionMode, menu: Menu) = false

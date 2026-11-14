@@ -189,10 +189,7 @@ class MailHub(
      */
     suspend fun send(req: SendRequest, owners: List<Pair<String, Identity>>, prefer: String? = null): Boolean {
         val from = bareAddr(req.from)
-        val candidates = owners.filter { it.second.email.equals(from, ignoreCase = true) }.map { it.first }
-        // Адрес есть у нескольких учёток (ящик подключён и через ddmail, и по
-        // IMAP) — отвечаем той, где беседа.
-        val key = (candidates.firstOrNull { it == prefer } ?: candidates.firstOrNull())
+        val key = senderOf(req, owners, prefer)
             ?: throw MailException.Rejected("Не через что отправить: адрес $from не принадлежит ни одной учётке")
         val src = source(key) ?: throw MailException.Rejected("Не через что отправить")
         try {
@@ -202,6 +199,17 @@ class MailHub(
             throw e
         }
         return src is SyncEngine
+    }
+
+    /**
+     * Учётка, через которую уйдёт письмо [req]: владелец адреса From. Адрес
+     * есть у нескольких учёток (ящик подключён и через ddmail, и по IMAP) —
+     * та, где беседа ([prefer]). `null` — владельца нет.
+     */
+    fun senderOf(req: SendRequest, owners: List<Pair<String, Identity>>, prefer: String? = null): String? {
+        val from = bareAddr(req.from)
+        val candidates = owners.filter { it.second.email.equals(from, ignoreCase = true) }.map { it.first }
+        return candidates.firstOrNull { it == prefer } ?: candidates.firstOrNull()
     }
 
     /** Документ папок в кэше (до ответа сервера) — для правок. */

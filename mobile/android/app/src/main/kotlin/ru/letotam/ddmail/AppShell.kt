@@ -20,7 +20,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,7 +43,7 @@ import ru.letotam.ddmail.mail.MailScreen
 import ru.letotam.ddmail.mail.MailViewModel
 import ru.letotam.ddmail.reminders.BackgroundWork
 import ru.letotam.ddmail.reminders.BackgroundWorkDialog
-import ru.letotam.ddmail.settings.SettingsDialog
+import ru.letotam.ddmail.settings.SettingsScreen
 import ru.letotam.ddmail.tasks.TasksScreen
 import ru.letotam.ddmail.tasks.TasksViewModel
 import ru.letotam.ddmail.ui.BurgerButton
@@ -57,13 +56,20 @@ enum class Section(val icon: ImageVector, val label: String) {
     Calendar(Icons.Filled.CalendarMonth, "Календарь"),
     Contacts(Icons.Filled.Contacts, "Контакты"),
     Tasks(Icons.Filled.ChecklistRtl, "Задачи"),
+
+    /** Раздел, как остальные: бургер в первой строке (mobile-layout.md «Бургер»). */
+    Settings(Icons.Filled.Settings, "Настройки"),
 }
 
 /**
  * Разделы приложения (контракт §16, docs/mobile-layout.md): почта,
- * календарь, контакты, задачи. Навигация между ними — только бургер в первой
- * строке каждого раздела, как у десктопа: ни нижней панели, ни боковой
- * колонки иконок нет ни сложенным, ни разложенным.
+ * календарь, контакты, задачи, настройки. Навигация между ними — только
+ * бургер в первой строке каждого раздела, как у десктопа: ни нижней панели,
+ * ни боковой колонки иконок нет ни сложенным, ни разложенным.
+ *
+ * [sectionState] живёт выше оболочки (`MainActivity`): «Добавить учётку» из
+ * «Настроек» уводит в окно подключения, оболочка уходит из композиции, и
+ * «Отмена» возвращала в «Почту» (аудит 2026-11-14 №13).
  */
 @Composable
 fun AppShell(
@@ -71,6 +77,7 @@ fun AppShell(
     session: Session?,
     mailVm: MailViewModel,
     accounts: AccountActions,
+    sectionState: androidx.compose.runtime.MutableState<Section>,
     modifier: Modifier = Modifier,
 ) {
     val key = app.pimKey()
@@ -82,9 +89,8 @@ fun AppShell(
     val calVm = pim?.let { viewModel(key = "cal-$key") { CalendarViewModel(app, it, onDead) } }
     val tasksVm = api?.let { viewModel(key = "tasks-$key") { TasksViewModel(app, it, onDead) } }
     val contactsVm = pim?.let { viewModel(key = "contacts-$key") { ContactsViewModel(app, it, onDead) } }
-    var section by rememberSaveable { mutableStateOf(Section.Mail) }
+    var section by sectionState
     var menuOpen by remember { mutableStateOf(false) }
-    var settingsOpen by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     // WebView беседы живёт всё время работы приложения: уход в календарь и обратно ленту не теряет.
     val web = remember { ConversationWeb(context, ConversationWeb.proxyClient(app.http)) }
@@ -128,16 +134,6 @@ fun AppShell(
     }
     if (askBattery) BackgroundWorkDialog { askBattery = false }
 
-    if (settingsOpen) {
-        val sources by mailVm.sources.collectAsState()
-        val statuses by mailVm.statuses.collectAsState()
-        SettingsDialog(
-            app.settings, sources, statuses, accounts.closing { settingsOpen = false },
-            calendars = calVm?.let { vm -> { CalendarList(vm) } },
-            addressBooks = contactsVm?.let { vm -> { AddressBookList(vm) } },
-            folders = { ru.letotam.ddmail.mail.FolderSettings(mailVm) },
-        ) { settingsOpen = false }
-    }
     // Редактор папки — поверх всего: его открывают и меню полосы табов, и настройки.
     ru.letotam.ddmail.mail.FolderEditorDialog(mailVm)
 
@@ -155,12 +151,23 @@ fun AppShell(
                         mailVm.startNew(addr)
                     }, content)
                 } else NoServer(content)
+                Section.Settings -> {
+                    val sources by mailVm.sources.collectAsState()
+                    val statuses by mailVm.statuses.collectAsState()
+                    // Действия с учётками окно не закрывают: после окна
+                    // подключения (и «Отмены» в нём) — снова «Настройки».
+                    SettingsScreen(
+                        content, app.settings, sources, statuses, accounts,
+                        calendars = calVm?.let { vm -> { CalendarList(vm) } },
+                        addressBooks = contactsVm?.let { vm -> { AddressBookList(vm) } },
+                        folders = { ru.letotam.ddmail.mail.FolderSettings(mailVm) },
+                    ) { section = Section.Mail }
+                }
             }
         }
         if (menuOpen) {
             BurgerMenu(
-                Section.entries.map { s -> BurgerItem(s.icon, s.label, selected = s == section) { section = s } } +
-                    BurgerItem(Icons.Filled.Settings, "Настройки", selected = false) { settingsOpen = true },
+                Section.entries.map { s -> BurgerItem(s.icon, s.label, selected = s == section) { section = s } },
                 onDismiss = { menuOpen = false },
             )
         }

@@ -93,4 +93,17 @@ class OutgoingTest {
         assertEquals("<div>a &lt;b&gt;<br>c</div>", textToHtml("a <b>\nc"))
         assertEquals("bob@x.ru", bareAddress("Bob <Bob@X.ru>"))
     }
+
+    /** Аудит 2026-11-14 №10: подсказки «Кому»/«Тема» — ровно то, что уйдёт. */
+    @Test
+    fun autoHintsShowWhatWillBeSent() {
+        val last = body("Вопрос", "bob@x.ru")
+        assertEquals(AutoHints("bob@x.ru, carol@y.ru", "Re: Вопрос"), autoHints(Branch.Implicit(conv(group = true), last, last), ids))
+        // Явный ответ 1:1 — отправителю письма, «Re:» его темы.
+        assertEquals(AutoHints("bob@x.ru", "Re: Тема"), autoHints(Branch.Reply(body("Тема", "bob@x.ru"), isGroup = false), ids))
+        // Новое письмо: адресат — из поиска, автотемы нет (не «Re: …»).
+        assertEquals(AutoHints("new@z.ru", ""), autoHints(Branch.New, ids, newTo = "new@z.ru"))
+        // Пересылка: «Кому» не выводится, тема — «Fwd: …».
+        assertEquals(AutoHints("", "Fwd: Тема"), autoHints(Branch.Forward(body("Тема", "bob@x.ru")), ids))
+    }
 }

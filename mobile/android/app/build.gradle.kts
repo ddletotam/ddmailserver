@@ -62,8 +62,8 @@ android {
         minSdk = 29
         targetSdk = 35
         // Бампается при любой правке клиента (контракт §1).
-        versionCode = 38
-        versionName = "0.0.38"
+        versionCode = 39
+        versionName = "0.0.39"
     }
 
     // Один код для Huawei и прочих Android: различается только доставка

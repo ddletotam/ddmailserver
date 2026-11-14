@@ -19,6 +19,11 @@
         <intent>
             <action android:name="android.intent.action.DIAL" />
         </intent>
+        <!-- «Открыть» вложение: есть ли чем открыть этот тип, иначе — запасной (text/plain, любой). -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="*/*" />
+        </intent>
     </queries>
     <!-- Бейдж непрочитанного на иконке в лаунчере Huawei. -->
     <uses-permission android:name="com.huawei.android.launcher.permission.CHANGE_BADGE" />

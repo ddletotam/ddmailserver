@@ -9,6 +9,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -92,8 +93,10 @@ fun PrefetchQuestion(settings: AppSettings) {
     )
 }
 
+/** Раздел «Настройки» (пункт бургера); [onClose] — системное «Назад», в «Почту». */
 @Composable
-fun SettingsDialog(
+fun SettingsScreen(
+    modifier: Modifier,
     settings: AppSettings,
     sources: List<MailSource>,
     statuses: Map<String, AccountStatus>,
@@ -127,12 +130,16 @@ fun SettingsDialog(
     var externalOpen by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     if (externalOpen) ExternalContentDialog(settings) { externalOpen = false }
     val scope = rememberCoroutineScope()
-    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+    // Раздел, а не окно поверх почты: mobile-layout.md «Бургер — в левом
+    // верхнем углу **каждого** раздела, в его первой строке» (аудит
+    // 2026-11-14 №12: была стрелка «Назад»). «Назад» системы — в «Почту».
+    androidx.activity.compose.BackHandler(onBack = onClose)
+    Box(modifier.fillMaxSize()) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            Column(Modifier.fillMaxSize().systemBarsPadding()) {
-                Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") }
-                    Text("Настройки", style = MaterialTheme.typography.titleLarge)
+            Column(Modifier.fillMaxSize()) {
+                Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    ru.letotam.ddmail.ui.BurgerButton()
+                    Text("Настройки", fontSize = 22.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, modifier = Modifier.padding(start = 4.dp))
                 }
                 HorizontalDivider()
                 Column(

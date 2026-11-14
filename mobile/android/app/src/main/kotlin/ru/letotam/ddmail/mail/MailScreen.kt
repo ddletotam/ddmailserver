@@ -82,6 +82,7 @@ import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
@@ -171,7 +172,7 @@ fun MailScreen(
             override fun onReady() {}
             override fun onRequestOlder() = vm.conversation.older()
             override fun onOpenAttachment(uid: Long, index: Int) =
-                vm.conversation.openAttachment(uid, index, vm.conversation.attachmentName(uid, index))
+                vm.conversation.openAttachment(uid, index, vm.conversation.attachmentName(uid, index)) { msg -> vm.notice.value = msg }
             override fun loadPart(uid: Long, cid: String) = vm.conversation.part(uid, cid)
             override fun onBubbleMenu(uid: Long, anchor: ru.letotam.ddmail.conversation.MenuAnchor?) = vm.showBubbleMenu(uid, anchor)
             override fun onAttachmentMenu(uid: Long, index: Int, anchor: ru.letotam.ddmail.conversation.MenuAnchor?) {
@@ -342,48 +343,52 @@ private fun SearchDropdown(r: SearchResults, vm: MailViewModel, modifier: Modifi
         border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFD8DDE6)),
         shadowElevation = 8.dp,
     ) {
-        LazyColumn(contentPadding = androidx.compose.foundation.layout.PaddingValues(4.dp)) {
-            if (r.composeEmail.isNotEmpty()) item(key = "compose") {
-                Row(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
-                        .clickable { vm.startNew(r.composeEmail) }.padding(horizontal = 12.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(Icons.Filled.Edit, null, tint = SelectedRow, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(10.dp))
-                    // Адрес — своей строкой: в колонке 340 dp «Написать по
-                    // адресу:» съедала его целиком.
-                    Column {
-                        Text("Написать по адресу:", color = SelectedRow, style = MaterialTheme.typography.bodyLarge, maxLines = 1)
-                        Text(r.composeEmail, color = SelectedRow, fontWeight = FontWeight.Medium, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        val rows = dropdownRows(r)
+        // «Написать по адресу» — всегда первой и на виду. LazyColumn держит
+        // позицию по ключу прежней первой строки: был в поле не-адрес
+        // («lucky» → «ДИАЛОГИ» первой), дописали до адреса — строка вставала
+        // выше видимой части, и путь к новому письму выглядел пропавшим
+        // (аудит 2026-11-14 №2). Сменилась первая строка или запрос — в начало.
+        val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+        val firstKey = rows.firstOrNull()?.key
+        LaunchedEffect(firstKey, r.query) { listState.scrollToItem(0) }
+        LazyColumn(state = listState, contentPadding = androidx.compose.foundation.layout.PaddingValues(4.dp)) {
+            items(rows, key = { it.key }) { row ->
+                when (row) {
+                    is DropRow.Compose -> Row(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+                            .clickable { vm.startNew(row.email) }.padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Filled.Edit, null, tint = SelectedRow, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(10.dp))
+                        // Адрес — своей строкой: в колонке 340 dp «Написать по
+                        // адресу:» съедала его целиком.
+                        Column {
+                            Text("Написать по адресу:", color = SelectedRow, style = MaterialTheme.typography.bodyLarge, maxLines = 1)
+                            Text(row.email, color = SelectedRow, fontWeight = FontWeight.Medium, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                     }
-                }
-            }
-            if (r.total == 0) item(key = "empty") {
-                if (r.loading || r.composeEmail.isEmpty()) Text(
-                    if (r.loading) "Ищу…" else "Ничего не найдено",
-                    color = Color(0xFF8B95A1),
-                    style = MaterialTheme.typography.bodyMedium,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
-                )
-            }
-            if (r.convs.isNotEmpty()) {
-                item(key = "h-convs") { DropdownHeader("ДИАЛОГИ") }
-                items(r.convs, key = { "c" + it.conv.ref }) { h ->
-                    DropdownRow(h.conv.label.ifBlank { h.conv.counterparts.firstOrNull()?.addr.orEmpty() }, h.detail) { vm.pickSearchConv(h.conv.ref) }
-                }
-            }
-            if (r.contacts.isNotEmpty()) {
-                item(key = "h-contacts") { DropdownHeader("КОНТАКТЫ") }
-                items(r.contacts, key = { "p" + it.email }) { c ->
-                    DropdownRow(c.name.ifEmpty { c.email }, if (c.name.isEmpty()) "" else c.email) { vm.pickSearchContact(c.email) }
-                }
-            }
-            if (r.messages.isNotEmpty()) {
-                item(key = "h-msgs") { DropdownHeader("СООБЩЕНИЯ") }
-                items(r.messages, key = { "m" + it.ref + it.dateTs + it.subject }) { m ->
-                    DropdownRow(m.from, m.subject.ifBlank { stringResource(R.string.no_subject) }, trailing = formatListDate(m.dateTs)) { vm.pickSearchConv(m.ref) }
+                    is DropRow.Status -> Text(
+                        if (row.loading) "Ищу…" else "Ничего не найдено",
+                        color = Color(0xFF8B95A1),
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
+                    )
+                    is DropRow.Header -> DropdownHeader(row.title)
+                    is DropRow.Conv -> {
+                        val h = row.hit
+                        DropdownRow(h.conv.label.ifBlank { h.conv.counterparts.firstOrNull()?.addr.orEmpty() }, h.detail) { vm.pickSearchConv(h.conv.ref) }
+                    }
+                    is DropRow.Contact -> {
+                        val c = row.hit
+                        DropdownRow(c.name.ifEmpty { c.email }, if (c.name.isEmpty()) "" else c.email) { vm.pickSearchContact(c.email) }
+                    }
+                    is DropRow.Msg -> {
+                        val m = row.hit
+                        DropdownRow(m.from, m.subject.ifBlank { stringResource(R.string.no_subject) }, trailing = formatListDate(m.dateTs)) { vm.pickSearchConv(m.ref) }
+                    }
                 }
             }
         }
@@ -704,10 +709,12 @@ private fun ListPane(
 /**
  * Табы папок, как в Telegram (§4 десктопа): текст, выбранный — акцентом с
  * подчёркиванием; таба «Все» нет — ничего не выбрано значит «Входящие». Пока
- * выбрана папка, первым стоит иконка «Входящих» со счётчиком — путь назад.
+ * выбрана папка, первым стоит «← Входящие» текстом со счётчиком — путь назад
+ * (§4 десктопа). Полоса прокручивается к выбранному табу.
  *
  * Долгое нажатие — меню полосы, как правый клик десктопа: на табе — «Все
- * прочитаны», «Настроить…», «Удалить» (у «Спама» — только первое); везде —
+ * прочитаны», «Настроить…», «Удалить» (у «Спама» — ничего из этого:
+ * счётчиков у него нет, §4 десктопа); везде —
  * «Новая папка» и «Показать скрытые (N)» / «Не показывать скрытые».
  */
 @Composable
@@ -752,27 +759,44 @@ private fun FolderTabs(s: MailState, vm: MailViewModel) {
             detectTapGestures(onLongPress = { stripAsk++ })
         },
     ) {
-        LazyRow(
-            Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
+        // Выбранный таб и «← Входящие» — на виду оба (аудит 2026-11-14 №9).
+        // Чип «← Входящие» — первым в полосе, но вне прокрутки: в LazyRow он
+        // вставал перед прежним первым табом и уезжал за левый край, а на
+        // телефоне полоса с ним шире экрана. Табы прокручиваются: сначала в
+        // начало, выбранный не влез — сдвиг ровно до правого края.
+        val stripState = androidx.compose.foundation.lazy.rememberLazyListState()
+        val selectedPos = s.active?.let { a -> s.tabs.indexOfFirst { it.index == a }.takeIf { it >= 0 } }
+        LaunchedEffect(s.active, selectedPos) {
+            stripState.scrollToItem(0)
+            val pos = selectedPos ?: return@LaunchedEffect
+            stripState.revealAtEnd(pos)
+        }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             if (s.active != null) {
-                item(key = "inbox") {
+                // Текстом, как чип десктопа, а не иконкой без подписи. Ширина —
+                // по содержимому: подчёркивание таба тянется во всю доступную.
+                Box(Modifier.width(androidx.compose.foundation.layout.IntrinsicSize.Max)) {
                     Tab(
-                        "", s.inboxUnread, selected = false, icon = Icons.Filled.Inbox,
-                        description = stringResource(R.string.tab_inbox_back),
+                        stringResource(R.string.tab_inbox_back), s.inboxUnread, selected = false,
                         onLongClick = { stripAsk++ },
                     ) { vm.selectFolder(null) }
                 }
+                Spacer(Modifier.width(4.dp))
             }
-            items(s.tabs, key = { it.id }) { t ->
-                val selected = t.index == s.active
-                val title = if (t.icon.isBlank()) t.name else "${t.icon} ${t.name}"
-                Box {
-                    // Повторное касание выбранного таба — назад во «Входящие».
-                    Tab(title, t.unread, selected, dim = t.hidden, onLongClick = { menuFor = t }) { vm.selectFolder(if (selected) null else t.id) }
-                    DropdownMenu(expanded = menuFor?.id == t.id, onDismissRequest = { menuFor = null }) {
-                        menuItems(t) { menuFor = null }
+            LazyRow(
+                Modifier.weight(1f),
+                state = stripState,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                items(s.tabs, key = { it.id }) { t ->
+                    val selected = t.index == s.active
+                    val title = if (t.icon.isBlank()) t.name else "${t.icon} ${t.name}"
+                    Box {
+                        // Повторное касание выбранного таба — назад во «Входящие».
+                        Tab(title, t.unread, selected, dim = t.hidden, onLongClick = { menuFor = t }) { vm.selectFolder(if (selected) null else t.id) }
+                        DropdownMenu(expanded = menuFor?.id == t.id, onDismissRequest = { menuFor = null }) {
+                            menuItems(t) { menuFor = null }
+                        }
                     }
                 }
             }
@@ -783,10 +807,35 @@ private fun FolderTabs(s: MailState, vm: MailViewModel) {
     }
 }
 
+/**
+ * Строка [pos] целиком на виду: уже влезла — ничего; торчит за правый край —
+ * сдвиг ровно на недостающее; не видна вовсе — она встаёт у правого края
+ * (слева остаётся сколько влезет из предыдущих). `scrollToItem` и `scrollBy`
+ * перемеривают список сразу, `layoutInfo` после них свежий.
+ */
+private suspend fun androidx.compose.foundation.lazy.LazyListState.revealAtEnd(pos: Int) {
+    // Полоса ещё ни разу не мерилась (первый кадр) — дождаться раскладки.
+    repeat(2) { if (layoutInfo.visibleItemsInfo.isEmpty()) androidx.compose.runtime.withFrameNanos { } }
+    fun end() = layoutInfo.viewportEndOffset - layoutInfo.afterContentPadding
+    fun item() = layoutInfo.visibleItemsInfo.firstOrNull { it.index == pos }
+    val seen = item()
+    if (seen == null) {
+        scrollToItem(pos)
+        val now = item() ?: return
+        val room = end() - (now.offset + now.size)
+        if (room > 0) scrollBy(-room.toFloat())
+        return
+    }
+    val over = seen.offset + seen.size - end()
+    if (over > 0) scrollBy(over.toFloat())
+}
+
 /** Пункты меню полосы табов; [tab] — таб под пальцем (`null` — полоса). */
 @Composable
 private fun FolderMenuItems(tab: FolderTab?, s: MailState, vm: MailViewModel, close: () -> Unit, askDelete: (FolderTab) -> Unit) {
-    if (tab != null) {
+    // У «Спама» (системная папка) — ни «Все прочитаны», ни «Настроить…», ни
+    // «Удалить»: «Счётчиков в «Спаме» нет» (§4 десктопа «Папки диалогов»).
+    if (tab != null && !tab.system) {
         DropdownMenuItem(
             text = { Text("Все прочитаны") },
             leadingIcon = { Icon(Icons.Filled.DoneAll, null) },
@@ -795,24 +844,22 @@ private fun FolderMenuItems(tab: FolderTab?, s: MailState, vm: MailViewModel, cl
                 vm.markFolderRead(tab.id)
             },
         )
-        if (!tab.system) {
-            DropdownMenuItem(
-                text = { Text("Настроить…") },
-                leadingIcon = { Icon(Icons.Filled.Tune, null) },
-                onClick = {
-                    close()
-                    vm.folderEditor.value = tab.id
-                },
-            )
-            DropdownMenuItem(
-                text = { Text("Удалить") },
-                leadingIcon = { Icon(Icons.Filled.Delete, null, tint = MaterialTheme.colorScheme.error) },
-                onClick = {
-                    close()
-                    askDelete(tab)
-                },
-            )
-        }
+        DropdownMenuItem(
+            text = { Text("Настроить…") },
+            leadingIcon = { Icon(Icons.Filled.Tune, null) },
+            onClick = {
+                close()
+                vm.folderEditor.value = tab.id
+            },
+        )
+        DropdownMenuItem(
+            text = { Text("Удалить") },
+            leadingIcon = { Icon(Icons.Filled.Delete, null, tint = MaterialTheme.colorScheme.error) },
+            onClick = {
+                close()
+                askDelete(tab)
+            },
+        )
     }
     DropdownMenuItem(
         text = { Text("Новая папка") },
@@ -1110,7 +1157,7 @@ private fun AttachmentMenu(vm: MailViewModel) {
     val close = { vm.attachmentMenu.value = null }
     val name = vm.conversation.attachmentName(uid, index) ?: "Вложение"
     AnchoredMenu(anchor, name, close) {
-        MenuRow(Icons.AutoMirrored.Filled.OpenInNew, "Открыть", close) { vm.conversation.openAttachment(uid, index, name) }
+        MenuRow(Icons.AutoMirrored.Filled.OpenInNew, "Открыть", close) { vm.conversation.openAttachment(uid, index, name) { msg -> vm.notice.value = msg } }
         MenuRow(Icons.Filled.Share, "Поделиться", close) {
             vm.conversation.shareAttachment(uid, index, name) { msg -> vm.notice.value = msg }
         }
@@ -1135,7 +1182,11 @@ private fun BubbleMenu(vm: MailViewModel) {
     val hasHtml = !body.html.isNullOrBlank()
     val hasText = !body.text.isNullOrBlank()
     val asText = vm.conversation.showsText(body.uid)
-    AnchoredMenu(anchor, body.subject.ifBlank { stringResource(R.string.no_subject) }, close) {
+    // У своего пузыря — адресаты под темой: desktop §4 «У своего пузыря —
+    // подсказка с адресатами («Кому: …», строкой ниже «Копия: …»)»; на
+    // телефоне наведения нет — подсказка живёт в меню долгого нажатия
+    // (android §9; аудит 2026-11-14 №11).
+    AnchoredMenu(anchor, body.subject.ifBlank { stringResource(R.string.no_subject) }, close, details = recipientsTip(body)) {
         MenuRow(Icons.AutoMirrored.Filled.Reply, "Ответить", close) { vm.compose.replyTo(body) }
         MenuRow(Icons.AutoMirrored.Filled.Forward, "Переслать", close) { vm.compose.openForward(body) }
         MenuRow(Icons.Filled.ContentCopy, "Копировать текст", close) {
@@ -1246,15 +1297,7 @@ class AccountActions(
     val relogin: (String) -> Unit,
     val edit: (String) -> Unit,
     val remove: (String) -> Unit,
-) {
-    /** Те же действия, но сначала закрыть окно (настройки). */
-    fun closing(close: () -> Unit) = AccountActions(
-        add = { close(); add() },
-        relogin = { close(); relogin(it) },
-        edit = { close(); edit(it) },
-        remove = { close(); remove(it) },
-    )
-}
+)
 
 /** «Не доставлено» — тот же красный, что в документе ленты (`--fail`). */
 private val DeliveryFailed = Color(0xFFC62828)
