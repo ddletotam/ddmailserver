@@ -161,7 +161,7 @@ private fun CompactMonths(vm: CalendarViewModel) {
     Column(Modifier.fillMaxSize()) {
         // Первая строка — как у десктопа: бургер, ‹ Сегодня ›, период, «Новое событие».
         DateBar(
-            title = monthTitle(visible),
+            title = narrowMonthTitle(visible),
             onPrev = { scope.launch { list.animateScrollToItem((list.firstVisibleItemIndex - 1).coerceAtLeast(0)) } },
             onToday = {
                 vm.today()
@@ -209,7 +209,7 @@ private fun CompactDay(vm: CalendarViewModel) {
     Column(Modifier.fillMaxSize()) {
         // Заголовок периода — месяц: касание (и «Назад») ведёт к месяцам.
         DateBar(
-            title = monthTitle(YearMonth.from(selected)),
+            title = narrowMonthTitle(YearMonth.from(selected)),
             onTitle = { vm.setView(CalView.Month) },
             onPrev = { vm.select(selected.minusDays(1)) },
             onToday = { vm.today() },
@@ -281,7 +281,9 @@ private fun WideCalendar(vm: CalendarViewModel, yearCols: Int) {
         },
     )
     val title = when (view) {
-        CalView.Day -> longDate(selected)
+        // День недели уже в шапке колонки («чт 12»): в заголовке только дата, иначе
+        // он обрезается переключателем вида.
+        CalView.Day -> "${selected.dayOfMonth} ${MONTHS_GEN[selected.monthValue - 1]} ${selected.year}"
         CalView.Week, CalView.Month -> monthTitle(YearMonth.from(selected))
         CalView.Year -> "${selected.year}"
     }
@@ -375,3 +377,9 @@ private fun DateBar(title: String, onPrev: () -> Unit, onToday: () -> Unit, onNe
         IconButton(onClick = onNew, modifier = Modifier.size(40.dp)) { Icon(Icons.Filled.Add, "Новое событие", tint = NowRed) }
     }
 }
+
+/**
+ * Заголовок месяца на сложенном экране (350 dp): год только если он не текущий —
+ * «Ноябрь 2026» рядом с ‹ Сегодня › и «+» обрезался до «Ноябрь 20…».
+ */
+private fun narrowMonthTitle(ym: YearMonth) = monthTitle(ym, withYear = ym.year != LocalDate.now().year)
