@@ -7,6 +7,8 @@
 #   mac.sh run [iphone|ipad]  собрать, поставить в симулятор, запустить, скриншот сюда
 #   mac.sh uitest [iphone|ipad|mac] [Класс/тест]  сквозные UI-тесты; скриншоты шагов — сюда
 #   mac.sh device [iphone|ipad]  собрать с подписью, поставить на устройство, запустить
+#   mac.sh install         Мак: собрать с подписью, поставить в /Applications/DDMail.app,
+#                          запустить, снимок экрана — сюда
 #
 # Окружение: DDMAIL_MAC (ssh-хост, по умолчанию `mac`),
 #            DDMAIL_SHOTS (куда класть скриншоты, по умолчанию ~/.cache/ddmail-ios),
@@ -202,6 +204,30 @@ case "$cmd" in
         xcrun xcresulttool export attachments --path "$rb" --output-path "$out" >/dev/null 2>&1 || true
         exit "$rc"
         ;;
+    install)
+        # Мак-версия для работы: та же отладочная сборка, что у `uitest mac`,
+        # подписанная командой; запущенная копия закрывается, новая ставится
+        # в /Applications и запускается. Снимок экрана — screencapture.
+        gen
+        team="$(team_id)"
+        [ -n "$team" ] || { echo "нет команды подписи (DDMAIL_TEAM или учётка Xcode)" >&2; exit 1; }
+        if [ -n "${1:-}" ]; then security unlock-keychain -p "$1" login.keychain; fi
+        xcodebuild -project DDMail.xcodeproj -scheme DDMail -configuration Debug \
+            -destination "platform=macOS" -derivedDataPath "$DD" -clonedSourcePackagesDirPath "$SPM" \
+            $(sign_args "$team") -quiet build
+        app="$DD/Build/Products/Debug/DDMail.app"
+        osascript -e 'tell application id "ru.letotam.ddmail" to quit' >/dev/null 2>&1 || true
+        for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -x DDMail >/dev/null || break; sleep 1; done
+        pkill -x DDMail 2>/dev/null || true
+        rm -rf /Applications/DDMail.app
+        ditto "$app" /Applications/DDMail.app
+        codesign --verify --deep --strict /Applications/DDMail.app
+        open /Applications/DDMail.app
+        sleep 8
+        rm -f "$HOME/build/ddmail/shot.png"
+        screencapture -x "$HOME/build/ddmail/shot.png" 2>/dev/null || true
+        echo "install: /Applications/DDMail.app $(defaults read /Applications/DDMail.app/Contents/Info.plist CFBundleShortVersionString)"
+        ;;
     device)
         kind="${1:-iphone}"
         gen
@@ -271,6 +297,14 @@ case "$cmd" in
         scp -qr "$HOST:$REMOTE/ui-shots/." "$dir/" 2>/dev/null || true
         echo "скриншоты: $dir"
         exit "$rc"
+        ;;
+    install)
+        sync_code
+        asc_upload
+        remote install "${DDMAIL_KEYCHAIN_PASSWORD:-}"
+        mkdir -p "$SHOTS"
+        out="$SHOTS/mac-$(date +%H%M%S).png"
+        if scp -q "$HOST:$REMOTE/shot.png" "$out" 2>/dev/null; then echo "скриншот: $out"; fi
         ;;
     device)
         sync_code
