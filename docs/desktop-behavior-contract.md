@@ -1768,9 +1768,13 @@ Slint наружу не отдаёт.
   обнаружение книг константой `true` (`carddav/client.DiscoverAddressBooks`),
   у уже известных книг он не обновлялся никогда, и корпоративный каталог
   «GAL small.kz» (SOGo) приходил записываемым. Теперь синк спрашивает у
-  CardDAV-сервера `current-user-privilege-set` (PROPFIND Depth 0): запись —
-  если есть `DAV:write`, `DAV:write-content` или `DAV:all`. Сервер, который
-  права не отдаёт, оставляет прежнее значение. Книги LDAP и импортированные
+  CardDAV-сервера `current-user-privilege-set` и `resourcetype` (PROPFIND
+  Depth 0). Коллекция с типом `{urn:ietf:params:xml:ns:carddav}directory`
+  (каталог) — только чтение всегда: SOGo объявляет у GAL `DAV:all`, а PUT
+  отвергает (аудит 2026-11-14, №1). Иначе запись — если есть `DAV:write`,
+  `DAV:write-content` или `DAV:all`. Сервер, который не отдаёт ни того, ни
+  другого, оставляет прежнее значение. Уже известная книга получает новое
+  значение на первом же синке источника после выката. Книги LDAP и импортированные
   (`*_import`) — только чтение всегда (`AddressBook.Writable`). То же
   значение — в `/address-books` и в `current-user-privilege-set` нашего
   CardDAV-сервера (Контакты iOS/macOS видят книгу только для чтения).

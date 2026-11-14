@@ -34,6 +34,19 @@ const sogoReadOnlyPrivileges = `<?xml version="1.0" encoding="utf-8"?>
   </D:response>
 </D:multistatus>`
 
+// Настоящий ответ SOGo (mail.skiftrade.kz, 2026-11-14) у GAL: в правах —
+// DAV:all, но тип ресурса — каталог (CARDDAV:directory), и PUT туда не
+// проходит. Права тут врут, решает тип.
+const sogoGALDirectory = `<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:" xmlns:a="http://calendarserver.org/ns/"><D:response><D:href>/SOGo/dav/user@small.kz/Contacts/small.kz/</D:href><D:propstat><D:status>HTTP/1.1 200 OK</D:status><D:prop><D:current-user-privilege-set xmlns:D="DAV:"><D:privilege><D:read/></D:privilege><D:privilege><D:read-current-user-privilege-set/></D:privilege><D:privilege><D:all/></D:privilege></D:current-user-privilege-set><D:resourcetype><D:collection/><vcard-collection xmlns="http://groupdav.org/"/><addressbook xmlns="urn:ietf:params:xml:ns:carddav"/><directory xmlns="urn:ietf:params:xml:ns:carddav"/></D:resourcetype></D:prop></D:propstat></D:response></D:multistatus>`
+
+// Личная книга того же SOGo: обычная addressbook, запись есть.
+const sogoPersonalBook = `<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:"><D:response><D:href>/SOGo/dav/user@small.kz/Contacts/personal/</D:href><D:propstat><D:status>HTTP/1.1 200 OK</D:status><D:prop><D:current-user-privilege-set xmlns:n1="urn:inverse:params:xml:ns:inverse-dav" xmlns:D="DAV:"><D:privilege><D:write/></D:privilege><D:privilege><D:bind/></D:privilege><D:privilege><n1:admin/></D:privilege><D:privilege><D:all/></D:privilege></D:current-user-privilege-set><D:resourcetype><D:collection/><vcard-collection xmlns="http://groupdav.org/"/><addressbook xmlns="urn:ietf:params:xml:ns:carddav"/></D:resourcetype></D:prop></D:propstat></D:response></D:multistatus>`
+
+// Каталог без прав в ответе (сервер права не отдаёт, тип — отдаёт).
+const directoryNoPrivileges = `<multistatus xmlns="DAV:"><response><propstat><prop><resourcetype><collection/><directory xmlns="urn:ietf:params:xml:ns:carddav"/></resourcetype></prop><status>HTTP/1.1 200 OK</status></propstat><propstat><prop><current-user-privilege-set/></prop><status>HTTP/1.1 404 Not Found</status></propstat></response></multistatus>`
+
 // iCloud: личная книга, запись разрешена (префикс другой — пространство то же).
 const icloudWritablePrivileges = `<?xml version="1.0" encoding="UTF-8"?>
 <multistatus xmlns="DAV:">
@@ -69,7 +82,10 @@ func TestParsePrivilegeSet(t *testing.T) {
 		body            string
 		writable, known bool
 	}{
-		{"SOGo GAL", sogoReadOnlyPrivileges, false, true},
+		{"SOGo GAL (read only)", sogoReadOnlyPrivileges, false, true},
+		{"SOGo GAL: DAV:all, но каталог", sogoGALDirectory, false, true},
+		{"SOGo личная", sogoPersonalBook, true, true},
+		{"каталог без прав", directoryNoPrivileges, false, true},
 		{"iCloud", icloudWritablePrivileges, true, true},
 		{"write-content", `<multistatus xmlns="DAV:"><response><propstat><prop><current-user-privilege-set><privilege><write-content/></privilege></current-user-privilege-set></prop><status>HTTP/1.1 200 OK</status></propstat></response></multistatus>`, true, true},
 		{"all", `<multistatus xmlns="DAV:"><response><propstat><prop><current-user-privilege-set><privilege><all/></privilege></current-user-privilege-set></prop><status>HTTP/1.1 200 OK</status></propstat></response></multistatus>`, true, true},
@@ -207,11 +223,22 @@ func TestBookWritable(t *testing.T) {
 			http.Error(w, "bad", http.StatusBadRequest)
 			return
 		}
-		w.WriteHeader(http.StatusMultiStatus)
-		if strings.Contains(r.URL.Path, "small.kz") {
-			_, _ = io.WriteString(w, sogoReadOnlyPrivileges)
+		if !strings.Contains(r.Header.Get("Content-Type"), "xml") {
+			http.Error(w, "no body type", http.StatusBadRequest)
 			return
 		}
+		if b, _ := io.ReadAll(r.Body); !strings.Contains(string(b), "resourcetype") {
+			// Без типа ресурса GAL SOGo не отличить: права у него врут.
+			w.WriteHeader(http.StatusMultiStatus)
+			_, _ = io.WriteString(w, sogoPersonalBook)
+			return
+		}
+		if strings.Contains(r.URL.Path, "small.kz") {
+			w.WriteHeader(http.StatusMultiStatus)
+			_, _ = io.WriteString(w, sogoGALDirectory)
+			return
+		}
+		w.WriteHeader(http.StatusMultiStatus)
 		_, _ = io.WriteString(w, icloudWritablePrivileges)
 	}))
 	defer srv.Close()

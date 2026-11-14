@@ -11,20 +11,24 @@ import (
 	"strings"
 )
 
-// privilegeProbeBody — PROPFIND одного свойства: права текущего пользователя
-// на коллекцию (RFC 3744 §5.4).
+// privilegeProbeBody — PROPFIND двух свойств коллекции: права текущего
+// пользователя (RFC 3744 §5.4) и тип ресурса.
 const privilegeProbeBody = `<?xml version="1.0" encoding="utf-8"?>` +
-	`<D:propfind xmlns:D="DAV:"><D:prop><D:current-user-privilege-set/></D:prop></D:propfind>`
+	`<D:propfind xmlns:D="DAV:"><D:prop><D:current-user-privilege-set/><D:resourcetype/></D:prop></D:propfind>`
 
 // BookWritable спрашивает у сервера, может ли пользователь менять карточки
-// коллекции. known=false — сервер свойство не отдал (или не ответил): решать
-// по нему нельзя, вызывающий оставляет то, что знал.
+// коллекции. known=false — сервер ничего полезного не отдал (или не ответил):
+// решать по нему нельзя, вызывающий оставляет то, что знал.
 //
 // Корпоративный каталог SOGo (GAL) приходит в той же «домашней» коллекции,
-// что и личные книги, и выглядит обычной адресной книгой: отличить его можно
-// только по правам. Без этого все книги считались доступными на запись, и
-// правка контакта из каталога оседала локально, а PUT наверх вечно получал
-// отказ.
+// что и личные книги, и выглядит обычной адресной книгой. Права он при этом
+// объявляет ложные: SOGo отдаёт у GAL `read`, `read-current-user-privilege-set`
+// и `DAV:all` (проверено на mail.skiftrade.kz 2026-11-14), а PUT отвергает.
+// Честный признак каталога — тип ресурса `{urn:ietf:params:xml:ns:carddav}directory`
+// (каталог-шлюз, draft-daboo-carddav-directory-gateway; так же помечает
+// каталог Apple Contacts Server): такая коллекция только для чтения, что бы
+// ни говорили права. Без этого правка контакта из каталога оседала локально,
+// а PUT наверх вечно получал отказ.
 func (c *Client) BookWritable(ctx context.Context, path string) (writable, known bool) {
 	if c.httpClient == nil {
 		return false, false
@@ -48,8 +52,9 @@ func (c *Client) BookWritable(ctx context.Context, path string) (writable, known
 	return parsePrivilegeSet(body)
 }
 
-// parsePrivilegeSet ищет в ответе PROPFIND успешный current-user-privilege-set
-// и решает, есть ли право писать карточки: DAV:all, DAV:write или
+// parsePrivilegeSet решает по ответу PROPFIND, можно ли писать карточки
+// коллекции. Каталог (resourcetype CARDDAV:directory) — только чтение всегда.
+// Иначе — по успешному current-user-privilege-set: DAV:all, DAV:write или
 // DAV:write-content (RFC 3744 §3: write включает write-content).
 func parsePrivilegeSet(body []byte) (writable, known bool) {
 	var ms struct {
@@ -64,12 +69,25 @@ func parsePrivilegeSet(body []byte) (writable, known bool) {
 							WriteContent *struct{} `xml:"DAV: write-content"`
 						} `xml:"DAV: privilege"`
 					} `xml:"DAV: current-user-privilege-set"`
+					ResourceType *struct {
+						Directory *struct{} `xml:"urn:ietf:params:xml:ns:carddav directory"`
+					} `xml:"DAV: resourcetype"`
 				} `xml:"DAV: prop"`
 			} `xml:"DAV: propstat"`
 		} `xml:"DAV: response"`
 	}
 	if err := xml.Unmarshal(body, &ms); err != nil {
 		return false, false
+	}
+	for _, r := range ms.Responses {
+		for _, ps := range r.Propstats {
+			if !statusOK(ps.Status) {
+				continue
+			}
+			if rt := ps.Prop.ResourceType; rt != nil && rt.Directory != nil {
+				return false, true
+			}
+		}
 	}
 	for _, r := range ms.Responses {
 		for _, ps := range r.Propstats {
