@@ -107,8 +107,9 @@ fun ComposerBar(
                 Spacer(Modifier.padding(2.dp))
             }
             if (u.expanded) {
-                val autoTo = conversation?.counterparts?.joinToString(", ") { it.addr } ?: newTo.orEmpty()
-                Overrides(d, ids, conversation?.receivedBy, autoTo, subjectHint = if (conversation != null) "Re: …" else "", onEdit = cc::edit)
+                // Что уйдёт при пустых полях — та же ветка, что у отправки.
+                val hints = cc.hints(conversation, newTo)
+                Overrides(d, ids, conversation?.receivedBy, hints.to, subjectHint = hints.subject, onEdit = cc::edit)
             }
             Attachments(d.attachments) { a -> cc.edit { it.copy(attachments = it.attachments - a) } }
             // Ошибка отправки — amber-плашкой над композером (десктоп §2: заглушка
@@ -149,24 +150,36 @@ fun ComposerBar(
 private fun Overrides(d: Draft, ids: List<Identity>, receivedBy: String?, autoTo: String, subjectHint: String, onEdit: ((Draft) -> Draft) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(bottom = 4.dp)) {
         FromPicker(d, ids, receivedBy) { email -> onEdit { it.copy(from = email) } }
-        OutlinedTextField(
-            value = d.to, onValueChange = { v -> onEdit { it.copy(to = v) } },
-            label = { Text("Кому") }, placeholder = { Text(autoTo) }, singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            value = d.cc, onValueChange = { v -> onEdit { it.copy(cc = v) } },
-            label = { Text("Копия") }, singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            value = d.subject, onValueChange = { v -> onEdit { it.copy(subject = v) } },
-            label = { Text("Тема") }, placeholder = { if (subjectHint.isNotEmpty()) Text(subjectHint) }, singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
+        // Название поля — слева постоянной подписью, а не плавающим label:
+        // у Material3 подсказка (placeholder) при label видна только в фокусе,
+        // и пустые «Кому»/«Тема» не говорили, кому и с какой темой уйдёт
+        // письмо (аудит 2026-11-14 №10; desktop §3 `composer-to-auto`).
+        val email = KeyboardOptions(keyboardType = KeyboardType.Email)
+        HintField("Кому", d.to, autoTo, email) { v -> onEdit { it.copy(to = v) } }
+        HintField("Копия", d.cc, "", email) { v -> onEdit { it.copy(cc = v) } }
+        HintField("Тема", d.subject, subjectHint, KeyboardOptions(capitalization = KeyboardCapitalization.Sentences)) { v -> onEdit { it.copy(subject = v) } }
     }
+}
+
+/** Поле с постоянной подписью слева и подсказкой «что выйдет само», пока оно пусто. */
+@Composable
+private fun HintField(title: String, value: String, hint: String, options: KeyboardOptions, onChange: (String) -> Unit) {
+    OutlinedTextField(
+        value = value, onValueChange = onChange,
+        leadingIcon = {
+            Text(
+                title,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(start = 12.dp).widthIn(min = 52.dp),
+            )
+        },
+        // Подсказка бледнее набранного — видно, что это «само», а не введено.
+        placeholder = { if (hint.isNotEmpty()) Text(hint, color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        singleLine = true,
+        keyboardOptions = options,
+        modifier = Modifier.fillMaxWidth(),
+    )
 }
 
 @Composable
@@ -264,26 +277,15 @@ fun ComposeSheetDialog(cc: ComposeController) {
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     FromPicker(d, ids, null) { email -> cc.editSheet { it.copy(from = email) } }
-                    OutlinedTextField(
-                        value = d.to, onValueChange = { v -> cc.editSheet { it.copy(to = v) } },
-                        label = { Text("Кому") }, singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Next),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        value = d.cc, onValueChange = { v -> cc.editSheet { it.copy(cc = v) } },
-                        label = { Text("Копия") }, singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Next),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    val email = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Next)
+                    HintField("Кому", d.to, "", email) { v -> cc.editSheet { it.copy(to = v) } }
+                    HintField("Копия", d.cc, "", email) { v -> cc.editSheet { it.copy(cc = v) } }
                     val fwd = (sheet.branch as? Branch.Forward)?.original
-                    OutlinedTextField(
-                        value = d.subject, onValueChange = { v -> cc.editSheet { it.copy(subject = v) } },
-                        label = { Text("Тема") }, singleLine = true,
-                        placeholder = { fwd?.let { Text("Fwd: ${it.subject}") } },
-                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Next),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    val hints = autoHints(sheet.branch, ids, d.from)
+                    HintField(
+                        "Тема", d.subject, hints.subject,
+                        KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Next),
+                    ) { v -> cc.editSheet { it.copy(subject = v) } }
                     RichField(
                         draft = d,
                         onEdit = cc::editSheet,

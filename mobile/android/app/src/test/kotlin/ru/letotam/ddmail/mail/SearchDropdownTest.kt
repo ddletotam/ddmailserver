@@ -90,4 +90,39 @@ class SearchDropdownTest {
     }
 
     private fun refOf(account: String, id: String) = c(id, "", "", account = account).ref
+
+    /**
+     * Аудит 2026-11-14 №2: «Написать по адресу» — всегда первая строка, и
+     * при смене запроса с не-адреса на адрес первая строка меняется (по её
+     * ключу выпадашка возвращается в начало).
+     */
+    @Test
+    fun composeRowAlwaysFirst() {
+        val conv = c("1", "lucky", "lucky@x.ru")
+        val before = dropdownRows(SearchResults(query = "lucky", convs = listOf(ConvHit(conv, "lucky@x.ru"))))
+        assertEquals(listOf("h-ДИАЛОГИ", "c" + conv.ref), before.map { it.key })
+        val after = dropdownRows(
+            SearchResults(
+                query = "lucky@x.ru",
+                composeEmail = "lucky@x.ru",
+                convs = listOf(ConvHit(conv, "lucky@x.ru")),
+                contacts = listOf(ContactHit("Лаки", "lucky2@x.ru")),
+                messages = listOf(MsgHit(conv.ref, "lucky", "Тема", 1)),
+            ),
+        )
+        assertEquals(
+            listOf("compose", "h-ДИАЛОГИ", "c" + conv.ref, "h-КОНТАКТЫ", "plucky2@x.ru", "h-СООБЩЕНИЯ", "m" + conv.ref + "1Тема"),
+            after.map { it.key },
+        )
+        assertTrue(before.first().key != after.first().key)
+        // Только адрес, ничего не найдено — одна строка «Написать», без «Ничего не найдено».
+        assertEquals(listOf("compose"), dropdownRows(SearchResults(query = "a@b.ru", composeEmail = "a@b.ru")).map { it.key })
+        assertEquals(listOf("empty"), dropdownRows(SearchResults(query = "zzz")).map { it.key })
+        // Ключи уникальны — LazyColumn иначе падает; письмо и его копия в той
+        // же беседе с той же датой и темой (замер 2026-11-14) — тоже.
+        assertEquals(after.size, after.map { it.key }.toSet().size)
+        val twin = MsgHit(conv.ref, "lucky", "RE: тема", 7)
+        val twins = dropdownRows(SearchResults(query = "re", messages = listOf(twin, twin, twin.copy(from = "другой"))))
+        assertEquals(twins.size, twins.map { it.key }.toSet().size)
+    }
 }

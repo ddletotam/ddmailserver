@@ -91,7 +91,7 @@ class ComposeController(
      * Поток, а не поле: беседа могла прийти (WS `message_sent` → синк) раньше
      * ответа на отправку — тогда переход делается по самой цели.
      */
-    val sentTarget = MutableStateFlow<Set<String>?>(null)
+    val sentTarget = MutableStateFlow<SentTarget?>(null)
 
     /** Заглушки ответов, которые не ушли (IMAP): уходят со следующей отправкой. */
     private val failedStubs = mutableListOf<String>()
@@ -135,7 +135,12 @@ class ComposeController(
      * ответ и причина возвращаются.
      */
     fun enter(where: String?) {
+        // Переход из «Новой беседы» в беседу своего письма: «✓ Отправлено»
+        // уже горит — не гасить, иначе её не видно вовсе (переход случается
+        // в те же доли секунды, что и вспышка; аудит 2026-11-14 №3).
+        val keepFlash = followFrom != null && ui.value.sentFlash
         reset()
+        if (keepFlash) ui.update { it.copy(sentFlash = true) }
         place = where
         // «Новая беседа» сменилась беседой своего письма — итог его отправки — туда.
         follow = followFrom?.let { it to where }
@@ -152,6 +157,20 @@ class ComposeController(
     fun editSheet(f: (Draft) -> Draft) = ui.update { u -> u.copy(sheet = u.sheet?.let { it.copy(draft = f(it.draft), error = null) }) }
 
     fun closeSheet() = ui.update { it.copy(sheet = null) }
+
+    /**
+     * Подсказки «Кому» / «Тема» композера беседы [c] (или новой беседы с
+     * [newTo]): та же ветка, что выберет [sendReply] / [sendNew].
+     */
+    fun hints(c: Conversation?, newTo: String?): AutoHints {
+        val u = ui.value
+        val branch = when {
+            c == null -> Branch.New
+            u.replyTo != null -> Branch.Reply(u.replyTo, c.isGroup)
+            else -> Branch.Implicit(c, conversation.lastIncoming(), conversation.last())
+        }
+        return autoHints(branch, identities.value, u.draft.from, newTo.orEmpty())
+    }
 
     fun consumeTarget() {
         sentTarget.value = null
@@ -266,8 +285,14 @@ class ComposeController(
                     try {
                         val viaServer = hub.send(built.request, owners.value)
                         // Беседа нового письма — набор адресатов: «Кому» и «Копия»
-                        // (§4 десктопа: bcc в набор не входит).
-                        sentTarget.value = targetOf(built.request)
+                        // (§4 десктопа: bcc в набор не входит) — в учётке, через
+                        // которую письмо ушло: тот же собеседник в другой учётке
+                        // (IMAP Mail.ru) — другая беседа, письма там нет.
+                        sentTarget.value = SentTarget(
+                            account = hub.senderOf(built.request, owners.value).orEmpty(),
+                            from = bareAddress(built.request.from),
+                            addrs = targetOf(built.request),
+                        )
                         if (here(origin)) {
                             ui.update { cur -> cur.copy(pendingNew = cur.pendingNew.map { if (it.key == key) it.copy(sent = true) else it }) }
                         }
@@ -402,6 +427,12 @@ class ComposeController(
         val SERVER_REFETCH_MS = listOf(2_500L, 7_000L)
     }
 }
+
+/**
+ * Беседа нового письма (§2 десктопа): учётка, через которую оно ушло
+ * ([account] — `accountKey`), свой адрес From и набор «Кому» + «Копия».
+ */
+data class SentTarget(val account: String, val from: String, val addrs: Set<String>)
 
 /** Набор адресатов нового письма — по нему узнаём его беседу (§2 десктопа). */
 internal fun targetOf(req: ru.letotam.ddmail.api.SendRequest): Set<String> =

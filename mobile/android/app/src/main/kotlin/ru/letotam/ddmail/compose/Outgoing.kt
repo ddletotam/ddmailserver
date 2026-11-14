@@ -207,6 +207,26 @@ fun build(
     )
 }
 
+/** Подсказки пустых «Кому» и «Тема»: что ветка выведет сама. */
+data class AutoHints(val to: String, val subject: String)
+
+/**
+ * Что уйдёт при пустых «Кому» и «Тема» (desktop §3: «поля с
+ * авто-подсказками (`composer-to-auto`, `composer-subject-auto`) — подсказка
+ * показывает, что будет выведено автоматически»). Считается той же [build],
+ * что и отправка, — подсказка не может разойтись с письмом. У нового письма
+ * адресат — [newTo], автотемы нет.
+ */
+fun autoHints(branch: Branch, identities: List<Identity>, from: String = "", newTo: String = ""): AutoHints {
+    if (branch is Branch.New) return AutoHints(newTo, "")
+    val probe = Draft(text = "x", from = from)
+    return when (val b = build(branch, probe, identities)) {
+        is Built.Ok -> AutoHints(if (branch is Branch.Forward) "" else b.request.to.joinToString(", "), b.request.subject)
+        // Пересылка без «Кому» не собирается — тема всё равно известна.
+        is Built.Refused -> if (branch is Branch.Forward) AutoHints("", "Fwd: ${branch.original.subject}") else AutoHints("", "")
+    }
+}
+
 private data class Quad(val to: List<String>, val subject: String, val irt: String, val refs: String)
 
 /** Блок пересылаемого письма: заголовки и само письмо. */

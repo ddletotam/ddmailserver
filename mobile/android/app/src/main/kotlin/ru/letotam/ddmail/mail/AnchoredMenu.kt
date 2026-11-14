@@ -39,6 +39,8 @@ fun AnchoredMenu(
     anchor: MenuAnchor?,
     title: String,
     onDismiss: () -> Unit,
+    /** Строки под заголовком (адресаты своего пузыря: «Кому: …», «Копия: …»). */
+    details: List<String> = emptyList(),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val density = LocalDensity.current
@@ -76,8 +78,18 @@ fun AnchoredMenu(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
+                    modifier = Modifier.padding(top = 8.dp, bottom = if (details.isEmpty()) 4.dp else 2.dp),
                 )
+                details.forEachIndexed { i, line ->
+                    Text(
+                        line,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(bottom = if (i == details.lastIndex) 4.dp else 0.dp),
+                    )
+                }
                 content()
             }
         }

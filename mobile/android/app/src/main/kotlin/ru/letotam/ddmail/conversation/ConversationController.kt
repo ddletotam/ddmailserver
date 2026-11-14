@@ -239,17 +239,27 @@ class ConversationController(
      * Вложение: скачать в кэш и открыть системным обработчиком через
      * content:// (файлы приложения наружу напрямую не отдаются).
      */
-    fun openAttachment(uid: Long, index: Int, filename: String?) {
+    fun openAttachment(uid: Long, index: Int, filename: String?, onError: (String) -> Unit = {}) {
         scope.launch {
-            val (uri, type) = download(uid, index, filename) ?: return@launch
-            val intent = Intent(Intent.ACTION_VIEW).setDataAndType(uri, type)
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            val (uri, type) = download(uid, index, filename) ?: return@launch onError("Не удалось скачать вложение.")
+            // Своего обработчика у типа нет (`.md` — `text/markdown`) — не тупик
+            // «Действие не поддерживается», а запасной путь, как «Открыть с
+            // помощью…» десктопа: текст — как `text/plain`, прочее — выбор из
+            // всех, кто открывает любые файлы (аудит 2026-11-14 №15).
+            val chosen = openTypes(type, filename).firstOrNull { t ->
+                app.packageManager.queryIntentActivities(viewIntent(uri, t), 0).isNotEmpty()
+            }
+            if (chosen == null) return@launch onError("Нет приложения, чтобы открыть «${filename.orEmpty()}». Попробуйте «Поделиться» или «В «Загрузки»».")
             try {
-                app.startActivity(Intent.createChooser(intent, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                app.startActivity(Intent.createChooser(viewIntent(uri, chosen), null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             } catch (_: ActivityNotFoundException) {
+                onError("Нет приложения, чтобы открыть вложение.")
             }
         }
     }
+
+    private fun viewIntent(uri: android.net.Uri, type: String) = Intent(Intent.ACTION_VIEW).setDataAndType(uri, type)
+        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
 
     /**
      * «Поделиться» вложением (как iOS §5 «Вложения»): системный выбор
@@ -443,6 +453,26 @@ internal fun deliveryJson(status: String, error: String, failed: List<String>): 
         "failed" to JsonArray(failed.map { JsonPrimitive(it) }),
     ),
 )
+
+/**
+ * Типы для «Открыть» вложение по порядку: свой; у текстового (`text/…`,
+ * JSON/XML/YAML, или расширение текстового файла при `octet-stream`) —
+ * `text/plain`; последним — `*` `/` `*` (кто открывает любые файлы).
+ */
+internal fun openTypes(type: String, filename: String?): List<String> {
+    val t = type.lowercase()
+    val ext = filename.orEmpty().substringAfterLast('.', "").lowercase()
+    val textual = t.startsWith("text/") || t.endsWith("+xml") || t.endsWith("+json") ||
+        t in setOf("application/json", "application/xml", "application/x-yaml", "application/yaml", "application/x-sh") ||
+        ext in TEXT_EXTENSIONS
+    return buildList {
+        add(t)
+        if (textual) add("text/plain")
+        add("*/*")
+    }.distinct()
+}
+
+private val TEXT_EXTENSIONS = setOf("md", "markdown", "txt", "log", "csv", "tsv", "json", "xml", "yaml", "yml", "ini", "conf", "cfg", "toml", "sh", "eml")
 
 internal fun deliveryJson(b: MessageBody): JsonObject = deliveryJson(b.deliveryStatus, b.deliveryError, b.deliveryFailed)
 

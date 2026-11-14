@@ -21,6 +21,7 @@ import kotlinx.coroutines.launch
 import ru.letotam.ddmail.DdmailApp
 import ru.letotam.ddmail.api.MessageBody
 import ru.letotam.ddmail.compose.ComposeController
+import ru.letotam.ddmail.compose.SentTarget
 import ru.letotam.ddmail.conversation.ConversationController
 import ru.letotam.ddmail.sync.Conversation
 import ru.letotam.ddmail.sync.FoldersDoc
@@ -685,10 +686,6 @@ private const val MAX_CONV_HITS = 30
 /** Писем в «Сообщениях» — как `limit: 12` у десктопа. */
 private const val MAX_MSG_HITS = 12
 
-/**
- * Беседа нового письма: набор собеседников совпал с адресатами. Письмо себе
- * сервер отдаёт беседой без собеседников — тогда сверяем по её id.
- */
 /** Итог «В спам» словами: у ddmail — правило, у IMAP — перенос в «Спам». */
 internal fun spamText(o: SpamOutcome): String = when (o) {
     is SpamOutcome.Rule -> {
@@ -700,8 +697,23 @@ internal fun spamText(o: SpamOutcome): String = when (o) {
     is SpamOutcome.Moved -> "✓ В спам: перенесено писем: ${o.messages}"
 }
 
-internal fun matchesTarget(c: Conversation, target: Set<String>, own: Set<String> = emptySet()): Boolean {
+/**
+ * Беседа нового письма: набор собеседников совпал с адресатами. Письмо себе
+ * сервер отдаёт беседой без собеседников — тогда сверяем по её id.
+ * Учётка — та, через которую письмо ушло; свой адрес — From письма.
+ */
+internal fun matchesTarget(c: Conversation, t: SentTarget, own: Set<String> = emptySet()): Boolean {
     if (c.spam) return false
+    // Беседа — в учётке, через которую письмо ушло: тот же собеседник в
+    // другой учётке (IMAP Mail.ru) — другая беседа, письма там нет (аудит
+    // 2026-11-14 №3: открывалась она и сразу).
+    if (c.accountKey != t.account) return false
+    // Свой адрес — часть набора (§4 десктопа «Чем опознаётся диалог»): беседа
+    // с тем же собеседником от другого своего адреса — не та. Свой адрес
+    // беседы — From письма или один из своих адресатов (себе в копию).
+    val mine = c.receivedBy.lowercase()
+    if (mine.isNotEmpty() && t.from.isNotEmpty() && mine != t.from && mine !in t.addrs) return false
+    val target = t.addrs
     val cps = c.counterparts.map { it.addr.lowercase() }.filter { it.isNotEmpty() }.toSet()
     // Свои адреса среди адресатов (письмо себе и ещё кому-то) в собеседники не
     // входят — сверяем без них.
@@ -727,6 +739,18 @@ internal fun searchConversations(convs: List<Conversation>, q: String): List<Con
     val byAddr = convs.filter { c -> c !in byName && (c.counterparts.any { it.addr.lowercase().contains(needle) || it.name.lowercase().contains(needle) } || c.receivedBy.lowercase().contains(needle)) }
     val bySubj = convs.filter { c -> c !in byName && c !in byAddr && c.lastSubject.lowercase().contains(needle) }
     return byName + byAddr + bySubj
+}
+
+/**
+ * Адресаты своего пузыря — `recipients_tip` десктопа: «Кому: …» (пусто —
+ * «—»), строкой ниже «Копия: …», если есть. У входящего — ничего.
+ */
+internal fun recipientsTip(b: MessageBody): List<String> {
+    if (!b.isOutgoing) return emptyList()
+    fun join(v: List<String>) = v.map { it.trim() }.filter { it.isNotEmpty() }.joinToString(", ")
+    val to = join(b.to)
+    val cc = join(b.cc)
+    return listOf("Кому: ${to.ifEmpty { "—" }}") + if (cc.isEmpty()) emptyList() else listOf("Копия: $cc")
 }
 
 /** Открытое меню пузыря: письмо и где пузырь на экране (`null` — неизвестно). */
