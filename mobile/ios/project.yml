@@ -76,6 +76,10 @@ targets:
           - ru.letotam.ddmail.refresh
           - ru.letotam.ddmail.prefetch
         UIBackgroundModes: [fetch, processing]
+        # Экспортный контроль (App Store Connect): своего шифрования нет —
+        # только то, что даёт ОС (HTTPS/TLS через URLSession и Network.framework),
+        # это освобождённое шифрование; без ключа каждая сборка ждёт анкету.
+        ITSAppUsesNonExemptEncryption: false
         # Какое окружение APNs у токена этой сборки — серверу при регистрации.
         DDMailAPSEnvironment: $(DDMAIL_APS_ENVIRONMENT)
         DDMailAppGroup: $(DDMAIL_APP_GROUP)

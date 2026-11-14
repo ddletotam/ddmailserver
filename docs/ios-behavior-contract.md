@@ -125,6 +125,7 @@ mobile/ios/scripts/mac.sh run iphone|ipad  # поставить в симуля�
 mobile/ios/scripts/mac.sh uitest           # сквозные UI-тесты на настоящем сервере, скриншоты шагов
 mobile/ios/scripts/mac.sh device iphone    # собрать с подписью и поставить на устройство (devicectl)
 mobile/ios/scripts/mac.sh install          # Мак: собрать с подписью, поставить в /Applications/DDMail.app, запустить, снимок экрана сюда
+mobile/ios/scripts/mac.sh archive ios|mac [upload]  # релизный архив App Store: экспорт .ipa/.pkg или загрузка в App Store Connect
 ```
 
 - Хост — алиас `mac` в `~/.ssh/config` станции. Каталог на Маке —
@@ -191,6 +192,16 @@ mobile/ios/scripts/mac.sh install          # Мак: собрать с подп�
   Group Xcode заводит сам (`-allowProvisioningUpdates`) по ключу App Store
   Connect API из `~/.config/ddmail-ios/asc.env`: `mac.sh` кладёт его на Мак
   во временный каталог (700, файл 600) только на время сборки и удаляет.
+- **Релиз в App Store / TestFlight** — `mac.sh archive ios|mac [upload]`:
+  Release (`aps-environment=production`), подпись Apple Distribution и
+  профили App Store для приложения и NSE заводит Xcode по ключу ASC
+  (`-allowProvisioningUpdates`). Без `upload` — только экспорт в
+  `~/build/ddmail/export-<ios|mac>` на Маке, с `upload` — загрузка
+  (`destination=upload` в ExportOptions). Номер сборки
+  (`CURRENT_PROJECT_VERSION`) в App Store Connect должен расти: повторно
+  загрузить тот же номер нельзя. Своего шифрования нет, только TLS ОС:
+  `ITSAppUsesNonExemptEncryption=NO` в Info.plist. Карточка, анкеты и
+  демо-учётка для ревью описаны в `docs/appstore-listing.md`.
 
 ## 2. API и сессия — решено
 

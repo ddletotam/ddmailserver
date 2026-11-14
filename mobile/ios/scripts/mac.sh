@@ -9,6 +9,8 @@
 #   mac.sh device [iphone|ipad]  собрать с подписью, поставить на устройство, запустить
 #   mac.sh install         Мак: собрать с подписью, поставить в /Applications/DDMail.app,
 #                          запустить, снимок экрана — сюда
+#   mac.sh archive [ios|mac] [upload]  релизный архив (Release, App Store-подпись),
+#                          экспорт .ipa/.pkg или сразу загрузка в App Store Connect
 #
 # Окружение: DDMAIL_MAC (ssh-хост, по умолчанию `mac`),
 #            DDMAIL_SHOTS (куда класть скриншоты, по умолчанию ~/.cache/ddmail-ios),
@@ -73,7 +75,10 @@ asc_upload() {
 remote() {
     # Общая часть для команд на Маке: PATH к xcodegen, выход при ошибке.
     # Команда подписи и ключ ASC — окружением (не секреты: путь и id).
-    ssh "$HOST" "DDMAIL_TEAM='${DDMAIL_TEAM:-}' ASC_PATH='$ASC_REMOTE' ASC_ID='${ASC_KEY_ID:-}' ASC_ISSUER='${ASC_ISSUER_ID:-}' bash -s" -- "$@" <<'EOF'
+    # Аргументы — экранированной строкой: ssh склеивает их через пробел, и
+    # пустой аргумент (нет пароля связки, нет ящика Mail.ru) пропадал, сдвигая
+    # следующие — `uitest … Класс/тест` запускал весь набор.
+    ssh "$HOST" "DDMAIL_TEAM='${DDMAIL_TEAM:-}' ASC_PATH='$ASC_REMOTE' ASC_ID='${ASC_KEY_ID:-}' ASC_ISSUER='${ASC_ISSUER_ID:-}' bash -s -- $(printf '%q ' "$@")" <<'EOF'
 set -euo pipefail
 export PATH="$HOME/.local/xcodegen/bin:$PATH"
 cd "$HOME/build/ddmail/mobile/ios"
@@ -228,6 +233,57 @@ case "$cmd" in
         screencapture -x "$HOME/build/ddmail/shot.png" 2>/dev/null || true
         echo "install: /Applications/DDMail.app $(defaults read /Applications/DDMail.app/Contents/Info.plist CFBundleShortVersionString)"
         ;;
+    archive)
+        # Релизный архив для App Store Connect / TestFlight (контракт §1):
+        # Release (aps-environment=production), подпись Apple Distribution и
+        # профили App Store для приложения и NSE — автоматически по ключу ASC.
+        # Второй аргумент `upload` — сразу загрузить в App Store Connect, иначе
+        # только экспорт (.ipa / .pkg) в ~/build/ddmail/export-<платформа>.
+        plat="${1:-ios}"; mode="${2:-export}"
+        gen
+        team="$(team_id)"
+        [ -n "$team" ] || { echo "нет команды подписи (DDMAIL_TEAM)" >&2; exit 1; }
+        [ -n "${ASC_PATH:-}" ] || { echo "нет ключа App Store Connect API (asc.env)" >&2; exit 1; }
+        if [ -n "${3:-}" ]; then security unlock-keychain -p "$3" login.keychain; fi
+        case "$plat" in
+            ios) dest="generic/platform=iOS" ;;
+            mac) dest="generic/platform=macOS" ;;
+            *) echo "платформа: ios или mac" >&2; exit 2 ;;
+        esac
+        ar="$HOME/build/ddmail/DDMail-$plat.xcarchive"
+        out="$HOME/build/ddmail/export-$plat"
+        rm -rf "$ar" "$out"
+        log="$HOME/build/ddmail/archive-$plat.log"
+        rc=0
+        xcodebuild -project DDMail.xcodeproj -scheme DDMail -configuration Release \
+            -destination "$dest" -derivedDataPath "$HOME/build/ddmail/DerivedData-release" \
+            -clonedSourcePackagesDirPath "$SPM" -archivePath "$ar" \
+            $(sign_args "$team") archive >"$log" 2>&1 || rc=$?
+        if [ "$rc" != 0 ]; then grep -E "error:|ARCHIVE FAILED" "$log" | tail -20; exit "$rc"; fi
+        if [ "$mode" = upload ]; then destination=upload; else destination=export; fi
+        opts="$HOME/build/ddmail/ExportOptions-$plat.plist"
+        cat >"$opts" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>method</key><string>app-store-connect</string>
+    <key>destination</key><string>$destination</string>
+    <key>teamID</key><string>$team</string>
+    <key>signingStyle</key><string>automatic</string>
+    <key>uploadSymbols</key><true/>
+    <key>manageAppVersionAndBuildNumber</key><false/>
+</dict>
+</plist>
+PLIST
+        xcodebuild -exportArchive -archivePath "$ar" -exportPath "$out" -exportOptionsPlist "$opts" \
+            $(sign_args "$team") >>"$log" 2>&1 || rc=$?
+        grep -E "error:|EXPORT (SUCCEEDED|FAILED)|Upload succeeded|Uploaded" "$log" | tail -20
+        [ "$rc" = 0 ] || exit "$rc"
+        ls -la "$out" 2>/dev/null || true
+        pb() { /usr/libexec/PlistBuddy -c "Print :ApplicationProperties:$1" "$ar/Info.plist"; }
+        echo "archive: $plat $(pb CFBundleShortVersionString) ($(pb CFBundleVersion)), $(pb SigningIdentity) → $destination"
+        ;;
     device)
         kind="${1:-iphone}"
         gen
@@ -305,6 +361,11 @@ case "$cmd" in
         mkdir -p "$SHOTS"
         out="$SHOTS/mac-$(date +%H%M%S).png"
         if scp -q "$HOST:$REMOTE/shot.png" "$out" 2>/dev/null; then echo "скриншот: $out"; fi
+        ;;
+    archive)
+        sync_code
+        asc_upload
+        remote archive "${2:-ios}" "${3:-export}" "${DDMAIL_KEYCHAIN_PASSWORD:-}"
         ;;
     device)
         sync_code
