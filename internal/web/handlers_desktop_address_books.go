@@ -41,12 +41,13 @@ func (s *Server) HandleDesktopAddressBooks(w http.ResponseWriter, r *http.Reques
 	for _, cs := range sources {
 		bySource[cs.ID] = src{cs.Name, cs.IdentityEmail}
 	}
+	defaultName := s.userText(user, "contacts.default_book_name")
 	out := make([]DesktopAddressBook, 0, len(books))
 	for _, b := range books {
 		sv := bySource[b.SourceID]
 		out = append(out, DesktopAddressBook{
 			ID:            b.ID,
-			Name:          b.Name,
+			Name:          b.DisplayName(defaultName),
 			SourceName:    sv.name,
 			SourceType:    b.SourceType,
 			IdentityEmail: sv.identity,

@@ -98,6 +98,9 @@ func (t *ContactSyncTask) doSync(ctx context.Context) error {
 	} else if pruned {
 		log.Printf("Removed placeholder address book for %s — discovery now returns real collections", t.source.Name)
 	}
+	if _, err := t.database.PruneVanishedAddressBooks(t.source.ID, t.source.CardDAVURL, addressBooks); err != nil {
+		log.Printf("Failed to prune vanished address books for %s: %v", t.source.Name, err)
+	}
 
 	// Sync each address book
 	for _, remoteBook := range addressBooks {

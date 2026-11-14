@@ -283,6 +283,7 @@
   "contacts.title": "Контакты",
   "contacts.sources": "Источники контактов",
   "contacts.address_books": "Адресные книги",
+  "contacts.default_book_name": "Контакты",
   "contacts.new_local": "Новая локальная адресная книга",
   "contacts.add_carddav": "Добавить CardDAV источник",
   "contacts.source_name": "Название источника",

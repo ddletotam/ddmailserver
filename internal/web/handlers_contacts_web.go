@@ -467,6 +467,9 @@ func (s *Server) syncContactSource(ctx context.Context, source *models.ContactSo
 	} else if pruned {
 		log.Printf("Removed placeholder address book for %s — discovery now returns real collections", source.Name)
 	}
+	if _, err := s.database.PruneVanishedAddressBooks(source.ID, source.CardDAVURL, addressBooks); err != nil {
+		log.Printf("Failed to prune vanished address books for %s: %v", source.Name, err)
+	}
 
 	var syncErrors []string
 

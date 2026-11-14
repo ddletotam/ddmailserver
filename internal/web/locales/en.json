@@ -283,6 +283,7 @@
   "contacts.title": "Contacts",
   "contacts.sources": "Contact Sources",
   "contacts.address_books": "Address Books",
+  "contacts.default_book_name": "Contacts",
   "contacts.new_local": "New Local Address Book",
   "contacts.add_carddav": "Add CardDAV Source",
   "contacts.source_name": "Source Name",

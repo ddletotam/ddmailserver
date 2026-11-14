@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"net/url"
 	"strings"
 
 	"github.com/ddletotam/ddmailserver/internal/models"
@@ -277,28 +278,122 @@ func (db *DB) PruneDirectURLAddressBook(sourceID int64, sourceURL string) (bool,
 		return false, nil
 	}
 
-	var id int64
-	var count int
-	err := db.QueryRow(`
+	// The placeholder took the source URL as typed at the time; the source may
+	// have been saved with or without the trailing slash since. Both spellings
+	// name the same placeholder (one row of a Yandex source on prod stayed for
+	// weeks because of exactly this).
+	rows, err := db.Query(`
 		SELECT ab.id, (SELECT COUNT(*) FROM contacts c WHERE c.address_book_id = ab.id)
 		FROM address_books ab
-		WHERE ab.source_id = $1 AND ab.remote_id = $2
-	`, sourceID, sourceURL).Scan(&id, &count)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
+		WHERE ab.source_id = $1 AND rtrim(ab.remote_id, '/') = rtrim($2, '/')
+	`, sourceID, strings.TrimSpace(sourceURL))
 	if err != nil {
 		return false, fmt.Errorf("failed to look up direct-URL address book: %w", err)
 	}
-
-	if count > 0 {
-		return false, nil
+	var empty []int64
+	for rows.Next() {
+		var id int64
+		var count int
+		if err := rows.Scan(&id, &count); err != nil {
+			rows.Close()
+			return false, fmt.Errorf("failed to scan direct-URL address book: %w", err)
+		}
+		if count == 0 {
+			empty = append(empty, id)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("failed to look up direct-URL address book: %w", err)
 	}
 
-	if _, err := db.Exec(`DELETE FROM address_books WHERE id = $1`, id); err != nil {
-		return false, fmt.Errorf("failed to delete direct-URL address book %d: %w", id, err)
+	for _, id := range empty {
+		if _, err := db.Exec(`DELETE FROM address_books WHERE id = $1`, id); err != nil {
+			return false, fmt.Errorf("failed to delete direct-URL address book %d: %w", id, err)
+		}
 	}
-	return true, nil
+	return len(empty) > 0, nil
+}
+
+// isDirectURLBook — книга-заглушка, заведённая на адрес источника, когда
+// обнаружение не сработало (см. useDirectAddressBookURL). Слэш в конце не в
+// счёт: адрес источника сохраняли то с ним, то без.
+func isDirectURLBook(remoteID, sourceURL string) bool {
+	sourceURL = strings.TrimRight(strings.TrimSpace(sourceURL), "/")
+	return sourceURL != "" && strings.TrimRight(remoteID, "/") == sourceURL
+}
+
+// sameCollection — один ли это путь коллекции: сервер может отдать href то с
+// %40, то с @ (Яндекс отдаёт /addressbook/user%40domain/1/).
+func sameCollection(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ua, errA := url.PathUnescape(a)
+	ub, errB := url.PathUnescape(b)
+	return errA == nil && errB == nil && ua == ub
+}
+
+// PruneVanishedAddressBooks удаляет книги источника, которых больше нет в
+// ответе обнаружения, вместе с их контактами. Возвращает имена удалённых.
+//
+// Зачем: Яндекс в сентябре 2026 отдал коллекции под другими путями
+// (organization:…:0/, user:…:0/ рядом с /1/ и /2/), синк завёл их отдельными
+// книгами, а потом пути пропали — книги остались навсегда, не синкались и
+// показывались клиентам. Запись в такую «призрачную» книгу уходила PUT'ом по
+// старому пути, Яндекс клал карточку в настоящую коллекцию, и следующий синк
+// приносил её второй раз — уже в «Personal» (аудит 2026-11-14, №7).
+//
+// Удаляем, только когда обнаружение ответило по-настоящему: непустой список
+// без заглушки на адрес источника (заглушка = обнаружение упало, список ничего
+// не говорит о том, каких книг нет). Заглушки не трогаем — их судьба у
+// PruneDirectURLAddressBook. Книгу с неотправленными правками
+// (contact_sync_queue) не трогаем: правка ещё должна уйти наверх.
+func (db *DB) PruneVanishedAddressBooks(sourceID int64, sourceURL string, discovered []*models.AddressBook) ([]string, error) {
+	if len(discovered) == 0 {
+		return nil, nil
+	}
+	for _, d := range discovered {
+		if d.RemoteID == "" || isDirectURLBook(d.RemoteID, sourceURL) {
+			return nil, nil
+		}
+	}
+
+	books, err := db.GetAddressBooksBySourceID(sourceID)
+	if err != nil {
+		return nil, err
+	}
+	var pruned []string
+	for _, b := range books {
+		if b.RemoteID == "" || isDirectURLBook(b.RemoteID, sourceURL) {
+			continue
+		}
+		found := false
+		for _, d := range discovered {
+			if sameCollection(b.RemoteID, d.RemoteID) {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+		res, err := db.Exec(`
+			DELETE FROM address_books ab
+			WHERE ab.id = $1
+			  AND NOT EXISTS (SELECT 1 FROM contact_sync_queue q WHERE q.address_book_id = ab.id)
+		`, b.ID)
+		if err != nil {
+			return pruned, fmt.Errorf("failed to delete vanished address book %d: %w", b.ID, err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			log.Printf("Address book %d (%s) is gone from the server but has unsent changes — kept for now", b.ID, b.RemoteID)
+			continue
+		}
+		log.Printf("Address book %d (%q, %s) is gone from the server — removed with its contacts", b.ID, b.Name, b.RemoteID)
+		pruned = append(pruned, b.Name)
+	}
+	return pruned, nil
 }
 
 // PruneDirectURLAddressBookIfDiscovered is the contacts counterpart of
@@ -307,7 +402,7 @@ func (db *DB) PruneDirectURLAddressBook(sourceID int64, sourceURL string) (bool,
 func (db *DB) PruneDirectURLAddressBookIfDiscovered(sourceID int64, sourceURL string, discovered []*models.AddressBook) (bool, error) {
 	worked := false
 	for _, b := range discovered {
-		if b.RemoteID != sourceURL {
+		if !isDirectURLBook(b.RemoteID, sourceURL) {
 			worked = true
 			break
 		}

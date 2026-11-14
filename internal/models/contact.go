@@ -96,6 +96,16 @@ type AddressBook struct {
 	CanWriteKnown bool `json:"-"`
 }
 
+// DisplayName — имя книги для людей. Коллекция без displayname (Яндекс отдаёт
+// личную книгу пустым именем) иначе выглядит в клиентах как « · AppSec»;
+// пустое имя заменяется fallback — «Контакты» на языке пользователя.
+func (b *AddressBook) DisplayName(fallback string) string {
+	if name := strings.TrimSpace(b.Name); name != "" {
+		return name
+	}
+	return fallback
+}
+
 // Writable — принимает ли книга создание, правку и удаление контактов.
 // Каталоги LDAP и импортированные книги только для чтения, даже если флаг
 // can_write у них почему-то стоит (как taskWritable у календарей).

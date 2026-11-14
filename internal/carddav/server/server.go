@@ -14,6 +14,7 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/clientip"
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/web/locales"
 	"github.com/emersion/go-vcard"
 )
 
@@ -30,15 +31,50 @@ type Server struct {
 	prefix      string
 	authLimiter *authlimit.Limiter
 	clientIP    *clientip.Resolver
+	// defaultBookNames — имя книги без displayname по языкам («ru», «en»).
+	defaultBookNames map[string]string
 }
 
 // New creates a new CardDAV server
 func New(database *db.DB, prefix string) *Server {
 	return &Server{
-		database: database,
-		prefix:   prefix,
-		clientIP: clientip.Default(),
+		database:         database,
+		prefix:           prefix,
+		clientIP:         clientip.Default(),
+		defaultBookNames: loadDefaultBookNames(),
 	}
+}
+
+// loadDefaultBookNames читает из каталогов переводов имя для книги без
+// displayname (contacts.default_book_name).
+func loadDefaultBookNames() map[string]string {
+	out := map[string]string{}
+	for _, l := range []string{"ru", "en"} {
+		m, err := locales.Load(l)
+		if err != nil {
+			log.Printf("CardDAV: %v", err)
+			continue
+		}
+		if v := m["contacts.default_book_name"]; v != "" {
+			out[l] = v
+		}
+	}
+	return out
+}
+
+// bookName — displayname книги для клиента: своё имя или «Контакты» на языке
+// пользователя (по умолчанию русский, как у веб-интерфейса).
+func (s *Server) bookName(user *models.User, book *models.AddressBook) string {
+	fallback := s.defaultBookNames["ru"]
+	if user != nil {
+		if v := s.defaultBookNames[user.Language]; v != "" {
+			fallback = v
+		}
+	}
+	if fallback == "" {
+		fallback = "Contacts"
+	}
+	return book.DisplayName(fallback)
 }
 
 // ServeHTTP handles CardDAV requests
@@ -217,7 +253,7 @@ func (s *Server) propfindAddressBookHome(user *models.User, depth string) string
       </D:prop>
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
-  </D:response>`, bookURL, xmlEscape(book.Name), privilegeSet(book))
+  </D:response>`, bookURL, xmlEscape(s.bookName(user, book)), privilegeSet(book))
 			}
 		}
 	}
@@ -259,7 +295,7 @@ func (s *Server) propfindAddressBook(user *models.User, bookID int64, depth stri
       </D:prop>
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
-  </D:response>`, bookURL, xmlEscape(book.Name), privilegeSet(book))
+  </D:response>`, bookURL, xmlEscape(s.bookName(user, book)), privilegeSet(book))
 
 	// If depth > 0, include contacts
 	if depth != "0" {
