@@ -213,6 +213,17 @@ case "$cmd" in
         # Мак-версия для работы: та же отладочная сборка, что у `uitest mac`,
         # подписанная командой; запущенная копия закрывается, новая ставится
         # в /Applications и запускается. Снимок экрана — screencapture.
+        # Сборку из TestFlight / App Store (квитанция _MASReceipt, подпись Apple)
+        # не затирать: отладочная подменила бы её молча — окружение APNs
+        # sandbox вместо production, права разработчика (так было с 0.0.14).
+        # Заменить всё же — DDMAIL_REPLACE_STORE=1.
+        if [ -d /Applications/DDMail.app ] && [ -z "${DDMAIL_REPLACE_STORE:-}" ] && {
+            [ -e /Applications/DDMail.app/Contents/_MASReceipt ] ||
+            codesign -dvv /Applications/DDMail.app 2>&1 | grep -q "Authority=Apple Mac OS Application Signing"
+        }; then
+            echo "install: в /Applications сборка из TestFlight/App Store — не заменяю (DDMAIL_REPLACE_STORE=1 — заменить)" >&2
+            exit 1
+        fi
         gen
         team="$(team_id)"
         [ -n "$team" ] || { echo "нет команды подписи (DDMAIL_TEAM или учётка Xcode)" >&2; exit 1; }

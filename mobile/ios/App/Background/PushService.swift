@@ -23,6 +23,7 @@ final class PushService {
     let registry: PushRegistry
     private weak var workspace: Workspace?
     private var observing = false
+    private var observingActivation = false
 
     private init() {
         // Окружение APNs — из права `aps-environment` этой сборки (project.yml
@@ -43,16 +44,41 @@ final class PushService {
     func attach(_ workspace: Workspace) {
         self.workspace = workspace
         observeCacheChanges()
-        Task {
-            let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
-            // Без разрешения видимый push не покажется и расширение не проснётся.
-            guard status == .authorized || status == .provisional else { return }
-            #if os(iOS)
-            UIApplication.shared.registerForRemoteNotifications()
-            #else
-            NSApplication.shared.registerForRemoteNotifications()
-            #endif
-            await sync()
+        observeActivation()
+        Task { await register() }
+    }
+
+    /// Токен у системы и регистрации учёток — если уведомления разрешены.
+    private func register() async {
+        guard workspace != nil else { return }
+        let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+        // Без разрешения видимый push не покажется и расширение не проснётся.
+        guard status == .authorized || status == .provisional else {
+            pushLog.notice("push: notifications not authorized (\(status.rawValue, privacy: .public)), no token")
+            return
+        }
+        #if os(iOS)
+        UIApplication.shared.registerForRemoteNotifications()
+        #else
+        NSApplication.shared.registerForRemoteNotifications()
+        #endif
+        await sync()
+    }
+
+    /// Приложение стало активным — повторить. Уведомления разрешают в
+    /// Системных настройках при запущенном приложении: на Маке окно при этом
+    /// остаётся `scenePhase == .active` (оно видно и без фокуса), и без
+    /// этого токен не просили до перезапуска (0.0.15, Мак без push).
+    private func observeActivation() {
+        guard !observingActivation else { return }
+        observingActivation = true
+        #if os(iOS)
+        let name = UIApplication.didBecomeActiveNotification
+        #else
+        let name = NSApplication.didBecomeActiveNotification
+        #endif
+        NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in
+            Task { @MainActor in await PushService.shared.register() }
         }
     }
 
