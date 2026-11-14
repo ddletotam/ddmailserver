@@ -132,6 +132,36 @@ struct DialogFoldersTests {
         #expect(doc.assign([spam], to: nil).folderOf(spam) == si)
     }
 
+    /// Документ с сервера (или локальный), где другой клиент снял «скрыта» с
+    /// «Спама», — после чтения папка снова скрыта, и в JSON тоже.
+    @Test func normalizeRepairsUnhiddenSpamFromJSON() throws {
+        let src = #"""
+        {"v":2,"folders":[{"id":"spam","name":"Спам","icon":"🚫","rules":{},"hidden":false,
+            "auto_read":true,"system":"spam","x":1}]}
+        """#
+        let doc = SyncEngine.parseFolders(src)
+        let f = try #require(doc.folders.first)
+        #expect(doc.folders.count == 1)
+        #expect(f.hidden)
+        #expect(!f.autoRead)
+        let out = try #require(doc.toJSON()["folders"]?.array?.first)
+        #expect(out["hidden"] == .bool(true))
+        #expect(out["x"] == .int(1))
+        #expect(doc.hiddenCount == 1)
+    }
+
+    /// Таб «Спама» — только по «Показать скрытые» или когда в него привели.
+    @Test func spamTabHiddenUnlessShowHiddenOrActive() throws {
+        let doc = FoldersDoc(folders: [folder("a")]).withSpam()
+        let si = try #require(doc.spamIndex)
+        #expect(!doc.tabVisible(si, showHidden: false, active: nil))
+        #expect(!doc.tabVisible(si, showHidden: false, active: 0))
+        #expect(doc.tabVisible(si, showHidden: true, active: nil))
+        #expect(doc.tabVisible(si, showHidden: false, active: si))
+        #expect(doc.tabVisible(0, showHidden: false, active: nil))
+        #expect(doc.hiddenCount == 1)
+    }
+
     @Test func withSpamIsIdempotentRepairsAndRoundtrips() {
         let once = FoldersDoc().withSpam()
         #expect(once.folders == once.withSpam().folders)
@@ -176,7 +206,7 @@ struct DialogFoldersTests {
             $0.hidden = true
         }
         #expect(doc.updating("spam") { $0.name = "x" }.folders[2].name == "Спам")
-        #expect(doc.hiddenCount == 1)
+        #expect(doc.hiddenCount == 2) // и «Спам»: он скрыт всегда
 
         // Через JSON — всё, что поправили.
         let back = FoldersDoc.parse(JSONValue.parse(doc.toJSON().data())).withSpam()
@@ -190,7 +220,6 @@ struct DialogFoldersTests {
 
         doc = doc.removing(id).removing("spam")
         #expect(doc.folders.map(\.id) == ["a", "spam"])
-        #expect(doc.onlySystem().folders.map(\.id) == ["spam"])
         #expect(clipFolderIcon(" 👨‍👩‍👧‍👦🇷🇺abc ") == "👨‍👩‍👧‍👦🇷🇺ab")
     }
 }

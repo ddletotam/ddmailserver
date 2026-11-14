@@ -142,6 +142,37 @@ class DialogFoldersTest {
         assertEquals(si, doc.assign(listOf(spam), null).folderOf(spam))
     }
 
+    /**
+     * Документ с сервера (или локальный), где другой клиент снял «скрыта» с
+     * «Спама», — после чтения папка снова скрыта, и в JSON тоже.
+     */
+    @Test
+    fun normalizeRepairsUnhiddenSpamFromJson() {
+        val text = """{"folders":[{"id":"spam","name":"Спам","icon":"🚫","rules":{},"hidden":false,""" +
+            """"auto_read":true,"system":"spam","x":1}],"v":2}"""
+        val doc = FoldersDoc.parse(Json.parseToJsonElement(text)).withSpam()
+        val f = doc.folders.single()
+        assertTrue(f.hidden)
+        assertTrue(!f.autoRead)
+        val out = doc.toJson()["folders"]!!.jsonArray[0].jsonObject
+        assertEquals("true", out["hidden"].toString())
+        assertEquals(1, out["x"]!!.jsonPrimitive.int)
+        assertEquals(1, doc.hiddenCount)
+    }
+
+    /** Таб «Спама» — только по «Показать скрытые» или когда в него привели. */
+    @Test
+    fun spamTabHiddenUnlessShowHiddenOrActive() {
+        val doc = FoldersDoc(listOf(folder("a"))).withSpam()
+        val si = doc.spamIndex!!
+        assertTrue(!doc.tabVisible(si, showHidden = false, active = null))
+        assertTrue(!doc.tabVisible(si, showHidden = false, active = 0))
+        assertTrue(doc.tabVisible(si, showHidden = true, active = null))
+        assertTrue(doc.tabVisible(si, showHidden = false, active = si))
+        assertTrue(doc.tabVisible(0, showHidden = false, active = null))
+        assertEquals(1, doc.hiddenCount)
+    }
+
     @Test
     fun withSpamIsIdempotentRepairsAndRoundtrips() {
         val once = FoldersDoc().withSpam()

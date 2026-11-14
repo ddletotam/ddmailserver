@@ -712,7 +712,10 @@ private fun ListPane(
  */
 @Composable
 private fun FolderTabs(s: MailState, vm: MailViewModel) {
-    if (s.tabs.isEmpty()) return
+    // Папок нет — полосы нет; все скрыты (хотя бы «Спам» — он скрыт всегда) —
+    // полоса есть, пустая, с меню «Показать скрытые» по долгому нажатию, как
+    // у десктопа.
+    if (s.tabs.isEmpty() && s.hiddenCount == 0) return
     // Меню открыто: на табе (`tab != null`) или на полосе.
     var menuFor by remember { mutableStateOf<FolderTab?>(null) }
     var stripMenu by remember { mutableStateOf(false) }
@@ -744,7 +747,8 @@ private fun FolderTabs(s: MailState, vm: MailViewModel) {
         if (menuFor == null) stripMenu = true
     }
     Box(
-        Modifier.fillMaxWidth().pointerInput(Unit) {
+        // Высота — и без табов (все скрыты): долгому нажатию нужно место.
+        Modifier.fillMaxWidth().heightIn(min = 40.dp).pointerInput(Unit) {
             detectTapGestures(onLongPress = { stripAsk++ })
         },
     ) {

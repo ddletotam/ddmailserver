@@ -22,8 +22,10 @@ import kotlinx.serialization.json.contentOrNull
  * объект держит исходный JSON и при записи меняет в нём только своё.
  *
  * Системная папка «Спам» (`system: "spam"`): состав задаёт сервер (беседы с
- * `spam`), а не правила и не руки; всегда скрыта. Android всегда подключён к
- * серверу ddmail, поэтому она есть всегда ([withSpam]).
+ * `spam`), а не правила и не руки; всегда скрыта — таб только по «Показать
+ * скрытые» или когда в неё привели ([tabVisible]). Документ нормализуется
+ * при каждом чтении ([withSpam]), так что `hidden: false` от другого клиента
+ * не доживает до экрана.
  */
 enum class DialogKind { Any, Direct, Group }
 
@@ -195,6 +197,18 @@ data class FoldersDoc(
         }
         return out.toList() to inbox
     }
+
+    /**
+     * Таб папки [i] виден в полосе: не скрыта, или включено «Показать
+     * скрытые» (на сессию), или в неё привели ([active] — открытие беседы из
+     * неё). «Спам» — скрытая папка, как любая другая (десктоп
+     * `refresh_folder_tabs`): исключений для неё нет.
+     */
+    fun tabVisible(i: Int, showHidden: Boolean, active: Int?): Boolean =
+        !folders[i].hidden || showHidden || i == active
+
+    /** Скрытых папок, «Спам» тоже, — для «Показать скрытые (N)» (`hidden-folders` десктопа). */
+    val hiddenCount: Int get() = folders.count { it.hidden }
 
     /** Индекс папки по id. */
     fun indexOf(id: String): Int? = folders.indexOfFirst { it.id == id }.takeIf { it >= 0 }

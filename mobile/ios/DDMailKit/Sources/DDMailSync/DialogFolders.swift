@@ -291,9 +291,17 @@ extension DialogKind {
 // MARK: Правка документа (раздел «Папки» настроек, меню полосы табов)
 
 extension FoldersDoc {
-    /// Скрытых папок — для «Показать скрытые (N)» (как `hidden-folders`
-    /// десктопа; «Спам» у мобильных — всегда таб, его не считаем).
-    public var hiddenCount: Int { folders.filter { $0.hidden && !$0.isSystem }.count }
+    /// Скрытых папок, «Спам» тоже, — для «Показать скрытые (N)» (как
+    /// `hidden-folders` десктопа).
+    public var hiddenCount: Int { folders.filter(\.hidden).count }
+
+    /// Таб папки `i` виден в полосе: не скрыта, или включено «Показать
+    /// скрытые» (на сессию), или в неё привели (`active` — открытие беседы из
+    /// неё). «Спам» — скрытая папка, как любая другая (десктоп
+    /// `refresh_folder_tabs`): исключений для неё нет.
+    public func tabVisible(_ i: Int, showHidden: Bool, active: Int?) -> Bool {
+        !folders[i].hidden || showHidden || i == active
+    }
 
     /// Папки, которые настраивают руками (системные — нет).
     public var userFolders: [DialogFolder] { folders.filter { !$0.isSystem } }
@@ -345,14 +353,6 @@ extension FoldersDoc {
         guard let i = index(of: id), !folders[i].isSystem else { return self }
         var doc = self
         edit(&doc.folders[i])
-        return doc
-    }
-
-    /// «Показывать папки» выключено (настройка устройства): список как без
-    /// папок — остаются только системные (у мобильных «Спам» — таб полосы).
-    public func onlySystem() -> FoldersDoc {
-        var doc = self
-        doc.folders = folders.filter(\.isSystem)
         return doc
     }
 }

@@ -228,9 +228,9 @@ final class MailModel {
         search?.refresh()
     }
 
-    /// Документ папок для списка: при выключенном «Показывать папки» — только
-    /// системные («Спам» остаётся табом).
-    var visibleDoc: FoldersDoc { foldersOn ? doc : doc.onlySystem() }
+    /// Документ папок для списка: при выключенном «Показывать папки» — пустой,
+    /// список как без папок: всё, кроме спама (десктоп `visible_view`).
+    var visibleDoc: FoldersDoc { foldersOn ? doc : FoldersDoc() }
 
     var selected: Conversation? { selectedID.flatMap { ref in all.first { $0.ref == ref } } }
 
