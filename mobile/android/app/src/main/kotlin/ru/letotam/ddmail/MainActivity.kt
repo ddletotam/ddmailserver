@@ -69,6 +69,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // Ответ на запрос POST_NOTIFICATIONS: разрешили — push регистрируется,
+    // запретили — снимается (будить телефон без уведомлений незачем).
+    // Activity Result API ради одного разрешения при запуске не заводим.
+    @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        app.push.syncLater()
+    }
+
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         handleOpen(intent)
@@ -77,6 +86,8 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         app.foreground = true
+        // Уведомления могли разрешить в системных настройках, пока нас не было.
+        app.push.syncLater()
     }
 
     override fun onStop() {

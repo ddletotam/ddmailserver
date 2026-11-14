@@ -52,6 +52,8 @@ class AppViewModel(private val app: DdmailApp) : ViewModel() {
         viewModelScope.launch {
             reload(connectIfEmpty = false)
             app.hub.setStatus(session.accountKey, AccountStatus.Ok)
+            // Вошли в ddmail — регистрация push на эту учётку (контракт §7).
+            app.push.syncLater()
         }
     }
 
@@ -85,6 +87,8 @@ class AppViewModel(private val app: DdmailApp) : ViewModel() {
             val ddmail = app.ddmailSession()
             app.hub.source(key)?.forget()
             if (ddmail?.accountKey == key) {
+                // Снять push с сервера, пока сессия есть.
+                app.push.forget(ddmail)
                 app.sessions.clear()
                 app.forgetSessionApi()
                 app.reminders.cancelAll()

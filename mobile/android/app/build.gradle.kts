@@ -6,6 +6,51 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// Секреты и ключи сборки — вне git, в каталоге станции (контракт §1, §7):
+// ~/.config/ddmail-android/ или %APPDATA%\ddmail-android\.
+val secrets = System.getenv("APPDATA")?.let { File(it, "ddmail-android") }
+    ?: File(System.getProperty("user.home"), ".config/ddmail-android")
+
+// Huawei Push Kit (сборка hms): agconnect-services.json из AppGallery Connect.
+// Плагин agconnect не нужен: Push Kit читает файл из assets, а App ID берём
+// из него сами. Нет файла — сборка собирается без push (фоновый синк).
+val agconnectJson = File(secrets, "agconnect-services.json")
+val hmsAppId: String = agconnectJson.takeIf { it.isFile }?.let { f ->
+    @Suppress("UNCHECKED_CAST")
+    val root = groovy.json.JsonSlurper().parse(f) as Map<String, Any?>
+    val client = root["client"] as? Map<String, Any?>
+    val app = root["app_info"] as? Map<String, Any?>
+    (client?.get("app_id") ?: app?.get("app_id"))?.toString()
+}.orEmpty()
+
+// RuStore Push (сборка rustore): project id из RuStore Консоли —
+// rustore.properties (`project_id=…`) станции. Нет — сборка без push.
+val rustoreProjectId: String = File(secrets, "rustore.properties").takeIf { it.isFile }?.let { f ->
+    Properties().apply { f.inputStream().use { load(it) } }.getProperty("project_id")
+}.orEmpty().trim()
+
+/** agconnect-services.json → assets сборки hms (только он, не весь каталог секретов). */
+abstract class AgconnectAssets : DefaultTask() {
+    @get:InputFiles
+    abstract val source: ConfigurableFileCollection
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun copy() {
+        val out = outputDir.get().asFile
+        out.deleteRecursively()
+        out.mkdirs()
+        source.files.filter { it.isFile }.forEach { it.copyTo(File(out, "agconnect-services.json"), overwrite = true) }
+    }
+}
+
+val agconnectAssets = tasks.register<AgconnectAssets>("agconnectAssets") {
+    source.from(agconnectJson.takeIf { it.isFile } ?: emptyList<File>())
+    outputDir.set(layout.buildDirectory.dir("generated/agconnect"))
+}
+
 android {
     namespace = "ru.letotam.ddmail"
     compileSdk = 35
@@ -17,23 +62,29 @@ android {
         minSdk = 29
         targetSdk = 35
         // Бампается при любой правке клиента (контракт §1).
-        versionCode = 37
-        versionName = "0.0.37"
+        versionCode = 38
+        versionName = "0.0.38"
     }
 
-    // Один код для Huawei и обычного Android: различается только доставка
-    // push (контракт §1, §7).
+    // Один код для Huawei и прочих Android: различается только доставка
+    // push (контракт §1, §7). hms — Huawei Push Kit (AppGallery, телефоны
+    // Huawei); rustore — RuStore Push (RuStore, остальные телефоны).
     flavorDimensions += "push"
     productFlavors {
-        create("hms") { dimension = "push" }
-        create("gms") { dimension = "push" }
+        create("hms") {
+            dimension = "push"
+            buildConfigField("String", "HMS_APP_ID", "\"$hmsAppId\"")
+            manifestPlaceholders["hmsAppId"] = hmsAppId
+            proguardFile("proguard-hms.pro")
+        }
+        create("rustore") {
+            dimension = "push"
+            buildConfigField("String", "RUSTORE_PROJECT_ID", "\"$rustoreProjectId\"")
+        }
     }
 
-    // Ключ подписи — вне git, в каталоге секретов станции (контракт §7):
-    // ~/.config/ddmail-android/ или %APPDATA%\ddmail-android\. Нет его —
+    // Ключ подписи — вне git, в каталоге секретов станции. Нет его —
     // release собирается неподписанным (на телефон такой не поставить).
-    val secrets = System.getenv("APPDATA")?.let { File(it, "ddmail-android") }
-        ?: File(System.getProperty("user.home"), ".config/ddmail-android")
     val keyProps = File(secrets, "keystore.properties")
     signingConfigs {
         if (keyProps.exists()) {
@@ -79,7 +130,15 @@ android {
     }
 }
 
+androidComponents {
+    onVariants(selector().withFlavor("push" to "hms")) { v ->
+        v.sources.assets?.addGeneratedSourceDirectory(agconnectAssets, AgconnectAssets::outputDir)
+    }
+}
+
 dependencies {
+    "hmsImplementation"(libs.hms.push)
+    "rustoreImplementation"(libs.rustore.push)
     implementation(project(":core:auth"))
     implementation(project(":core:sync"))
     implementation(libs.androidx.lifecycle.runtime.compose)

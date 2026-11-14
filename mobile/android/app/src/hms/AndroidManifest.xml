@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Сборка hms: Huawei Push Kit (контракт §7). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- App ID из agconnect-services.json станции; пусто — push нет. -->
+        <meta-data
+            android:name="com.huawei.hms.client.appid"
+            android:value="appid=${hmsAppId}" />
+        <!-- Токен — по явному запросу приложения (FlavorPush.requestToken). -->
+        <meta-data
+            android:name="push_kit_auto_init_enabled"
+            android:value="false" />
+        <!-- Только сама HMS Core шлёт сюда события: служба не экспортирована. -->
+        <service
+            android:name=".push.HmsPushService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.huawei.push.action.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>

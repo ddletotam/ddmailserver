@@ -196,6 +196,28 @@ class SessionApi(
         write("DELETE", "/contacts/$id", null)
     }
 
+    /**
+     * Регистрация устройства для push (контракт §7): [kind] — служба
+     * (`hms`, `rustore`), [topic] — имя пакета. Идемпотентна — шлётся при
+     * каждом запуске и смене токена. Ответ — доставляет ли сервер сейчас этой
+     * службой (без ключей службы токен хранится, push не идут).
+     */
+    suspend fun registerPushToken(kind: String, token: String, topic: String): Boolean {
+        val body = JsonObject(
+            mapOf("kind" to JsonPrimitive(kind), "token" to JsonPrimitive(token), "topic" to JsonPrimitive(topic)),
+        ).toString()
+        val reply = write("POST", "/push/token", body)
+        return runCatching {
+            (DdmailApi.json.parseToJsonElement(reply) as JsonObject)["delivery"]
+                .let { it is JsonPrimitive && it.content == "true" }
+        }.getOrDefault(false)
+    }
+
+    /** Снять регистрацию устройства (выход из учётки, уведомления выключены). */
+    suspend fun deletePushToken(kind: String, token: String) {
+        write("DELETE", "/push/token", JsonObject(mapOf("kind" to JsonPrimitive(kind), "token" to JsonPrimitive(token))).toString())
+    }
+
     private suspend fun write(method: String, path: String, json: String?): String = authed { token ->
         Request.Builder().url("$baseUrl/api/desktop/v1$path")
             .header("Authorization", "Bearer $token")

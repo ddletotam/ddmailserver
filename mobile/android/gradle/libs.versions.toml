@@ -16,6 +16,8 @@ webkit = "1.12.1"
 work = "2.10.0"
 angus = "2.0.5"
 angusActivation = "2.0.2"
+hmsPush = "6.13.0.301"
+rustorePush = "7.6.0"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
@@ -44,6 +46,8 @@ room-ktx = { module = "androidx.room:room-ktx", version.ref = "room" }
 room-compiler = { module = "androidx.room:room-compiler", version.ref = "room" }
 angus-smtp = { module = "org.eclipse.angus:smtp", version.ref = "angus" }
 angus-activation = { module = "org.eclipse.angus:angus-activation", version.ref = "angusActivation" }
+hms-push = { module = "com.huawei.hms:push", version.ref = "hmsPush" }
+rustore-push = { module = "ru.rustore.sdk:pushclient", version.ref = "rustorePush" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

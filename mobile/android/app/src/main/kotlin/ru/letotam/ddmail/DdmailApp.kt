@@ -28,6 +28,17 @@ import java.util.concurrent.TimeUnit
 
 /** Корень зависимостей приложения — вручную, без DI-фреймворка, пока их мало. */
 class DdmailApp : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        // Push сборки (hms / rustore): SDK, токен, регистрация (контракт §7).
+        push.start()
+    }
+
+    /** Push — служба сборки (`FlavorPush` из каталога flavor'а). */
+    val push: ru.letotam.ddmail.push.PushRegistrar by lazy {
+        ru.letotam.ddmail.push.PushRegistrar(this, ru.letotam.ddmail.push.FlavorPush)
+    }
+
     val http: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)

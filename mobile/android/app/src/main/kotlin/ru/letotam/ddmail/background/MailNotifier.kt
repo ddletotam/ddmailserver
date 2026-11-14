@@ -119,6 +119,17 @@ class MailNotifier(private val context: Context, private val settings: AppSettin
     companion object {
         const val CHANNEL = "mail"
 
+        /** Тихий канал синка по push (foreground-задача на Android 10–11). */
+        const val SYNC_CHANNEL = "sync"
+
+        fun ensureSyncChannel(context: Context) {
+            val nm = context.getSystemService(NotificationManager::class.java) ?: return
+            if (nm.getNotificationChannel(SYNC_CHANNEL) != null) return
+            nm.createNotificationChannel(
+                NotificationChannel(SYNC_CHANNEL, "Проверка почты", NotificationManager.IMPORTANCE_MIN),
+            )
+        }
+
         fun ensureChannel(context: Context) {
             val nm = context.getSystemService(NotificationManager::class.java) ?: return
             if (nm.getNotificationChannel(CHANNEL) != null) return

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Сборка rustore: RuStore Push (контракт §7). Инициализация — вручную в
+     FlavorPush.init (project id из BuildConfig), без автоинициализации по
+     meta-data: без project id SDK не должен подниматься вовсе. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application>
+        <!-- Экспорт требует SDK: события приносит приложение RuStore. Всё,
+             что служба делает по сообщению, — ставит синк с нашим сервером. -->
+        <service
+            android:name=".push.RuStorePushService"
+            android:exported="true"
+            tools:ignore="ExportedService">
+            <intent-filter>
+                <action android:name="ru.rustore.sdk.pushclient.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+        <meta-data
+            android:name="ru.rustore.sdk.pushclient.default_notification_icon"
+            android:resource="@drawable/ic_stat_mail" />
+        <meta-data
+            android:name="ru.rustore.sdk.pushclient.default_notification_channel_id"
+            android:value="mail" />
+    </application>
+</manifest>

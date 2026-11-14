@@ -11,6 +11,14 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // Push сборок (контракт §7): Huawei Push Kit — сборка hms, RuStore
+        // Push — сборка rustore. Каждый репозиторий отдаёт только свои группы.
+        maven("https://developer.huawei.com/repo/") {
+            content { includeGroupByRegex("com\\.huawei\\..*") }
+        }
+        maven("https://nexus-external.rustore.ru/repository/maven-rustore-exposed/") {
+            content { includeGroupByRegex("ru\\.rustore\\..*") }
+        }
     }
 }
 

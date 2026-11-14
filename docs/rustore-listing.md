@@ -6,8 +6,12 @@
 
 ## Сборка
 
-- Вариант `gms` (обычные Android-телефоны), релиз: `./gradlew assembleGmsRelease`
-  → `~/.cache/builds/gradle/ddmail-android/app/outputs/apk/gms/release/app-gms-release.apk`.
+- Вариант `rustore` (обычные Android-телефоны, RuStore Push; до 0.0.38 назывался `gms`),
+  релиз: `./gradlew assembleRustoreRelease`
+  → `~/.cache/builds/gradle/ddmail-android/app/outputs/apk/rustore/release/app-rustore-release.apk`.
+- Push: проект в RuStore Консоли («Push-уведомления» → «Проекты»), его ID — в
+  `~/.config/ddmail-android/rustore.properties` (`project_id=…`) станции сборки,
+  ID и сервисный токен — в `push.rustore` конфига сервера (android-behavior-contract §7).
 - Пакет `ru.letotam.ddmail`; подпись — постоянный ключ `~/.config/ddmail-android/release.jks`
   (сертификат SHA-256 `5307940420de9fb5f70444c4e1583394bb899828f81747e492cf7238fe0b17f5`).
   **Потеря ключа = невозможность выпускать обновления под тем же приложением**:

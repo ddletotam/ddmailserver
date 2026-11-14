@@ -4,7 +4,11 @@ import android.content.Context
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.ForegroundInfo
 import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
@@ -15,10 +19,11 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Фоновая синхронизация (контракт §4, §7; mobile-external-accounts §6): у
- * ddmail — страховка от потерянного push, у внешних IMAP-учёток — единственный
- * путь новой почты в фоне (push у них нет). Раз в ~15 минут (меньше Android
- * не даёт; точное время решает ОС): синк всех учёток, уведомления, докачка
- * тел по выбору пользователя. Ошибка одной учётки другим не мешает.
+ * ddmail — по push и страховкой от потерянного push, у внешних IMAP-учёток —
+ * единственный путь новой почты в фоне (push у них нет). Периодически раз в
+ * ~15 минут (меньше Android не даёт; точное время решает ОС) и разово —
+ * сразу по push ([runNow]): синк всех учёток, уведомления, докачка тел по
+ * выбору пользователя. Ошибка одной учётки другим не мешает.
  */
 class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
@@ -50,8 +55,42 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         return Result.success()
     }
 
+    /**
+     * Срочная задача по push на Android 10–11 идёт foreground-сервисом —
+     * ему нужно своё уведомление (тихое, на время синка). С Android 12
+     * срочная задача обходится без него.
+     */
+    override suspend fun getForegroundInfo(): ForegroundInfo {
+        val ctx = applicationContext
+        MailNotifier.ensureSyncChannel(ctx)
+        val n = androidx.core.app.NotificationCompat.Builder(ctx, MailNotifier.SYNC_CHANNEL)
+            .setSmallIcon(ru.letotam.ddmail.R.drawable.ic_stat_mail)
+            .setContentTitle("Проверка почты")
+            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_MIN)
+            .setSilent(true)
+            .setOngoing(true)
+            .build()
+        return ForegroundInfo(SYNC_NOTIFICATION_ID, n)
+    }
+
     companion object {
         private const val NAME = "mail-sync"
+        private const val PUSH_NAME = "mail-sync-push"
+        private const val SYNC_NOTIFICATION_ID = 0x5359_4e43
+
+        /**
+         * Синк сразу — пришёл push (контракт §7). Срочная задача: система
+         * запускает её без ожидания окна; квота срочных кончилась — обычная.
+         * Push во время идущего синка ставит ещё один проход следом, а не
+         * теряется: письмо могло прийти после того, как синк его миновал.
+         */
+        fun runNow(context: Context) {
+            val req = OneTimeWorkRequestBuilder<SyncWorker>()
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+                .build()
+            WorkManager.getInstance(context).enqueueUniqueWork(PUSH_NAME, ExistingWorkPolicy.APPEND_OR_REPLACE, req)
+        }
 
         fun schedule(context: Context) {
             val req = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
@@ -60,6 +99,9 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(NAME, ExistingPeriodicWorkPolicy.KEEP, req)
         }
 
-        fun cancel(context: Context) = WorkManager.getInstance(context).cancelUniqueWork(NAME)
+        fun cancel(context: Context) {
+            WorkManager.getInstance(context).cancelUniqueWork(NAME)
+            WorkManager.getInstance(context).cancelUniqueWork(PUSH_NAME)
+        }
     }
 }

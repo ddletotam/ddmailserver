@@ -34,7 +34,7 @@
 | Клиент | Каталог | Стек | Контракт поведения |
 |---|---|---|---|
 | Десктоп (Windows/Linux) | `desktop/` | Rust + Slint, кэш SQLite | [`docs/desktop-behavior-contract.md`](docs/desktop-behavior-contract.md) |
-| Android | `mobile/android` | Kotlin (сборки HMS/GMS) | [`docs/android-behavior-contract.md`](docs/android-behavior-contract.md) |
+| Android | `mobile/android` | Kotlin (сборки HMS/RuStore) | [`docs/android-behavior-contract.md`](docs/android-behavior-contract.md) |
 | iOS / macOS | `mobile/ios` | Swift, XcodeGen | [`docs/ios-behavior-contract.md`](docs/ios-behavior-contract.md) |
 
 Клиенты работают через нативный API (`/api/desktop/v1`, HTTP + WebSocket),

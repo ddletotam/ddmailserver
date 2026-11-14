@@ -552,13 +552,13 @@ Over, Stage Manager на iPad и в окне любого размера на М
 ### 7.1. Сервер (сделано 2026-11-12)
 
 - **Регистрация — одна на все платформы:** `POST /api/desktop/v1/push/token`
-  под JWT, тело `{"kind":"apns|hms|fcm","token":…,"environment":"sandbox|production","topic":"ru.letotam.ddmail"}`
+  под JWT, тело `{"kind":"apns|hms|rustore|fcm","token":…,"environment":"sandbox|production","topic":"ru.letotam.ddmail"}`
   (окружение — только у APNs). Идемпотентна: повтор обновляет строку. Ответ
   `{"kind","delivery"}` — настроена ли у сервера доставка этой службой (без
   ключа токен хранится, push не идут). `DELETE` того же пути (`{"kind","token"}`
   или `?kind=&token=`) — выход из учётки на устройстве; нет такого — тоже 200.
-  Токен APNs — hex, хранится в нижнем регистре; у HMS/FCM — base64url.
-- **Таблица** `push_tokens` (миграция 055): пользователь, служба, токен,
+  Токен APNs — hex, хранится в нижнем регистре; у HMS/RuStore/FCM — base64url.
+- **Таблица** `push_tokens` (миграция 055; 058 — `kind` `rustore`): пользователь, служба, токен,
   окружение APNs, topic, `created_at`/`updated_at`/`last_sent_at`. Ключ —
   (пользователь, служба, токен): две ddmail-учётки одного сервера на одном
   телефоне — две строки. Больше 20 устройств у пользователя — вытесняются
@@ -583,9 +583,34 @@ Over, Stage Manager на iPad и в окне любого размера на М
   `topic`, `environment` (`auto` — по токену; `sandbox`/`production` — только
   такие токены). Нет секции — доставка выключена, сервер работает как
   раньше; ключ не читается — ошибка в журнале, сервер работает без push.
-  Ключ `.p8` — секрет сервера, вне git. HMS и FCM — интерфейс `push.Sender`
-  и секции конфига, без реализации (Android §7).
-- **Тесты:** фальшивый APNs на `httptest` (HTTP/2): форма запроса, подпись
+  Ключ `.p8` — секрет сервера, вне git.
+- **HMS** (`push.HMS`, Android-сборка `hms`, 2026-11-14): OAuth 2.0 client
+  credentials на `oauth-login.cloud.huawei.com/oauth2/v3/token` (`client_id`
+  — App ID или отдельный `client_id`, `client_secret` — App secret), токен
+  доступа кэшируется на срок из ответа минус 5 минут; `POST
+  push-api.cloud.huawei.com/v1/{appId}/messages:send` — один токен на
+  запрос, `android.ttl` сутки. Режим `push.hms.mode`: `data` (по умолчанию)
+  — `data: "{\"type\":\"new_mail\"}"`, `urgency: HIGH`, приложение само
+  синхронизируется и показывает уведомление; `notification` — обезличенное
+  «ddmail / Новые письма» показывает система (запасной путь, если data до
+  остановленного приложения не доходит). Отказ по OAuth (`80200001`,
+  `80200003`, HTTP 401) — новый токен доступа и один повтор. `80300007` и
+  `80100000` с нашим токеном в `illegal_tokens` — токен удаляется.
+- **RuStore** (`push.RuStore`, Android-сборка `rustore`, 2026-11-14): `POST
+  vkpns.rustore.ru/v1/projects/{projectId}/messages:send`,
+  `Authorization: Bearer <сервисный токен>`, тело — только `data`
+  (`{"type":"new_mail"}`) и `android.ttl` сутки: с `notification` SDK
+  показал бы уведомление сам. Токен удаляется по `status` ответа
+  `NOT_FOUND`/`UNREGISTERED` и `INVALID_ARGUMENT` про токен; 404 без тела или
+  про проект токены не трогает (ошибка конфига не должна стирать
+  устройства всех пользователей).
+- **Конфиг Android-служб:** `push.hms` — `app_id`, `client_secret`,
+  `client_id` (необязательно), `mode`; `push.rustore` — `project_id`,
+  `service_token`. Не хватает обязательного — служба выключена, сервер
+  работает. FCM — секция читается, отправителя нет.
+- **Тесты:** фальшивые HMS и RuStore на `httptest` (форма запросов, кэш и
+  повтор OAuth, удаление отвергнутых, путь от хаба до обеих служб, payload
+  без ПДн); фальшивый APNs на `httptest` (HTTP/2): форма запроса, подпись
   JWT, кэш токена, повтор, удаление отвергнутых, payload без ПДн, путь от
   события хаба до APNs, коалесинг; обработчики; таблица — на Postgres.
   Живая проверка — `TestLiveAPNs` (ключ и токен из окружения).
