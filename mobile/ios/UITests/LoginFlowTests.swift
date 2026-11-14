@@ -42,16 +42,9 @@ final class LoginFlowTests: XCTestCase {
         passwordField.typeText(password)
         #endif
         app.buttons["connect.login"].tap()
-        // Раздел восстанавливается из прошлого запуска (@SceneStorage). Если после
-        // входа не видно ни списка, ни вопроса о загрузке — идём в «Почту». Нажать
-        // бургер поверх алерта нельзя: XCTest сам «закроет помеху» последней кнопкой.
-        let anyRow = app.descendants(matching: .any).matching(identifier: "conv.row").firstMatch
-        let question = app.buttons["Только по Wi-Fi"].firstMatch
-        let deadline = Date().addingTimeInterval(30)
-        while Date() < deadline && !anyRow.exists && !question.exists { sleep(1) }
-        if !anyRow.exists && !question.exists { Nav.go("Почта", app) }
-
-        // Вход прошёл, синк лёг в кэш — в списке появились беседы.
+        // Вход прошёл, синк лёг в кэш — в списке появились беседы. Вход с окна
+        // подключения всегда открывает «Почту», какой бы раздел окно ни помнило
+        // с прошлого запуска (@SceneStorage; на Маке он переживает перезапуск).
         let firstRow = app.descendants(matching: .any).matching(identifier: "conv.row").firstMatch
         XCTAssertTrue(firstRow.waitForExistence(timeout: 60), "список бесед пуст")
         shot(app, "3-list-raw")
@@ -108,7 +101,7 @@ final class LoginFlowTests: XCTestCase {
         shot(app, "3d-compose-row")
         composeRow.tap()
         let newRow = app.descendants(matching: .any).matching(identifier: "conv.new").firstMatch
-        let fresh = app.staticTexts["Новая беседа"].firstMatch
+        let fresh = Shown.newConversation(app)
         XCTAssertTrue(fresh.waitForExistence(timeout: 10), "новая беседа не открылась")
         let draftField = app.textViews["Сообщение"].exists ? app.textViews["Сообщение"] : app.textFields["Сообщение"]
         XCTAssertTrue(draftField.waitForExistence(timeout: 5), "у новой беседы нет строки ввода")

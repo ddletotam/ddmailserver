@@ -95,8 +95,14 @@ final class AppModel {
     }
 
     func reload() {
+        // Вход с окна подключения (первая учётка, вход после удаления всех) —
+        // рабочее пространство начинается с «Почты», а не с раздела, который
+        // окно запомнило с прошлого раза (@SceneStorage; на Маке он переживает
+        // и перезапуск, и удаление учёток).
+        let fromConnect = if case .connect = phase { true } else { false }
         workspace?.close()
         phase = Self.phase(for: accounts.accounts(), self)
+        if fromConnect { workspace?.startOnMail = true }
         // Новая учётка (или вход заново) — зарегистрировать push и для неё.
         if let workspace { PushService.shared.attach(workspace) }
     }
@@ -182,6 +188,8 @@ final class Workspace {
     let links: [AccountLink]
     /// Кэш не открылся (диск полон, файл повреждён) — почта без кэша не работает.
     private(set) var cacheError: String?
+    /// Только что вошли с окна подключения: окно открывает «Почту» (`AppShell`).
+    @ObservationIgnored var startOnMail = false
     @ObservationIgnored private(set) lazy var mail: MailModel? = cache.map { MailModel(workspace: self, cache: $0) }
 
     /// Первая ddmail-учётка: её сервер ведёт календарь, задачи, контакты,

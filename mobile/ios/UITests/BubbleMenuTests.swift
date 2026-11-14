@@ -25,7 +25,7 @@ final class BubbleMenuTests: XCTestCase {
         hit.tap()
         let web = app.webViews.firstMatch
         XCTAssertTrue(web.waitForExistence(timeout: 20), "лента беседы не появилась")
-        let text = web.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "доставить")).firstMatch
+        let text = web.staticTexts.matching(Shown.contains("доставить")).firstMatch
         XCTAssertTrue(text.waitForExistence(timeout: 20), "нет текста письма")
         sleep(2)
 
@@ -64,7 +64,7 @@ final class BubbleMenuTests: XCTestCase {
         XCTAssertTrue(UIFlow.menuItem("Исходник сообщения", app).exists, "нет пункта «Исходник сообщения»")
         UIFlow.shot(app, "bubble-2-show", self)
         headers.tap()
-        let from = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "From:")).firstMatch
+        let from = app.descendants(matching: .any).matching(Shown.contains("From:")).firstMatch
         XCTAssertTrue(from.waitForExistence(timeout: 20), "заголовки не показались")
         sleep(1)
         UIFlow.shot(app, "bubble-3-headers", self)
@@ -78,7 +78,12 @@ final class BubbleMenuTests: XCTestCase {
         UIFlow.contextMenu(text)
         XCTAssertTrue(UIFlow.menuItem("Ответить", app).waitForExistence(timeout: 5), "правый клик не открыл меню")
         app.typeKey(.escape, modifierFlags: [])
-        XCTAssertTrue(UIFlow.waitGone(UIFlow.menuItem("Ответить", app), 5), "Esc не закрыл меню пузыря")
+        // «Ответить» есть и в меню «Письмо» строки меню — оно существует всегда,
+        // но не нажимается, пока не раскрыто: ждём, пока не останется видимого пункта.
+        let replies = app.menuItems.matching(NSPredicate(format: "title == %@ OR label == %@", "Ответить", "Ответить"))
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline && replies.allElementsBoundByIndex.contains(where: { $0.isHittable }) { usleep(300_000) }
+        XCTAssertFalse(replies.allElementsBoundByIndex.contains { $0.isHittable }, "Esc не закрыл меню пузыря")
         #endif
 
         // Меню чипа вложения (S-15): «Поделиться» везде; Мак — «Загрузки» и
@@ -122,9 +127,9 @@ final class BubbleMenuTests: XCTestCase {
         let composeRow = app.descendants(matching: .any).matching(identifier: "search.compose").firstMatch
         XCTAssertTrue(composeRow.waitForExistence(timeout: 10), "нет «Написать по адресу…»")
         composeRow.tap()
-        let fresh = app.staticTexts["Новая беседа"].firstMatch
+        let fresh = Shown.newConversation(app)
         XCTAssertTrue(fresh.waitForExistence(timeout: 10), "новая беседа не открылась")
-        let plus = app.buttons["Вложить или поля письма"].firstMatch
+        let plus = UIFlow.composerPlus(app)
         XCTAssertTrue(plus.waitForExistence(timeout: 5), "нет «+» композера")
         plus.tap()
         let fields = UIFlow.menuItem("Кому, копия, тема", app)
@@ -135,7 +140,7 @@ final class BubbleMenuTests: XCTestCase {
         subject.tap()
         subject.typeText("Проверка ddmail удаление \(stamp)")
         // Подпись «От» у поля отправителя (M-07).
-        XCTAssertTrue(app.staticTexts["От"].firstMatch.exists, "у поля отправителя нет подписи «От»")
+        XCTAssertTrue(app.staticTexts.matching(Shown.equals("От")).firstMatch.exists, "у поля отправителя нет подписи «От»")
         UIFlow.shot(app, "delete-0-fields", self)
         let text = app.textViews["composer.text"].firstMatch
         text.tap()
@@ -145,13 +150,13 @@ final class BubbleMenuTests: XCTestCase {
 
         let web = app.webViews.firstMatch
         XCTAssertTrue(web.waitForExistence(timeout: 20), "лента беседы не появилась")
-        let mine = web.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", stamp)).firstMatch
+        let mine = web.staticTexts.matching(Shown.contains(stamp)).firstMatch
         XCTAssertTrue(mine.waitForExistence(timeout: 60), "в беседе нет отправленного письма")
-        let pending = web.staticTexts["Отправляется…"].firstMatch
+        let pending = web.staticTexts.matching(Shown.equals("Отправляется…")).firstMatch
         XCTAssertTrue(UIFlow.waitGone(pending, 150), "письмо так и не пришло синком")
         sleep(3)
         // Тело письма — последнее с меткой (тема в ленте не видна, но пусть).
-        let target = web.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", stamp)).allElementsBoundByIndex.last { $0.isHittable } ?? mine
+        let target = web.staticTexts.matching(Shown.contains(stamp)).allElementsBoundByIndex.last { $0.isHittable } ?? mine
         UIFlow.shot(app, "delete-1-landed", self)
 
         UIFlow.contextMenu(target)
@@ -177,7 +182,7 @@ final class BubbleMenuTests: XCTestCase {
         let link = app.descendants(matching: .any).matching(identifier: "settings.external").firstMatch
         XCTAssertTrue(link.waitForExistence(timeout: 10), "в настройках нет «Внешний контент»")
         link.tap()
-        let header = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Всегда показывать картинки от")).firstMatch
+        let header = app.staticTexts.matching(Shown.containsCI("Всегда показывать картинки от")).firstMatch
         XCTAssertTrue(header.waitForExistence(timeout: 10), "экран «Внешний контент» не открылся")
         sleep(1)
         UIFlow.shot(app, "external-1-screen", self)

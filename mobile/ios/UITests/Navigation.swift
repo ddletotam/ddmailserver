@@ -57,3 +57,42 @@ extension XCUIElement {
     func tap() { click() }
 }
 #endif
+
+/// Видимый текст элемента. На iOS он в `label`; на Маке у `StaticText`
+/// (объединённых строк SwiftUI и текста в WKWebView) `label` пустой, а текст —
+/// в `value`. Тесты, сверявшие только `label`, на Маке не находили ни строк,
+/// ни пузырей.
+extension XCUIElement {
+    var shownText: String {
+        if !label.isEmpty { return label }
+        return (value as? String) ?? ""
+    }
+}
+
+/// Предикаты по видимому тексту — и `label` (iOS), и `value`/`title` (Мак).
+enum Shown {
+    static func contains(_ s: String) -> NSPredicate {
+        NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@ OR title CONTAINS %@", s, s, s)
+    }
+
+    static func containsCI(_ s: String) -> NSPredicate {
+        NSPredicate(format: "label CONTAINS[c] %@ OR value CONTAINS[c] %@ OR title CONTAINS[c] %@", s, s, s)
+    }
+
+    static func begins(_ s: String) -> NSPredicate {
+        NSPredicate(format: "label BEGINSWITH %@ OR value BEGINSWITH %@ OR title BEGINSWITH %@", s, s, s)
+    }
+
+    static func equals(_ s: String) -> NSPredicate {
+        NSPredicate(format: "label == %@ OR value == %@ OR title == %@", s, s, s)
+    }
+
+    /// Новая беседа на экране: подпись шапки (iOS) или строка `conv.new` над
+    /// списком (Мак: шапка — в заголовке окна, подписи «Новая беседа» в дереве нет).
+    @MainActor
+    static func newConversation(_ app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier == 'conv.new' OR label == 'Новая беседа' OR value == 'Новая беседа'"))
+            .firstMatch
+    }
+}
