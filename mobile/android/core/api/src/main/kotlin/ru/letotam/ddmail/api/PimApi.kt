@@ -17,9 +17,23 @@ interface PimApi {
 
     /** Ответ на приглашение: ACCEPTED | TENTATIVE | DECLINED. */
     suspend fun rsvp(id: Long, partstat: String)
-    suspend fun contacts(limit: Int = 5000): List<ContactDto>
+    /**
+     * Вся книга (до [limit]). У сервера ddmail — страницами по
+     * [SessionApi.CONTACTS_PAGE] через `offset`: до 0.0.40 клиент брал одну
+     * страницу в 5000, и книга в 15 000 карточек обрывалась на «Ару…».
+     */
+    suspend fun contacts(limit: Int = Int.MAX_VALUE): List<ContactDto>
+
+    /**
+     * Поиск по всей книге на стороне источника (`/contacts/search`, до
+     * [limit]): находит и то, чего нет в загруженном списке. Источник без
+     * поиска — пусто (тогда хватает локального поиска по загруженному).
+     */
+    suspend fun searchContacts(query: String, limit: Int = 100): List<ContactDto> = emptyList()
     suspend fun addressBooks(): List<AddressBookDto>
-    suspend fun createContact(req: ContactWriteRequest)
+
+    /** Новый контакт; ответ — его id, если источник его сообщил (ddmail: `{"id":…}`). */
+    suspend fun createContact(req: ContactWriteRequest): Long?
     suspend fun patchContact(id: Long, req: ContactWriteRequest)
     suspend fun deleteContact(id: Long)
 }

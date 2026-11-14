@@ -246,13 +246,22 @@ class PimHub(
         }
     }
 
-    override suspend fun createContact(req: ContactWriteRequest) {
-        if (req.addressBookId >= 0) return ddmail?.createContact(req) ?: noServer()
+    /**
+     * Поиск по всей книге — у сервера ddmail; книги внешних CardDAV
+     * [contacts] отдаёт целиком, их находит локальный поиск экрана.
+     */
+    override suspend fun searchContacts(query: String, limit: Int): List<ContactDto> =
+        ddmail?.searchContacts(query, limit).orEmpty()
+
+    /** id нового — у ddmail из ответа; у CardDAV `null` (появится со следующей загрузкой книги). */
+    override suspend fun createContact(req: ContactWriteRequest): Long? {
+        if (req.addressBookId >= 0) return (ddmail ?: noServer()).createContact(req)
         ensureBooks()
         val c = lock.withLock { books[req.addressBookId] } ?: throw ApiException.Server(404, "Адресная книга не найдена — обновите")
         val uid = UUID.randomUUID().toString()
         val card = VCard.build(uid, req.fullName, req.emails, req.phones, req.organization, req.title)
         write(c.account) { it.put(c.col.url + uid + ".vcf", card, "text/vcard; charset=utf-8", Precondition.IfNew) }
+        return null
     }
 
     override suspend fun patchContact(id: Long, req: ContactWriteRequest) {

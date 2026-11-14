@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -88,9 +89,21 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import ru.letotam.ddmail.api.ApiException
 import ru.letotam.ddmail.api.AddressBookDto
 import ru.letotam.ddmail.api.ContactDto
@@ -117,35 +130,89 @@ data class ContactDraft(
 
 /**
  * Адресная книга (контракт §15): одна сводная книга по всем источникам —
- * так её отдаёт сервер, источник наружу не показывается.
+ * так её отдаёт сервер, источник наружу не показывается. Книга целиком
+ * (страницами, 0.0.40), индекс и список строятся вне главного потока; поиск
+ * — локальный по загруженному плюс поиск сервера по всей книге после паузы.
  */
 class ContactsViewModel(private val app: ru.letotam.ddmail.DdmailApp, private val api: PimApi, private val onDead: () -> Unit) : ViewModel() {
     val books = MutableStateFlow<List<AddressBookDto>>(emptyList())
     val defaultBook = MutableStateFlow<Long?>(null)
-    val contacts = MutableStateFlow<List<ContactDto>?>(null)
+    /** Загруженная книга; `null` — ещё не загружена. */
+    private val index = MutableStateFlow<ContactIndex?>(null)
+    /** Вся загруженная книга по алфавиту (адресная книга поиска почты). */
+    val contacts: StateFlow<List<ContactDto>?> = index.map { it?.sorted }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val query = MutableStateFlow("")
     val selected = MutableStateFlow<ContactDto?>(null)
     val draft = MutableStateFlow<ContactDraft?>(null)
     val loading = MutableStateFlow(false)
     val notice = MutableStateFlow<String?>(null)
+    /** Только что созданный: список прокручивается к нему, как только он на экране. */
+    val reveal = MutableStateFlow<Long?>(null)
+    /**
+     * Созданные здесь, которых ещё нет в загруженной книге: видны в списке и
+     * поиске сразу, до перезагрузки, в которой они пришли.
+     */
+    private val pinned = MutableStateFlow<Map<Long, ContactDto>>(emptyMap())
+    /** Найденное сервером по строке (строка → контакты вне загруженной книги). */
+    private val remote = MutableStateFlow<Pair<String, List<ContactDto>>>("" to emptyList())
+
+    /** Что показывает список: буквенные разделы; `null` — книга ещё не загружена. */
+    val sections: StateFlow<List<ContactSection>?> =
+        combine(index, query, pinned, remote) { idx, q, pin, rem ->
+            idx ?: return@combine null
+            val t = q.trim()
+            idx.view(t, pin.values + if (t.isNotEmpty() && rem.first == t) rem.second else emptyList())
+        }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    private var loadJob: Job? = null
+    private var loadGen = 0
+
     init {
         refresh()
         viewModelScope.launch {
             runCatching { api.addressBooks() }.onSuccess { books.value = it }
         }
         viewModelScope.launch { app.calendarPrefs.defaultAddressBook.collect { defaultBook.value = it } }
+        // Поиск сервера по всей книге — через 300 мс после последней буквы;
+        // новая строка отменяет прошлый запрос.
+        viewModelScope.launch {
+            query.map { it.trim() }.distinctUntilChanged().collectLatest { q ->
+                if (q.isEmpty()) return@collectLatest
+                delay(300)
+                val found = try {
+                    withContext(Dispatchers.Default) { api.searchContacts(q, 100) }
+                } catch (e: ApiException) {
+                    if (e is ApiException.Unauthorized) onDead()
+                    return@collectLatest
+                }
+                val known = index.value
+                remote.value = q to found.filter { known?.byId?.containsKey(it.id) != true }
+            }
+        }
     }
 
-    fun refresh() = viewModelScope.launch {
-        loading.value = true
-        try {
-            val list = api.contacts()
-            contacts.value = list
-            selected.update { s -> s?.let { cur -> list.firstOrNull { it.id == cur.id } } }
-        } catch (e: ApiException) {
-            if (e is ApiException.Unauthorized) onDead() else notice.value = "Не удалось загрузить контакты"
-        }
-        loading.value = false
+    /**
+     * Перезагрузить книгу. Без [force] — не дублирует идущую загрузку (возврат
+     * на экран); с [force] (после правки) — начинает заново, чтобы ответ
+     * точно включал правку.
+     */
+    fun refresh(force: Boolean = false): Job {
+        loadJob?.let { if (it.isActive) { if (force) it.cancel() else return it } }
+        val gen = ++loadGen
+        return viewModelScope.launch {
+            loading.value = true
+            try {
+                // Разбор JSON трёх страниц и индекс 15–30 тыс. карточек — не на главном потоке.
+                val built = withContext(Dispatchers.Default) { ContactIndex(api.contacts()) }
+                index.value = built
+                pinned.update { p -> p.filterKeys { it !in built.byId } }
+                selected.update { s -> s?.let { cur -> built.byId[cur.id] ?: pinned.value[cur.id] } }
+            } catch (e: ApiException) {
+                if (e is ApiException.Unauthorized) onDead() else notice.value = "Не удалось загрузить контакты"
+            } finally {
+                if (gen == loadGen) loading.value = false
+            }
+        }.also { loadJob = it }
     }
 
     /**
@@ -186,10 +253,18 @@ class ContactsViewModel(private val app: ru.letotam.ddmail.DdmailApp, private va
         viewModelScope.launch {
             val req = ContactWriteRequest(name, emails, phones, d.org.trim(), d.title.trim(), addressBookId = if (d.id == null) d.bookId else 0)
             try {
-                if (d.id == null) api.createContact(req) else api.patchContact(d.id, req)
+                val created = if (d.id == null) api.createContact(req) else null.also { api.patchContact(d.id, req) }
                 draft.value = null
                 notice.value = if (d.id == null) "Контакт добавлен" else "Сохранено"
-                refresh()
+                // Созданный виден сразу и открыт — в списке, в поиске, карточкой —
+                // ещё до того, как перезагрузка книги его принесёт.
+                if (created != null) {
+                    val c = ContactDto(created, name, emails, phones, d.org.trim(), d.title.trim(), addressBookId = d.bookId)
+                    pinned.update { it + (created to c) }
+                    selected.value = c
+                    reveal.value = created
+                }
+                refresh(force = true)
             } catch (e: ApiException) {
                 draft.update { it?.copy(busy = false, error = errorText(e)) }
                 if (e is ApiException.Unauthorized) onDead()
@@ -200,9 +275,13 @@ class ContactsViewModel(private val app: ru.letotam.ddmail.DdmailApp, private va
     fun delete(c: ContactDto) = viewModelScope.launch {
         try {
             api.deleteContact(c.id)
+            // Созданный здесь и найденный сервером живут вне книги — убрать и
+            // оттуда, иначе строка переживёт удаление.
+            pinned.update { it - c.id }
+            remote.update { (q, list) -> q to list.filter { it.id != c.id } }
             selected.value = null
             notice.value = "Контакт удалён"
-            refresh()
+            refresh(force = true)
         } catch (e: ApiException) {
             if (e is ApiException.Unauthorized) onDead() else notice.value = errorText(e)
         }
@@ -218,15 +297,6 @@ class ContactsViewModel(private val app: ru.letotam.ddmail.DdmailApp, private va
 
 /** Выбранная строка — как открытая беседа в почте (`#10b981`, белый текст). */
 private val SelectedRow = Color(0xFF10B981)
-
-private fun ContactDto.display(): String = fullName.ifBlank { emails.firstOrNull() ?: phones.firstOrNull() ?: "(без имени)" }
-
-private fun ContactDto.matches(q: String): Boolean {
-    val n = q.trim().lowercase()
-    if (n.isEmpty()) return true
-    return fullName.lowercase().contains(n) || organization.lowercase().contains(n) ||
-        emails.any { it.lowercase().contains(n) } || phones.any { it.filter(Char::isDigit).contains(n.filter(Char::isDigit).ifEmpty { "\u0000" }) }
-}
 
 @Composable
 fun ContactsScreen(vm: ContactsViewModel, avatars: Avatars, onMail: (String) -> Unit, modifier: Modifier = Modifier) {
@@ -263,8 +333,26 @@ fun ContactsScreen(vm: ContactsViewModel, avatars: Avatars, onMail: (String) -> 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ContactList(vm: ContactsViewModel, avatars: Avatars, modifier: Modifier) {
-    val all by vm.contacts.collectAsState()
+    val sections by vm.sections.collectAsState()
     val q by vm.query.collectAsState()
+    val reveal by vm.reveal.collectAsState()
+    val listState = rememberLazyListState()
+    // Только что созданный — прокрутить к нему, когда он есть в списке.
+    LaunchedEffect(reveal, sections) {
+        val id = reveal ?: return@LaunchedEffect
+        val secs = sections ?: return@LaunchedEffect
+        var pos = 0
+        for (sec in secs) {
+            pos++ // заголовок
+            val i = sec.items.indexOfFirst { it.id == id }
+            if (i >= 0) {
+                listState.scrollToItem(maxOf(0, pos + i - 2))
+                vm.reveal.value = null
+                return@LaunchedEffect
+            }
+            pos += sec.items.size
+        }
+    }
     val loading by vm.loading.collectAsState()
     val selected by vm.selected.collectAsState()
     Box(modifier) {
@@ -284,22 +372,21 @@ private fun ContactList(vm: ContactsViewModel, avatars: Avatars, modifier: Modif
                 colors = TextFieldDefaults.colors(focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent),
             )
             if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp)) else Spacer(Modifier.height(2.dp))
-            val list = all
+            val secs = sections
             when {
-                list == null -> Text("Загрузка…", Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                secs == null -> Text("Загрузка…", Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 else -> {
-                    val shown = list.filter { it.matches(q) }.sortedBy { it.display().lowercase() }
-                    if (shown.isEmpty()) Text(if (q.isBlank()) "Контактов нет" else "Ничего не найдено", Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    val groups = shown.groupBy { it.display().firstOrNull()?.uppercaseChar()?.takeIf(Char::isLetter) ?: '#' }
-                    LazyColumn(Modifier.fillMaxSize()) {
-                        groups.forEach { (letter, items) ->
-                            stickyHeader(key = "h$letter") {
+                    // Разделы готовит модель вне главного потока; здесь — только показ.
+                    if (secs.isEmpty()) Text(if (q.isBlank()) "Контактов нет" else "Ничего не найдено", Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    LazyColumn(Modifier.fillMaxSize(), state = listState) {
+                        secs.forEach { (letter, items) ->
+                            stickyHeader(key = "h$letter", contentType = "h") {
                                 Text(
                                     "$letter", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.9f)).padding(horizontal = 16.dp, vertical = 2.dp),
                                 )
                             }
-                            items(items, key = { it.id }) { c ->
+                            items(items, key = { it.id }, contentType = { "c" }) { c ->
                                 // Выбранная — сплошной зелёный с белым текстом, как открытая беседа.
                                 val on = selected?.id == c.id
                                 Row(

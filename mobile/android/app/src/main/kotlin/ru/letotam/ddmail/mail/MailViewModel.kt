@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -204,7 +205,8 @@ class MailViewModel(
 
     /**
      * Выпадашка поиска: «Диалоги» и «Контакты» — локально на каждое нажатие,
-     * «Сообщения» — с источников (у кого поиск есть), когда ответят.
+     * «Сообщения» — с источников (у кого поиск есть), когда ответят. Считается
+     * не на главном потоке: книга контактов — до 30 тыс. карточек.
      */
     val search: StateFlow<SearchResults> =
         combine(query, hub.conversations, addressBook, serverHits) { q, convs, book, server ->
@@ -223,7 +225,7 @@ class MailViewModel(
                 messages = if (fresh) mapMessageHits(server!!.second, ham) else emptyList(),
                 loading = !fresh,
             )
-        }.stateIn(viewModelScope, SharingStarted.Eagerly, SearchResults())
+        }.flowOn(kotlinx.coroutines.Dispatchers.Default).stateIn(viewModelScope, SharingStarted.Eagerly, SearchResults())
 
     init {
         viewModelScope.launch {

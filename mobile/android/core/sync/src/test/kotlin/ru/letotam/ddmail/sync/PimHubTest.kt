@@ -40,7 +40,8 @@ class PimHubTest {
             override suspend fun rsvp(id: Long, partstat: String) { calls += "rsvp $id" }
             override suspend fun contacts(limit: Int) = listOf(ContactDto(3, "Иван"))
             override suspend fun addressBooks() = listOf(AddressBookDto(2))
-            override suspend fun createContact(req: ContactWriteRequest) { calls += "contact" }
+            override suspend fun createContact(req: ContactWriteRequest): Long? { calls += "contact"; return 9 }
+            override suspend fun searchContacts(query: String, limit: Int) = listOf(ContactDto(20001, query))
             override suspend fun patchContact(id: Long, req: ContactWriteRequest) { calls += "pc $id" }
             override suspend fun deleteContact(id: Long) { calls += "dc $id" }
         }
@@ -52,5 +53,8 @@ class PimHubTest {
         hub.rsvp(1, "ACCEPTED")
         assertEquals(listOf("patch 1", "delete 1", "rsvp 1"), calls)
         assertEquals(1, hub.contacts().size)
+        // Поиск по всей книге и id нового — от сервера ddmail.
+        assertEquals(listOf(20001L), hub.searchContacts("ауд", 100).map { it.id })
+        assertEquals(9L, hub.createContact(ContactWriteRequest("X", emptyList(), emptyList(), addressBookId = 2)))
     }
 }

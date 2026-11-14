@@ -178,14 +178,42 @@ class SessionApi(
         write("DELETE", "/tasks/$id", null)
     }
 
-    override suspend fun contacts(limit: Int): List<ContactDto> =
-        get("/contacts?limit=$limit", ListSerializer(ContactDto.serializer()))
+    override suspend fun contacts(limit: Int): List<ContactDto> = contactPages(limit).contacts
+
+    /**
+     * Книга страницами по [CONTACTS_PAGE] (`?limit=&offset=`, сервер
+     * сортирует по имени, затем id — страницы не пересекаются). Короткая
+     * страница — последняя. Сервер, не знающий `offset`, отдаёт ту же первую
+     * страницу снова — её узнаём по повтору id и останавливаемся
+     * ([ContactPages.truncated]), а не крутимся до бесконечности.
+     */
+    suspend fun contactPages(limit: Int = Int.MAX_VALUE): ContactPages {
+        val out = ArrayList<ContactDto>()
+        val seen = HashSet<Long>()
+        while (out.size < limit) {
+            val got = get("/contacts?limit=$CONTACTS_PAGE&offset=${out.size}", ListSerializer(ContactDto.serializer()))
+            val fresh = got.filter { seen.add(it.id) }
+            if (fresh.size < got.size) return ContactPages(out, truncated = true)
+            out += fresh
+            if (got.size < CONTACTS_PAGE) break
+        }
+        return ContactPages(if (out.size > limit) out.subList(0, limit).toList() else out, truncated = false)
+    }
+
+    override suspend fun searchContacts(query: String, limit: Int): List<ContactDto> =
+        get(
+            "/contacts/search?q=" + java.net.URLEncoder.encode(query, "UTF-8").replace("+", "%20") + "&limit=$limit",
+            ListSerializer(ContactDto.serializer()),
+        )
 
     override suspend fun addressBooks(): List<AddressBookDto> =
         get("/address-books", ListSerializer(AddressBookDto.serializer()))
 
-    override suspend fun createContact(req: ContactWriteRequest) {
-        write("POST", "/contacts", DdmailApi.json.encodeToString(ContactWriteRequest.serializer(), req))
+    override suspend fun createContact(req: ContactWriteRequest): Long? {
+        val reply = write("POST", "/contacts", DdmailApi.json.encodeToString(ContactWriteRequest.serializer(), req))
+        return runCatching {
+            ((DdmailApi.json.parseToJsonElement(reply) as JsonObject)["id"] as JsonPrimitive).content.toLong()
+        }.getOrNull()
     }
 
     override suspend fun patchContact(id: Long, req: ContactWriteRequest) {
@@ -349,10 +377,16 @@ class SessionApi(
         }
     }
 
-    private companion object {
-        val JSON = "application/json; charset=utf-8".toMediaType()
+    companion object {
+        private val JSON = "application/json; charset=utf-8".toMediaType()
+
+        /** Страница книги — предел сервера на один запрос `/contacts`. */
+        const val CONTACTS_PAGE = 5000
     }
 }
+
+/** Книга со страниц `/contacts`; [truncated] — сервер без `offset` отдал не всё. */
+data class ContactPages(val contacts: List<ContactDto>, val truncated: Boolean)
 
 /** Двоичный ответ: части письма, вложения. */
 class Binary(val bytes: ByteArray, val contentType: String)
