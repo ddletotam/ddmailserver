@@ -538,8 +538,30 @@ func newPushDispatcher(cfg config.PushConfig, database *db.DB, hub *notify.Hub) 
 	} else {
 		log.Printf("Push via APNs disabled (push.apns not configured)")
 	}
-	if cfg.HMS.AppID != "" || cfg.FCM.ProjectID != "" {
-		log.Printf("WARNING: push.hms / push.fcm are not implemented yet — ignored")
+	if cfg.HMS.Enabled() {
+		hms, err := push.HMSFromConfig(cfg.HMS)
+		if err != nil {
+			log.Printf("ERROR: push via HMS disabled: %v", err)
+		} else {
+			senders = append(senders, hms)
+			log.Printf("Push via HMS enabled (app id %s, mode %s)", cfg.HMS.AppID, hms.Mode())
+		}
+	} else {
+		log.Printf("Push via HMS disabled (push.hms not configured)")
+	}
+	if cfg.RuStore.Enabled() {
+		rs, err := push.RuStoreFromConfig(cfg.RuStore)
+		if err != nil {
+			log.Printf("ERROR: push via RuStore disabled: %v", err)
+		} else {
+			senders = append(senders, rs)
+			log.Printf("Push via RuStore enabled (project %s)", cfg.RuStore.ProjectID)
+		}
+	} else {
+		log.Printf("Push via RuStore disabled (push.rustore not configured)")
+	}
+	if cfg.FCM.ProjectID != "" {
+		log.Printf("WARNING: push.fcm is not implemented — ignored")
 	}
 	d := push.NewDispatcher(database, push.DefaultWindow, senders...)
 	d.Attach(hub)

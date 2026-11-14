@@ -129,6 +129,13 @@ func TestPushTokenRegisterReportsDelivery(t *testing.T) {
 	if !resp.Delivery {
 		t.Error("delivery = false with an APNs sender configured")
 	}
+	rec = pushRequest(t, s, http.MethodPost, "/", map[string]string{"kind": "rustore", "token": "rs_AbC-123", "topic": "ru.letotam.ddmail"})
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK || resp.Kind != "rustore" || resp.Delivery {
+		t.Errorf("rustore without sender: %d %+v, want 200 without delivery", rec.Code, resp)
+	}
 	rec = pushRequest(t, s, http.MethodPost, "/", map[string]string{"kind": "fcm", "token": "abc:DEF-123_x"})
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
@@ -154,6 +161,8 @@ func TestPushTokenRegisterValidates(t *testing.T) {
 		{"fcm empty", map[string]string{"kind": "fcm", "token": ""}},
 		{"fcm with environment", map[string]string{"kind": "fcm", "token": "abc", "environment": "sandbox"}},
 		{"hms with spaces", map[string]string{"kind": "hms", "token": "abc def"}},
+		{"rustore empty", map[string]string{"kind": "rustore", "token": ""}},
+		{"rustore with environment", map[string]string{"kind": "rustore", "token": "abc", "environment": "production"}},
 	} {
 		rec := pushRequest(t, s, http.MethodPost, "/", c.body)
 		if rec.Code != http.StatusBadRequest {
@@ -166,6 +175,41 @@ func TestPushTokenRegisterValidates(t *testing.T) {
 	s.HandleDesktopPushTokenRegister(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("broken JSON: %d, want 400", rec.Code)
+	}
+}
+
+// Android: обе сборки регистрируются тем же запросом; delivery — по
+// настроенным службам.
+func TestPushTokenRegisterAndroidKinds(t *testing.T) {
+	hms, err := push.NewHMS(push.HMSOptions{AppID: "107000001", ClientSecret: "s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs, err := push.NewRuStore(push.RuStoreOptions{ProjectID: "p", ServiceToken: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := push.NewDispatcher(nil, time.Second, hms, rs)
+	defer d.Stop()
+	store := &memPushTokens{}
+	s := &Server{pushTokens: store}
+	s.SetPush(d)
+	for _, kind := range []string{"hms", "rustore"} {
+		rec := pushRequest(t, s, http.MethodPost, "/", map[string]string{"kind": kind, "token": "Tok_" + kind + "-1:2/3+4=", "topic": "ru.letotam.ddmail"})
+		var resp pushTokenResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Code != http.StatusOK || resp.Kind != kind || !resp.Delivery {
+			t.Errorf("%s: %d %+v, want 200 with delivery", kind, rec.Code, resp)
+		}
+	}
+	if n := len(store.all()); n != 2 {
+		t.Errorf("stored %d rows, want 2", n)
+	}
+	rec := pushRequest(t, s, http.MethodDelete, "/", map[string]string{"kind": "rustore", "token": "Tok_rustore-1:2/3+4="})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"deleted":true`) {
+		t.Errorf("delete rustore: %d %s", rec.Code, rec.Body)
 	}
 }
 

@@ -85,7 +85,8 @@ logging:
 
 # Push-уведомления о новой почте для мобильных клиентов. Нет секции — push
 # выключен, сервер работает как раньше (регистрация токенов принимается).
-# В push уходит только «Новые письма» — ни отправителя, ни темы (152-ФЗ).
+# В push уходит только факт «есть новые письма» — ни отправителя, ни темы
+# (152-ФЗ). Пустая секция службы — служба выключена.
 # push:
 #   apns:
 #     key_file: "/etc/mailserver/apns/AuthKey_XXXXXXXXXX.p8"  # Apple Developer → Keys
@@ -96,4 +97,20 @@ logging:
 #     # сборка — sandbox, релизная — production); sandbox / production —
 #     # обслуживать только токены этого окружения.
 #     environment: auto
-#   # hms / fcm — ещё не реализованы.
+#   # Huawei Push Kit — Android-сборка hms. AppGallery Connect → проект →
+#   # приложение ru.letotam.ddmail → «Информация о приложении»: App ID и
+#   # App secret; в проекте включить Push Kit.
+#   hms:
+#     app_id: "1xxxxxxxx"
+#     client_secret: "…"        # App secret (секрет)
+#     # client_id: ""           # OAuth client id, если не совпадает с app_id
+#     # data (по умолчанию) — data-сообщение будит приложение, уведомление с
+#     # отправителем и темой собирает телефон; notification — система сама
+#     # показывает обезличенное «Новые письма» (если data на EMUI не доходит).
+#     mode: data
+#   # RuStore Push — Android-сборка rustore. RuStore Консоль → приложение →
+#   # «Push-уведомления» → «Проекты»: ID проекта и сервисный токен.
+#   rustore:
+#     project_id: "…"
+#     service_token: "…"        # секрет
+#   # fcm — не реализован.

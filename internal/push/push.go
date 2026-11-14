@@ -1,9 +1,10 @@
 // Package push доставляет клиентам в фоне весть «есть новые письма» через
-// службы push: APNs (iPhone, iPad, Mac), в будущем HMS и FCM (Android).
+// службы push: APNs (iPhone, iPad, Mac), Huawei Push Kit и RuStore Push
+// (Android-сборки hms и rustore).
 //
-// Что уходит в push — только факт: службы доставки — серверы за рубежом, и
-// отправитель, тема или адреса там были бы передачей ПДн третьему лицу
-// (152-ФЗ). Текст уведомления клиент собирает сам после синхронизации, из
+// Что уходит в push — только факт: службы доставки — третьи лица (Apple и
+// Huawei — ещё и за рубежом), и отправитель, тема или адреса там были бы
+// передачей ПДн третьему лицу (152-ФЗ). Текст уведомления клиент собирает сам после синхронизации, из
 // своего кэша (ios-behavior-contract.md §7, android-behavior-contract.md §7).
 //
 // Поток: notify.Hub → Dispatcher (отбор «настоящего нового входящего»,
@@ -20,7 +21,7 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/notify"
 )
 
-// Sender — доставка через одну службу (APNs, HMS, FCM).
+// Sender — доставка через одну службу (APNs, HMS, RuStore).
 type Sender interface {
 	// Kind — служба: models.PushKindAPNs и т.д. Совпадает с push_tokens.kind.
 	Kind() string

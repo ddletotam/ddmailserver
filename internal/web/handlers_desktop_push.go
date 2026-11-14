@@ -13,7 +13,8 @@ import (
 )
 
 // Регистрация устройств для push (ios-behavior-contract.md §7,
-// android-behavior-contract.md §7): одна на все платформы, служба — kind.
+// android-behavior-contract.md §7): одна на все платформы, служба — kind
+// (apns, hms, rustore; fcm — зарезервирован).
 //
 //	POST   /api/desktop/v1/push/token  {"kind","token","environment","topic"}
 //	DELETE /api/desktop/v1/push/token  {"kind","token"} (или ?kind=&token=)
@@ -22,7 +23,7 @@ import (
 // токена. Выход из учётки на устройстве — DELETE.
 
 // maxPushTokenBody — тело запроса; токены FCM бывают под 200 символов,
-// HMS — длиннее, но не килобайты.
+// HMS и RuStore — длиннее, но не килобайты.
 const maxPushTokenBody = 8 << 10
 
 // PushTokenStore — где сервер хранит токены. *db.DB его реализует; тесты —
@@ -149,7 +150,7 @@ func normalizePushToken(req pushTokenRequest, full bool) (models.PushToken, stri
 		if full && t.Environment != models.PushEnvSandbox && t.Environment != models.PushEnvProduction {
 			return t, "environment must be sandbox or production"
 		}
-	case models.PushKindHMS, models.PushKindFCM:
+	case models.PushKindHMS, models.PushKindRuStore, models.PushKindFCM:
 		if t.Token == "" || len(t.Token) > 4096 || !onlyChars(t.Token, tokenChars) {
 			return t, "invalid " + t.Kind + " token"
 		}
@@ -157,7 +158,7 @@ func normalizePushToken(req pushTokenRequest, full bool) (models.PushToken, stri
 			return t, "environment is only for apns"
 		}
 	default:
-		return t, "kind must be apns, hms or fcm"
+		return t, "kind must be apns, hms, rustore or fcm"
 	}
 	if !full {
 		t.Environment, t.Topic = "", ""
@@ -169,7 +170,7 @@ func normalizePushToken(req pushTokenRequest, full bool) (models.PushToken, stri
 	return t, ""
 }
 
-// Символы токенов HMS/FCM (base64url, двоеточие FCM) и topic (bundle id,
+// Символы токенов HMS/RuStore/FCM (base64url, двоеточие FCM) и topic (bundle id,
 // имя пакета Android).
 const (
 	tokenChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_:.+/="

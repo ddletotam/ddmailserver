@@ -29,9 +29,11 @@ type Config struct {
 // этом всё равно принимается.
 type PushConfig struct {
 	APNs APNsConfig `yaml:"apns"`
-	// HMS и FCM — место под будущие службы (Android): секции читаются, но
-	// отправителей у них пока нет.
-	HMS HMSConfig `yaml:"hms"`
+	// HMS — Huawei Push Kit (Android-сборка hms), RuStore — RuStore Push
+	// (Android-сборка rustore).
+	HMS     HMSConfig     `yaml:"hms"`
+	RuStore RuStoreConfig `yaml:"rustore"`
+	// FCM — место под Firebase: секция читается, отправителя нет.
 	FCM FCMConfig `yaml:"fcm"`
 }
 
@@ -70,10 +72,53 @@ func (c APNsConfig) EnvironmentOrDefault() string {
 	return e
 }
 
-// HMSConfig — Huawei Push Kit (не реализовано).
+// HMSConfig — Huawei Push Kit, серверный API v1: OAuth 2.0 client
+// credentials (AppGallery Connect → проект → «Мои приложения» → приложение →
+// App ID и App secret) и messages:send.
 type HMSConfig struct {
-	AppID        string `yaml:"app_id"`
-	ClientSecret string `yaml:"client_secret"`
+	AppID string `yaml:"app_id"`
+	// ClientID — OAuth client id; пусто — App ID (так у ключей приложения).
+	ClientID     string `yaml:"client_id"`
+	ClientSecret string `yaml:"client_secret"` // App secret (секрет, вне git)
+	// Mode — вид сообщения: "data" (по умолчанию) — data-сообщение будит
+	// приложение, оно синхронизируется и показывает уведомление с отправителем
+	// и темой из своего кэша; "notification" — запасной путь, если data до
+	// остановленного приложения на EMUI не доходит: система сама показывает
+	// обезличенное «Новые письма», нажатие открывает приложение
+	// (android-behavior-contract §7).
+	Mode string `yaml:"mode"`
+}
+
+// Значения HMSConfig.Mode.
+const (
+	HMSModeData         = "data"
+	HMSModeNotification = "notification"
+)
+
+// Enabled — заданы ли App ID и секрет.
+func (c HMSConfig) Enabled() bool {
+	return strings.TrimSpace(c.AppID) != "" && strings.TrimSpace(c.ClientSecret) != ""
+}
+
+// ModeOrDefault — Mode с пустым значением как "data".
+func (c HMSConfig) ModeOrDefault() string {
+	m := strings.ToLower(strings.TrimSpace(c.Mode))
+	if m == "" {
+		return HMSModeData
+	}
+	return m
+}
+
+// RuStoreConfig — RuStore Push, серверный API: RuStore Консоль → приложение →
+// «Push-уведомления» → «Проекты» → ID проекта и сервисный токен.
+type RuStoreConfig struct {
+	ProjectID    string `yaml:"project_id"`
+	ServiceToken string `yaml:"service_token"` // секрет, вне git
+}
+
+// Enabled — заданы ли проект и сервисный токен.
+func (c RuStoreConfig) Enabled() bool {
+	return strings.TrimSpace(c.ProjectID) != "" && strings.TrimSpace(c.ServiceToken) != ""
 }
 
 // FCMConfig — Firebase Cloud Messaging (не реализовано).
@@ -347,6 +392,11 @@ func (c *Config) Validate() error {
 	case APNsEnvAuto, APNsEnvSandbox, APNsEnvProduction:
 	default:
 		return fmt.Errorf("push.apns.environment must be auto, sandbox or production, got %q", c.Push.APNs.Environment)
+	}
+	switch c.Push.HMS.ModeOrDefault() {
+	case HMSModeData, HMSModeNotification:
+	default:
+		return fmt.Errorf("push.hms.mode must be data or notification, got %q", c.Push.HMS.Mode)
 	}
 	return nil
 }
