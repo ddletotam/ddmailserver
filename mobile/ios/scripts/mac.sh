@@ -122,6 +122,7 @@ sim_udid() {
     local pattern
     case "$1" in
         ipad) pattern='^iPad Pro 13' ;;
+        iphonemax) pattern='^iPhone [0-9]+ Pro Max$' ;;
         *) pattern='^iPhone [0-9]+ Pro$' ;;
     esac
     xcrun simctl list devices available -j | /usr/bin/python3 -c '

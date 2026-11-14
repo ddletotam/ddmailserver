@@ -60,10 +60,17 @@ DDMail — почтовый клиент для сервера ddmail и люб�
 ревью придерётся, нужна страница с контактом, например `https://mail.letotam.ru/support`.
 **URL маркетинга:** не обязателен, можно оставить пустым.
 **URL политики конфиденциальности:** https://mail.letotam.ru/privacy
-**Copyright:** 2026 Данилин Денис Валентинович
+**Copyright:** 2026 Денис Данилин
 
 **Скриншоты:** iPhone 6.9″ (1320×2868, симулятор iPhone 18 Pro Max), iPad 13″
-(2064×2752, iPad Pro 13-inch (M5)), Mac (2880×1800). Снимать на демо-учётке ниже: в ней
+(2064×2752, iPad Pro 13-inch (M5)), Mac (2880×1800). Снимает UI-тест
+`AppStoreShotsTests` под демо-учёткой (список с табами папок, беседа, «Написать по
+адресу», календарь, контакты, задачи):
+`DDMAIL_TEST_EMAIL=review@mail.letotam.ru DDMAIL_TEST_PASSWORD=… mac.sh uitest iphonemax AppStoreShotsTests`
+(и `ipad`), перед этим на симуляторах `xcrun simctl status_bar <udid> override --time 9:41
+--batteryLevel 100 --batteryState charged --cellularBars 4 --wifiBars 3`. В git снимков нет.
+Mac-снимки по SSH снять нельзя (нет разрешения «Запись экрана»), поэтому macOS-версия
+на первое ревью не подаётся. Снимать на демо-учётке ниже: в ней
 только вымышленные люди и адреса `example.com`/`example.org`. Скриншоты с настоящей почты
 не годятся: на них персональные данные корреспондентов (152-ФЗ).
 
@@ -80,8 +87,10 @@ DDMail — почтовый клиент для сервера ddmail и люб�
   заблокировать отправителя можно через «В спам» и чёрный список домена.
 - Advertising, In-App Purchases — **No**.
 
-Решение владельца 2026-11-14 — **12+** во всех сторах. Анкета даст ниже (4+/9+), поэтому
-в App Store Connect включить повышение рейтинга до 12+ (Age Rating → override to higher age rating).
+Решение владельца 2026-11-14 — **12+** во всех сторах. Анкета даёт 4+. В новой шкале
+Apple (с 2025: 4+/9+/13+/16+/18+) 12+ нет, поэтому стоит ближайшее не ниже:
+`ageRatingOverrideV2 = THIRTEEN_PLUS`. ASC при этом показывает `appStoreAgeRating =
+TWELVE_PLUS` (старая шкала), Бразилия — 12.
 
 ## App Privacy (анкета «Конфиденциальность приложения»)
 
@@ -119,7 +128,8 @@ Diagnostics, Purchases, Sensitive Info) — **не собирается**. От�
 **Password:** вводится только в App Store Connect, в поле Password раздела Sign-In
 Information. В git пароля нет; на станции сборки он лежит в
 `~/.config/ddmail-ios/review-account.env`.
-**Контакт:** Данилин Денис, legal@mfml.ru (телефон — на усмотрение владельца).
+**Контакт:** Денис Данилин, legal@mfml.ru, телефон в формате `+7 …`. API без телефона
+контакт не сохраняет (`contactPhone` обязателен), поэтому все три поля вводит владелец.
 
 **Notes (англ., для ревьюера):**
 
@@ -141,6 +151,31 @@ Information. В git пароля нет; на станции сборки он �
 >
 > Encryption: the app uses only the encryption built into the OS (HTTPS/TLS via URLSession and
 > Network.framework); ITSAppUsesNonExemptEncryption = NO.
+
+## Состояние в App Store Connect (2026-11-14)
+
+Заполнено через ASC API (app id 6834889461), iOS-версия `0.0.14` (`db6bb49c-…`; создавалась
+как «1.0», переименована):
+
+- app: `contentRightsDeclaration = DOES_NOT_USE_THIRD_PARTY_CONTENT`;
+- appInfo: категории PRODUCTIVITY / BUSINESS; ru: имя, подзаголовок, политика URL;
+- версия: copyright, сборка 14 (iOS) привязана; ru: описание, ключевые слова,
+  рекламный текст, support URL. «Что нового» у первой версии не заполняется;
+- возрастная анкета: всё «нет», messagingAndChat и userGeneratedContent — «да»,
+  повышение до 13+ (см. выше);
+- цена: бесплатно (база USA), доступность: все 175 территорий плюс новые;
+- App Review: демо-учётка, пароль, заметки (текст выше);
+- скриншоты: 6 штук iPhone 6.9″ (`APP_IPHONE_67`) и 5 штук iPad 13″
+  (`APP_IPAD_PRO_3GEN_129`); у iPad нет отдельного экрана списка, на снимке беседы
+  список и беседа стоят рядом.
+
+Проверка `reviewSubmissionItems` (черновик reviewSubmission для iOS уже создан) называет
+только два недостающих пункта:
+1. App Review → Contact Information: имя, фамилия, email, телефон;
+2. App Privacy: ответы по таблице выше, затем Publish. В публичном API этого раздела нет.
+
+macOS-версия (`1.0`, PREPARE_FOR_SUBMISSION) не заполнялась. Без настоящих Mac-скриншотов
+её не подаём.
 
 ## Демо-учётка (сервер)
 
