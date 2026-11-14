@@ -54,8 +54,18 @@ final class SelectionTests: XCTestCase {
         let texts = web.staticTexts.matching(Shown.contains(stamp))
         XCTAssertTrue(texts.firstMatch.waitForExistence(timeout: 30), "нет текста письма")
         sleep(2)
-        // Видимая нижняя строка с меткой.
-        let text = texts.allElementsBoundByIndex.last { $0.isHittable } ?? texts.firstMatch
+        // Беседа открывается на первом непрочитанном (§8), а у тестовой учётки
+        // там бывают чужие непрочитанные письма выше нашего (на iPad — в
+        // беседе, открытой справа после входа) — прокрутить ленту вниз, пока
+        // наше письмо не окажется на экране.
+        var shown = texts.allElementsBoundByIndex.last { $0.isHittable }
+        for _ in 0..<30 where shown == nil {
+            web.swipeUp()
+            sleep(1)
+            shown = texts.allElementsBoundByIndex.last { $0.isHittable }
+        }
+        let text = try XCTUnwrap(shown, "своё письмо не показалось в ленте")
+        sleep(1)
         XCTAssertTrue(text.label.hasPrefix(Self.firstWord), "текст письма не тот: «\(text.label)»")
         UIFlow.shot(app, "select-0-open", self)
 
