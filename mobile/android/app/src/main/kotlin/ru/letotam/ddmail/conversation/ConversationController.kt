@@ -17,6 +17,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import ru.letotam.ddmail.api.ApiException
+import ru.letotam.ddmail.api.Delivery
 import ru.letotam.ddmail.api.DeliveryEvent
 import ru.letotam.ddmail.api.MessageBody
 import ru.letotam.ddmail.api.MessageRef
@@ -157,6 +158,7 @@ class ConversationController(
      * нечего делать: кэш уже поправлен, откроют — покажется верно.
      */
     fun delivery(ev: DeliveryEvent) {
+        stubs.event(ev)?.let { (key, d) -> js.trySend("ddm.stubDelivery(\"$key\",$d)") }
         val c = conv ?: return
         if (c.accountKey != hub.ddmail?.accountKey) return
         val uid = ev.messageId.takeIf { it > 0 }
@@ -166,6 +168,17 @@ class ConversationController(
         val now = b.copy(deliveryStatus = ev.status, deliveryReason = ev.reason, deliveryError = ev.error, deliveryFailed = ev.failed)
         loadedBodies[uid] = now
         js.trySend("ddm.delivery($uid,${deliveryJson(now)})")
+    }
+
+    /** Заглушки отправленных писем и события доставки к ним ([StubDelivery]). */
+    private val stubs = StubDelivery()
+
+    /**
+     * Сервер принял письмо заглушки [key], его копия — [rfcMessageId]. Событие
+     * доставки могло прийти раньше ответа `/send` — тогда пометка сразу.
+     */
+    fun stubSent(key: String, rfcMessageId: String) {
+        stubs.sent(key, rfcMessageId)?.let { d -> js.trySend("ddm.stubDelivery(\"$key\",$d)") }
     }
 
     /** Убрать письма из ленты (удалены): пузыри, тела, отметки. */
@@ -475,6 +488,48 @@ internal fun openTypes(type: String, filename: String?): List<String> {
 private val TEXT_EXTENSIONS = setOf("md", "markdown", "txt", "log", "csv", "tsv", "json", "xml", "yaml", "yml", "ini", "conf", "cfg", "toml", "sh", "eml")
 
 internal fun deliveryJson(b: MessageBody): JsonObject = deliveryJson(b.deliveryStatus, b.deliveryError, b.deliveryFailed)
+
+/**
+ * Статус доставки для заглушки отправляемого письма — до того, как его копия
+ * придёт дельтой бесед (а это запрос в секунды). Сервер ddmail шлёт
+ * `delivery_status` с Message-ID копии сразу при доставке — письмо себе или на
+ * свой домен доставлено ещё до ответа `/send`, — а Message-ID заглушка узнаёт
+ * из ответа `/send`. Поэтому события копятся (последние [KEEP]), и связка
+ * срабатывает в любом порядке. Простое `pending` без причины не передаётся:
+ * заглушка и так «Отправляется…».
+ */
+internal class StubDelivery {
+    private val keyOf = LinkedHashMap<String, String>()
+    private val seen = LinkedHashMap<String, DeliveryEvent>()
+
+    /** Сервер принял письмо заглушки [key]: пометка, если событие уже было. */
+    fun sent(key: String, rfcMessageId: String): JsonObject? {
+        if (rfcMessageId.isEmpty()) return null
+        keyOf[rfcMessageId] = key
+        trim(keyOf)
+        return seen[rfcMessageId]?.let(::shown)
+    }
+
+    /** Событие доставки: заглушка и её пометка, если заглушка известна. */
+    fun event(ev: DeliveryEvent): Pair<String, JsonObject>? {
+        if (ev.rfcMessageId.isEmpty()) return null
+        seen[ev.rfcMessageId] = ev
+        trim(seen)
+        val key = keyOf[ev.rfcMessageId] ?: return null
+        return shown(ev)?.let { key to it }
+    }
+
+    private fun shown(ev: DeliveryEvent): JsonObject? =
+        if (ev.status == Delivery.PENDING && ev.error.isEmpty()) null else deliveryJson(ev.status, ev.error, ev.failed)
+
+    private fun <V> trim(m: LinkedHashMap<String, V>) {
+        while (m.size > KEEP) m.remove(m.keys.first())
+    }
+
+    private companion object {
+        const val KEEP = 64
+    }
+}
 
 /**
  * Письма, пропавшие из беседы: какие из показанных убрать из ленты и сколько

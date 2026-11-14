@@ -256,15 +256,19 @@ class SessionApi(
     override suspend fun identities(): List<Identity> =
         get("/identities", ListSerializer(Identity.serializer()))
 
-    /** Поставить письмо в отправку. 413 — вложения больше лимита сервера. */
-    suspend fun send(req: SendRequest) {
+    /**
+     * Поставить письмо в отправку. 413 — вложения больше лимита сервера.
+     * Ответ без полей (старый сервер) — пустой [SendAck]: письмо принято и так.
+     */
+    suspend fun send(req: SendRequest): SendAck {
         val body = DdmailApi.json.encodeToString(SendRequest.serializer(), req)
-        authed { token ->
+        val text = authed { token ->
             Request.Builder().url("$baseUrl/api/desktop/v1/send")
                 .header("Authorization", "Bearer $token")
                 .post(body.toRequestBody(JSON))
                 .build()
         }
+        return runCatching { DdmailApi.json.decodeFromString(SendAck.serializer(), text) }.getOrDefault(SendAck())
     }
 
     /** Мягкое удаление писем (vault на сервере, у внешних учёток — и на источнике). */

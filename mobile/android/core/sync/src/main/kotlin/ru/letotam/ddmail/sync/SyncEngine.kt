@@ -37,7 +37,10 @@ import ru.letotam.ddmail.sync.CacheRows.toEntity
  * 4. документ папок диалогов `/dialog-folders` — в кэш (табы видны на
  *    старте, до ответа сервера).
  *
- * Синхронизации одной учётки не идут параллельно ([lock]).
+ * Шаги 1–2 — беседы ([syncConversations]) — не идут параллельно ([lock]);
+ * 3–4 и прочие документы — хвост прохода под своим замком ([extrasLock]):
+ * пока он идёт (спам, адреса, папки — секунды), следующий проход бесед уже
+ * может начаться. Иначе отправленное письмо ждало бы чужой хвост.
  */
 class SyncEngine(
     override val accountKey: String,
@@ -47,6 +50,7 @@ class SyncEngine(
     private val now: () -> Long = { System.currentTimeMillis() / 1000 },
 ) : MailSource {
     private val lock = Mutex()
+    private val extrasLock = Mutex()
 
     /** Пространство кэша бесед спама — как `spam_cache_key` десктопа. */
     private val spamKey = "$accountKey#spam"
@@ -59,7 +63,17 @@ class SyncEngine(
     }
 
     /** Один проход. Ошибки API уходят наверх ([ru.letotam.ddmail.api.ApiException]). */
-    override suspend fun sync(): Unit = lock.withLock {
+    override suspend fun sync() {
+        syncConversations()
+        syncExtras()
+    }
+
+    /**
+     * Только беседы: журнал удалений и дельта (шаги 1–2) — то, что приносит
+     * новое письмо в ленту. После отправки ([MailHub.refreshConversations])
+     * этого хватает: спам, адреса и папки от письма не меняются.
+     */
+    suspend fun syncConversations(): Unit = lock.withLock {
         var forceFull = false
 
         val seq = dao.meta(K_SEQ)?.toLongOrNull() ?: 0
@@ -90,7 +104,10 @@ class SyncEngine(
         // Курсор журнала — только после того, как дельта легла: упади она,
         // надгробия этого прохода не потеряются, их отдадут ещё раз.
         if (ch.latestSeq > 0) dao.setMeta(K_SEQ, ch.latestSeq.toString())
+    }
 
+    /** Хвост прохода: спам, адреса, цвета, папки диалогов (шаги 3–4). */
+    private suspend fun syncExtras(): Unit = extrasLock.withLock {
         // Спам не повод валить проход: папка «Спам» покажет прошлый список.
         runCatching { api.spamConversations() }.getOrNull()?.let { list ->
             dao.replaceAll(
@@ -322,7 +339,12 @@ class SyncEngine(
         s?.let { runCatching { json.decodeFromString(idents, it) }.getOrNull() }.orEmpty()
     }
 
-    override suspend fun send(req: SendRequest) = api.send(req)
+    override suspend fun send(req: SendRequest) {
+        sendAcked(req)
+    }
+
+    /** Отправка с ответом сервера: Message-ID копии в «Отправленных». */
+    suspend fun sendAcked(req: SendRequest): ru.letotam.ddmail.api.SendAck = api.send(req)
 
     override suspend fun searchMessages(query: String, limit: Int): List<MessageHit> = try {
         api.searchMessages(query, limit)

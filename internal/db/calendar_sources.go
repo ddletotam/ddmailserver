@@ -392,7 +392,7 @@ func (db *DB) UpdateCalendarSourceOAuthTokens(sourceID int64, accessToken, refre
 // decryptCalendarSourceSecrets decrypts password and OAuth tokens
 func (db *DB) decryptCalendarSourceSecrets(source *models.CalendarSource) error {
 	if source.CalDAVPassword != "" {
-		decrypted, err := crypto.DecryptPassword(source.CalDAVPassword, db.encryptionKey)
+		decrypted, err := db.decryptSecret(source.CalDAVPassword)
 		if err != nil {
 			return fmt.Errorf("failed to decrypt CalDAV password: %w", err)
 		}
@@ -400,7 +400,7 @@ func (db *DB) decryptCalendarSourceSecrets(source *models.CalendarSource) error 
 	}
 
 	if source.OAuthAccessToken != "" {
-		decrypted, err := crypto.DecryptPassword(source.OAuthAccessToken, db.encryptionKey)
+		decrypted, err := db.decryptSecret(source.OAuthAccessToken)
 		if err != nil {
 			return fmt.Errorf("failed to decrypt OAuth access token: %w", err)
 		}
@@ -408,7 +408,7 @@ func (db *DB) decryptCalendarSourceSecrets(source *models.CalendarSource) error 
 	}
 
 	if source.OAuthRefreshToken != "" {
-		decrypted, err := crypto.DecryptPassword(source.OAuthRefreshToken, db.encryptionKey)
+		decrypted, err := db.decryptSecret(source.OAuthRefreshToken)
 		if err != nil {
 			return fmt.Errorf("failed to decrypt OAuth refresh token: %w", err)
 		}

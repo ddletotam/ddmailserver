@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/ddletotam/ddmailserver/internal/crypto"
 	_ "github.com/lib/pq"
 )
 
@@ -21,6 +22,9 @@ type Queryable interface {
 type DB struct {
 	*sql.DB
 	encryptionKey string
+	// keys remembers derived keys of stored secrets (see crypto.KeyCache);
+	// nil — every decryption derives its key anew.
+	keys *crypto.KeyCache
 }
 
 // Tx wraps a sql.Tx with encryption key for DB operations
@@ -68,6 +72,15 @@ func (db *DB) Close() error {
 // SetEncryptionKey sets the encryption key for encrypting/decrypting passwords
 func (db *DB) SetEncryptionKey(key string) {
 	db.encryptionKey = key
+	db.keys = crypto.NewKeyCache()
+}
+
+// decryptSecret decrypts a stored password or token with the encryption key.
+func (db *DB) decryptSecret(ciphertext string) (string, error) {
+	if db.keys == nil {
+		return crypto.DecryptPassword(ciphertext, db.encryptionKey)
+	}
+	return db.keys.Decrypt(ciphertext, db.encryptionKey)
 }
 
 // BeginTx starts a transaction with context

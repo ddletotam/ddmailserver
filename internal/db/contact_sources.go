@@ -377,19 +377,19 @@ func (db *DB) decryptContactSourceSecrets(source *models.ContactSource) error {
 	var err error
 
 	if source.CardDAVPassword != "" {
-		source.CardDAVPassword, err = crypto.DecryptPassword(source.CardDAVPassword, db.encryptionKey)
+		source.CardDAVPassword, err = db.decryptSecret(source.CardDAVPassword)
 		if err != nil {
 			return fmt.Errorf("failed to decrypt CardDAV password: %w", err)
 		}
 	}
 	if source.OAuthAccessToken != "" {
-		source.OAuthAccessToken, err = crypto.DecryptPassword(source.OAuthAccessToken, db.encryptionKey)
+		source.OAuthAccessToken, err = db.decryptSecret(source.OAuthAccessToken)
 		if err != nil {
 			return fmt.Errorf("failed to decrypt OAuth access token: %w", err)
 		}
 	}
 	if source.OAuthRefreshToken != "" {
-		source.OAuthRefreshToken, err = crypto.DecryptPassword(source.OAuthRefreshToken, db.encryptionKey)
+		source.OAuthRefreshToken, err = db.decryptSecret(source.OAuthRefreshToken)
 		if err != nil {
 			return fmt.Errorf("failed to decrypt OAuth refresh token: %w", err)
 		}

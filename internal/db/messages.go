@@ -116,11 +116,15 @@ func (db *DB) GetMessagesByFolder(folderID int64, limit, offset int) ([]*models.
 // перерастает лимит (5000 у /conversations), новые письма перестают попадать
 // в беседы вовсе. Порядок по возрастанию сохранён — вызывающие на него
 // рассчитывают так же, как с GetMessagesByFolder.
+//
+// Тела (body, body_html) не читаются — приходят пустыми строками: беседам
+// они не нужны, а у ящика в 4 тыс. писем это ~75 МБ на каждый запрос
+// дельты, то есть заметная часть пути «отправил → письмо в ленте».
 func (db *DB) GetRecentMessagesByFolder(folderID int64, limit int) ([]*models.Message, error) {
 	query := `
 		SELECT * FROM (
 		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
-		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
+		       date, '' AS body, '' AS body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 		       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
 		       COALESCE(remote_uid, 0), COALESCE(remote_folder, 'INBOX'), created_at, updated_at,
 		       delivery_status, delivery_reason, delivery_failed

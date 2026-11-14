@@ -164,6 +164,18 @@ data class OutgoingAttachment(
     @SerialName("content_id") val contentId: String? = null,
 )
 
+/**
+ * Ответ `/send`: письмо принято, копия в «Отправленных» уже есть.
+ * [rfcMessageId] — её Message-ID: по нему событие `delivery_status` находит
+ * заглушку отправляемого письма, пока копия ещё не пришла дельтой.
+ */
+@Serializable
+data class SendAck(
+    @SerialName("message_id") val messageId: Long = 0,
+    @SerialName("rfc_message_id") val rfcMessageId: String = "",
+    @SerialName("delivery_status") val status: String = "",
+)
+
 /** Тело `/send`. Отправка асинхронная: сервер ставит письмо в очередь. */
 @Serializable
 data class SendRequest(
