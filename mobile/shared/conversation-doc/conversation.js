@@ -106,16 +106,27 @@ function onLongPress(el, handler) {
 if (touchWebKit) document.documentElement.classList.add('ddm-touch-webkit');
 
 /**
- * Просьба о нативном меню у элемента (пузыря, чипа вложения). Android — как
- * было (`bubbleMenu(uid)`); WebKit — ещё прямоугольник элемента и точка
- * нажатия в CSS px от начала документа (как `selectionMenu`): меню iPhone и
- * iPad встаёт у пузыря, а не посреди колонки.
+ * Просьба о нативном меню у элемента (пузыря, чипа вложения): после `args` —
+ * прямоугольник элемента и точка нажатия.
+ * - WebKit (iPhone, iPad, Мак): в CSS px от начала документа (как
+ *   `selectionMenu`) — меню встаёт у пузыря, а не посреди колонки.
+ * - Android: в CSS px от левого верхнего угла видимой области (visual
+ *   viewport: учтены прокрутка и щипок) и последним — её ширина в CSS px;
+ *   отношение ширины WebView в пикселях к ней — масштаб (density × щипок).
+ *   Число аргументов входит в сигнатуру `@JavascriptInterface` — менять
+ *   вместе с `ConversationWeb.Bridge`.
  */
 function askMenu(name, args, el, x, y) {
-  if (window.ddmNative) { native(name, ...args); return; }
   const r = el.getBoundingClientRect();
   const px = typeof x === 'number' ? x : r.left + r.width / 2;
   const py = typeof y === 'number' ? y : r.top + r.height / 2;
+  if (window.ddmNative) {
+    const vv = window.visualViewport;
+    const ox = vv ? vv.offsetLeft : 0, oy = vv ? vv.offsetTop : 0;
+    const vw = vv ? vv.width : window.innerWidth;
+    native(name, ...args, r.left - ox, r.top - oy, r.width, r.height, px - ox, py - oy, vw);
+    return;
+  }
   native(name, ...args, r.left + scrollX, r.top + scrollY, r.width, r.height, px + scrollX, py + scrollY);
 }
 

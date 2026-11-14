@@ -94,8 +94,8 @@ class MailViewModel(
 
     val conversation = ConversationController(app, app.settings, hub, viewModelScope)
 
-    /** Вложение, на котором открыто меню (uid письма, индекс). */
-    val attachmentMenu = MutableStateFlow<Pair<Long, Int>?>(null)
+    /** Вложение, на котором открыто меню (uid письма, индекс, где чип на экране). */
+    val attachmentMenu = MutableStateFlow<AttachmentMenuAt?>(null)
 
     val compose = ComposeController(app, hub, conversation, viewModelScope, ::sync)
 
@@ -115,10 +115,10 @@ class MailViewModel(
         hub.identityColors.stateIn(viewModelScope, SharingStarted.Eagerly, ru.letotam.ddmail.sync.IdentityColors())
 
     /** Письмо, на котором открыто меню пузыря. */
-    val bubbleMenu = MutableStateFlow<MessageBody?>(null)
+    val bubbleMenu = MutableStateFlow<BubbleMenuAt?>(null)
 
-    fun showBubbleMenu(uid: Long) {
-        bubbleMenu.value = conversation.body(uid)
+    fun showBubbleMenu(uid: Long, anchor: ru.letotam.ddmail.conversation.MenuAnchor?) {
+        bubbleMenu.value = conversation.body(uid)?.let { BubbleMenuAt(it, anchor) }
     }
 
     /** «Показать… → Заголовки / Исходник»: открытый просмотр; `null` — закрыт. */
@@ -728,3 +728,9 @@ internal fun searchConversations(convs: List<Conversation>, q: String): List<Con
     val bySubj = convs.filter { c -> c !in byName && c !in byAddr && c.lastSubject.lowercase().contains(needle) }
     return byName + byAddr + bySubj
 }
+
+/** Открытое меню пузыря: письмо и где пузырь на экране (`null` — неизвестно). */
+data class BubbleMenuAt(val body: MessageBody, val anchor: ru.letotam.ddmail.conversation.MenuAnchor?)
+
+/** Открытое меню вложения: письмо, индекс вложения и где его чип на экране. */
+data class AttachmentMenuAt(val uid: Long, val index: Int, val anchor: ru.letotam.ddmail.conversation.MenuAnchor?)

@@ -173,9 +173,9 @@ fun MailScreen(
             override fun onOpenAttachment(uid: Long, index: Int) =
                 vm.conversation.openAttachment(uid, index, vm.conversation.attachmentName(uid, index))
             override fun loadPart(uid: Long, cid: String) = vm.conversation.part(uid, cid)
-            override fun onBubbleMenu(uid: Long) = vm.showBubbleMenu(uid)
-            override fun onAttachmentMenu(uid: Long, index: Int) {
-                vm.attachmentMenu.value = uid to index
+            override fun onBubbleMenu(uid: Long, anchor: ru.letotam.ddmail.conversation.MenuAnchor?) = vm.showBubbleMenu(uid, anchor)
+            override fun onAttachmentMenu(uid: Long, index: Int, anchor: ru.letotam.ddmail.conversation.MenuAnchor?) {
+                vm.attachmentMenu.value = AttachmentMenuAt(uid, index, anchor)
             }
             override fun onAllowSender(uid: Long) = vm.conversation.allowSender(uid)
             override fun onRestarted() = vm.conversation.restarted()
@@ -1106,23 +1106,16 @@ private fun ConversationPane(c: Conversation?, web: ConversationWeb, vm: MailVie
 @Composable
 private fun AttachmentMenu(vm: MailViewModel) {
     val m by vm.attachmentMenu.collectAsState()
-    val (uid, index) = m ?: return
+    val (uid, index, anchor) = m ?: return
     val close = { vm.attachmentMenu.value = null }
     val name = vm.conversation.attachmentName(uid, index) ?: "Вложение"
-    AlertDialog(
-        onDismissRequest = close,
-        title = { Text(name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-        text = {
-            Column {
-                MenuRow(Icons.AutoMirrored.Filled.OpenInNew, "Открыть", close) { vm.conversation.openAttachment(uid, index, name) }
-                MenuRow(Icons.Filled.Share, "Поделиться", close) {
-                    vm.conversation.shareAttachment(uid, index, name) { msg -> vm.notice.value = msg }
-                }
-                MenuRow(Icons.Filled.Download, "В «Загрузки»", close) { vm.conversation.saveAttachment(uid, index) { msg -> vm.notice.value = msg } }
-            }
-        },
-        confirmButton = { IconButton(onClick = close) { Icon(Icons.Filled.Close, "Отмена") } },
-    )
+    AnchoredMenu(anchor, name, close) {
+        MenuRow(Icons.AutoMirrored.Filled.OpenInNew, "Открыть", close) { vm.conversation.openAttachment(uid, index, name) }
+        MenuRow(Icons.Filled.Share, "Поделиться", close) {
+            vm.conversation.shareAttachment(uid, index, name) { msg -> vm.notice.value = msg }
+        }
+        MenuRow(Icons.Filled.Download, "В «Загрузки»", close) { vm.conversation.saveAttachment(uid, index) { msg -> vm.notice.value = msg } }
+    }
 }
 
 /**
@@ -1130,48 +1123,41 @@ private fun AttachmentMenu(vm: MailViewModel) {
  * (`app.slint`): «Ответить», «Переслать», «Копировать текст», «Копировать
  * адрес», «Показать…» (заголовки, исходник сообщения, исходник тела, текстовая
  * или HTML-версия), «Удалить письмо». «Показать…» раскрывается на месте — у
- * диалога вложенного меню нет.
+ * поповера вложенного меню нет. Меню — у пузыря ([AnchoredMenu]).
  */
 @Composable
 private fun BubbleMenu(vm: MailViewModel) {
     val b by vm.bubbleMenu.collectAsState()
-    val body = b ?: return
+    val (body, anchor) = b ?: return
     val clipboard = LocalClipboardManager.current
     val close = { vm.bubbleMenu.value = null }
     var more by remember(body.uid) { mutableStateOf(false) }
     val hasHtml = !body.html.isNullOrBlank()
     val hasText = !body.text.isNullOrBlank()
     val asText = vm.conversation.showsText(body.uid)
-    AlertDialog(
-        onDismissRequest = close,
-        title = { Text(body.subject.ifBlank { stringResource(R.string.no_subject) }, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-        text = {
-            Column(Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState())) {
-                MenuRow(Icons.AutoMirrored.Filled.Reply, "Ответить", close) { vm.compose.replyTo(body) }
-                MenuRow(Icons.AutoMirrored.Filled.Forward, "Переслать", close) { vm.compose.openForward(body) }
-                MenuRow(Icons.Filled.ContentCopy, "Копировать текст", close) {
-                    val plain = body.text?.takeIf { it.isNotBlank() }
-                        ?: android.text.Html.fromHtml(body.html.orEmpty(), android.text.Html.FROM_HTML_MODE_COMPACT).toString()
-                    clipboard.setText(AnnotatedString(plain.trim()))
-                }
-                if (body.fromAddr.isNotBlank()) MenuRow(Icons.Filled.AlternateEmail, "Копировать адрес", close) {
-                    clipboard.setText(AnnotatedString(body.fromAddr))
-                }
-                HorizontalDivider()
-                MenuRow(Icons.Filled.Visibility, "Показать…", close = {}, trailing = if (more) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore) { more = !more }
-                if (more) Column(Modifier.padding(start = 40.dp)) {
-                    MenuRow(Icons.AutoMirrored.Filled.List, "Заголовки", close) { vm.showSource(body, headersOnly = true) }
-                    MenuRow(Icons.Filled.Code, "Исходник сообщения", close) { vm.showSource(body, headersOnly = false) }
-                    if (hasHtml && !asText) MenuRow(Icons.Filled.DataObject, "Исходник тела (HTML)", close) { vm.showBodySource(body) }
-                    if (hasHtml && hasText && !asText) MenuRow(Icons.Filled.Notes, "Текстовую версию", close) { vm.conversation.view(body.uid, asText = true) }
-                    if (hasHtml && asText) MenuRow(Icons.Filled.Html, "HTML-версию", close) { vm.conversation.view(body.uid, asText = false) }
-                }
-                HorizontalDivider()
-                MenuRow(Icons.Filled.Delete, "Удалить письмо", close, tint = MaterialTheme.colorScheme.error) { vm.deleteMessageAsk.value = body }
-            }
-        },
-        confirmButton = { IconButton(onClick = close) { Icon(Icons.Filled.Close, "Отмена") } },
-    )
+    AnchoredMenu(anchor, body.subject.ifBlank { stringResource(R.string.no_subject) }, close) {
+        MenuRow(Icons.AutoMirrored.Filled.Reply, "Ответить", close) { vm.compose.replyTo(body) }
+        MenuRow(Icons.AutoMirrored.Filled.Forward, "Переслать", close) { vm.compose.openForward(body) }
+        MenuRow(Icons.Filled.ContentCopy, "Копировать текст", close) {
+            val plain = body.text?.takeIf { it.isNotBlank() }
+                ?: android.text.Html.fromHtml(body.html.orEmpty(), android.text.Html.FROM_HTML_MODE_COMPACT).toString()
+            clipboard.setText(AnnotatedString(plain.trim()))
+        }
+        if (body.fromAddr.isNotBlank()) MenuRow(Icons.Filled.AlternateEmail, "Копировать адрес", close) {
+            clipboard.setText(AnnotatedString(body.fromAddr))
+        }
+        HorizontalDivider()
+        MenuRow(Icons.Filled.Visibility, "Показать…", close = {}, trailing = if (more) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore) { more = !more }
+        if (more) Column(Modifier.padding(start = 40.dp)) {
+            MenuRow(Icons.AutoMirrored.Filled.List, "Заголовки", close) { vm.showSource(body, headersOnly = true) }
+            MenuRow(Icons.Filled.Code, "Исходник сообщения", close) { vm.showSource(body, headersOnly = false) }
+            if (hasHtml && !asText) MenuRow(Icons.Filled.DataObject, "Исходник тела (HTML)", close) { vm.showBodySource(body) }
+            if (hasHtml && hasText && !asText) MenuRow(Icons.Filled.Notes, "Текстовую версию", close) { vm.conversation.view(body.uid, asText = true) }
+            if (hasHtml && asText) MenuRow(Icons.Filled.Html, "HTML-версию", close) { vm.conversation.view(body.uid, asText = false) }
+        }
+        HorizontalDivider()
+        MenuRow(Icons.Filled.Delete, "Удалить письмо", close, tint = MaterialTheme.colorScheme.error) { vm.deleteMessageAsk.value = body }
+    }
 }
 
 /** «Удалить письмо» — с подтверждением до: API восстановления нет (§5). */

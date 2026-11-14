@@ -37,8 +37,9 @@ class ConversationWeb(context: Context, private val proxyHttp: OkHttpClient) {
         fun onReady()
         fun onRequestOlder()
         fun onOpenAttachment(uid: Long, index: Int)
-        fun onBubbleMenu(uid: Long)
-        fun onAttachmentMenu(uid: Long, index: Int)
+        /** Меню пузыря; [anchor] — где он на экране (`null` — неизвестно, меню посередине). */
+        fun onBubbleMenu(uid: Long, anchor: MenuAnchor?)
+        fun onAttachmentMenu(uid: Long, index: Int, anchor: MenuAnchor?)
         fun onAllowSender(uid: Long)
         /** Документ создан заново после падения процесса отрисовки: показать текущую беседу снова. */
         fun onRestarted()
@@ -124,11 +125,16 @@ class ConversationWeb(context: Context, private val proxyHttp: OkHttpClient) {
         @JavascriptInterface
         fun openAttachment(uid: Long, index: Int) = main.post { host?.onOpenAttachment(uid, index) }
 
+        // Меню у элемента: после id — его прямоугольник, точка нажатия и
+        // ширина видимой области, всё в CSS px (`askMenu` в conversation.js).
+        // Число аргументов — часть сигнатуры: менять вместе с JS.
         @JavascriptInterface
-        fun bubbleMenu(uid: Long) = main.post { host?.onBubbleMenu(uid) }
+        fun bubbleMenu(uid: Long, x: Double, y: Double, w: Double, h: Double, px: Double, py: Double, vw: Double) =
+            main.post { host?.onBubbleMenu(uid, anchor(x, y, w, h, px, py, vw)) }
 
         @JavascriptInterface
-        fun attachmentMenu(uid: Long, index: Int) = main.post { host?.onAttachmentMenu(uid, index) }
+        fun attachmentMenu(uid: Long, index: Int, x: Double, y: Double, w: Double, h: Double, px: Double, py: Double, vw: Double) =
+            main.post { host?.onAttachmentMenu(uid, index, anchor(x, y, w, h, px, py, vw)) }
 
         @JavascriptInterface
         fun allowSender(uid: Long) = main.post { host?.onAllowSender(uid) }
@@ -142,6 +148,13 @@ class ConversationWeb(context: Context, private val proxyHttp: OkHttpClient) {
         fun allowSpamImages(uid: Long) {
             gate?.allow(uid)
         }
+    }
+
+    /** Координаты документа → пиксели окна; на главном потоке (читает вид). */
+    private fun anchor(x: Double, y: Double, w: Double, h: Double, px: Double, py: Double, vw: Double): MenuAnchor? {
+        val loc = IntArray(2)
+        view.getLocationInWindow(loc)
+        return MenuAnchor.fromDocument(loc[0], loc[1], view.width, view.height, x, y, w, h, px, py, vw)
     }
 
     private inner class Client : WebViewClient() {
