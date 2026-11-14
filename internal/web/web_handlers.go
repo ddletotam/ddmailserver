@@ -32,6 +32,13 @@ type PageData struct {
 	FlashError   string
 }
 
+// LoginPageData is the login page: the register tab is shown only when
+// self-service registration is enabled.
+type LoginPageData struct {
+	PageData
+	RegistrationEnabled bool
+}
+
 // UserLanguage returns the user's preferred language code, or empty if unknown.
 // Implementing this on PageData makes it auto-available on any data struct that
 // embeds PageData (DashboardData, AccountsData, etc.).
@@ -203,10 +210,10 @@ func (s *Server) HandleIndex(w http.ResponseWriter, r *http.Request) {
 
 // HandleLoginPage shows the login/register page
 func (s *Server) HandleLoginPage(w http.ResponseWriter, r *http.Request) {
-	data := PageData{
-		Title: "Login",
-	}
-	s.renderTemplate(w, "login.html", data)
+	s.renderTemplate(w, "login.html", LoginPageData{
+		PageData:            PageData{Title: "Login"},
+		RegistrationEnabled: !s.registrationDisabled,
+	})
 }
 
 // HandleDashboard shows the dashboard

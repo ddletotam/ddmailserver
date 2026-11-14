@@ -46,6 +46,11 @@ security:
   # an explicit empty list [] trusts nobody.
   # trusted_proxies: ["127.0.0.0/8", "::1/128"]
 
+  # Close self-service registration (web form and POST /api/register).
+  # Default false: anyone can sign up. Domains users add need DNS
+  # verification either way (see DEPLOY.md "Domains").
+  # disable_registration: true
+
   # Failed-login throttling shared by web, desktop API, IMAP, SMTP, CalDAV
   # and CardDAV. Repeating the same wrong password counts once; an IP that
   # logged in successfully is exempt from that user's username block.

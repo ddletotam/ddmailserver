@@ -17,7 +17,7 @@ func (f fakeDirectory) GetDomainByName(name string) (*models.Domain, error) {
 		return nil, f.err
 	}
 	if name == "local.test" {
-		return &models.Domain{ID: 1, Domain: name, Enabled: true}, nil
+		return &models.Domain{ID: 1, Domain: name, Enabled: true, Verified: true}, nil
 	}
 	return nil, db.ErrDomainNotFound
 }
