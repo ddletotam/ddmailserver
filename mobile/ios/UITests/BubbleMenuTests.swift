@@ -88,7 +88,12 @@ final class BubbleMenuTests: XCTestCase {
 
         // Меню чипа вложения (S-15): «Поделиться» везде; Мак — «Загрузки» и
         // программа по умолчанию, iPhone/iPad — «Файлы».
+        #if os(macOS)
+        // На Маке чип в дереве WebKit — не кнопка, имя файла — в value/title.
+        let chip = web.descendants(matching: .any).matching(Shown.contains("unnamed")).firstMatch
+        #else
         let chip = web.buttons.matching(NSPredicate(format: "label CONTAINS %@", "unnamed")).firstMatch
+        #endif
         XCTAssertTrue(chip.waitForExistence(timeout: 5), "нет чипа вложения")
         UIFlow.contextMenu(chip)
         let share = UIFlow.menuItem("Поделиться", app)

@@ -112,7 +112,7 @@ final class CalendarDragTests: XCTestCase {
             sleep(2)
             UIFlow.shot(app, "month-1-full-height", self)
             let day = try XCTUnwrap(visible(Shown.begins("15, событий:"), app), "нет 15-го числа")
-            day.press(forDuration: 1.0)
+            hold(day, 1.0)
         } else {
             // iPhone: лента без предела — 30 месяцев вперёд и назад кнопками.
             let now = Date()
@@ -130,7 +130,7 @@ final class CalendarDragTests: XCTestCase {
             app.buttons["Сегодня"].tap()
             sleep(1)
             let day = try XCTUnwrap(visible(Shown.begins("15, событий:"), app), "нет 15-го числа")
-            day.press(forDuration: 1.0)
+            hold(day, 1.0)
         }
         // Долгое нажатие на день — форма нового события; без сохранения.
         XCTAssertTrue(app.navigationBars["Новое событие"].waitForExistence(timeout: 5)
@@ -190,6 +190,18 @@ final class CalendarDragTests: XCTestCase {
     private func event(_ title: String, _ app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: "cal.event")
             .matching(Shown.contains(title)).firstMatch
+    }
+
+    /// Долгое нажатие: на Маке — удержание кнопки мыши (`press(forDuration:)`
+    /// там — жест трекпада, `onLongPressGesture` его не видит).
+    @MainActor
+    private func hold(_ e: XCUIElement, _ seconds: TimeInterval) {
+        #if os(macOS)
+        let c = e.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        c.click(forDuration: seconds, thenDragTo: c)
+        #else
+        e.press(forDuration: seconds)
+        #endif
     }
 
     /// Долгое нажатие и ведение (на Маке — нажатие кнопки мыши и ведение).
