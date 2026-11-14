@@ -64,11 +64,13 @@ final class LoginFlowTests: XCTestCase {
         shot(app, "3-list")
 
         // Раскладка как у десктопа (mobile-layout.md): первая строка — бургер и
-        // поиск; «Спам» — таб полосы папок; ни «Написать», ни «Ещё», ни таб-бара.
+        // поиск; «Спам» скрыт (таб — только по «Показать скрытые», §5 0.0.11);
+        // ни «Написать», ни «Ещё», ни таб-бара.
         XCTAssertTrue(Nav.burger(app).exists, "нет бургера")
         let search = app.textFields["search.field"].firstMatch
         XCTAssertTrue(search.exists, "нет поля поиска")
-        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS 'Спам'")).firstMatch.exists, "нет таба «Спам»")
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier == 'folder.tab' AND label CONTAINS 'Спам'")).firstMatch.exists,
+                       "«Спам» — видимый таб, а должен быть скрыт")
         XCTAssertFalse(app.buttons["Новое письмо"].exists, "кнопка «Новое письмо» осталась")
         XCTAssertFalse(app.buttons["Ещё"].exists, "меню «Ещё» осталось")
         #if os(iOS)

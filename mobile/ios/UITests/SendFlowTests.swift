@@ -43,7 +43,7 @@ final class SendFlowTests: XCTestCase {
 
     /// Папки без ddmail — локальный документ (на сервер ничего не уходит):
     /// «Настройки → Папки» → новая папка, имя → таб; меню таба; «Не
-    /// показывать в списке» → таба нет; «Показать скрытые (1)» → таб снова
+    /// показывать в списке» → таба нет; «Показать скрытые (2)» (папка и «Спам», §5) → таб снова
     /// виден; «Удалить».
     @MainActor
     func testFoldersLocal() throws {
@@ -100,13 +100,14 @@ final class SendFlowTests: XCTestCase {
         app.buttons["Готово"].firstMatch.tap()
         XCTAssertTrue(UIFlow.waitGone(tab, 10), "скрытая папка осталась табом")
 
-        // 4. Полоса осталась (папки есть, все скрыты) — «Показать скрытые (1)».
+        // 4. Полоса осталась (папки есть, все скрыты) — «Показать скрытые (2)»:
+        // N считает и «Спам», он скрыт всегда (§5, 0.0.11).
         let strip = app.buttons.matching(identifier: "folder.tab").firstMatch
         let area = strip.exists ? strip : app.otherElements["folder.strip"].firstMatch
         XCTAssertTrue(area.waitForExistence(timeout: 5), "полосы табов нет")
         UIFlow.contextMenu(area)
-        let show = UIFlow.menuItem("Показать скрытые (1)", app)
-        XCTAssertTrue(show.waitForExistence(timeout: 5), "нет «Показать скрытые (1)»")
+        let show = UIFlow.menuItem("Показать скрытые (2)", app)
+        XCTAssertTrue(show.waitForExistence(timeout: 5), "нет «Показать скрытые (2)»")
         show.tap()
         XCTAssertTrue(tab.waitForExistence(timeout: 10), "скрытая папка не показалась")
         UIFlow.shot(app, "folders-5-shown", self)
