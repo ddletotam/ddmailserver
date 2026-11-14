@@ -52,6 +52,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import ru.letotam.ddmail.sync.DialogFolder
 import ru.letotam.ddmail.sync.DialogKind
+import ru.letotam.ddmail.sync.FoldersDoc
+import ru.letotam.ddmail.sync.SYSTEM_SPAM
 import ru.letotam.ddmail.sync.splitRuleList
 
 private val Accent = Color(0xFF047857)
@@ -250,6 +252,20 @@ fun FolderSettings(vm: MailViewModel) {
         Text(FOLDERS_HELP, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
+
+/**
+ * Табы полосы папок (десктоп `refresh_folder_tabs`): скрытые — только по
+ * «Показать скрытые» или когда в папку привели, и тогда бледнее. «Спам» —
+ * скрытая папка, как прочие (всегда скрыта: [FoldersDoc.withSpam]), только
+ * без счётчика — непрочитанный спам не повод на него смотреть. [counts] —
+ * из [FoldersDoc.unreadCounts].
+ */
+internal fun folderTabs(doc: FoldersDoc, counts: List<Int>, active: Int?, showHidden: Boolean): List<FolderTab> =
+    doc.folders.mapIndexedNotNull { i, f ->
+        if (!doc.tabVisible(i, showHidden, active)) return@mapIndexedNotNull null
+        val spam = f.system == SYSTEM_SPAM
+        FolderTab(i, f.id, f.name, f.icon, if (spam) 0 else counts.getOrElse(i) { 0 }, hidden = f.hidden, system = f.isSystem)
+    }
 
 /** Правила папки одной строкой — под названием в списке настроек. */
 internal fun folderSummary(f: DialogFolder): String {

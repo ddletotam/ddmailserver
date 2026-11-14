@@ -37,36 +37,47 @@ struct MailListTests {
         #expect(s.conversations.map(\.id) == ["1", "3"])
     }
 
-    @Test func tabsHideHiddenFoldersAndSpamHasNoCount() {
-        let doc = FoldersDoc(folders: [
+    /// «Спам» скрыт по умолчанию, виден с «Показать скрытые» (бледнее, без
+    /// счётчика) или когда в него привели — как прочие скрытые (десктоп §4).
+    @Test func spamHiddenByDefaultShownWithShowHidden() {
+        var doc = FoldersDoc(folders: [
             DialogFolder(id: "w", name: "Работа", rules: FolderRules(domains: ["x.ru"])),
             DialogFolder(id: "h", name: "Скрытая", rules: FolderRules(domains: ["y.ru"]), hidden: true),
         ]).withSpam()
+        // Другой клиент снял «скрыта» со «Спама» — нормализация чинит.
+        doc.folders = doc.folders.map { var f = $0; if f.isSystem { f.hidden = false }; return f }
+        doc = doc.withSpam()
         let convs = [
             c("1", "a", "a@x.ru", "", unread: 1),
             c("2", "b", "b@y.ru", "", unread: 1),
             c("3", "c", "c@q.ru", "", unread: 1),
             c("s", "s", "s@s.ru", "", unread: 1, spam: true),
         ]
-        // «Спам» — таб полосы всегда (mobile-layout.md), без счётчика.
         let inbox = buildMailList(convs, doc: doc, activeID: nil, query: nil)
-        #expect(inbox.tabs.map(\.id) == ["w", "spam"])
-        #expect(inbox.tabs[1].unread == 0)
+        #expect(inbox.tabs.map(\.id) == ["w"])
         #expect(inbox.tabs[0].unread == 1)
         #expect(inbox.inboxUnread == 1)
         #expect(inbox.conversations.map(\.id) == ["3"])
+        #expect(doc.hiddenCount == 2)
 
-        let spam = buildMailList(convs, doc: doc, activeID: "spam", query: nil)
-        #expect(spam.inSpam)
-        #expect(spam.tabs.map(\.id) == ["w", "spam"])
-        #expect(spam.tabs[1].unread == 0)
-        #expect(spam.conversations.map(\.id) == ["s"])
-
-        // «Показать скрытые» — таб скрытой виден (бледнее).
+        // «Показать скрытые» — табы скрытых видны, бледнее; у «Спама» счётчика нет.
         let shown = buildMailList(convs, doc: doc, activeID: nil, query: nil, showHidden: true)
         #expect(shown.tabs.map(\.id) == ["w", "h", "spam"])
         #expect(shown.tabs[1].hidden)
-        #expect(!shown.tabs[2].hidden && shown.tabs[2].system)
+        #expect(shown.tabs[2].hidden && shown.tabs[2].system)
+        #expect(shown.tabs[2].unread == 0)
+
+        // Привели в «Спам» — таб виден и без «Показать скрытые».
+        let spam = buildMailList(convs, doc: doc, activeID: "spam", query: nil)
+        #expect(spam.inSpam)
+        #expect(spam.tabs.map(\.id) == ["w", "spam"])
+        #expect(spam.conversations.map(\.id) == ["s"])
+
+        // Папки выключены — списка как без папок: спама нет нигде.
+        let off = buildMailList(convs, doc: FoldersDoc(), activeID: "spam", query: nil, showHidden: true)
+        #expect(off.tabs.isEmpty)
+        #expect(off.active == nil)
+        #expect(off.conversations.map(\.id) == ["1", "2", "3"])
 
         // Удалённая папка — снова инбокс.
         #expect(buildMailList(convs, doc: doc, activeID: "gone", query: nil).active == nil)

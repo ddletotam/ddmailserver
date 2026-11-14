@@ -33,8 +33,9 @@ public struct MailListState: Equatable, Sendable {
 /// - Удалённая папка — снова инбокс. Скрытая видна табом, только пока в неё
 ///   привели (открытие беседы из неё) или включено «Показать скрытые»
 ///   (`showHidden`, на сессию — десктоп §4).
-/// - Системная «Спам» — всегда таб полосы, последним (`docs/mobile-layout.md`):
-///   у мобильных клиентов нет меню, откуда в неё прийти иначе.
+/// - Системная «Спам» всегда скрыта (`withSpam` чинит при чтении) — таб, как
+///   у прочих скрытых, только по «Показать скрытые» или когда в неё привели;
+///   рисуется бледнее и без счётчика (десктоп §4 «Папки диалогов»).
 public func buildMailList(_ convs: [Conversation], doc: FoldersDoc, activeID: String?, query: String?, showHidden: Bool = false) -> MailListState {
     var s = MailListState()
     if let q = query, !q.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -45,11 +46,11 @@ public func buildMailList(_ convs: [Conversation], doc: FoldersDoc, activeID: St
     let active = activeID.flatMap { id in doc.folders.firstIndex { $0.id == id } }
     let counts = doc.unreadCounts(convs)
     s.tabs = doc.folders.enumerated().compactMap { i, f in
-        let spam = f.system == systemSpam
-        if f.hidden && i != active && !spam && !showHidden { return nil }
+        guard doc.tabVisible(i, showHidden: showHidden, active: active) else { return nil }
         // Непрочитанный спам — не повод на него смотреть.
+        let spam = f.system == systemSpam
         return FolderTab(index: i, id: f.id, name: f.name, icon: f.icon, unread: spam ? 0 : counts.folders[i],
-                         hidden: f.hidden && !spam, system: f.isSystem)
+                         hidden: f.hidden, system: f.isSystem)
     }
     s.active = active
     s.inboxUnread = counts.inbox

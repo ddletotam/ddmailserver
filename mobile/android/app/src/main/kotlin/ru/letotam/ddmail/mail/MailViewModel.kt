@@ -24,7 +24,6 @@ import ru.letotam.ddmail.compose.ComposeController
 import ru.letotam.ddmail.conversation.ConversationController
 import ru.letotam.ddmail.sync.Conversation
 import ru.letotam.ddmail.sync.FoldersDoc
-import ru.letotam.ddmail.sync.SYSTEM_SPAM
 import ru.letotam.ddmail.sync.MailHub
 import ru.letotam.ddmail.sync.MailSource
 import ru.letotam.ddmail.sync.SpamOutcome
@@ -59,7 +58,7 @@ data class MailState(
     val loaded: Boolean = false,
     /** Выбрана папка «Спам»: смотреть и «Не спам», других действий нет. */
     val inSpam: Boolean = false,
-    /** Скрытых папок (кроме «Спама» — он табом всегда) — для «Показать скрытые (N)». */
+    /** Скрытых папок («Спам» тоже) — для «Показать скрытые (N)». */
     val hiddenCount: Int = 0,
     /** «Показать скрытые» включено (на сессию). */
     val showHidden: Boolean = false,
@@ -613,20 +612,14 @@ class MailViewModel(
         if (!on || doc.folders.isEmpty()) {
             return MailState(conversations = convs.filter { !it.spam }, loaded = true)
         }
-        // Удалённая папка — снова инбокс. Скрытая видна табом, пока включено
-        // «Показать скрытые» или в неё привели (открытие беседы из неё).
-        // «Спам» — таб полосы всегда (mobile-layout.md): меню, через которое в
-        // него входили, больше нет.
+        // Удалённая папка — снова инбокс. Скрытая (и «Спам» — он скрыт
+        // всегда) видна табом, пока включено «Показать скрытые» или в неё
+        // привели (открытие беседы из неё).
         val active = doc.folders.indexOfFirst { it.id == id }.takeIf { it >= 0 }
         val (counts, inbox) = doc.unreadCounts(convs)
-        val tabs = doc.folders.mapIndexedNotNull { i, f ->
-            val spam = f.system == SYSTEM_SPAM
-            // У «Спама» счётчика нет: непрочитанный спам — не повод на него смотреть.
-            if (f.hidden && !spam && !showHidden && i != active) null
-            else FolderTab(i, f.id, f.name, f.icon, if (spam) 0 else counts[i], hidden = f.hidden && !spam, system = f.isSystem)
-        }
+        val tabs = folderTabs(doc, counts, active, showHidden)
         val inSpam = active != null && active == doc.spamIndex
-        val hiddenCount = doc.folders.count { it.hidden && !it.isSystem }
+        val hiddenCount = doc.hiddenCount
         return MailState(tabs, active, inbox, doc.filter(convs, active), loaded = true, inSpam = inSpam, hiddenCount = hiddenCount, showHidden = showHidden)
     }
 
