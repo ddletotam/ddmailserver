@@ -93,8 +93,9 @@ final class MailListTests: XCTestCase {
         let app = try start()
         rows(app).element(boundBy: 0).tap()
         XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 20), "беседа не открылась")
-        let dialog = app.descendants(matching: .any)
-            .matching(Shown.begins("Удалить бесед")).firstMatch
+        // Заголовок диалога «Удалить бесед: N…?» — на Маке текст в value; пункт
+        // «Удалить беседу» строки меню (он есть всегда) не в счёт.
+        let dialog = app.staticTexts.matching(Shown.begins("Удалить бесед")).firstMatch
 
         let composer = app.textViews["composer.text"].firstMatch
         XCTAssertTrue(composer.waitForExistence(timeout: 10), "нет строки ввода")

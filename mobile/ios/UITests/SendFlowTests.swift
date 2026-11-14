@@ -69,11 +69,11 @@ final class SendFlowTests: XCTestCase {
         sleep(2)
         UIFlow.shot(app, "folders-1-editor", self)
         // Назад к списку папок, затем закрыть настройки.
-        app.navigationBars.buttons.firstMatch.tap()
+        UIFlow.back(app)
         XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "identifier == 'folders.row' AND (label CONTAINS %@ OR value CONTAINS %@)", name, name))
             .firstMatch.waitForExistence(timeout: 10), "папки нет в списке настроек")
         UIFlow.shot(app, "folders-2-list", self)
-        app.navigationBars.buttons.firstMatch.tap()
+        UIFlow.back(app)
         let done = app.buttons["Готово"].firstMatch
         XCTAssertTrue(done.waitForExistence(timeout: 5), "нет «Готово» настроек")
         done.tap()
@@ -345,6 +345,20 @@ enum UIFlow {
         sleep(1)
     }
     #endif
+
+    /// «Назад» в стеке настроек: на iOS — первая кнопка панели навигации; на
+    /// Маке панели навигации нет — кнопка «Назад» (chevron) листа.
+    @MainActor
+    static func back(_ app: XCUIApplication) {
+        #if os(macOS)
+        let b = app.buttons.matching(NSPredicate(format: "label == 'Назад' OR identifier == 'chevron.backward'"))
+            .allElementsBoundByIndex.first { $0.isHittable }
+        XCTAssertNotNil(b, "нет кнопки «Назад»")
+        b?.click()
+        #else
+        app.navigationBars.buttons.firstMatch.tap()
+        #endif
+    }
 
     /// «+» композера: на iOS — кнопка, на Маке — `MenuButton` (в `app.buttons` его нет).
     @MainActor

@@ -196,7 +196,13 @@ final class CalendarDragTests: XCTestCase {
     @MainActor
     private func drag(_ e: XCUIElement, from: CGVector, by: CGVector) {
         let start = e.coordinate(withNormalizedOffset: from)
+        #if os(macOS)
+        // На Маке `press(forDuration:thenDragTo:)` мышь не двигает (это жест
+        // трекпада) — плашка не получала ни одного события. Мышью — click-drag.
+        start.click(forDuration: 0.3, thenDragTo: start.withOffset(by), withVelocity: .slow, thenHoldForDuration: 0.4)
+        #else
         start.press(forDuration: 0.8, thenDragTo: start.withOffset(by), withVelocity: .slow, thenHoldForDuration: 0.4)
+        #endif
         sleep(1)
     }
 
