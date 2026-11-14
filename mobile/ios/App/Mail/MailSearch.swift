@@ -42,6 +42,9 @@ final class MailSearch {
     private(set) var loadingMessages = false
     /// Просьба поставить фокус в поле (⌘N): экран следит за сменой числа.
     private(set) var focusRequest = 0
+    /// Просьба снять фокус с поля: выбрали результат — клавиатура не должна
+    /// закрывать открытую беседу (аудит 2026-11-14 №20).
+    private(set) var blurRequest = 0
 
     @ObservationIgnored private var messageTask: Task<Void, Never>?
     @ObservationIgnored private var contactsRequested = false
@@ -61,8 +64,15 @@ final class MailSearch {
 
     func requestFocus() { focusRequest += 1 }
 
-    /// Закрыть выпадашку и стереть строку (выбрали результат).
+    /// Закрыть выпадашку и стереть строку («⊗», Esc): фокус остаётся в поле.
     func clear() { query = "" }
+
+    /// Выбрали результат: выпадашка закрыта, строка стёрта, фокус уходит из
+    /// поля — дальше беседа (или композер новой беседы).
+    func finish() {
+        query = ""
+        blurRequest += 1
+    }
 
     /// Локальная часть: адрес, диалоги, контакты. Зовётся и при смене списка
     /// бесед (дельта синка), чтобы выпадашка не показывала ушедшее.
@@ -78,7 +88,7 @@ final class MailSearch {
         // По всем диалогам, а не по выбранной папке; спама в поиске нет.
         let hits = Array(searchConversationHits(mail.all.filter { !$0.spam }, q).prefix(Self.convLimit))
         if hits != conversations { conversations = hits }
-        let found = Self.contacts(in: mail.workspace.contacts?.contacts ?? [], q,
+        let found = Self.contacts(in: mail.workspace.contacts?.matching(q) ?? [], q,
                                   skip: Set(hits.flatMap { $0.conversation.counterparts.map { $0.addr.lowercased() } }))
         if found != contacts { contacts = found }
         loadContactsOnce()
@@ -161,7 +171,7 @@ final class MailSearch {
     /// Диалог выпадашки — открыть (переходом в его папку).
     func open(_ hit: ConversationHit) {
         guard let mail else { return }
-        clear()
+        finish()
         mail.open(hit.conversation.ref)
     }
 
@@ -180,7 +190,7 @@ final class MailSearch {
             c.accountKey == m.accountKey
                 && c.messages.contains { $0.uid == m.hit.id || (!mid.isEmpty && $0.messageID == mid) }
         }
-        clear()
+        finish()
         if let owner {
             mail.open(owner.ref)
         } else {

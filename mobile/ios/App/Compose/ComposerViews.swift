@@ -18,6 +18,14 @@ struct ComposerBar: View {
     @Bindable var model: ComposeModel
     /// Фокус в строку сразу (новая беседа: адрес выбран — пишем).
     var autofocus = false
+    /// Чей композер: от этого — подсказки пустых «Кому», «Тема», «От»
+    /// (считаются в теле: они зависят от «Ответ на …» и ленты, §0).
+    let place: Place
+
+    enum Place {
+        case conversation(Conversation)
+        case new(String)
+    }
     /// Ответ в беседе или первое письмо новой беседы; контекст шрифтов —
     /// чтобы понять, где жирный и курсив.
     let onSend: (Font.Context) -> Void
@@ -31,6 +39,10 @@ struct ComposerBar: View {
         let flash = model.sentFlash
         let text = model.draft.text
         let canSend = model.draft.canSend
+        let hints: ComposeHints = switch place {
+        case let .conversation(c): model.hints(for: c)
+        case let .new(address): model.hints(for: nil, newTo: address)
+        }
         VStack(alignment: .leading, spacing: 6) {
             if let r = model.replyTo {
                 HStack(spacing: 6) {
@@ -43,7 +55,7 @@ struct ComposerBar: View {
                 }
                 .font(.footnote)
             }
-            if model.expanded { OverrideFields(draft: $model.draft, identities: model.identities) }
+            if model.expanded { OverrideFields(draft: $model.draft, choices: model.fromChoices, hints: hints) }
             InlineImages(images: $model.draft.images)
             AttachmentChips(attachments: $model.draft.attachments)
             if let e = model.error {
@@ -246,7 +258,8 @@ struct ComposeSheetView: View {
                         LabeledContent("Тема") {
                             TextField(s.original.map { "Fwd: \($0.subject)" } ?? "", text: sheetBinding(\.subject))
                         }
-                        FromPicker(selection: sheetBinding(\.from), identities: model.identities)
+                        FromPicker(selection: sheetBinding(\.from), choices: model.fromChoices,
+                                   auto: model.hints(for: nil, newTo: "").from)
                     }
                     Section {
                         TextField("Сообщение", text: sheetBinding(\.text), axis: .vertical)
@@ -322,23 +335,28 @@ struct ComposeSheetView: View {
 }
 
 /// Поля-переопределения ответа: пусто — как выведет ветка отправки (§1).
+/// Подсказка пустого поля — ровно то, что уйдёт (десктоп §3
+/// `composer-to-auto`, `composer-subject-auto`); у нового письма темы нет —
+/// и подсказки «Re: …» нет (аудит 2026-11-14 №10).
 private struct OverrideFields: View {
     @Binding var draft: Draft
-    let identities: [Identity]
+    let choices: FromChoices
+    let hints: ComposeHints
 
     var body: some View {
         VStack(spacing: 4) {
-            field("Кому", $draft.to, prompt: "как в беседе")
-            field("Копия", $draft.cc, prompt: "")
+            field("Кому", $draft.to, prompt: hints.to, id: "composer.to")
+            field("Копия", $draft.cc, prompt: "", id: "composer.cc")
             HStack {
                 Text("Тема").foregroundStyle(.secondary).frame(width: 56, alignment: .leading)
-                TextField("Re: …", text: $draft.subject).accessibilityIdentifier("composer.subject")
+                TextField(hints.subject.isEmpty ? "Без темы" : hints.subject, text: $draft.subject)
+                    .accessibilityIdentifier("composer.subject")
             }
             // Подпись — как у «Кому / Копия / Тема»: без неё «Автоматически ⇕»
             // висело без объяснения, что это.
             HStack {
                 Text("От").foregroundStyle(.secondary).frame(width: 56, alignment: .leading)
-                FromPicker(selection: $draft.from, identities: identities)
+                FromPicker(selection: $draft.from, choices: choices, auto: hints.from)
                     .labelsHidden()
                 Spacer(minLength: 0)
             }
@@ -347,26 +365,41 @@ private struct OverrideFields: View {
         .textFieldStyle(.roundedBorder)
     }
 
-    private func field(_ label: String, _ text: Binding<String>, prompt: String) -> some View {
+    private func field(_ label: String, _ text: Binding<String>, prompt: String, id: String) -> some View {
         HStack {
             Text(label).foregroundStyle(.secondary).frame(width: 56, alignment: .leading)
-            TextField(prompt, text: text).addressInput()
+            TextField(prompt, text: text).addressInput().accessibilityIdentifier(id)
         }
     }
 }
 
-/// «От кого»: пусто — адрес выбирается по беседе.
+/// «От кого»: пусто — адрес выбирается по беседе (подсказкой — какой).
+/// Адреса — по учёткам (десктоп §1в «собираются по **всем** учёткам»):
+/// сверху по адресу на учётку, ниже остальные — адрес внешней учётки виден
+/// сразу, а не в хвосте двадцати адресов ddmail (аудит 2026-11-14 №4).
+/// Отправка — через учётку выбранного адреса (`ComposeModel.owner`).
 private struct FromPicker: View {
     @Binding var selection: String
-    let identities: [Identity]
+    let choices: FromChoices
+    let auto: String
 
     var body: some View {
         Picker("От", selection: $selection) {
-            Text("Автоматически").tag("")
-            ForEach(identities, id: \.email) { i in
-                Text(i.name.isEmpty ? i.email : "\(i.name) <\(i.email)>").tag(i.email)
+            Text(auto.isEmpty ? "Автоматически" : "Автоматически (\(auto))").tag("")
+            Section("Учётки") {
+                ForEach(choices.accounts, id: \.email) { row($0) }
+            }
+            if !choices.others.isEmpty {
+                Section("Другие адреса") {
+                    ForEach(choices.others, id: \.email) { row($0) }
+                }
             }
         }
+        .accessibilityIdentifier("composer.from")
+    }
+
+    private func row(_ i: Identity) -> some View {
+        Text(i.name.isEmpty ? i.email : "\(i.name) <\(i.email)>").tag(i.email)
     }
 }
 

@@ -119,6 +119,34 @@ public func pickFrom(_ draft: Draft, identities: [Identity], receivedBy: String?
     return identities.first(where: \.isDefault) ?? identities.first
 }
 
+/// Выпадашка «От кого», разложенная по учёткам (аудит 2026-11-14 №4): у
+/// ddmail-учётки адресов десятки, и адрес внешней учётки (Mail.ru) уходил в
+/// хвост длинного меню — выглядел отсутствующим. Сверху — по адресу на
+/// учётку (её адрес по умолчанию, в порядке учёток), ниже — остальные адреса.
+/// Адрес, повторённый в двух учётках, — один раз, у первой.
+public struct FromChoices: Equatable, Sendable {
+    /// По адресу на учётку.
+    public var accounts: [Identity] = []
+    /// Остальные адреса учёток.
+    public var others: [Identity] = []
+
+    public init(_ perAccount: [[Identity]]) {
+        var seen = Set<String>()
+        for list in perAccount {
+            // Адрес по умолчанию; занят другой учёткой — следующий свой.
+            let ordered = list.filter(\.isDefault) + list.filter { !$0.isDefault }
+            guard let main = ordered.first(where: { !seen.contains($0.email.lowercased()) }) else { continue }
+            seen.insert(main.email.lowercased())
+            accounts.append(main)
+        }
+        for list in perAccount {
+            for i in list where seen.insert(i.email.lowercased()).inserted { others.append(i) }
+        }
+    }
+
+    public var all: [Identity] { accounts + others }
+}
+
 public func fromHeader(_ id: Identity) -> String {
     if id.name.trimmingCharacters(in: .whitespaces).isEmpty || id.name.caseInsensitiveCompare(id.email) == .orderedSame {
         return id.email
@@ -132,6 +160,35 @@ private func threading(_ b: MessageBody?) -> (inReplyTo: String, references: Str
     return (b.messageID, refs.joined(separator: " "))
 }
 
+/// Что ветка выводит сама, без переопределений «Кому» и «Тема» (десктоп
+/// `refresh_composer_hints`, §3: подсказки полей показывают ровно это).
+/// Новое письмо — ни адресатов, ни темы: адресат — у новой беседы, автотемы
+/// у нового письма нет (аудит 2026-11-14 №10). Пересылка — «Fwd: …», «Кому»
+/// обязательно.
+public func derivedFields(_ branch: Branch, identities: [Identity]) -> (to: [String], subject: String) {
+    let own = Set(identities.map { $0.email.lowercased() })
+    switch branch {
+    case let .forward(o):
+        return ([], "Fwd: \(o.subject)")
+    case .new:
+        return ([], "")
+    case let .reply(o, isGroup):
+        var derived = [o.fromAddr.lowercased()]
+        if isGroup { derived += (o.to + o.cc).map(bareAddress) }
+        var seen = Set<String>()
+        derived = derived.filter { !$0.isEmpty && !own.contains($0) && seen.insert($0).inserted }
+        return (derived, re(o.subject))
+    case let .implicit(c, lastIncoming, _):
+        // Беседа «все адреса мои» (письмо себе) собеседников не имеет —
+        // отвечаем отправителю последнего входящего (§4 «Роли» десктопа).
+        var t = c.counterparts.map(\.addr).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        if t.isEmpty, let a = [lastIncoming?.fromAddr ?? c.receivedBy].first, !a.isEmpty { t = [a] }
+        // Тема — от последнего входящего: на него и отвечают, даже если наше
+        // письмо было позже (§1 десктопа).
+        return (t, re(lastIncoming?.subject ?? c.lastSubject))
+    }
+}
+
 /// Собрать письмо по ветке (§1, порт `build` Android). Непустое «Кому»
 /// побеждает любую авто-деривацию, непустая тема — авто-«Re:»/«Fwd:»; копия
 /// уходит всегда.
@@ -140,7 +197,6 @@ public func buildOutgoing(
     forwardHTML: String = "", forwardText: String = "", extraAttachments: [PendingAttachment] = []
 ) -> Built {
     if case .forward = branch {} else if !draft.canSend { return .refused("Нечего отправлять.") }
-    let own = Set(identities.map { $0.email.lowercased() })
     let toOverride = splitAddresses(draft.to)
     let cc = splitAddresses(draft.cc)
     let subjectOverride = draft.subject.trimmingCharacters(in: .whitespaces).isEmpty ? nil : draft.subject
@@ -151,35 +207,23 @@ public func buildOutgoing(
         return .refused("Нет ни одного своего адреса для отправки.")
     }
 
-    let to: [String], subject: String, irt: String, refs: String
+    let auto = derivedFields(branch, identities: identities)
+    let to = toOverride.isEmpty ? auto.to : toOverride
+    let subject = subjectOverride ?? auto.subject
+    let irt: String, refs: String
     switch branch {
-    case let .forward(o):
-        if toOverride.isEmpty { return .refused("Укажите, кому переслать.") }
-        (to, subject, irt, refs) = (toOverride, subjectOverride ?? "Fwd: \(o.subject)", "", "")
+    case .forward:
+        if to.isEmpty { return .refused("Укажите, кому переслать.") }
+        (irt, refs) = ("", "")
     case .new:
-        if toOverride.isEmpty { return .refused("Укажите адресата.") }
-        (to, subject, irt, refs) = (toOverride, draft.subject, "", "")
-    case let .reply(o, isGroup):
-        var derived = [o.fromAddr.lowercased()]
-        if isGroup { derived += (o.to + o.cc).map(bareAddress) }
-        var seen = Set<String>()
-        derived = derived.filter { !$0.isEmpty && !own.contains($0) && seen.insert($0).inserted }
-        let t = toOverride.isEmpty ? derived : toOverride
-        if t.isEmpty { return .refused("Не нашлось, кому ответить.") }
-        let th = threading(o)
-        (to, subject, irt, refs) = (t, subjectOverride ?? re(o.subject), th.inReplyTo, th.references)
-    case let .implicit(c, lastIncoming, last):
-        // Беседа «все адреса мои» (письмо себе) собеседников не имеет —
-        // отвечаем отправителю последнего входящего (§4 «Роли» десктопа).
-        var t = toOverride
-        if t.isEmpty { t = c.counterparts.map(\.addr).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty } }
-        if t.isEmpty, let a = [lastIncoming?.fromAddr ?? c.receivedBy].first, !a.isEmpty { t = [a] }
-        if t.isEmpty { return .refused("У беседы нет адресата.") }
-        // Тема и цепочка — от последнего входящего: на него и отвечают,
-        // даже если наше письмо было позже (§1 десктопа).
-        let base = lastIncoming?.subject ?? c.lastSubject
-        let th = threading(lastIncoming ?? last)
-        (to, subject, irt, refs) = (t, subjectOverride ?? re(base), th.inReplyTo, th.references)
+        if to.isEmpty { return .refused("Укажите адресата.") }
+        (irt, refs) = ("", "")
+    case let .reply(o, _):
+        if to.isEmpty { return .refused("Не нашлось, кому ответить.") }
+        (irt, refs) = threading(o)
+    case let .implicit(_, lastIncoming, last):
+        if to.isEmpty { return .refused("У беседы нет адресата.") }
+        (irt, refs) = threading(lastIncoming ?? last)
     }
     let atts = (draft.images + draft.attachments + extraAttachments).map {
         OutgoingAttachment(filename: $0.name, mimeType: $0.mime, content: $0.data, contentID: $0.contentID)

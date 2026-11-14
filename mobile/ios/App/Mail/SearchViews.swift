@@ -46,6 +46,7 @@ struct MailSearchField: View {
         .background(Capsule().fill(Color.secondary.opacity(0.12)))
         .frame(maxWidth: .infinity)
         .onChange(of: request) { focused = true }
+        .onChange(of: search.blurRequest) { focused = false }
     }
 }
 

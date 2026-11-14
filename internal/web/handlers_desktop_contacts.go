@@ -16,7 +16,7 @@ import (
 // contactStore — то, что обработчикам контактов нужно от базы. *db.DB его
 // реализует; тесты подставляют хранилище в памяти.
 type contactStore interface {
-	GetAllUserContacts(userID int64, limit int) ([]*models.Contact, error)
+	GetUserContactsPage(userID int64, limit, offset int) ([]*models.Contact, error)
 	SearchContacts(userID int64, query string, limit int) ([]*models.Contact, error)
 	GetAddressBooksByUserID(userID int64) ([]*models.AddressBook, error)
 	GetAddressBookByID(id int64) (*models.AddressBook, error)
@@ -211,8 +211,12 @@ func (a contactAPI) respondContacts(w http.ResponseWriter, userID int64, contact
 	respondJSON(w, http.StatusOK, out)
 }
 
-// HandleDesktopContacts returns the user's full unified address book.
-// GET /api/desktop/v1/contacts?limit=N
+// HandleDesktopContacts returns the user's full unified address book, page by
+// page: ordered by name (then id, so pages never overlap or skip), `offset`
+// skips that many. A page shorter than `limit` is the last one. The cap per
+// page stays 5000; a book of 15 000 cards (corporate GAL) is three pages —
+// before `offset` the clients silently stopped at 5000.
+// GET /api/desktop/v1/contacts?limit=N&offset=M
 func (s *Server) HandleDesktopContacts(w http.ResponseWriter, r *http.Request) {
 	s.contactAPI().list(w, r)
 }
@@ -224,7 +228,11 @@ func (a contactAPI) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit := clampLimit(r.URL.Query().Get("limit"), 500, 5000)
-	contacts, err := a.store.GetAllUserContacts(user.ID, limit)
+	offset, err := strconv.Atoi(r.URL.Query().Get("offset"))
+	if err != nil || offset < 0 {
+		offset = 0
+	}
+	contacts, err := a.store.GetUserContactsPage(user.ID, limit, offset)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to load contacts")
 		return

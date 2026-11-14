@@ -149,8 +149,13 @@ final class AppModel {
 final class AccountLink: Identifiable {
     let account: MailAccount
     let provider: any MailProvider
-    /// Только у ddmail: API сервера (календарь, контакты, аватарки, WebSocket).
+    /// Только у ddmail: API сервера (календарь, контакты, WebSocket).
     let api: SessionAPI?
+    /// Только у ddmail: тот же сервер для аватарок — своим пулом соединений.
+    /// Сервер ищет аватарку на стороне (~4 с на адрес) и говорит HTTP/1.1:
+    /// десяток строк списка контактов занимал все шесть соединений общего
+    /// пула, и удаление контакта ждало в очереди 20 с и дольше.
+    let avatarAPI: SessionAPI?
     let engine: SyncEngine?
     /// Только у IMAP: движок (IDLE, закрытие соединений).
     let imap: ImapEngine?
@@ -158,10 +163,12 @@ final class AccountLink: Identifiable {
 
     nonisolated var id: String { account.key }
 
-    init(account: MailAccount, provider: any MailProvider, api: SessionAPI? = nil, engine: SyncEngine? = nil, imap: ImapEngine? = nil) {
+    init(account: MailAccount, provider: any MailProvider, api: SessionAPI? = nil, avatarAPI: SessionAPI? = nil,
+         engine: SyncEngine? = nil, imap: ImapEngine? = nil) {
         self.account = account
         self.provider = provider
         self.api = api
+        self.avatarAPI = avatarAPI
         self.engine = engine
         self.imap = imap
     }
@@ -273,7 +280,8 @@ final class Workspace {
             let api = SessionAPI(baseURL: session.serverURL, transport: transport, tokens: tokens)
             let wifi = SessionAPI(baseURL: session.serverURL, transport: wifiOnlySession, tokens: tokens)
             let engine = SyncEngine(accountKey: a.key, api: api, store: cache, prefetchAPI: wifi)
-            let link = AccountLink(account: a, provider: engine, api: api, engine: engine)
+            let pics = SessionAPI(baseURL: session.serverURL, transport: avatarSession, tokens: tokens)
+            let link = AccountLink(account: a, provider: engine, api: api, avatarAPI: pics, engine: engine)
             if session.token.isEmpty { link.report(.dead) }
             return link
         case .imap:
@@ -290,6 +298,17 @@ final class Workspace {
             return link
         }
     }
+
+    /// Аватарки — отдельной сессией: медленные ответы не держат соединения
+    /// API (правка контакта, отправка, синк).
+    nonisolated static let avatarSession: URLSession = {
+        let c = URLSessionConfiguration.default
+        c.httpCookieStorage = nil
+        c.urlCache = nil
+        c.httpMaximumConnectionsPerHost = 4
+        c.timeoutIntervalForRequest = 30
+        return URLSession(configuration: c)
+    }()
 
     nonisolated static let wifiOnlySession: URLSession = {
         let c = URLSessionConfiguration.default

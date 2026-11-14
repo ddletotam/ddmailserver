@@ -117,7 +117,7 @@ final class MailModel {
         let resolve: @MainActor (String) -> (any MailProvider)? = { [weak workspace] key in workspace?.link(key)?.provider }
         let dead: @MainActor (String) -> Void = { [weak workspace] key in workspace?.link(key)?.report(.dead) }
         conversation = ConversationModel(provider: resolve, onAuthDead: dead)
-        avatars = AvatarStore(api: workspace.primary?.api)
+        avatars = AvatarStore(api: workspace.primary?.avatarAPI)
         search = MailSearch(mail: self)
         compose = ComposeModel(
             workspace: workspace, conversation: conversation,
@@ -323,11 +323,23 @@ final class MailModel {
         }
     }
 
+    /// Что открыто справа после смены таба на широкой раскладке (десктоп §4
+    /// «Смена таба не гасит чужое непрочитанное»): открытая беседа есть в
+    /// новом списке — остаётся; иначе первая **прочитанная** (открытие гасит
+    /// непрочитанное); все непрочитаны — первая; пустая папка — пустая панель.
+    /// Новая беседа (письмо ещё не ушло) не закрывается.
+    func settleOpen() {
+        guard composingTo == nil, !picking else { return }
+        let rows = list.conversations
+        if let id = selectedID, rows.contains(where: { $0.ref == id }) { return }
+        selectedID = (rows.first { $0.unreadCount == 0 } ?? rows.first)?.ref
+    }
+
     /// Новая беседа с адресом — «Написать по адресу…» выпадашки поиска.
     func startNew(to address: String) {
         let addr = address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !addr.isEmpty else { return }
-        search.clear()
+        search.finish()
         selectedID = Self.newPrefix + addr
     }
 
@@ -337,7 +349,7 @@ final class MailModel {
     func write(to address: String) {
         let addr = address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if let c = all.first(where: { !$0.spam && $0.counterparts.first?.addr.lowercased() == addr }) {
-            search.clear()
+            search.finish()
             open(c.ref)
         } else {
             startNew(to: addr)
