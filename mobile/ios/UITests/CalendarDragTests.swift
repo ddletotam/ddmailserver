@@ -205,8 +205,12 @@ final class CalendarDragTests: XCTestCase {
     }
 
     /// Долгое нажатие и ведение (на Маке — нажатие кнопки мыши и ведение).
+    /// Перед жестом плашка должна стоять на месте: после прошлого броска
+    /// календарь перечитывается (ответ на PATCH и `calendar_updated`), и
+    /// жест по ещё переезжающей плашке попадал мимо кромки или середины.
     @MainActor
     private func drag(_ e: XCUIElement, from: CGVector, by: CGVector) {
+        steady(e)
         let start = e.coordinate(withNormalizedOffset: from)
         #if os(macOS)
         // На Маке `press(forDuration:thenDragTo:)` мышь не двигает (это жест
@@ -216,6 +220,27 @@ final class CalendarDragTests: XCTestCase {
         start.press(forDuration: 0.8, thenDragTo: start.withOffset(by), withVelocity: .slow, thenHoldForDuration: 0.4)
         #endif
         sleep(1)
+    }
+
+    /// Рамка элемента не меняется секунду подряд (до 15 с).
+    @MainActor
+    private func steady(_ e: XCUIElement) {
+        let deadline = Date().addingTimeInterval(15)
+        // Пока календарь перечитывается, плашки на миг может не быть.
+        func frame() -> CGRect { e.waitForExistence(timeout: 5) ? e.frame : .null }
+        var last = frame()
+        var since = Date()
+        while Date() < deadline {
+            usleep(250_000)
+            let f = frame()
+            if f != last {
+                last = f
+                since = Date()
+            } else if !f.isNull, Date().timeIntervalSince(since) >= 1 {
+                return
+            }
+        }
+        XCTFail("плашка не встала на место: \(last)")
     }
 
     /// Сервер получил новое время (ждём до 20 с).
