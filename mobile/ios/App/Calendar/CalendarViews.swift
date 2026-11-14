@@ -666,7 +666,11 @@ private struct DayColumn: View {
             .frame(width: max(w - 2, 10), height: h, alignment: .topLeading)
             .contentShape(Rectangle())
             .onTapGesture { model.detail = o }
+            #if os(macOS)
             .gesture(dragGesture(o, top: top, height: baseH, colW: colW), including: movable ? .all : .subviews)
+            #else
+            .gesture(PressDrag(enabled: movable, handlers: dragHandlers(o, top: top, height: baseH, colW: colW)))
+            #endif
             .accessibilityIdentifier("cal.event")
             .accessibilityActions {
                 if movable {
@@ -689,39 +693,42 @@ private struct DayColumn: View {
         return (m, min(max(d, -index), dayCount - 1 - index))
     }
 
-    /// iPhone и iPad — долгое нажатие и ведение (прокрутке шкалы не мешает);
-    /// Мак — сразу ведение мышью, как у десктопа.
-    private func dragGesture(_ o: Occ, top: CGFloat, height: CGFloat, colW: CGFloat) -> some Gesture {
+    /// Ведение плашки: смещение пальца от точки нажатия.
+    private func dragHandlers(_ o: Occ, top: CGFloat, height: CGFloat, colW: CGFloat) -> EventDragHandlers {
         let drag = $drag
         let model = self.model
         let offsets = self.offsets
-        @MainActor func update(_ v: DragGesture.Value) {
-            if drag.wrappedValue?.occID != o.id {
-                // Кромка или середина — по месту первого касания внутри плашки.
-                drag.wrappedValue = EventDragState(occID: o.id, kind: EventDrag.kind(at: v.startLocation.y - top, height: height))
+        return EventDragHandlers(
+            changed: { start, location in
+                if drag.wrappedValue?.occID != o.id {
+                    // Кромка или середина — по месту нажатия внутри плашки.
+                    drag.wrappedValue = EventDragState(occID: o.id, kind: EventDrag.kind(at: start.y - top, height: height))
+                }
+                drag.wrappedValue?.translation = CGSize(width: location.x - start.x, height: location.y - start.y)
+            },
+            ended: { commit in
+                if commit, let st = drag.wrappedValue, st.occID == o.id {
+                    let s = offsets(st, colW)
+                    model.drop(o, st.kind, minutes: s.minutes, days: s.days)
+                }
+                drag.wrappedValue = nil
             }
-            drag.wrappedValue?.translation = v.translation
-        }
-        @MainActor func finish() {
-            if let st = drag.wrappedValue, st.occID == o.id {
-                let s = offsets(st, colW)
-                model.drop(o, st.kind, minutes: s.minutes, days: s.days)
-            }
-            drag.wrappedValue = nil
-        }
-        #if os(macOS)
-        return DragGesture(minimumDistance: 3, coordinateSpace: .named(Timeline.space))
-            .onChanged { update($0) }
-            .onEnded { _ in finish() }
-        #else
-        return LongPressGesture(minimumDuration: 0.35)
-            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named(Timeline.space)))
-            .onChanged { value in
-                if case let .second(true, v?) = value { update(v) }
-            }
-            .onEnded { _ in finish() }
-        #endif
+        )
     }
+
+    #if os(macOS)
+    /// Мак — сразу ведение мышью (порог 3 точки), как у десктопа; бросок —
+    /// по точке, где кнопку отпустили.
+    private func dragGesture(_ o: Occ, top: CGFloat, height: CGFloat, colW: CGFloat) -> some Gesture {
+        let h = dragHandlers(o, top: top, height: height, colW: colW)
+        return DragGesture(minimumDistance: 3, coordinateSpace: .named(Timeline.space))
+            .onChanged { h.changed($0.startLocation, $0.location) }
+            .onEnded { v in
+                h.changed(v.startLocation, v.location)
+                h.ended(true)
+            }
+    }
+    #endif
 
     struct Placed { let occ: Occ; let column: Int; let columns: Int }
 
@@ -892,3 +899,60 @@ struct CalendarsListView: View {
         .task { if model.calendars.isEmpty { await model.start() } }
     }
 }
+
+/// Что делать с ведением плашки: `changed(точка нажатия, точка пальца)` в
+/// пространстве шкалы, `ended(бросить?)`.
+struct EventDragHandlers {
+    let changed: @MainActor (CGPoint, CGPoint) -> Void
+    let ended: @MainActor (Bool) -> Void
+}
+
+#if os(iOS)
+/// iPhone и iPad: долгое нажатие (0,35 с) и ведение — `UILongPressGestureRecognizer`.
+/// Смещение считается от точки, где палец нажал, а не от первого движения
+/// после распознавания: связка SwiftUI `LongPressGesture` → `DragGesture`
+/// начинала отсчёт с первого сдвига пальца и теряла его (3–8 точек, до
+/// половины шага в 15 минут) — событие ложилось на шаг раньше. Шкала
+/// перестаёт прокручиваться с момента распознавания, ещё до движения.
+private struct PressDrag: UIGestureRecognizerRepresentable {
+    let enabled: Bool
+    let handlers: EventDragHandlers
+
+    final class Coordinator {
+        var start: CGPoint?
+    }
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
+
+    func makeUIGestureRecognizer(context: Context) -> UILongPressGestureRecognizer {
+        let g = UILongPressGestureRecognizer()
+        g.minimumPressDuration = 0.35
+        g.isEnabled = enabled
+        return g
+    }
+
+    func updateUIGestureRecognizer(_ g: UILongPressGestureRecognizer, context: Context) {
+        g.isEnabled = enabled
+    }
+
+    func handleUIGestureRecognizerAction(_ g: UILongPressGestureRecognizer, context: Context) {
+        let p = context.converter.location(in: .named(Timeline.space))
+        switch g.state {
+        case .began:
+            context.coordinator.start = p
+            handlers.changed(p, p)
+        case .changed:
+            if let s = context.coordinator.start { handlers.changed(s, p) }
+        case .ended:
+            if let s = context.coordinator.start { handlers.changed(s, p) }
+            context.coordinator.start = nil
+            handlers.ended(true)
+        case .cancelled, .failed:
+            context.coordinator.start = nil
+            handlers.ended(false)
+        default:
+            break
+        }
+    }
+}
+#endif
