@@ -69,8 +69,13 @@ DDMail — почтовый клиент для сервера ddmail и люб�
 `DDMAIL_TEST_EMAIL=review@mail.letotam.ru DDMAIL_TEST_PASSWORD=… mac.sh uitest iphonemax AppStoreShotsTests`
 (и `ipad`), перед этим на симуляторах `xcrun simctl status_bar <udid> override --time 9:41
 --batteryLevel 100 --batteryState charged --cellularBars 4 --wifiBars 3`. В git снимков нет.
-Mac-снимки по SSH снять нельзя (нет разрешения «Запись экрана»), поэтому macOS-версия
-на первое ревью не подаётся. Снимать на демо-учётке ниже: в ней
+Mac-снимки снимает тот же тест: `mac.sh uitest mac AppStoreShotsTests` с
+`DDMAIL_TEST_EMAIL`/`DDMAIL_TEST_PASSWORD` демо-учётки в окружении (они важнее `test.env`).
+На Маке приложение идёт в отдельном профиле данных (`DDMAIL_PROFILE=shots`: свой каталог,
+свои общие настройки и записи Keychain, без push и напоминаний), учётки владельца не
+стираются. Тест снимает окно; на холст 2880×1800 его кладёт `mobile/store-assets/mac_canvas.py` (окно по
+центру на светло-зелёном фоне). Нужно разрешение «Запись экрана» для
+`/usr/libexec/sshd-keygen-wrapper` (дано 2026-11-15). Снимать на демо-учётке ниже: в ней
 только вымышленные люди и адреса `example.com`/`example.org`. Скриншоты с настоящей почты
 не годятся: на них персональные данные корреспондентов (152-ФЗ).
 
@@ -174,8 +179,12 @@ Information. В git пароля нет; на станции сборки он �
 1. App Review → Contact Information: имя, фамилия, email, телефон;
 2. App Privacy: ответы по таблице выше, затем Publish. В публичном API этого раздела нет.
 
-macOS-версия (`1.0`, PREPARE_FOR_SUBMISSION) не заполнялась. Без настоящих Mac-скриншотов
-её не подаём.
+macOS-версия 0.0.15 (сборка 15) отправлена на ревью 2026-11-15 (WAITING_FOR_REVIEW):
+тексты, данные для ревью и 5 скриншотов `APP_DESKTOP` (2880×1800) — как у iOS.
+
+iOS 0.0.15 падала в фоне (с 0.0.7): обработчик `BGProcessingTask` докачки был изолирован
+на главном акторе, а `BGTaskScheduler` звал его из фоновой очереди (`using: nil`) —
+EXC_BREAKPOINT в `dispatch_assert_queue`. Исправлено в 0.0.16 (`using: .main`).
 
 ## Демо-учётка (сервер)
 

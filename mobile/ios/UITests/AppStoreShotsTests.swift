@@ -4,6 +4,9 @@ import XCTest
 /// демо-учётка ревью, ничего не меняет. Снимок — весь экран со статус-баром
 /// (его заранее приводит в порядок `simctl status_bar override`).
 /// Запуск: `DDMAIL_TEST_EMAIL=… DDMAIL_TEST_PASSWORD=… mac.sh uitest iphonemax AppStoreShotsTests`.
+/// На Маке приложение идёт в отдельном профиле данных (`DDMAIL_PROFILE=shots`):
+/// учётки владельца в обычном профиле не стираются. Снимок — окно приложения,
+/// на холст 2880×1800 его кладёт `mobile/store-assets/mac_canvas.py`.
 final class AppStoreShotsTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
@@ -12,7 +15,11 @@ final class AppStoreShotsTests: XCTestCase {
     @MainActor
     private func shot(_ name: String) {
         sleep(2)
+        #if os(macOS)
+        let a = XCTAttachment(screenshot: XCUIApplication().windows.firstMatch.screenshot())
+        #else
         let a = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        #endif
         a.name = name
         a.lifetime = .keepAlways
         add(a)
@@ -21,7 +28,12 @@ final class AppStoreShotsTests: XCTestCase {
     @MainActor
     func testStoreScreenshots() throws {
         let (email, password) = try CalendarDragTests.credentials()
-        let app = UIFlow.launch()
+        let app = XCUIApplication.ddmail()
+        #if os(macOS)
+        app.launchEnvironment["DDMAIL_PROFILE"] = "shots"
+        #endif
+        app.launchArguments += ["-ddmail-reset", "-ddmail-uitest-ids"]
+        app.launch()
         UIFlow.login(email, password, app, self)
         let rows = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'conv.row'"))
         XCTAssertTrue(rows.element(boundBy: 2).waitForExistence(timeout: 30), "в списке меньше трёх бесед")
@@ -48,7 +60,9 @@ final class AppStoreShotsTests: XCTestCase {
         UIFlow.replace(search, with: "", app)
         let cancel = app.buttons.matching(NSPredicate(format: "label IN %@", ["Отмена", "Cancel"])).firstMatch
         if cancel.exists { cancel.tap() }
+        #if os(iOS)
         app.swipeDown()
+        #endif
         sleep(1)
 
         Nav.go("Календарь", app)

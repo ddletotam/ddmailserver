@@ -29,7 +29,12 @@ set -euo pipefail
 #   keychain-password  пароль входа на Мак: разблокировать связку для подписи
 SECRETS="${XDG_CONFIG_HOME:-$HOME/.config}/ddmail-ios"
 # shellcheck source=/dev/null
-[ -f "$SECRETS/test.env" ] && . "$SECRETS/test.env"
+# Заданное в окружении важнее файла (так `AppStoreShotsTests` идёт под демо-учёткой).
+if [ -f "$SECRETS/test.env" ]; then
+    _e="${DDMAIL_TEST_EMAIL:-}" _p="${DDMAIL_TEST_PASSWORD:-}"
+    . "$SECRETS/test.env"
+    if [ -n "$_e" ]; then DDMAIL_TEST_EMAIL="$_e" DDMAIL_TEST_PASSWORD="$_p"; fi
+fi
 if [ -z "${DDMAIL_KEYCHAIN_PASSWORD:-}" ] && [ -f "$SECRETS/keychain-password" ]; then
     DDMAIL_KEYCHAIN_PASSWORD="$(cat "$SECRETS/keychain-password")"
 fi

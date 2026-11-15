@@ -51,6 +51,8 @@ final class PushService {
     /// Токен у системы и регистрации учёток — если уведомления разрешены.
     private func register() async {
         guard workspace != nil else { return }
+        // Отдельный профиль (скриншоты демо-учёткой) не подписывает Мак владельца на чужие push.
+        guard AppGroup.profile == nil else { return }
         let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
         // Без разрешения видимый push не покажется и расширение не проснётся.
         guard status == .authorized || status == .provisional else {

@@ -11,6 +11,18 @@ public enum AppGroup {
         Bundle.main.object(forInfoDictionaryKey: "DDMailAppGroup") as? String ?? "group.ru.letotam.ddmail"
     }
 
+    /// Отдельный профиль данных (`DDMAIL_PROFILE=<имя>` в окружении процесса):
+    /// свой каталог, свои общие настройки и свои записи Keychain. Нужен, чтобы
+    /// снимать скриншоты демо-учёткой на Маке, не трогая учётки владельца
+    /// (`mac.sh shots`). Без переменной — обычные данные.
+    public static var profile: String? {
+        guard let p = ProcessInfo.processInfo.environment["DDMAIL_PROFILE"], !p.isEmpty else { return nil }
+        return p
+    }
+
+    /// Суффикс профиля для имён каталогов и служб Keychain (`""` — обычный).
+    public static var profileSuffix: String { profile.map { ".\($0)" } ?? "" }
+
     /// Контейнер группы; `nil` — у процесса нет права (`swift test`, сборка
     /// без подписи).
     public static var containerURL: URL? {
@@ -21,12 +33,12 @@ public enum AppGroup {
     /// без группы — свой каталог процесса, как до App Group.
     public static var dataDirectory: URL {
         guard let c = containerURL else { return legacyDataDirectory }
-        return c.appending(path: "Library/Application Support/ddmail", directoryHint: .isDirectory)
+        return c.appending(path: "Library/Application Support/ddmail" + profileSuffix, directoryHint: .isDirectory)
     }
 
     /// Где данные лежали до App Group — Application Support приложения.
     public static var legacyDataDirectory: URL {
-        URL.applicationSupportDirectory.appending(path: "ddmail", directoryHint: .isDirectory)
+        URL.applicationSupportDirectory.appending(path: "ddmail" + profileSuffix, directoryHint: .isDirectory)
     }
 
     public static var cacheURL: URL { dataDirectory.appending(path: "cache.sqlite") }
@@ -34,7 +46,8 @@ public enum AppGroup {
 
     /// Общие настройки (рубежи уведомлений, токен push); без группы — свои.
     public static var defaults: UserDefaults {
-        containerURL == nil ? .standard : UserDefaults(suiteName: id) ?? .standard
+        if let p = profile { return UserDefaults(suiteName: "\(id).\(p)") ?? .standard }
+        return containerURL == nil ? .standard : UserDefaults(suiteName: id) ?? .standard
     }
 
     /// Имя уведомления Darwin «расширение записало в кэш» — приложение на

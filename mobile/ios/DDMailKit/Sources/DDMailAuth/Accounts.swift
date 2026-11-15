@@ -179,7 +179,7 @@ public final class KeychainAccountStore: AccountStore, @unchecked Sendable {
 
     public init(
         file: URL = AppGroup.accountsURL,
-        service: String = "ru.letotam.ddmail.account"
+        service: String = "ru.letotam.ddmail.account" + AppGroup.profileSuffix
     ) {
         self.file = file
         self.service = service

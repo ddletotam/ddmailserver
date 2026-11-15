@@ -28,7 +28,11 @@ struct DDMailApp: App {
         #if os(iOS)
         // Докачка тел — задача обработки: SwiftUI `.backgroundTask` её не
         // умеет, регистрируем до конца запуска, как требует BGTaskScheduler.
-        BGTaskScheduler.shared.register(forTaskWithIdentifier: BackgroundSync.prefetchID, using: nil) { task in
+        // Очередь — главная: замыкание объявлено в `init` App и потому
+        // изолировано на главном акторе; с `using: nil` система звала его из
+        // фоновой очереди, и проверка изоляции Swift 6 роняла процесс
+        // (EXC_BREAKPOINT в `dispatch_assert_queue`, с 0.0.7 по 0.0.15).
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: BackgroundSync.prefetchID, using: .main) { task in
             nonisolated(unsafe) let task = task
             let work = Task { @MainActor in
                 await BackgroundSync.withDatabase {

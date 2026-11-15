@@ -74,6 +74,9 @@ final class ReminderService {
     }
 
     private func refreshOnce() async {
+        // Отдельный профиль (скриншоты демо-учёткой) напоминания не ставит и не
+        // снимает: уведомления у приложения общие с обычным профилем.
+        guard AppGroup.profile == nil else { return }
         guard CalendarPrefs.shared.reminders else {
             await removeAll()
             return
@@ -197,10 +200,14 @@ final class ReminderService {
     }
 
     /// Выход из учётки: напоминания чужой учётки не звонят.
-    func clear() async { await removeAll() }
+    func clear() async {
+        guard AppGroup.profile == nil else { return }
+        await removeAll()
+    }
 
     /// Учёток не осталось — без экземпляра сервиса (его API уже нет).
     static func clearAll() async {
+        guard AppGroup.profile == nil else { return }
         let center = UNUserNotificationCenter.current()
         let pending = await center.pendingNotificationRequests().map(\.identifier).filter { $0.hasPrefix("rem|") }
         center.removePendingNotificationRequests(withIdentifiers: pending)

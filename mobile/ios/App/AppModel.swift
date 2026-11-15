@@ -44,8 +44,14 @@ final class AppModel {
             KeychainSessionStore().clear()
             try? FileManager.default.removeItem(at: AppGroup.dataDirectory)
             try? FileManager.default.removeItem(at: AppGroup.legacyDataDirectory)
-            if let id = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: id) }
-            UserDefaults(suiteName: AppGroup.id)?.removePersistentDomain(forName: AppGroup.id)
+            // В отдельном профиле обычные настройки не трогаем: они владельца
+            // (`mac.sh shots` сохраняет и возвращает их сам).
+            if AppGroup.profile == nil {
+                if let id = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: id) }
+                UserDefaults(suiteName: AppGroup.id)?.removePersistentDomain(forName: AppGroup.id)
+            } else {
+                AppGroup.defaults.removePersistentDomain(forName: "\(AppGroup.id).\(AppGroup.profile!)")
+            }
         }
         #endif
         Self.migrateStorage(accounts)

@@ -39,7 +39,7 @@ public struct KeychainSessionStore: SessionStore {
     let service: String
     let account = "session"
 
-    public init(service: String = "ru.letotam.ddmail.session") {
+    public init(service: String = "ru.letotam.ddmail.session" + AppGroup.profileSuffix) {
         self.service = service
     }
 
