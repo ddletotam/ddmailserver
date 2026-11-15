@@ -231,6 +231,29 @@ func (c *Client) SearchInFolder(userID, folderID int64, query string, limit, off
 	return &result, nil
 }
 
+// ListDocumentIDs returns the ids of up to limit documents starting at offset,
+// and the total number of documents in the index.
+func (c *Client) ListDocumentIDs(offset, limit int) ([]int64, int64, error) {
+	respBody, err := c.request("GET", fmt.Sprintf("/indexes/messages/documents?fields=id&offset=%d&limit=%d", offset, limit), nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	var page struct {
+		Results []struct {
+			ID int64 `json:"id"`
+		} `json:"results"`
+		Total int64 `json:"total"`
+	}
+	if err := json.Unmarshal(respBody, &page); err != nil {
+		return nil, 0, fmt.Errorf("failed to unmarshal documents: %w", err)
+	}
+	ids := make([]int64, len(page.Results))
+	for i, r := range page.Results {
+		ids[i] = r.ID
+	}
+	return ids, page.Total, nil
+}
+
 // GetStats returns index statistics
 func (c *Client) GetStats() (map[string]interface{}, error) {
 	respBody, err := c.request("GET", "/indexes/messages/stats", nil)
