@@ -912,24 +912,41 @@ func (db *DB) GetTotalMessageCount() (int, error) {
 	return count, nil
 }
 
-// GetMessagesForIndexing retrieves messages for search indexing with pagination
-func (db *DB) GetMessagesForIndexing(limit, offset int) ([]*models.Message, error) {
-	query := `
-		SELECT id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
+// indexingColumns are the messages columns search indexing reads; see
+// scanMessagesForIndexing.
+const indexingColumns = `id, COALESCE(account_id, 0), user_id, folder_id, message_id, subject, from_addr, to_addr, cc, bcc, reply_to,
 		       date, body, body_html, attachments, size, uid, seen, flagged, answered, draft, deleted,
 		       in_reply_to, message_references, COALESCE(spam_score, 0), COALESCE(spam_status, 'clean'), COALESCE(spam_reasons, ''),
-		       created_at, updated_at, COALESCE(soft_deleted, false)
-		FROM messages
-		ORDER BY id ASC
-		LIMIT $1 OFFSET $2
-	`
+		       created_at, updated_at, COALESCE(soft_deleted, false)`
 
-	rows, err := db.Query(query, limit, offset)
+// GetMessagesForIndexing returns up to limit messages with id > afterID in id
+// order, for the full search reindex. Keyset paging: OFFSET over a table that
+// grows and shrinks while the reindex runs skips or repeats rows.
+func (db *DB) GetMessagesForIndexing(afterID int64, limit int) ([]*models.Message, error) {
+	rows, err := db.Query(`SELECT `+indexingColumns+` FROM messages WHERE id > $1 ORDER BY id ASC LIMIT $2`, afterID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get messages for indexing: %w", err)
 	}
 	defer rows.Close()
+	return scanMessagesForIndexing(rows)
+}
 
+// GetMessagesForIndexingByIDs returns the messages among ids that still exist,
+// in any state (soft-deleted and spam included: the index document carries
+// that state). Ids without a row are simply absent from the result.
+func (db *DB) GetMessagesForIndexingByIDs(ids []int64) ([]*models.Message, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := db.Query(`SELECT `+indexingColumns+` FROM messages WHERE id = ANY($1)`, pq.Array(ids))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get messages for indexing: %w", err)
+	}
+	defer rows.Close()
+	return scanMessagesForIndexing(rows)
+}
+
+func scanMessagesForIndexing(rows *sql.Rows) ([]*models.Message, error) {
 	var messages []*models.Message
 	for rows.Next() {
 		msg := &models.Message{}
@@ -946,8 +963,7 @@ func (db *DB) GetMessagesForIndexing(limit, offset int) ([]*models.Message, erro
 		}
 		messages = append(messages, msg)
 	}
-
-	return messages, nil
+	return messages, rows.Err()
 }
 
 // GetMessagesByIDs retrieves messages by their IDs (preserving order)

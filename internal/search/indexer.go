@@ -1,6 +1,7 @@
 package search
 
 import (
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -10,10 +11,23 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
+// store is the part of the database the indexer reads.
+type store interface {
+	GetMessageByID(id int64) (*models.Message, error)
+	GetMessagesForIndexing(afterID int64, limit int) ([]*models.Message, error)
+	GetMessagesForIndexingByIDs(ids []int64) ([]*models.Message, error)
+	PendingSearchIndex(limit int) ([]db.SearchIndexEntry, error)
+	AckSearchIndex(entries []db.SearchIndexEntry) error
+	MessageRowsExist(ids []int64) (map[int64]bool, error)
+}
+
 // Indexer handles synchronization between database and Meilisearch
 type Indexer struct {
 	client   *Client
-	database *db.DB
+	database store
+
+	// pollInterval overrides syncPollInterval (tests).
+	pollInterval time.Duration
 }
 
 // NewIndexer creates a new indexer
@@ -32,39 +46,36 @@ func (idx *Indexer) Initialize() error {
 	return idx.client.CreateIndex()
 }
 
-// IndexAllMessages indexes all messages from database (full reindex)
+// IndexAllMessages indexes all messages from database (full reindex). It stops
+// at the first batch Meilisearch rejects, so a caller can retry it whole.
 func (idx *Indexer) IndexAllMessages() error {
 	log.Println("Starting full message reindex...")
 
-	// Get total count
-	total, err := idx.database.GetTotalMessageCount()
-	if err != nil {
-		return err
-	}
-	log.Printf("Found %d messages to index", total)
-
-	batchSize := 100
+	const batchSize = 100
+	var afterID int64
 	indexed := 0
-
-	for offset := 0; offset < total; offset += batchSize {
-		messages, err := idx.database.GetMessagesForIndexing(batchSize, offset)
+	for {
+		messages, err := idx.database.GetMessagesForIndexing(afterID, batchSize)
 		if err != nil {
-			log.Printf("Failed to get messages at offset %d: %v", offset, err)
-			continue
+			return err
+		}
+		if len(messages) == 0 {
+			break
 		}
 
 		docs := make([]IndexDocument, 0, len(messages))
 		for _, msg := range messages {
 			docs = append(docs, messageToDocument(msg))
 		}
-
 		if err := idx.client.IndexDocuments(docs); err != nil {
-			log.Printf("Failed to index batch at offset %d: %v", offset, err)
-			continue
+			return fmt.Errorf("index batch after id %d: %w", afterID, err)
 		}
 
+		afterID = messages[len(messages)-1].ID
 		indexed += len(docs)
-		log.Printf("Indexed %d/%d messages", indexed, total)
+		if indexed%10000 < batchSize {
+			log.Printf("Indexed %d messages", indexed)
+		}
 	}
 
 	log.Printf("Full reindex complete: %d messages indexed", indexed)

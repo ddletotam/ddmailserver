@@ -180,26 +180,25 @@ func main() {
 		log.Printf("Warning: attendee backfill failed: %v", err)
 	}
 
-	// Initialize Meilisearch if configured
+	// Initialize Meilisearch if configured. The indexer runs in the
+	// background: it waits for Meilisearch, then drains search_index_queue
+	// (filled by a trigger on messages) so new, changed and deleted messages
+	// reach the index within seconds, whichever path wrote them.
+	searchCtx, stopSearch := context.WithCancel(context.Background())
+	defer stopSearch()
 	var searchIndexer *search.Indexer
 	if cfg.Meilisearch.Host != "" && cfg.Meilisearch.APIKey != "" {
 		log.Printf("Initializing Meilisearch at %s...", cfg.Meilisearch.Host)
 		searchClient := search.New(&cfg.Meilisearch)
 		searchIndexer = search.NewIndexer(searchClient, database)
-
-		if err := searchIndexer.Initialize(); err != nil {
-			log.Printf("Warning: Failed to initialize Meilisearch: %v", err)
-		} else {
-			log.Printf("Meilisearch initialized successfully")
-			// Run full reindex in background on first start
-			go func() {
-				if err := searchIndexer.IndexAllMessages(); err != nil {
-					log.Printf("Warning: Failed to index messages: %v", err)
-				}
-			}()
-		}
+		go searchIndexer.Run(searchCtx)
 	} else {
 		log.Printf("Meilisearch not configured, search will use database")
+		// Nobody drains the queue; don't let it collect every change. A
+		// later-configured Meilisearch starts empty and gets a full reindex.
+		if err := database.ClearSearchIndexQueue(); err != nil {
+			log.Printf("Warning: %v", err)
+		}
 	}
 
 	// Initialize worker pool
@@ -443,6 +442,7 @@ func main() {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	sig := <-sigChan
 	log.Printf("Received %v, shutting down gracefully...", sig)
+	stopSearch()
 
 	shutdown(sigChan, scheduler, idleManager, listeners, pool, database)
 }
