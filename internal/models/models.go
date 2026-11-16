@@ -19,9 +19,9 @@ type User struct {
 	IsBannedFlag    bool   `json:"is_banned"`
 	// PendingFlag: signed up under moderated registration, not yet approved
 	// by an administrator (users.approved = false).
-	PendingFlag bool `json:"pending,omitempty"`
-	CreatedAt       int64  `json:"created_at"`
-	UpdatedAt       int64  `json:"updated_at"`
+	PendingFlag bool  `json:"pending,omitempty"`
+	CreatedAt   int64 `json:"created_at"`
+	UpdatedAt   int64 `json:"updated_at"`
 }
 
 // IsAdmin returns true if user is an administrator
