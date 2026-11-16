@@ -149,3 +149,37 @@ func (s *Server) adminInviteRows() []adminInviteRow {
 	}
 	return rows
 }
+
+// HandleAdminSetLimits saves the server limits: a number ≥ 0 per key, 0 —
+// off (all are off by default).
+func (s *Server) HandleAdminSetLimits(w http.ResponseWriter, r *http.Request) {
+	admin := s.GetUserFromContext(r.Context())
+	var changed []string
+	for _, key := range db.LimitSettings {
+		raw := strings.TrimSpace(r.FormValue(key))
+		if raw == "" {
+			raw = "0"
+		}
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n < 0 || n > 1_000_000 {
+			respondError(w, http.StatusBadRequest, key+": a whole number from 0")
+			return
+		}
+		if err := s.database.SetSetting(key, strconv.FormatInt(n, 10)); err != nil {
+			respondError(w, http.StatusInternalServerError, "save failed")
+			return
+		}
+		changed = append(changed, key+"="+strconv.FormatInt(n, 10))
+	}
+	s.auditAdmin(r, admin, "limits.save", "settings", 0, strings.Join(changed, " "))
+	respondJSON(w, http.StatusOK, map[string]bool{"saved": true})
+}
+
+func (s *Server) adminLimits() map[string]int64 {
+	out := map[string]int64{}
+	for _, key := range db.LimitSettings {
+		n, _ := s.database.Limit(key)
+		out[key] = n
+	}
+	return out
+}

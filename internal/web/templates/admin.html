@@ -138,6 +138,26 @@
         </div>
     </div>
 
+    <!-- Limits -->
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">{{t "admin.lim_title"}}</h3></div>
+            <div class="card-body">
+                <div class="text-muted small mb-3">{{t "admin.lim_hint"}}</div>
+                <form id="limits-form">
+                    {{range $k := list "limit_mailbox_quota_mb" "limit_send_per_hour" "limit_external_accounts"}}
+                    <div class="mb-2 row">
+                        <label class="col-8 col-form-label">{{t (printf "admin.%s" $k)}}</label>
+                        <div class="col-4"><input type="number" min="0" class="form-control" name="{{$k}}" value="{{index $.Limits $k}}"></div>
+                    </div>
+                    {{end}}
+                    <button type="submit" class="btn btn-primary">{{t "admin.password_save_short"}}</button>
+                    <span id="limits-result" class="ms-2 small"></span>
+                </form>
+            </div>
+        </div>
+    </div>
+
     <!-- Administrators -->
     <div class="col-md-6">
         <div class="card">
@@ -265,6 +285,14 @@
         e.preventDefault();
         fetch('/api/admin/invites/' + b.dataset.inviteRevoke, { method: 'DELETE', credentials: 'same-origin' })
             .then(function (r) { if (r.ok) b.closest('div').remove(); });
+    });
+    var lf = document.getElementById('limits-form');
+    if (lf) lf.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var out = document.getElementById('limits-result');
+        post('/api/admin/settings/limits', new FormData(lf))
+            .then(function () { out.className = 'ms-2 small text-success'; out.textContent = '{{t "admin.saved"}}'; })
+            .catch(function (err) { out.className = 'ms-2 small text-danger'; out.textContent = err.message; });
     });
     var acf = document.getElementById('admin-create-form');
     if (acf) acf.addEventListener('submit', function (e) {

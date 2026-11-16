@@ -217,6 +217,7 @@ func (s *Server) setupRoutes() {
 	adminAPI.HandleFunc("/users/{id}/ban", s.HandleAdminToggleBan).Methods("POST")
 	adminAPI.HandleFunc("/users/{id}/approve", s.HandleAdminApproveUser).Methods("POST")
 	adminAPI.HandleFunc("/settings/registration", s.HandleAdminSetRegistrationMode).Methods("POST")
+	adminAPI.HandleFunc("/settings/limits", s.HandleAdminSetLimits).Methods("POST")
 	adminAPI.HandleFunc("/invites", s.HandleAdminCreateInvite).Methods("POST")
 	adminAPI.HandleFunc("/admins", s.HandleAdminCreateAdmin).Methods("POST")
 	adminAPI.HandleFunc("/domains", s.HandleAdminCreateDomain).Methods("POST")

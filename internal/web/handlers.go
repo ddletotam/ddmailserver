@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -379,6 +380,10 @@ func (s *Server) HandleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	// Create account
 	if err := s.database.CreateAccount(&account); err != nil {
 		log.Printf("Failed to create account: %v", err)
+		if errors.Is(err, db.ErrAccountLimit) {
+			respondHTMXError(w, r, http.StatusForbidden, s.i18n.T("limits.accounts_reached"))
+			return
+		}
 		respondHTMXError(w, r, http.StatusInternalServerError, "Failed to create account")
 		return
 	}

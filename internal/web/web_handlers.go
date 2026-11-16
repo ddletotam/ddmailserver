@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
@@ -484,6 +485,10 @@ func (s *Server) HandleSaveAccount(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		log.Printf("Failed to save account: %v", err)
+		if errors.Is(err, db.ErrAccountLimit) {
+			http.Error(w, s.i18n.T("limits.accounts_reached"), http.StatusForbidden)
+			return
+		}
 		http.Error(w, "Failed to save account", http.StatusInternalServerError)
 		return
 	}

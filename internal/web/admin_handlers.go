@@ -79,6 +79,7 @@ func (s *Server) HandleAdminPage(w http.ResponseWriter, r *http.Request) {
 		Audit                  []adminAuditRow
 		RegistrationMode       string
 		Admins                 []adminUserRow
+		Limits                 map[string]int64
 		Invites                []adminInviteRow
 	}{
 		PageData: PageData{
@@ -95,6 +96,7 @@ func (s *Server) HandleAdminPage(w http.ResponseWriter, r *http.Request) {
 		Audit:                  s.adminAuditRows(),
 		RegistrationMode:       s.registrationMode(),
 		Admins:                 adminRows(users, user.ID),
+		Limits:                 s.adminLimits(),
 		Invites:                s.adminInviteRows(),
 	}
 

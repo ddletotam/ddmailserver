@@ -948,6 +948,10 @@ func (s *Server) HandleDesktopSend(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if err := s.database.CreateOutboxMessage(outboxMsg); err != nil {
+		if errors.Is(err, db.ErrSendLimit) {
+			respondError(w, http.StatusTooManyRequests, "sending limit reached, try again later")
+			return
+		}
 		respondError(w, http.StatusInternalServerError, "failed to queue message")
 		return
 	}

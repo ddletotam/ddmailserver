@@ -312,6 +312,9 @@ func (s *Session) Data(r io.Reader) error {
 
 	// Save to database
 	if err := s.database.CreateOutboxMessage(outboxMsg); err != nil {
+		if errors.Is(err, db.ErrSendLimit) {
+			return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 7, 1}, Message: "Sending limit reached, try again later"}
+		}
 		return fmt.Errorf("failed to save message: %w", err)
 	}
 

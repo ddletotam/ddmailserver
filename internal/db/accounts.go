@@ -23,6 +23,9 @@ func (tx *Tx) CreateAccount(account *models.Account) error {
 }
 
 func createAccount(q querier, encryptionKey string, account *models.Account) error {
+	if err := checkAccountLimit(q, account.UserID); err != nil {
+		return err
+	}
 	account.CreatedAt = timeutil.Now()
 	account.UpdatedAt = timeutil.Now()
 

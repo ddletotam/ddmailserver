@@ -62,6 +62,13 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 		return rcptError(email, err)
 	}
 
+	// Mailbox quota (off unless the administrator set one): a full mailbox
+	// with its own account refuses new mail like any server does.
+	if q, ok := s.directory.(interface{ MailboxOverQuota(int64) (bool, error) }); ok && rcpt.Mailbox != nil {
+		if full, err := q.MailboxOverQuota(rcpt.Mailbox.PrincipalID); err == nil && full {
+			return &smtp.SMTPError{Code: 552, EnhancedCode: smtp.EnhancedCode{5, 2, 2}, Message: "Mailbox full"}
+		}
+	}
 	s.recipients = append(s.recipients, rcpt)
 	log.Printf("MX: Accepted recipient %s (user_id=%d)", rcpt.Email, rcpt.Mailbox.StoreUserID())
 	return nil
