@@ -10,7 +10,7 @@ import (
 
 // CreateAdmin creates an administrator account: it manages the server in
 // /admin and has no mail of its own (migration 061). passwordHash is a
-// bcrypt hash. recovery_key_hash is '' rather than NULL: the user queries scan
+// bcrypt hash. recovery_key_hash is ” rather than NULL: the user queries scan
 // it into a string, and a NULL there made every lookup of the account fail.
 func (db *DB) CreateAdmin(username, passwordHash string) (*models.User, error) {
 	now := timeutil.Now()
