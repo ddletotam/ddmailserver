@@ -154,6 +154,10 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/login", s.HandleLoginPage).Methods("GET")
 	s.router.HandleFunc("/logout", s.HandleLogout).Methods("GET")
 	s.router.HandleFunc("/forgot-password", s.HandleForgotPasswordPage).Methods("GET")
+	// Public: after a moderated sign-up there is no session yet, and the
+	// recovery key (one-time cookie) must still be shown.
+	s.router.HandleFunc("/recovery-key", s.HandleShowRecoveryKeyPage).Methods("GET")
+	s.router.HandleFunc("/invite/{token}", s.HandleInvitePage).Methods("GET")
 
 	// Public API routes
 	s.router.HandleFunc("/health", s.HandleHealthCheck).Methods("GET")
@@ -162,6 +166,7 @@ func (s *Server) setupRoutes() {
 	authRouter := s.router.PathPrefix("/api").Subrouter()
 	authRouter.Use(s.RateLimitMiddleware(s.authRateLimiter))
 	authRouter.HandleFunc("/register", s.HandleRegister).Methods("POST")
+	authRouter.HandleFunc("/invite/{token}", s.HandleInviteRegister).Methods("POST")
 	authRouter.HandleFunc("/login", s.HandleLogin).Methods("POST")
 	authRouter.HandleFunc("/forgot-password", s.HandleForgotPassword).Methods("POST")
 
@@ -210,6 +215,10 @@ func (s *Server) setupRoutes() {
 	adminAPI := s.router.PathPrefix("/api/admin").Subrouter()
 	adminAPI.Use(s.APIAdminMiddleware)
 	adminAPI.HandleFunc("/users/{id}/ban", s.HandleAdminToggleBan).Methods("POST")
+	adminAPI.HandleFunc("/users/{id}/approve", s.HandleAdminApproveUser).Methods("POST")
+	adminAPI.HandleFunc("/settings/registration", s.HandleAdminSetRegistrationMode).Methods("POST")
+	adminAPI.HandleFunc("/invites", s.HandleAdminCreateInvite).Methods("POST")
+	adminAPI.HandleFunc("/invites/{id}", s.HandleAdminRevokeInvite).Methods("DELETE")
 	adminAPI.HandleFunc("/users/{id}", s.HandleAdminDeleteUser).Methods("DELETE")
 
 	// Accounts API (uses session cookie auth, must be registered before general API routes)
@@ -317,7 +326,6 @@ func (s *Server) setupRoutes() {
 	web.HandleFunc("/dashboard", s.HandleDashboard).Methods("GET")
 
 	// Recovery key display (after registration)
-	web.HandleFunc("/recovery-key", s.HandleShowRecoveryKeyPage).Methods("GET")
 
 	// Accounts web pages
 	web.HandleFunc("/accounts", s.HandleAccountsPage).Methods("GET")

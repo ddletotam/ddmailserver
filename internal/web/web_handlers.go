@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"github.com/ddletotam/ddmailserver/internal/db"
 	"html/template"
 	"log"
 	"net/http"
@@ -36,7 +37,8 @@ type PageData struct {
 // self-service registration is enabled.
 type LoginPageData struct {
 	PageData
-	RegistrationEnabled bool
+	RegistrationEnabled   bool
+	RegistrationModerated bool // sign-ups wait for an administrator's approval
 }
 
 // UserLanguage returns the user's preferred language code, or empty if unknown.
@@ -213,8 +215,9 @@ func (s *Server) HandleIndex(w http.ResponseWriter, r *http.Request) {
 // HandleLoginPage shows the login/register page
 func (s *Server) HandleLoginPage(w http.ResponseWriter, r *http.Request) {
 	s.renderTemplate(w, "login.html", LoginPageData{
-		PageData:            PageData{Title: "Login"},
-		RegistrationEnabled: !s.registrationDisabled,
+		PageData:              PageData{Title: "Login"},
+		RegistrationEnabled:   s.registrationMode() != db.RegistrationClosed,
+		RegistrationModerated: s.registrationMode() == db.RegistrationModerated,
 	})
 }
 

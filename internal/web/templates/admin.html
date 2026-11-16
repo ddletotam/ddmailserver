@@ -99,6 +99,45 @@
         </div>
     </div>
 
+    <!-- Registration -->
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">{{t "admin.reg_title"}}</h3></div>
+            <div class="card-body">
+                <div class="mb-3">
+                    {{range $m := list "open" "moderated" "closed"}}
+                    <label class="form-check">
+                        <input class="form-check-input" type="radio" name="reg-mode" value="{{$m}}" {{if eq $m $.RegistrationMode}}checked{{end}}>
+                        <span class="form-check-label">{{t (printf "admin.reg_%s" $m)}}</span>
+                    </label>
+                    {{end}}
+                </div>
+                <div id="reg-mode-result" class="small"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Invitations -->
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">{{t "admin.inv_title"}}</h3></div>
+            <div class="card-body">
+                <form id="invite-form" class="d-flex gap-2 mb-2">
+                    <input type="text" name="note" class="form-control" placeholder="{{t "admin.inv_note"}}" maxlength="200">
+                    <button type="submit" class="btn btn-primary text-nowrap">{{t "admin.inv_create"}}</button>
+                </form>
+                <div id="invite-result" class="mb-2"></div>
+                <div class="text-muted small mb-2">{{t "admin.inv_hint"}}</div>
+                {{range .Invites}}
+                <div class="d-flex align-items-center justify-content-between border-top py-1">
+                    <span>{{if .Note}}{{.Note}}{{else}}#{{.ID}}{{end}} <span class="text-muted small">— {{t "admin.inv_until"}} {{.Expires}}</span></span>
+                    <button class="btn btn-sm btn-outline-danger" data-invite-revoke="{{.ID}}" title="{{t "admin.inv_revoke"}}"><i class="ti ti-x"></i></button>
+                </div>
+                {{end}}
+            </div>
+        </div>
+    </div>
+
     <!-- Users -->
     <div class="col-12">
         <div class="card">
@@ -167,6 +206,46 @@
             })
             .catch(function (err) { alert(err.message || 'Action failed'); btn.disabled = false; });
     });
+    function post(url, body) {
+        return fetch(url, { method: 'POST', credentials: 'same-origin', body: body }).then(function (r) {
+            return r.json().catch(function () { return {}; }).then(function (j) {
+                if (!r.ok) throw new Error((j && j.error) || r.statusText);
+                return j;
+            });
+        });
+    }
+    document.querySelectorAll('input[name="reg-mode"]').forEach(function (el) {
+        el.addEventListener('change', function () {
+            var out = document.getElementById('reg-mode-result');
+            var fd = new FormData(); fd.append('mode', el.value);
+            post('/api/admin/settings/registration', fd)
+                .then(function () { out.className = 'small text-success'; out.textContent = '{{t "admin.saved"}}'; })
+                .catch(function (e) { out.className = 'small text-danger'; out.textContent = e.message; });
+        });
+    });
+    var inf = document.getElementById('invite-form');
+    if (inf) inf.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var out = document.getElementById('invite-result');
+        post('/api/admin/invites', new FormData(inf)).then(function (j) {
+            out.innerHTML = '';
+            var a = document.createElement('input');
+            a.className = 'form-control'; a.readOnly = true; a.value = j.url;
+            a.addEventListener('focus', function () { a.select(); });
+            var note = document.createElement('div');
+            note.className = 'small text-muted mt-1';
+            note.textContent = '{{t "admin.inv_once"}} ' + j.expires;
+            out.appendChild(a); out.appendChild(note);
+            a.focus();
+        }).catch(function (err) { out.className = 'text-danger'; out.textContent = err.message; });
+    });
+    document.addEventListener('click', function (e) {
+        var b = e.target.closest('[data-invite-revoke]');
+        if (!b) return;
+        e.preventDefault();
+        fetch('/api/admin/invites/' + b.dataset.inviteRevoke, { method: 'DELETE', credentials: 'same-origin' })
+            .then(function (r) { if (r.ok) b.closest('div').remove(); });
+    });
     var pf = document.getElementById('admin-password-form');
     if (pf) pf.addEventListener('submit', function (e) {
         e.preventDefault();
@@ -204,7 +283,7 @@
         </thead>
         <tbody>
             {{range .}}
-            <tr {{if .IsBanned}}class="text-muted"{{end}}>
+            <tr {{if or .IsBanned .IsPending}}class="text-muted"{{end}}>
                 <td>{{.ID}}</td>
                 <td>
                     {{.Username}}
@@ -212,12 +291,21 @@
                 </td>
                 <td>{{if .Email}}{{.Email}}{{else}}<span class="text-muted">—</span>{{end}}</td>
                 <td>
-                    {{if .IsBanned}}<span class="badge bg-red-lt">{{t "admin.banned"}}</span>{{else}}<span class="badge bg-green-lt">{{t "admin.active"}}</span>{{end}}
+                    {{if .IsPending}}<span class="badge bg-yellow-lt">{{t "admin.pending"}}</span>{{else if .IsBanned}}<span class="badge bg-red-lt">{{t "admin.banned"}}</span>{{else}}<span class="badge bg-green-lt">{{t "admin.active"}}</span>{{end}}
                 </td>
                 <td>{{.CreatedAt}}</td>
                 <td>
                     {{if not .IsCurrent}}
                     <div class="btn-list flex-nowrap">
+                        {{if .IsPending}}
+                        <button class="btn btn-sm btn-outline-success"
+                                data-admin-action="approve"
+                                data-user-id="{{.ID}}"
+                                data-username="{{.Username}}"
+                                title="{{t "admin.approve"}}">
+                            <i class="ti ti-check"></i>
+                        </button>
+                        {{end}}
                         <button class="btn btn-sm {{if .IsBanned}}btn-outline-success{{else}}btn-outline-warning{{end}}"
                                 data-admin-action="ban"
                                 data-user-id="{{.ID}}"

@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"github.com/ddletotam/ddmailserver/internal/db"
 	"io"
 	"log"
 	"net/http"
@@ -52,10 +53,19 @@ type LoginRequest struct {
 
 // HandleRegister handles user registration
 func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
-	if s.registrationDisabled {
+	mode := s.registrationMode()
+	if mode == db.RegistrationClosed {
 		respondHTMXError(w, r, http.StatusForbidden, s.i18n.T("auth.registration_disabled"))
 		return
 	}
+	s.registerAccount(w, r, mode == db.RegistrationModerated, nil)
+}
+
+// registerAccount creates a user from the sign-up form. pending: moderated
+// registration — the account waits for approval, no session is opened.
+// invite: the invitation the form came with (claimed after the account is
+// created; a lost race deletes the account again).
+func (s *Server) registerAccount(w http.ResponseWriter, r *http.Request, pending bool, invite *db.Invite) {
 	// Parse form data (for htmx form submissions) or JSON (for API)
 	var req RegisterRequest
 
@@ -124,10 +134,44 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create user (email not used)
-	user, err := s.database.CreateUser(req.Username, passwordHash, "", recoveryKeyHash)
+	user, err := s.database.CreateUserApproval(req.Username, passwordHash, "", recoveryKeyHash, !pending)
 	if err != nil {
 		log.Printf("Failed to create user: %v", err)
 		respondHTMXError(w, r, http.StatusBadRequest, "Username already exists")
+		return
+	}
+	if invite != nil {
+		ok, err := s.database.UseInvite(invite.ID, user.ID)
+		if err != nil || !ok {
+			_ = s.database.DeleteUser(user.ID)
+			log.Printf("Invite %d already used or failed (%v); account %s removed", invite.ID, err, user.Username)
+			respondHTMXError(w, r, http.StatusGone, s.i18n.T("auth.invite_invalid"))
+			return
+		}
+		log.Printf("User %s registered by invitation %d", user.Username, invite.ID)
+	}
+
+	// Recovery key in a secure temporary cookie (one-time display): avoids
+	// exposing the key in URL parameters or logs.
+	recoveryCookie := &http.Cookie{
+		Name:     "recovery_key_temp",
+		Value:    recoveryKey,
+		Path:     "/",
+		MaxAge:   300, // 5 minutes - enough time to view and save
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	}
+	if user.IsPending() {
+		// No session until an administrator approves; the recovery key is
+		// still shown once — it is the only way back if the password is lost.
+		log.Printf("User registered, awaiting approval: %s", user.Username)
+		http.SetCookie(w, recoveryCookie)
+		w.Header().Set("X-Registration", "pending")
+		if r.Header.Get("HX-Request") == "true" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		respondJSON(w, http.StatusAccepted, map[string]interface{}{"pending": true})
 		return
 	}
 
@@ -144,16 +188,7 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	// Set session cookie for web UI
 	s.SetSessionCookie(w, r, token)
 
-	// Set recovery key in secure temporary cookie (one-time use)
-	// This avoids exposing the key in URL parameters or logs
-	http.SetCookie(w, &http.Cookie{
-		Name:     "recovery_key_temp",
-		Value:    recoveryKey,
-		Path:     "/",
-		MaxAge:   300, // 5 minutes - enough time to view and save
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-	})
+	http.SetCookie(w, recoveryCookie)
 
 	// For HTMX requests, return empty response - JS will handle redirect
 	if r.Header.Get("HX-Request") == "true" {
@@ -219,6 +254,12 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	if user.IsBanned() {
 		log.Printf("Login refused for banned user: %s", user.Username)
 		respondHTMXError(w, r, http.StatusUnauthorized, "Invalid username or password")
+		return
+	}
+	// A sign-up awaiting approval: the password was right, so saying why is
+	// no leak — and the person needs to know they are not locked out.
+	if user.IsPending() {
+		respondHTMXError(w, r, http.StatusForbidden, s.userI18n(user).T("auth.pending_approval"))
 		return
 	}
 

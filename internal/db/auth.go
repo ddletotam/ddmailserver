@@ -51,7 +51,7 @@ func (db *DB) AuthenticateProtocol(username, secret string) (*models.User, error
 			return nil, err
 		}
 		if ok {
-			if user.IsBanned() {
+			if user.Blocked() {
 				return nil, ErrInvalidCredentials
 			}
 			return user, nil
@@ -63,7 +63,7 @@ func (db *DB) AuthenticateProtocol(username, secret string) (*models.User, error
 	}
 	// A blocked user is refused on every protocol, with the same answer as a
 	// wrong password (stage 2, docs/server-admin-split-plan.md).
-	if user.IsBanned() {
+	if user.Blocked() {
 		return nil, ErrInvalidCredentials
 	}
 	return user, nil

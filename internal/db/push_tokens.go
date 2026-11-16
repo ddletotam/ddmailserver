@@ -80,7 +80,7 @@ func (db *DB) PushTokensForUser(ctx context.Context, userID int64) ([]models.Pus
 	rows, err := db.QueryContext(ctx, `
 		SELECT t.id, t.user_id, t.kind, t.token, t.environment, t.topic, t.created_at, t.updated_at
 		FROM push_tokens t JOIN users u ON u.id = t.user_id
-		WHERE t.user_id = $1 AND NOT COALESCE(u.is_banned, false)
+		WHERE t.user_id = $1 AND NOT COALESCE(u.is_banned, false) AND COALESCE(u.approved, true)
 		ORDER BY t.id`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("push tokens: query: %w", err)

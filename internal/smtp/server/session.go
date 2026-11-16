@@ -111,7 +111,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	}
 	// A session authenticated before the user was blocked sends nothing more.
 	if s.database != nil {
-		if u, err := s.database.GetUserByID(s.userID); err == nil && u.IsBanned() {
+		if u, err := s.database.GetUserByID(s.userID); err == nil && u.Blocked() {
 			return &smtp.SMTPError{Code: 535, EnhancedCode: smtp.EnhancedCode{5, 7, 8}, Message: "Authentication credentials invalid"}
 		}
 	}

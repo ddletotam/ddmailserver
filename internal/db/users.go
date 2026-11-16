@@ -12,6 +12,12 @@ import (
 // on the installation is automatically promoted to admin so a fresh deployment
 // has someone who can configure OAuth and manage other users.
 func (db *DB) CreateUser(username, passwordHash, email, recoveryKeyHash string) (*models.User, error) {
+	return db.CreateUserApproval(username, passwordHash, email, recoveryKeyHash, true)
+}
+
+// CreateUserApproval is CreateUser with the approval state: approved=false —
+// a sign-up under moderated registration, waiting for an administrator.
+func (db *DB) CreateUserApproval(username, passwordHash, email, recoveryKeyHash string, approved bool) (*models.User, error) {
 	user := &models.User{
 		Username:        username,
 		PasswordHash:    passwordHash,
@@ -29,12 +35,13 @@ func (db *DB) CreateUser(username, passwordHash, email, recoveryKeyHash string) 
 	// First-user-as-admin: derive is_admin from a SELECT inside the same statement
 	// so two concurrent first-time registrations can't both end up admin.
 	query := `
-		INSERT INTO users (username, password_hash, email, recovery_key_hash, is_admin, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, NOT EXISTS (SELECT 1 FROM users), $5, $6)
+		INSERT INTO users (username, password_hash, email, recovery_key_hash, is_admin, approved, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, NOT EXISTS (SELECT 1 FROM users), $7, $5, $6)
 		RETURNING id, is_admin
 	`
 
-	err := db.QueryRow(query, user.Username, user.PasswordHash, emailVal, user.RecoveryKeyHash, user.CreatedAt, user.UpdatedAt).Scan(&user.ID, &user.IsAdminFlag)
+	err := db.QueryRow(query, user.Username, user.PasswordHash, emailVal, user.RecoveryKeyHash, user.CreatedAt, user.UpdatedAt, approved).Scan(&user.ID, &user.IsAdminFlag)
+	user.PendingFlag = !approved && !user.IsAdminFlag
 	if err != nil {
 		return nil, fmt.Errorf("failed to create user: %w", err)
 	}
@@ -46,14 +53,14 @@ func (db *DB) CreateUser(username, passwordHash, email, recoveryKeyHash string) 
 func (db *DB) GetUserByUsername(username string) (*models.User, error) {
 	user := &models.User{}
 	query := `
-		SELECT id, username, password_hash, email, language, recovery_key_hash, COALESCE(is_admin, false), COALESCE(is_banned, false), created_at, updated_at
+		SELECT id, username, password_hash, email, language, recovery_key_hash, COALESCE(is_admin, false), COALESCE(is_banned, false), NOT COALESCE(approved, true), created_at, updated_at
 		FROM users
 		WHERE username = $1
 	`
 
 	var email, language sql.NullString
 	err := db.QueryRow(query, username).Scan(
-		&user.ID, &user.Username, &user.PasswordHash, &email, &language, &user.RecoveryKeyHash, &user.IsAdminFlag, &user.IsBannedFlag, &user.CreatedAt, &user.UpdatedAt,
+		&user.ID, &user.Username, &user.PasswordHash, &email, &language, &user.RecoveryKeyHash, &user.IsAdminFlag, &user.IsBannedFlag, &user.PendingFlag, &user.CreatedAt, &user.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("user not found")
@@ -90,14 +97,14 @@ func (db *DB) GetUsernameByID(id int64) (string, error) {
 func (db *DB) GetUserByID(id int64) (*models.User, error) {
 	user := &models.User{}
 	query := `
-		SELECT id, username, password_hash, email, language, recovery_key_hash, COALESCE(is_admin, false), COALESCE(is_banned, false), created_at, updated_at
+		SELECT id, username, password_hash, email, language, recovery_key_hash, COALESCE(is_admin, false), COALESCE(is_banned, false), NOT COALESCE(approved, true), created_at, updated_at
 		FROM users
 		WHERE id = $1
 	`
 
 	var email, language sql.NullString
 	err := db.QueryRow(query, id).Scan(
-		&user.ID, &user.Username, &user.PasswordHash, &email, &language, &user.RecoveryKeyHash, &user.IsAdminFlag, &user.IsBannedFlag, &user.CreatedAt, &user.UpdatedAt,
+		&user.ID, &user.Username, &user.PasswordHash, &email, &language, &user.RecoveryKeyHash, &user.IsAdminFlag, &user.IsBannedFlag, &user.PendingFlag, &user.CreatedAt, &user.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("user not found")
@@ -200,7 +207,7 @@ func (db *DB) DeleteUser(id int64) error {
 // ListUsers returns all users ordered by id. Admin-only consumer.
 func (db *DB) ListUsers() ([]*models.User, error) {
 	query := `
-		SELECT id, username, email, language, COALESCE(is_admin, false), COALESCE(is_banned, false), created_at, updated_at
+		SELECT id, username, email, language, COALESCE(is_admin, false), COALESCE(is_banned, false), NOT COALESCE(approved, true), created_at, updated_at
 		FROM users
 		ORDER BY id ASC
 	`
@@ -214,7 +221,7 @@ func (db *DB) ListUsers() ([]*models.User, error) {
 	for rows.Next() {
 		u := &models.User{}
 		var email, language sql.NullString
-		if err := rows.Scan(&u.ID, &u.Username, &email, &language, &u.IsAdminFlag, &u.IsBannedFlag, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &email, &language, &u.IsAdminFlag, &u.IsBannedFlag, &u.PendingFlag, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan user: %w", err)
 		}
 		if email.Valid {
@@ -250,4 +257,13 @@ func (db *DB) CountAdmins() (int, error) {
 		return 0, fmt.Errorf("failed to count admins: %w", err)
 	}
 	return n, nil
+}
+
+// ApproveUser lets a sign-up awaiting moderation in.
+func (db *DB) ApproveUser(id int64) error {
+	_, err := db.Exec(`UPDATE users SET approved = true, updated_at = $1 WHERE id = $2`, timeutil.Now(), id)
+	if err != nil {
+		return fmt.Errorf("failed to approve user: %w", err)
+	}
+	return nil
 }

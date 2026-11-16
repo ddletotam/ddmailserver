@@ -17,6 +17,9 @@ type User struct {
 	RecoveryKeyHash string `json:"-"` // never expose in JSON
 	IsAdminFlag     bool   `json:"is_admin"`
 	IsBannedFlag    bool   `json:"is_banned"`
+	// PendingFlag: signed up under moderated registration, not yet approved
+	// by an administrator (users.approved = false).
+	PendingFlag bool `json:"pending,omitempty"`
 	CreatedAt       int64  `json:"created_at"`
 	UpdatedAt       int64  `json:"updated_at"`
 }
@@ -29,6 +32,16 @@ func (u *User) IsAdmin() bool {
 // IsBanned returns true if user is banned from logging in
 func (u *User) IsBanned() bool {
 	return u.IsBannedFlag
+}
+
+// IsPending: waits for an administrator to approve the sign-up.
+func (u *User) IsPending() bool {
+	return u.PendingFlag
+}
+
+// Blocked: may not sign in anywhere — banned or not yet approved.
+func (u *User) Blocked() bool {
+	return u.IsBannedFlag || u.PendingFlag
 }
 
 // AppPassword is a scoped credential that authenticates a user on the protocol

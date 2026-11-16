@@ -1,0 +1,46 @@
+{{define "content"}}
+<div class="container container-tight py-4">
+    <div class="card card-md">
+        <div class="card-body">
+            <h2 class="h2 text-center mb-4">{{t "app.name"}}</h2>
+            {{if .Valid}}
+            <p class="text-muted text-center mb-4">{{t "auth.invite_intro"}}</p>
+            <form hx-post="/api/invite/{{.Token}}" hx-target="#invite-error" hx-swap="innerHTML">
+                <div id="invite-error" class="alert alert-danger" style="display: none;"></div>
+                <div class="mb-3">
+                    <label class="form-label" for="invite-username">{{t "auth.username"}}</label>
+                    <input type="text" id="invite-username" name="username" class="form-control" required autofocus>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label" for="invite-password">{{t "auth.password"}}</label>
+                    <input type="password" id="invite-password" name="password" class="form-control" autocomplete="new-password" required minlength="6">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label" for="invite-password-confirm">{{t "auth.password_confirm"}}</label>
+                    <input type="password" id="invite-password-confirm" name="password_confirm" class="form-control" autocomplete="new-password" required minlength="6">
+                </div>
+                <div class="form-footer">
+                    <button type="submit" class="btn btn-primary w-100"><i class="ti ti-user-plus me-2"></i>{{t "auth.register"}}</button>
+                </div>
+            </form>
+            {{else}}
+            <div class="alert alert-warning">{{t "auth.invite_invalid"}}</div>
+            <a href="/login" class="btn btn-link w-100">{{t "auth.login"}}</a>
+            {{end}}
+        </div>
+    </div>
+</div>
+<script>
+document.body.addEventListener('htmx:beforeSwap', function (evt) {
+    if (evt.detail.xhr.status >= 400) {
+        evt.detail.shouldSwap = true;
+        evt.detail.isError = false;
+        evt.detail.target.style.display = 'block';
+    }
+});
+document.body.addEventListener('htmx:afterRequest', function (evt) {
+    var st = evt.detail.xhr.status;
+    if (st >= 200 && st < 300) window.location.href = '/recovery-key';
+});
+</script>
+{{end}}

@@ -22,7 +22,7 @@ func (s *Server) SessionMiddleware(next http.Handler) http.Handler {
 			if err == nil {
 				user, err := s.database.GetUserByID(claims.UserID)
 				// A blocked user's cookie stops working at once, not at expiry.
-				if err == nil && !user.IsBanned() {
+				if err == nil && !user.Blocked() {
 					// Add user to context
 					ctx := context.WithValue(r.Context(), userContextKey, user)
 					r = r.WithContext(ctx)

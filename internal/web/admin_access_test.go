@@ -112,3 +112,28 @@ func TestAdminNetworks(t *testing.T) {
 		t.Errorf("user on admin API: got %d", w.Code)
 	}
 }
+
+// Without an administrator's setting the config decides.
+func TestRegistrationModeFallsBackToConfig(t *testing.T) {
+	if m := (&Server{}).registrationMode(); m != "open" {
+		t.Errorf("default: %q, want open", m)
+	}
+	if m := (&Server{registrationDisabled: true}).registrationMode(); m != "closed" {
+		t.Errorf("disable_registration: %q, want closed", m)
+	}
+}
+
+// A pending sign-up is blocked like a ban until approved.
+func TestPendingUserIsBlocked(t *testing.T) {
+	u := &models.User{PendingFlag: true}
+	if !u.Blocked() || u.IsBanned() {
+		t.Fatalf("pending: Blocked=%v IsBanned=%v", u.Blocked(), u.IsBanned())
+	}
+	s := &Server{}
+	r := withUser(httptest.NewRequest("GET", "/accounts", nil), &models.User{ID: 3, Username: "p"})
+	w := httptest.NewRecorder()
+	s.WebAuthMiddleware(okHandler).ServeHTTP(w, r)
+	if w.Code != http.StatusTeapot {
+		t.Fatalf("approved user: %d", w.Code)
+	}
+}

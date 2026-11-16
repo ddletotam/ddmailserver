@@ -18,6 +18,7 @@ type adminUserRow struct {
 	Username  string
 	Email     string
 	IsBanned  bool
+	IsPending bool
 	IsCurrent bool // self-modification of admin/ban/delete is disabled in UI
 	CreatedAt string
 }
@@ -33,6 +34,7 @@ func toAdminUserRows(users []*models.User, currentID int64) []adminUserRow {
 			Username:  u.Username,
 			Email:     u.Email,
 			IsBanned:  u.IsBanned(),
+			IsPending: u.IsPending(),
 			IsCurrent: u.ID == currentID,
 			CreatedAt: timeutil.FromMs(u.CreatedAt).Format("2006-01-02"),
 		})
@@ -75,6 +77,8 @@ func (s *Server) HandleAdminPage(w http.ResponseWriter, r *http.Request) {
 		MicrosoftOAuthEnabled  bool
 		Users                  []adminUserRow
 		Audit                  []adminAuditRow
+		RegistrationMode       string
+		Invites                []adminInviteRow
 	}{
 		PageData: PageData{
 			Title: "Server Settings",
@@ -88,6 +92,8 @@ func (s *Server) HandleAdminPage(w http.ResponseWriter, r *http.Request) {
 		MicrosoftOAuthEnabled:  s.microsoftOAuth != nil,
 		Users:                  toAdminUserRows(users, user.ID),
 		Audit:                  s.adminAuditRows(),
+		RegistrationMode:       s.registrationMode(),
+		Invites:                s.adminInviteRows(),
 	}
 
 	s.renderTemplate(w, "admin.html", data)

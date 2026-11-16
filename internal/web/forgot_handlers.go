@@ -109,16 +109,17 @@ func (s *Server) HandleForgotPassword(w http.ResponseWriter, r *http.Request) {
 // HandleShowRecoveryKeyPage shows recovery key after registration
 // Recovery key is passed via secure session cookie (one-time display)
 func (s *Server) HandleShowRecoveryKeyPage(w http.ResponseWriter, r *http.Request) {
+	// user is nil after a moderated sign-up: no session until approval.
 	user := s.GetUserFromContext(r.Context())
-	if user == nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
-		return
-	}
 
 	// Get recovery key from secure cookie (set during registration)
 	cookie, err := r.Cookie("recovery_key_temp")
 	if err != nil || cookie.Value == "" {
-		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+		if user == nil {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+		} else {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+		}
 		return
 	}
 
@@ -137,7 +138,9 @@ func (s *Server) HandleShowRecoveryKeyPage(w http.ResponseWriter, r *http.Reques
 	data := struct {
 		PageData
 		RecoveryKey string
+		Pending     bool
 	}{
+		Pending: user == nil,
 		PageData: PageData{
 			Title: "Your Recovery Key",
 			User:  user,

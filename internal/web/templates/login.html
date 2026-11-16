@@ -59,6 +59,9 @@
                           hx-target="#register-error"
                           hx-swap="innerHTML">
                         <div id="register-error" class="alert alert-danger" style="display: none;"></div>
+                        {{if .RegistrationModerated}}
+                        <div class="alert alert-info">{{t "auth.registration_moderated"}}</div>
+                        {{end}}
 
                         <div class="mb-3">
                             <label class="form-label" for="register-username">{{t "auth.username"}}</label>

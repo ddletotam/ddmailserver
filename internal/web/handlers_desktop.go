@@ -62,7 +62,7 @@ func (s *Server) HandleDesktopLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	// Administrator accounts have no mail (migration 061): same answer as a
 	// wrong password, the client cannot do anything with one.
-	if user.IsBanned() || user.IsAdmin() {
+	if user.Blocked() || user.IsAdmin() {
 		respondError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -113,7 +113,7 @@ func (s *Server) HandleDesktopRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user, err := s.database.GetUserByID(claims.UserID)
-	if err != nil || user.IsBanned() {
+	if err != nil || user.Blocked() {
 		respondError(w, http.StatusUnauthorized, "user not found or banned")
 		return
 	}
@@ -154,7 +154,7 @@ func (s *Server) DesktopAuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		user, err := s.database.GetUserByID(claims.UserID)
-		if err != nil || user.IsBanned() || user.IsAdmin() {
+		if err != nil || user.Blocked() || user.IsAdmin() {
 			respondError(w, http.StatusUnauthorized, "user not found or banned")
 			return
 		}
