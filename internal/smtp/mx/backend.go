@@ -72,6 +72,7 @@ func (b *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		directory: b.database,
 		deliverer: localdelivery.New(b.database, b.hub, b.analyzer, b.calendarSyncTrigger, ITIPHandler(b.database)),
 		senderIP:  senderIP,
+		conn:      c,
 	}, nil
 }
 

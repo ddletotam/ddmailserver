@@ -381,7 +381,7 @@ func (d *Deliverer) classify(env Envelope, parsed *parser.ParsedMessage, userID 
 			userID, parsed.SpamScore, parsed.SpamStatus, parsed.SpamReasons)
 	}
 	if parsed.AuthResults != nil {
-		log.Printf("Local delivery: auth results - SPF=%s DKIM=%s", parsed.AuthResults.SPF, parsed.AuthResults.DKIM)
+		log.Printf("Local delivery: auth results - SPF=%s DKIM=%s DMARC=%s", parsed.AuthResults.SPF, parsed.AuthResults.DKIM, parsed.AuthResults.DMARC)
 	}
 	if parsed.SpamStatus == parser.SpamStatusSpam && action != "allow" {
 		log.Printf("Local delivery: message marked as spam by system (score=%.1f) for user %d", parsed.SpamScore, userID)

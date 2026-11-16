@@ -2,12 +2,16 @@ package mx
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/mail"
 	"strings"
+	"time"
 
 	"github.com/ddletotam/ddmailserver/internal/parser"
 	"github.com/ddletotam/ddmailserver/internal/smtp/localdelivery"
@@ -25,6 +29,7 @@ type Session struct {
 	fromDomain string
 	senderIP   string
 	recipients []*Recipient
+	conn       *smtp.Conn // HELO name and TLS state for the Received header
 }
 
 // AuthPlain - MX server does not require authentication
@@ -104,7 +109,11 @@ func (s *Session) Data(r io.Reader) error {
 		return fmt.Errorf("failed to read message: %w", err)
 	}
 
-	messageData := buf.Bytes()
+	// Our own trace header (RFC 5321 §4.4): who handed the message over, and
+	// whether over TLS. Without it the stored message had no record of this
+	// hop, and the spam check scored every direct delivery "only one Received
+	// hop". Prepended, so DKIM signatures stay valid.
+	messageData := append([]byte(s.receivedHeader(time.Now())), buf.Bytes()...)
 
 	// Parse the message using the new parser
 	p := parser.New()
@@ -174,6 +183,74 @@ func (s *Session) Data(r io.Reader) error {
 
 	log.Printf("MX: Message delivered to %d/%d recipients", accepted, len(s.recipients))
 	return nil
+}
+
+// receivedHeader is "Received: from <helo> ([ip]) by <host> with ESMTP[S] ...".
+func (s *Session) receivedHeader(now time.Time) string {
+	helo, by := "unknown", "localhost"
+	var tlsState *tls.ConnectionState
+	if s.conn != nil {
+		if h := s.conn.Hostname(); h != "" {
+			helo = h
+		}
+		if srv := s.conn.Server(); srv != nil && srv.Domain != "" {
+			by = srv.Domain
+		}
+		if st, ok := s.conn.TLSConnectionState(); ok {
+			tlsState = &st
+		}
+	}
+	var forAddr string
+	if len(s.recipients) == 1 {
+		forAddr = s.recipients[0].Email
+	}
+	return formatReceived(helo, reverseName(s.senderIP), s.senderIP, by, tlsState, forAddr, now)
+}
+
+// reverseName is the PTR name of ip, "unknown" without one — as Postfix
+// writes it; the spam check reads it from the origin hop.
+func reverseName(ip string) string {
+	if ip == "" {
+		return "unknown"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	names, err := net.DefaultResolver.LookupAddr(ctx, ip)
+	if err != nil || len(names) == 0 {
+		return "unknown"
+	}
+	return strings.TrimSuffix(names[0], ".")
+}
+
+func formatReceived(helo, ptr, ip, by string, st *tls.ConnectionState, forAddr string, now time.Time) string {
+	var b strings.Builder
+	b.WriteString("Received: from ")
+	b.WriteString(sanitizeTrace(helo))
+	if ip != "" {
+		b.WriteString(" (" + sanitizeTrace(ptr) + " [" + ip + "])")
+	}
+	b.WriteString("\r\n\tby " + by + " with ")
+	if st != nil {
+		b.WriteString("ESMTPS (" + tls.VersionName(st.Version) + " " + tls.CipherSuiteName(st.CipherSuite) + ")")
+	} else {
+		b.WriteString("ESMTP")
+	}
+	if forAddr != "" {
+		b.WriteString("\r\n\tfor <" + sanitizeTrace(forAddr) + ">")
+	}
+	b.WriteString("; " + now.Format(time.RFC1123Z) + "\r\n")
+	return b.String()
+}
+
+// sanitizeTrace keeps a client-supplied token from breaking the header:
+// no line breaks, spaces, angle brackets or parentheses.
+func sanitizeTrace(v string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x21 || r == 0x7f || strings.ContainsRune("<>()[];", r) {
+			return -1
+		}
+		return r
+	}, v)
 }
 
 // Reset resets the session state

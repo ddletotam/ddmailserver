@@ -26,4 +26,5 @@ require (
 require (
 	github.com/nmcclain/asn1-ber v0.0.0-20170104154839-2661553a0484 // indirect
 	github.com/teambition/rrule-go v1.8.2 // indirect
+	golang.org/x/net v0.49.0 // indirect
 )

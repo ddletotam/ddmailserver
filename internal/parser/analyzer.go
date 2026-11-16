@@ -19,6 +19,7 @@ type AnalyzerConfig struct {
 	CheckLinks          bool
 	CheckSPF            bool
 	CheckDKIM           bool
+	CheckDMARC          bool // needs CheckDKIM: alignment uses the verified d= domains
 	CheckRBL            bool
 	DangerousExtensions []string
 	SpamWords           []string
@@ -38,6 +39,7 @@ func DefaultAnalyzerConfig() *AnalyzerConfig {
 		CheckLinks:          true,
 		CheckSPF:            true,
 		CheckDKIM:           true,
+		CheckDMARC:          true,
 		CheckRBL:            true,
 		DangerousExtensions: DangerousExtensions,
 		SpamWords: []string{
@@ -71,10 +73,11 @@ func DefaultAnalyzerConfig() *AnalyzerConfig {
 
 // Analyzer performs spam analysis on parsed messages
 type Analyzer struct {
-	config      *AnalyzerConfig
-	spfChecker  *SPFChecker
-	dkimChecker *DKIMChecker
-	rblChecker  *RBLChecker
+	config       *AnalyzerConfig
+	spfChecker   *SPFChecker
+	dkimChecker  *DKIMChecker
+	dmarcChecker *DMARCChecker
+	rblChecker   *RBLChecker
 }
 
 // NewAnalyzer creates a new spam analyzer
@@ -90,6 +93,9 @@ func NewAnalyzer(config *AnalyzerConfig) *Analyzer {
 	}
 	if config.CheckDKIM {
 		analyzer.dkimChecker = NewDKIMChecker()
+		if config.CheckDMARC {
+			analyzer.dmarcChecker = NewDMARCChecker()
+		}
 	}
 	if config.CheckRBL {
 		if len(config.RBLLists) > 0 {
@@ -128,7 +134,7 @@ func (a *Analyzer) AnalyzeWithDisabledChecks(msg *ParsedMessage, senderIP, fromD
 // from the former second engine of the web "why spam" page. They never
 // scored deliveries, so switching them on is the user's call (weight > 0).
 var SpamCheckCategories = []string{
-	"chain", "spf", "rbl", "dkim", "headers", "content",
+	"chain", "spf", "rbl", "dkim", "dmarc", "headers", "content",
 	"attachments", "links", "embedded", "sender", "emojis",
 	"subject_heuristics", "sender_heuristics", "link_heuristics",
 }
@@ -235,6 +241,13 @@ func (a *Analyzer) AnalyzeWithUserConfig(msg *ParsedMessage, senderIP, fromDomai
 		apply("dkim", a.analyzeDKIM(msg))
 	}
 
+	// DMARC: the visible From must be backed by aligned SPF or DKIM. Runs
+	// only after DKIM verification — without the verified d= domains every
+	// DKIM-only sender would look like a failure.
+	if a.dmarcChecker != nil && msg.AuthResults.DKIMChecked && msg.From != nil && !disabledChecks["dmarc"] && categoryWeight(weights, "dmarc") > 0 {
+		apply("dmarc", a.analyzeDMARC(msg))
+	}
+
 	// Check headers
 	if a.config.CheckHeaders {
 		apply("headers", a.analyzeHeaders(msg))
@@ -318,6 +331,7 @@ func (a *Analyzer) analyzeSPF(senderIP, fromDomain string, msg *ParsedMessage) r
 
 	result, detail := a.spfChecker.CheckSPF(senderIP, fromDomain)
 	msg.AuthResults.SPF = result
+	msg.AuthResults.SPFDomain = fromDomain
 
 	switch result {
 	case AuthResultFail:
@@ -350,8 +364,10 @@ func (a *Analyzer) analyzeRBL(senderIP string, msg *ParsedMessage) ruleHits {
 func (a *Analyzer) analyzeDKIM(msg *ParsedMessage) ruleHits {
 	var hits ruleHits
 
-	result, detail := a.dkimChecker.CheckDKIM(msg.RawData)
+	result, detail, passed := a.dkimChecker.CheckDKIMDomains(msg.RawData)
 	msg.AuthResults.DKIM = result
+	msg.AuthResults.DKIMDomains = passed
+	msg.AuthResults.DKIMChecked = true
 
 	switch result {
 	case AuthResultFail:
@@ -360,6 +376,37 @@ func (a *Analyzer) analyzeDKIM(msg *ParsedMessage) ruleHits {
 		// Good - could reduce score in future
 	}
 
+	return hits
+}
+
+// analyzeDMARC scores a From domain its owner's DMARC policy does not back.
+// The weight follows the policy: p=reject alone reaches the spam threshold
+// (6.0), quarantine alone is "suspicious", p=none is a hint only.
+func (a *Analyzer) analyzeDMARC(msg *ParsedMessage) ruleHits {
+	var hits ruleHits
+	fromDomain := extractDomain(msg.From.Address)
+	spfResult := msg.AuthResults.SPF
+	if msg.AuthResults.SPFDomain == "" {
+		// SPF was not evaluated (no sender IP, private network, disabled):
+		// only DKIM can show alignment, and its absence proves nothing.
+		spfResult = AuthResultNone
+	}
+	out := a.dmarcChecker.Evaluate(fromDomain, spfResult, msg.AuthResults.SPFDomain, msg.AuthResults.DKIMDomains)
+	if out.Result == AuthResultFail && msg.AuthResults.SPFDomain == "" {
+		out.Result = AuthResultNone // cannot tell a failure from a missing SPF check
+	}
+	msg.AuthResults.DMARC = out.Result
+	if out.Result != AuthResultFail {
+		return hits
+	}
+	switch out.Policy {
+	case "reject":
+		hits.add(6.0, "DMARC fail: "+out.Detail)
+	case "quarantine":
+		hits.add(4.0, "DMARC fail: "+out.Detail)
+	default:
+		hits.add(1.0, "DMARC fail: "+out.Detail)
+	}
 	return hits
 }
 

@@ -290,6 +290,8 @@ func reasonCheck(reason string) string {
 		return "spf"
 	case strings.HasPrefix(reason, "DKIM "):
 		return "dkim"
+	case strings.HasPrefix(reason, "DMARC "):
+		return "dmarc"
 	case strings.HasPrefix(reason, "RBL listed"):
 		return "rbl"
 	case strings.HasPrefix(reason, "classified spam by upstream"):
@@ -311,7 +313,7 @@ func hasCheck(findings []Finding, check string) bool {
 
 func isRecheckable(check string) bool {
 	switch check {
-	case "spf", "dkim", "rbl", "upstream", "recipient":
+	case "spf", "dkim", "dmarc", "rbl", "upstream", "recipient":
 		return false
 	}
 	return true

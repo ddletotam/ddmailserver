@@ -25,47 +25,42 @@ type DKIMResult struct {
 // CheckDKIM verifies DKIM signatures in a raw email message
 // Returns AuthResult and details about the verification
 func (c *DKIMChecker) CheckDKIM(rawMessage []byte) (AuthResult, string) {
+	result, detail, _ := c.CheckDKIMDomains(rawMessage)
+	return result, detail
+}
+
+// CheckDKIMDomains is CheckDKIM plus the d= domains of the signatures that
+// verified — DMARC alignment needs them. One verification pass.
+func (c *DKIMChecker) CheckDKIMDomains(rawMessage []byte) (AuthResult, string, []string) {
 	verifications, err := dkim.Verify(bytes.NewReader(rawMessage))
 	if err != nil {
-		return AuthResultNone, "DKIM verification error: " + err.Error()
+		return AuthResultNone, "DKIM verification error: " + err.Error(), nil
 	}
 
 	if len(verifications) == 0 {
-		return AuthResultNone, "no DKIM signature found"
+		return AuthResultNone, "no DKIM signature found", nil
 	}
 
-	// Check all signatures
-	var passCount, failCount int
-	var domains []string
-	var failReasons []string
-
+	var domains, passed, failReasons []string
 	for _, v := range verifications {
-		domain := v.Domain
-		domains = append(domains, domain)
-
+		domains = append(domains, v.Domain)
 		if v.Err == nil {
-			passCount++
+			passed = append(passed, v.Domain)
 		} else {
-			failCount++
-			failReasons = append(failReasons, domain+": "+v.Err.Error())
+			failReasons = append(failReasons, v.Domain+": "+v.Err.Error())
 		}
 	}
 
-	// Determine overall result
-	if passCount > 0 && failCount == 0 {
-		return AuthResultPass, "verified: " + strings.Join(domains, ", ")
-	}
-
-	if failCount > 0 && passCount == 0 {
-		return AuthResultFail, "failed: " + strings.Join(failReasons, "; ")
-	}
-
-	if passCount > 0 && failCount > 0 {
+	switch {
+	case len(passed) > 0 && len(failReasons) == 0:
+		return AuthResultPass, "verified: " + strings.Join(domains, ", "), passed
+	case len(failReasons) > 0 && len(passed) == 0:
+		return AuthResultFail, "failed: " + strings.Join(failReasons, "; "), passed
+	case len(passed) > 0:
 		// Mixed results - some passed, some failed
-		return AuthResultPass, "partial: " + strings.Join(domains, ", ")
+		return AuthResultPass, "partial: " + strings.Join(domains, ", "), passed
 	}
-
-	return AuthResultNone, "no valid signatures"
+	return AuthResultNone, "no valid signatures", passed
 }
 
 // CheckDKIMDetailed returns detailed results for each signature

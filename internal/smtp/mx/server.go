@@ -1,6 +1,7 @@
 package mx
 
 import (
+	"crypto/tls"
 	"log"
 
 	"github.com/ddletotam/ddmailserver/internal/db"
@@ -75,6 +76,27 @@ func NewWithHubAndCalendarSync(database *db.DB, addr string, hostname string, hu
 		smtpServer: s,
 		addr:       addr,
 	}
+}
+
+// EnableSTARTTLS offers STARTTLS on the MX port with the server certificate.
+//
+// Without it every message from Gmail, Mail.ru and the rest arrived in
+// plaintext (EHLO listed no STARTTLS — found 2026-11-16). TLS here is
+// opportunistic, as on any public MX: a sender that cannot do TLS still
+// delivers in the clear; the certificate is not required to match the MX
+// host name, senders without MTA-STS/DANE do not check it. The certificate
+// is read once — the certbot deploy hook restarts the service on renewal.
+func (s *Server) EnableSTARTTLS(certFile, keyFile string) error {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return err
+	}
+	s.smtpServer.TLSConfig = &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}
+	log.Printf("MX server: STARTTLS enabled")
+	return nil
 }
 
 // Start starts the MX SMTP server

@@ -383,6 +383,11 @@ func main() {
 		mxHostname := hostname
 		// Pass scheduler's calendar sync trigger to MX server
 		mxSrv := smtpmx.NewWithHubAndCalendarSync(database, mxAddr, mxHostname, notifyHub, scheduler.TriggerCalendarSyncForUser)
+		if hasTLS {
+			if err := mxSrv.EnableSTARTTLS(cfg.Security.TLSCert, cfg.Security.TLSKey); err != nil {
+				log.Printf("MX server: STARTTLS disabled, certificate not loaded: %v", err)
+			}
+		}
 		go func() {
 			if err := mxSrv.Start(); err != nil {
 				log.Printf("MX server error: %v (may need root for port 25)", err)

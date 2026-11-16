@@ -47,6 +47,11 @@ type AuthResults struct {
 	DKIM     AuthResult
 	DMARC    AuthResult
 	SenderIP string
+
+	SPFDomain   string   // domain SPF was checked for ("" — SPF not evaluated)
+	DKIMDomains []string // d= of signatures that verified
+	DKIMChecked bool     // DKIM verification ran
+
 }
 
 // ParsedAttachment represents an email attachment
