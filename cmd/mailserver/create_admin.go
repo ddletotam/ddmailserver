@@ -2,11 +2,9 @@ package main
 
 import (
 	"bufio"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"strings"
 
 	"github.com/ddletotam/ddmailserver/internal/db"
@@ -31,7 +29,7 @@ func createAdminAccount(database *db.DB, username string, in io.Reader, out io.W
 	password := strings.TrimRight(line, "\r\n")
 	generated := password == ""
 	if generated {
-		if password, err = randomPassword(20); err != nil {
+		if password, err = web.RandomPassword(20); err != nil {
 			return err
 		}
 	} else if len(password) < 8 {
@@ -50,17 +48,4 @@ func createAdminAccount(database *db.DB, username string, in io.Reader, out io.W
 		fmt.Fprintf(out, "password: %s\n", password)
 	}
 	return nil
-}
-
-func randomPassword(n int) (string, error) {
-	const alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-	b := make([]byte, n)
-	for i := range b {
-		k, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
-		if err != nil {
-			return "", fmt.Errorf("random: %w", err)
-		}
-		b[i] = alphabet[k.Int64()]
-	}
-	return string(b), nil
 }

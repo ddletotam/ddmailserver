@@ -138,6 +138,26 @@
         </div>
     </div>
 
+    <!-- Administrators -->
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">{{t "admin.admins_title"}}</h3></div>
+            <div class="card-body">
+                {{range .Admins}}
+                <div class="d-flex align-items-center justify-content-between border-bottom py-1">
+                    <span>{{.Username}} {{if .IsCurrent}}<span class="badge bg-blue-lt ms-1">{{t "admin.you"}}</span>{{end}}</span>
+                    {{if not .IsCurrent}}<button class="btn btn-sm btn-outline-danger" data-admin-delete="{{.ID}}" data-username="{{.Username}}" title="{{t "admin.admins_delete"}}"><i class="ti ti-trash"></i></button>{{end}}
+                </div>
+                {{end}}
+                <form id="admin-create-form" class="d-flex gap-2 mt-3">
+                    <input type="text" name="username" class="form-control" placeholder="{{t "admin.username"}}" required>
+                    <button type="submit" class="btn btn-primary text-nowrap">{{t "admin.admins_create"}}</button>
+                </form>
+                <div id="admin-create-result" class="mt-2"></div>
+            </div>
+        </div>
+    </div>
+
     <!-- Users -->
     <div class="col-12">
         <div class="card">
@@ -245,6 +265,27 @@
         e.preventDefault();
         fetch('/api/admin/invites/' + b.dataset.inviteRevoke, { method: 'DELETE', credentials: 'same-origin' })
             .then(function (r) { if (r.ok) b.closest('div').remove(); });
+    });
+    var acf = document.getElementById('admin-create-form');
+    if (acf) acf.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var out = document.getElementById('admin-create-result');
+        post('/api/admin/admins', new FormData(acf)).then(function (j) {
+            out.className = 'mt-2';
+            out.innerHTML = '';
+            var d = document.createElement('div');
+            d.className = 'alert alert-info';
+            d.textContent = '{{t "admin.admins_created"}} ' + j.username + ' / ' + j.password;
+            out.appendChild(d);
+        }).catch(function (err) { out.className = 'mt-2 text-danger'; out.textContent = err.message; });
+    });
+    document.addEventListener('click', function (e) {
+        var b = e.target.closest('[data-admin-delete]');
+        if (!b) return;
+        e.preventDefault();
+        if (!confirm('{{t "admin.admins_delete"}}: ' + b.dataset.username + '?')) return;
+        fetch('/api/admin/admins/' + b.dataset.adminDelete, { method: 'DELETE', credentials: 'same-origin' })
+            .then(function (r) { if (r.ok) b.closest('div').remove(); else r.json().then(function (j) { alert(j.error || r.statusText); }); });
     });
     var pf = document.getElementById('admin-password-form');
     if (pf) pf.addEventListener('submit', function (e) {

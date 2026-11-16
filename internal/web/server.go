@@ -218,6 +218,8 @@ func (s *Server) setupRoutes() {
 	adminAPI.HandleFunc("/users/{id}/approve", s.HandleAdminApproveUser).Methods("POST")
 	adminAPI.HandleFunc("/settings/registration", s.HandleAdminSetRegistrationMode).Methods("POST")
 	adminAPI.HandleFunc("/invites", s.HandleAdminCreateInvite).Methods("POST")
+	adminAPI.HandleFunc("/admins", s.HandleAdminCreateAdmin).Methods("POST")
+	adminAPI.HandleFunc("/admins/{id}", s.HandleAdminDeleteAdmin).Methods("DELETE")
 	adminAPI.HandleFunc("/invites/{id}", s.HandleAdminRevokeInvite).Methods("DELETE")
 	adminAPI.HandleFunc("/users/{id}", s.HandleAdminDeleteUser).Methods("DELETE")
 

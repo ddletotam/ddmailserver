@@ -78,6 +78,7 @@ func (s *Server) HandleAdminPage(w http.ResponseWriter, r *http.Request) {
 		Users                  []adminUserRow
 		Audit                  []adminAuditRow
 		RegistrationMode       string
+		Admins                 []adminUserRow
 		Invites                []adminInviteRow
 	}{
 		PageData: PageData{
@@ -93,6 +94,7 @@ func (s *Server) HandleAdminPage(w http.ResponseWriter, r *http.Request) {
 		Users:                  toAdminUserRows(users, user.ID),
 		Audit:                  s.adminAuditRows(),
 		RegistrationMode:       s.registrationMode(),
+		Admins:                 adminRows(users, user.ID),
 		Invites:                s.adminInviteRows(),
 	}
 
@@ -229,4 +231,19 @@ func (s *Server) revokeSessions(userID int64) {
 		return
 	}
 	s.notifyHub.Publish(notify.Event{UserID: userID, Type: notify.EventSessionRevoked})
+}
+
+// adminRows: the administrator accounts (users table shows only users).
+func adminRows(users []*models.User, currentID int64) []adminUserRow {
+	var rows []adminUserRow
+	for _, u := range users {
+		if !u.IsAdmin() {
+			continue
+		}
+		rows = append(rows, adminUserRow{
+			ID: u.ID, Username: u.Username, IsCurrent: u.ID == currentID,
+			CreatedAt: timeutil.FromMs(u.CreatedAt).Format("2006-01-02"),
+		})
+	}
+	return rows
 }
