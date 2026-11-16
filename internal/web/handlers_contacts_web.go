@@ -147,41 +147,6 @@ func (s *Server) HandleAddressBooksList(w http.ResponseWriter, r *http.Request) 
 	s.renderTemplatePartial(w, "contacts.html", "address-books-list", data)
 }
 
-// HandleContactsList returns the list of contacts for search (HTMX partial)
-func (s *Server) HandleContactsList(w http.ResponseWriter, r *http.Request) {
-	user := s.GetUserFromContext(r.Context())
-	if user == nil {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	query := r.URL.Query().Get("q")
-
-	var contacts []*models.Contact
-	var err error
-
-	if query != "" {
-		contacts, err = s.database.SearchContacts(user.ID, query, 100)
-	} else {
-		// Get all contacts (limited)
-		contacts, err = s.database.GetAllUserContacts(user.ID, 100)
-	}
-
-	if err != nil {
-		log.Printf("Failed to get contacts: %v", err)
-		http.Error(w, "Failed to load contacts", http.StatusInternalServerError)
-		return
-	}
-
-	data := ContactsListData{
-		PageData: PageData{User: user},
-		Contacts: contacts,
-		Query:    query,
-	}
-
-	s.renderTemplatePartial(w, "contacts.html", "contacts-list", data)
-}
-
 // HandleCreateContactSourceWeb creates a new CardDAV source (web form handler)
 func (s *Server) HandleCreateContactSourceWeb(w http.ResponseWriter, r *http.Request) {
 	user := s.GetUserFromContext(r.Context())

@@ -4,16 +4,17 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"io"
+	"log"
+	"net/http"
+	"strconv"
+
 	caldavutil "github.com/ddletotam/ddmailserver/internal/caldav"
 	"github.com/ddletotam/ddmailserver/internal/caldav/importer"
 	"github.com/ddletotam/ddmailserver/internal/calendar"
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
 	"github.com/gorilla/mux"
-	"io"
-	"log"
-	"net/http"
-	"strconv"
 )
 
 // Calendar Sources Handlers

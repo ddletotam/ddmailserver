@@ -4,7 +4,6 @@ import (
 	"context"
 	"embed"
 	"fmt"
-	"github.com/ddletotam/ddmailserver/internal/db"
 	"html/template"
 	"log"
 	"net/http"
@@ -12,9 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ddletotam/ddmailserver/internal/db"
+
 	imapclient "github.com/ddletotam/ddmailserver/internal/imap/client"
 	"github.com/ddletotam/ddmailserver/internal/models"
-	msgsvc "github.com/ddletotam/ddmailserver/internal/service/messages"
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
 	"github.com/gorilla/mux"
 )
@@ -659,168 +659,6 @@ func (s *Server) HandleDeleteAccountWeb(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.WriteHeader(http.StatusOK)
-}
-
-// HandleInboxPage shows the inbox
-func (s *Server) HandleInboxPage(w http.ResponseWriter, r *http.Request) {
-	user := s.GetUserFromContext(r.Context())
-	if user == nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
-		return
-	}
-
-	accounts, _ := s.database.GetAccountsByUserID(user.ID)
-	folder := r.URL.Query().Get("folder")
-	if folder == "" {
-		// "Inbox" page lands on the inbox folder, not on every message
-		// the user has ever received. The dropdown still offers "all"
-		// (and Sent / Drafts / Trash) for explicit switching; we just
-		// stop defaulting there. Matches the desktop client's
-		// conversation list, which is strictly inbox-scoped.
-		folder = "inbox"
-	}
-
-	unreadCount, _ := s.database.GetUnreadCountByUser(user.ID)
-
-	data := InboxData{
-		PageData: PageData{
-			Title: "Inbox",
-			User:  user,
-		},
-		Accounts:    accounts,
-		Folder:      folder,
-		UnreadCount: unreadCount,
-	}
-
-	s.renderTemplate(w, "inbox.html", data)
-}
-
-// HandleMessagesList returns the messages list with filtering and pagination (htmx endpoint)
-func (s *Server) HandleMessagesList(w http.ResponseWriter, r *http.Request) {
-	user := s.GetUserFromContext(r.Context())
-	if user == nil {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	folder := r.URL.Query().Get("folder")
-	q := r.URL.Query().Get("q")
-	page := 1
-	if p, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && p > 0 {
-		page = p
-	}
-	var accountID int64
-	if v := r.URL.Query().Get("account"); v != "" {
-		accountID, _ = strconv.ParseInt(v, 10, 64)
-	}
-
-	const pageSize = 50
-	offset := (page - 1) * pageSize
-
-	messages, total, err := s.database.GetMessagesByUserFiltered(user.ID, folder, accountID, q, pageSize, offset)
-	if err != nil {
-		log.Printf("Error getting messages: %v", err)
-		http.Error(w, "Error loading messages", http.StatusInternalServerError)
-		return
-	}
-
-	s.renderMessageList(w, messages, page, total, pageSize, folder, accountID, q)
-}
-
-// HandleMessagePage shows a single message
-func (s *Server) HandleMessagePage(w http.ResponseWriter, r *http.Request) {
-	user := s.GetUserFromContext(r.Context())
-	if user == nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
-		return
-	}
-
-	vars := mux.Vars(r)
-	idStr := vars["id"]
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		http.Error(w, "Invalid message ID", http.StatusBadRequest)
-		return
-	}
-
-	message, err := s.database.GetMessageByIDForUser(id, user.ID)
-	if err != nil {
-		http.Redirect(w, r, "/inbox?error=message_not_found", http.StatusSeeOther)
-		return
-	}
-
-	// Get attachments
-	attachments, err := s.database.GetAttachmentsByMessageID(id)
-	if err != nil {
-		log.Printf("Failed to get attachments for message %d: %v", id, err)
-		// Continue without attachments
-	}
-
-	// Replace cid: URLs with actual attachment URLs
-	if message.BodyHTML != "" {
-		message.BodyHTML = replaceCIDURLs(message.BodyHTML, message.ID)
-	}
-
-	// Mark as read — through the same path as IMAP and the desktop API, so
-	// an external account's source server learns it too (the old direct
-	// UPDATE never queued the upstream sync).
-	if _, err := s.messageService().SetFlags(r.Context(), user.ID, message.ID, msgsvc.FlagUpdate{Seen: msgsvc.Bool(true)}); err != nil {
-		log.Printf("Failed to mark message %d as read: %v", id, err)
-	}
-	message.Seen = true
-
-	data := MessageData{
-		PageData: PageData{
-			Title: message.Subject,
-			User:  user,
-		},
-		Message:     message,
-		Attachments: attachments,
-	}
-
-	s.renderTemplate(w, "message.html", data)
-}
-
-// HandleComposePage shows the compose email page, optionally loading a draft
-func (s *Server) HandleComposePage(w http.ResponseWriter, r *http.Request) {
-	user := s.GetUserFromContext(r.Context())
-	if user == nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
-		return
-	}
-
-	accounts, _ := s.database.GetAccountsByUserID(user.ID)
-
-	data := ComposeData{
-		PageData: PageData{
-			Title: "Compose Email",
-			User:  user,
-		},
-		Accounts: accounts,
-	}
-
-	// Load draft if requested
-	if draftIDStr := r.URL.Query().Get("draft_id"); draftIDStr != "" {
-		draftID, _ := strconv.ParseInt(draftIDStr, 10, 64)
-		if draftID > 0 {
-			draft, err := s.database.GetMessageByID(draftID)
-			if err == nil && draft.UserID == user.ID && draft.Draft {
-				data.DraftID = draft.ID
-				data.To = draft.To
-				data.Cc = draft.Cc
-				data.Bcc = draft.Bcc
-				data.Subject = draft.Subject
-				data.SelectedAccountID = draft.AccountID
-				if draft.BodyHTML != "" {
-					data.Body = draft.BodyHTML
-				} else {
-					data.Body = draft.Body
-				}
-			}
-		}
-	}
-
-	s.renderTemplate(w, "compose.html", data)
 }
 
 // HandleSettingsPage shows the per-user settings page (profile, language,

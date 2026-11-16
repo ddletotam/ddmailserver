@@ -2,14 +2,13 @@ package web
 
 import (
 	"encoding/json"
-	"github.com/ddletotam/ddmailserver/internal/db"
-	"io"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
 
-	"github.com/ddletotam/ddmailserver/internal/logmask"
+	"github.com/ddletotam/ddmailserver/internal/db"
+
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/gorilla/mux"
 )
@@ -727,123 +726,4 @@ func (s *Server) HandleDeleteUserAccount(w http.ResponseWriter, r *http.Request)
 	// Redirect to login page
 	w.Header().Set("HX-Redirect", "/login")
 	respondJSON(w, http.StatusOK, map[string]string{"message": "account deleted"})
-}
-
-// HandleSendMessage handles sending an email
-func (s *Server) HandleSendMessage(w http.ResponseWriter, r *http.Request) {
-	userID := getUserID(r)
-	log.Printf("HandleSendMessage: userID=%d", userID)
-
-	// Parse multipart form (25 MB limit for attachments)
-	if err := r.ParseMultipartForm(25 << 20); err != nil {
-		// Fall back to regular form
-		if err2 := r.ParseForm(); err2 != nil {
-			respondError(w, http.StatusBadRequest, "invalid form data")
-			return
-		}
-	}
-
-	accountIDStr := r.FormValue("account_id")
-	to := r.FormValue("to")
-	subject := r.FormValue("subject")
-	body := r.FormValue("body")
-	format := r.FormValue("format")
-	cc := r.FormValue("cc")
-	bcc := r.FormValue("bcc")
-
-	if accountIDStr == "" || to == "" {
-		respondError(w, http.StatusBadRequest, "account_id and to are required")
-		return
-	}
-
-	accountID, err := strconv.ParseInt(accountIDStr, 10, 64)
-	if err != nil {
-		respondError(w, http.StatusBadRequest, "invalid account_id")
-		return
-	}
-
-	account, err := s.database.GetAccountByID(accountID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "account not found")
-		return
-	}
-	if account.UserID != userID {
-		respondError(w, http.StatusForbidden, "access denied")
-		return
-	}
-
-	outboxMsg := &models.OutboxMessage{
-		UserID:    userID,
-		AccountID: accountID,
-		From:      account.Email,
-		To:        to,
-		Cc:        cc,
-		Bcc:       bcc,
-		Subject:   subject,
-		Status:    "pending",
-		Retries:   0,
-	}
-
-	if format == "html" {
-		outboxMsg.BodyHTML = body
-	} else {
-		outboxMsg.Body = body
-	}
-
-	if err := s.database.CreateOutboxMessage(outboxMsg); err != nil {
-		log.Printf("Failed to create outbox message: %v", err)
-		respondError(w, http.StatusInternalServerError, "failed to queue message for sending")
-		return
-	}
-
-	// Save uploaded attachments
-	if r.MultipartForm != nil {
-		for _, fh := range r.MultipartForm.File["attachments"] {
-			file, err := fh.Open()
-			if err != nil {
-				continue
-			}
-			data, err := io.ReadAll(file)
-			file.Close()
-			if err != nil {
-				continue
-			}
-			ct := fh.Header.Get("Content-Type")
-			if ct == "" {
-				ct = "application/octet-stream"
-			}
-			att := &models.OutboxAttachment{
-				OutboxMessageID: outboxMsg.ID,
-				Filename:        fh.Filename,
-				ContentType:     ct,
-				Size:            len(data),
-				Data:            data,
-			}
-			if err := s.database.CreateOutboxAttachment(att); err != nil {
-				log.Printf("Failed to save outbox attachment %s: %v", fh.Filename, err)
-			}
-		}
-	}
-
-	// Delete draft if this was a draft being sent
-	if draftIDStr := r.FormValue("draft_id"); draftIDStr != "" {
-		if draftID, err := strconv.ParseInt(draftIDStr, 10, 64); err == nil && draftID > 0 {
-			s.database.DeleteMessage(draftID)
-		}
-	}
-
-	log.Printf("Outbox message created: %d (from %s to %s)", outboxMsg.ID, logmask.Addr(outboxMsg.From), logmask.AddrList(outboxMsg.To))
-
-	// Accept after the attachments are stored: the wire form is composed from
-	// the row and its attachments, then the copy goes into Sent. Kicking the
-	// outbox only after that keeps the send task from composing it without
-	// them.
-	s.acceptOutbox(outboxMsg)
-
-	// Send it now rather than on the next scheduler tick.
-	s.kickOutbox()
-
-	w.Header().Set("Content-Type", "text/html")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`<div class="alert alert-success alert-dismissible" role="alert"><i class="ti ti-check me-1"></i>Email queued for sending! <a href="/inbox">View Inbox</a><a href="#" class="btn-close" data-bs-dismiss="alert"></a></div>`))
 }

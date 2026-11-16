@@ -339,26 +339,10 @@ func (s *Server) setupRoutes() {
 	web.HandleFunc("/accounts/{id}", s.HandleDeleteAccountWeb).Methods("DELETE")
 
 	// Inbox & messages
-	web.HandleFunc("/inbox", s.HandleInboxPage).Methods("GET")
-	web.HandleFunc("/messages/list", s.HandleMessagesList).Methods("GET")
-	web.HandleFunc("/messages/search", s.HandleInlineSearch).Methods("GET")
-	web.HandleFunc("/messages/send", s.HandleSendMessage).Methods("POST")
-	web.HandleFunc("/messages/draft", s.HandleSaveDraft).Methods("POST")
-	web.HandleFunc("/messages/refresh", s.HandleRefreshMessages).Methods("POST")
-	web.HandleFunc("/messages/{id}/reply", s.HandleReply).Methods("POST")
-	web.HandleFunc("/messages/{id}/forward", s.HandleForward).Methods("POST")
-	web.HandleFunc("/messages/{id}/body", s.HandleMessageBody).Methods("GET")
-	web.HandleFunc("/messages/{id}/source", s.HandleMessageSource).Methods("GET")
-	web.HandleFunc("/messages/{id}", s.HandleMessagePage).Methods("GET")
-	web.HandleFunc("/messages/{id}", s.HandleDeleteMessage).Methods("DELETE")
-	web.HandleFunc("/message/{id}", s.HandleMessagePage).Methods("GET")
 
 	// Attachments
-	web.HandleFunc("/attachments/{id}", s.HandleAttachment).Methods("GET")
-	web.HandleFunc("/messages/{messageId}/attachments/cid/{cid}", s.HandleAttachmentByCID).Methods("GET")
 
 	// Compose
-	web.HandleFunc("/compose", s.HandleComposePage).Methods("GET")
 
 	// Settings
 	web.HandleFunc("/settings", s.HandleSettingsPage).Methods("GET")
@@ -391,7 +375,6 @@ func (s *Server) setupRoutes() {
 	web.HandleFunc("/contacts", s.HandleContactsPage).Methods("GET")
 	web.HandleFunc("/contacts/sources/list", s.HandleContactSourcesList).Methods("GET")
 	web.HandleFunc("/contacts/addressbooks/list", s.HandleAddressBooksList).Methods("GET")
-	web.HandleFunc("/contacts/search", s.HandleContactsList).Methods("GET")
 	web.HandleFunc("/contacts/sources/create", s.HandleCreateContactSourceWeb).Methods("POST")
 	web.HandleFunc("/contacts/addressbooks/create", s.HandleCreateLocalAddressBook).Methods("POST")
 	web.HandleFunc("/contacts/sources/{id}/update", s.HandleUpdateContactSourceWeb).Methods("POST")
@@ -400,20 +383,8 @@ func (s *Server) setupRoutes() {
 	web.HandleFunc("/contacts/addressbooks/{id}", s.HandleDeleteAddressBookWeb).Methods("DELETE")
 
 	// Vault (soft-deleted messages)
-	web.HandleFunc("/vault", s.HandleVaultPage).Methods("GET")
-	web.HandleFunc("/vault/restore/{id}", s.HandleRestoreMessage).Methods("POST")
-	web.HandleFunc("/vault/delete/{id}", s.HandlePermanentDelete).Methods("DELETE")
 
 	// Spam section
-	web.HandleFunc("/spam", s.HandleSpamPage).Methods("GET")
-	web.HandleFunc("/spam/restore/{id}", s.HandleRestoreFromSpam).Methods("POST")
-	web.HandleFunc("/spam/restore-by-sender", s.HandleRestoreSpamBySender).Methods("POST")
-	web.HandleFunc("/spam/restore-by-domain", s.HandleRestoreSpamByDomain).Methods("POST")
-	web.HandleFunc("/spam/delete/{id}", s.HandleDeleteSpamMessage).Methods("DELETE")
-	web.HandleFunc("/spam/analyze/{id}", s.HandleAnalyzeSpam).Methods("GET")
-	web.HandleFunc("/spam/mark/{id}", s.HandleMarkAsSpam).Methods("POST")
-	web.HandleFunc("/spam/mark-by-message-id", s.HandleMarkAsSpamByMessageID).Methods("POST")
-	web.HandleFunc("/spam/analyze-by-message-id", s.HandleAnalyzeByMessageID).Methods("POST")
 	web.HandleFunc("/spam/rules", s.HandleSpamRulesPage).Methods("GET")
 	web.HandleFunc("/spam/rules", s.HandleCreateSpamRule).Methods("POST")
 	web.HandleFunc("/spam/rules/{id}", s.HandleDeleteSpamRule).Methods("DELETE")
@@ -422,7 +393,6 @@ func (s *Server) setupRoutes() {
 	web.HandleFunc("/spam/settings/weight/{name}", s.HandleSetSpamCheckWeight).Methods("POST")
 
 	// Search
-	web.HandleFunc("/search", s.HandleSearchPage).Methods("GET")
 
 	// Domains API
 	domainsAPI := s.router.PathPrefix("/api/domains").Subrouter()

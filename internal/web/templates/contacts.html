@@ -60,31 +60,6 @@
     </div>
 </div>
 
-<!-- Contact Search -->
-<div class="card mt-4">
-    <div class="card-header">
-        <h3 class="card-title">{{t "contacts.search"}}</h3>
-    </div>
-    <div class="card-body">
-        <div class="mb-3">
-            <input type="text" class="form-control" placeholder="{{t "contacts.search_placeholder"}}"
-                   hx-get="/contacts/search"
-                   hx-trigger="keyup changed delay:300ms"
-                   hx-target="#contacts-list"
-                   name="q">
-        </div>
-        <div id="contacts-list"
-             hx-get="/contacts/search"
-             hx-trigger="load"
-             hx-swap="innerHTML">
-            <div class="text-center text-muted py-4">
-                <div class="spinner-border spinner-border-sm me-2" role="status"></div>
-                {{t "common.loading"}}
-            </div>
-        </div>
-    </div>
-</div>
-
 <!-- CardDAV Connection Info -->
 <div class="card mt-4">
     <div class="card-header">
@@ -355,58 +330,6 @@
     </div>
     <p class="empty-title">{{t "contacts.no_address_books"}}</p>
     <p class="empty-subtitle text-muted">{{t "contacts.no_address_books_hint"}}</p>
-</div>
-{{end}}
-{{end}}
-
-{{define "contacts-list"}}
-{{if .Contacts}}
-<div class="table-responsive">
-    <table class="table table-vcenter card-table">
-        <thead>
-            <tr>
-                <th>{{t "contacts.name"}}</th>
-                <th>{{t "contacts.email"}}</th>
-                <th>{{t "contacts.phone"}}</th>
-                <th>{{t "contacts.organization"}}</th>
-            </tr>
-        </thead>
-        <tbody>
-            {{range .Contacts}}
-            <tr>
-                <td>
-                    <div class="d-flex align-items-center">
-                        <span class="avatar avatar-sm me-2 bg-primary-lt">
-                            {{if .FullName}}{{substr .FullName 0 1}}{{else}}<i class="ti ti-user"></i>{{end}}
-                        </span>
-                        <div>
-                            <div class="font-weight-medium">{{if .FullName}}{{.FullName}}{{else}}{{.Email}}{{end}}</div>
-                            {{if .Nickname}}<div class="text-muted small">{{.Nickname}}</div>{{end}}
-                        </div>
-                    </div>
-                </td>
-                <td>
-                    {{if .Email}}<a href="mailto:{{.Email}}">{{.Email}}</a>{{end}}
-                </td>
-                <td>
-                    {{if .Phone}}{{.Phone}}{{end}}
-                </td>
-                <td>
-                    {{if .Organization}}{{.Organization}}{{end}}
-                    {{if .Title}}<div class="text-muted small">{{.Title}}</div>{{end}}
-                </td>
-            </tr>
-            {{end}}
-        </tbody>
-    </table>
-</div>
-{{else}}
-<div class="empty py-4">
-    <div class="empty-icon">
-        <i class="ti ti-users-group"></i>
-    </div>
-    <p class="empty-title">{{t "contacts.no_contacts"}}</p>
-    <p class="empty-subtitle text-muted">{{t "contacts.no_contacts_hint"}}</p>
 </div>
 {{end}}
 {{end}}
