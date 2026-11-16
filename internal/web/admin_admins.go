@@ -67,6 +67,10 @@ func (s *Server) HandleAdminDeleteAdmin(w http.ResponseWriter, r *http.Request) 
 		respondError(w, http.StatusNotFound, "administrator not found")
 		return
 	}
+	if owned, err := s.database.CountDomainsOwnedBy(id); err != nil || owned > 0 {
+		respondError(w, http.StatusBadRequest, "this administrator owns domains; delete or move them first")
+		return
+	}
 	n, err := s.database.CountAdmins()
 	if err != nil || n <= 1 {
 		respondError(w, http.StatusBadRequest, "cannot delete the last administrator")

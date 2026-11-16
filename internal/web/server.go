@@ -219,6 +219,13 @@ func (s *Server) setupRoutes() {
 	adminAPI.HandleFunc("/settings/registration", s.HandleAdminSetRegistrationMode).Methods("POST")
 	adminAPI.HandleFunc("/invites", s.HandleAdminCreateInvite).Methods("POST")
 	adminAPI.HandleFunc("/admins", s.HandleAdminCreateAdmin).Methods("POST")
+	adminAPI.HandleFunc("/domains", s.HandleAdminCreateDomain).Methods("POST")
+	adminAPI.HandleFunc("/domains/{id}/toggle", s.HandleAdminToggleDomain).Methods("POST")
+	adminAPI.HandleFunc("/domains/{id}", s.HandleAdminDeleteDomain).Methods("DELETE")
+	adminAPI.HandleFunc("/mailboxes", s.HandleAdminCreateMailbox).Methods("POST")
+	adminAPI.HandleFunc("/mailboxes/{id}/password", s.HandleAdminMailboxPassword).Methods("POST")
+	adminAPI.HandleFunc("/mailboxes/{id}/toggle", s.HandleAdminToggleMailbox).Methods("POST")
+	adminAPI.HandleFunc("/mailboxes/{id}", s.HandleAdminDeleteMailbox).Methods("DELETE")
 	adminAPI.HandleFunc("/admins/{id}", s.HandleAdminDeleteAdmin).Methods("DELETE")
 	adminAPI.HandleFunc("/invites/{id}", s.HandleAdminRevokeInvite).Methods("DELETE")
 	adminAPI.HandleFunc("/users/{id}", s.HandleAdminDeleteUser).Methods("DELETE")
@@ -355,9 +362,9 @@ func (s *Server) setupRoutes() {
 	// runs first, then the admin gate.
 	web.Handle("/admin", s.WebAdminMiddleware(http.HandlerFunc(s.HandleAdminPage))).Methods("GET")
 	web.Handle("/admin/users", s.WebAdminMiddleware(http.HandlerFunc(s.HandleAdminListUsers))).Methods("GET")
+	web.Handle("/admin/domains", s.WebAdminMiddleware(http.HandlerFunc(s.HandleAdminDomainsPage))).Methods("GET")
 
 	// Domains (for MX server)
-	web.HandleFunc("/domains", s.HandleDomainsPage).Methods("GET")
 
 	// Calendars web pages
 	web.HandleFunc("/calendars", s.HandleCalendarsPage).Methods("GET")
@@ -397,20 +404,8 @@ func (s *Server) setupRoutes() {
 	// Search
 
 	// Domains API
-	domainsAPI := s.router.PathPrefix("/api/domains").Subrouter()
-	domainsAPI.Use(s.APIAuthMiddleware)
-	domainsAPI.HandleFunc("", s.HandleListDomains).Methods("GET")
-	domainsAPI.HandleFunc("", s.HandleCreateDomain).Methods("POST")
-	domainsAPI.HandleFunc("/{id}/verify", s.HandleVerifyDomain).Methods("POST")
-	domainsAPI.HandleFunc("/{id}/toggle", s.HandleToggleDomain).Methods("POST")
-	domainsAPI.HandleFunc("/{id}", s.HandleDeleteDomain).Methods("DELETE")
 
 	// Mailboxes API
-	mailboxesAPI := s.router.PathPrefix("/api/mailboxes").Subrouter()
-	mailboxesAPI.Use(s.APIAuthMiddleware)
-	mailboxesAPI.HandleFunc("", s.HandleCreateMailbox).Methods("POST")
-	mailboxesAPI.HandleFunc("/{id}/toggle", s.HandleToggleMailbox).Methods("POST")
-	mailboxesAPI.HandleFunc("/{id}", s.HandleDeleteMailbox).Methods("DELETE")
 
 	// Calendar Sources API
 	calSourcesAPI := s.router.PathPrefix("/api/calendar-sources").Subrouter()

@@ -1,0 +1,131 @@
+{{define "content"}}
+<div class="row row-cards">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">{{t "admin.dom_title"}}</h3></div>
+            <div class="card-body">
+                <form id="domain-form" class="d-flex gap-2">
+                    <input type="text" name="domain" class="form-control" placeholder="example.com" required>
+                    <button type="submit" class="btn btn-primary text-nowrap">{{t "admin.dom_add"}}</button>
+                </form>
+                <div id="domain-result" class="mt-2"></div>
+                <div class="text-muted small mt-2">{{t "admin.dom_hint"}}</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-12"><div id="mailbox-secret"></div></div>
+
+    {{range .Domains}}
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between">
+                <h3 class="card-title">
+                    {{.Domain}}
+                    {{if not .Enabled}}<span class="badge bg-red-lt ms-2">{{t "admin.dom_disabled"}}</span>{{end}}
+                    {{if not .Verified}}<span class="badge bg-yellow-lt ms-2">{{t "admin.dom_unverified"}}</span>{{end}}
+                    <span class="text-muted small ms-2">{{t "admin.dom_owner"}}: {{.Owner}}</span>
+                </h3>
+                <div class="btn-list">
+                    <button class="btn btn-sm btn-outline-secondary" data-act="POST" data-url="/api/admin/domains/{{.ID}}/toggle">{{if .Enabled}}{{t "admin.disable"}}{{else}}{{t "admin.enable"}}{{end}}</button>
+                    <button class="btn btn-sm btn-outline-danger" data-act="DELETE" data-url="/api/admin/domains/{{.ID}}" data-confirm="{{t "admin.dom_delete_confirm"}} {{.Domain}}"><i class="ti ti-trash"></i></button>
+                </div>
+            </div>
+            <div class="card-body">
+                <table class="table table-sm table-vcenter">
+                    <tbody>
+                    {{range .Mailboxes}}
+                    <tr {{if not .Enabled}}class="text-muted"{{end}}>
+                        <td>{{.Address}}</td>
+                        <td>
+                            {{if .HasAccount}}<span class="badge bg-green-lt">{{t "admin.mb_own"}}</span>
+                            {{else}}<span class="badge bg-secondary-lt" title="{{t "admin.mb_legacy_hint"}}">{{t "admin.mb_legacy"}} {{.Owner}}</span>{{end}}
+                            {{if not .Enabled}}<span class="badge bg-red-lt">{{t "admin.dom_disabled"}}</span>{{end}}
+                        </td>
+                        <td class="text-end">
+                            <div class="btn-list justify-content-end flex-nowrap">
+                                {{if .HasAccount}}
+                                <button class="btn btn-sm btn-outline-primary" data-act="POST" data-url="/api/admin/mailboxes/{{.ID}}/password" data-secret="1" data-confirm="{{t "admin.mb_newpw_confirm"}} {{.Address}}">{{t "admin.mb_newpw"}}</button>
+                                {{else}}
+                                <button class="btn btn-sm btn-outline-primary" data-act="POST" data-url="/api/admin/mailboxes/{{.ID}}/password" data-secret="1" data-confirm="{{t "admin.mb_convert_confirm"}}">{{t "admin.mb_convert"}}</button>
+                                {{end}}
+                                <button class="btn btn-sm btn-outline-secondary" data-act="POST" data-url="/api/admin/mailboxes/{{.ID}}/toggle">{{if .Enabled}}{{t "admin.disable"}}{{else}}{{t "admin.enable"}}{{end}}</button>
+                                <button class="btn btn-sm btn-outline-danger" data-act="DELETE" data-url="/api/admin/mailboxes/{{.ID}}" data-confirm="{{t "admin.mb_delete_confirm"}} {{.Address}}"><i class="ti ti-trash"></i></button>
+                            </div>
+                        </td>
+                    </tr>
+                    {{else}}
+                    <tr><td class="text-muted">{{t "admin.mb_none"}}</td></tr>
+                    {{end}}
+                    </tbody>
+                </table>
+                <form class="mailbox-form d-flex gap-2 mt-2">
+                    <input type="hidden" name="domain_id" value="{{.ID}}">
+                    <div class="input-group">
+                        <input type="text" name="local_part" class="form-control" placeholder="vasya" required>
+                        <span class="input-group-text">@{{.Domain}}</span>
+                    </div>
+                    <button type="submit" class="btn btn-primary text-nowrap">{{t "admin.mb_add"}}</button>
+                </form>
+                <details class="mt-3">
+                    <summary class="text-muted">{{t "admin.dom_dns"}}</summary>
+                    <pre class="bg-dark text-light p-3 rounded mt-2"><code>{{.Domain}}.  MX   10  {{$.MailHost}}.
+{{.Domain}}.  TXT  "v=spf1 mx a:{{$.MailHost}} -all"
+_dmarc.{{.Domain}}.  TXT  "v=DMARC1; p=quarantine; adkim=r; aspf=r"</code></pre>
+                    <div class="text-muted small">{{t "admin.dom_dkim"}}</div>
+                </details>
+            </div>
+        </div>
+    </div>
+    {{end}}
+</div>
+
+<script>
+(function () {
+    function send(method, url, body) {
+        return fetch(url, { method: method, credentials: 'same-origin', body: body }).then(function (r) {
+            return r.json().catch(function () { return {}; }).then(function (j) {
+                if (!r.ok) throw new Error((j && j.error) || r.statusText);
+                return j;
+            });
+        });
+    }
+    function showSecret(j) {
+        var box = document.getElementById('mailbox-secret');
+        box.innerHTML = '';
+        var d = document.createElement('div');
+        d.className = 'alert alert-info';
+        d.textContent = '{{t "admin.mb_secret"}} ' + j.address + ' / ' + j.password + '   ({{t "admin.mb_servers"}} {{.MailHost}}: IMAP 993 SSL, SMTP 465 SSL)';
+        box.appendChild(d);
+        window.scrollTo(0, 0);
+    }
+    document.getElementById('domain-form').addEventListener('submit', function (e) {
+        e.preventDefault();
+        send('POST', '/api/admin/domains', new FormData(e.target)).then(function () { location.reload(); })
+            .catch(function (err) { var o = document.getElementById('domain-result'); o.className = 'mt-2 text-danger'; o.textContent = err.message; });
+    });
+    document.querySelectorAll('.mailbox-form').forEach(function (f) {
+        f.addEventListener('submit', function (e) {
+            e.preventDefault();
+            send('POST', '/api/admin/mailboxes', new FormData(f)).then(function (j) {
+                sessionStorage.setItem('ddmail-secret', JSON.stringify(j)); location.reload();
+            }).catch(function (err) { alert(err.message); });
+        });
+    });
+    document.addEventListener('click', function (e) {
+        var b = e.target.closest('[data-act]');
+        if (!b) return;
+        e.preventDefault();
+        if (b.dataset.confirm && !confirm(b.dataset.confirm)) return;
+        send(b.dataset.act, b.dataset.url).then(function (j) {
+            if (b.dataset.secret) { sessionStorage.setItem('ddmail-secret', JSON.stringify(j)); }
+            location.reload();
+        }).catch(function (err) { alert(err.message); });
+    });
+    try {
+        var s = sessionStorage.getItem('ddmail-secret');
+        if (s) { sessionStorage.removeItem('ddmail-secret'); showSecret(JSON.parse(s)); }
+    } catch (_) {}
+})();
+</script>
+{{end}}

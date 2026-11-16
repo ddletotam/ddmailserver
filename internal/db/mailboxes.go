@@ -44,7 +44,7 @@ func (db *DB) CreateMailbox(mailbox *models.Mailbox) error {
 // GetMailboxByID returns a mailbox by ID
 func (db *DB) GetMailboxByID(id int64) (*models.Mailbox, error) {
 	query := `
-		SELECT id, user_id, domain_id, local_part, enabled, COALESCE(created_at, 0)
+		SELECT id, user_id, domain_id, local_part, enabled, COALESCE(created_at, 0), COALESCE(principal_id, 0)
 		FROM mailboxes
 		WHERE id = $1`
 
@@ -56,6 +56,7 @@ func (db *DB) GetMailboxByID(id int64) (*models.Mailbox, error) {
 		&mailbox.LocalPart,
 		&mailbox.Enabled,
 		&mailbox.CreatedAt,
+		&mailbox.PrincipalID,
 	)
 
 	if err == sql.ErrNoRows {
