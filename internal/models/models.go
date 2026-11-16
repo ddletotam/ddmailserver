@@ -19,9 +19,12 @@ type User struct {
 	IsBannedFlag    bool   `json:"is_banned"`
 	// PendingFlag: signed up under moderated registration, not yet approved
 	// by an administrator (users.approved = false).
-	PendingFlag bool  `json:"pending,omitempty"`
-	CreatedAt   int64 `json:"created_at"`
-	UpdatedAt   int64 `json:"updated_at"`
+	PendingFlag bool `json:"pending,omitempty"`
+	// Kind: "user" (a person) or "mailbox" — the account of a mailbox on a
+	// hosted domain, signing in on IMAP/SMTP with its address (migration 063).
+	Kind      string `json:"kind,omitempty"`
+	CreatedAt int64  `json:"created_at"`
+	UpdatedAt int64  `json:"updated_at"`
 }
 
 // IsAdmin returns true if user is an administrator
@@ -37,6 +40,12 @@ func (u *User) IsBanned() bool {
 // IsPending: waits for an administrator to approve the sign-up.
 func (u *User) IsPending() bool {
 	return u.PendingFlag
+}
+
+// IsMailbox: the account of a hosted mailbox — IMAP/SMTP only, no web, API
+// or push.
+func (u *User) IsMailbox() bool {
+	return u.Kind == "mailbox"
 }
 
 // Blocked: may not sign in anywhere — banned or not yet approved.
@@ -365,6 +374,18 @@ type Mailbox struct {
 	LocalPart string `json:"local_part"`
 	Enabled   bool   `json:"enabled"`
 	CreatedAt int64  `json:"created_at"`
+	// PrincipalID: the mailbox's own account (users.kind = 'mailbox'); 0 —
+	// the old way, mail goes to the owner UserID.
+	PrincipalID int64 `json:"principal_id,omitempty"`
+}
+
+// StoreUserID is whose storage holds the mailbox's mail: its own account if
+// it has one, else the owner.
+func (m *Mailbox) StoreUserID() int64 {
+	if m.PrincipalID != 0 {
+		return m.PrincipalID
+	}
+	return m.UserID
 }
 
 // FlagSyncEntry represents a pending flag change to sync to remote IMAP server

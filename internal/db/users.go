@@ -53,14 +53,14 @@ func (db *DB) CreateUserApproval(username, passwordHash, email, recoveryKeyHash 
 func (db *DB) GetUserByUsername(username string) (*models.User, error) {
 	user := &models.User{}
 	query := `
-		SELECT id, username, password_hash, email, language, recovery_key_hash, COALESCE(is_admin, false), COALESCE(is_banned, false), NOT COALESCE(approved, true), created_at, updated_at
+		SELECT id, username, password_hash, email, language, recovery_key_hash, COALESCE(is_admin, false), COALESCE(is_banned, false), NOT COALESCE(approved, true), COALESCE(kind, 'user'), created_at, updated_at
 		FROM users
 		WHERE username = $1
 	`
 
 	var email, language sql.NullString
 	err := db.QueryRow(query, username).Scan(
-		&user.ID, &user.Username, &user.PasswordHash, &email, &language, &user.RecoveryKeyHash, &user.IsAdminFlag, &user.IsBannedFlag, &user.PendingFlag, &user.CreatedAt, &user.UpdatedAt,
+		&user.ID, &user.Username, &user.PasswordHash, &email, &language, &user.RecoveryKeyHash, &user.IsAdminFlag, &user.IsBannedFlag, &user.PendingFlag, &user.Kind, &user.CreatedAt, &user.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("user not found")
@@ -97,14 +97,14 @@ func (db *DB) GetUsernameByID(id int64) (string, error) {
 func (db *DB) GetUserByID(id int64) (*models.User, error) {
 	user := &models.User{}
 	query := `
-		SELECT id, username, password_hash, email, language, recovery_key_hash, COALESCE(is_admin, false), COALESCE(is_banned, false), NOT COALESCE(approved, true), created_at, updated_at
+		SELECT id, username, password_hash, email, language, recovery_key_hash, COALESCE(is_admin, false), COALESCE(is_banned, false), NOT COALESCE(approved, true), COALESCE(kind, 'user'), created_at, updated_at
 		FROM users
 		WHERE id = $1
 	`
 
 	var email, language sql.NullString
 	err := db.QueryRow(query, id).Scan(
-		&user.ID, &user.Username, &user.PasswordHash, &email, &language, &user.RecoveryKeyHash, &user.IsAdminFlag, &user.IsBannedFlag, &user.PendingFlag, &user.CreatedAt, &user.UpdatedAt,
+		&user.ID, &user.Username, &user.PasswordHash, &email, &language, &user.RecoveryKeyHash, &user.IsAdminFlag, &user.IsBannedFlag, &user.PendingFlag, &user.Kind, &user.CreatedAt, &user.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("user not found")
@@ -207,7 +207,7 @@ func (db *DB) DeleteUser(id int64) error {
 // ListUsers returns all users ordered by id. Admin-only consumer.
 func (db *DB) ListUsers() ([]*models.User, error) {
 	query := `
-		SELECT id, username, email, language, COALESCE(is_admin, false), COALESCE(is_banned, false), NOT COALESCE(approved, true), created_at, updated_at
+		SELECT id, username, email, language, COALESCE(is_admin, false), COALESCE(is_banned, false), NOT COALESCE(approved, true), COALESCE(kind, 'user'), created_at, updated_at
 		FROM users
 		ORDER BY id ASC
 	`
@@ -221,7 +221,7 @@ func (db *DB) ListUsers() ([]*models.User, error) {
 	for rows.Next() {
 		u := &models.User{}
 		var email, language sql.NullString
-		if err := rows.Scan(&u.ID, &u.Username, &email, &language, &u.IsAdminFlag, &u.IsBannedFlag, &u.PendingFlag, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &email, &language, &u.IsAdminFlag, &u.IsBannedFlag, &u.PendingFlag, &u.Kind, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan user: %w", err)
 		}
 		if email.Valid {

@@ -142,7 +142,7 @@ func routeRecipients(local LocalDeliverer, senderUserID int64, recipients []stri
 		var reject *localdelivery.RejectError
 		switch {
 		case err == nil:
-			if rcpt.Mailbox.UserID == senderUserID {
+			if rcpt.Mailbox.StoreUserID() == senderUserID {
 				r.self++
 			} else {
 				r.local = append(r.local, rcpt)

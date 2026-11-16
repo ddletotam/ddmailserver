@@ -215,7 +215,8 @@ func (d *Deliverer) Deliver(env Envelope, raw []byte, parsed *parser.ParsedMessa
 }
 
 func (d *Deliverer) deliverOne(env Envelope, raw []byte, parsed *parser.ParsedMessage, rcpt *Recipient) (Result, error) {
-	userID := rcpt.Mailbox.UserID
+	// The mailbox's own account if it has one, else the owner (migration 063).
+	userID := rcpt.Mailbox.StoreUserID()
 
 	fromAddr := parser.FormatAddress(parsed.From)
 	if fromAddr == "" {

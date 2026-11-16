@@ -63,7 +63,7 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 	}
 
 	s.recipients = append(s.recipients, rcpt)
-	log.Printf("MX: Accepted recipient %s (user_id=%d)", rcpt.Email, rcpt.Mailbox.UserID)
+	log.Printf("MX: Accepted recipient %s (user_id=%d)", rcpt.Email, rcpt.Mailbox.StoreUserID())
 	return nil
 }
 

@@ -146,7 +146,7 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 
 		// Administrator accounts have no mail (migration 061); a blocked user
 		// loses access at once.
-		if u, err := s.database.GetUserByID(claims.UserID); err != nil || u.IsAdmin() || u.Blocked() {
+		if u, err := s.database.GetUserByID(claims.UserID); err != nil || u.IsAdmin() || u.Blocked() || u.IsMailbox() {
 			respondError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}

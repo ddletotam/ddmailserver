@@ -27,6 +27,24 @@ var ErrInvalidCredentials = errors.New("invalid credentials")
 // login. The domain part is dropped, matching what IMAP and SMTP already did
 // before this helper existed.
 func (db *DB) AuthenticateProtocol(username, secret string) (*models.User, error) {
+	// A hosted mailbox with its own account signs in with its full address
+	// (migration 063, docs/mailbox-accounts-plan.md). Any other address-shaped
+	// login keeps the old meaning: the user whose name is the local part.
+	if strings.Contains(username, "@") {
+		if mb, err := db.GetUserByUsername(strings.ToLower(strings.TrimSpace(username))); err == nil && mb.IsMailbox() {
+			if bcrypt.CompareHashAndPassword([]byte(mb.PasswordHash), []byte(secret)) != nil || mb.Blocked() {
+				return nil, ErrInvalidCredentials
+			}
+			active, err := db.mailboxPrincipalActive(mb.ID)
+			if err != nil {
+				return nil, err
+			}
+			if !active {
+				return nil, ErrInvalidCredentials
+			}
+			return mb, nil
+		}
+	}
 	if idx := strings.IndexByte(username, '@'); idx != -1 {
 		username = username[:idx]
 	}
@@ -36,7 +54,8 @@ func (db *DB) AuthenticateProtocol(username, secret string) (*models.User, error
 		return nil, ErrInvalidCredentials
 	}
 	// Administrator accounts have no mail: no IMAP, SMTP or DAV (migration 061).
-	if user.IsAdmin() {
+	// A mailbox account signs in only by its full address (above).
+	if user.IsAdmin() || user.IsMailbox() {
 		return nil, ErrInvalidCredentials
 	}
 

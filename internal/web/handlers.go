@@ -92,6 +92,12 @@ func (s *Server) registerAccount(w http.ResponseWriter, r *http.Request, pending
 		return
 	}
 
+	// An address-shaped login is how a mailbox signs in (migration 063).
+	if strings.ContainsAny(req.Username, "@ ") {
+		respondHTMXError(w, r, http.StatusBadRequest, "Login must not contain @ or spaces")
+		return
+	}
+
 	// Validate field lengths
 	if len(req.Username) > MaxUsernameLength {
 		respondHTMXError(w, r, http.StatusBadRequest, "Username is too long")
@@ -249,8 +255,9 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	s.authLimiter.Success(ip, user.Username)
 
 	// Banned users get the same generic error as wrong password — exposing
-	// "you're banned" leaks user state to anyone with the password.
-	if user.IsBanned() {
+	// "you're banned" leaks user state to anyone with the password. A mailbox
+	// account (migration 063) has no web sign-in at all.
+	if user.IsBanned() || user.IsMailbox() {
 		log.Printf("Login refused for banned user: %s", user.Username)
 		respondHTMXError(w, r, http.StatusUnauthorized, "Invalid username or password")
 		return

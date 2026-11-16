@@ -137,3 +137,19 @@ func TestPendingUserIsBlocked(t *testing.T) {
 		t.Fatalf("approved user: %d", w.Code)
 	}
 }
+
+// A mailbox account (migration 063) never reaches the web or client API.
+func TestMailboxAccountHasNoWebSession(t *testing.T) {
+	mb := &models.User{ID: 9, Username: "vasya@example.com", Kind: "mailbox"}
+	if !mb.IsMailbox() {
+		t.Fatal("kind mailbox not recognised")
+	}
+	m := &models.Mailbox{UserID: 1}
+	if m.StoreUserID() != 1 {
+		t.Fatal("mailbox without account must store to the owner")
+	}
+	m.PrincipalID = 9
+	if m.StoreUserID() != 9 {
+		t.Fatal("mailbox with account must store to it")
+	}
+}

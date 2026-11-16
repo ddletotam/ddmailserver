@@ -71,7 +71,7 @@ func (db *DB) GetMailboxByID(id int64) (*models.Mailbox, error) {
 // GetMailbox returns a mailbox by domain ID and local part (for MX server)
 func (db *DB) GetMailbox(domainID int64, localPart string) (*models.Mailbox, error) {
 	query := `
-		SELECT id, user_id, domain_id, local_part, enabled, COALESCE(created_at, 0)
+		SELECT id, user_id, domain_id, local_part, enabled, COALESCE(created_at, 0), COALESCE(principal_id, 0)
 		FROM mailboxes
 		WHERE domain_id = $1 AND local_part = $2`
 
@@ -83,6 +83,7 @@ func (db *DB) GetMailbox(domainID int64, localPart string) (*models.Mailbox, err
 		&mailbox.LocalPart,
 		&mailbox.Enabled,
 		&mailbox.CreatedAt,
+		&mailbox.PrincipalID,
 	)
 
 	if err == sql.ErrNoRows {
@@ -207,6 +208,10 @@ type MailboxWithDomain struct {
 	DomainVerified bool   `json:"domain_verified"`
 }
 
+// A mailbox that has its own account (principal) is that account's identity,
+// not the owner's — the owner reaches it as an ordinary connected IMAP
+// account; its UserID is reported as the principal so ownership checks hold.
+//
 // GetMailboxesWithDomainByUserID returns the user's mailboxes on verified
 // domains — the addresses the user actually owns. Every identity consumer
 // (sender ownership, desktop /identities, IMAP METADATA, "is this me?")
@@ -224,10 +229,13 @@ func (db *DB) GetAllMailboxesWithDomainByUserID(userID int64) ([]*MailboxWithDom
 
 func (db *DB) queryMailboxesWithDomain(userID int64, verifiedOnly bool) ([]*MailboxWithDomain, error) {
 	query := `
-		SELECT m.id, m.user_id, m.domain_id, m.local_part, m.enabled, COALESCE(m.created_at, 0), d.domain, d.verified
+		SELECT m.id, CASE WHEN $2 THEN COALESCE(m.principal_id, m.user_id) ELSE m.user_id END,
+		       m.domain_id, m.local_part, m.enabled, COALESCE(m.created_at, 0), d.domain, d.verified
 		FROM mailboxes m
 		JOIN domains d ON m.domain_id = d.id
-		WHERE m.user_id = $1 AND (d.verified OR NOT $2)
+		WHERE (CASE WHEN $2 THEN (m.user_id = $1 AND m.principal_id IS NULL) OR m.principal_id = $1
+		            ELSE m.user_id = $1 END)
+		  AND (d.verified OR NOT $2)
 		ORDER BY d.domain, m.local_part`
 
 	rows, err := db.Query(query, userID, verifiedOnly)

@@ -85,7 +85,7 @@ func (s *Server) HandleDesktopWebSocket(w http.ResponseWriter, r *http.Request) 
 	}
 
 	user, err := s.database.GetUserByID(claims.UserID)
-	if err != nil || user.Blocked() {
+	if err != nil || user.Blocked() || user.IsMailbox() {
 		http.Error(w, "user not found", http.StatusUnauthorized)
 		return
 	}

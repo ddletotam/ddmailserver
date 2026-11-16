@@ -26,8 +26,8 @@ type adminUserRow struct {
 func toAdminUserRows(users []*models.User, currentID int64) []adminUserRow {
 	rows := make([]adminUserRow, 0, len(users))
 	for _, u := range users {
-		if u.IsAdmin() {
-			continue // administrator accounts are not users (migration 061)
+		if u.IsAdmin() || u.IsMailbox() {
+			continue // administrator and mailbox accounts are not users (migrations 061, 063)
 		}
 		rows = append(rows, adminUserRow{
 			ID:        u.ID,
@@ -148,8 +148,8 @@ func (s *Server) HandleAdminToggleBan(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "user not found")
 		return
 	}
-	if target.IsAdmin() {
-		respondError(w, http.StatusBadRequest, "administrator accounts are not managed here")
+	if target.IsAdmin() || target.IsMailbox() {
+		respondError(w, http.StatusBadRequest, "administrator and mailbox accounts are not managed here")
 		return
 	}
 	newVal := !target.IsBanned()
