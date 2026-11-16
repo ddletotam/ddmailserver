@@ -7,6 +7,7 @@ import (
 
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/models"
+	"github.com/ddletotam/ddmailserver/internal/notify"
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
 	"github.com/gorilla/mux"
 )
@@ -152,6 +153,8 @@ func (s *Server) HandleAdminToggleBan(w http.ResponseWriter, r *http.Request) {
 	action := "user.ban"
 	if !newVal {
 		action = "user.unban"
+	} else {
+		s.revokeSessions(id)
 	}
 	s.auditAdmin(r, s.GetUserFromContext(r.Context()), action, "user", id, target.Username)
 	respondJSON(w, http.StatusOK, map[string]bool{"is_banned": newVal})
@@ -177,6 +180,7 @@ func (s *Server) HandleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, "delete failed")
 		return
 	}
+	s.revokeSessions(id)
 	s.auditAdmin(r, s.GetUserFromContext(r.Context()), "user.delete", "user", id, target.Username)
 	respondJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }
@@ -210,4 +214,13 @@ func (s *Server) adminAuditRows() []adminAuditRow {
 		})
 	}
 	return rows
+}
+
+// revokeSessions closes the user's open WebSocket and IMAP sessions (a ban
+// or deletion must not wait for them to reconnect).
+func (s *Server) revokeSessions(userID int64) {
+	if s.notifyHub == nil {
+		return
+	}
+	s.notifyHub.Publish(notify.Event{UserID: userID, Type: notify.EventSessionRevoked})
 }

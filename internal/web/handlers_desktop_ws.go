@@ -126,6 +126,10 @@ func (s *Server) HandleDesktopWebSocket(w http.ResponseWriter, r *http.Request) 
 			if !ok {
 				return // Channel closed
 			}
+			if event.Type == notify.EventSessionRevoked {
+				log.Printf("WebSocket: user %s blocked or deleted, closing", user.Username)
+				return
+			}
 			wsEvent := WSEvent{
 				Type:       string(event.Type),
 				UserID:     event.UserID,

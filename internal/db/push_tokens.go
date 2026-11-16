@@ -74,10 +74,14 @@ func (db *DB) DeletePushToken(ctx context.Context, kind, token string) error {
 }
 
 // PushTokensForUser — устройства пользователя.
+// A blocked user gets no push: the devices stay registered and resume after
+// the block is lifted.
 func (db *DB) PushTokensForUser(ctx context.Context, userID int64) ([]models.PushToken, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, user_id, kind, token, environment, topic, created_at, updated_at
-		FROM push_tokens WHERE user_id = $1 ORDER BY id`, userID)
+		SELECT t.id, t.user_id, t.kind, t.token, t.environment, t.topic, t.created_at, t.updated_at
+		FROM push_tokens t JOIN users u ON u.id = t.user_id
+		WHERE t.user_id = $1 AND NOT COALESCE(u.is_banned, false)
+		ORDER BY t.id`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("push tokens: query: %w", err)
 	}

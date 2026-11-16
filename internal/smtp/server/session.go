@@ -109,6 +109,12 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	if s.userID == 0 {
 		return smtp.ErrAuthRequired
 	}
+	// A session authenticated before the user was blocked sends nothing more.
+	if s.database != nil {
+		if u, err := s.database.GetUserByID(s.userID); err == nil && u.IsBanned() {
+			return &smtp.SMTPError{Code: 535, EnhancedCode: smtp.EnhancedCode{5, 7, 8}, Message: "Authentication credentials invalid"}
+		}
+	}
 
 	owned, err := db.SenderIdentities(s.identityStore(), s.userID)
 	if err != nil {

@@ -54,11 +54,13 @@ func NewWithHub(database *db.DB, addr string, hub *notify.Hub) *Server {
 
 	log.Printf("IMAP server with IDLE support created, will listen on %s", addr)
 
-	return &Server{
+	srv := &Server{
 		imapServer: s,
 		backend:    be,
 		addr:       addr,
 	}
+	srv.watchRevocations(hub)
+	return srv
 }
 
 // NewWithBackend creates a new IMAP server with existing backend (for shared backend usage)
@@ -173,12 +175,46 @@ func NewWithTLSAndHub(database *db.DB, addr string, certFile, keyFile string, hu
 	moveExt.Arm()
 	log.Printf("IMAP server with TLS, IDLE, UIDPLUS extensions enabled, will listen on %s", addr)
 
-	return &Server{
+	srv := &Server{
 		imapServer: s,
 		backend:    be,
 		addr:       addr,
 		tlsConfig:  tlsConfig,
-	}, nil
+	}
+	srv.watchRevocations(hub)
+	return srv, nil
+}
+
+// watchRevocations closes every IMAP connection of a user who was blocked or
+// deleted: a session authenticated before the ban would otherwise keep
+// reading mail (IDLE keeps it open for up to AutoLogout).
+func (s *Server) watchRevocations(hub *notify.Hub) {
+	if hub == nil {
+		return
+	}
+	ch := hub.SubscribeAll()
+	go func() {
+		for ev := range ch {
+			if ev.Type == notify.EventSessionRevoked {
+				s.closeUserConns(ev.UserID)
+			}
+		}
+	}()
+}
+
+func (s *Server) closeUserConns(userID int64) {
+	var victims []server.Conn
+	s.imapServer.ForEachConn(func(c server.Conn) {
+		if u, ok := c.Context().User.(*User); ok && u.userID == userID {
+			victims = append(victims, c)
+		}
+	})
+	for _, c := range victims {
+		_ = c.Close()
+	}
+	if len(victims) > 0 {
+		log.Printf("IMAP: closed %d connection(s) of blocked/deleted user %d", len(victims), userID)
+	}
 }
 
 // Start starts the IMAP server

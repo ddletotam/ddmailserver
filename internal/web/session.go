@@ -21,7 +21,8 @@ func (s *Server) SessionMiddleware(next http.Handler) http.Handler {
 			claims, err := ValidateToken(cookie.Value, s.jwtSecret)
 			if err == nil {
 				user, err := s.database.GetUserByID(claims.UserID)
-				if err == nil {
+				// A blocked user's cookie stops working at once, not at expiry.
+				if err == nil && !user.IsBanned() {
 					// Add user to context
 					ctx := context.WithValue(r.Context(), userContextKey, user)
 					r = r.WithContext(ctx)

@@ -51,10 +51,6 @@ func (db *DB) AuthenticateProtocol(username, secret string) (*models.User, error
 			return nil, err
 		}
 		if ok {
-			// Unlike the account-password path below, this one honours bans.
-			// A banned user keeping protocol access is a pre-existing gap and
-			// widening it through a credential added today would be a choice;
-			// closing it for the account password too is a separate decision.
 			if user.IsBanned() {
 				return nil, ErrInvalidCredentials
 			}
@@ -65,6 +61,10 @@ func (db *DB) AuthenticateProtocol(username, secret string) (*models.User, error
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(secret)); err != nil {
 		return nil, ErrInvalidCredentials
 	}
-
+	// A blocked user is refused on every protocol, with the same answer as a
+	// wrong password (stage 2, docs/server-admin-split-plan.md).
+	if user.IsBanned() {
+		return nil, ErrInvalidCredentials
+	}
 	return user, nil
 }

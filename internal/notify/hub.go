@@ -58,6 +58,10 @@ const (
 	// was saved. Other stations refetch it so names, colours and signatures
 	// stay the same everywhere without a restart.
 	EventIdentityGroupsChanged EventType = "identity_groups_changed"
+
+	// EventSessionRevoked: the user was blocked or deleted — every open
+	// session (WebSocket, IMAP) is closed. Not forwarded to clients.
+	EventSessionRevoked EventType = "session_revoked"
 )
 
 // Event represents a notification about a user-visible change.
