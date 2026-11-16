@@ -78,6 +78,27 @@
         </div>
     </div>
 
+    <!-- Administrator: own password -->
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">{{t "admin.password_title"}}</h3></div>
+            <div class="card-body">
+                <form id="admin-password-form">
+                    <div class="mb-3">
+                        <label class="form-label">{{t "admin.password_current"}}</label>
+                        <input type="password" name="current_password" class="form-control" autocomplete="current-password" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">{{t "admin.password_new"}}</label>
+                        <input type="password" name="new_password" class="form-control" autocomplete="new-password" minlength="8" required>
+                    </div>
+                    <div id="admin-password-result" class="mb-2"></div>
+                    <button type="submit" class="btn btn-primary">{{t "admin.password_save"}}</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
     <!-- Users -->
     <div class="col-12">
         <div class="card">
@@ -87,6 +108,35 @@
             <div class="card-body p-0">
                 <div id="admin-users" hx-get="/admin/users" hx-trigger="load, ddmail:users-changed from:body" hx-swap="innerHTML">
                     {{template "admin-users-table" .Users}}
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- Audit log -->
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">{{t "admin.audit_title"}}</h3></div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-vcenter card-table table-sm">
+                        <thead><tr>
+                            <th>{{t "admin.audit_when"}}</th><th>{{t "admin.audit_who"}}</th>
+                            <th>{{t "admin.audit_action"}}</th><th>{{t "admin.audit_target"}}</th><th>IP</th>
+                        </tr></thead>
+                        <tbody>
+                        {{range .Audit}}
+                            <tr>
+                                <td class="text-nowrap">{{.When}}</td>
+                                <td>{{.Who}}</td>
+                                <td>{{.Action}}</td>
+                                <td>{{.Target}}</td>
+                                <td class="text-muted">{{.IP}}</td>
+                            </tr>
+                        {{else}}
+                            <tr><td colspan="5" class="text-center text-muted">{{t "admin.audit_empty"}}</td></tr>
+                        {{end}}
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
@@ -117,6 +167,24 @@
             })
             .catch(function (err) { alert(err.message || 'Action failed'); btn.disabled = false; });
     });
+    var pf = document.getElementById('admin-password-form');
+    if (pf) pf.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var out = document.getElementById('admin-password-result');
+        fetch('/api/settings/password', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ current_password: pf.current_password.value, new_password: pf.new_password.value, confirm_password: pf.new_password.value })
+        }).then(function (r) {
+            return r.text().then(function (t) {
+                var msg = t;
+                try { msg = JSON.parse(t).error || t; } catch (_) { msg = t.replace(/<[^>]*>/g, '').trim(); }
+                out.className = r.ok ? 'text-success mb-2' : 'text-danger mb-2';
+                out.textContent = r.ok ? '{{t "admin.password_saved"}}' : (msg || r.statusText);
+                if (r.ok) pf.reset();
+            });
+        });
+    });
 })();
 </script>
 {{end}}
@@ -129,8 +197,7 @@
                 <th>ID</th>
                 <th>{{t "admin.username"}}</th>
                 <th>{{t "admin.email"}}</th>
-                <th>{{t "admin.role"}}</th>
-                <th>{{t "admin.status"}}</th>
+                                <th>{{t "admin.status"}}</th>
                 <th>{{t "admin.created"}}</th>
                 <th class="w-1">{{t "admin.actions"}}</th>
             </tr>
@@ -145,22 +212,12 @@
                 </td>
                 <td>{{if .Email}}{{.Email}}{{else}}<span class="text-muted">—</span>{{end}}</td>
                 <td>
-                    {{if .IsAdmin}}<span class="badge bg-purple-lt">admin</span>{{else}}<span class="text-muted">user</span>{{end}}
-                </td>
-                <td>
                     {{if .IsBanned}}<span class="badge bg-red-lt">{{t "admin.banned"}}</span>{{else}}<span class="badge bg-green-lt">{{t "admin.active"}}</span>{{end}}
                 </td>
                 <td>{{.CreatedAt}}</td>
                 <td>
                     {{if not .IsCurrent}}
                     <div class="btn-list flex-nowrap">
-                        <button class="btn btn-sm btn-outline-secondary"
-                                data-admin-action="admin"
-                                data-user-id="{{.ID}}"
-                                data-username="{{.Username}}"
-                                title="{{if .IsAdmin}}{{t "admin.demote"}}{{else}}{{t "admin.promote"}}{{end}}">
-                            {{if .IsAdmin}}<i class="ti ti-arrow-down"></i>{{else}}<i class="ti ti-arrow-up"></i>{{end}}
-                        </button>
                         <button class="btn btn-sm {{if .IsBanned}}btn-outline-success{{else}}btn-outline-warning{{end}}"
                                 data-admin-action="ban"
                                 data-user-id="{{.ID}}"
@@ -181,7 +238,7 @@
                 </td>
             </tr>
             {{else}}
-            <tr><td colspan="7" class="text-center text-muted">{{t "admin.no_users"}}</td></tr>
+            <tr><td colspan="6" class="text-center text-muted">{{t "admin.no_users"}}</td></tr>
             {{end}}
         </tbody>
     </table>

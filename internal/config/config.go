@@ -264,6 +264,12 @@ type SecurityConfig struct {
 	// Default false keeps registration open.
 	DisableRegistration bool `yaml:"disable_registration"`
 
+	// AdminNetworks limits /admin and /api/admin to these IPs/CIDRs (client
+	// address as resolved through trusted_proxies). Empty — from anywhere.
+	// Config only, not a setting in /admin: a wrong value typed in the UI
+	// would lock the administrator out with no way back.
+	AdminNetworks []string `yaml:"admin_networks"`
+
 	// AuthLimit throttles failed logins on every protocol; unset fields use
 	// authlimit.DefaultConfig.
 	AuthLimit authlimit.Config `yaml:"auth_limit"`

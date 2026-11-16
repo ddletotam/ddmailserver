@@ -23,12 +23,30 @@
                     <span class="navbar-toggler-icon"></span>
                 </button>
                 <h1 class="navbar-brand navbar-brand-autodark">
-                    <a href="/dashboard">
+                    <a href="/">
                         <span class="text-white">{{t "app.name"}}</span>
                     </a>
                 </h1>
                 <div class="collapse navbar-collapse" id="sidebar-menu">
                     <ul class="navbar-nav pt-lg-3">
+                        {{if and .User .User.IsAdmin}}
+                        <li class="nav-item">
+                            <a class="nav-link" href="/admin">
+                                <span class="nav-link-icon d-md-none d-lg-inline-block">
+                                    <i class="ti ti-shield-lock"></i>
+                                </span>
+                                <span class="nav-link-title">{{t "nav.admin"}}</span>
+                            </a>
+                        </li>
+                        <li class="nav-item mt-auto">
+                            <a class="nav-link text-muted" href="/logout">
+                                <span class="nav-link-icon d-md-none d-lg-inline-block">
+                                    <i class="ti ti-logout"></i>
+                                </span>
+                                <span class="nav-link-title">{{t "auth.logout"}}</span>
+                            </a>
+                        </li>
+                        {{else}}
                         <li class="nav-item">
                             <a class="nav-link" href="/inbox">
                                 <span class="nav-link-icon d-md-none d-lg-inline-block">
@@ -109,19 +127,7 @@
                                 <span class="nav-link-title">{{t "nav.domains"}}</span>
                             </a>
                         </li>
-                        {{if and .User .User.IsAdmin}}
                         <li class="nav-item mt-auto">
-                            <a class="nav-link" href="/admin">
-                                <span class="nav-link-icon d-md-none d-lg-inline-block">
-                                    <i class="ti ti-shield-lock"></i>
-                                </span>
-                                <span class="nav-link-title">{{t "nav.admin"}}</span>
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                        {{else}}
-                        <li class="nav-item mt-auto">
-                        {{end}}
                             <a class="nav-link" href="/settings">
                                 <span class="nav-link-icon d-md-none d-lg-inline-block">
                                     <i class="ti ti-settings"></i>
@@ -137,6 +143,7 @@
                                 <span class="nav-link-title">{{t "auth.logout"}}</span>
                             </a>
                         </li>
+                        {{end}}
                     </ul>
                 </div>
             </div>
@@ -160,10 +167,12 @@
                                     {{.User.Username}}
                                 </a>
                                 <div class="dropdown-menu dropdown-menu-end">
+                                    {{if not .User.IsAdmin}}
                                     <a class="dropdown-item" href="/settings">
                                         <i class="ti ti-settings me-2"></i>{{t "nav.settings"}}
                                     </a>
                                     <div class="dropdown-divider"></div>
+                                    {{end}}
                                     <a class="dropdown-item" href="/logout">
                                         <i class="ti ti-logout me-2"></i>{{t "auth.logout"}}
                                     </a>

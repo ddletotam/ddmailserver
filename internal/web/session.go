@@ -41,6 +41,11 @@ func (s *Server) WebAuthMiddleware(next http.Handler) http.Handler {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
+		// An administrator account has no mail: every user page leads to /admin.
+		if user.IsAdmin() && !adminWebPath(r.URL.Path) {
+			http.Redirect(w, r, "/admin", http.StatusSeeOther)
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -51,6 +56,10 @@ func (s *Server) APIAuthMiddleware(next http.Handler) http.Handler {
 		user := s.GetUserFromContext(r.Context())
 		if user == nil {
 			respondError(w, http.StatusUnauthorized, "unauthorized - please login")
+			return
+		}
+		if user.IsAdmin() && !adminMayCallAPI(r.URL.Path) {
+			respondError(w, http.StatusForbidden, "administrator accounts have no mail access")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -66,7 +75,7 @@ func (s *Server) WebAdminMiddleware(next http.Handler) http.Handler {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
-		if !user.IsAdmin() {
+		if !user.IsAdmin() || !s.adminNetworkAllowed(r) {
 			http.NotFound(w, r)
 			return
 		}
@@ -82,7 +91,7 @@ func (s *Server) APIAdminMiddleware(next http.Handler) http.Handler {
 			respondError(w, http.StatusUnauthorized, "unauthorized - please login")
 			return
 		}
-		if !user.IsAdmin() {
+		if !user.IsAdmin() || !s.adminNetworkAllowed(r) {
 			respondError(w, http.StatusForbidden, "admin only")
 			return
 		}

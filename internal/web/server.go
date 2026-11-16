@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"time"
 
@@ -75,6 +76,8 @@ type Server struct {
 	// registrationDisabled turns off self-service sign-up (POST /api/register
 	// and the tab on the login page). See SetRegistrationEnabled.
 	registrationDisabled bool
+	// adminNetworks: /admin and /api/admin only from these networks (empty — any).
+	adminNetworks []*net.IPNet
 }
 
 // New creates a new web server
@@ -206,7 +209,6 @@ func (s *Server) setupRoutes() {
 	// more-specific prefix wins in gorilla/mux's first-match-wins traversal.
 	adminAPI := s.router.PathPrefix("/api/admin").Subrouter()
 	adminAPI.Use(s.APIAdminMiddleware)
-	adminAPI.HandleFunc("/users/{id}/admin", s.HandleAdminToggleAdmin).Methods("POST")
 	adminAPI.HandleFunc("/users/{id}/ban", s.HandleAdminToggleBan).Methods("POST")
 	adminAPI.HandleFunc("/users/{id}", s.HandleAdminDeleteUser).Methods("DELETE")
 
@@ -569,6 +571,14 @@ func (s *Server) SetPublicEndpoints(p config.PublicEndpoints) {
 
 // SetRegistrationEnabled turns self-service registration on (the default) or
 // off; with it off only an administrator creates accounts.
+// SetAdminNetworks limits the admin pages and API to these IPs/CIDRs; empty
+// allows any address. Invalid entries are reported and skipped.
+func (s *Server) SetAdminNetworks(entries []string) error {
+	nets, err := parseNetworks(entries)
+	s.adminNetworks = nets
+	return err
+}
+
 func (s *Server) SetRegistrationEnabled(enabled bool) {
 	s.registrationDisabled = !enabled
 }

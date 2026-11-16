@@ -201,7 +201,9 @@ func (s *Server) renderTemplate(w http.ResponseWriter, templateName string, data
 // HandleIndex redirects to dashboard or login
 func (s *Server) HandleIndex(w http.ResponseWriter, r *http.Request) {
 	user := s.GetUserFromContext(r.Context())
-	if user != nil {
+	if user != nil && user.IsAdmin() {
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+	} else if user != nil {
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 	} else {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)

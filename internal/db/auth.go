@@ -35,6 +35,10 @@ func (db *DB) AuthenticateProtocol(username, secret string) (*models.User, error
 	if err != nil {
 		return nil, ErrInvalidCredentials
 	}
+	// Administrator accounts have no mail: no IMAP, SMTP or DAV (migration 061).
+	if user.IsAdmin() {
+		return nil, ErrInvalidCredentials
+	}
 
 	// Application passwords are tried first when the secret has their exact
 	// shape — 16 letters, dashes optional. That check is free, and it spares a

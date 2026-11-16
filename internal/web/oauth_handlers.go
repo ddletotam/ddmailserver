@@ -186,7 +186,7 @@ func (s *Server) RefreshOAuthToken(account *models.Account) error {
 // HandleSaveGoogleOAuthSettings saves Google OAuth configuration (admin only)
 func (s *Server) HandleSaveGoogleOAuthSettings(w http.ResponseWriter, r *http.Request) {
 	user := s.GetUserFromContext(r.Context())
-	if user == nil || !user.IsAdmin() {
+	if user == nil || !user.IsAdmin() || !s.adminNetworkAllowed(r) {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusForbidden)
 		w.Write([]byte(`<div class="error-message">Access denied. Admin only.</div>`))
@@ -257,7 +257,7 @@ func (s *Server) HandleSaveGoogleOAuthSettings(w http.ResponseWriter, r *http.Re
 		RedirectURI:  settings.RedirectURI,
 	})
 
-	log.Printf("Google OAuth settings updated by admin")
+	s.auditAdmin(r, user, "oauth.google.save", "settings", 0, "")
 
 	w.Header().Set("Content-Type", "text/html")
 	w.WriteHeader(http.StatusOK)
@@ -444,7 +444,7 @@ func (s *Server) RefreshMicrosoftOAuthToken(account *models.Account) error {
 // HandleSaveMicrosoftOAuthSettings saves Microsoft OAuth configuration (admin only)
 func (s *Server) HandleSaveMicrosoftOAuthSettings(w http.ResponseWriter, r *http.Request) {
 	user := s.GetUserFromContext(r.Context())
-	if user == nil || !user.IsAdmin() {
+	if user == nil || !user.IsAdmin() || !s.adminNetworkAllowed(r) {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusForbidden)
 		w.Write([]byte(`<div class="error-message">Access denied. Admin only.</div>`))
@@ -515,7 +515,7 @@ func (s *Server) HandleSaveMicrosoftOAuthSettings(w http.ResponseWriter, r *http
 		RedirectURI:  settings.RedirectURI,
 	})
 
-	log.Printf("Microsoft OAuth settings updated by admin")
+	s.auditAdmin(r, user, "oauth.microsoft.save", "settings", 0, "")
 
 	w.Header().Set("Content-Type", "text/html")
 	w.WriteHeader(http.StatusOK)

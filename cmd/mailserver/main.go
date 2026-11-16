@@ -78,6 +78,9 @@ func main() {
 	migrateMode := flag.String("migrate", "auto",
 		"Schema migrations: auto (apply pending, then serve), plan (print what would be applied and exit), "+
 			"only (apply pending and exit), off (do not touch the schema)")
+	createAdmin := flag.String("create-admin", "",
+		"Create an administrator account with this login and exit. The password is read from stdin "+
+			"(one line); an empty line generates one and prints it")
 	flag.Parse()
 
 	switch *migrateMode {
@@ -128,6 +131,12 @@ func main() {
 		log.Fatalf("Startup aborted: %v", err)
 	}
 	if *migrateMode == "plan" || *migrateMode == "only" {
+		return
+	}
+	if *createAdmin != "" {
+		if err := createAdminAccount(database, *createAdmin, os.Stdin, os.Stdout); err != nil {
+			log.Fatalf("create-admin: %v", err)
+		}
 		return
 	}
 
@@ -418,6 +427,9 @@ func main() {
 	// 993/465, so a profile built from the listen config would be unusable.
 	webSrv.SetPublicEndpoints(cfg.PublicWithDefaults())
 	webSrv.SetRegistrationEnabled(!cfg.Security.DisableRegistration)
+	if err := webSrv.SetAdminNetworks(cfg.Security.AdminNetworks); err != nil {
+		log.Printf("WARNING: %v", err)
+	}
 	// Queueing a message is not sending it: without this hook the outbox row
 	// waits for the next scheduler cycle, delaying every send by up to one
 	// interval.

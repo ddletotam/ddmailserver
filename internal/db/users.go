@@ -231,15 +231,6 @@ func (db *DB) ListUsers() ([]*models.User, error) {
 	return users, nil
 }
 
-// SetUserAdmin flips the admin flag on a user.
-func (db *DB) SetUserAdmin(id int64, isAdmin bool) error {
-	_, err := db.Exec(`UPDATE users SET is_admin = $1, updated_at = $2 WHERE id = $3`, isAdmin, timeutil.Now(), id)
-	if err != nil {
-		return fmt.Errorf("failed to update is_admin: %w", err)
-	}
-	return nil
-}
-
 // SetUserBanned flips the banned flag on a user. A banned user can't log in
 // but their data is preserved (use DeleteUser to wipe).
 func (db *DB) SetUserBanned(id int64, isBanned bool) error {

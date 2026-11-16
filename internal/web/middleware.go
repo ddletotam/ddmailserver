@@ -144,6 +144,12 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Administrator accounts have no mail (migration 061).
+		if u, err := s.database.GetUserByID(claims.UserID); err != nil || u.IsAdmin() {
+			respondError(w, http.StatusUnauthorized, "invalid token")
+			return
+		}
+
 		// Add user info to context
 		ctx := context.WithValue(r.Context(), userIDKey, claims.UserID)
 		ctx = context.WithValue(ctx, usernameKey, claims.Username)

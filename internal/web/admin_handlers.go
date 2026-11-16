@@ -16,7 +16,6 @@ type adminUserRow struct {
 	ID        int64
 	Username  string
 	Email     string
-	IsAdmin   bool
 	IsBanned  bool
 	IsCurrent bool // self-modification of admin/ban/delete is disabled in UI
 	CreatedAt string
@@ -25,11 +24,13 @@ type adminUserRow struct {
 func toAdminUserRows(users []*models.User, currentID int64) []adminUserRow {
 	rows := make([]adminUserRow, 0, len(users))
 	for _, u := range users {
+		if u.IsAdmin() {
+			continue // administrator accounts are not users (migration 061)
+		}
 		rows = append(rows, adminUserRow{
 			ID:        u.ID,
 			Username:  u.Username,
 			Email:     u.Email,
-			IsAdmin:   u.IsAdmin(),
 			IsBanned:  u.IsBanned(),
 			IsCurrent: u.ID == currentID,
 			CreatedAt: timeutil.FromMs(u.CreatedAt).Format("2006-01-02"),
@@ -72,6 +73,7 @@ func (s *Server) HandleAdminPage(w http.ResponseWriter, r *http.Request) {
 		GoogleOAuthEnabled     bool
 		MicrosoftOAuthEnabled  bool
 		Users                  []adminUserRow
+		Audit                  []adminAuditRow
 	}{
 		PageData: PageData{
 			Title: "Server Settings",
@@ -84,6 +86,7 @@ func (s *Server) HandleAdminPage(w http.ResponseWriter, r *http.Request) {
 		GoogleOAuthEnabled:     s.googleOAuth != nil,
 		MicrosoftOAuthEnabled:  s.microsoftOAuth != nil,
 		Users:                  toAdminUserRows(users, user.ID),
+		Audit:                  s.adminAuditRows(),
 	}
 
 	s.renderTemplate(w, "admin.html", data)
@@ -125,42 +128,7 @@ func (s *Server) adminParseUserID(w http.ResponseWriter, r *http.Request, allowS
 	return id, true
 }
 
-// HandleAdminToggleAdmin flips is_admin on a target user. Refuses to demote the
-// last admin so the install never ends up with zero admins.
-func (s *Server) HandleAdminToggleAdmin(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.adminParseUserID(w, r, false)
-	if !ok {
-		return
-	}
-	target, err := s.database.GetUserByID(id)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "user not found")
-		return
-	}
-	newVal := !target.IsAdmin()
-	if !newVal {
-		// Demoting — make sure another admin remains.
-		count, err := s.database.CountAdmins()
-		if err != nil {
-			respondError(w, http.StatusInternalServerError, "admin count failed")
-			return
-		}
-		if count <= 1 {
-			respondError(w, http.StatusBadRequest, "cannot demote the last admin")
-			return
-		}
-	}
-	if err := s.database.SetUserAdmin(id, newVal); err != nil {
-		log.Printf("SetUserAdmin failed: %v", err)
-		respondError(w, http.StatusInternalServerError, "update failed")
-		return
-	}
-	log.Printf("admin: user %d is_admin=%v (by user %d)", id, newVal, s.GetUserFromContext(r.Context()).ID)
-	respondJSON(w, http.StatusOK, map[string]bool{"is_admin": newVal})
-}
-
-// HandleAdminToggleBan flips is_banned on a target user. Refuses to ban the
-// last admin (would lock the install out).
+// HandleAdminToggleBan flips is_banned on a target user.
 func (s *Server) HandleAdminToggleBan(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.adminParseUserID(w, r, false)
 	if !ok {
@@ -171,29 +139,25 @@ func (s *Server) HandleAdminToggleBan(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "user not found")
 		return
 	}
-	newVal := !target.IsBanned()
-	if newVal && target.IsAdmin() {
-		count, err := s.database.CountAdmins()
-		if err != nil {
-			respondError(w, http.StatusInternalServerError, "admin count failed")
-			return
-		}
-		if count <= 1 {
-			respondError(w, http.StatusBadRequest, "cannot ban the last admin")
-			return
-		}
+	if target.IsAdmin() {
+		respondError(w, http.StatusBadRequest, "administrator accounts are not managed here")
+		return
 	}
+	newVal := !target.IsBanned()
 	if err := s.database.SetUserBanned(id, newVal); err != nil {
 		log.Printf("SetUserBanned failed: %v", err)
 		respondError(w, http.StatusInternalServerError, "update failed")
 		return
 	}
-	log.Printf("admin: user %d is_banned=%v (by user %d)", id, newVal, s.GetUserFromContext(r.Context()).ID)
+	action := "user.ban"
+	if !newVal {
+		action = "user.unban"
+	}
+	s.auditAdmin(r, s.GetUserFromContext(r.Context()), action, "user", id, target.Username)
 	respondJSON(w, http.StatusOK, map[string]bool{"is_banned": newVal})
 }
 
-// HandleAdminDeleteUser removes a user (CASCADE wipes their data). Refuses to
-// delete the last admin or self.
+// HandleAdminDeleteUser removes a user (CASCADE wipes their data).
 func (s *Server) HandleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.adminParseUserID(w, r, false)
 	if !ok {
@@ -205,21 +169,45 @@ func (s *Server) HandleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if target.IsAdmin() {
-		count, err := s.database.CountAdmins()
-		if err != nil {
-			respondError(w, http.StatusInternalServerError, "admin count failed")
-			return
-		}
-		if count <= 1 {
-			respondError(w, http.StatusBadRequest, "cannot delete the last admin")
-			return
-		}
+		respondError(w, http.StatusBadRequest, "administrator accounts are not managed here")
+		return
 	}
 	if err := s.database.DeleteUser(id); err != nil {
 		log.Printf("DeleteUser failed: %v", err)
 		respondError(w, http.StatusInternalServerError, "delete failed")
 		return
 	}
-	log.Printf("admin: user %d deleted (by user %d)", id, s.GetUserFromContext(r.Context()).ID)
+	s.auditAdmin(r, s.GetUserFromContext(r.Context()), "user.delete", "user", id, target.Username)
 	respondJSON(w, http.StatusOK, map[string]bool{"deleted": true})
+}
+
+// adminAuditRow is one line of the audit table on the admin page.
+type adminAuditRow struct {
+	When, Who, Action, Target, IP string
+}
+
+func (s *Server) adminAuditRows() []adminAuditRow {
+	actions, err := s.database.ListAdminActions(100)
+	if err != nil {
+		log.Printf("admin audit list: %v", err)
+		return nil
+	}
+	rows := make([]adminAuditRow, 0, len(actions))
+	for _, a := range actions {
+		target := a.TargetType
+		if a.TargetID != 0 {
+			target += " #" + strconv.FormatInt(a.TargetID, 10)
+		}
+		if a.Details != "" {
+			target += " " + a.Details
+		}
+		rows = append(rows, adminAuditRow{
+			When:   timeutil.FromMs(a.CreatedAt).Format("2006-01-02 15:04"),
+			Who:    a.AdminName,
+			Action: a.Action,
+			Target: target,
+			IP:     a.IP,
+		})
+	}
+	return rows
 }
