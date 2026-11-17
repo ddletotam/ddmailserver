@@ -2,6 +2,13 @@
 <resources>
     <string name="app_name">DDMail</string>
 
+    <!-- Политика конфиденциальности (AppGallery 7.5) -->
+    <string name="privacy_title">Политика конфиденциальности</string>
+    <string name="privacy_text">Прежде чем начать, ознакомьтесь с политикой конфиденциальности DDMail: какие данные обрабатываются, зачем и как их удалить. Нажимая «Принимаю», вы соглашаетесь с ней.</string>
+    <string name="privacy_link">Политика конфиденциальности</string>
+    <string name="privacy_accept">Принимаю</string>
+    <string name="privacy_decline">Отказаться</string>
+
     <!-- Подключение (контракт §3) -->
     <string name="connect_title">Подключение</string>
     <string name="connect_email_hint">Введите адрес почты — сервер найдём сами.</string>

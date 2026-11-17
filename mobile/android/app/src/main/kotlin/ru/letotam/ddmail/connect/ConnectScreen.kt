@@ -17,6 +17,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import android.app.Activity
+import android.content.Context
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -30,11 +33,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -86,8 +93,52 @@ fun ConnectScreen(vm: ConnectViewModel, modifier: Modifier = Modifier, onCancel:
                 Text(it.text(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
             }
             Buttons(s, vm, onCancel)
+            PrivacyLink()
         }
     }
+    PrivacyFirstRun()
+}
+
+private const val PRIVACY_URL = "https://mail.letotam.ru/privacy"
+
+/** Ссылка на политику на экране входа (AppGallery, правило 7.5: политика на странице входа). */
+@Composable
+private fun PrivacyLink() {
+    val uri = LocalUriHandler.current
+    TextButton(onClick = { runCatching { uri.openUri(PRIVACY_URL) } }) {
+        Text(stringResource(R.string.privacy_link), style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+/**
+ * Первый запуск: окно с политикой конфиденциальности до начала работы
+ * (AppGallery, правило 7.5, 17.11.2026). Согласие запоминается; «Отказаться» закрывает приложение.
+ */
+@Composable
+private fun PrivacyFirstRun() {
+    val ctx = LocalContext.current
+    val prefs = remember { ctx.getSharedPreferences("privacy", Context.MODE_PRIVATE) }
+    var accepted by remember { mutableStateOf(prefs.getBoolean("accepted", false)) }
+    if (accepted) return
+    val uri = LocalUriHandler.current
+    AlertDialog(
+        onDismissRequest = {},
+        title = { Text(stringResource(R.string.privacy_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(stringResource(R.string.privacy_text), style = MaterialTheme.typography.bodyMedium)
+                TextButton(onClick = { runCatching { uri.openUri(PRIVACY_URL) } }) { Text(stringResource(R.string.privacy_link)) }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { prefs.edit().putBoolean("accepted", true).apply(); accepted = true }) {
+                Text(stringResource(R.string.privacy_accept))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = { (ctx as? Activity)?.finish() }) { Text(stringResource(R.string.privacy_decline)) }
+        },
+    )
 }
 
 @Composable
