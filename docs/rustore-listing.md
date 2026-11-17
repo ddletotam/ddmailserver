@@ -190,3 +190,13 @@ Keystore и уходят только своим серверам, разраб�
 - [RuStore: отправка push (ID проекта, сервисный токен)](https://rustore.ru/help/sdk/general-push-notifications/send-push-notifications/api)
 - [RuStore: проверка подписи приложений](https://www.rustore.ru/help/guides/check-sign)
 - [RuStore блог: частые ошибки при модерации](https://www.rustore.ru/developer/blog/chastye-oshibki-pri-podache-prilozheniya-na-moderaciyu-v-rustore)
+
+## Публикация через API (с 17.11.2026)
+
+Ключ API RuStore — `~/.config/ddmail-android/rustore-api.env` (`RUSTORE_KEY_ID` — число,
+`RUSTORE_PRIVATE_KEY` — base64 PKCS#8; в git нет). `mobile/android/scripts/rustore.py` — токен
+(подпись SHA512withRSA от keyId+timestamp) и список приложений; версии —
+`GET /public/v1/application/<pkg>/version`.
+
+Состояние 17.11.2026: lunlun 0.1.13 на модерации с 14.11 (публикация MANUAL — после одобрения
+выпустить); DDMail — пустой черновик, ждёт окончания модерации lunlun и проекта RuStore Push.
