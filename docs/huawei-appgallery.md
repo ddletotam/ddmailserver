@@ -189,3 +189,16 @@ Push несёт только сигнал «есть новые письма», 
 - [HUAWEI Developers: Identity Verification](https://developer.huawei.com/consumer/en/doc/help/identityverfication-0000001053292680)
 - [AppGallery Connect: Getting Started with Android](https://developer.huawei.com/consumer/en/doc/AppGallery-connect-Guides/agc-get-started-android-0000001058210705)
 - [Push Kit: Configuring App Information in AppGallery Connect](https://developer.huawei.com/consumer/en/doc/HMS-Plugin-Guides-V1/config-agc-0000001050178043-V1)
+
+## Публикация через API (с 17.11.2026)
+
+Ключ Connect API — **командный** (Project = N/A; проектный даёт 403):
+`~/.config/ddmail-android/agc-apiclient.json` (в git нет). Скрипты — `mobile/android/scripts/`:
+- `agc.py` — токен и запросы; `python3 agc.py` печатает карточку (версия, `releaseState`, `auditInfo`).
+- `agc_upload.py 0.0.NN` — загрузить `app-hms-release.apk` в черновик версии.
+- Отправка: `POST /publish/v2/app-submit?appId=…&remark=…` — `remark` 10–300 символов, туда
+  тестовая учётка (пароль из `~/.config/ddmail-ios/review-account.env`) и «копируйте, не
+  набирайте»: 17.11.2026 проверяющий ввёл `letotam.rn` и отклонил «сервер не найден».
+
+Отклонение 17.11.2026: (1) политика без китайского — Китай исключён из стран; (2) нет
+политики при первом запуске и на входе — окно согласия и ссылка в 0.0.44.
