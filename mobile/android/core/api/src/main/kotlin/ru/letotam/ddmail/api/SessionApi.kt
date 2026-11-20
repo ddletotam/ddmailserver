@@ -294,6 +294,18 @@ class SessionApi(
         return DdmailApi.json.decodeFromString(DialogFoldersResponse.serializer(), text)
     }
 
+    /** Документ групп айдентик (десктоп §1в): `409` — его поменяла другая станция, в ответе текущий. */
+    suspend fun saveIdentityGroups(baseVersion: Long, doc: kotlinx.serialization.json.JsonElement): DialogFoldersResponse {
+        val body = JsonObject(mapOf("base_version" to JsonPrimitive(baseVersion), "doc" to doc)).toString()
+        val text = authed { token ->
+            Request.Builder().url("$baseUrl/api/desktop/v1/identity-groups")
+                .header("Authorization", "Bearer $token")
+                .put(body.toRequestBody(JSON))
+                .build()
+        }
+        return DdmailApi.json.decodeFromString(DialogFoldersResponse.serializer(), text)
+    }
+
     /** Аватар адреса (`/avatars?email=`): байты картинки или `null`, если нет. */
     suspend fun avatar(email: String): Binary? = try {
         // 204 — аватара нет: пустое тело.

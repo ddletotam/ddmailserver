@@ -5,6 +5,7 @@ import ru.letotam.ddmail.api.MessageBody
 import ru.letotam.ddmail.api.OutgoingAttachment
 import ru.letotam.ddmail.api.SendRequest
 import ru.letotam.ddmail.sync.Conversation
+import ru.letotam.ddmail.sync.IdentityGroups
 
 /**
  * Файл, приложенный к письму в композере. [cid] — inline-картинка тела
@@ -65,14 +66,17 @@ data class Draft(
 
 /** Ветка отправки (§1 десктопа), в порядке проверки. */
 sealed interface Branch {
-    /** Пересылка: адресат — только явное «Кому». */
-    data class Forward(val original: MessageBody, val accountKey: String = "") : Branch
+    /**
+     * Пересылка: адресат — только явное «Кому». [receivedBy] — адрес, на
+     * который пришла беседа пересылаемого письма (контекст строгих групп).
+     */
+    data class Forward(val original: MessageBody, val accountKey: String = "", val receivedBy: String = "") : Branch
 
     /** Новое письмо (из списка). */
     data object New : Branch
 
     /** Явный ответ на конкретное письмо; в группе — всем, кроме своих. */
-    data class Reply(val original: MessageBody, val isGroup: Boolean) : Branch
+    data class Reply(val original: MessageBody, val isGroup: Boolean, val receivedBy: String = "") : Branch
 
     /** Неявный ответ в открытой беседе — её собеседникам. */
     data class Implicit(val conversation: Conversation, val lastIncoming: MessageBody?, val last: MessageBody?) : Branch
@@ -107,16 +111,38 @@ private fun escapeHtml(s: String) = s
 fun textToHtml(text: String): String = "<div>" + escapeHtml(text).replace("\n", "<br>") + "</div>"
 
 /**
- * «От кого»: явный выбор; иначе адрес, на который пришла беседа (если он
- * свой); иначе адрес по умолчанию.
+ * Контекст отправки для групп айдентик (десктоп `send_context`, §1в):
+ * `null` — новое письмо; иначе адрес, на который пришла беседа ответа или
+ * пересылки (пусто — «не мой адрес»).
  */
-fun pickFrom(draft: Draft, identities: List<Identity>, receivedBy: String?): Identity? {
+fun contextOf(branch: Branch): String? = when (branch) {
+    Branch.New -> null
+    is Branch.Implicit -> branch.conversation.receivedBy.lowercase()
+    is Branch.Reply -> branch.receivedBy.lowercase()
+    is Branch.Forward -> branch.receivedBy.lowercase()
+}
+
+/**
+ * «От кого» (десктоп §1в): явный выбор; иначе отправитель по документу групп —
+ * у ответа и пересылки отправитель группы адреса, на который пришло письмо
+ * (не мой адрес — группы по умолчанию ★, строгие пропускаются), у нового
+ * письма — группы по умолчанию. Групп ещё нет (документ не пришёл) — адрес
+ * беседы, если он свой, иначе адрес по умолчанию учётки. `null` — выбрать
+ * некого: ответ ждёт ручного выбора. Отправитель группы без живой учётки —
+ * всё равно он: отправка скажет «Не через что отправить», как десктоп.
+ */
+fun pickFrom(draft: Draft, identities: List<Identity>, groups: IdentityGroups, context: String?): Identity? {
     fun find(a: String) = identities.firstOrNull { it.email.equals(a, ignoreCase = true) }
-    return draft.from.takeIf { it.isNotBlank() }?.let(::find)
-        ?: receivedBy?.let(::find)
+    draft.from.takeIf { it.isNotBlank() }?.let { f -> return find(f) ?: Identity(email = f) }
+    if (!groups.isEmpty) return groups.autoSender(context)?.let { find(it) ?: Identity(email = it) }
+    return context?.let(::find)
         ?: identities.firstOrNull { it.isDefault }
         ?: identities.firstOrNull()
 }
+
+/** Адреса для выпадашки «От кого»: предлагаемые в этом контексте и выбранный (десктоп `offered`). */
+fun fromChoices(identities: List<Identity>, groups: IdentityGroups, context: String?, current: String?): List<Identity> =
+    identities.filter { groups.offered(it.email, context) || it.email.equals(current, ignoreCase = true) }
 
 fun fromHeader(id: Identity): String =
     if (id.name.isBlank() || id.name.equals(id.email, ignoreCase = true)) id.email
@@ -139,14 +165,26 @@ fun build(
     forwardHtml: String = "",
     forwardText: String = "",
     extraAttachments: List<PendingAttachment> = emptyList(),
+    groups: IdentityGroups = IdentityGroups.EMPTY,
+    /** `false` — только адресаты и тема (подсказки): отправитель не проверяется. */
+    checkSender: Boolean = true,
 ): Built {
     if (!draft.canSend && branch !is Branch.Forward) return Built.Refused("Нечего отправлять.")
-    val own = identities.map { it.email.lowercase() }.toSet()
+    val own = identities.map { it.email.lowercase() }.toSet() + groups.groups.flatMap { g -> g.addresses.map { it.email } }
     val toOverride = splitAddresses(draft.to)
     val cc = splitAddresses(draft.cc)
 
-    val receivedBy = (branch as? Branch.Implicit)?.conversation?.receivedBy
-    val from = pickFrom(draft, identities, receivedBy) ?: return Built.Refused("Нет ни одного своего адреса для отправки.")
+    val context = contextOf(branch)
+    val from = pickFrom(draft, identities, groups, context)
+        ?: (if (!checkSender) Identity(email = "probe@invalid.example") else null)
+        ?: return Built.Refused(
+        if (groups.isEmpty) "Нет ни одного своего адреса для отправки."
+        else "Ни один адрес не подходит для ответа на это письмо автоматически — выберите его в «От кого».",
+    )
+    // Строгая группа (§1в) отвечает только на письма своих адресов.
+    if (checkSender && !groups.allowed(from.email, context)) {
+        return Built.Refused("Адрес ${from.email} отвечает только на письма, пришедшие на адреса своей группы. Выберите другой адрес в «От кого».")
+    }
 
     val (to, subject, irt, refs) = when (branch) {
         is Branch.Forward -> {
@@ -217,10 +255,10 @@ data class AutoHints(val to: String, val subject: String)
  * что и отправка, — подсказка не может разойтись с письмом. У нового письма
  * адресат — [newTo], автотемы нет.
  */
-fun autoHints(branch: Branch, identities: List<Identity>, from: String = "", newTo: String = ""): AutoHints {
+fun autoHints(branch: Branch, identities: List<Identity>, from: String = "", newTo: String = "", groups: IdentityGroups = IdentityGroups.EMPTY): AutoHints {
     if (branch is Branch.New) return AutoHints(newTo, "")
     val probe = Draft(text = "x", from = from)
-    return when (val b = build(branch, probe, identities)) {
+    return when (val b = build(branch, probe, identities, groups = groups, checkSender = false)) {
         is Built.Ok -> AutoHints(if (branch is Branch.Forward) "" else b.request.to.joinToString(", "), b.request.subject)
         // Пересылка без «Кому» не собирается — тема всё равно известна.
         is Built.Refused -> if (branch is Branch.Forward) AutoHints("", "Fwd: ${branch.original.subject}") else AutoHints("", "")

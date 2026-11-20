@@ -107,6 +107,8 @@ fun SettingsScreen(
     addressBooks: (@Composable () -> Unit)? = null,
     /** Раздел «Папки» (десктоп §5г): «Показывать папки», список, правка, порядок. */
     folders: (@Composable () -> Unit)? = null,
+    /** «Отправитель по умолчанию» — группа айдентик нового письма (★ десктопа, §1в). */
+    sender: (@Composable () -> Unit)? = null,
     onClose: () -> Unit,
 ) {
     var removeAsk by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<MailSource?>(null) }
@@ -170,6 +172,11 @@ fun SettingsScreen(
                         Text("Добавить учётку")
                     }
                     HorizontalDivider()
+                    sender?.let {
+                        Section("Отправитель по умолчанию")
+                        it()
+                        HorizontalDivider()
+                    }
                     Section("Загрузка писем заранее")
                     PrefetchChoice(prefetch) { v -> scope.launch { settings.setPrefetch(v) } }
                     HorizontalDivider()
@@ -344,4 +351,47 @@ private fun ExternalContentDialog(settings: AppSettings, onClose: () -> Unit) {
 @Composable
 private fun Section(title: String) {
     Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+}
+
+/**
+ * «Отправитель по умолчанию» (десктоп §1в, ★ во вкладке «Айдентики»): с
+ * какой группы адресов уходит новое письмо и ответ на письмо, пришедшее не
+ * на мой адрес. Строка — имя группы и её адрес-отправитель. Выбор пишется в
+ * `default_group` общего документа групп: с ddmail — на сервер (виден
+ * десктопу и другим телефонам), без него — на этом телефоне.
+ */
+@Composable
+fun DefaultSenderSettings(vm: ru.letotam.ddmail.mail.MailViewModel) {
+    val doc by vm.identityGroups.collectAsState()
+    val error by vm.senderError.collectAsState()
+    val sources by vm.sources.collectAsState()
+    val shared = sources.any { it is ru.letotam.ddmail.sync.SyncEngine }
+    val groups = doc.groups.filter { it.sender.isNotEmpty() }
+    val current = doc.defaultGroup?.id
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        if (groups.isEmpty()) {
+            Text("Своих адресов пока нет — они появятся после синхронизации учёток.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        groups.forEach { g ->
+            Row(
+                Modifier.fillMaxWidth().clickable { if (g.id != current) vm.setDefaultSender(g.sender) }.padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                androidx.compose.material3.RadioButton(selected = g.id == current, onClick = { if (g.id != current) vm.setDefaultSender(g.sender) })
+                Column(Modifier.weight(1f)) {
+                    Text(g.name.ifBlank { g.sender }, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                    if (g.name.isNotBlank()) {
+                        Text(g.sender, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        }
+        error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        Text(
+            "Новое письмо и ответ на письмо, пришедшее не на ваш адрес, уходят с этого адреса. " +
+                (if (shared) "Настройка общая с десктопом и другими устройствами." else "Настройка хранится на этом телефоне."),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }

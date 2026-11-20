@@ -9,6 +9,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -84,9 +86,46 @@ class MailHub(
             ?: dao.observeMeta(K_LOCAL_FOLDERS).map { s -> parseDoc(s).withSpam() }
     }
 
-    val identityColors: Flow<IdentityColors> = _sources.flatMapLatest { list ->
-        list.filterIsInstance<SyncEngine>().firstOrNull()?.identityColors ?: flowOf(IdentityColors())
+    /**
+     * Документ групп айдентик (десктоп §1в): сервера ddmail, если такая
+     * учётка есть; иначе локальный (как `identities.json` десктопа без
+     * сервера). Адреса учёток, которых в нём нет, — своими группами
+     * (`merge_sources`): так они получают цвет и место в «Отправителе по
+     * умолчанию». Локальный документ с новыми адресами сразу записывается —
+     * id групп должны пережить смену набора учёток; серверному они уходят с
+     * первой правкой ([setDefaultSender]).
+     */
+    val identityGroups: Flow<IdentityGroups> = _sources.flatMapLatest { list ->
+        val engine = list.filterIsInstance<SyncEngine>().firstOrNull()
+        val base = engine?.identityGroups ?: dao.observeMeta(K_LOCAL_IDENT_GROUPS).map(::parseGroups)
+        combine(base, identities) { doc, ids ->
+            val merged = doc.merged(groupSources(ids))
+            if (engine == null && merged !== doc) dao.setMeta(K_LOCAL_IDENT_GROUPS, merged.json.toString())
+            merged
+        }.distinctUntilChanged()
     }
+
+    /** Цвета строк — по тому же документу. */
+    val identityColors: Flow<IdentityColors> = identityGroups.map { it.colors() }
+
+    /**
+     * «Отправитель по умолчанию»: группа адреса [sender] — `default_group`.
+     * С ddmail — запись на сервер ([SyncEngine.setDefaultSender]), без него —
+     * в локальный документ.
+     */
+    suspend fun setDefaultSender(sender: String) {
+        val sources = groupSources(identities.first())
+        ddmail?.let { return it.setDefaultSender(sender, sources) }
+        val doc = parseGroups(dao.meta(K_LOCAL_IDENT_GROUPS)).merged(sources)
+        val group = doc.groupOf(sender) ?: throw IdentityGroupGone()
+        dao.setMeta(K_LOCAL_IDENT_GROUPS, doc.withDefault(group.id).json.toString())
+    }
+
+    private fun groupSources(ids: List<Pair<String, Identity>>): List<IdentityGroups.Source> =
+        ids.map { IdentityGroups.Source(it.second.email, it.second.name.takeIf { n -> !n.equals(it.second.email, ignoreCase = true) }.orEmpty()) }
+
+    private fun parseGroups(s: String?): IdentityGroups =
+        s?.let { runCatching { IdentityGroups.parse(Json.parseToJsonElement(it)) }.getOrNull() } ?: IdentityGroups.EMPTY
 
     fun setStatus(accountKey: String, s: AccountStatus) = _statuses.update { it + (accountKey to s) }
 
@@ -276,6 +315,7 @@ class MailHub(
 
     companion object {
         const val K_LOCAL_FOLDERS = "local:dialog_folders"
+        const val K_LOCAL_IDENT_GROUPS = "local:identity_groups"
 
         fun bareAddr(raw: String): String {
             val lt = raw.lastIndexOf('<')

@@ -161,6 +161,7 @@ fun AppShell(
                         calendars = calVm?.let { vm -> { CalendarList(vm) } },
                         addressBooks = contactsVm?.let { vm -> { AddressBookList(vm) } },
                         folders = { ru.letotam.ddmail.mail.FolderSettings(mailVm) },
+                        sender = { ru.letotam.ddmail.settings.DefaultSenderSettings(mailVm) },
                     ) { section = Section.Mail }
                 }
             }

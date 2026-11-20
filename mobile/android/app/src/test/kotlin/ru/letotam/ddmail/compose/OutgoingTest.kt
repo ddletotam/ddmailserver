@@ -106,4 +106,60 @@ class OutgoingTest {
         // Пересылка: «Кому» не выводится, тема — «Fwd: …».
         assertEquals(AutoHints("", "Fwd: Тема"), autoHints(Branch.Forward(body("Тема", "bob@x.ru")), ids))
     }
+
+    /** Документ групп (десктоп §1в): work@ и boss@ — одна строгая группа «Работа», отправитель boss@; me@ — по умолчанию. */
+    private val groups = ru.letotam.ddmail.sync.IdentityGroups.parse(
+        kotlinx.serialization.json.Json.parseToJsonElement(
+            """{"default_group":"g2","groups":[
+              {"id":"g1","name":"Работа","sender":"boss@b.ru","strict":true,"addresses":[{"email":"work@b.ru"},{"email":"boss@b.ru"}]},
+              {"id":"g2","name":"Я","sender":"me@a.ru","addresses":[{"email":"me@a.ru"}]}]}""",
+        ),
+    )
+    private val idsWithBoss = ids + Identity("boss@b.ru", "Шеф")
+
+    @Test
+    fun replyGoesFromGroupSenderOfReceivingAddress() {
+        val last = body("Вопрос", "bob@x.ru")
+        val r = build(Branch.Implicit(conv(), last, last), Draft(text = "ок"), idsWithBoss, groups = groups) as Built.Ok
+        assertEquals("\"Шеф\" <boss@b.ru>", r.request.from)
+        val e = build(Branch.Reply(last, false, receivedBy = "work@b.ru"), Draft(text = "ок"), idsWithBoss, groups = groups) as Built.Ok
+        assertEquals("\"Шеф\" <boss@b.ru>", e.request.from)
+    }
+
+    @Test
+    fun newMailAndForeignMailGoFromDefaultGroup() {
+        val n = build(Branch.New, Draft(text = "x", to = "z@z.ru"), idsWithBoss, groups = groups) as Built.Ok
+        assertEquals("\"Я\" <me@a.ru>", n.request.from)
+        val last = body("Рассылка", "list@x.ru")
+        val r = build(Branch.Implicit(conv(receivedBy = "list@x.ru"), last, last), Draft(text = "x"), idsWithBoss, groups = groups) as Built.Ok
+        assertEquals("\"Я\" <me@a.ru>", r.request.from)
+        // Сменили группу по умолчанию — новое письмо уходит с её отправителя.
+        val w = build(Branch.New, Draft(text = "x", to = "z@z.ru"), idsWithBoss, groups = groups.withDefault("g1")) as Built.Ok
+        assertEquals("\"Шеф\" <boss@b.ru>", w.request.from)
+    }
+
+    @Test
+    fun strictGroupRefusesForeignContext() {
+        val last = body("Личное", "bob@x.ru")
+        val r = build(Branch.Implicit(conv(receivedBy = "me@a.ru"), last, last), Draft(text = "x", from = "work@b.ru"), idsWithBoss, groups = groups)
+        assertTrue(r is Built.Refused)
+        // Строгая группа по умолчанию и чужой адрес — первая нестрогая.
+        val strictDefault = groups.withDefault("g1")
+        val f = build(Branch.Implicit(conv(receivedBy = "list@x.ru"), last, last), Draft(text = "x"), idsWithBoss, groups = strictDefault) as Built.Ok
+        assertEquals("\"Я\" <me@a.ru>", f.request.from)
+        // В выпадашке строгой группы в чужом контексте нет.
+        assertEquals(listOf("me@a.ru"), fromChoices(idsWithBoss, groups, "me@a.ru", null).map { it.email })
+    }
+
+    /** «Отправить без темы?»: у нового письма автотемы нет, у ответа на письмо без темы — тоже. */
+    @Test
+    fun subjectStaysEmptyWithoutBaseSubject() {
+        val n = build(Branch.New, Draft(text = "x", to = "z@z.ru"), ids) as Built.Ok
+        assertEquals("", n.request.subject)
+        val last = body("", "bob@x.ru")
+        val r = build(Branch.Implicit(conv().copy(lastSubject = ""), last, last), Draft(text = "x"), ids) as Built.Ok
+        assertEquals("", r.request.subject)
+        val ok = build(Branch.Implicit(conv(), body("Вопрос", "bob@x.ru"), null), Draft(text = "x"), ids) as Built.Ok
+        assertEquals("Re: Вопрос", ok.request.subject)
+    }
 }

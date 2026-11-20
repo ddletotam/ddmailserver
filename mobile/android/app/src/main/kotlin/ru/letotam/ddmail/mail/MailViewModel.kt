@@ -127,6 +127,26 @@ class MailViewModel(
     val identityColors: StateFlow<ru.letotam.ddmail.sync.IdentityColors> =
         hub.identityColors.stateIn(viewModelScope, SharingStarted.Eagerly, ru.letotam.ddmail.sync.IdentityColors())
 
+    /** Документ групп айдентик — для «Настройки → Отправитель по умолчанию». */
+    val identityGroups: StateFlow<ru.letotam.ddmail.sync.IdentityGroups> get() = compose.groups
+
+    /** Почему не сохранился «Отправитель по умолчанию»; `null` — всё хорошо. */
+    val senderError = MutableStateFlow<String?>(null)
+
+    /** «Отправитель по умолчанию» (★ десктопа, §1в): группа адреса [sender] — группа нового письма. */
+    fun setDefaultSender(sender: String) {
+        viewModelScope.launch {
+            senderError.value = null
+            runCatching { hub.setDefaultSender(sender) }.onFailure { e ->
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                senderError.value = when (e) {
+                    is ru.letotam.ddmail.sync.IdentityGroupsBusy, is ru.letotam.ddmail.sync.IdentityGroupGone -> e.message
+                    else -> "Не сохранено: ${e.errorText()}"
+                }
+            }
+        }
+    }
+
     /** Письмо, на котором открыто меню пузыря. */
     val bubbleMenu = MutableStateFlow<BubbleMenuAt?>(null)
 

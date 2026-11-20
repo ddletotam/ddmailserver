@@ -25,6 +25,7 @@ import ru.letotam.ddmail.conversation.ConversationController
 import ru.letotam.ddmail.conversation.deliveryJson
 import ru.letotam.ddmail.sync.SmtpFailed
 import ru.letotam.ddmail.sync.Conversation
+import ru.letotam.ddmail.sync.IdentityGroups
 import ru.letotam.ddmail.sync.MailHub
 import ru.letotam.ddmail.sync.errorText
 import ru.letotam.ddmail.sync.isMailError
@@ -47,6 +48,10 @@ data class ComposerUi(
      * пока беседа не пришла с сервера и не открылась вместо заготовки.
      */
     val pendingNew: List<PendingNew> = emptyList(),
+    /** Вопрос «Отправить без темы?» на экране (десктоп §1). */
+    val askNoSubject: Boolean = false,
+    /** Фокус в поле «Тема» — после «Отмены» в этом вопросе; снимается, когда поле его взяло. */
+    val focusSubject: Boolean = false,
 )
 
 /**
@@ -85,6 +90,50 @@ class ComposeController(
     val identities: StateFlow<List<Identity>> = hub.identities
         .map { l -> l.map { it.second }.distinctBy { it.email.lowercase() } }
         .stateIn(scope, SharingStarted.Eagerly, emptyList())
+
+    /** Документ групп айдентик (десктоп §1в): отправитель по умолчанию, строгие группы, «не предлагать». */
+    val groups: StateFlow<IdentityGroups> = hub.identityGroups.stateIn(scope, SharingStarted.Eagerly, IdentityGroups.EMPTY)
+
+    /** Отправка, ждущая ответа на «Отправить без темы?». */
+    private var noSubjectResume: (() -> Unit)? = null
+
+    /** «Отправить» в этом вопросе: следующая сборка темы не проверяет. */
+    private var subjectConfirmed = false
+
+    /**
+     * Итоговая тема пуста (поле «Тема» пустое, у ветки автотемы нет: новое
+     * письмо, ответ на письмо без темы) — спросить, а отправку отложить
+     * (десктоп §1 «Отправить без темы?»). `true` — спросили, отправлять рано.
+     */
+    private fun askNoSubject(subject: String, resume: () -> Unit): Boolean {
+        if (subject.isNotBlank()) return false
+        if (subjectConfirmed) {
+            subjectConfirmed = false
+            return false
+        }
+        noSubjectResume = resume
+        ui.update { it.copy(askNoSubject = true) }
+        return true
+    }
+
+    /** «Отправить без темы?» → «Отправить». */
+    fun confirmNoSubject() {
+        val resume = noSubjectResume ?: return
+        noSubjectResume = null
+        ui.update { it.copy(askNoSubject = false) }
+        // Флаг снимает сама проверка (пересылка доходит до неё асинхронно,
+        // после загрузки вложений) или отказ сборки.
+        subjectConfirmed = true
+        resume()
+    }
+
+    /** «Отправить без темы?» → «Отмена»: письмо остаётся, фокус — в поле «Тема» (поля раскрываются). */
+    fun cancelNoSubject() {
+        noSubjectResume = null
+        ui.update { u -> u.copy(askNoSubject = false, expanded = u.sheet == null || u.expanded, focusSubject = true) }
+    }
+
+    fun subjectFocused() = ui.update { it.copy(focusSubject = false) }
 
     /**
      * После нового письма — открыть беседу с этими адресатами, когда появится.
@@ -152,7 +201,10 @@ class ComposeController(
     /** Место новой беседы с адресатом [to] — для [enter]. */
     fun newPlace(to: String) = "new:$to"
 
-    fun openForward(b: MessageBody) = ui.update { it.copy(sheet = ComposeSheet(Branch.Forward(b, conversation.current?.accountKey.orEmpty()), Draft())) }
+    fun openForward(b: MessageBody) = ui.update {
+        val c = conversation.current
+        it.copy(sheet = ComposeSheet(Branch.Forward(b, c?.accountKey.orEmpty(), c?.receivedBy.orEmpty()), Draft()))
+    }
 
     fun editSheet(f: (Draft) -> Draft) = ui.update { u -> u.copy(sheet = u.sheet?.let { it.copy(draft = f(it.draft), error = null) }) }
 
@@ -166,10 +218,10 @@ class ComposeController(
         val u = ui.value
         val branch = when {
             c == null -> Branch.New
-            u.replyTo != null -> Branch.Reply(u.replyTo, c.isGroup)
+            u.replyTo != null -> Branch.Reply(u.replyTo, c.isGroup, c.receivedBy)
             else -> Branch.Implicit(c, conversation.lastIncoming(), conversation.last())
         }
-        return autoHints(branch, identities.value, u.draft.from, newTo.orEmpty())
+        return autoHints(branch, identities.value, u.draft.from, newTo.orEmpty(), groups.value)
     }
 
     fun consumeTarget() {
@@ -205,11 +257,15 @@ class ComposeController(
     /** Ответ в открытой беседе (ветки 2–3). */
     fun sendReply(c: Conversation) {
         val u = ui.value
-        val branch = u.replyTo?.let { Branch.Reply(it, c.isGroup) }
+        val branch = u.replyTo?.let { Branch.Reply(it, c.isGroup, c.receivedBy) }
             ?: Branch.Implicit(c, conversation.lastIncoming(), conversation.last())
-        when (val built = build(branch, u.draft, identities.value)) {
-            is Built.Refused -> ui.update { it.copy(error = built.reason) }
+        when (val built = build(branch, u.draft, identities.value, groups = groups.value)) {
+            is Built.Refused -> {
+                subjectConfirmed = false
+                ui.update { it.copy(error = built.reason) }
+            }
             is Built.Ok -> {
+                if (askNoSubject(built.request.subject) { sendReply(c) }) return
                 val draft = u.draft
                 val key = "s${++stubSeq}"
                 // Новая попытка заменяет пузыри прежних неудач (их текст и так был в композере).
@@ -267,9 +323,13 @@ class ComposeController(
     fun sendNew(target: String) {
         val u = ui.value
         val draft = if (u.draft.to.isBlank()) u.draft.copy(to = target) else u.draft
-        when (val built = build(Branch.New, draft, identities.value)) {
-            is Built.Refused -> ui.update { it.copy(error = built.reason) }
+        when (val built = build(Branch.New, draft, identities.value, groups = groups.value)) {
+            is Built.Refused -> {
+                subjectConfirmed = false
+                ui.update { it.copy(error = built.reason) }
+            }
             is Built.Ok -> {
+                if (askNoSubject(built.request.subject) { sendNew(target) }) return
                 val text = u.draft.text.trim().ifBlank {
                     (u.draft.inline.map { "Картинка" } + u.draft.attachments.map { it.name }).joinToString(", ")
                 }
@@ -345,9 +405,14 @@ class ComposeController(
                 ui.update { u -> u.copy(sheet = u.sheet?.copy(busy = false, error = "Не удалось забрать вложения пересылаемого письма: ${sendError(e)}")) }
                 return@launch
             }
-            when (val built = build(sheet.branch, sheet.draft, identities.value, fwdHtml, fwdText, extra)) {
-                is Built.Refused -> ui.update { u -> u.copy(sheet = u.sheet?.copy(busy = false, error = built.reason)) }
-                is Built.Ok -> try {
+            when (val built = build(sheet.branch, sheet.draft, identities.value, fwdHtml, fwdText, extra, groups.value)) {
+                is Built.Refused -> {
+                    subjectConfirmed = false
+                    ui.update { u -> u.copy(sheet = u.sheet?.copy(busy = false, error = built.reason)) }
+                }
+                is Built.Ok -> if (askNoSubject(built.request.subject) { sendSheet() }) {
+                    ui.update { u -> u.copy(sheet = u.sheet?.copy(busy = false)) }
+                } else try {
                     val viaServer = hub.send(built.request, owners.value, prefer = fwdBranch?.accountKey).viaServer
                     ui.update { it.copy(sheet = null, sentFlash = true) }
                     afterSend(viaServer, hub.senderOf(built.request, owners.value, prefer = fwdBranch?.accountKey))

@@ -64,6 +64,7 @@ import android.net.Uri
 import kotlinx.coroutines.launch
 import ru.letotam.ddmail.api.Identity
 import ru.letotam.ddmail.sync.Conversation
+import ru.letotam.ddmail.sync.IdentityGroups
 
 private val Accent = Color(0xFF047857)
 
@@ -83,10 +84,12 @@ fun ComposerBar(
 ) {
     val u by cc.ui.collectAsState()
     val ids by cc.identities.collectAsState()
+    val groups by cc.groups.collectAsState()
     val d = u.draft
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) cc.attach(uris, toSheet = false)
     }
+    if (u.askNoSubject && u.sheet == null) NoSubjectDialog(cc)
     Surface(color = MaterialTheme.colorScheme.surface, modifier = modifier.fillMaxWidth()) {
         Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
             u.replyTo?.let { r ->
@@ -109,7 +112,10 @@ fun ComposerBar(
             if (u.expanded) {
                 // Что уйдёт при пустых полях — та же ветка, что у отправки.
                 val hints = cc.hints(conversation, newTo)
-                Overrides(d, ids, conversation?.receivedBy, hints.to, subjectHint = hints.subject, onEdit = cc::edit)
+                Overrides(
+                    d, ids, groups, conversation?.receivedBy?.lowercase(), hints.to, subjectHint = hints.subject,
+                    focusSubject = u.focusSubject, onSubjectFocused = cc::subjectFocused, onEdit = cc::edit,
+                )
             }
             Attachments(d.attachments) { a -> cc.edit { it.copy(attachments = it.attachments - a) } }
             // Ошибка отправки — amber-плашкой над композером (десктоп §2: заглушка
@@ -147,9 +153,20 @@ fun ComposerBar(
 }
 
 @Composable
-private fun Overrides(d: Draft, ids: List<Identity>, receivedBy: String?, autoTo: String, subjectHint: String, onEdit: ((Draft) -> Draft) -> Unit) {
+private fun Overrides(
+    d: Draft,
+    ids: List<Identity>,
+    groups: IdentityGroups,
+    /** Контекст отправки (§1в): `null` — новое письмо, иначе адрес, на который пришла беседа. */
+    context: String?,
+    autoTo: String,
+    subjectHint: String,
+    focusSubject: Boolean,
+    onSubjectFocused: () -> Unit,
+    onEdit: ((Draft) -> Draft) -> Unit,
+) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(bottom = 4.dp)) {
-        FromPicker(d, ids, receivedBy) { email -> onEdit { it.copy(from = email) } }
+        FromPicker(d, ids, groups, context) { email -> onEdit { it.copy(from = email) } }
         // Название поля — слева постоянной подписью, а не плавающим label:
         // у Material3 подсказка (placeholder) при label видна только в фокусе,
         // и пустые «Кому»/«Тема» не говорили, кому и с какой темой уйдёт
@@ -157,13 +174,49 @@ private fun Overrides(d: Draft, ids: List<Identity>, receivedBy: String?, autoTo
         val email = KeyboardOptions(keyboardType = KeyboardType.Email)
         HintField("Кому", d.to, autoTo, email) { v -> onEdit { it.copy(to = v) } }
         HintField("Копия", d.cc, "", email) { v -> onEdit { it.copy(cc = v) } }
-        HintField("Тема", d.subject, subjectHint, KeyboardOptions(capitalization = KeyboardCapitalization.Sentences)) { v -> onEdit { it.copy(subject = v) } }
+        HintField(
+            "Тема", d.subject, subjectHint, KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+            focus = focusSubject, onFocused = onSubjectFocused,
+        ) { v -> onEdit { it.copy(subject = v) } }
     }
+}
+
+/**
+ * «Отправить без темы?» (десктоп §1): итоговая тема пуста. «Отправить» —
+ * письмо уходит как есть; «Отмена» — письмо остаётся, фокус в поле «Тема».
+ */
+@Composable
+fun NoSubjectDialog(cc: ComposeController) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = cc::cancelNoSubject,
+        title = { Text("Отправить без темы?") },
+        text = { Text("У письма нет темы.") },
+        confirmButton = { androidx.compose.material3.TextButton(onClick = cc::confirmNoSubject) { Text("Отправить") } },
+        dismissButton = { androidx.compose.material3.TextButton(onClick = cc::cancelNoSubject) { Text("Отмена") } },
+    )
 }
 
 /** Поле с постоянной подписью слева и подсказкой «что выйдет само», пока оно пусто. */
 @Composable
-private fun HintField(title: String, value: String, hint: String, options: KeyboardOptions, onChange: (String) -> Unit) {
+private fun HintField(
+    title: String,
+    value: String,
+    hint: String,
+    options: KeyboardOptions,
+    /** Взять фокус (и клавиатуру) — после «Отмены» в «Отправить без темы?». */
+    focus: Boolean = false,
+    onFocused: () -> Unit = {},
+    onChange: (String) -> Unit,
+) {
+    val requester = remember { androidx.compose.ui.focus.FocusRequester() }
+    androidx.compose.runtime.LaunchedEffect(focus) {
+        if (focus) {
+            // Поле могло только что появиться (поля раскрылись вместе с флагом).
+            kotlinx.coroutines.delay(50)
+            runCatching { requester.requestFocus() }
+            onFocused()
+        }
+    }
     OutlinedTextField(
         value = value, onValueChange = onChange,
         leadingIcon = {
@@ -178,14 +231,14 @@ private fun HintField(title: String, value: String, hint: String, options: Keybo
         placeholder = { if (hint.isNotEmpty()) Text(hint, color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         singleLine = true,
         keyboardOptions = options,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().focusRequester(requester),
     )
 }
 
 @Composable
-fun FromPicker(d: Draft, ids: List<Identity>, receivedBy: String?, onPick: (String) -> Unit) {
+fun FromPicker(d: Draft, ids: List<Identity>, groups: IdentityGroups, context: String?, onPick: (String) -> Unit) {
     var open by remember { mutableStateOf(false) }
-    val cur = pickFrom(d, ids, receivedBy)
+    val cur = pickFrom(d, ids, groups, context)
     Box {
         Row(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)).clickable { open = true }.padding(horizontal = 4.dp, vertical = 8.dp),
@@ -197,7 +250,9 @@ fun FromPicker(d: Draft, ids: List<Identity>, receivedBy: String?, onPick: (Stri
             Icon(Icons.Filled.ArrowDropDown, null)
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            ids.forEach { id ->
+            // Скрытые («не предлагать») и строгие чужого контекста — не предлагаются,
+            // кроме выбранного (десктоп §1в).
+            fromChoices(ids, groups, context, cur?.email).forEach { id ->
                 DropdownMenuItem(
                     text = { Text(if (id.name.isBlank()) id.email else "${id.name} · ${id.email}") },
                     onClick = {
@@ -240,6 +295,7 @@ fun ComposeSheetDialog(cc: ComposeController) {
     val u by cc.ui.collectAsState()
     val sheet = u.sheet ?: return
     val ids by cc.identities.collectAsState()
+    val groups by cc.groups.collectAsState()
     val d = sheet.draft
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) cc.attach(uris, toSheet = true)
@@ -251,6 +307,7 @@ fun ComposeSheetDialog(cc: ComposeController) {
         onDismissRequest = { if (!sheet.busy) cc.closeSheet() },
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
+        if (u.askNoSubject) NoSubjectDialog(cc)
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
           Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
             Column(Modifier.fillMaxSize()) {
@@ -276,15 +333,17 @@ fun ComposeSheetDialog(cc: ComposeController) {
                     Modifier.fillMaxWidth().widthIn(max = 720.dp).verticalScroll(rememberScrollState()).padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    FromPicker(d, ids, null) { email -> cc.editSheet { it.copy(from = email) } }
+                    val context = contextOf(sheet.branch)
+                    FromPicker(d, ids, groups, context) { email -> cc.editSheet { it.copy(from = email) } }
                     val email = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Next)
                     HintField("Кому", d.to, "", email) { v -> cc.editSheet { it.copy(to = v) } }
                     HintField("Копия", d.cc, "", email) { v -> cc.editSheet { it.copy(cc = v) } }
                     val fwd = (sheet.branch as? Branch.Forward)?.original
-                    val hints = autoHints(sheet.branch, ids, d.from)
+                    val hints = autoHints(sheet.branch, ids, d.from, groups = groups)
                     HintField(
                         "Тема", d.subject, hints.subject,
                         KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Next),
+                        focus = u.focusSubject, onFocused = cc::subjectFocused,
                     ) { v -> cc.editSheet { it.copy(subject = v) } }
                     RichField(
                         draft = d,

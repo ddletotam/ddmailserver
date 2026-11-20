@@ -120,7 +120,10 @@ class SyncEngine(
         runCatching { api.identities() }.getOrNull()?.let { dao.setMeta(K_IDENTITIES, json.encodeToString(idents, it)) }
 
         // Цвета строк — не повод валить проход: старые цвета остаются.
-        runCatching { api.identityGroups() }.getOrNull()?.doc?.let { dao.setMeta(K_IDENT_GROUPS, it.toString()) }
+        runCatching { api.identityGroups() }.getOrNull()?.let { g ->
+            g.doc?.let { dao.setMeta(K_IDENT_GROUPS, it.toString()) }
+            dao.setMeta(K_IDENT_GROUPS_VERSION, g.version.toString())
+        }
 
         val f = api.dialogFolders()
         f.doc?.let {
@@ -329,9 +332,50 @@ class SyncEngine(
     private suspend fun currentFolders(): FoldersDoc =
         (dao.meta(K_FOLDERS)?.let { runCatching { FoldersDoc.parse(json.parseToJsonElement(it)) }.getOrNull() } ?: FoldersDoc()).withSpam()
 
-    /** Цвета строк по группам адресов (контракт §5): из кэша, раз в синк — с сервера. */
-    val identityColors: Flow<IdentityColors> = dao.observeMeta(K_IDENT_GROUPS).map { s ->
-        s?.let { runCatching { IdentityColors.parse(json.parseToJsonElement(it)) }.getOrNull() } ?: IdentityColors()
+    /** Документ групп айдентик (контракт §5, десктоп §1в): из кэша, раз в синк — с сервера. */
+    val identityGroups: Flow<IdentityGroups> = dao.observeMeta(K_IDENT_GROUPS).map(::parseGroups)
+
+    private fun parseGroups(s: String?): IdentityGroups =
+        s?.let { runCatching { IdentityGroups.parse(json.parseToJsonElement(it)) }.getOrNull() } ?: IdentityGroups.EMPTY
+
+    /**
+     * «Отправитель по умолчанию» (★): группа адреса [sender] становится
+     * `default_group` документа сервера. Документ — как у десктопа: серверный
+     * плюс адреса учёток телефона ([sources]), которых в нём нет. Сначала в
+     * кэш, затем `PUT` с версией; чужая правка между чтением и записью
+     * (`409`) — та же правка поверх свежего документа (группу ищем заново по
+     * адресу: id групп другой станции могли сдвинуться). Три конфликта
+     * подряд — [IdentityGroupsBusy]; адреса в свежем документе нет —
+     * [IdentityGroupGone].
+     */
+    suspend fun setDefaultSender(sender: String, sources: List<IdentityGroups.Source>) {
+        var version = dao.meta(K_IDENT_GROUPS_VERSION)?.toLongOrNull() ?: 0
+        val before = dao.meta(K_IDENT_GROUPS)
+        var doc = parseGroups(before).merged(sources)
+        repeat(3) {
+            val group = doc.groupOf(sender) ?: throw IdentityGroupGone()
+            val edited = doc.withDefault(group.id)
+            dao.setMeta(K_IDENT_GROUPS, edited.json.toString())
+            try {
+                val r = api.saveIdentityGroups(version, edited.json)
+                dao.setMeta(K_IDENT_GROUPS_VERSION, r.version.toString())
+                return
+            } catch (e: Exception) {
+                // Не записалось — в кэше снова серверный документ, а не
+                // правка, которой на сервере нет.
+                if (e !is ApiException.Server || e.code != 409) {
+                    if (before != null) dao.setMeta(K_IDENT_GROUPS, before) else dao.deleteMeta(K_IDENT_GROUPS)
+                    throw e
+                }
+                val fresh = runCatching { json.decodeFromString(ru.letotam.ddmail.api.DialogFoldersResponse.serializer(), e.serverMessage) }.getOrNull()
+                    ?: throw e
+                version = fresh.version
+                doc = IdentityGroups.parse(fresh.doc).merged(sources)
+                fresh.doc?.let { dao.setMeta(K_IDENT_GROUPS, it.toString()) }
+                dao.setMeta(K_IDENT_GROUPS_VERSION, version.toString())
+            }
+        }
+        throw IdentityGroupsBusy()
     }
 
     /** Свои адреса: из кэша, раз в синк — с сервера. */
@@ -379,7 +423,7 @@ class SyncEngine(
     /** Учётку ddmail удаляют: её беседы, тела и курсоры синка. */
     override suspend fun forget() {
         dao.clearAccount(accountKey)
-        for (k in listOf(K_SEQ, K_SINCE, K_FULL_TS, K_EPOCH, K_FOLDERS, K_FOLDERS_VERSION, K_IDENTITIES, K_IDENT_GROUPS)) dao.deleteMeta(k)
+        for (k in listOf(K_SEQ, K_SINCE, K_FULL_TS, K_EPOCH, K_FOLDERS, K_FOLDERS_VERSION, K_IDENTITIES, K_IDENT_GROUPS, K_IDENT_GROUPS_VERSION)) dao.deleteMeta(k)
     }
 
     companion object {
@@ -409,6 +453,7 @@ class SyncEngine(
         private const val K_FOLDERS_VERSION = "dialog_folders_version"
         private const val K_IDENTITIES = "identities"
         private const val K_IDENT_GROUPS = "identity_groups"
+        private const val K_IDENT_GROUPS_VERSION = "identity_groups_version"
 
         private val json = Json { ignoreUnknownKeys = true }
         private val idents = ListSerializer(Identity.serializer())
