@@ -192,15 +192,6 @@ pub(crate) fn aim_composer_identity(ui: &MainWindow, sh: &Shared, email: &str) {
 /// changes (conversation switch, bodies arrival, reply/forward/compose
 /// mode transitions).
 pub(crate) fn refresh_composer_hints(ui: &MainWindow, sh: &Shared) {
-    let re_subject = |s: &str| -> String {
-        if s.trim().is_empty() {
-            String::new()
-        } else if s.to_lowercase().starts_with("re:") {
-            s.to_string()
-        } else {
-            format!("Re: {s}")
-        }
-    };
     // Forward: «Кому» is a REQUIRED real field (the send refuses without
     // it) — a hint would wrongly suggest it can stay empty.
     if sh.compose.pending_forward.borrow().is_some() {
@@ -264,6 +255,47 @@ pub(crate) fn refresh_composer_hints(ui: &MainWindow, sh: &Shared) {
         .unwrap_or_else(|| c.last_subject.clone());
     ui.set_composer_to_auto(to.join(", ").into());
     ui.set_composer_subject_auto(re_subject(&base_subject).into());
+}
+
+/// Автотема ответа: «Re: » к теме, если её там нет. Пустая тема остаётся
+/// пустой — «Re: » без темы не тема (§1, вопрос «Отправить без темы?»).
+pub(crate) fn re_subject(s: &str) -> String {
+    if s.trim().is_empty() {
+        String::new()
+    } else if s.to_lowercase().starts_with("re:") {
+        s.to_string()
+    } else {
+        format!("Re: {s}")
+    }
+}
+
+/// Итоговая тема письма пуста: поле «Тема» пустое и ветка своей темы не
+/// даёт. Пересылка — всегда «Fwd: …»; новое письмо — автотемы нет; ответ —
+/// «Re: » темы письма, на которое отвечают (явный ответ — темы его письма,
+/// неявный — последнего входящего, как `on_send`).
+pub(crate) fn effective_subject_empty(ui: &MainWindow, sh: &Shared) -> bool {
+    if !ui.get_composer_subject().trim().is_empty() {
+        return false;
+    }
+    if sh.compose.pending_forward.borrow().is_some() {
+        return false;
+    }
+    if sh.compose.pending_compose.borrow().is_some() {
+        return true;
+    }
+    if let Some(body) = sh.compose.pending_reply.borrow().as_ref() {
+        return re_subject(&body.subject).trim().is_empty();
+    }
+    let convs = sh.convs.borrow();
+    let Some(c) = convs.get(sh.current.get()) else { return false };
+    let cached = sh.current_bodies.borrow();
+    let base = cached
+        .iter()
+        .rev()
+        .find(|b| !b.is_outgoing)
+        .map(|b| b.subject.clone())
+        .unwrap_or_else(|| c.last_subject.clone());
+    re_subject(&base).trim().is_empty()
 }
 
 pub(crate) fn enter_reply_mode(sh: &Shared, ui: &MainWindow, body: MessageBody) {
@@ -1031,6 +1063,38 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
         });
     }
 
+    // ---- «Отправить без темы?»: решения по задержанной отправке ----
+    {
+        let weak = ui.as_weak();
+        let sh = shared.clone();
+        ui.on_no_subject_send(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let text = sh.compose.held_send.borrow().clone().unwrap_or_default();
+            sh.compose.no_subject_ok.set(true);
+            ui.invoke_send(text.into());
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let sh = shared.clone();
+        ui.on_no_subject_cancel(move || {
+            // Письмо остаётся в композере (оно чистится только на успешной
+            // ветке); фокус — в поле темы, панель полей раскрыта.
+            sh.compose.held_send.borrow_mut().take();
+            sh.compose.no_subject_ok.set(false);
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_composer_expanded(true);
+            // Поле темы появляется вместе с панелью: мост фокуса внутри неё
+            // ловит смену счётчика, только когда панель уже есть.
+            let w = ui.as_weak();
+            slint::Timer::single_shot(Duration::from_millis(30), move || {
+                if let Some(u) = w.upgrade() {
+                    u.set_focus_subject_seq(u.get_focus_subject_seq() + 1);
+                }
+            });
+        });
+    }
+
     let ui_weak_send = ui.as_weak();
     let sh_send = shared.clone();
     ui.on_send(move |text| {
@@ -1192,6 +1256,21 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
                 return;
             }
         }
+        // «Отправить без темы?» (§1): итоговая тема — непустое поле «Тема»
+        // или автотема ветки («Re: …» ответа, «Fwd: …» пересылки; у нового
+        // письма автотемы нет). Пустая — спросить; письмо ждёт ответа.
+        {
+            let confirmed = sh_send.compose.no_subject_ok.replace(false);
+            if !confirmed {
+                if let Some(u) = ui_weak_send.upgrade() {
+                    if effective_subject_empty(&u, &sh_send) {
+                        *sh_send.compose.held_send.borrow_mut() = Some(text.clone());
+                        u.set_no_subject_visible(true);
+                        return;
+                    }
+                }
+            }
+        }
         // Read chevron-panel overrides up front. Non-empty subject
         // override wins over the per-branch auto-derivation; cc is
         // parsed once and passed through to the engine in every
@@ -1327,11 +1406,9 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
         // Branch 1: transient compose target set via the search dropdown.
         let compose_target = sh_send.compose.pending_compose.borrow().clone();
         if let Some(target) = compose_target {
-            let subject = if !subject_override.is_empty() {
-                subject_override.clone()
-            } else {
-                "Новое сообщение".to_string()
-            };
+            // Автотемы у нового письма нет: пустая тема — только после
+            // «Отправить без темы?» (§1).
+            let subject = subject_override.clone();
             if let Some(etx) = sh_send.engine_tx.borrow().as_ref() {
                 let to = if !to_override.is_empty() {
                     to_override.clone()
@@ -1431,10 +1508,8 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
             }
             let subject = if !subject_override.is_empty() {
                 subject_override.clone()
-            } else if reply_body.subject.to_lowercase().starts_with("re:") {
-                reply_body.subject.clone()
             } else {
-                format!("Re: {}", reply_body.subject)
+                re_subject(&reply_body.subject)
             };
             let in_reply_to = (!reply_body.message_id.is_empty())
                 .then(|| reply_body.message_id.clone());
@@ -1508,10 +1583,8 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
             .unwrap_or_else(|| c.last_subject.clone());
         let subject = if !subject_override.is_empty() {
             subject_override.clone()
-        } else if base_subject.to_lowercase().starts_with("re:") {
-            base_subject
         } else {
-            format!("Re: {base_subject}")
+            re_subject(&base_subject)
         };
         // Threading headers from the same last-incoming we used for the subject.
         let (in_reply_to, references) = last_incoming
@@ -1578,4 +1651,18 @@ pub(crate) fn wire_identity_pick(ui: &MainWindow, shared: &Rc<Shared>) {
             identities_ui::sync_picker_rows(&ui, &sh_ip);
         }
     });
+}
+
+#[cfg(test)]
+mod subject_tests {
+    use super::re_subject;
+
+    #[test]
+    fn re_subject_keeps_empty_empty() {
+        // Пустая тема ответа остаётся пустой — тогда спрашиваем «Отправить без темы?».
+        assert_eq!(re_subject(""), "");
+        assert_eq!(re_subject("   "), "");
+        assert_eq!(re_subject("Привет"), "Re: Привет");
+        assert_eq!(re_subject("RE: Привет"), "RE: Привет");
+    }
 }

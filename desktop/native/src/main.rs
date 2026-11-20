@@ -454,6 +454,7 @@ fn main() {
             picked_identity: RefCell::new(None),
             pending_switch: RefCell::new(None),
             held_send: RefCell::new(None),
+            no_subject_ok: Cell::new(false),
             pending_forward: RefCell::new(None),
             composer_identities: RefCell::new(Vec::new()),
             pending_compose: RefCell::new(None),

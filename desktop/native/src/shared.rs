@@ -184,6 +184,9 @@ pub(crate) struct ComposeState {
     /// Задержка нужна потому, что композер очищает поле сразу при отправке:
     /// без этого отменённое письмо просто пропало бы.
     pub(crate) held_send: RefCell<Option<String>>,
+    /// «Отправить без темы?» — подтверждено: следующий вход в on_send
+    /// вопрос не задаёт. Снимается при первой же проверке (контракт §1).
+    pub(crate) no_subject_ok: Cell<bool>,
     /// Forward target — set by «Переслать»; on Send the original's text
     /// goes below the typed text and its attachments are re-attached.
     pub(crate) pending_forward: RefCell<Option<MessageBody>>,

@@ -1140,6 +1140,11 @@ export component MainWindow inherits Window {
     // Композер очищает поле сразу при отправке, поэтому отмена обязана вернуть
     // текст обратно — иначе письмо просто исчезнет.
     callback from-mismatch-cancel();
+    // «Отправить без темы?» — итоговая тема письма пуста (поле «Тема» пустое,
+    // автотемы у ветки нет). Отправка ждёт ответа; «Отмена» — фокус в тему.
+    in-out property <bool> no-subject-visible: false;
+    callback no-subject-send();
+    callback no-subject-cancel();
 
     // Форматирование выделения в композере: (начало, конец, вид), смещения —
     // байтовые, как их отдаёт TextInput. Вид: 5 жирный, 6 курсив,
@@ -1206,6 +1211,8 @@ export component MainWindow inherits Window {
     // Bump to pull keyboard focus into the «Кому» field (bridge inside
     // the composer panel scope — same pattern as chat-scroll-seq).
     in-out property <int> focus-to-seq: 0;
+    // То же для поля «Тема» (отмена «Отправить без темы?»).
+    in-out property <int> focus-subject-seq: 0;
     // Arrow-key navigation over the conversation list: keep the selected
     // row visible (see the bridge next to the sidebar ListView).
     in-out property <length> sidebar-row-y: 0;
@@ -2963,6 +2970,12 @@ export component MainWindow inherits Window {
                     width: 0; height: 0;
                     x: root.focus-to-seq * 1px;
                     changed x => { si-to.focus(); }
+                }
+                Rectangle {
+                    visible: false;
+                    width: 0; height: 0;
+                    x: root.focus-subject-seq * 1px;
+                    changed x => { si-subj.focus(); }
                 }
                 VerticalLayout {
                     padding-left: 14px;
@@ -5445,6 +5458,84 @@ export component MainWindow inherits Window {
                 }
             }
         }
+        }
+    }
+
+    // ---------- «Отправить без темы?» (modal) ----------
+    if root.no-subject-visible: TouchArea {
+        clicked => {
+            root.no-subject-visible = false;
+            kb.focus();
+            root.no-subject-cancel();
+        }
+        FocusScope {
+            init => { self.focus(); }
+            key-pressed(ev) => {
+                if (ev.text == Key.Escape) {
+                    root.no-subject-visible = false;
+                    kb.focus();
+                    root.no-subject-cancel();
+                    return accept;
+                }
+                // Enter не подтверждает: Enter и есть «Отправить» композера,
+                // второй Enter по привычке отправил бы письмо без темы.
+                reject
+            }
+            Rectangle {
+                background: #00000066;
+                Rectangle {
+                    width: min(440px, root.width - 80px);
+                    height: ns-body.preferred-height + 40px;
+                    background: white;
+                    border-radius: 14px;
+                    drop-shadow-blur: 24px;
+                    drop-shadow-color: #00000044;
+                    TouchArea {} // keep clicks inside the card from closing it
+                    ns-body := VerticalLayout {
+                        padding: 20px;
+                        spacing: 16px;
+                        Text {
+                            text: "Отправить без темы?";
+                            font-size: 17px; font-weight: 700; color: #0f1419;
+                        }
+                        Text {
+                            text: "У письма нет темы.";
+                            wrap: word-wrap;
+                            font-size: 14px;
+                            color: #2b3640;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle { horizontal-stretch: 1; }
+                            Button {
+                                text: "Отмена";
+                                clicked => {
+                                    root.no-subject-visible = false;
+                                    kb.focus();
+                                    root.no-subject-cancel();
+                                }
+                            }
+                            Rectangle {
+                                width: 120px; height: 34px;
+                                border-radius: 8px;
+                                background: ns-send.has-hover ? #059669 : #10b981;
+                                Text {
+                                    text: "Отправить";
+                                    color: white; font-size: 13px; font-weight: 700;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                                ns-send := TouchArea {
+                                    clicked => {
+                                        root.no-subject-visible = false;
+                                        kb.focus();
+                                        root.no-subject-send();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
