@@ -43,6 +43,16 @@ extension SessionAPI {
         return try decode(VersionedDoc.self, from: data)
     }
 
+    /// Документ групп айдентик (десктоп §1в): `409` — его поменяла другая станция, в теле ответа текущий.
+    public func saveIdentityGroups(baseVersion: Int64, doc: JSONValue) async throws -> VersionedDoc {
+        struct Body: Encodable {
+            let base_version: Int64
+            let doc: JSONValue
+        }
+        let data = try await send("PUT", "/identity-groups", body: Body(base_version: baseVersion, doc: doc))
+        return try decode(VersionedDoc.self, from: data)
+    }
+
     /// Тела писем по ссылкам. Ключ — стабильный `message_id`, uid — запасной.
     public func messages(_ refs: [MessageRef]) async throws -> [MessageBody] {
         let data = try await send("POST", "/conversations/messages", body: refs)

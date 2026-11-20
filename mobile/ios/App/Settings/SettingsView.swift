@@ -1,4 +1,5 @@
 import DDMailAuth
+import DDMailSync
 import SwiftUI
 import UserNotifications
 
@@ -18,6 +19,9 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 AccountsSection(app: app, workspace: workspace, close: { dismiss() })
+                if let mail = workspace.mail {
+                    DefaultSenderSection(mail: mail)
+                }
                 if let mail = workspace.mail {
                     Section {
                         NavigationLink {
@@ -99,6 +103,61 @@ struct SettingsView: View {
             }
             .task {
                 denied = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus == .denied
+            }
+        }
+    }
+}
+
+/// «Отправитель по умолчанию» (десктоп §1в, ★ во вкладке «Айдентики»): с
+/// какой группы адресов уходит новое письмо и ответ на письмо, пришедшее не
+/// на мой адрес. Строка — имя группы и её адрес-отправитель. Выбор пишется в
+/// `default_group` общего документа групп: с ddmail — на сервер (виден
+/// десктопу и другим устройствам), без него — на этом устройстве.
+struct DefaultSenderSection: View {
+    let mail: MailModel
+    @State private var error: String?
+
+    var body: some View {
+        let groups = mail.groups.groups.filter { !$0.sender.isEmpty }
+        let current = mail.groups.defaultGroup?.id ?? ""
+        Section {
+            if groups.isEmpty {
+                Text("Своих адресов пока нет — они появятся после синхронизации учёток.")
+                    .foregroundStyle(.secondary)
+            } else {
+                Picker("Отправитель", selection: Binding(get: { current }, set: { pick($0, in: groups) })) {
+                    ForEach(groups, id: \.id) { g in
+                        VStack(alignment: .leading) {
+                            Text(g.name.trimmingCharacters(in: .whitespaces).isEmpty ? g.sender : g.name)
+                            if !g.name.trimmingCharacters(in: .whitespaces).isEmpty {
+                                Text(g.sender).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .tag(g.id)
+                    }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+                .accessibilityIdentifier("settings.defaultSender")
+            }
+            if let error {
+                Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red)
+            }
+        } header: {
+            Text("Отправитель по умолчанию")
+        } footer: {
+            Text("Новое письмо и ответ на письмо, пришедшее не на ваш адрес, уходят с этого адреса. "
+                + (mail.groupsShared ? "Настройка общая с десктопом и другими устройствами." : "Настройка хранится на этом устройстве."))
+        }
+    }
+
+    private func pick(_ id: String, in groups: [IdentityGroups.Group]) {
+        guard id != mail.groups.defaultGroup?.id, let g = groups.first(where: { $0.id == id }) else { return }
+        error = nil
+        Task {
+            do { try await mail.setDefaultSender(g.sender) } catch {
+                self.error = error is IdentityGroupsBusy || error is IdentityGroupGone
+                    ? error.localizedDescription : "Не сохранено: \(error.localizedDescription)"
             }
         }
     }

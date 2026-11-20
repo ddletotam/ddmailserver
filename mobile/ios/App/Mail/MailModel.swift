@@ -24,11 +24,20 @@ final class MailModel {
     @ObservationIgnored private(set) var live: [LiveChannel] = []
     /// Папки диалогов: документ ddmail-учётки или локальный (внешние учётки §4).
     let folderSource: any DialogFolderSource
+    /// Группы айдентик (десктоп §1в): документ ddmail-учётки или локальный.
+    let identitySource: any IdentityGroupSource
 
     private(set) var all: [Conversation] = []
     private var byAccount: [String: [Conversation]] = [:]
     private(set) var doc = FoldersDoc().withSpam()
     private(set) var colors = IdentityColors()
+    /// Документ групп как пришёл (сервер или устройство) и он же с адресами
+    /// учёток, которых в нём нет (`merge_sources` десктопа): по нему —
+    /// отправитель, «Отправитель по умолчанию», цвета строк.
+    private var baseGroups = IdentityGroups.empty
+    private(set) var groups = IdentityGroups.empty
+    /// Группы общие с десктопом (есть ddmail-учётка), а не только на устройстве.
+    var groupsShared: Bool { identitySource is SyncEngine }
     private(set) var list = MailListState()
     private(set) var loaded = false
     private(set) var syncing = false
@@ -114,6 +123,7 @@ final class MailModel {
     init(workspace: Workspace, cache: MailStore) {
         self.workspace = workspace
         folderSource = workspace.primary?.engine ?? LocalDialogFolders(store: cache)
+        identitySource = workspace.primary?.engine ?? LocalIdentityGroups(store: cache)
         let resolve: @MainActor (String) -> (any MailProvider)? = { [weak workspace] key in workspace?.link(key)?.provider }
         let dead: @MainActor (String) -> Void = { [weak workspace] key in workspace?.link(key)?.report(.dead) }
         conversation = ConversationModel(provider: resolve, onAuthDead: dead)
@@ -122,7 +132,8 @@ final class MailModel {
         compose = ComposeModel(
             workspace: workspace, conversation: conversation,
             syncSoon: { [weak self] key in Task { await self?.sync(only: key) } },
-            onAuthDead: dead
+            onAuthDead: dead,
+            groups: { [weak self] in self?.groups ?? .empty }
         )
         live = workspace.links.compactMap { link -> LiveChannel? in
             if let imap = link.imap {
@@ -174,15 +185,42 @@ final class MailModel {
                 rebuild()
             }
         })
-        if let engine = workspace.primary?.engine {
-            tasks.append(Task { [weak self] in
-                for await c in engine.identityColors() { self?.colors = c }
-            })
+        tasks.append(Task { [weak self, identitySource] in
+            for await g in identitySource.identityGroups() {
+                guard let self else { return }
+                baseGroups = g
+                remergeGroups()
+            }
+        })
+    }
+
+    /// Адреса всех учёток — источники групп (как `collect_sources` десктопа).
+    func groupSources() -> [IdentityGroups.Source] {
+        workspace.links.flatMap { $0.provider.identities() }.map {
+            IdentityGroups.Source(email: $0.email, name: $0.name.caseInsensitiveCompare($0.email) == .orderedSame ? "" : $0.name)
         }
+    }
+
+    /// Документ групп плюс адреса учёток, которых в нём нет. Локальный
+    /// документ с новыми адресами записывается сразу: id групп должны
+    /// пережить смену набора учёток (серверному — с первой правкой).
+    private func remergeGroups() {
+        let m = baseGroups.merged(groupSources())
+        if !groupsShared, m != baseGroups { try? identitySource.storeMerged(m) }
+        if m != groups {
+            groups = m
+            colors = m.colors
+        }
+    }
+
+    /// «Отправитель по умолчанию» (★ десктопа): группа адреса `sender` — группа нового письма.
+    func setDefaultSender(_ sender: String) async throws {
+        try await identitySource.setDefaultSender(sender, sources: groupSources())
     }
 
     /// Беседы всех учёток — одним списком по дате.
     private func merge() {
+        remergeGroups()
         all = byAccount.values.flatMap { $0 }.sorted { ($0.lastDateTs, $1.ref) > ($1.lastDateTs, $0.ref) }
         // Список готов, когда отозвались все учётки (кэш читается сразу).
         loaded = byAccount.count >= workspace.links.count

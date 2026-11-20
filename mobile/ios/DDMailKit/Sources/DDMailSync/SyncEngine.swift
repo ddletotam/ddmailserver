@@ -17,7 +17,7 @@ import Foundation
 /// 4. документы папок и групп адресов — в кэш (табы и цвета видны на старте).
 ///
 /// Проходы одной учётки не идут параллельно: следующий ждёт предыдущего.
-public actor SyncEngine: MailProvider, DialogFolderSource {
+public actor SyncEngine: MailProvider, DialogFolderSource, IdentityGroupSource {
     /// Версия формата id бесед (сервер). Сменилась — следующий синк полный,
     /// иначе старые ключи висели бы рядом с новыми (§4 десктопа).
     public static let convIDEpoch = "2"
@@ -104,16 +104,62 @@ public actor SyncEngine: MailProvider, DialogFolderSource {
         return FoldersDoc.parse(raw).withSpam()
     }
 
-    /// Цвета строк по группам адресов: из кэша, раз в синк — с сервера.
-    public nonisolated func identityColors() -> AsyncStream<IdentityColors> {
+    /// Документ групп айдентик (десктоп §1в): из кэша, раз в синк — с сервера.
+    public nonisolated func identityGroups() -> AsyncStream<IdentityGroups> {
         let source = store.observeMeta(keys.identityGroups)
         return AsyncStream { cont in
             let t = Task {
-                for await s in source { cont.yield(IdentityColors.parse(s.flatMap { JSONValue.parse(Data($0.utf8)) })) }
+                for await s in source { cont.yield(IdentityGroups.parse(s)) }
                 cont.finish()
             }
             cont.onTermination = { _ in t.cancel() }
         }
+    }
+
+    public nonisolated func currentIdentityGroups() -> IdentityGroups {
+        IdentityGroups.parse((try? store.meta(keys.identityGroups)) ?? nil)
+    }
+
+    /// Серверному документу адреса учёток уходят с первой правкой, не сами.
+    public nonisolated func storeMerged(_ doc: IdentityGroups) throws {}
+
+    /// «Отправитель по умолчанию» (★): группа адреса `sender` становится
+    /// `default_group` документа сервера. Документ — как у десктопа:
+    /// серверный плюс адреса учёток устройства (`sources`), которых в нём
+    /// нет. Сначала в кэш, затем `PUT` с версией; чужая правка между чтением
+    /// и записью (`409`) — та же правка поверх свежего документа (группа
+    /// ищется заново по адресу). Не записалось — в кэше снова прежний документ.
+    public func setDefaultSender(_ sender: String, sources: [IdentityGroups.Source]) async throws {
+        var version = Int64(try store.meta(keys.identityGroupsVersion) ?? "") ?? 0
+        let before = try store.meta(keys.identityGroups)
+        var doc = IdentityGroups.parse(before).merged(sources)
+        let store = self.store, key = keys.identityGroups
+        func restore(_ s: String?) throws {
+            if let s { try store.setMeta(key, s) }
+        }
+        for _ in 0..<3 {
+            guard let g = doc.group(of: sender) else { throw IdentityGroupGone() }
+            let edited = doc.withDefault(g.id)
+            try store.setMeta(keys.identityGroups, String(decoding: edited.value.data(), as: UTF8.self))
+            do {
+                let r = try await api.saveIdentityGroups(baseVersion: version, doc: edited.value)
+                try store.setMeta(keys.identityGroupsVersion, String(r.version))
+                return
+            } catch let APIError.server(code, message) where code == 409 {
+                guard let fresh = try? JSONDecoder().decode(VersionedDoc.self, from: Data(message.utf8)) else {
+                    try restore(before)
+                    throw APIError.server(code: code, message: message)
+                }
+                version = fresh.version
+                doc = IdentityGroups.parse(fresh.doc).merged(sources)
+                if let d = fresh.doc { try store.setMeta(keys.identityGroups, String(decoding: d.data(), as: UTF8.self)) }
+                try store.setMeta(keys.identityGroupsVersion, String(version))
+            } catch {
+                try restore(before)
+                throw error
+            }
+        }
+        throw IdentityGroupsBusy()
     }
 
     /// «В спам» у ddmail — правилом сервера (адрес или домен).
@@ -180,8 +226,9 @@ public actor SyncEngine: MailProvider, DialogFolderSource {
             try store.setMeta(keys.identities, String(decoding: data, as: UTF8.self))
         }
         // Цвета строк — не повод валить проход: старые цвета остаются.
-        if let g = try? await api.identityGroups(), let doc = g.doc {
-            try store.setMeta(keys.identityGroups, String(decoding: doc.data(), as: UTF8.self))
+        if let g = try? await api.identityGroups() {
+            if let doc = g.doc { try store.setMeta(keys.identityGroups, String(decoding: doc.data(), as: UTF8.self)) }
+            try store.setMeta(keys.identityGroupsVersion, String(g.version))
         }
         let f = try await api.dialogFolders()
         if let doc = f.doc {
@@ -392,13 +439,14 @@ public actor SyncEngine: MailProvider, DialogFolderSource {
 
     /// Служебные ключи кэша — с ключом учётки (учёток несколько, кэш один).
     struct Keys: Sendable {
-        let seq, since, fullTs, epoch, folders, foldersVersion, identities, identityGroups: String
+        let seq, since, fullTs, epoch, folders, foldersVersion, identities, identityGroups, identityGroupsVersion: String
 
         init(_ account: String) {
             func k(_ s: String) -> String { "\(account)/\(s)" }
             seq = k("journal_seq"); since = k("conv_since"); fullTs = k("conv_full_ts"); epoch = k("conv_id_epoch")
             folders = k("dialog_folders"); foldersVersion = k("dialog_folders_version")
             identities = k("identities"); identityGroups = k("identity_groups")
+            identityGroupsVersion = k("identity_groups_version")
         }
     }
 }

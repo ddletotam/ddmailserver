@@ -29,6 +29,8 @@ final class ComposeModel {
         var draft: Draft
         var error: String?
         var busy = false
+        /// Адрес, на который пришла беседа пересылаемого письма (контекст строгих групп, §1в).
+        var receivedBy: String?
 
         var isForward: Bool { if case .forward = branch { true } else { false } }
         var original: MessageBody? { if case let .forward(o) = branch { o } else { nil } }
@@ -39,6 +41,17 @@ final class ComposeModel {
     /// Синк учётки, через которую ушло письмо.
     private let syncSoon: (String) -> Void
     private let onAuthDead: @MainActor (String) -> Void
+    /// Документ групп айдентик (десктоп §1в) с адресами учёток — у `MailModel`.
+    @ObservationIgnored private let groups: @MainActor () -> IdentityGroups
+
+    /// Вопрос «Отправить без темы?» на экране (десктоп §1).
+    var askNoSubject = false
+    /// Фокус в поле «Тема» — после «Отмены» в этом вопросе; снимает поле, взяв его.
+    var focusSubject = false
+    /// Отправка, ждущая ответа на вопрос.
+    @ObservationIgnored private var noSubjectResume: (() -> Void)?
+    /// «Отправить» в вопросе: следующая сборка тему не проверяет.
+    @ObservationIgnored private var subjectConfirmed = false
 
     /// Черновик ответа в открытой беседе. Его `text` — зеркало `rich`.
     var draft = Draft()
@@ -83,11 +96,50 @@ final class ComposeModel {
         let error: String?
     }
 
-    init(workspace: Workspace, conversation: ConversationModel, syncSoon: @escaping (String) -> Void, onAuthDead: @escaping @MainActor (String) -> Void) {
+    init(
+        workspace: Workspace, conversation: ConversationModel, syncSoon: @escaping (String) -> Void,
+        onAuthDead: @escaping @MainActor (String) -> Void, groups: @escaping @MainActor () -> IdentityGroups = { .empty }
+    ) {
         self.workspace = workspace
         self.conversation = conversation
         self.syncSoon = syncSoon
         self.onAuthDead = onAuthDead
+        self.groups = groups
+    }
+
+    // MARK: «Отправить без темы?»
+
+    /// Итоговая тема пуста (поле «Тема» пустое, у ветки автотемы нет: новое
+    /// письмо, ответ на письмо без темы) — спросить, отправку отложить
+    /// (десктоп §1). `true` — спросили, отправлять рано.
+    private func needsSubjectQuestion(_ subject: String, resume: @escaping () -> Void) -> Bool {
+        guard subject.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        if subjectConfirmed {
+            subjectConfirmed = false
+            return false
+        }
+        noSubjectResume = resume
+        askNoSubject = true
+        return true
+    }
+
+    /// «Отправить без темы?» → «Отправить».
+    func confirmNoSubject() {
+        askNoSubject = false
+        guard let resume = noSubjectResume else { return }
+        noSubjectResume = nil
+        // Флаг снимает сама проверка (пересылка доходит до неё после
+        // загрузки вложений) или отказ сборки.
+        subjectConfirmed = true
+        resume()
+    }
+
+    /// «Отправить без темы?» → «Отмена»: письмо остаётся, фокус — в «Тему» (поля раскрываются).
+    func cancelNoSubject() {
+        askNoSubject = false
+        noSubjectResume = nil
+        if sheet == nil { expanded = true }
+        focusSubject = true
     }
 
     /// Свои адреса всех учёток; учётка открытой беседы — первой, чтобы при
@@ -102,10 +154,30 @@ final class ComposeModel {
     /// «От кого» по учёткам: сверху — по адресу на учётку, ниже остальные
     /// (аудит 2026-11-14 №4: адрес Mail.ru терялся в хвосте двадцати адресов
     /// ddmail). Порядок учёток — как у `identities`.
-    var fromChoices: FromChoices {
+    /// Скрытые («не предлагать») и строгие чужого контекста не предлагаются,
+    /// кроме выбранного (десктоп §1в `offered`).
+    func fromChoices(context: String?, current: String) -> FromChoices {
         let prefer = conversation.conversation?.accountKey
         let ordered = workspace.links.sorted { ($0.account.key == prefer ? 0 : 1) < ($1.account.key == prefer ? 0 : 1) }
-        return FromChoices(ordered.map { $0.provider.identities() })
+        let g = groups()
+        let cur = current.lowercased()
+        return FromChoices(ordered.map { $0.provider.identities() }) { e in
+            e.lowercased() == cur || g.offered(e, context: context)
+        }
+    }
+
+    /// Контекст отправки композера беседы `c` (`nil` — новое письмо, §1в).
+    func context(for c: Conversation?) -> String? { c.map { $0.receivedBy.lowercased() } }
+
+    /// Адрес, который выберет «Автоматически» в контексте `context`.
+    func autoFrom(context: String?) -> String {
+        pickFrom(Draft(), identities: identities, groups: groups(), context: context)?.email ?? ""
+    }
+
+    /// Контекст окна пересылки.
+    var sheetContext: String? {
+        guard let s = sheet else { return nil }
+        return sendContext(s.branch, receivedBy: s.receivedBy)
     }
 
     /// Подсказки полей «Кому», «Тема», «От» (десктоп §3, `refresh_composer_hints`):
@@ -113,15 +185,16 @@ final class ComposeModel {
     /// беседа — её адрес и пустая тема: автотемы у нового письма нет (№10).
     func hints(for c: Conversation?, newTo: String? = nil) -> ComposeHints {
         let ids = identities
-        let auto = { (receivedBy: String?) in pickFrom(Draft(), identities: ids, receivedBy: receivedBy)?.email ?? "" }
+        let g = groups()
+        let auto = { (context: String?) in pickFrom(Draft(), identities: ids, groups: g, context: context)?.email ?? "" }
         if let newTo { return ComposeHints(to: newTo, subject: "", from: auto(nil)) }
         guard let c else { return ComposeHints() }
         if let r = replyTo {
-            let d = derivedFields(.reply(r, isGroup: c.isGroup), identities: ids)
-            return ComposeHints(to: d.to.joined(separator: ", "), subject: d.subject, from: auto(nil))
+            let d = derivedFields(.reply(r, isGroup: c.isGroup), identities: ids, groups: g)
+            return ComposeHints(to: d.to.joined(separator: ", "), subject: d.subject, from: auto(context(for: c)))
         }
-        let d = derivedFields(.implicit(c, lastIncoming: conversation.lastIncoming, last: conversation.last), identities: ids)
-        return ComposeHints(to: d.to.joined(separator: ", "), subject: d.subject, from: auto(c.receivedBy))
+        let d = derivedFields(.implicit(c, lastIncoming: conversation.lastIncoming, last: conversation.last), identities: ids, groups: g)
+        return ComposeHints(to: d.to.joined(separator: ", "), subject: d.subject, from: auto(context(for: c)))
     }
 
     /// Учётка для отправки — владелец адреса From (как `owner_for` десктопа):
@@ -192,7 +265,9 @@ final class ComposeModel {
         return f.to.id == target.id && f.to.recipients == target.recipients
     }
 
-    func openForward(_ b: MessageBody) { sheet = Sheet(branch: .forward(b), draft: Draft()) }
+    func openForward(_ b: MessageBody) {
+        sheet = Sheet(branch: .forward(b), draft: Draft(), receivedBy: conversation.conversation?.receivedBy ?? "")
+    }
     /// Беседа нашлась: цель снята, заглушки — ей.
     func consumeTarget() -> [String] {
         if let t = sentTarget { followed = (place, t) }
@@ -296,10 +371,12 @@ final class ComposeModel {
         let branch: Branch = replyTo.map { .reply($0, isGroup: c.isGroup) }
             ?? .implicit(c, lastIncoming: conversation.lastIncoming, last: conversation.last)
         let d = prepared(ctx)
-        switch buildOutgoing(branch, draft: d, identities: identities) {
+        switch buildOutgoing(branch, draft: d, identities: identities, groups: groups(), receivedBy: c.receivedBy) {
         case let .refused(reason):
+            subjectConfirmed = false
             error = reason
         case let .ok(request, _):
+            if needsSubjectQuestion(request.subject, resume: { [weak self] in self?.sendReply(c, ctx) }) { return }
             let sent = d
             let sentRich = rich
             let sentReply = replyTo
@@ -338,10 +415,12 @@ final class ComposeModel {
     func sendNew(to address: String, _ ctx: Font.Context) {
         var d = prepared(ctx)
         if d.to.trimmingCharacters(in: .whitespaces).isEmpty { d.to = address }
-        switch buildOutgoing(.new, draft: d, identities: identities) {
+        switch buildOutgoing(.new, draft: d, identities: identities, groups: groups()) {
         case let .refused(reason):
+            subjectConfirmed = false
             error = reason
         case let .ok(request, _):
+            if needsSubjectQuestion(request.subject, resume: { [weak self] in self?.sendNew(to: address, ctx) }) { return }
             var sent = d
             sent.to = draft.to
             let sentRich = rich
@@ -447,10 +526,16 @@ final class ComposeModel {
                 }
             }
             switch buildOutgoing(snapshot.branch, draft: snapshot.draft, identities: identities,
-                                 forwardHTML: fwdHTML, forwardText: fwdText, extraAttachments: extra) {
+                                 forwardHTML: fwdHTML, forwardText: fwdText, extraAttachments: extra,
+                                 groups: groups(), receivedBy: snapshot.receivedBy) {
             case let .refused(reason):
+                subjectConfirmed = false
                 fail(reason)
             case let .ok(request, _):
+                if needsSubjectQuestion(request.subject, resume: { [weak self] in self?.sendSheet() }) {
+                    sheet?.busy = false
+                    return
+                }
                 do {
                     let via = try await send(request)
                     if case .new = snapshot.branch {

@@ -110,12 +110,31 @@ public func textToHTML(_ text: String) -> String {
     "<div>" + escapeHTML(text).replacingOccurrences(of: "\n", with: "<br>") + "</div>"
 }
 
-/// «От кого»: явный выбор; иначе адрес, на который пришла беседа (если он
-/// свой); иначе адрес по умолчанию.
-public func pickFrom(_ draft: Draft, identities: [Identity], receivedBy: String?) -> Identity? {
+/// Контекст отправки для групп айдентик (десктоп `send_context`, §1в):
+/// `nil` — новое письмо; иначе адрес, на который пришла беседа ответа или
+/// пересылки (пусто — «не мой адрес»). `receivedBy` — беседы, откуда
+/// отвечают или пересылают; у неявного ответа он берётся из самой беседы.
+public func sendContext(_ branch: Branch, receivedBy: String? = nil) -> String? {
+    switch branch {
+    case .new: return nil
+    case let .implicit(c, _, _): return (receivedBy ?? c.receivedBy).lowercased()
+    case .reply, .forward: return (receivedBy ?? "").lowercased()
+    }
+}
+
+/// «От кого» (десктоп §1в): явный выбор; иначе отправитель по документу
+/// групп — у ответа и пересылки отправитель группы адреса, на который пришло
+/// письмо (не мой адрес — группы по умолчанию ★, строгие пропускаются), у
+/// нового письма — группы по умолчанию. Групп ещё нет (документ не пришёл) —
+/// адрес беседы, если он свой, иначе адрес по умолчанию учётки. `nil` —
+/// выбрать некого: ответ ждёт ручного выбора. Отправитель группы без живой
+/// учётки — всё равно он: отправка скажет «Не через что отправить».
+public func pickFrom(_ draft: Draft, identities: [Identity], groups: IdentityGroups = .empty, context: String?) -> Identity? {
     func find(_ a: String) -> Identity? { identities.first { $0.email.caseInsensitiveCompare(a) == .orderedSame } }
-    if !draft.from.trimmingCharacters(in: .whitespaces).isEmpty, let i = find(draft.from) { return i }
-    if let r = receivedBy, let i = find(r) { return i }
+    let explicit = draft.from.trimmingCharacters(in: .whitespaces)
+    if !explicit.isEmpty { return find(explicit) ?? Identity(email: explicit) }
+    if !groups.isEmpty { return groups.autoSender(context).map { find($0) ?? Identity(email: $0) } }
+    if let r = context, let i = find(r) { return i }
     return identities.first(where: \.isDefault) ?? identities.first
 }
 
@@ -130,7 +149,10 @@ public struct FromChoices: Equatable, Sendable {
     /// Остальные адреса учёток.
     public var others: [Identity] = []
 
-    public init(_ perAccount: [[Identity]]) {
+    /// `keep` — какие адреса предлагать (десктоп `offered`: не скрытые и
+    /// разрешённые строгой группой в этом контексте; выбранный — всегда).
+    public init(_ perAccount: [[Identity]], keep: (String) -> Bool = { _ in true }) {
+        let perAccount = perAccount.map { $0.filter { keep($0.email) } }
         var seen = Set<String>()
         for list in perAccount {
             // Адрес по умолчанию; занят другой учёткой — следующий свой.
@@ -165,8 +187,8 @@ private func threading(_ b: MessageBody?) -> (inReplyTo: String, references: Str
 /// Новое письмо — ни адресатов, ни темы: адресат — у новой беседы, автотемы
 /// у нового письма нет (аудит 2026-11-14 №10). Пересылка — «Fwd: …», «Кому»
 /// обязательно.
-public func derivedFields(_ branch: Branch, identities: [Identity]) -> (to: [String], subject: String) {
-    let own = Set(identities.map { $0.email.lowercased() })
+public func derivedFields(_ branch: Branch, identities: [Identity], groups: IdentityGroups = .empty) -> (to: [String], subject: String) {
+    let own = Set(identities.map { $0.email.lowercased() } + groups.groups.flatMap { $0.addresses.map(\.email) })
     switch branch {
     case let .forward(o):
         return ([], "Fwd: \(o.subject)")
@@ -194,20 +216,26 @@ public func derivedFields(_ branch: Branch, identities: [Identity]) -> (to: [Str
 /// уходит всегда.
 public func buildOutgoing(
     _ branch: Branch, draft: Draft, identities: [Identity],
-    forwardHTML: String = "", forwardText: String = "", extraAttachments: [PendingAttachment] = []
+    forwardHTML: String = "", forwardText: String = "", extraAttachments: [PendingAttachment] = [],
+    groups: IdentityGroups = .empty, receivedBy: String? = nil
 ) -> Built {
     if case .forward = branch {} else if !draft.canSend { return .refused("Нечего отправлять.") }
     let toOverride = splitAddresses(draft.to)
     let cc = splitAddresses(draft.cc)
     let subjectOverride = draft.subject.trimmingCharacters(in: .whitespaces).isEmpty ? nil : draft.subject
 
-    var receivedBy: String?
-    if case let .implicit(c, _, _) = branch { receivedBy = c.receivedBy }
-    guard let from = pickFrom(draft, identities: identities, receivedBy: receivedBy) else {
-        return .refused("Нет ни одного своего адреса для отправки.")
+    let context = sendContext(branch, receivedBy: receivedBy)
+    guard let from = pickFrom(draft, identities: identities, groups: groups, context: context) else {
+        return .refused(groups.isEmpty
+            ? "Нет ни одного своего адреса для отправки."
+            : "Ни один адрес не подходит для ответа на это письмо автоматически — выберите его в «От кого».")
+    }
+    // Строгая группа (§1в) отвечает только на письма своих адресов.
+    if !groups.allowed(from.email, context: context) {
+        return .refused("Адрес \(from.email) отвечает только на письма, пришедшие на адреса своей группы. Выберите другой адрес в «От кого».")
     }
 
-    let auto = derivedFields(branch, identities: identities)
+    let auto = derivedFields(branch, identities: identities, groups: groups)
     let to = toOverride.isEmpty ? auto.to : toOverride
     let subject = subjectOverride ?? auto.subject
     let irt: String, refs: String

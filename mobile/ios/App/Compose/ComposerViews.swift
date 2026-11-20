@@ -55,7 +55,16 @@ struct ComposerBar: View {
                 }
                 .font(.footnote)
             }
-            if model.expanded { OverrideFields(draft: $model.draft, choices: model.fromChoices, hints: hints) }
+            if model.expanded {
+                let context: String? = switch place {
+                case let .conversation(c): model.context(for: c)
+                case .new: nil
+                }
+                OverrideFields(
+                    draft: $model.draft, choices: model.fromChoices(context: context, current: model.draft.from),
+                    hints: hints, focusSubject: $model.focusSubject
+                )
+            }
             InlineImages(images: $model.draft.images)
             AttachmentChips(attachments: $model.draft.attachments)
             if let e = model.error {
@@ -115,6 +124,7 @@ struct ComposerBar: View {
         }
         .onChange(of: photos) { loadPhotos() }
         .onAppear { if autofocus { focused = true } }
+        .noSubjectQuestion(model, active: model.sheet == nil)
     }
 
     /// Поле ввода растёт со строками до восьми, дальше прокручивается.
@@ -241,6 +251,7 @@ struct ComposeSheetView: View {
     @State private var importing = false
     @State private var photos: [PhotosPickerItem] = []
     @FocusState private var toFocused: Bool
+    @FocusState private var subjectFocused: Bool
 
     var body: some View {
         if let s = model.sheet {
@@ -257,9 +268,11 @@ struct ComposeSheetView: View {
                         }
                         LabeledContent("Тема") {
                             TextField(s.original.map { "Fwd: \($0.subject)" } ?? "", text: sheetBinding(\.subject))
+                                .focused($subjectFocused)
                         }
-                        FromPicker(selection: sheetBinding(\.from), choices: model.fromChoices,
-                                   auto: model.hints(for: nil, newTo: "").from)
+                        FromPicker(selection: sheetBinding(\.from),
+                                   choices: model.fromChoices(context: model.sheetContext, current: s.draft.from),
+                                   auto: model.autoFrom(context: model.sheetContext))
                     }
                     Section {
                         TextField("Сообщение", text: sheetBinding(\.text), axis: .vertical)
@@ -310,6 +323,13 @@ struct ComposeSheetView: View {
                 }
                 .disabled(s.busy)
                 .onAppear { toFocused = true }
+                .noSubjectQuestion(model, active: true)
+                .onChange(of: model.focusSubject) {
+                    if model.focusSubject {
+                        subjectFocused = true
+                        model.focusSubject = false
+                    }
+                }
                 .fileImporter(isPresented: $importing, allowedContentTypes: [.item], allowsMultipleSelection: true) { r in
                     if case let .success(urls) = r { model.attach(urls, toSheet: true) }
                 }
@@ -342,6 +362,9 @@ private struct OverrideFields: View {
     @Binding var draft: Draft
     let choices: FromChoices
     let hints: ComposeHints
+    /// Взять фокус в «Тему» — после «Отмены» в «Отправить без темы?».
+    @Binding var focusSubject: Bool
+    @FocusState private var subjectFocused: Bool
 
     var body: some View {
         VStack(spacing: 4) {
@@ -350,6 +373,7 @@ private struct OverrideFields: View {
             HStack {
                 Text("Тема").foregroundStyle(.secondary).frame(width: 56, alignment: .leading)
                 TextField(hints.subject.isEmpty ? "Без темы" : hints.subject, text: $draft.subject)
+                    .focused($subjectFocused)
                     .accessibilityIdentifier("composer.subject")
             }
             // Подпись — как у «Кому / Копия / Тема»: без неё «Автоматически ⇕»
@@ -363,6 +387,13 @@ private struct OverrideFields: View {
         }
         .font(.subheadline)
         .textFieldStyle(.roundedBorder)
+        // Поле могло только что появиться вместе с флагом (поля раскрылись).
+        .task(id: focusSubject) {
+            guard focusSubject else { return }
+            try? await Task.sleep(for: .milliseconds(100))
+            subjectFocused = true
+            focusSubject = false
+        }
     }
 
     private func field(_ label: String, _ text: Binding<String>, prompt: String, id: String) -> some View {
@@ -450,6 +481,21 @@ enum PhotoLoader {
 }
 
 private extension View {
+    /// «Отправить без темы?» (десктоп §1): «Отправить» — как есть, «Отмена» —
+    /// письмо остаётся, фокус в «Тему».
+    func noSubjectQuestion(_ model: ComposeModel, active: Bool) -> some View {
+        alert(
+            "Отправить без темы?",
+            isPresented: Binding(get: { active && model.askNoSubject }, set: { _ in })
+            // Закрыть вопрос можно только кнопкой; её действие и снимает флаг.
+        ) {
+            Button("Отмена", role: .cancel) { model.cancelNoSubject() }
+            Button("Отправить") { model.confirmNoSubject() }
+        } message: {
+            Text("У письма нет темы.")
+        }
+    }
+
     func addressInput() -> some View {
         #if os(iOS)
         textContentType(.emailAddress)
