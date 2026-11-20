@@ -64,8 +64,9 @@ Android** с причиной.
   пользователя; совместимость со старыми не нужна, свежий SwiftUI используется
   без обходов. Если какое-то из устройств не получит 27 — опускаемся до 26.
 - **Язык:** Swift 6, строгая проверка конкурентности (`complete`).
-- **Устройства проверки:** iPhone 15 (iPhone15,4, iOS 27.0.1), iPad Pro 13″, MacBook
-  (Apple Silicon). Симуляторы — iPhone 18 Pro и iPad Pro 13-inch (M5) на iOS 27.2.
+- **Устройства проверки:** с 20.11.2026 физических iPhone и iPad нет (отданы) —
+  iOS проверяется только на симуляторах (iPhone 18 Pro и iPad Pro 13-inch (M5) на
+  iOS 27.2) и macOS-сборкой на MacBook (Apple Silicon). `mac.sh device` больше не к чему применять.
 - **Bundle ID:** `ru.letotam.ddmail` — как пакет Android.
 - **Проект Xcode генерируется** из `mobile/ios/project.yml` (XcodeGen). Сам
   `.xcodeproj` в git не хранится: его правка руками и конфликты слияния —
