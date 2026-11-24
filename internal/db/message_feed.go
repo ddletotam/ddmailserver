@@ -162,14 +162,20 @@ func (db *DB) DeleteMessageFeed(id int64) error {
 	return nil
 }
 
-// EnqueueStaleMessageFeed queues messages never computed or computed by an
-// older version. Returns how many were queued.
+// EnqueueStaleMessageFeed queues feed messages never computed or computed by
+// an older version. Returns how many were queued.
 func (db *DB) EnqueueStaleMessageFeed(version int) (int64, error) {
 	res, err := db.Exec(
 		`INSERT INTO message_feed_queue (message_row_id, enqueued_at)
 		 SELECT m.id, (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT
-		   FROM messages m LEFT JOIN message_feed f ON f.message_row_id = m.id
-		  WHERE f.message_row_id IS NULL OR f.version < $1
+		   FROM messages m
+		   JOIN folders fo ON fo.id = m.folder_id
+		   LEFT JOIN message_feed f ON f.message_row_id = m.id
+		  WHERE (f.message_row_id IS NULL OR f.version < $1)
+		    -- Spam and Trash have no feed version; a message brought back from
+		    -- there is computed when a client asks for it (Worker.Ensure).
+		    AND NOT COALESCE(m.is_spam, FALSE) AND NOT COALESCE(m.soft_deleted, FALSE)
+		    AND fo.type NOT IN ('trash', 'junk', 'spam')
 		 ON CONFLICT (message_row_id) DO NOTHING`, version)
 	if err != nil {
 		return 0, fmt.Errorf("enqueue stale message feed: %w", err)
