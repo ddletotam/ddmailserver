@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/feedtrim"
 	"github.com/ddletotam/ddmailserver/internal/logmask"
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/notify"
@@ -1380,13 +1381,10 @@ type DesktopMessageBody struct {
 	MessageID   string              `json:"message_id"`
 	InReplyTo   string              `json:"in_reply_to"`
 	References  []string            `json:"references"`
-	// Версия для ленты (internal/feedtrim): письмо без процитированной
-	// переписки и без подписи. Есть, только если что-то срезано: тогда лента
-	// показывает FeedHTML (или FeedText), а HTML/Text — оригинал за «•••».
-	// Trimmed — что срезано: "history", "signature".
-	FeedHTML *string  `json:"feed_html,omitempty"`
-	FeedText *string  `json:"feed_text,omitempty"`
-	Trimmed  []string `json:"trimmed,omitempty"`
+	// Trimmed — что сервер срезал из HTML/Text (internal/feedtrim):
+	// "history" — процитированная переписка, "signature" — подпись. Пусто —
+	// тело как в письме. Оригинал — /messages/{id}/source.
+	Trimmed []string `json:"trimmed,omitempty"`
 	// Доставка исходящего (outbox): DeliveryStatus — "pending" (в очереди /
 	// отправляется), "delivered", "failed"; пусто — неизвестно, считать
 	// доставленным. DeliveryReason — код причины (у failed; у pending — почему
@@ -1509,12 +1507,17 @@ func (s *Server) HandleDesktopConversationMessages(w http.ResponseWriter, r *htt
 	respondJSON(w, http.StatusOK, bodies)
 }
 
-// attachFeed adds the feed versions of the messages that have a cut. A
-// failure only costs the trimming: the feed shows the originals.
+// attachFeed replaces the bodies with their feed versions: without the quoted
+// correspondence and the signature (docs/feed-trim.md). Clients draw what they
+// get and trim nothing themselves. A failure only costs the trimming: the
+// bodies stay original.
 func (s *Server) attachFeed(bodies []DesktopMessageBody) {
 	ids := make([]int64, len(bodies))
 	for i, b := range bodies {
 		ids[i] = b.UID
+	}
+	if err := feedtrim.NewWorker(s.database).Ensure(ids); err != nil {
+		log.Printf("conversation messages: compute feed versions: %v", err)
 	}
 	feeds, err := s.database.MessageFeeds(ids)
 	if err != nil {
@@ -1526,7 +1529,12 @@ func (s *Server) attachFeed(bodies []DesktopMessageBody) {
 		if f == nil {
 			continue
 		}
-		bodies[i].FeedHTML, bodies[i].FeedText = f.FeedHTML, f.FeedText
+		if f.FeedHTML != nil && bodies[i].HTML != nil {
+			bodies[i].HTML = f.FeedHTML
+		}
+		if f.FeedText != nil && bodies[i].Text != nil {
+			bodies[i].Text = f.FeedText
+		}
 		if f.HistoryCut {
 			bodies[i].Trimmed = append(bodies[i].Trimmed, "history")
 		}

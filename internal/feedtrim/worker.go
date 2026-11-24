@@ -23,6 +23,7 @@ type Store interface {
 	EnqueueFeedReplies(userID int64, messageID string, exclude int64) error
 	PendingMessageFeed(limit int) ([]int64, error)
 	AckMessageFeed(ids []int64) error
+	MessageFeedCurrent(ids []int64, version int) (map[int64]bool, error)
 }
 
 const (
@@ -70,6 +71,25 @@ func (w *Worker) Run(ctx context.Context) {
 		case <-time.After(wait):
 		}
 	}
+}
+
+// Ensure computes, right now, those of ids that the queue has not reached
+// yet. Clients cache a body forever once fetched, so a message they ask for
+// must leave the server already trimmed, not a couple of seconds later.
+func (w *Worker) Ensure(ids []int64) error {
+	done, err := w.store.MessageFeedCurrent(ids, Version)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if done[id] {
+			continue
+		}
+		if err := w.compute(id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Drain computes one batch from the queue and returns its size.

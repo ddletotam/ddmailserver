@@ -38,6 +38,15 @@ func (m *memStore) FeedPeers(userID int64, sender string, exclude int64, limit i
 	}
 	return out, nil
 }
+func (m *memStore) MessageFeedCurrent(ids []int64, version int) (map[int64]bool, error) {
+	out := map[int64]bool{}
+	for _, id := range ids {
+		if f := m.feed[id]; f != nil && f.Version >= version {
+			out[id] = true
+		}
+	}
+	return out, nil
+}
 func (m *memStore) HasMessageFeed(id int64) (bool, error)      { _, ok := m.feed[id]; return ok, nil }
 func (m *memStore) SaveMessageFeed(f *db.MessageFeed) error    { m.feed[f.MessageRowID] = f; return nil }
 func (m *memStore) DeleteMessageFeed(id int64) error           { delete(m.feed, id); return nil }

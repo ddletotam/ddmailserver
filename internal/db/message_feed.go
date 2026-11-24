@@ -247,3 +247,27 @@ func (db *DB) MessageFeeds(ids []int64) (map[int64]*MessageFeed, error) {
 	}
 	return out, rows.Err()
 }
+
+// MessageFeedCurrent returns which of ids have a row computed by the given
+// version (or a newer one).
+func (db *DB) MessageFeedCurrent(ids []int64, version int) (map[int64]bool, error) {
+	out := make(map[int64]bool, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := db.Query(
+		`SELECT message_row_id FROM message_feed WHERE message_row_id = ANY($1) AND version >= $2`,
+		pq.Array(ids), version)
+	if err != nil {
+		return nil, fmt.Errorf("read message feed versions: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan message feed version: %w", err)
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
