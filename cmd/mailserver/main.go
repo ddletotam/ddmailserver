@@ -19,6 +19,7 @@ import (
 	"github.com/ddletotam/ddmailserver/internal/config"
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/dkimsign"
+	"github.com/ddletotam/ddmailserver/internal/feedtrim"
 	imapclient "github.com/ddletotam/ddmailserver/internal/imap/client"
 	imapserver "github.com/ddletotam/ddmailserver/internal/imap/server"
 	"github.com/ddletotam/ddmailserver/internal/notify"
@@ -188,6 +189,13 @@ func main() {
 	if err := importer.BackfillAttendees(database); err != nil {
 		log.Printf("Warning: attendee backfill failed: %v", err)
 	}
+
+	// Feed versions of messages (without quoted history and signature) are
+	// computed in the background from message_feed_queue, filled by a trigger
+	// on messages — every write path is covered without calling anything.
+	feedCtx, stopFeed := context.WithCancel(context.Background())
+	defer stopFeed()
+	go feedtrim.NewWorker(database).Run(feedCtx)
 
 	// Initialize Meilisearch if configured. The indexer runs in the
 	// background: it waits for Meilisearch, then drains search_index_queue
@@ -460,6 +468,7 @@ func main() {
 	sig := <-sigChan
 	log.Printf("Received %v, shutting down gracefully...", sig)
 	stopSearch()
+	stopFeed()
 
 	shutdown(sigChan, scheduler, idleManager, listeners, pool, database)
 }

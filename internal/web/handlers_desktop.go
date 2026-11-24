@@ -1380,6 +1380,13 @@ type DesktopMessageBody struct {
 	MessageID   string              `json:"message_id"`
 	InReplyTo   string              `json:"in_reply_to"`
 	References  []string            `json:"references"`
+	// Версия для ленты (internal/feedtrim): письмо без процитированной
+	// переписки и без подписи. Есть, только если что-то срезано: тогда лента
+	// показывает FeedHTML (или FeedText), а HTML/Text — оригинал за «•••».
+	// Trimmed — что срезано: "history", "signature".
+	FeedHTML *string  `json:"feed_html,omitempty"`
+	FeedText *string  `json:"feed_text,omitempty"`
+	Trimmed  []string `json:"trimmed,omitempty"`
 	// Доставка исходящего (outbox): DeliveryStatus — "pending" (в очереди /
 	// отправляется), "delivered", "failed"; пусто — неизвестно, считать
 	// доставленным. DeliveryReason — код причины (у failed; у pending — почему
@@ -1498,7 +1505,35 @@ func (s *Server) HandleDesktopConversationMessages(w http.ResponseWriter, r *htt
 		}
 	}
 
+	s.attachFeed(bodies)
 	respondJSON(w, http.StatusOK, bodies)
+}
+
+// attachFeed adds the feed versions of the messages that have a cut. A
+// failure only costs the trimming: the feed shows the originals.
+func (s *Server) attachFeed(bodies []DesktopMessageBody) {
+	ids := make([]int64, len(bodies))
+	for i, b := range bodies {
+		ids[i] = b.UID
+	}
+	feeds, err := s.database.MessageFeeds(ids)
+	if err != nil {
+		log.Printf("conversation messages: feed versions: %v", err)
+		return
+	}
+	for i := range bodies {
+		f := feeds[bodies[i].UID]
+		if f == nil {
+			continue
+		}
+		bodies[i].FeedHTML, bodies[i].FeedText = f.FeedHTML, f.FeedText
+		if f.HistoryCut {
+			bodies[i].Trimmed = append(bodies[i].Trimmed, "history")
+		}
+		if f.SignatureCut {
+			bodies[i].Trimmed = append(bodies[i].Trimmed, "signature")
+		}
+	}
 }
 
 // hideInlineAttachment reports whether an "inline" attachment row should stay

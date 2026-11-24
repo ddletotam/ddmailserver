@@ -19,6 +19,7 @@ require (
 	github.com/lib/pq v1.10.9
 	github.com/nmcclain/ldap v0.0.0-20210720162743-7f8d1e44eeba
 	golang.org/x/crypto v0.48.0
+	golang.org/x/net v0.49.0
 	golang.org/x/text v0.34.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -26,5 +27,4 @@ require (
 require (
 	github.com/nmcclain/asn1-ber v0.0.0-20170104154839-2661553a0484 // indirect
 	github.com/teambition/rrule-go v1.8.2 // indirect
-	golang.org/x/net v0.49.0 // indirect
 )
