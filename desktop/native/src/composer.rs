@@ -140,6 +140,13 @@ pub(crate) fn try_pending_switch(ui: &MainWindow, sh: &Shared) -> bool {
 /// алиас, который всё равно не выбрать, значит учить пользователя жать «всё
 /// равно отправить» не глядя.
 pub(crate) fn from_mismatch(ui: &MainWindow, sh: &Shared) -> Option<(String, String)> {
+    // Новое письмо: открытого диалога нет — `sh.current` всё ещё указывает на
+    // беседу, из которой нажали «Новое письмо», и сравнение с её `received_by`
+    // ложно. Наблюдалось так: новое письмо на незнакомый адрес, а окно
+    // «В этом диалоге вам пишут на …» про чужой, ранее открытый диалог.
+    if sh.compose.pending_compose.borrow().is_some() {
+        return None;
+    }
     // Та же логика, что и в on_send: закреплённый выбор важнее индекса пикера.
     let current = sh
         .compose
