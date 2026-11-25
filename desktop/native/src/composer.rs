@@ -40,21 +40,38 @@ pub(crate) fn refresh_composer_identities(ui: &MainWindow, sh: &Shared) {
                     label: label.into(),
                     email: a.email.clone().into(),
                     tint,
-                    hidden: !doc.offered(&a.email, context.as_deref()),
+                    hidden: !doc.offered(&a.email, context.as_deref())
+                        || !identities_ui::sendable(sh, &a.email),
                 });
                 emails.push(a.email.clone());
             }
         }
+        // Адрес без подключённой учётки отправить нельзя (§1в) — сам по
+        // умолчанию не выбирается: берём другой адрес его группы, иначе
+        // первый пригодный из всех.
+        let usable =
+            |e: &String| doc.offered(e, context.as_deref()) && identities_ui::sendable(sh, e);
         let default_email = match &context {
             None => doc.new_mail_sender(),
             Some(r) => doc.reply_sender(r),
-        };
+        }
+        .filter(|d| identities_ui::sendable(sh, d))
+        .or_else(|| {
+            let wanted = match &context {
+                None => doc.new_mail_sender(),
+                Some(r) => doc.reply_sender(r),
+            }?;
+            let group = doc.group_of(&wanted)?;
+            group.addresses.iter().map(|a| a.email.clone()).find(|e| usable(e))
+        })
+        .or_else(|| emails.iter().find(|e| usable(e)).cloned());
         (items, emails, default_email)
     };
     // Прежний выбор держится, только пока он разрешён в этом контексте.
     let selected = prev_email
         .as_ref()
         .filter(|p| sh.idents.stored.borrow().doc.allowed(p, context.as_deref()))
+        .filter(|p| identities_ui::sendable(sh, p))
         .and_then(|p| emails.iter().position(|e| e == p));
     let default_idx = default_email
         .and_then(|d| emails.iter().position(|e| *e == d))
@@ -172,7 +189,9 @@ pub(crate) fn from_mismatch(ui: &MainWindow, sh: &Shared) -> Option<(String, Str
         return None;
     }
     let expected = group.sender().to_string();
-    if expected.is_empty() || expected == current {
+    // Адрес диалога без подключённой учётки предлагать бессмысленно: с него
+    // всё равно не отправить.
+    if expected.is_empty() || expected == current || !identities_ui::sendable(sh, &expected) {
         return None;
     }
     Some((expected, current))
@@ -1153,6 +1172,7 @@ pub(crate) fn wire_send(ui: &MainWindow, shared: &Rc<Shared>) {
                             .borrow()
                             .iter()
                             .filter(|e| **e == expected || doc.offered(e, context.as_deref()))
+                            .filter(|e| identities_ui::sendable(&sh_send, e))
                             .cloned()
                             .collect()
                     };

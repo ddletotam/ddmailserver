@@ -93,6 +93,13 @@ pub(crate) fn owner_for(sh: &Shared, from: &str, prefer: &str) -> Option<String>
     if list.iter().any(|k| k == prefer) { Some(prefer.to_string()) } else { list.first().cloned() }
 }
 
+/// Есть ли учётка, через которую уйдёт письмо с `from`. Пока владельцы ещё
+/// не собраны (до первого списка бесед), считаем пригодными все адреса —
+/// иначе выпадашка на старте была бы пустой.
+pub(crate) fn sendable(sh: &Shared, from: &str) -> bool {
+    sh.idents.owners.borrow().is_empty() || owner_for(sh, from, "").is_some()
+}
+
 /// Собрать адреса со всех учёток, добавить новые в документ и обновить всё,
 /// что от него зависит. Зовётся на каждый список бесед: айдентики учёток
 /// приезжают вместе с ним.
