@@ -6,12 +6,12 @@
     <title>{{.Title}} - {{t "app.name"}}</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23206bc4'><path d='M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5zm2 0v2.5l7 4.5 7-4.5V5H5zm0 5v9h14v-9l-7 4.5L5 10z'/></svg>">
     <!-- Tabler CSS -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.0.0-beta20/dist/css/tabler.min.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.44.0/tabler-icons.min.css">
+    <link rel="stylesheet" href="/static/vendor/tabler-core-1.0.0-beta20/tabler.min.css">
+    <link rel="stylesheet" href="/static/vendor/tabler-icons-2.44.0/tabler-icons.min.css">
     <!-- Custom overrides -->
     <link rel="stylesheet" href="/static/css/custom.css">
     <!-- htmx for AJAX interactions -->
-    <script src="/static/js/htmx-1.9.10.min.js"></script>
+    <script src="/static/vendor/htmx-1.9.10.min.js"></script>
 </head>
 <body class="{{if not .User}}border-top-wide border-primary d-flex flex-column{{end}}">
     {{if .User}}
@@ -200,6 +200,6 @@
     {{end}}
 
     <!-- Tabler JS -->
-    <script src="https://cdn.jsdelivr.net/npm/@tabler/core@1.0.0-beta20/dist/js/tabler.min.js"></script>
+    <script src="/static/vendor/tabler-core-1.0.0-beta20/tabler.min.js"></script>
 </body>
 </html>
