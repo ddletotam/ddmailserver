@@ -65,6 +65,10 @@
                         <input type="text" name="local_part" class="form-control" placeholder="vasya" required>
                         <span class="input-group-text">@{{.Domain}}</span>
                     </div>
+                    <select name="owner" class="form-select w-auto" title="{{t "admin.mb_kind_hint"}}">
+                        <option value="">{{t "admin.mb_kind_own"}}</option>
+                        {{range $.People}}<option value="{{.}}">{{t "admin.mb_kind_user"}} {{.}}</option>{{end}}
+                    </select>
                     <button type="submit" class="btn btn-primary text-nowrap">{{t "admin.mb_add"}}</button>
                 </form>
                 <details class="mt-3">
@@ -108,7 +112,9 @@ _dmarc.{{.Domain}}.  TXT  "v=DMARC1; p=quarantine; adkim=r; aspf=r"</code></pre>
         f.addEventListener('submit', function (e) {
             e.preventDefault();
             send('POST', '/api/admin/mailboxes', new FormData(f)).then(function (j) {
-                sessionStorage.setItem('ddmail-secret', JSON.stringify(j)); location.reload();
+                // Адрес пользователя — без пароля, показывать нечего.
+                if (j.password) sessionStorage.setItem('ddmail-secret', JSON.stringify(j));
+                location.reload();
             }).catch(function (err) { alert(err.message); });
         });
     });

@@ -43,9 +43,13 @@ func (s *Server) HandleAdminDomainsPage(w http.ResponseWriter, r *http.Request) 
 		log.Printf("admin domains: %v", err)
 	}
 	names := map[int64]string{}
+	var people []string // кому можно выдать адрес: люди, не админы и не ящики
 	if users, err := s.database.ListUsers(); err == nil {
 		for _, u := range users {
 			names[u.ID] = u.Username
+			if !u.IsMailbox() && !u.IsAdmin() {
+				people = append(people, u.Username)
+			}
 		}
 	}
 	var rows []adminDomainRow
@@ -70,7 +74,8 @@ func (s *Server) HandleAdminDomainsPage(w http.ResponseWriter, r *http.Request) 
 		PageData
 		Domains  []adminDomainRow
 		MailHost string
-	}{PageData: PageData{Title: "Domains", User: user}, Domains: rows, MailHost: host})
+		People   []string
+	}{PageData: PageData{Title: "Domains", User: user}, Domains: rows, MailHost: host, People: people})
 }
 
 func adminPathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
@@ -165,12 +170,33 @@ func (s *Server) HandleAdminCreateMailbox(w http.ResponseWriter, r *http.Request
 		respondError(w, http.StatusBadRequest, "invalid mailbox name")
 		return
 	}
+	address := local + "@" + d.Domain
+	// Адрес существующего пользователя: ящик без своей учётки, почта ложится
+	// этому пользователю, отправлять с адреса может он (как старые ящики).
+	if ownerName := strings.TrimSpace(r.FormValue("owner")); ownerName != "" {
+		owner, err := s.database.GetUserByUsername(ownerName)
+		if err != nil || owner.IsMailbox() {
+			respondError(w, http.StatusBadRequest, "user not found")
+			return
+		}
+		if owner.IsAdmin() {
+			respondError(w, http.StatusBadRequest, "administrator has no mail")
+			return
+		}
+		mb := &models.Mailbox{UserID: owner.ID, DomainID: d.ID, LocalPart: local, Enabled: true}
+		if err := s.database.CreateMailbox(mb); err != nil {
+			respondError(w, http.StatusConflict, "mailbox already exists")
+			return
+		}
+		s.auditAdmin(r, admin, "mailbox.create_for_user", "mailbox", mb.ID, address+" -> "+owner.Username)
+		respondJSON(w, http.StatusCreated, map[string]string{"address": address, "owner": owner.Username})
+		return
+	}
 	mb := &models.Mailbox{UserID: d.UserID, DomainID: d.ID, LocalPart: local, Enabled: true}
 	if err := s.database.CreateMailbox(mb); err != nil {
 		respondError(w, http.StatusConflict, "mailbox already exists")
 		return
 	}
-	address := local + "@" + d.Domain
 	password, err := s.giveMailboxAccount(mb.ID, address)
 	if err != nil {
 		_, _ = s.database.DeleteMailboxAndAccount(mb.ID)
