@@ -4,7 +4,7 @@
         <div class="card">
             <div class="card-header"><h3 class="card-title">{{t "admin.dom_title"}}</h3></div>
             <div class="card-body">
-                <form id="domain-form" class="d-flex gap-2">
+                <form method="post" id="domain-form" class="d-flex gap-2">
                     <input type="text" name="domain" class="form-control" placeholder="example.com" required>
                     <button type="submit" class="btn btn-primary text-nowrap">{{t "admin.dom_add"}}</button>
                 </form>
@@ -59,7 +59,7 @@
                     {{end}}
                     </tbody>
                 </table>
-                <form class="mailbox-form d-flex gap-2 mt-2">
+                <form method="post" class="mailbox-form d-flex gap-2 mt-2">
                     <input type="hidden" name="domain_id" value="{{.ID}}">
                     <div class="input-group">
                         <input type="text" name="local_part" class="form-control" placeholder="vasya" required>

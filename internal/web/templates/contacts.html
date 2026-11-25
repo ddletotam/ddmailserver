@@ -82,7 +82,7 @@
                 <h5 class="modal-title">{{t "contacts.add_carddav"}}</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
-            <form hx-post="/contacts/sources/create"
+            <form method="post" hx-post="/contacts/sources/create"
                   hx-target="#contact-sources-list"
                   hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('add-carddav-modal')).hide()">
                 <div class="modal-body">
@@ -129,7 +129,7 @@
                 <h5 class="modal-title">{{t "contacts.new_local"}}</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
-            <form hx-post="/contacts/addressbooks/create"
+            <form method="post" hx-post="/contacts/addressbooks/create"
                   hx-target="#address-books-list"
                   hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('add-local-modal')).hide()">
                 <div class="modal-body">
@@ -228,7 +228,7 @@
                         <h5 class="modal-title">Edit: {{.Name}}</h5>
                         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                     </div>
-                    <form hx-post="/contacts/sources/{{.ID}}/update"
+                    <form method="post" hx-post="/contacts/sources/{{.ID}}/update"
                           hx-target="#contact-sources-list"
                           hx-swap="innerHTML settle:100ms"
                           hx-on::before-request="var m=bootstrap.Modal.getInstance(document.getElementById('edit-contact-source-modal-{{.ID}}')); if(m) m.hide();"

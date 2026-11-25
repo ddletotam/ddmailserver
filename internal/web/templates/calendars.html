@@ -80,7 +80,7 @@
                 <h5 class="modal-title">{{t "calendars.add_caldav"}}</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
-            <form hx-post="/calendars/sources/create"
+            <form method="post" hx-post="/calendars/sources/create"
                   hx-target="#calendar-sources-list"
                   hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('add-caldav-modal')).hide()">
                 <div class="modal-body">
@@ -153,7 +153,7 @@
                 <h5 class="modal-title">{{t "calendars.new_local"}}</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
-            <form hx-post="/calendars/create"
+            <form method="post" hx-post="/calendars/create"
                   hx-target="#calendars-list"
                   hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('add-local-modal')).hide()">
                 <div class="modal-body">
@@ -183,7 +183,7 @@
                 <h5 class="modal-title">Subscribe to ICS Calendar</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
-            <form hx-post="/calendars/sources/create-ics-url"
+            <form method="post" hx-post="/calendars/sources/create-ics-url"
                   hx-target="#calendar-sources-list"
                   hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('add-ics-url-modal')).hide()">
                 <div class="modal-body">
@@ -248,7 +248,7 @@
                 <h5 class="modal-title">{{t "calendars.import_ics"}}</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
-            <form hx-post="/calendars/import"
+            <form method="post" hx-post="/calendars/import"
                   hx-encoding="multipart/form-data"
                   hx-target="#calendars-list"
                   hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('import-ics-modal')).hide()">
@@ -347,7 +347,7 @@
                         <h5 class="modal-title">Edit: {{.Name}}</h5>
                         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                     </div>
-                    <form hx-post="/calendars/sources/{{.ID}}/update"
+                    <form method="post" hx-post="/calendars/sources/{{.ID}}/update"
                           hx-target="#calendar-sources-list"
                           hx-swap="innerHTML settle:100ms"
                           hx-on::before-request="var m=bootstrap.Modal.getInstance(document.getElementById('edit-source-modal-{{.ID}}')); if(m) m.hide();"

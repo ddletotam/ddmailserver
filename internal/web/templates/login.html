@@ -24,7 +24,7 @@
             <div class="tab-content">
                 <!-- Login form -->
                 <div class="tab-pane fade show active" id="login-pane" role="tabpanel">
-                    <form hx-post="/api/login"
+                    <form method="post" hx-post="/api/login"
                           hx-target="#login-error"
                           hx-swap="innerHTML">
                         <div id="login-error" class="alert alert-danger" style="display: none;"></div>
@@ -55,7 +55,7 @@
                 <!-- Register form -->
                 {{if .RegistrationEnabled}}
                 <div class="tab-pane fade" id="register-pane" role="tabpanel">
-                    <form hx-post="/api/register"
+                    <form method="post" hx-post="/api/register"
                           hx-target="#register-error"
                           hx-swap="innerHTML">
                         <div id="register-error" class="alert alert-danger" style="display: none;"></div>

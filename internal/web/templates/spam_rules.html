@@ -8,7 +8,7 @@
     </div>
     <div class="card-body">
         <p class="text-muted mb-3">{{t "spam.analyze.hint"}}</p>
-        <form hx-post="/spam/analyze-by-message-id" hx-target="#analyze-result" hx-swap="innerHTML">
+        <form method="post" hx-post="/spam/analyze-by-message-id" hx-target="#analyze-result" hx-swap="innerHTML">
             <div class="row g-3 align-items-end">
                 <div class="col">
                     <label class="form-label">Message-ID</label>
@@ -35,7 +35,7 @@
     </div>
     <div class="card-body">
         <p class="text-muted mb-3">{{t "spam.rules.mark_message_hint"}}</p>
-        <form hx-post="/spam/mark-by-message-id" hx-target="#mark-result" hx-swap="innerHTML">
+        <form method="post" hx-post="/spam/mark-by-message-id" hx-target="#mark-result" hx-swap="innerHTML">
             <div class="row g-3 align-items-end">
                 <div class="col">
                     <label class="form-label">Message-ID</label>

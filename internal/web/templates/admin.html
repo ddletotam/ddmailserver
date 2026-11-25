@@ -19,7 +19,7 @@
                         <li>Set redirect URI: <code>{{.GoogleRedirectURI}}</code></li>
                     </ol>
                 </div>
-                <form hx-post="/api/settings/oauth/google" hx-target="#google-oauth-message" hx-swap="innerHTML">
+                <form method="post" hx-post="/api/settings/oauth/google" hx-target="#google-oauth-message" hx-swap="innerHTML">
                     <div id="google-oauth-message"></div>
                     <div class="mb-3">
                         <label class="form-label">Client ID</label>
@@ -58,7 +58,7 @@
                         <li>Set redirect URI: <code>{{.MicrosoftRedirectURI}}</code></li>
                     </ol>
                 </div>
-                <form hx-post="/api/settings/oauth/microsoft" hx-target="#ms-oauth-message" hx-swap="innerHTML">
+                <form method="post" hx-post="/api/settings/oauth/microsoft" hx-target="#ms-oauth-message" hx-swap="innerHTML">
                     <div id="ms-oauth-message"></div>
                     <div class="mb-3">
                         <label class="form-label">Application (Client) ID</label>
@@ -83,7 +83,7 @@
         <div class="card">
             <div class="card-header"><h3 class="card-title">{{t "admin.password_title"}}</h3></div>
             <div class="card-body">
-                <form id="admin-password-form">
+                <form method="post" id="admin-password-form">
                     <div class="mb-3">
                         <label class="form-label">{{t "admin.password_current"}}</label>
                         <input type="password" name="current_password" class="form-control" autocomplete="current-password" required>
@@ -122,7 +122,7 @@
         <div class="card">
             <div class="card-header"><h3 class="card-title">{{t "admin.inv_title"}}</h3></div>
             <div class="card-body">
-                <form id="invite-form" class="d-flex gap-2 mb-2">
+                <form method="post" id="invite-form" class="d-flex gap-2 mb-2">
                     <input type="text" name="note" class="form-control" placeholder="{{t "admin.inv_note"}}" maxlength="200">
                     <button type="submit" class="btn btn-primary text-nowrap">{{t "admin.inv_create"}}</button>
                 </form>
@@ -144,7 +144,7 @@
             <div class="card-header"><h3 class="card-title">{{t "admin.lim_title"}}</h3></div>
             <div class="card-body">
                 <div class="text-muted small mb-3">{{t "admin.lim_hint"}}</div>
-                <form id="limits-form">
+                <form method="post" id="limits-form">
                     {{range $k := list "limit_mailbox_quota_mb" "limit_send_per_hour" "limit_external_accounts"}}
                     <div class="mb-2 row">
                         <label class="col-8 col-form-label">{{t (printf "admin.%s" $k)}}</label>
@@ -169,7 +169,7 @@
                     {{if not .IsCurrent}}<button class="btn btn-sm btn-outline-danger" data-admin-delete="{{.ID}}" data-username="{{.Username}}" title="{{t "admin.admins_delete"}}"><i class="ti ti-trash"></i></button>{{end}}
                 </div>
                 {{end}}
-                <form id="admin-create-form" class="d-flex gap-2 mt-3">
+                <form method="post" id="admin-create-form" class="d-flex gap-2 mt-3">
                     <input type="text" name="username" class="form-control" placeholder="{{t "admin.username"}}" required>
                     <button type="submit" class="btn btn-primary text-nowrap">{{t "admin.admins_create"}}</button>
                 </form>

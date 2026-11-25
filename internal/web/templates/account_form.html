@@ -1,7 +1,7 @@
 {{define "content"}}
 <div class="row justify-content-center">
     <div class="col-lg-8">
-        <form hx-post="/accounts/save" hx-target="#form-error">
+        <form method="post" hx-post="/accounts/save" hx-target="#form-error">
             {{if .Account}}
             <input type="hidden" name="id" value="{{.Account.ID}}">
             {{end}}
