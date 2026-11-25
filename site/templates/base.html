@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{page_title}}</title>
+<meta name="description" content="{{page_description}}">
+<link rel="canonical" href="{{canonical}}">
+<meta property="og:title" content="{{page_title}}">
+<meta property="og:description" content="{{page_description}}">
+<meta name="theme-color" content="#282e6c">
+<link rel="icon" type="image/svg+xml" href="{{root}}static/logo.svg">
+<link rel="stylesheet" href="{{root}}static/style.css">
+</head>
+<body>
+<a class="skip" href="#main">К содержимому</a>
+<header class="top">
+  <div class="wrap top-row">
+    <a class="logo" href="{{root}}index.html"><img src="{{root}}static/logo.svg" alt="" width="32" height="32"><span>{{cfg.brand}}</span></a>
+    <button class="menu-btn" type="button" aria-expanded="false" aria-controls="nav">Меню</button>
+    <nav id="nav" class="nav">{{nav}}<a class="btn btn-small" href="{{snippet:signup-href}}">{{snippet:signup-label}}</a></nav>
+  </div>
+</header>
+<main id="main">
+{{body}}
+</main>
+<footer class="foot">
+  <div class="wrap foot-grid">
+    <div>
+      <a class="logo" href="{{root}}index.html"><img src="{{root}}static/logo.svg" alt="" width="28" height="28"><span>{{cfg.brand}}</span></a>
+      <p class="muted">Почтовый сервис: адреса на {{cfg.domain}} и на своём домене, беседы вместо списка писем.</p>
+    </div>
+    <div>
+      <h2 class="foot-h">Продукт</h2>
+      <a href="{{root}}index.html#features">Возможности</a>
+      <a href="{{root}}apps.html">Приложение {{cfg.app_name}}</a>
+      <a href="{{root}}faq.html">Вопросы и ответы</a>
+    </div>
+    <div>
+      <h2 class="foot-h">Помощь</h2>
+      <a href="{{root}}help/start.html">Начало работы</a>
+      <a href="{{root}}help/other-clients.html">Другие почтовые программы</a>
+      <a href="{{root}}help/external.html">Подключить Gmail, Яндекс, Mail.ru</a>
+      <a href="{{root}}help/domain.html">Свой домен</a>
+    </div>
+    <div>
+      <h2 class="foot-h">Контакты</h2>
+      <a href="mailto:{{cfg.support_email}}">{{cfg.support_email}}</a>
+      <a href="{{root}}privacy.html">Политика конфиденциальности</a>
+    </div>
+  </div>
+  <div class="wrap foot-bottom muted">© {{snippet:year}} {{cfg.operator}}</div>
+</footer>
+<script src="{{root}}static/site.js"></script>
+</body>
+</html>

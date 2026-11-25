@@ -1,0 +1,43 @@
+{
+  "brand": "lunlun.email",
+  "app_name": "DDMail",
+  "domain": "lunlun.email",
+  "site_url": "https://lunlun.email",
+  "mail_host": "mail.lunlun.email",
+  "web_url": "https://mail.lunlun.email",
+  "support_email": "support@lunlun.email",
+  "signup": {
+    "open": false,
+    "url": "https://mail.lunlun.email/login",
+    "request_subject": "Хочу адрес на lunlun.email"
+  },
+  "operator": "Данилин Денис Валентинович",
+  "stores": {
+    "appstore": {
+      "url": "https://apps.apple.com/app/id6834889461",
+      "live": true
+    },
+    "appgallery": {
+      "url": "https://appgallery.huawei.com/app/C119816773",
+      "live": true
+    },
+    "rustore": {
+      "url": "https://www.rustore.ru/catalog/app/ru.letotam.ddmail",
+      "live": false
+    }
+  },
+  "desktop": {
+    "macos": {
+      "url": "https://apps.apple.com/app/id6834889461",
+      "live": true
+    },
+    "windows": {
+      "url": "",
+      "live": false
+    },
+    "linux": {
+      "url": "",
+      "live": false
+    }
+  }
+}

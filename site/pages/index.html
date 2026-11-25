@@ -1,0 +1,164 @@
+<!--meta {"title": "lunlun.email — почта, которая читается как мессенджер", "description": "Почтовый сервис lunlun.email: адрес на lunlun.email или своём домене, переписка собрана в беседы, цитаты и подписи спрятаны, все ящики в одном месте. Календарь, задачи и контакты.", "nav": "home"} -->
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <p class="eyebrow">Почтовый сервис {{cfg.domain}}</p>
+      <h1>Почта, которая читается <span>как мессенджер</span></h1>
+      <p class="lead">Адрес на {{cfg.domain}} или на вашем домене. Переписка с человеком или группой — одна лента, цитаты и подписи спрятаны: в сообщении только суть. Рабочие и личные ящики — в одном месте.</p>
+      <div class="btn-row">
+        <a class="btn" href="{{snippet:signup-href}}">{{snippet:signup-label}}</a>
+        <a class="btn btn-ghost" href="{{root}}apps.html">Скачать приложение</a>
+      </div>
+      <p class="note muted">{{snippet:signup-note}}</p>
+    </div>
+    <div class="phones" aria-hidden="true">
+      <div class="phone"><img src="{{root}}img/screen-conversations.png" alt="" width="1080" height="1920"></div>
+      <div class="phone"><img src="{{root}}img/screen-conversation.png" alt="" width="1080" height="1920"></div>
+    </div>
+  </div>
+</section>
+
+<section id="features" class="soft">
+  <div class="wrap">
+    <div class="center">
+      <p class="eyebrow">Возможности</p>
+      <h2>Всё, что нужно для переписки — и ничего лишнего</h2>
+      <p class="lead">Почта остаётся почтой: вам пишут с любых адресов, вы отвечаете кому угодно. Меняется то, как вы её читаете.</p>
+    </div>
+    <div class="grid" style="margin-top:40px">
+      <div class="card">
+        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+        <h3>Беседы вместо писем</h3>
+        <p>Все письма с человеком или группой собраны в одну ленту по порядку. Не нужно искать, что вам ответили и на что.</p>
+      </div>
+      <div class="card">
+        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h10M4 18h6"/></svg></div>
+        <h3>Только суть</h3>
+        <p>Процитированную переписку, подписи, шапки и дисклеймеры сервер убирает из ленты. Само письмо не меняется: в почтовых программах оно приходит целиком.</p>
+      </div>
+      <div class="card">
+        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg></div>
+        <h3>Все ящики в одном месте</h3>
+        <p>Подключите Gmail, Яндекс, Mail.ru, рабочую почту — любой ящик с IMAP. Беседы со всех адресов в одном списке.</p>
+      </div>
+      <div class="card">
+        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg></div>
+        <h3>Свой адрес и свой домен</h3>
+        <p>Адрес на {{cfg.domain}} или на вашем собственном домене — для себя, семьи или небольшой команды.</p>
+      </div>
+      <div class="card">
+        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg></div>
+        <h3>Календарь, задачи, контакты</h3>
+        <p>День, неделя, месяц и год, напоминания о встречах, задачи и адресная книга. Синхронизация по CalDAV и CardDAV.</p>
+      </div>
+      <div class="card">
+        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+        <h3>Без рекламы и слежки</h3>
+        <p>В приложении {{cfg.app_name}} нет рекламы, аналитики и трекеров, на этом сайте — тоже. Картинки из писем загружаются только с вашего разрешения.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap split">
+    <div class="phone"><img src="{{root}}img/screen-group.png" alt="Групповая беседа в приложении DDMail" width="1080" height="1920" loading="lazy"></div>
+    <div>
+      <p class="eyebrow">Беседы</p>
+      <h2>Переписка, а не стопка писем</h2>
+      <p class="lead">Сервис собирает письма в беседы по участникам. Ответ, пересылка, вложения и история — всё в одной ленте, как в мессенджере.</p>
+      <ul class="checks">
+        <li>Группы: все, кто в копии, видны в шапке беседы; «ответить всем» не отправит копию вам самим.</li>
+        <li>Цвет беседы — по адресу, на который пришло письмо: рабочее и личное видно сразу.</li>
+        <li>Папки диалогов с правилами по адресу получателя и домену собеседника.</li>
+        <li>Спам — в отдельной папке, без уведомлений.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="soft">
+  <div class="wrap split rev">
+    <div class="phone"><img src="{{root}}img/screen-calendar.png" alt="Календарь в приложении DDMail" width="1080" height="1920" loading="lazy"></div>
+    <div>
+      <p class="eyebrow">Организация</p>
+      <h2>Календарь и задачи рядом с почтой</h2>
+      <p class="lead">Приглашения из писем, встречи, напоминания и задачи — в том же приложении, без переключения.</p>
+      <ul class="checks">
+        <li>Календарь на день, неделю, месяц и год.</li>
+        <li>Задачи и адресная книга.</li>
+        <li>Внешние календари и адресные книги по CalDAV и CardDAV.</li>
+        <li>На iPhone и Mac — профиль, который за один шаг настраивает почту, календарь и контакты во встроенных приложениях Apple.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="center">
+      <p class="eyebrow">Приложение {{cfg.app_name}}</p>
+      <h2>На телефоне, планшете и компьютере</h2>
+      <p class="lead">Для {{cfg.brand}} мы рекомендуем приложение {{cfg.app_name}}: беседы, папки и настройки одинаковые на всех устройствах, новые письма приходят push-уведомлением сразу. Подойдёт и любая другая почтовая программа.</p>
+    </div>
+    <div class="shots" style="margin-top:32px">
+      <figure><img src="{{root}}img/screen-conversations.png" alt="" width="1080" height="1920" loading="lazy"><figcaption>Список бесед</figcaption></figure>
+      <figure><img src="{{root}}img/screen-conversation.png" alt="" width="1080" height="1920" loading="lazy"><figcaption>Беседа</figcaption></figure>
+      <figure><img src="{{root}}img/screen-compose.png" alt="" width="1080" height="1920" loading="lazy"><figcaption>Поиск и новое письмо</figcaption></figure>
+      <figure><img src="{{root}}img/screen-calendar.png" alt="" width="1080" height="1920" loading="lazy"><figcaption>Календарь</figcaption></figure>
+      <figure><img src="{{root}}img/screen-contacts.png" alt="" width="1080" height="1920" loading="lazy"><figcaption>Контакты</figcaption></figure>
+      <figure><img src="{{root}}img/screen-tasks.png" alt="" width="1080" height="1920" loading="lazy"><figcaption>Задачи</figcaption></figure>
+    </div>
+    <div class="center" style="margin-top:16px">
+      {{snippet:stores-mobile}}
+    </div>
+  </div>
+</section>
+
+<section class="soft">
+  <div class="wrap">
+    <div class="center">
+      <p class="eyebrow">Как начать</p>
+      <h2>Три шага до первой беседы</h2>
+    </div>
+    <div class="steps" style="margin-top:32px">
+      <div class="card"><h3>Получите адрес</h3><p>{{snippet:signup-note}}</p></div>
+      <div class="card"><h3>Установите приложение</h3><p>{{cfg.app_name}} для iPhone, iPad, Mac и Android — ссылки на странице <a href="{{root}}apps.html">«Приложение»</a>. Или настройте свою почтовую программу.</p></div>
+      <div class="card"><h3>Войдите</h3><p>Введите свой адрес — приложение само найдёт сервер. Остальные ящики добавьте в настройках. <a href="{{root}}help/start.html">Подробнее</a></p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="grid">
+      <div class="card">
+        <h3>Работает с любыми программами</h3>
+        <p>Адрес на {{cfg.brand}} — обычная почта: IMAP и SMTP с шифрованием. Thunderbird, Outlook, «Почта» на iPhone и Mac подключаются стандартными настройками.</p>
+        <p><a href="{{root}}help/other-clients.html">Настройки для почтовых программ</a></p>
+      </div>
+      <div class="card">
+        <h3>Уведомления без содержания</h3>
+        <p>Через сервисы push-уведомлений Apple, Huawei и RuStore передаётся только сигнал «есть новые письма». Отправитель и тема подставляются уже на вашем устройстве.</p>
+        <p><a href="{{root}}privacy.html">Политика конфиденциальности</a></p>
+      </div>
+      <div class="card">
+        <h3>Пароли — только у серверов почты</h3>
+        <p>Пароль от {{cfg.brand}} приложение {{cfg.app_name}} на телефоне не хранит — только токен сессии. Пароли других ящиков хранятся в защищённом хранилище системы и уходят только их серверам.</p>
+        <p><a href="{{root}}faq.html#security">Вопросы о безопасности</a></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="cta">
+      <h2>Попробуйте почту, которую приятно читать</h2>
+      <p>{{snippet:signup-note}}</p>
+      <div class="btn-row">
+        <a class="btn" href="{{snippet:signup-href}}">{{snippet:signup-label}}</a>
+      </div>
+    </div>
+  </div>
+</section>

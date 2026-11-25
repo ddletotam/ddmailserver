@@ -1,0 +1,62 @@
+<!--meta {"title": "Настройки для почтовых программ — lunlun.email", "description": "Серверы IMAP, SMTP, CalDAV и CardDAV lunlun.email: настройка Thunderbird, Outlook, «Почты» на iPhone и Mac.", "nav": "help"} -->
+<div class="doc">
+  <div class="wrap narrow">
+    <p class="crumbs"><a href="index.html">Инструкции</a> / Другие почтовые программы</p>
+    <h1>Настройки для почтовых программ</h1>
+    <p class="lead">Адрес на {{cfg.brand}} — обычная почта. Её можно читать в любой программе с IMAP и SMTP, а календарь и контакты подключить по CalDAV и CardDAV.</p>
+    <div class="toc"><ol>
+      <li><a href="#settings">Параметры серверов</a></li>
+      <li><a href="#apple">iPhone, iPad и Mac: профиль за один шаг</a></li>
+      <li><a href="#thunderbird">Thunderbird</a></li>
+      <li><a href="#outlook">Outlook</a></li>
+      <li><a href="#android">Другие приложения на Android</a></li>
+    </ol></div>
+
+    <h2 id="settings">Параметры серверов</h2>
+    <div class="table-wrap"><table>
+      <tr><th></th><th>Сервер</th><th>Порт</th><th>Шифрование</th></tr>
+      <tr><td>Входящая почта (IMAP)</td><td><code>{{cfg.mail_host}}</code></td><td>993</td><td>SSL/TLS</td></tr>
+      <tr><td>Исходящая почта (SMTP)</td><td><code>{{cfg.mail_host}}</code></td><td>465</td><td>SSL/TLS</td></tr>
+    </table></div>
+    <ul>
+      <li><strong>Имя пользователя</strong> — полный адрес, например <code>ivan@{{cfg.domain}}</code>.</li>
+      <li><strong>Пароль</strong> — пароль от {{cfg.brand}}.</li>
+      <li>Для исходящей почты включите авторизацию с теми же логином и паролем.</li>
+      <li>Используйте только эти порты с шифрованием SSL/TLS.</li>
+    </ul>
+    <div class="table-wrap"><table>
+      <tr><th></th><th>Адрес</th></tr>
+      <tr><td>Календарь (CalDAV)</td><td><code>https://{{cfg.mail_host}}/caldav/</code></td></tr>
+      <tr><td>Контакты (CardDAV)</td><td><code>https://{{cfg.mail_host}}/carddav/</code></td></tr>
+    </table></div>
+    <p>Логин и пароль — те же. Программы, которые умеют находить календарь сами, достаточно направить на <code>{{cfg.mail_host}}</code>.</p>
+
+    <h2 id="apple">iPhone, iPad и Mac: профиль за один шаг</h2>
+    <p>Вместо ручной настройки почты, календаря и контактов скачайте профиль — он настроит всё сразу во встроенных приложениях Apple.</p>
+    <ol>
+      <li>Откройте веб-кабинет <a href="{{cfg.web_url}}">{{cfg.web_url}}</a> и войдите.</li>
+      <li>Перейдите в <strong>Настройки → Профили устройств</strong> и нажмите <strong>«Скачать профиль»</strong>.</li>
+      <li>На iPhone или iPad: <strong>Настройки → Профиль загружен → Установить</strong>. На Mac: <strong>Системные настройки → Конфиденциальность и безопасность → Профили</strong>.</li>
+      <li>Введите пароль, когда система попросит.</li>
+    </ol>
+    <div class="callout"><p>Галочка «Положить пароль в профиль» кладёт в файл пароль открытым текстом — так устроен формат профилей Apple. Такой файл не пересылайте почтой и не храните в синхронизируемых папках. Безопаснее не ставить галочку и ввести пароль при установке.</p></div>
+
+    <h2 id="thunderbird">Thunderbird</h2>
+    <ol>
+      <li><strong>Учётные записи → Добавить почтовую учётную запись</strong>, введите имя, адрес и пароль.</li>
+      <li>Нажмите <strong>«Настроить вручную»</strong> и укажите параметры из <a href="#settings">таблицы выше</a>: IMAP 993 и SMTP 465, SSL/TLS, обычный пароль, имя пользователя — полный адрес.</li>
+      <li>Нажмите <strong>«Готово»</strong>.</li>
+    </ol>
+    <p>Календарь: <strong>Файл → Создать → Календарь → В сети</strong>, адрес CalDAV из таблицы.</p>
+
+    <h2 id="outlook">Outlook</h2>
+    <ol>
+      <li><strong>Файл → Добавить учётную запись</strong>, введите адрес, откройте <strong>«Дополнительные параметры» → «Настроить учётную запись вручную»</strong>.</li>
+      <li>Выберите <strong>IMAP</strong> и укажите серверы, порты и шифрование SSL/TLS из <a href="#settings">таблицы</a>.</li>
+      <li>Введите пароль и завершите настройку.</li>
+    </ol>
+
+    <h2 id="android">Другие приложения на Android</h2>
+    <p>В любом почтовом приложении выберите тип учётной записи <strong>IMAP</strong> («Другая почта», «Личная (IMAP)») и введите параметры из <a href="#settings">таблицы</a>. Для мгновенных уведомлений и бесед используйте <a href="../apps.html">{{cfg.app_name}}</a>: сторонние приложения проверяют почту по своему расписанию.</p>
+  </div>
+</div>
