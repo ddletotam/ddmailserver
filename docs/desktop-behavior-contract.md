@@ -1998,6 +1998,10 @@ Slint наружу не отдаёт.
   `cargo build --release` → `ISCC installer\ddmail.iss` →
   установить `installer\out\ddmail-setup-<v>.exe`. Билд без переустановки —
   фикс «не работает».
+- **Linux — пакеты .deb/.rpm**: `installer/build-packages.sh` (cargo-zigbuild под
+  glibc 2.31 → nfpm, результат в `~/.cache/builds/ddmail-packages/`). Обычный
+  `cargo build` привязывает бинарь к glibc станции — для раздачи не годится.
+  Бинарные сборки вне магазинов публикуются в GitHub Releases, сайт ведёт туда.
 - **Версия** живёт в двух местах и бампается вместе:
   `desktop/native/Cargo.toml` `version` == `installer/ddmail.iss` `AppVersion`.
 - **Build-stamp**: тултип иконки трея — `ddmail <версия> (<git-hash>[+] · <дата коммита>)`;
