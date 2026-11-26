@@ -81,8 +81,8 @@ def snippets(cfg):
     ])
     desktop = "".join([
         store_button("macOS", "Mac App Store", d["macos"]),
-        store_button("Windows", "компьютер", d["windows"]),
-        store_button("Linux", "компьютер", d["linux"]),
+        store_button("Windows", d["windows"].get("sub", "компьютер"), d["windows"]),
+        store_button("Linux", d["linux"].get("sub", "компьютер"), d["linux"]),
     ])
     sup = cfg["support_email"]
     if cfg["signup"]["open"]:

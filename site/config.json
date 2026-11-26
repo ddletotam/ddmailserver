@@ -35,8 +35,9 @@
       "live": false
     },
     "linux": {
-      "url": "",
-      "live": false
+      "url": "https://github.com/ddletotam/ddmailserver/releases/latest",
+      "live": true,
+      "sub": "deb и rpm, GitHub"
     }
   }
 }
