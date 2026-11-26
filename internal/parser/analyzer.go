@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // AnalyzerConfig contains configuration for the spam analyzer
@@ -460,6 +462,29 @@ func (a *Analyzer) analyzeHeaders(msg *ParsedMessage) ruleHits {
 	return hits
 }
 
+// containsAtWordStart reports whether word occurs in content starting at a word
+// boundary. The list holds stems ("бесплатн", "заработ"), so the match may run on
+// to the right, but not start mid-word: "ставки" must not fire on "доставки",
+// "кредит" on "аккредитация".
+func containsAtWordStart(content, word string) bool {
+	if word == "" {
+		return false
+	}
+	for from := 0; ; {
+		i := strings.Index(content[from:], word)
+		if i < 0 {
+			return false
+		}
+		i += from
+		prev, _ := utf8.DecodeLastRuneInString(content[:i])
+		if i == 0 || !(unicode.IsLetter(prev) || unicode.IsDigit(prev)) {
+			return true
+		}
+		_, size := utf8.DecodeRuneInString(content[i:])
+		from = i + size
+	}
+}
+
 // analyzeContent checks for spam words and patterns in content
 func (a *Analyzer) analyzeContent(msg *ParsedMessage, disabledChecks map[string]bool) ruleHits {
 	var hits ruleHits
@@ -477,7 +502,7 @@ func (a *Analyzer) analyzeContent(msg *ParsedMessage, disabledChecks map[string]
 		if disabledChecks[checkName] {
 			continue
 		}
-		if strings.Contains(content, strings.ToLower(word)) {
+		if containsAtWordStart(content, strings.ToLower(word)) {
 			hits.add(0.5, "spam word: "+word)
 			if hits.total() >= 3.0 {
 				// Cap content spam word score
