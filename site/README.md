@@ -47,37 +47,33 @@ Cookie, аналитики и счётчиков нет.
 `lunlun/design/logo-icon.svg`; логотип — плитка lunlun с маленьким конвертом.
 Тёмная тема — по настройке системы.
 
-## Выкладка (когда будет домен)
+## Выкладка
 
-1. DNS: `lunlun.email` A → сервер сайта; `mail.lunlun.email` A → почтовый сервер
-   (сейчас 178.215.144.47), плюс MX/SPF/DKIM/DMARC для самого `lunlun.email`.
-2. Сертификат на `lunlun.email` и `mail.lunlun.email` (и `www`, если нужен).
-3. nginx для сайта:
-
-```nginx
-server {
-    server_name lunlun.email;
-    root /var/www/lunlun.email;
-    index index.html;
-    error_page 404 /404.html;
-    location / { try_files $uri $uri/ =404; }
-    # Автонастройка клиентов ищет сервер и на самом домене — отдаём почтовому.
-    location /.well-known/ddmail  { proxy_pass https://mail.lunlun.email; }
-    location /.well-known/caldav  { return 301 https://mail.lunlun.email/caldav/; }
-    location /.well-known/carddav { return 301 https://mail.lunlun.email/carddav/; }
-}
+```bash
+site/deploy.sh            # собрать и выложить на сервер
+site/deploy.sh --dry-run  # показать, что изменится
 ```
 
-4. `rsync -a --delete ~/.cache/builds/lunlun-email-site/ сервер:/var/www/lunlun.email/`
+Выложено 2026-11-26. Сервер `jwebhelp.ru`, каталог `/var/www/lunlun.email` (владелец
+`lucky`, sudo не нужен), nginx — `sites-available/lunlun.email`: `www` и http →
+`https://lunlun.email`, `/.well-known/ddmail` — почтовому серверу, HTML без кэша.
+Сертификат certbot `lunlun.email` (+ `www`).
+
+Почта домена: DNS у регистратора — `mail` A, MX `mail.lunlun.email`, SPF
+`ip4:178.215.144.47`, DKIM селектор `mf` (ключ `/etc/mailserver/dkim/lunlun.email.key`),
+DMARC `p=quarantine`. `mail.lunlun.email` — в общем сертификате `mail.letotam.ru`
+и в `server_name` его nginx-конфига. Домен заведён в админке (id 7), ящик
+`support@lunlun.email` — у пользователя `lucky`. Проверено: входящее и исходящее
+с Mail.ru — SPF/DKIM/DMARC pass.
 
 ## Решить владельцу до запуска
 
 - **Регистрация.** Сейчас `signup.open: false`: кнопка «Оставить заявку» —
   письмо на `support@lunlun.email`. На сервере `disable_registration: true`.
   Откроете — `open: true` и `url` страницы регистрации.
-- **Ящик поддержки** `support@lunlun.email` должен существовать.
-- **Хост почты** `mail.lunlun.email` — новое имя: в сертификат сервера, в
-  `public_endpoints` конфига, в PTR/HELO для доставки.
+- **Публичное имя сервера** в профилях устройств (`server.public.hostname`) одно на
+  весь сервер, сейчас `mail.letotam.ru`. Перевести на `mail.lunlun.email` — значит
+  и старым пользователям. PTR/HELO тоже `mail.letotam.ru` (SPF по IP проходит).
 - **Политика конфиденциальности сервиса.** На сайте — политика приложения
   DDMail. Для SaaS (оператор хранит почту пользователей на своём сервере) нужна
   своя политика и согласие при регистрации — 152-ФЗ; заодно пользовательское
