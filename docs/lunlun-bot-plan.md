@@ -56,13 +56,14 @@
 5. **Жалобы получателей:** Google Postmaster Tools, Яндекс и Mail.ru Postmaster (FBL),
    Microsoft SNDS. `abuse@` и `postmaster@lunlun.email` — существуют и читаются.
 6. **Раздельные IP для отправки.** У сервера блок 178.215.144.47–54 (на 2026-11-27 на
-   интерфейсе поднят только .47, PTR есть только у него — `mail.letotam.ru`):
+   интерфейсе поднят только .47, PTR есть только у него — `mail.letotam.ru`; вторая
+   сетевая карта `eno2np1` без линка — кабель не подключён, для адресов не нужна):
    - `.47` — как сейчас: личные домены владельца и уже подключённые (letotam.ru,
      help-it-audit.ru, mfml.ru, lunlun.io);
    - `.48` — бесплатные ящики lunlun.email;
    - `.49` — платные ящики lunlun.email и свои домены клиентов.
    Спамер на бесплатном тарифе портит только `.48`. Для каждого IP: адрес на интерфейсе
-   (netplan, `~/workspace/self/infra`), PTR у хостера = имя с A-записью на этот IP
+   (Debian ifupdown, `/etc/network/interfaces` на `eno1np0`; см. `~/workspace/self/infra`), PTR у хостера = имя с A-записью на этот IP
    (`out1.lunlun.email`, `out2.lunlun.email`), то же имя в HELO; SPF lunlun.email —
    `ip4:` всех трёх. Исходящее соединение привязывается к IP по классу отправителя
    (`net.Dialer.LocalAddr`). Новые IP прогревать: сначала малый объём.
