@@ -292,6 +292,22 @@ func main() {
 		DKIMSigner:      dkimSigner,
 	})
 
+	// Separate source IPs for the sign-up service's free and paid senders
+	// (docs/lunlun-bot-plan.md, п. 6). Off until configured.
+	if len(cfg.Outbound) > 0 {
+		routes := map[string]worker.OutboundRoute{}
+		for class, r := range cfg.Outbound {
+			ip := net.ParseIP(r.IP)
+			if ip == nil || r.Helo == "" {
+				log.Printf("WARNING: outbound.%s: need ip and helo — class uses the default route", class)
+				continue
+			}
+			routes[class] = worker.OutboundRoute{IP: ip, Helo: r.Helo}
+			log.Printf("Outbound: %s senders deliver from %s as %s", class, ip, r.Helo)
+		}
+		scheduler.SetOutboundRoutes(routes)
+	}
+
 	// Initialize IDLE manager for persistent IMAP connections
 	log.Printf("Initializing IMAP IDLE manager...")
 	idleManager := imapclient.NewIdleManager(database)

@@ -22,6 +22,16 @@ type Config struct {
 	DKIM        DKIMConfig        `yaml:"dkim"`
 	Push        PushConfig        `yaml:"push"`
 	BotAPI      BotAPIConfig      `yaml:"bot_api"`
+	// Outbound — откуда уходит прямая доставка по классу отправителя
+	// (docs/lunlun-bot-plan.md, п. 6): free, paid. Нет класса — как у сервера.
+	Outbound map[string]OutboundRoute `yaml:"outbound"`
+}
+
+// OutboundRoute — исходящий IP и имя для EHLO. У IP обязана быть PTR-запись
+// с этим именем, а у имени — A-запись на этот IP; иначе получатели режут почту.
+type OutboundRoute struct {
+	IP   string `yaml:"ip"`
+	Helo string `yaml:"helo"`
 }
 
 // BotAPIConfig — служебное API для бота регистрации в Telegram

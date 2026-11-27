@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"time"
 
@@ -63,6 +64,18 @@ func (t *DirectSendTask) SetLocalDeliverer(d LocalDeliverer) {
 // SetDeliveryTracker sets where the delivery outcome is recorded.
 func (t *DirectSendTask) SetDeliveryTracker(tr DeliveryTracker) {
 	t.tracker = tr
+}
+
+// SetOutboundRoute makes the task deliver from sourceIP, greeting with
+// hostname (its PTR name). An empty route changes nothing.
+func (t *DirectSendTask) SetOutboundRoute(sourceIP net.IP, hostname string) {
+	if sourceIP == nil || hostname == "" {
+		return
+	}
+	t.hostname = hostname
+	t.sendExternal = func(from string, to []string, msg []byte, helo string) map[string]error {
+		return SendDirectEachVia(from, to, msg, helo, sourceIP)
+	}
 }
 
 // SetExternalSender replaces delivery via MX (SendDirectEach) — for tests

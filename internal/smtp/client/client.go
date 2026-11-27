@@ -195,6 +195,10 @@ const (
 type timeouts struct {
 	dial    time.Duration
 	session time.Duration
+	// local — the address outgoing connections are made from; nil — the
+	// system's choice (docs/lunlun-bot-plan.md: free and paid accounts send
+	// from separate IPs so one spammer can't spoil everyone's delivery).
+	local *net.TCPAddr
 }
 
 func defaultTimeouts() timeouts {
@@ -207,6 +211,9 @@ func defaultTimeouts() timeouts {
 // bounded by it too (a STARTTLS upgrade wraps the same connection).
 func dialSMTP(addr, serverName string, implicitTLS *tls.Config, t timeouts) (*smtp.Client, error) {
 	dialer := &net.Dialer{Timeout: t.dial}
+	if t.local != nil {
+		dialer.LocalAddr = t.local
+	}
 	var conn net.Conn
 	var err error
 	if implicitTLS != nil {
@@ -344,6 +351,16 @@ var lookupMX = net.LookupMX
 // and the caller can bounce exactly the recipients that failed.
 func SendDirectEach(from string, to []string, message []byte, hostname string) map[string]error {
 	return sendDirectEach(defaultTimeouts(), from, to, message, hostname)
+}
+
+// SendDirectEachVia is SendDirectEach from a given source IP. The IP's PTR
+// record must name hostname, the EHLO name, or receivers count it against us.
+func SendDirectEachVia(from string, to []string, message []byte, hostname string, sourceIP net.IP) map[string]error {
+	t := defaultTimeouts()
+	if sourceIP != nil {
+		t.local = &net.TCPAddr{IP: sourceIP}
+	}
+	return sendDirectEach(t, from, to, message, hostname)
 }
 
 // sendDirectEach is SendDirectEach with explicit session limits.

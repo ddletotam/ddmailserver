@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"sync"
 	"time"
 
@@ -71,6 +72,21 @@ type Scheduler struct {
 	// outbox loop. Not a correctness guard — the atomic claim in the send
 	// tasks is — just no reason to read the same pending rows twice at once.
 	sendMu sync.Mutex
+
+	// outbound: source IP and EHLO name of direct delivery by sender class
+	// (db.OutboundClass); empty — the system default for everyone.
+	outbound map[string]OutboundRoute
+}
+
+// OutboundRoute is where one class of senders' direct mail leaves from.
+type OutboundRoute struct {
+	IP   net.IP
+	Helo string
+}
+
+// SetOutboundRoutes sets the per-class source IPs of direct delivery.
+func (s *Scheduler) SetOutboundRoutes(routes map[string]OutboundRoute) {
+	s.outbound = routes
 }
 
 // NewScheduler creates a new task scheduler with all dependencies wired up.
@@ -549,6 +565,14 @@ func (s *Scheduler) scheduleSMTPSend() {
 		if msg.AccountID == 0 {
 			// Direct delivery for local domain senders
 			direct := smtpclient.NewDirectSendTask(msg, s.database, s.getHostname(), s.dkimSigner)
+			if len(s.outbound) > 0 {
+				class, err := s.database.OutboundClass(msg.UserID)
+				if err != nil {
+					log.Printf("outbound class of user %d: %v — default route", msg.UserID, err)
+				} else if r, ok := s.outbound[class]; ok {
+					direct.SetOutboundRoute(r.IP, r.Helo)
+				}
+			}
 			direct.SetDeliveryTracker(tracker)
 			direct.SetLocalDeliverer(s.localDelivery)
 			sendTask = direct

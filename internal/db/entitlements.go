@@ -112,3 +112,27 @@ func (db *DB) RecordPayment(p Payment) (int64, error) {
 	}
 	return newUntil, nil
 }
+
+// Outbound classes: which source IP a user's direct mail leaves from.
+const (
+	OutboundFree = "free" // signed up through the bot, nothing paid
+	OutboundPaid = "paid" // signed up through the bot, some feature paid
+)
+
+// OutboundClass returns the class of userID's outgoing mail; "" — the
+// server's own users (the default route).
+func (db *DB) OutboundClass(userID int64) (string, error) {
+	since, err := freeTierSince(db, userID)
+	if err != nil || since == 0 {
+		return "", err
+	}
+	var paid bool
+	if err := db.QueryRow(`SELECT EXISTS (SELECT 1 FROM entitlements WHERE user_id = $1 AND until > $2)`,
+		userID, timeutil.Now()).Scan(&paid); err != nil {
+		return "", fmt.Errorf("outbound class of user %d: %w", userID, err)
+	}
+	if paid {
+		return OutboundPaid, nil
+	}
+	return OutboundFree, nil
+}

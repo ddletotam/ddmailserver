@@ -152,6 +152,21 @@ func TestFreeTierSendLimits(t *testing.T) {
 		}
 	}
 
+	if c, err := d.OutboundClass(fresh); err != nil || c != OutboundFree {
+		t.Fatalf("OutboundClass(free) = %q, %v", c, err)
+	}
+	if c, err := d.OutboundClass(admin); err != nil || c != "" {
+		t.Fatalf("OutboundClass(plain) = %q, %v", c, err)
+	}
+	if _, err := raw.Exec(`INSERT INTO entitlements (user_id, feature, until, updated_at) VALUES ($1, $2, $3, 0)`,
+		old, FeatureExtraStorage, timeutil.Now()+3600*1000); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := d.OutboundClass(old); err != nil || c != OutboundPaid {
+		t.Fatalf("OutboundClass(paid) = %q, %v", c, err)
+	}
+	_, _ = raw.Exec(`DELETE FROM entitlements WHERE user_id = $1`, old)
+
 	if full, err := d.FreeTierOverQuota(fresh); err != nil || full {
 		t.Fatalf("FreeTierOverQuota(empty) = %v, %v", full, err)
 	}
