@@ -106,12 +106,51 @@ func TestFreeTierSendLimits(t *testing.T) {
 		}
 	}
 
+	// Mail to addresses that don't exist stops sending and tells the user once.
+	bouncy := newUser("zzbouncy", 10*24*time.Hour)
+	link(bouncy)
+	sentFolder, err := d.GetOrCreateLocalFolder(bouncy, "Sent", "sent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < FreeBounceStop; i++ {
+		if _, err := raw.Exec(`INSERT INTO messages (user_id, folder_id, message_id, from_addr, uid, subject, created_at, delivery_status, delivery_reason)
+			VALUES ($1, $2, $3, 'a@b.c', $4, 'x', $5, 'failed', 'mailbox_unavailable')`,
+			bouncy, sentFolder.ID, fmt.Sprintf("<b%d-%d@test>", tag, i), i+1, timeutil.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err := send(bouncy, "ok@example.com"); !errors.Is(err, ErrSendStopped) || !errors.Is(err, ErrSendLimit) {
+			t.Fatalf("after bounces, try %d: %v", i, err)
+		}
+	}
+	var notices int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM bot_notices WHERE tg_user_id = $1 AND kind = 'send_stopped'`,
+		tag%1_000_000_000+bouncy).Scan(&notices); err != nil || notices != 1 {
+		t.Fatalf("send_stopped notices = %d, %v (want exactly one)", notices, err)
+	}
+	pending, err := d.PendingBotNotices(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range pending {
+		if n.TgUserID == tag%1_000_000_000+bouncy {
+			if err := d.MarkBotNoticeSent(n.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
 	if full, err := d.FreeTierOverQuota(fresh); err != nil || full {
 		t.Fatalf("FreeTierOverQuota(empty) = %v, %v", full, err)
 	}
 
-	for _, id := range []int64{fresh, old, admin} {
+	for _, id := range []int64{fresh, old, admin, bouncy} {
 		_, _ = raw.Exec(`DELETE FROM outbox_messages WHERE user_id = $1`, id)
+		_, _ = raw.Exec(`DELETE FROM messages WHERE user_id = $1`, id)
+		_, _ = raw.Exec(`DELETE FROM telegram_links WHERE user_id = $1`, id)
+		_, _ = raw.Exec(`DELETE FROM folders WHERE user_id = $1`, id)
 		_, _ = raw.Exec(`DELETE FROM users WHERE id = $1`, id)
 	}
 }

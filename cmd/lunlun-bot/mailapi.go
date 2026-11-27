@@ -104,3 +104,24 @@ func (m *mailAPI) resetPassword(ctx context.Context, tg int64) (*account, error)
 	var a account
 	return &a, m.do(ctx, http.MethodPost, fmt.Sprintf("/accounts/%d/password", tg), nil, &a)
 }
+
+type notice struct {
+	ID       int64  `json:"id"`
+	TgUserID int64  `json:"tg_user_id"`
+	Kind     string `json:"kind"`
+	Text     string `json:"text"`
+}
+
+func (m *mailAPI) notices(ctx context.Context) ([]notice, error) {
+	var out struct {
+		Notices []notice `json:"notices"`
+	}
+	// Not «return out.Notices, m.do(...)»: the operands are evaluated left
+	// to right, so that would return the list before the request filled it.
+	err := m.do(ctx, http.MethodGet, "/notices", nil, &out)
+	return out.Notices, err
+}
+
+func (m *mailAPI) noticeSent(ctx context.Context, id int64) error {
+	return m.do(ctx, http.MethodPost, fmt.Sprintf("/notices/%d/sent", id), nil, nil)
+}

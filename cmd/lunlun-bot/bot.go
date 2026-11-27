@@ -26,6 +26,8 @@ type accounts interface {
 	checkLogin(ctx context.Context, login string) (*loginCheck, error)
 	createAccount(ctx context.Context, tg int64, login, lang string) (*account, error)
 	resetPassword(ctx context.Context, tg int64) (*account, error)
+	notices(ctx context.Context) ([]notice, error)
+	noticeSent(ctx context.Context, id int64) error
 }
 
 var botCommands = []command{
@@ -62,6 +64,7 @@ func newBot(c config, tg messenger, api accounts) *bot {
 }
 
 func (b *bot) run(ctx context.Context) {
+	go b.deliverNotices(ctx)
 	var offset int64
 	for ctx.Err() == nil {
 		ups, err := b.tg.getUpdates(ctx, offset)
@@ -75,6 +78,35 @@ func (b *bot) run(ctx context.Context) {
 		for _, u := range ups {
 			offset = u.UpdateID + 1
 			b.handle(ctx, u)
+		}
+	}
+}
+
+// deliverNotices forwards the server's messages for people (sending stopped,
+// subscription ending, ...): the server can't reach Telegram itself.
+func (b *bot) deliverNotices(ctx context.Context) {
+	for ctx.Err() == nil {
+		b.deliverNoticesOnce(ctx)
+		sleep(ctx, 30*time.Second)
+	}
+}
+
+func (b *bot) deliverNoticesOnce(ctx context.Context) {
+	ns, err := b.api.notices(ctx)
+	if err != nil {
+		log.Printf("notices: %v", err)
+		return
+	}
+	for _, n := range ns {
+		// A private chat with a user has the user's id. A user who never
+		// started the bot or blocked it can't be written to: the notice is
+		// marked sent anyway, so one dead chat doesn't jam the queue.
+		if _, err := b.tg.send(ctx, n.TgUserID, html.EscapeString(n.Text), nil); err != nil {
+			log.Printf("notice %d (%s) to %d: %v", n.ID, n.Kind, n.TgUserID, err)
+		}
+		if err := b.api.noticeSent(ctx, n.ID); err != nil {
+			log.Printf("notice %d sent: %v", n.ID, err)
+			return
 		}
 	}
 }
@@ -258,6 +290,9 @@ func (b *bot) create(ctx context.Context, chat int64, from tgUser, login string)
 		b.say(ctx, chat, reasonText(code, login+"@lunlun.email")+"\n\nПопробуйте другой логин.", nil)
 	case code == "banned":
 		b.say(ctx, chat, bannedText, nil)
+	case code == "busy":
+		b.setAwaiting(from.ID, true)
+		b.say(ctx, chat, "Сейчас слишком много регистраций. Попробуйте через час — логин можно будет выбрать тот же, если его не займут.", nil)
 	default:
 		b.fail(ctx, chat, err)
 	}

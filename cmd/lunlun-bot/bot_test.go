@@ -34,8 +34,10 @@ func (f *fakeTG) setCommands(context.Context, []command) error     { return nil 
 func (f *fakeTG) last() sent { return f.sent[len(f.sent)-1] }
 
 type fakeAPI struct {
-	accounts map[int64]*account
-	taken    map[string]bool
+	accounts    map[int64]*account
+	taken       map[string]bool
+	pending     []notice
+	sentNotices []int64
 }
 
 func (f *fakeAPI) getAccount(_ context.Context, tg int64) (*account, error) {
@@ -69,6 +71,28 @@ func (f *fakeAPI) resetPassword(_ context.Context, tg int64) (*account, error) {
 		return nil, &apiError{404, "not_found"}
 	}
 	return &account{Login: a.Login, Address: a.Address, Password: "NewSecret123new4"}, nil
+}
+
+func (f *fakeAPI) notices(context.Context) ([]notice, error) {
+	ns := f.pending
+	f.pending = nil
+	return ns, nil
+}
+func (f *fakeAPI) noticeSent(_ context.Context, id int64) error {
+	f.sentNotices = append(f.sentNotices, id)
+	return nil
+}
+
+func TestNoticesDelivered(t *testing.T) {
+	b, tg, api := newTestBot()
+	api.pending = []notice{{ID: 7, TgUserID: 42, Kind: "send_stopped", Text: "Отправка <остановлена>"}}
+	b.deliverNoticesOnce(context.Background())
+	if len(tg.sent) != 1 || tg.sent[0].chat != 42 || !strings.Contains(tg.sent[0].text, "&lt;остановлена&gt;") {
+		t.Fatalf("sent: %+v", tg.sent)
+	}
+	if len(api.sentNotices) != 1 || api.sentNotices[0] != 7 {
+		t.Fatalf("marked: %v", api.sentNotices)
+	}
 }
 
 func newTestBot() (*bot, *fakeTG, *fakeAPI) {

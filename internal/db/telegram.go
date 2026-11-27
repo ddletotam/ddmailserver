@@ -19,7 +19,13 @@ var (
 	ErrTelegramRegistered = errors.New("telegram account already has a mail account")
 	// ErrLoginTaken: the login (or the address it makes) is in use.
 	ErrLoginTaken = errors.New("login is taken")
+	// ErrSignupBusy: the hourly ceiling of sign-ups is reached — a wave of
+	// sign-ups is what a farm of Telegram accounts looks like.
+	ErrSignupBusy = errors.New("too many sign-ups this hour")
 )
+
+// SignupsPerHour is the ceiling of bot sign-ups across the whole service.
+const SignupsPerHour = 30
 
 // TelegramAccount is the account a Telegram user signed up with.
 type TelegramAccount struct {
@@ -97,6 +103,15 @@ func (db *DB) CreateTelegramAccount(tgUserID int64, login, domain string, domain
 		return nil, ErrTelegramRegistered
 	}
 
+	now := timeutil.Now()
+	var lastHour int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM telegram_links WHERE created_at > $1`, now-3600*1000).Scan(&lastHour); err != nil {
+		return nil, fmt.Errorf("count sign-ups: %w", err)
+	}
+	if lastHour >= SignupsPerHour {
+		return nil, ErrSignupBusy
+	}
+
 	taken, err := loginTaken(tx, login, domain, domainID)
 	if err != nil {
 		return nil, err
@@ -105,7 +120,6 @@ func (db *DB) CreateTelegramAccount(tgUserID int64, login, domain string, domain
 		return nil, ErrLoginTaken
 	}
 
-	now := timeutil.Now()
 	u := &models.User{Username: login, PasswordHash: passwordHash, Language: language, Kind: "user", CreatedAt: now, UpdatedAt: now}
 	// is_admin is explicit: CreateUser makes the very first user an admin,
 	// which a sign-up must never be. recovery_key_hash is '' rather than NULL:

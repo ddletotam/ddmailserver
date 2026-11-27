@@ -24,8 +24,10 @@ import (
 //	GET  /api/bot/v1/logins/{login}          → 200 {login,address,available,reason}
 //	POST /api/bot/v1/accounts                {tg_user_id,login,language}
 //	                                         → 201 {login,address,password} | 400 invalid|reserved
-//	                                           | 409 taken|registered | 403 banned
+//	                                           | 409 taken|registered | 403 banned | 429 busy
 //	POST /api/bot/v1/accounts/{tg}/password  → 200 {login,address,password}
+//	GET  /api/bot/v1/notices                 → 200 {notices:[{id,tg_user_id,kind,text}]}
+//	POST /api/bot/v1/notices/{id}/sent       → 204
 //
 // Errors are {"error": "<code>"}; the bot turns the code into words.
 
@@ -64,6 +66,29 @@ func (s *Server) registerBotRoutes() {
 	r.HandleFunc("/accounts/{tg:[0-9]+}", s.handleBotGetAccount).Methods("GET")
 	r.HandleFunc("/accounts/{tg:[0-9]+}/password", s.handleBotResetPassword).Methods("POST")
 	r.HandleFunc("/logins/{login}", s.handleBotCheckLogin).Methods("GET")
+	r.HandleFunc("/notices", s.handleBotNotices).Methods("GET")
+	r.HandleFunc("/notices/{id:[0-9]+}/sent", s.handleBotNoticeSent).Methods("POST")
+}
+
+// handleBotNotices: messages waiting for the bot to deliver.
+func (s *Server) handleBotNotices(w http.ResponseWriter, r *http.Request) {
+	notices, err := s.database.PendingBotNotices(50)
+	if err != nil {
+		log.Printf("bot api: %v", err)
+		botError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"notices": notices})
+}
+
+func (s *Server) handleBotNoticeSent(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(mux.Vars(r)["id"], 10, 64)
+	if err := s.database.MarkBotNoticeSent(id); err != nil {
+		log.Printf("bot api: %v", err)
+		botError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // botAuthMiddleware: API off → 404 (as if it did not exist); wrong network
@@ -210,6 +235,10 @@ func (s *Server) handleBotCreateAccount(w http.ResponseWriter, r *http.Request) 
 		return
 	case errors.Is(err, db.ErrLoginTaken):
 		botError(w, http.StatusConflict, signup.ReasonTaken)
+		return
+	case errors.Is(err, db.ErrSignupBusy):
+		log.Printf("bot api: sign-up ceiling of %d per hour reached", db.SignupsPerHour)
+		botError(w, http.StatusTooManyRequests, "busy")
 		return
 	case err != nil:
 		log.Printf("bot api: %v", err)

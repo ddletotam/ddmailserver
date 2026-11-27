@@ -134,6 +134,45 @@ func TestBotAPISignUpFlow(t *testing.T) {
 	if code, out := botCall(t, s, "GET", fmt.Sprintf("/api/bot/v1/accounts/%d", tg), ""); code != 403 || out["error"] != "banned" {
 		t.Fatalf("banned get: %d %v", code, out)
 	}
+	_, _ = database.Exec(`DELETE FROM telegram_links WHERE tg_user_id = $1`, tg)
+}
+
+func TestBotAPISignupCeiling(t *testing.T) {
+	s, database, _ := newBotEnv(t)
+	base := 9_000_000_000_000 + time.Now().UnixNano()%1_000_000_000
+	t.Cleanup(func() {
+		_, _ = database.Exec(`DELETE FROM telegram_links WHERE tg_user_id >= $1 AND tg_user_id < $2`, base, base+1000)
+	})
+	var recent int
+	_ = database.QueryRow(`SELECT COUNT(*) FROM telegram_links WHERE created_at > $1`, time.Now().Add(-time.Hour).UnixMilli()).Scan(&recent)
+	for i := recent; i < db.SignupsPerHour; i++ {
+		if _, err := database.Exec(`INSERT INTO telegram_links (tg_user_id, terms_accepted_at, created_at) VALUES ($1, 0, $2)`,
+			base+int64(i), time.Now().UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, out := botCall(t, s, "POST", "/api/bot/v1/accounts", fmt.Sprintf(`{"tg_user_id":%d,"login":"ceiling%d"}`, base+999, base%100000))
+	if code != 429 || out["error"] != "busy" {
+		t.Fatalf("over the ceiling: %d %v", code, out)
+	}
+}
+
+func TestBotAPINotices(t *testing.T) {
+	s, database, _ := newBotEnv(t)
+	var id int64
+	if err := database.QueryRow(`INSERT INTO bot_notices (tg_user_id, kind, text, created_at) VALUES (77, 'test', 'привет', 0) RETURNING id`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	code, out := botCall(t, s, "GET", "/api/bot/v1/notices", "")
+	if code != 200 || !strings.Contains(fmt.Sprint(out["notices"]), "привет") {
+		t.Fatalf("notices: %d %v", code, out)
+	}
+	if code, _ := botCall(t, s, "POST", fmt.Sprintf("/api/bot/v1/notices/%d/sent", id), ""); code != 204 {
+		t.Fatalf("mark sent: %d", code)
+	}
+	if _, out := botCall(t, s, "GET", "/api/bot/v1/notices", ""); strings.Contains(fmt.Sprint(out["notices"]), "привет") {
+		t.Fatal("a sent notice is still pending")
+	}
 }
 
 func TestBotAPIAuth(t *testing.T) {

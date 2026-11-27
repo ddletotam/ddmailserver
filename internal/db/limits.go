@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"net/mail"
 	"strconv"
 	"strings"
@@ -30,6 +31,9 @@ var (
 	// ErrRecipientLimit is a kind of ErrSendLimit: too many different
 	// recipients today. Callers that only know ErrSendLimit still refuse it.
 	ErrRecipientLimit = fmt.Errorf("daily recipients limit reached: %w", ErrSendLimit)
+	// ErrSendStopped is a kind of ErrSendLimit: sending is stopped for the day
+	// because too much of the account's mail went to addresses that don't exist.
+	ErrSendStopped = fmt.Errorf("sending stopped after undeliverable mail: %w", ErrSendLimit)
 )
 
 // Free tier of the sign-up service (docs/lunlun-bot-plan.md, decided
@@ -42,6 +46,10 @@ const (
 	FreeRecipientsPerDay = 20
 	FreeWarmupDays       = 7
 	FreeQuotaMB          = 1024
+	// FreeBounceStop: this many messages in 24 hours that came back «no such
+	// mailbox / no such domain» stop a free account's sending — the mark of
+	// mail sent to a bought or harvested list.
+	FreeBounceStop = 5
 )
 
 // freeTierSince returns when userID signed up through the bot, or 0 when the
@@ -130,6 +138,21 @@ func checkFreeTierSend(q querier, msg *models.OutboxMessage) error {
 	}
 	if sent >= maxMsgs {
 		return ErrSendLimit
+	}
+	var bounced int
+	if err := q.QueryRow(`SELECT COUNT(*) FROM messages WHERE user_id = $1 AND delivery_status = 'failed'
+		AND delivery_reason IN ('mailbox_unavailable', 'domain_not_found') AND created_at > $2`,
+		msg.UserID, now-24*3600*1000).Scan(&bounced); err != nil {
+		return fmt.Errorf("undeliverable mail: %w", err)
+	}
+	if bounced >= FreeBounceStop {
+		if err := notifyUserOnce(q, msg.UserID, "send_stopped", fmt.Sprintf(
+			"Отправка писем с вашего адреса остановлена на сутки: %d писем за последние 24 часа вернулись — таких адресов не существует. "+
+				"Так бывает при рассылке по чужим или устаревшим спискам адресов. Проверьте адреса получателей.", bounced),
+			24*3600*1000); err != nil {
+			log.Printf("free tier: %v", err)
+		}
+		return ErrSendStopped
 	}
 	for _, a := range recipientAddrs(msg.To, msg.Cc, msg.Bcc) {
 		seen[a] = true
