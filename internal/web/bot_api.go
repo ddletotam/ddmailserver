@@ -26,6 +26,9 @@ import (
 //	                                         → 201 {login,address,password} | 400 invalid|reserved
 //	                                           | 409 taken|registered | 403 banned | 429 busy
 //	POST /api/bot/v1/accounts/{tg}/password  → 200 {login,address,password}
+//	GET  /api/bot/v1/accounts/{tg}/features  → 200 {features:[{code,title,description,price,until}]}
+//	POST /api/bot/v1/payments                {tg_user_id,feature,amount,charge_id,recurring,expires_at}
+//	                                         → 200 {feature,until} | 404 not_found | 400 unknown_feature|wrong_amount
 //	GET  /api/bot/v1/notices                 → 200 {notices:[{id,tg_user_id,kind,text}]}
 //	POST /api/bot/v1/notices/{id}/sent       → 204
 //
@@ -38,6 +41,35 @@ type botAPI struct {
 	secret string
 	domain string
 	nets   []*net.IPNet
+	prices map[string]int
+}
+
+// botFeature is a paid feature as the bot sells it.
+type botFeature struct {
+	Code        string `json:"code"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Price       int    `json:"price"`
+	Until       int64  `json:"until,omitempty"` // ms; past — expired
+}
+
+// botFeatureCatalog: order and wording of the paid features. No brands of
+// mail services anywhere — only IMAP/SMTP terms (owner's rule, 2026-11-27).
+var botFeatureCatalog = []botFeature{
+	{Code: db.FeatureExternalAccounts, Title: "Другие ящики",
+		Description: "Сервер забирает почту из других ящиков по IMAP и отправляет через их SMTP — почта всех адресов видна на всех устройствах."},
+	{Code: db.FeatureExtraStorage, Title: "+10 ГБ",
+		Description: "Ящик 11 ГБ вместо 1 ГБ."},
+	{Code: db.FeatureSendLimits, Title: "Отправка без лимитов",
+		Description: "Без суточных ограничений бесплатного ящика на число писем и получателей."},
+}
+
+// SetBotPrices sets the monthly price in Stars of each paid feature; a
+// feature without a price is not sold.
+func (s *Server) SetBotPrices(prices map[string]int) {
+	if s.bot != nil {
+		s.bot.prices = prices
+	}
 }
 
 // SetBotAPI switches the bot API on. An empty secret or domain leaves it off.
@@ -66,6 +98,8 @@ func (s *Server) registerBotRoutes() {
 	r.HandleFunc("/accounts/{tg:[0-9]+}", s.handleBotGetAccount).Methods("GET")
 	r.HandleFunc("/accounts/{tg:[0-9]+}/password", s.handleBotResetPassword).Methods("POST")
 	r.HandleFunc("/logins/{login}", s.handleBotCheckLogin).Methods("GET")
+	r.HandleFunc("/accounts/{tg:[0-9]+}/features", s.handleBotFeatures).Methods("GET")
+	r.HandleFunc("/payments", s.handleBotPayment).Methods("POST")
 	r.HandleFunc("/notices", s.handleBotNotices).Methods("GET")
 	r.HandleFunc("/notices/{id:[0-9]+}/sent", s.handleBotNoticeSent).Methods("POST")
 }
@@ -291,4 +325,93 @@ func newBotPassword() (password, hash string, err error) {
 		return "", "", fmt.Errorf("hash password: %w", err)
 	}
 	return password, hash, nil
+}
+
+// botLinkedAccount resolves the Telegram user of the request to its account,
+// answering 404/403 itself when there is none.
+func (s *Server) botLinkedAccount(w http.ResponseWriter, tg int64) (*db.TelegramAccount, bool) {
+	a, err := s.database.GetTelegramAccount(tg)
+	switch {
+	case errors.Is(err, db.ErrTelegramNotLinked):
+		botError(w, http.StatusNotFound, "not_found")
+	case err != nil:
+		log.Printf("bot api: %v", err)
+		botError(w, http.StatusInternalServerError, "internal")
+	case a.Banned:
+		botError(w, http.StatusForbidden, "banned")
+	default:
+		return a, true
+	}
+	return nil, false
+}
+
+// handleBotFeatures: the paid features on sale and how long each is paid for.
+func (s *Server) handleBotFeatures(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.botLinkedAccount(w, tgUserID(r))
+	if !ok {
+		return
+	}
+	paid, err := s.database.Entitlements(a.UserID)
+	if err != nil {
+		log.Printf("bot api: %v", err)
+		botError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	out := []botFeature{}
+	for _, f := range botFeatureCatalog {
+		price := s.bot.prices[f.Code]
+		if price <= 0 {
+			continue
+		}
+		f.Price, f.Until = price, paid[f.Code]
+		out = append(out, f)
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"features": out})
+}
+
+type botPaymentRequest struct {
+	TgUserID  int64  `json:"tg_user_id"`
+	Feature   string `json:"feature"`
+	Amount    int    `json:"amount"`
+	ChargeID  string `json:"charge_id"`
+	Recurring bool   `json:"recurring"`
+	ExpiresAt int64  `json:"expires_at"` // unix seconds, Telegram's subscription_expiration_date; 0 — none
+}
+
+// handleBotPayment records a successful Stars payment and extends the
+// feature. The amount is checked against the price only on the first charge:
+// a renewal is billed at the price the subscription was made at.
+func (s *Server) handleBotPayment(w http.ResponseWriter, r *http.Request) {
+	var req botPaymentRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil || req.TgUserID <= 0 || req.ChargeID == "" {
+		botError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	price, known := s.bot.prices[req.Feature]
+	if !known {
+		log.Printf("bot api: payment %s for unknown feature %q, %d stars — refund by hand", req.ChargeID, req.Feature, req.Amount)
+		botError(w, http.StatusBadRequest, "unknown_feature")
+		return
+	}
+	if !req.Recurring && req.Amount < price {
+		log.Printf("bot api: payment %s for %s: %d stars, price %d — refund by hand", req.ChargeID, req.Feature, req.Amount, price)
+		botError(w, http.StatusBadRequest, "wrong_amount")
+		return
+	}
+	a, ok := s.botLinkedAccount(w, req.TgUserID)
+	if !ok {
+		log.Printf("bot api: payment %s from Telegram %d without an account — refund by hand", req.ChargeID, req.TgUserID)
+		return
+	}
+	until, err := s.database.RecordPayment(db.Payment{
+		UserID: a.UserID, TgUserID: req.TgUserID, Feature: req.Feature, Amount: req.Amount,
+		ChargeID: req.ChargeID, Recurring: req.Recurring, ExpiresAt: req.ExpiresAt * 1000,
+	})
+	if err != nil {
+		log.Printf("bot api: payment %s: %v", req.ChargeID, err)
+		botError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	log.Printf("bot api: %s paid %s (%d stars, recurring=%v) until %d", a.Username, req.Feature, req.Amount, req.Recurring, until)
+	respondJSON(w, http.StatusOK, map[string]any{"feature": req.Feature, "until": until})
 }

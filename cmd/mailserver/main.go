@@ -447,7 +447,8 @@ func main() {
 		} else if err := webSrv.SetBotAPI(string(secret), cfg.BotAPI.Domain, cfg.BotAPI.Networks); err != nil {
 			log.Printf("WARNING: %v", err)
 		} else {
-			log.Printf("Bot API enabled for domain %s", cfg.BotAPI.Domain)
+			webSrv.SetBotPrices(cfg.BotAPI.Prices)
+			log.Printf("Bot API enabled for domain %s, %d paid features priced", cfg.BotAPI.Domain, len(cfg.BotAPI.Prices))
 		}
 	}
 	// Queueing a message is not sending it: without this hook the outbox row

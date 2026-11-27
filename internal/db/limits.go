@@ -113,6 +113,9 @@ func checkFreeTierSend(q querier, msg *models.OutboxMessage) error {
 	if err != nil || since == 0 {
 		return err
 	}
+	if paid, err := hasEntitlement(q, msg.UserID, FeatureSendLimits); err != nil || paid {
+		return err
+	}
 	now := timeutil.Now()
 	maxMsgs, maxRcpts := freeTierLimits(since, now)
 	rows, err := q.Query(`SELECT to_addr, COALESCE(cc, ''), COALESCE(bcc, '') FROM outbox_messages
@@ -169,11 +172,17 @@ func (db *DB) FreeTierOverQuota(userID int64) (bool, error) {
 	if err != nil || since == 0 {
 		return false, err
 	}
+	quotaMB := int64(FreeQuotaMB)
+	if paid, err := hasEntitlement(db, userID, FeatureExtraStorage); err != nil {
+		return false, err
+	} else if paid {
+		quotaMB += ExtraStorageMB
+	}
 	var used int64
 	if err := db.QueryRow(`SELECT COALESCE(SUM(size), 0) FROM messages WHERE user_id = $1`, userID).Scan(&used); err != nil {
 		return false, fmt.Errorf("storage of user %d: %w", userID, err)
 	}
-	return used >= FreeQuotaMB*1024*1024, nil
+	return used >= quotaMB*1024*1024, nil
 }
 
 func limitValue(q querier, key string) (int64, error) {
@@ -198,6 +207,19 @@ func (db *DB) Limit(key string) (int64, error) { return limitValue(db, key) }
 // checkAccountLimit: one more connected account for userID would exceed the
 // limit.
 func checkAccountLimit(q querier, userID int64) error {
+	// The free tier connects other mailboxes on the server only with the
+	// paid feature; in the DDMail app it can connect them for free.
+	if since, err := freeTierSince(q, userID); err != nil {
+		return err
+	} else if since != 0 {
+		paid, err := hasEntitlement(q, userID, FeatureExternalAccounts)
+		if err != nil {
+			return err
+		}
+		if !paid {
+			return ErrAccountLimit
+		}
+	}
 	limit, err := limitValue(q, SettingLimitExternalAccounts)
 	if err != nil || limit == 0 {
 		return err

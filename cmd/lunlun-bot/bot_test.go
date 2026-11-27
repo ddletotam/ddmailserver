@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -14,8 +15,24 @@ type sent struct {
 }
 
 type fakeTG struct {
-	sent    []sent
-	deleted []int64
+	sent      []sent
+	deleted   []int64
+	links     []string
+	preAnswer []bool
+	refunded  []string
+}
+
+func (f *fakeTG) createSubscriptionLink(_ context.Context, _, _, payload string, stars int) (string, error) {
+	f.links = append(f.links, fmt.Sprintf("%s/%d", payload, stars))
+	return "https://t.me/$invoice", nil
+}
+func (f *fakeTG) answerPreCheckout(_ context.Context, _ string, ok bool, _ string) error {
+	f.preAnswer = append(f.preAnswer, ok)
+	return nil
+}
+func (f *fakeTG) refundStars(_ context.Context, _ int64, charge string) error {
+	f.refunded = append(f.refunded, charge)
+	return nil
 }
 
 func (f *fakeTG) getUpdates(context.Context, int64) ([]tgUpdate, error) { return nil, nil }
@@ -38,6 +55,27 @@ type fakeAPI struct {
 	taken       map[string]bool
 	pending     []notice
 	sentNotices []int64
+	until       map[string]int64
+	payments    []payment
+}
+
+func (f *fakeAPI) features(_ context.Context, tg int64) ([]feature, error) {
+	if _, ok := f.accounts[tg]; !ok {
+		return nil, &apiError{404, "not_found"}
+	}
+	return []feature{
+		{Code: "external_accounts", Title: "Другие ящики", Price: 100, Until: f.until["external_accounts"]},
+		{Code: "send_limits", Title: "Отправка без лимитов", Price: 50, Until: f.until["send_limits"]},
+	}, nil
+}
+func (f *fakeAPI) recordPayment(_ context.Context, p payment) (int64, error) {
+	if p.Feature != "external_accounts" && p.Feature != "send_limits" {
+		return 0, &apiError{400, "unknown_feature"}
+	}
+	f.payments = append(f.payments, p)
+	u := time.Now().Add(30 * 24 * time.Hour).UnixMilli()
+	f.until[p.Feature] = u
+	return u, nil
 }
 
 func (f *fakeAPI) getAccount(_ context.Context, tg int64) (*account, error) {
@@ -97,7 +135,7 @@ func TestNoticesDelivered(t *testing.T) {
 
 func newTestBot() (*bot, *fakeTG, *fakeAPI) {
 	tg := &fakeTG{}
-	api := &fakeAPI{accounts: map[int64]*account{}, taken: map[string]bool{"busy": true}}
+	api := &fakeAPI{accounts: map[int64]*account{}, taken: map[string]bool{"busy": true}, until: map[string]int64{}}
 	b := newBot(config{siteURL: "https://lunlun.email", mailHost: "mail.lunlun.email", credsTTL: time.Hour}, tg, api)
 	return b, tg, api
 }
@@ -180,5 +218,48 @@ func TestGroupsIgnored(t *testing.T) {
 	step(b, u)
 	if len(tg.sent) != 0 {
 		t.Fatalf("answered in a group: %+v", tg.sent)
+	}
+}
+
+func TestPaymentFlow(t *testing.T) {
+	b, tg, api := newTestBot()
+	const user = 5
+	api.accounts[user] = &account{Login: "pay", Address: "pay@lunlun.email"}
+
+	step(b, msg(user, "/features"))
+	if kb := tg.last().kb; kb == nil || len(kb.Rows) != 2 || kb.Rows[0][0].Data != cbBuy+"external_accounts" {
+		t.Fatalf("features: %+v", tg.last())
+	}
+	step(b, press(user, cbBuy+"external_accounts"))
+	if len(tg.links) != 1 || tg.links[0] != "f:external_accounts/100" || tg.last().kb.Rows[0][0].URL == "" {
+		t.Fatalf("invoice: %v %+v", tg.links, tg.last())
+	}
+
+	pre := func(payload string, amount int) bool {
+		b.handle(context.Background(), tgUpdate{PreCheckout: &tgPreCheckout{ID: "p", From: tgUser{ID: user}, Currency: "XTR", TotalAmount: amount, InvoicePayload: payload}})
+		return tg.preAnswer[len(tg.preAnswer)-1]
+	}
+	if !pre("f:external_accounts", 100) || pre("f:external_accounts", 99) || pre("f:nothing", 100) {
+		t.Fatalf("pre-checkout answers: %v", tg.preAnswer)
+	}
+
+	paidMsg := func(payload, charge string) tgUpdate {
+		return tgUpdate{Message: &tgMessage{From: &tgUser{ID: user}, Chat: tgChat{ID: user, Type: "private"},
+			SuccessfulPayment: &tgSuccessfulPayment{Currency: "XTR", TotalAmount: 100, InvoicePayload: payload,
+				TelegramPaymentChargeID: charge, IsRecurring: true, IsFirstRecurring: true}}}
+	}
+	step(b, paidMsg("f:external_accounts", "ch1"))
+	if len(api.payments) != 1 || api.payments[0].Recurring || !strings.Contains(tg.last().text, "Подключено до") {
+		t.Fatalf("paid: %+v %q", api.payments, tg.last().text)
+	}
+	// Already paid: no buy button for it any more.
+	step(b, msg(user, "/features"))
+	if kb := tg.last().kb; kb == nil || len(kb.Rows) != 1 || kb.Rows[0][0].Data != cbBuy+"send_limits" {
+		t.Fatalf("features after payment: %+v", tg.last())
+	}
+	// A payment the server refuses is refunded.
+	step(b, paidMsg("f:nothing", "ch2"))
+	if len(tg.refunded) != 1 || tg.refunded[0] != "ch2" {
+		t.Fatalf("refunds: %v", tg.refunded)
 	}
 }

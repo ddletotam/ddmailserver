@@ -295,8 +295,13 @@ func (db *DB) GetAllEnabledAccounts() ([]*models.Account, error) {
 		       created_at, updated_at,
 		       COALESCE(last_sync_error, ''), COALESCE(consecutive_errors, 0),
 		       COALESCE(aliases, '')
-		FROM accounts
+		FROM accounts a
 		WHERE enabled = true
+		  -- A free-tier user's mailboxes sync only while the paid feature
+		  -- lasts (docs/lunlun-bot-plan.md); expired — kept, not synced.
+		  AND (NOT EXISTS (SELECT 1 FROM telegram_links l WHERE l.user_id = a.user_id)
+		       OR EXISTS (SELECT 1 FROM entitlements e WHERE e.user_id = a.user_id
+		                  AND e.feature = 'external_accounts' AND e.until > (extract(epoch from now()) * 1000)::bigint))
 		ORDER BY last_sync ASC NULLS FIRST
 	`
 

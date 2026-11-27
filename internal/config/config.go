@@ -36,6 +36,10 @@ type BotAPIConfig struct {
 	Domain string `yaml:"domain"`
 	// Networks — откуда принимать запросы бота (IP/CIDR); пусто — откуда угодно.
 	Networks []string `yaml:"networks"`
+	// Prices — цена каждой платной функции в звёздах Telegram за месяц
+	// (external_accounts, extra_storage, send_limits). Нет цены — функция в
+	// боте не продаётся.
+	Prices map[string]int `yaml:"prices"`
 }
 
 // PushConfig — доставка push-уведомлений о новой почте (ios-behavior-contract

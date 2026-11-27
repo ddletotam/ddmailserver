@@ -125,3 +125,37 @@ func (m *mailAPI) notices(ctx context.Context) ([]notice, error) {
 func (m *mailAPI) noticeSent(ctx context.Context, id int64) error {
 	return m.do(ctx, http.MethodPost, fmt.Sprintf("/notices/%d/sent", id), nil, nil)
 }
+
+type feature struct {
+	Code        string `json:"code"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Price       int    `json:"price"`
+	Until       int64  `json:"until"` // ms
+}
+
+func (m *mailAPI) features(ctx context.Context, tg int64) ([]feature, error) {
+	var out struct {
+		Features []feature `json:"features"`
+	}
+	err := m.do(ctx, http.MethodGet, fmt.Sprintf("/accounts/%d/features", tg), nil, &out)
+	return out.Features, err
+}
+
+type payment struct {
+	TgUserID  int64  `json:"tg_user_id"`
+	Feature   string `json:"feature"`
+	Amount    int    `json:"amount"`
+	ChargeID  string `json:"charge_id"`
+	Recurring bool   `json:"recurring"`
+	ExpiresAt int64  `json:"expires_at"`
+}
+
+// recordPayment returns until when (ms) the feature is now paid.
+func (m *mailAPI) recordPayment(ctx context.Context, p payment) (int64, error) {
+	var out struct {
+		Until int64 `json:"until"`
+	}
+	err := m.do(ctx, http.MethodPost, "/payments", p, &out)
+	return out.Until, err
+}

@@ -86,6 +86,16 @@ func TestFreeTierSendLimits(t *testing.T) {
 		t.Fatalf("26th message: %v", err)
 	}
 
+	// The paid feature lifts the free-tier limits.
+	if _, err := raw.Exec(`INSERT INTO entitlements (user_id, feature, until, updated_at) VALUES ($1, $2, $3, 0)`,
+		fresh, FeatureSendLimits, timeutil.Now()+3600*1000); err != nil {
+		t.Fatal(err)
+	}
+	if err := send(fresh, "someone-new@example.com"); err != nil {
+		t.Fatalf("with send_limits paid: %v", err)
+	}
+	_, _ = raw.Exec(`DELETE FROM entitlements WHERE user_id = $1`, fresh)
+
 	// After the warm-up week: the full 20 recipients.
 	old := newUser("zzfreeold", 10*24*time.Hour)
 	link(old)

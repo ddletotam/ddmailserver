@@ -23,6 +23,7 @@ type config struct {
 	tokenFile, secretFile string
 	apiURL, siteURL       string
 	mailHost              string
+	supportEmail          string
 	credsTTL              time.Duration
 	// allow: Telegram ids the bot talks to; empty — everyone. Until the
 	// free-tier limits are live (plan, stage 2) only the owner tests sign-up.
@@ -36,6 +37,7 @@ func main() {
 	flag.StringVar(&c.apiURL, "api", "https://mail.lunlun.email", "mail server base URL")
 	flag.StringVar(&c.siteURL, "site", "https://lunlun.email", "service site URL")
 	flag.StringVar(&c.mailHost, "mail-host", "mail.lunlun.email", "IMAP/SMTP host shown to users")
+	flag.StringVar(&c.supportEmail, "support", "support@lunlun.email", "support address shown to users")
 	flag.DurationVar(&c.credsTTL, "creds-ttl", 10*time.Minute, "how long a message with a password stays in the chat")
 	allowList := flag.String("allow", "", "comma-separated Telegram user ids the bot answers (empty: everyone)")
 	flag.Parse()

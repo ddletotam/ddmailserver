@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/migrations"
 	"github.com/gorilla/mux"
 )
@@ -201,4 +203,48 @@ func TestBotAPIAuth(t *testing.T) {
 			t.Fatalf("auth %q: %d, want 401", auth, rec.Code)
 		}
 	}
+}
+
+func TestBotAPIPayments(t *testing.T) {
+	s, database, _ := newBotEnv(t)
+	s.SetBotPrices(map[string]int{db.FeatureExternalAccounts: 100, db.FeatureSendLimits: 50})
+	tg := 8_000_000_000_000 + time.Now().UnixNano()%1_000_000_000
+	login := fmt.Sprintf("payer%d", tg%100000)
+	if code, out := botCall(t, s, "POST", "/api/bot/v1/accounts", fmt.Sprintf(`{"tg_user_id":%d,"login":%q}`, tg, login)); code != 201 {
+		t.Fatalf("create: %d %v", code, out)
+	}
+	t.Cleanup(func() { _, _ = database.Exec(`DELETE FROM telegram_links WHERE tg_user_id = $1`, tg) })
+	u, _ := database.GetUserByUsername(login)
+
+	code, out := botCall(t, s, "GET", fmt.Sprintf("/api/bot/v1/accounts/%d/features", tg), "")
+	list := fmt.Sprint(out["features"])
+	if code != 200 || !strings.Contains(list, "external_accounts") || strings.Contains(list, "extra_storage") {
+		t.Fatalf("features: %d %v", code, out)
+	}
+
+	// Free tier: no other mailboxes on the server until paid.
+	acc := &models.Account{UserID: u.ID, Name: "x", Email: "x@example.com", IMAPHost: "imap.example.com", IMAPPort: 993,
+		IMAPUsername: "x", IMAPPassword: "p", SMTPHost: "smtp.example.com", SMTPPort: 465, SMTPUsername: "x", SMTPPassword: "p", Enabled: true}
+	if err := database.CreateAccount(acc); !errors.Is(err, db.ErrAccountLimit) {
+		t.Fatalf("unpaid account: %v", err)
+	}
+
+	if code, out := botCall(t, s, "POST", "/api/bot/v1/payments",
+		fmt.Sprintf(`{"tg_user_id":%d,"feature":"external_accounts","amount":10,"charge_id":"c-%d-0"}`, tg, tg)); code != 400 || out["error"] != "wrong_amount" {
+		t.Fatalf("underpaid: %d %v", code, out)
+	}
+	body := fmt.Sprintf(`{"tg_user_id":%d,"feature":"external_accounts","amount":100,"charge_id":"c-%d-1"}`, tg, tg)
+	code, out = botCall(t, s, "POST", "/api/bot/v1/payments", body)
+	until, _ := out["until"].(float64)
+	if code != 200 || int64(until) < time.Now().Add(29*24*time.Hour).UnixMilli() {
+		t.Fatalf("payment: %d %v", code, out)
+	}
+	if _, out2 := botCall(t, s, "POST", "/api/bot/v1/payments", body); out2["until"] != out["until"] {
+		t.Fatalf("the same charge twice extended again: %v → %v", out["until"], out2["until"])
+	}
+	if err := database.CreateAccount(acc); err != nil {
+		t.Fatalf("paid account: %v", err)
+	}
+	_, _ = database.Exec(`DELETE FROM accounts WHERE user_id = $1`, u.ID)
+	_, _ = database.Exec(`DELETE FROM payments WHERE tg_user_id = $1`, tg)
 }

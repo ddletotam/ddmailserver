@@ -18,6 +18,9 @@ type messenger interface {
 	dropKeyboard(ctx context.Context, chatID, messageID int64) error
 	answerCallback(ctx context.Context, id string) error
 	setCommands(ctx context.Context, cmds []command) error
+	createSubscriptionLink(ctx context.Context, title, description, payload string, stars int) (string, error)
+	answerPreCheckout(ctx context.Context, id string, ok bool, errText string) error
+	refundStars(ctx context.Context, user int64, chargeID string) error
 }
 
 // accounts is the mail server's bot API (fake in tests).
@@ -28,12 +31,16 @@ type accounts interface {
 	resetPassword(ctx context.Context, tg int64) (*account, error)
 	notices(ctx context.Context) ([]notice, error)
 	noticeSent(ctx context.Context, id int64) error
+	features(ctx context.Context, tg int64) ([]feature, error)
+	recordPayment(ctx context.Context, p payment) (int64, error)
 }
 
 var botCommands = []command{
 	{"start", "Мой адрес / регистрация"},
 	{"password", "Новый пароль"},
 	{"settings", "Настройки почтовых программ"},
+	{"features", "Платные возможности"},
+	{"paysupport", "Вопросы по оплате"},
 	{"help", "Помощь"},
 }
 
@@ -45,6 +52,8 @@ const (
 	cbPassword   = "password"
 	cbPasswordOK = "password-ok"
 	cbSettings   = "settings"
+	cbFeatures   = "features"
+	cbBuy        = "buy:"
 )
 
 type bot struct {
@@ -120,6 +129,12 @@ func sleep(ctx context.Context, d time.Duration) {
 
 func (b *bot) handle(ctx context.Context, u tgUpdate) {
 	switch {
+	case u.PreCheckout != nil:
+		// Answered within 10 seconds or Telegram cancels the payment — no
+		// throttling here.
+		b.preCheckout(ctx, u.PreCheckout)
+	case u.Message != nil && u.Message.SuccessfulPayment != nil && u.Message.From != nil:
+		b.paid(ctx, u.Message.Chat.ID, *u.Message.From, u.Message.SuccessfulPayment)
 	case u.Message != nil:
 		m := u.Message
 		// Private chats only: a password must never land in a group.
@@ -187,6 +202,12 @@ func (b *bot) onText(ctx context.Context, chat int64, from tgUser, text string) 
 	case "/help":
 		b.say(ctx, chat, b.helpText(), nil)
 		return
+	case "/features":
+		b.showFeatures(ctx, chat, from)
+		return
+	case "/paysupport":
+		b.say(ctx, chat, b.paySupportText(), nil)
+		return
 	}
 	if b.awaiting(from.ID) {
 		b.proposeLogin(ctx, chat, text)
@@ -208,6 +229,10 @@ func (b *bot) onButton(ctx context.Context, chat int64, from tgUser, data string
 		b.resetPassword(ctx, chat, from)
 	case data == cbSettings:
 		b.say(ctx, chat, b.settingsText(""), nil)
+	case data == cbFeatures:
+		b.showFeatures(ctx, chat, from)
+	case strings.HasPrefix(data, cbBuy):
+		b.buy(ctx, chat, from, strings.TrimPrefix(data, cbBuy))
 	}
 }
 
@@ -236,6 +261,7 @@ func (b *bot) start(ctx context.Context, chat int64, from tgUser) {
 func (b *bot) showAccount(ctx context.Context, chat int64, a *account) {
 	b.say(ctx, chat, fmt.Sprintf("Ваш адрес: <code>%s</code>", html.EscapeString(a.Address)),
 		&keyboard{Rows: [][]button{
+			{{Text: "Платные возможности", Data: cbFeatures}},
 			{{Text: "Новый пароль", Data: cbPassword}},
 			{{Text: "Настройки почтовых программ", Data: cbSettings}},
 			{{Text: "Приложение DDMail", URL: b.cfg.siteURL + "/apps.html"}},
@@ -354,7 +380,8 @@ func (b *bot) settingsText(address string) string {
 }
 
 func (b *bot) helpText() string {
-	return "/start — ваш адрес или регистрация\n/password — новый пароль\n/settings — настройки почтовых программ\n\n" +
+	return "/start — ваш адрес или регистрация\n/password — новый пароль\n/settings — настройки почтовых программ\n" +
+		"/features — платные возможности\n/paysupport — вопросы по оплате\n\n" +
 		"Сайт сервиса: " + b.cfg.siteURL
 }
 
