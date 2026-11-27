@@ -4,8 +4,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/mail"
 	"strconv"
+	"strings"
 
+	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/internal/timeutil"
 )
 
@@ -24,7 +27,131 @@ var LimitSettings = []string{SettingLimitMailboxQuotaMB, SettingLimitSendPerHour
 var (
 	ErrAccountLimit = errors.New("connected accounts limit reached")
 	ErrSendLimit    = errors.New("sending limit reached")
+	// ErrRecipientLimit is a kind of ErrSendLimit: too many different
+	// recipients today. Callers that only know ErrSendLimit still refuse it.
+	ErrRecipientLimit = fmt.Errorf("daily recipients limit reached: %w", ErrSendLimit)
 )
+
+// Free tier of the sign-up service (docs/lunlun-bot-plan.md, decided
+// 2026-11-27): an account signed up through the Telegram bot. Spammers write
+// to many different addresses, people to a few — so different recipients per
+// day are limited along with messages. A fresh account gets half of both for
+// its first week.
+const (
+	FreeSendPerDay       = 50
+	FreeRecipientsPerDay = 20
+	FreeWarmupDays       = 7
+	FreeQuotaMB          = 1024
+)
+
+// freeTierSince returns when userID signed up through the bot, or 0 when the
+// account is not on the free tier (made by an administrator, a mailbox, ...).
+func freeTierSince(q querier, userID int64) (int64, error) {
+	var created sql.NullInt64
+	err := q.QueryRow(`SELECT u.created_at FROM telegram_links l JOIN users u ON u.id = l.user_id
+		WHERE l.user_id = $1`, userID).Scan(&created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("free tier of user %d: %w", userID, err)
+	}
+	if !created.Valid || created.Int64 == 0 {
+		return 1, nil // on the free tier, sign-up time unknown: no warm-up
+	}
+	return created.Int64, nil
+}
+
+// freeTierLimits: messages and different recipients a free account may send
+// per 24 hours, halved during the warm-up week.
+func freeTierLimits(since, now int64) (msgs, rcpts int) {
+	msgs, rcpts = FreeSendPerDay, FreeRecipientsPerDay
+	if since > 1 && now-since < FreeWarmupDays*24*3600*1000 {
+		msgs, rcpts = msgs/2, rcpts/2
+	}
+	return msgs, rcpts
+}
+
+// recipientAddrs extracts lower-cased addresses from To/Cc/Bcc header values.
+func recipientAddrs(fields ...string) []string {
+	var out []string
+	for _, f := range fields {
+		if strings.TrimSpace(f) == "" {
+			continue
+		}
+		if list, err := mail.ParseAddressList(f); err == nil {
+			for _, a := range list {
+				out = append(out, strings.ToLower(a.Address))
+			}
+			continue
+		}
+		for _, part := range strings.Split(f, ",") {
+			part = strings.TrimSpace(part)
+			if i := strings.LastIndexByte(part, '<'); i >= 0 {
+				part = strings.TrimSuffix(part[i+1:], ">")
+			}
+			if part != "" {
+				out = append(out, strings.ToLower(part))
+			}
+		}
+	}
+	return out
+}
+
+// checkFreeTierSend: a free account may queue msg only within its daily
+// limits of messages and different recipients.
+func checkFreeTierSend(q querier, msg *models.OutboxMessage) error {
+	since, err := freeTierSince(q, msg.UserID)
+	if err != nil || since == 0 {
+		return err
+	}
+	now := timeutil.Now()
+	maxMsgs, maxRcpts := freeTierLimits(since, now)
+	rows, err := q.Query(`SELECT to_addr, COALESCE(cc, ''), COALESCE(bcc, '') FROM outbox_messages
+		WHERE user_id = $1 AND created_at > $2`, msg.UserID, now-24*3600*1000)
+	if err != nil {
+		return fmt.Errorf("today's sending: %w", err)
+	}
+	defer rows.Close()
+	sent := 0
+	seen := map[string]bool{}
+	for rows.Next() {
+		var to, cc, bcc string
+		if err := rows.Scan(&to, &cc, &bcc); err != nil {
+			return fmt.Errorf("today's sending: %w", err)
+		}
+		sent++
+		for _, a := range recipientAddrs(to, cc, bcc) {
+			seen[a] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("today's sending: %w", err)
+	}
+	if sent >= maxMsgs {
+		return ErrSendLimit
+	}
+	for _, a := range recipientAddrs(msg.To, msg.Cc, msg.Bcc) {
+		seen[a] = true
+	}
+	if len(seen) > maxRcpts {
+		return ErrRecipientLimit
+	}
+	return nil
+}
+
+// FreeTierOverQuota: a free account's storage has reached the free quota.
+func (db *DB) FreeTierOverQuota(userID int64) (bool, error) {
+	since, err := freeTierSince(db, userID)
+	if err != nil || since == 0 {
+		return false, err
+	}
+	var used int64
+	if err := db.QueryRow(`SELECT COALESCE(SUM(size), 0) FROM messages WHERE user_id = $1`, userID).Scan(&used); err != nil {
+		return false, fmt.Errorf("storage of user %d: %w", userID, err)
+	}
+	return used >= FreeQuotaMB*1024*1024, nil
+}
 
 func limitValue(q querier, key string) (int64, error) {
 	var v string
@@ -63,8 +190,12 @@ func checkAccountLimit(q querier, userID int64) error {
 }
 
 // checkSendLimit: the sender has queued the limit's worth of messages in the
-// last hour.
-func checkSendLimit(q querier, userID int64) error {
+// last hour, or — on the free tier — is past its daily limits.
+func checkSendLimit(q querier, msg *models.OutboxMessage) error {
+	if err := checkFreeTierSend(q, msg); err != nil {
+		return err
+	}
+	userID := msg.UserID
 	limit, err := limitValue(q, SettingLimitSendPerHour)
 	if err != nil || limit == 0 {
 		return err

@@ -10,7 +10,7 @@ import (
 
 // CreateOutboxMessage creates a new outbox message
 func (db *DB) CreateOutboxMessage(msg *models.OutboxMessage) error {
-	if err := checkSendLimit(db, msg.UserID); err != nil {
+	if err := checkSendLimit(db, msg); err != nil {
 		return err
 	}
 	msg.CreatedAt = timeutil.Now()
