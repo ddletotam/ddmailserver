@@ -26,6 +26,8 @@ import (
 // Server represents the web server
 type Server struct {
 	database *db.DB
+	// bot — служебное API бота регистрации (bot_api.go); nil — выключено.
+	bot *botAPI
 	// messages owns message mutations (flags, delete, purge) and the
 	// upstream sync they imply — shared with the IMAP server.
 	messages        *msgsvc.Service
@@ -161,6 +163,9 @@ func (s *Server) setupRoutes() {
 
 	// Public API routes
 	s.router.HandleFunc("/health", s.HandleHealthCheck).Methods("GET")
+
+	// Telegram sign-up bot service API — before the generic /api subrouters.
+	s.registerBotRoutes()
 
 	// Auth routes with rate limiting (5 attempts per minute per IP)
 	authRouter := s.router.PathPrefix("/api").Subrouter()

@@ -438,6 +438,18 @@ func main() {
 	if err := webSrv.SetAdminNetworks(cfg.Security.AdminNetworks); err != nil {
 		log.Printf("WARNING: %v", err)
 	}
+	// Telegram sign-up bot API (docs/lunlun-bot-plan.md): the secret lives in
+	// its own file, never in config.yaml.
+	if f := cfg.BotAPI.SecretFile; f != "" {
+		secret, err := os.ReadFile(f)
+		if err != nil {
+			log.Printf("WARNING: bot_api: %v — API stays off", err)
+		} else if err := webSrv.SetBotAPI(string(secret), cfg.BotAPI.Domain, cfg.BotAPI.Networks); err != nil {
+			log.Printf("WARNING: %v", err)
+		} else {
+			log.Printf("Bot API enabled for domain %s", cfg.BotAPI.Domain)
+		}
+	}
 	// Queueing a message is not sending it: without this hook the outbox row
 	// waits for the next scheduler cycle, delaying every send by up to one
 	// interval.

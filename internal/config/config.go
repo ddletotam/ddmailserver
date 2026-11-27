@@ -21,6 +21,21 @@ type Config struct {
 	Meilisearch MeilisearchConfig `yaml:"meilisearch"`
 	DKIM        DKIMConfig        `yaml:"dkim"`
 	Push        PushConfig        `yaml:"push"`
+	BotAPI      BotAPIConfig      `yaml:"bot_api"`
+}
+
+// BotAPIConfig — служебное API для бота регистрации в Telegram
+// (docs/lunlun-bot-plan.md). Бот живёт вне РФ и сам ходит сюда по HTTPS с
+// секретом. Нет секции или секрета — API выключено (404).
+type BotAPIConfig struct {
+	// SecretFile — файл с общим секретом бота (одна строка, не короче 32
+	// символов). Сам секрет в config.yaml не пишем.
+	SecretFile string `yaml:"secret_file"`
+	// Domain — домен, на котором бот выдаёт адреса (lunlun.email). Должен быть
+	// заведён в админке.
+	Domain string `yaml:"domain"`
+	// Networks — откуда принимать запросы бота (IP/CIDR); пусто — откуда угодно.
+	Networks []string `yaml:"networks"`
 }
 
 // PushConfig — доставка push-уведомлений о новой почте (ios-behavior-contract
