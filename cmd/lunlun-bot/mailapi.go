@@ -131,31 +131,72 @@ type feature struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	Price       int    `json:"price"`
-	Until       int64  `json:"until"` // ms
+	Status      string `json:"status"`
+	PaidUntil   int64  `json:"paid_until"` // ms
+	Working     bool   `json:"working"`
 }
 
-func (m *mailAPI) features(ctx context.Context, tg int64) ([]feature, error) {
-	var out struct {
-		Features []feature `json:"features"`
+type billing struct {
+	Balance  int       `json:"balance"`
+	Features []feature `json:"features"`
+}
+
+func (m *mailAPI) billing(ctx context.Context, tg int64) (*billing, error) {
+	var b billing
+	err := m.do(ctx, http.MethodGet, fmt.Sprintf("/accounts/%d/billing", tg), nil, &b)
+	return &b, err
+}
+
+type enableResult struct {
+	Balance   int   `json:"balance"`
+	PaidUntil int64 `json:"paid_until"`
+}
+
+// enable subscribes to a feature from the balance; errCode "insufficient" —
+// not enough Stars.
+func (m *mailAPI) enable(ctx context.Context, tg int64, code string) (*enableResult, error) {
+	var r enableResult
+	err := m.do(ctx, http.MethodPost, fmt.Sprintf("/accounts/%d/features/%s", tg, url.PathEscape(code)), nil, &r)
+	return &r, err
+}
+
+func (m *mailAPI) cancel(ctx context.Context, tg int64, code string) (int64, error) {
+	var r struct {
+		PaidUntil int64 `json:"paid_until"`
 	}
-	err := m.do(ctx, http.MethodGet, fmt.Sprintf("/accounts/%d/features", tg), nil, &out)
-	return out.Features, err
+	err := m.do(ctx, http.MethodDelete, fmt.Sprintf("/accounts/%d/features/%s", tg, url.PathEscape(code)), nil, &r)
+	return r.PaidUntil, err
 }
 
-type payment struct {
-	TgUserID  int64  `json:"tg_user_id"`
-	Feature   string `json:"feature"`
-	Amount    int    `json:"amount"`
-	ChargeID  string `json:"charge_id"`
-	Recurring bool   `json:"recurring"`
-	ExpiresAt int64  `json:"expires_at"`
-}
-
-// recordPayment returns until when (ms) the feature is now paid.
-func (m *mailAPI) recordPayment(ctx context.Context, p payment) (int64, error) {
-	var out struct {
-		Until int64 `json:"until"`
+func (m *mailAPI) topUp(ctx context.Context, tg int64, amount int, charge string) (int, error) {
+	var r struct {
+		Balance int `json:"balance"`
 	}
-	err := m.do(ctx, http.MethodPost, "/payments", p, &out)
-	return out.Until, err
+	err := m.do(ctx, http.MethodPost, "/topups", map[string]any{"tg_user_id": tg, "amount": amount, "charge_id": charge}, &r)
+	return r.Balance, err
+}
+
+type topUp struct {
+	Amount   int    `json:"amount"`
+	ChargeID string `json:"charge_id"`
+}
+
+func (m *mailAPI) refundable(ctx context.Context, tg int64) ([]topUp, error) {
+	var r struct {
+		TopUps []topUp `json:"topups"`
+	}
+	err := m.do(ctx, http.MethodGet, fmt.Sprintf("/accounts/%d/refunds", tg), nil, &r)
+	return r.TopUps, err
+}
+
+func (m *mailAPI) reserveRefund(ctx context.Context, tg int64, charge string) (int, error) {
+	var r struct {
+		Amount int `json:"amount"`
+	}
+	err := m.do(ctx, http.MethodPost, fmt.Sprintf("/accounts/%d/refunds/%s", tg, url.PathEscape(charge)), nil, &r)
+	return r.Amount, err
+}
+
+func (m *mailAPI) cancelRefund(ctx context.Context, tg int64, charge string) error {
+	return m.do(ctx, http.MethodDelete, fmt.Sprintf("/accounts/%d/refunds/%s", tg, url.PathEscape(charge)), nil, nil)
 }

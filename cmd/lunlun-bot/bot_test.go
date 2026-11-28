@@ -22,9 +22,9 @@ type fakeTG struct {
 	refunded  []string
 }
 
-func (f *fakeTG) createSubscriptionLink(_ context.Context, _, _, payload string, stars int) (string, error) {
+func (f *fakeTG) sendStarsInvoice(_ context.Context, _ int64, _, _, payload string, stars int) error {
 	f.links = append(f.links, fmt.Sprintf("%s/%d", payload, stars))
-	return "https://t.me/$invoice", nil
+	return nil
 }
 func (f *fakeTG) answerPreCheckout(_ context.Context, _ string, ok bool, _ string) error {
 	f.preAnswer = append(f.preAnswer, ok)
@@ -55,28 +55,65 @@ type fakeAPI struct {
 	taken       map[string]bool
 	pending     []notice
 	sentNotices []int64
-	until       map[string]int64
-	payments    []payment
+	balance     int
+	topups      map[string]int
+	enabled     map[string]bool
+	reserved    []string
 }
 
-func (f *fakeAPI) features(_ context.Context, tg int64) ([]feature, error) {
+func (f *fakeAPI) billing(_ context.Context, tg int64) (*billing, error) {
 	if _, ok := f.accounts[tg]; !ok {
 		return nil, &apiError{404, "not_found"}
 	}
-	return []feature{
-		{Code: "external_accounts", Title: "Другие ящики", Price: 100, Until: f.until["external_accounts"]},
-		{Code: "send_limits", Title: "Больше отправки", Price: 50, Until: f.until["send_limits"]},
-	}, nil
-}
-func (f *fakeAPI) recordPayment(_ context.Context, p payment) (int64, error) {
-	if p.Feature != "external_accounts" && p.Feature != "send_limits" {
-		return 0, &apiError{400, "unknown_feature"}
+	f1 := feature{Code: "external_accounts", Title: "Другие ящики", Price: 50, PaidUntil: time.Now().Add(720 * time.Hour).UnixMilli()}
+	if f.enabled["external_accounts"] {
+		f1.Status, f1.Working = "active", true
 	}
-	f.payments = append(f.payments, p)
-	u := time.Now().Add(30 * 24 * time.Hour).UnixMilli()
-	f.until[p.Feature] = u
-	return u, nil
+	return &billing{Balance: f.balance, Features: []feature{f1, {Code: "mailbox", Title: "Ещё ящик", Price: 25}}}, nil
 }
+func (f *fakeAPI) enable(_ context.Context, _ int64, code string) (*enableResult, error) {
+	if f.balance < 50 {
+		return nil, &apiError{402, "insufficient"}
+	}
+	f.balance -= 50
+	f.enabled[code] = true
+	return &enableResult{Balance: f.balance, PaidUntil: time.Now().Add(720 * time.Hour).UnixMilli()}, nil
+}
+func (f *fakeAPI) cancel(_ context.Context, _ int64, code string) (int64, error) {
+	if !f.enabled[code] {
+		return 0, &apiError{404, "not_subscribed"}
+	}
+	f.enabled[code] = false
+	return time.Now().UnixMilli(), nil
+}
+func (f *fakeAPI) topUp(_ context.Context, tg int64, amount int, charge string) (int, error) {
+	if _, ok := f.accounts[tg]; !ok {
+		return 0, &apiError{404, "not_found"}
+	}
+	if _, seen := f.topups[charge]; !seen {
+		f.topups[charge] = amount
+		f.balance += amount
+	}
+	return f.balance, nil
+}
+func (f *fakeAPI) refundable(context.Context, int64) ([]topUp, error) {
+	var out []topUp
+	for c, a := range f.topups {
+		out = append(out, topUp{Amount: a, ChargeID: c})
+	}
+	return out, nil
+}
+func (f *fakeAPI) reserveRefund(_ context.Context, _ int64, charge string) (int, error) {
+	a, ok := f.topups[charge]
+	if !ok {
+		return 0, &apiError{409, "not_refundable"}
+	}
+	delete(f.topups, charge)
+	f.balance -= a
+	f.reserved = append(f.reserved, charge)
+	return a, nil
+}
+func (f *fakeAPI) cancelRefund(context.Context, int64, string) error { return nil }
 
 func (f *fakeAPI) getAccount(_ context.Context, tg int64) (*account, error) {
 	if a, ok := f.accounts[tg]; ok {
@@ -135,7 +172,7 @@ func TestNoticesDelivered(t *testing.T) {
 
 func newTestBot() (*bot, *fakeTG, *fakeAPI) {
 	tg := &fakeTG{}
-	api := &fakeAPI{accounts: map[int64]*account{}, taken: map[string]bool{"busy": true}, until: map[string]int64{}}
+	api := &fakeAPI{accounts: map[int64]*account{}, taken: map[string]bool{"busy": true}, topups: map[string]int{}, enabled: map[string]bool{}}
 	b := newBot(config{siteURL: "https://lunlun.email", mailHost: "mail.lunlun.email", credsTTL: time.Hour}, tg, api)
 	b.del = loadDeletions("") // in memory
 	return b, tg, api
@@ -226,46 +263,58 @@ func TestGroupsIgnored(t *testing.T) {
 	}
 }
 
-func TestPaymentFlow(t *testing.T) {
+func TestBalanceFlow(t *testing.T) {
 	b, tg, api := newTestBot()
 	const user = 5
 	api.accounts[user] = &account{Login: "pay", Address: "pay@lunlun.email"}
 
-	step(b, msg(user, "/features"))
-	if kb := tg.last().kb; kb == nil || len(kb.Rows) != 2 || kb.Rows[0][0].Data != cbBuy+"external_accounts" {
-		t.Fatalf("features: %+v", tg.last())
+	step(b, msg(user, "/balance"))
+	if kb := tg.last().kb; kb == nil || kb.Rows[0][0].Data != cbEnable+"external_accounts" || !strings.Contains(tg.last().text, "Баланс: 0") {
+		t.Fatalf("balance: %+v", tg.last())
 	}
-	step(b, press(user, cbBuy+"external_accounts"))
-	if len(tg.links) != 1 || tg.links[0] != "f:external_accounts/100" || tg.last().kb.Rows[0][0].URL == "" {
-		t.Fatalf("invoice: %v %+v", tg.links, tg.last())
+	step(b, press(user, cbEnable+"external_accounts"))
+	if kb := tg.last().kb; kb == nil || kb.Rows[0][0].Data != cbTopUp+"50" {
+		t.Fatalf("insufficient: %+v", tg.last())
 	}
-
+	step(b, press(user, cbTopUp+"100"))
+	if len(tg.links) != 1 || tg.links[0] != "topup:100/100" {
+		t.Fatalf("invoice: %v", tg.links)
+	}
 	pre := func(payload string, amount int) bool {
 		b.handle(context.Background(), tgUpdate{PreCheckout: &tgPreCheckout{ID: "p", From: tgUser{ID: user}, Currency: "XTR", TotalAmount: amount, InvoicePayload: payload}})
 		return tg.preAnswer[len(tg.preAnswer)-1]
 	}
-	if !pre("f:external_accounts", 100) || pre("f:external_accounts", 99) || pre("f:nothing", 100) {
+	if !pre("topup:100", 100) || pre("topup:100", 99) || pre("topup:7", 7) {
 		t.Fatalf("pre-checkout answers: %v", tg.preAnswer)
 	}
-
-	paidMsg := func(payload, charge string) tgUpdate {
-		return tgUpdate{Message: &tgMessage{From: &tgUser{ID: user}, Chat: tgChat{ID: user, Type: "private"},
-			SuccessfulPayment: &tgSuccessfulPayment{Currency: "XTR", TotalAmount: 100, InvoicePayload: payload,
-				TelegramPaymentChargeID: charge, IsRecurring: true, IsFirstRecurring: true}}}
+	paidMsg := func(from int64, charge string, amount int) tgUpdate {
+		return tgUpdate{Message: &tgMessage{From: &tgUser{ID: from}, Chat: tgChat{ID: from, Type: "private"},
+			SuccessfulPayment: &tgSuccessfulPayment{Currency: "XTR", TotalAmount: amount, InvoicePayload: fmt.Sprintf("topup:%d", amount), TelegramPaymentChargeID: charge}}}
 	}
-	step(b, paidMsg("f:external_accounts", "ch1"))
-	if len(api.payments) != 1 || api.payments[0].Recurring || !strings.Contains(tg.last().text, "Подключено до") {
-		t.Fatalf("paid: %+v %q", api.payments, tg.last().text)
+	step(b, paidMsg(user, "ch1", 100))
+	if api.balance != 100 || !strings.Contains(tg.last().text, "100 ⭐") {
+		t.Fatalf("topped up: %d %q", api.balance, tg.last().text)
 	}
-	// Already paid: no buy button for it any more.
-	step(b, msg(user, "/features"))
-	if kb := tg.last().kb; kb == nil || len(kb.Rows) != 1 || kb.Rows[0][0].Data != cbBuy+"send_limits" {
-		t.Fatalf("features after payment: %+v", tg.last())
+	step(b, press(user, cbEnable+"external_accounts"))
+	if !api.enabled["external_accounts"] || api.balance != 50 {
+		t.Fatalf("enable: %v %d", api.enabled, api.balance)
 	}
-	// A payment the server refuses is refunded.
-	step(b, paidMsg("f:nothing", "ch2"))
-	if len(tg.refunded) != 1 || tg.refunded[0] != "ch2" {
-		t.Fatalf("refunds: %v", tg.refunded)
+	step(b, msg(user, "/balance"))
+	if kb := tg.last().kb; kb == nil || kb.Rows[0][0].Data != cbCancel+"external_accounts" {
+		t.Fatalf("balance with a feature on: %+v", tg.last())
+	}
+	step(b, press(user, cbCancel+"external_accounts"))
+	if api.enabled["external_accounts"] {
+		t.Fatal("not cancelled")
+	}
+	step(b, press(user, cbRefundDo+"ch1"))
+	if len(api.reserved) != 1 || len(tg.refunded) != 1 || tg.refunded[0] != "ch1" {
+		t.Fatalf("refund: %v %v", api.reserved, tg.refunded)
+	}
+	// A top-up from someone without an account is given back.
+	step(b, paidMsg(999, "stray", 50))
+	if tg.refunded[len(tg.refunded)-1] != "stray" {
+		t.Fatalf("stray top-up not refunded: %v", tg.refunded)
 	}
 }
 

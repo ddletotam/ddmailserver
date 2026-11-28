@@ -161,17 +161,12 @@ func (t *telegram) setCommands(ctx context.Context, cmds []command) error {
 	return t.call(ctx, "setMyCommands", map[string]any{"commands": cmds}, nil)
 }
 
-// subscriptionPeriod is the only period Telegram allows for Stars subscriptions.
-const subscriptionPeriod = 30 * 24 * 3600
-
-// createSubscriptionLink returns a link to a monthly Stars subscription.
-func (t *telegram) createSubscriptionLink(ctx context.Context, title, description, payload string, stars int) (string, error) {
-	var link string
-	err := t.call(ctx, "createInvoiceLink", map[string]any{
-		"title": title, "description": description, "payload": payload, "currency": "XTR",
-		"prices": []map[string]any{{"label": title, "amount": stars}}, "subscription_period": subscriptionPeriod,
-	}, &link)
-	return link, err
+// sendStarsInvoice sends a one-off invoice in Stars.
+func (t *telegram) sendStarsInvoice(ctx context.Context, chat int64, title, description, payload string, stars int) error {
+	return t.call(ctx, "sendInvoice", map[string]any{
+		"chat_id": chat, "title": title, "description": description, "payload": payload, "currency": "XTR",
+		"prices": []map[string]any{{"label": title, "amount": stars}},
+	}, nil)
 }
 
 func (t *telegram) answerPreCheckout(ctx context.Context, id string, ok bool, errText string) error {

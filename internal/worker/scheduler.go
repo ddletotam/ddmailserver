@@ -59,6 +59,7 @@ type Scheduler struct {
 	spamCleanupLastRun       time.Time
 	accountLogCleanupLastRun time.Time
 	vaultCleanupLastRun      time.Time
+	billingLastRun           time.Time
 	journalCompactLastRun    time.Time
 
 	// outboxKick coalesces TriggerOutbox calls: capacity 1, so any number of
@@ -408,6 +409,7 @@ func (s *Scheduler) scheduleAllAccounts() {
 
 	// Run vault cleanup (permanently delete soft-deleted messages older than 30 days)
 	s.runVaultCleanup()
+	s.runBilling()
 
 	// Prune the change journal (keep 30 days; advance low-watermark)
 	s.runJournalCompaction()
@@ -870,6 +872,23 @@ func (s *Scheduler) runAccountLogCleanup() {
 // expunged from non-Trash folders; without a purge it grows unbounded (it was
 // the bulk of the rows bloating per-folder scans). Only runs once per day.
 const vaultRetention = 30 * 24 * time.Hour
+
+// runBilling renews paid subscriptions from users' balances, hourly
+// (docs/lunlun-bot-plan.md).
+func (s *Scheduler) runBilling() {
+	if time.Since(s.billingLastRun) < time.Hour {
+		return
+	}
+	s.billingLastRun = time.Now()
+	renewed, suspended, err := s.database.RenewSubscriptions()
+	if err != nil {
+		log.Printf("Billing: %v", err)
+		return
+	}
+	if renewed > 0 || suspended > 0 {
+		log.Printf("Billing: renewed %d, suspended %d subscriptions", renewed, suspended)
+	}
+}
 
 func (s *Scheduler) runVaultCleanup() {
 	if time.Since(s.vaultCleanupLastRun) < 24*time.Hour {

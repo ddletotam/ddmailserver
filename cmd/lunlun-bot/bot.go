@@ -18,7 +18,7 @@ type messenger interface {
 	dropKeyboard(ctx context.Context, chatID, messageID int64) error
 	answerCallback(ctx context.Context, id string) error
 	setCommands(ctx context.Context, cmds []command) error
-	createSubscriptionLink(ctx context.Context, title, description, payload string, stars int) (string, error)
+	sendStarsInvoice(ctx context.Context, chat int64, title, description, payload string, stars int) error
 	answerPreCheckout(ctx context.Context, id string, ok bool, errText string) error
 	refundStars(ctx context.Context, user int64, chargeID string) error
 }
@@ -31,15 +31,21 @@ type accounts interface {
 	resetPassword(ctx context.Context, tg int64) (*account, error)
 	notices(ctx context.Context) ([]notice, error)
 	noticeSent(ctx context.Context, id int64) error
-	features(ctx context.Context, tg int64) ([]feature, error)
-	recordPayment(ctx context.Context, p payment) (int64, error)
+	billing(ctx context.Context, tg int64) (*billing, error)
+	enable(ctx context.Context, tg int64, code string) (*enableResult, error)
+	cancel(ctx context.Context, tg int64, code string) (int64, error)
+	topUp(ctx context.Context, tg int64, amount int, charge string) (int, error)
+	refundable(ctx context.Context, tg int64) ([]topUp, error)
+	reserveRefund(ctx context.Context, tg int64, charge string) (int, error)
+	cancelRefund(ctx context.Context, tg int64, charge string) error
 }
 
 var botCommands = []command{
 	{"start", "Мой адрес / регистрация"},
 	{"password", "Новый пароль"},
 	{"settings", "Настройки почтовых программ"},
-	{"features", "Платные возможности"},
+	{"balance", "Баланс и платные возможности"},
+	{"refund", "Вернуть неизрасходованные звёзды"},
 	{"paysupport", "Вопросы по оплате"},
 	{"help", "Помощь"},
 }
@@ -53,7 +59,11 @@ const (
 	cbPasswordOK = "password-ok"
 	cbSettings   = "settings"
 	cbFeatures   = "features"
-	cbBuy        = "buy:"
+	cbEnable     = "enable:"
+	cbCancel     = "cancel:"
+	cbTopUp      = "topup:"
+	cbRefund     = "refund"
+	cbRefundDo   = "refund:"
 )
 
 type bot struct {
@@ -206,8 +216,11 @@ func (b *bot) onText(ctx context.Context, chat int64, from tgUser, text string) 
 	case "/help":
 		b.say(ctx, chat, b.helpText(), nil)
 		return
-	case "/features":
-		b.showFeatures(ctx, chat, from)
+	case "/balance", "/features":
+		b.showBalance(ctx, chat, from)
+		return
+	case "/refund":
+		b.showRefunds(ctx, chat, from)
 		return
 	case "/paysupport":
 		b.say(ctx, chat, b.paySupportText(), nil)
@@ -234,9 +247,17 @@ func (b *bot) onButton(ctx context.Context, chat int64, from tgUser, data string
 	case data == cbSettings:
 		b.say(ctx, chat, b.settingsText(""), nil)
 	case data == cbFeatures:
-		b.showFeatures(ctx, chat, from)
-	case strings.HasPrefix(data, cbBuy):
-		b.buy(ctx, chat, from, strings.TrimPrefix(data, cbBuy))
+		b.showBalance(ctx, chat, from)
+	case strings.HasPrefix(data, cbEnable):
+		b.enable(ctx, chat, from, strings.TrimPrefix(data, cbEnable))
+	case strings.HasPrefix(data, cbCancel):
+		b.cancelFeature(ctx, chat, from, strings.TrimPrefix(data, cbCancel))
+	case strings.HasPrefix(data, cbTopUp):
+		b.askTopUp(ctx, chat, from, strings.TrimPrefix(data, cbTopUp))
+	case data == cbRefund:
+		b.showRefunds(ctx, chat, from)
+	case strings.HasPrefix(data, cbRefundDo):
+		b.refund(ctx, chat, from, strings.TrimPrefix(data, cbRefundDo))
 	}
 }
 
@@ -251,7 +272,7 @@ func (b *bot) start(ctx context.Context, chat int64, from tgUser) {
 			"Здравствуйте! Это регистрация в почте <b>lunlun.email</b>.\n\n"+
 				"Бесплатно — один адрес вида <code>логин@lunlun.email</code> на аккаунт Telegram. "+
 				"Войти в почту можно из приложения DDMail или любой почтовой программы. "+
-				"Дополнительные возможности — другие ящики, +10 ГБ и другие — подключаются здесь же, помесячно за звёзды.\n\n"+
+				"Дополнительные возможности — ещё ящики, другие ящики, +10 ГБ — подключаются здесь же: пополняете баланс звёздами, возможности оплачиваются с него помесячно.\n\n"+
 				"Перед регистрацией прочитайте <a href=\"%s/terms.html\">условия использования</a> "+
 				"и <a href=\"%s/privacy.html\">политику конфиденциальности</a>.",
 			b.cfg.siteURL, b.cfg.siteURL),
@@ -266,7 +287,7 @@ func (b *bot) start(ctx context.Context, chat int64, from tgUser) {
 func (b *bot) showAccount(ctx context.Context, chat int64, a *account) {
 	b.say(ctx, chat, fmt.Sprintf("Ваш адрес: <code>%s</code>", html.EscapeString(a.Address)),
 		&keyboard{Rows: [][]button{
-			{{Text: "Платные возможности", Data: cbFeatures}},
+			{{Text: "Баланс и платные возможности", Data: cbFeatures}},
 			{{Text: "Новый пароль", Data: cbPassword}},
 			{{Text: "Настройки почтовых программ", Data: cbSettings}},
 			{{Text: "Приложение DDMail", URL: b.cfg.siteURL + "/apps.html"}},
@@ -383,7 +404,7 @@ func (b *bot) settingsText(address string) string {
 
 func (b *bot) helpText() string {
 	return "/start — ваш адрес или регистрация\n/password — новый пароль\n/settings — настройки почтовых программ\n" +
-		"/features — платные возможности\n/paysupport — вопросы по оплате\n\n" +
+		"/balance — баланс и платные возможности\n/refund — вернуть неизрасходованные звёзды\n/paysupport — вопросы по оплате\n\n" +
 		"Сайт сервиса: " + b.cfg.siteURL
 }
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ddletotam/ddmailserver/internal/db"
 	"github.com/ddletotam/ddmailserver/internal/signup"
@@ -26,9 +27,13 @@ import (
 //	                                         → 201 {login,address,password} | 400 invalid|reserved
 //	                                           | 409 taken|registered | 403 banned | 429 busy
 //	POST /api/bot/v1/accounts/{tg}/password  → 200 {login,address,password}
-//	GET  /api/bot/v1/accounts/{tg}/features  → 200 {features:[{code,title,description,price,until}]}
-//	POST /api/bot/v1/payments                {tg_user_id,feature,amount,charge_id,recurring,expires_at}
-//	                                         → 200 {feature,until} | 404 not_found | 400 unknown_feature|wrong_amount
+//	GET    /api/bot/v1/accounts/{tg}/billing           → 200 {balance,features:[{code,title,description,price,status,paid_until}]}
+//	POST   /api/bot/v1/accounts/{tg}/features/{code}   → 200 {balance,status,paid_until} | 402 insufficient {balance,price}
+//	DELETE /api/bot/v1/accounts/{tg}/features/{code}   → 200 {status,paid_until}  (stops renewal)
+//	POST   /api/bot/v1/topups {tg_user_id,amount,charge_id} → 200 {balance}  (the same charge twice — once)
+//	GET    /api/bot/v1/accounts/{tg}/refunds           → 200 {topups:[{amount,charge_id}]}
+//	POST   /api/bot/v1/accounts/{tg}/refunds/{charge}  → 200 {amount}  (taken off the balance; bot refunds in Telegram)
+//	DELETE /api/bot/v1/accounts/{tg}/refunds/{charge}  → 204           (Telegram refused: put it back)
 //	GET  /api/bot/v1/notices                 → 200 {notices:[{id,tg_user_id,kind,text}]}
 //	POST /api/bot/v1/notices/{id}/sent       → 204
 //
@@ -50,7 +55,9 @@ type botFeature struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	Price       int    `json:"price"`
-	Until       int64  `json:"until,omitempty"` // ms; past — expired
+	Status      string `json:"status,omitempty"`     // active | cancelled | suspended; "" — never had it
+	PaidUntil   int64  `json:"paid_until,omitempty"` // ms
+	Working     bool   `json:"working"`
 }
 
 // botFeatureCatalog: order and wording of the paid features. No brands of
@@ -60,6 +67,8 @@ var botFeatureCatalog = []botFeature{
 		Description: "Сервер забирает почту из других ящиков по IMAP и отправляет через их SMTP — почта всех адресов видна на всех устройствах."},
 	{Code: db.FeatureExtraStorage, Title: "+10 ГБ",
 		Description: "Ящик 11 ГБ вместо 1 ГБ."},
+	{Code: db.FeatureMailbox, Title: "Ещё ящик",
+		Description: "Дополнительный ящик на lunlun.email или на своём домене — для себя или с отдельным входом. Создаётся в кабинете, оплачивается за каждый."},
 	{Code: db.FeatureSendLimits, Title: "Больше отправки",
 		Description: "До 300 писем и 100 разных получателей в сутки вместо 50 и 20."},
 }
@@ -98,8 +107,13 @@ func (s *Server) registerBotRoutes() {
 	r.HandleFunc("/accounts/{tg:[0-9]+}", s.handleBotGetAccount).Methods("GET")
 	r.HandleFunc("/accounts/{tg:[0-9]+}/password", s.handleBotResetPassword).Methods("POST")
 	r.HandleFunc("/logins/{login}", s.handleBotCheckLogin).Methods("GET")
-	r.HandleFunc("/accounts/{tg:[0-9]+}/features", s.handleBotFeatures).Methods("GET")
-	r.HandleFunc("/payments", s.handleBotPayment).Methods("POST")
+	r.HandleFunc("/accounts/{tg:[0-9]+}/billing", s.handleBotBilling).Methods("GET")
+	r.HandleFunc("/accounts/{tg:[0-9]+}/features/{code}", s.handleBotEnableFeature).Methods("POST")
+	r.HandleFunc("/accounts/{tg:[0-9]+}/features/{code}", s.handleBotCancelFeature).Methods("DELETE")
+	r.HandleFunc("/topups", s.handleBotTopUp).Methods("POST")
+	r.HandleFunc("/accounts/{tg:[0-9]+}/refunds", s.handleBotRefundable).Methods("GET")
+	r.HandleFunc("/accounts/{tg:[0-9]+}/refunds/{charge}", s.handleBotReserveRefund).Methods("POST")
+	r.HandleFunc("/accounts/{tg:[0-9]+}/refunds/{charge}", s.handleBotCancelRefund).Methods("DELETE")
 	r.HandleFunc("/notices", s.handleBotNotices).Methods("GET")
 	r.HandleFunc("/notices/{id:[0-9]+}/sent", s.handleBotNoticeSent).Methods("POST")
 }
@@ -345,73 +359,163 @@ func (s *Server) botLinkedAccount(w http.ResponseWriter, tg int64) (*db.Telegram
 	return nil, false
 }
 
-// handleBotFeatures: the paid features on sale and how long each is paid for.
-func (s *Server) handleBotFeatures(w http.ResponseWriter, r *http.Request) {
+// handleBotBilling: balance and the features on sale with their state.
+func (s *Server) handleBotBilling(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.botLinkedAccount(w, tgUserID(r))
 	if !ok {
 		return
 	}
-	paid, err := s.database.Entitlements(a.UserID)
+	balance, err := s.database.Balance(a.UserID)
+	var subs []db.Subscription
+	if err == nil {
+		subs, err = s.database.Subscriptions(a.UserID)
+	}
 	if err != nil {
 		log.Printf("bot api: %v", err)
 		botError(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	now := time.Now().UnixMilli()
 	out := []botFeature{}
 	for _, f := range botFeatureCatalog {
 		price := s.bot.prices[f.Code]
 		if price <= 0 {
 			continue
 		}
-		f.Price, f.Until = price, paid[f.Code]
+		f.Price = price
+		for _, sub := range subs { // newest first
+			if sub.Feature == f.Code {
+				f.Status, f.PaidUntil, f.Working = sub.Status, sub.PaidUntil, sub.Working(now)
+				break
+			}
+		}
 		out = append(out, f)
 	}
-	respondJSON(w, http.StatusOK, map[string]any{"features": out})
+	respondJSON(w, http.StatusOK, map[string]any{"balance": balance, "features": out})
 }
 
-type botPaymentRequest struct {
-	TgUserID  int64  `json:"tg_user_id"`
-	Feature   string `json:"feature"`
-	Amount    int    `json:"amount"`
-	ChargeID  string `json:"charge_id"`
-	Recurring bool   `json:"recurring"`
-	ExpiresAt int64  `json:"expires_at"` // unix seconds, Telegram's subscription_expiration_date; 0 — none
-}
-
-// handleBotPayment records a successful Stars payment and extends the
-// feature. The amount is checked against the price only on the first charge:
-// a renewal is billed at the price the subscription was made at.
-func (s *Server) handleBotPayment(w http.ResponseWriter, r *http.Request) {
-	var req botPaymentRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil || req.TgUserID <= 0 || req.ChargeID == "" {
-		botError(w, http.StatusBadRequest, "bad_request")
+func (s *Server) handleBotEnableFeature(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.botLinkedAccount(w, tgUserID(r))
+	if !ok {
 		return
 	}
-	price, known := s.bot.prices[req.Feature]
-	if !known {
-		log.Printf("bot api: payment %s for unknown feature %q, %d stars — refund by hand", req.ChargeID, req.Feature, req.Amount)
+	code := mux.Vars(r)["code"]
+	price := s.bot.prices[code]
+	if price <= 0 || code == db.FeatureMailbox {
+		// Mailboxes are subscribed to one by one, when made in the cabinet.
 		botError(w, http.StatusBadRequest, "unknown_feature")
 		return
 	}
-	if !req.Recurring && req.Amount < price {
-		log.Printf("bot api: payment %s for %s: %d stars, price %d — refund by hand", req.ChargeID, req.Feature, req.Amount, price)
-		botError(w, http.StatusBadRequest, "wrong_amount")
+	sub, balance, err := s.database.EnableFeature(a.UserID, code, 0, price)
+	if errors.Is(err, db.ErrInsufficientFunds) {
+		respondJSON(w, http.StatusPaymentRequired, map[string]any{"error": "insufficient", "balance": balance, "price": price})
+		return
+	}
+	if err != nil {
+		log.Printf("bot api: enable %s for %s: %v", code, a.Username, err)
+		botError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	log.Printf("bot api: %s enabled %s, balance %d", a.Username, code, balance)
+	respondJSON(w, http.StatusOK, map[string]any{"balance": balance, "status": sub.Status, "paid_until": sub.PaidUntil})
+}
+
+func (s *Server) handleBotCancelFeature(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.botLinkedAccount(w, tgUserID(r))
+	if !ok {
+		return
+	}
+	code := mux.Vars(r)["code"]
+	subs, err := s.database.Subscriptions(a.UserID)
+	if err != nil {
+		log.Printf("bot api: %v", err)
+		botError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	for _, sub := range subs {
+		if sub.Feature == code && sub.Status == "active" {
+			if err := s.database.CancelSubscription(a.UserID, sub.ID); err != nil {
+				log.Printf("bot api: %v", err)
+				botError(w, http.StatusInternalServerError, "internal")
+				return
+			}
+			respondJSON(w, http.StatusOK, map[string]any{"status": "cancelled", "paid_until": sub.PaidUntil})
+			return
+		}
+	}
+	botError(w, http.StatusNotFound, "not_subscribed")
+}
+
+type botTopUpRequest struct {
+	TgUserID int64  `json:"tg_user_id"`
+	Amount   int    `json:"amount"`
+	ChargeID string `json:"charge_id"`
+}
+
+// handleBotTopUp records a Stars payment onto the balance.
+func (s *Server) handleBotTopUp(w http.ResponseWriter, r *http.Request) {
+	var req botTopUpRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil || req.TgUserID <= 0 || req.Amount <= 0 || req.ChargeID == "" {
+		botError(w, http.StatusBadRequest, "bad_request")
 		return
 	}
 	a, ok := s.botLinkedAccount(w, req.TgUserID)
 	if !ok {
-		log.Printf("bot api: payment %s from Telegram %d without an account — refund by hand", req.ChargeID, req.TgUserID)
+		log.Printf("bot api: top-up %s from Telegram %d without an account — refund", req.ChargeID, req.TgUserID)
 		return
 	}
-	until, err := s.database.RecordPayment(db.Payment{
-		UserID: a.UserID, TgUserID: req.TgUserID, Feature: req.Feature, Amount: req.Amount,
-		ChargeID: req.ChargeID, Recurring: req.Recurring, ExpiresAt: req.ExpiresAt * 1000,
-	})
+	balance, err := s.database.AddTopUp(a.UserID, req.Amount, req.ChargeID)
 	if err != nil {
-		log.Printf("bot api: payment %s: %v", req.ChargeID, err)
+		log.Printf("bot api: top-up %s: %v", req.ChargeID, err)
 		botError(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	log.Printf("bot api: %s paid %s (%d stars, recurring=%v) until %d", a.Username, req.Feature, req.Amount, req.Recurring, until)
-	respondJSON(w, http.StatusOK, map[string]any{"feature": req.Feature, "until": until})
+	log.Printf("bot api: %s topped up %d stars, balance %d", a.Username, req.Amount, balance)
+	respondJSON(w, http.StatusOK, map[string]any{"balance": balance})
+}
+
+func (s *Server) handleBotRefundable(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.botLinkedAccount(w, tgUserID(r))
+	if !ok {
+		return
+	}
+	list, err := s.database.RefundableTopUps(a.UserID)
+	if err != nil {
+		log.Printf("bot api: %v", err)
+		botError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"topups": list})
+}
+
+func (s *Server) handleBotReserveRefund(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.botLinkedAccount(w, tgUserID(r))
+	if !ok {
+		return
+	}
+	t, err := s.database.ReserveRefund(a.UserID, mux.Vars(r)["charge"])
+	if errors.Is(err, db.ErrNotRefundable) {
+		botError(w, http.StatusConflict, "not_refundable")
+		return
+	}
+	if err != nil {
+		log.Printf("bot api: %v", err)
+		botError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	log.Printf("bot api: %s refund of %d stars reserved", a.Username, t.Amount)
+	respondJSON(w, http.StatusOK, map[string]any{"amount": t.Amount})
+}
+
+func (s *Server) handleBotCancelRefund(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.botLinkedAccount(w, tgUserID(r))
+	if !ok {
+		return
+	}
+	if err := s.database.CancelRefund(a.UserID, mux.Vars(r)["charge"]); err != nil {
+		log.Printf("bot api: %v", err)
+		botError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
