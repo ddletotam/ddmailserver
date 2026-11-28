@@ -74,6 +74,25 @@ func freeTierSince(q querier, userID int64) (int64, error) {
 	return created.Int64, nil
 }
 
+// billingOwner returns who pays for userID: the owner of the mailbox when
+// userID is a mailbox's own account, else userID itself. Limits, space and
+// paid features of a service user cover all their mailboxes.
+func billingOwner(q querier, userID int64) (int64, error) {
+	var owner int64
+	err := q.QueryRow(`SELECT user_id FROM mailboxes WHERE principal_id = $1`, userID).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return userID, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("owner of user %d: %w", userID, err)
+	}
+	return owner, nil
+}
+
+// ownedUsers is the SQL set of user ids whose mail belongs to owner $1: the
+// owner and the own accounts of the owner's mailboxes.
+const ownedUsers = `(SELECT $1::integer UNION SELECT principal_id FROM mailboxes WHERE user_id = $1 AND principal_id IS NOT NULL)`
+
 // freeTierLimits: messages and different recipients a free account may send
 // per 24 hours, halved during the warm-up week.
 func freeTierLimits(since, now int64) (msgs, rcpts int) {
@@ -113,7 +132,11 @@ func recipientAddrs(fields ...string) []string {
 // checkFreeTierSend: a free account may queue msg only within its daily
 // limits of messages and different recipients.
 func checkFreeTierSend(q querier, msg *models.OutboxMessage) error {
-	since, err := freeTierSince(q, msg.UserID)
+	owner, err := billingOwner(q, msg.UserID)
+	if err != nil {
+		return err
+	}
+	since, err := freeTierSince(q, owner)
 	if err != nil || since == 0 {
 		return err
 	}
@@ -122,13 +145,13 @@ func checkFreeTierSend(q querier, msg *models.OutboxMessage) error {
 	// Autostop applies to every account of the service, paid or not: a paid
 	// feature must never buy a way around spam protection.
 	var bounced int
-	if err := q.QueryRow(`SELECT COUNT(*) FROM messages WHERE user_id = $1 AND delivery_status = 'failed'
+	if err := q.QueryRow(`SELECT COUNT(*) FROM messages WHERE user_id IN `+ownedUsers+` AND delivery_status = 'failed'
 		AND delivery_reason IN ('mailbox_unavailable', 'domain_not_found') AND created_at > $2`,
-		msg.UserID, now-24*3600*1000).Scan(&bounced); err != nil {
+		owner, now-24*3600*1000).Scan(&bounced); err != nil {
 		return fmt.Errorf("undeliverable mail: %w", err)
 	}
 	if bounced >= FreeBounceStop {
-		if err := notifyUserOnce(q, msg.UserID, "send_stopped", fmt.Sprintf(
+		if err := notifyUserOnce(q, owner, "send_stopped", fmt.Sprintf(
 			"Отправка писем с вашего адреса остановлена на сутки: %d писем за последние 24 часа вернулись — таких адресов не существует. "+
 				"Так бывает при рассылке по чужим или устаревшим спискам адресов. Проверьте адреса получателей.", bounced),
 			24*3600*1000); err != nil {
@@ -138,7 +161,7 @@ func checkFreeTierSend(q querier, msg *models.OutboxMessage) error {
 	}
 
 	maxMsgs, maxRcpts := freeTierLimits(since, now)
-	if paid, err := hasEntitlement(q, msg.UserID, FeatureSendLimits); err != nil {
+	if paid, err := hasEntitlement(q, owner, FeatureSendLimits); err != nil {
 		return err
 	} else if paid {
 		// Raised limits, not none: an ordinary person never reaches them, a
@@ -146,7 +169,7 @@ func checkFreeTierSend(q querier, msg *models.OutboxMessage) error {
 		maxMsgs, maxRcpts = PaidSendPerDay, PaidRecipientsPerDay
 	}
 	rows, err := q.Query(`SELECT to_addr, COALESCE(cc, ''), COALESCE(bcc, '') FROM outbox_messages
-		WHERE user_id = $1 AND created_at > $2`, msg.UserID, now-24*3600*1000)
+		WHERE user_id IN `+ownedUsers+` AND created_at > $2`, owner, now-24*3600*1000)
 	if err != nil {
 		return fmt.Errorf("today's sending: %w", err)
 	}
@@ -180,6 +203,10 @@ func checkFreeTierSend(q querier, msg *models.OutboxMessage) error {
 
 // FreeTierOverQuota: a free account's storage has reached the free quota.
 func (db *DB) FreeTierOverQuota(userID int64) (bool, error) {
+	userID, err := billingOwner(db, userID)
+	if err != nil {
+		return false, err
+	}
 	since, err := freeTierSince(db, userID)
 	if err != nil || since == 0 {
 		return false, err
@@ -191,7 +218,7 @@ func (db *DB) FreeTierOverQuota(userID int64) (bool, error) {
 		quotaMB += ExtraStorageMB
 	}
 	var used int64
-	if err := db.QueryRow(`SELECT COALESCE(SUM(size), 0) FROM messages WHERE user_id = $1`, userID).Scan(&used); err != nil {
+	if err := db.QueryRow(`SELECT COALESCE(SUM(size), 0) FROM messages WHERE user_id IN `+ownedUsers, userID).Scan(&used); err != nil {
 		return false, fmt.Errorf("storage of user %d: %w", userID, err)
 	}
 	return used >= quotaMB*1024*1024, nil

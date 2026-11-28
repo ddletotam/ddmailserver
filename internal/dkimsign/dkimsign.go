@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/emersion/go-msgauth/dkim"
 )
@@ -27,6 +28,51 @@ import (
 type Signer struct {
 	selector string
 	keys     map[string]crypto.Signer
+	// resolve finds keys not in keys — those of users' own domains, kept in
+	// the database (SetResolver). Found keys are cached in keys.
+	resolve func(domain string) crypto.Signer
+	mu      sync.Mutex
+}
+
+// NewEmpty is a Signer with no file keys, for a server whose keys all come
+// from the resolver.
+func NewEmpty(selector string) *Signer {
+	if selector == "" {
+		return nil
+	}
+	return &Signer{selector: selector, keys: map[string]crypto.Signer{}}
+}
+
+// SetResolver sets where keys missing from the key dir are looked up.
+func (s *Signer) SetResolver(r func(domain string) crypto.Signer) {
+	if s != nil {
+		s.resolve = r
+	}
+}
+
+func (s *Signer) key(domain string) (crypto.Signer, bool) {
+	s.mu.Lock()
+	k, ok := s.keys[domain]
+	s.mu.Unlock()
+	if ok || s.resolve == nil {
+		return k, ok
+	}
+	k = s.resolve(domain)
+	if k == nil {
+		return nil, false
+	}
+	s.mu.Lock()
+	s.keys[domain] = k
+	s.mu.Unlock()
+	return k, true
+}
+
+// Selector is the DKIM selector the keys are published under.
+func (s *Signer) Selector() string {
+	if s == nil {
+		return ""
+	}
+	return s.selector
 }
 
 // New loads every "<domain>.key" from keyDir. Returns nil (signing disabled)
@@ -103,7 +149,7 @@ func (s *Signer) Has(from string) bool {
 	if s == nil {
 		return false
 	}
-	_, ok := s.keys[domainOf(from)]
+	_, ok := s.key(domainOf(from))
 	return ok
 }
 
@@ -115,7 +161,7 @@ func (s *Signer) Sign(from string, msg []byte) []byte {
 		return msg
 	}
 	domain := domainOf(from)
-	key, ok := s.keys[domain]
+	key, ok := s.key(domain)
 	if !ok {
 		return msg
 	}

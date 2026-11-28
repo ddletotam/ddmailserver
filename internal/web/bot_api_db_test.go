@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -258,4 +259,89 @@ func TestBotAPIBalance(t *testing.T) {
 		t.Fatalf("mailbox through the bot: %d", code)
 	}
 	_, _ = database.Exec(`DELETE FROM accounts WHERE user_id = $1`, u.ID)
+}
+
+// The cabinet: a free domain, paid mailboxes on it and on the service domain.
+func TestMyDomainsAndMailboxes(t *testing.T) {
+	s, database, domain := newBotEnv(t)
+	s.SetBotPrices(map[string]int{db.FeatureMailbox: 25})
+	tg := 7_000_000_000_000 + time.Now().UnixNano()%1_000_000_000
+	login := fmt.Sprintf("owner%d", tg%100000)
+	if code, out := botCall(t, s, "POST", "/api/bot/v1/accounts", fmt.Sprintf(`{"tg_user_id":%d,"login":%q}`, tg, login)); code != 201 {
+		t.Fatalf("create: %d %v", code, out)
+	}
+	t.Cleanup(func() { _, _ = database.Exec(`DELETE FROM telegram_links WHERE tg_user_id = $1`, tg) })
+	u, _ := database.GetUserByUsername(login)
+	s.router.HandleFunc("/domains/add", s.HandleMyAddDomain).Methods("POST")
+	s.router.HandleFunc("/domains/{id:[0-9]+}/verify", s.HandleMyVerifyDomain).Methods("POST")
+	s.router.HandleFunc("/mailboxes/add", s.HandleMyAddMailbox).Methods("POST")
+	s.router.HandleFunc("/mailboxes/{id:[0-9]+}/delete", s.HandleMyDeleteMailbox).Methods("POST")
+	call := func(path string, form url.Values) (int, map[string]any) {
+		req := httptest.NewRequest("POST", path, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req = req.WithContext(context.WithValue(req.Context(), userContextKey, u))
+		rec := httptest.NewRecorder()
+		s.router.ServeHTTP(rec, req)
+		out := map[string]any{}
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return rec.Code, out
+	}
+
+	own := fmt.Sprintf("own%d.test", tg%100000)
+	code, out := call("/domains/add", url.Values{"domain": {own}})
+	if code != 201 {
+		t.Fatalf("add domain: %d %v", code, out)
+	}
+	domID := int64(out["id"].(float64))
+	t.Cleanup(func() { _, _ = database.Exec(`DELETE FROM domains WHERE id = $1`, domID) })
+	if code, _ := call("/domains/add", url.Values{"domain": {domain}}); code != 400 {
+		t.Fatalf("the service domain as own: %d", code)
+	}
+	d, _ := database.GetDomainByID(domID)
+	s.lookupTXT = func(context.Context, string) ([]string, error) { return []string{"nothing"}, nil }
+	if code, _ := call(fmt.Sprintf("/domains/%d/verify", domID), nil); code != 409 {
+		t.Fatalf("verify without the record: %d", code)
+	}
+	s.lookupTXT = func(context.Context, string) ([]string, error) { return []string{"ddmail-verify=" + d.VerifyToken}, nil }
+	if code, out := call(fmt.Sprintf("/domains/%d/verify", domID), nil); code != 200 {
+		t.Fatalf("verify: %d %v", code, out)
+	}
+	if k, err := database.DKIMSigner(own); err != nil || k == nil {
+		t.Fatalf("dkim key of the new domain: %v %v", k, err)
+	}
+
+	// No Stars: no mailbox.
+	if code, _ := call("/mailboxes/add", url.Values{"domain_id": {fmt.Sprint(domID)}, "local_part": {"info"}}); code != 402 {
+		t.Fatalf("mailbox with an empty balance: %d", code)
+	}
+	if _, err := database.AddTopUp(u.ID, 60, fmt.Sprintf("my-%d", tg)); err != nil {
+		t.Fatal(err)
+	}
+	code, out = call("/mailboxes/add", url.Values{"domain_id": {fmt.Sprint(domID)}, "local_part": {"info"}, "kind": {"separate"}})
+	if code != 201 || out["password"] == "" {
+		t.Fatalf("separate mailbox: %d %v", code, out)
+	}
+	if _, err := database.AuthenticateProtocol("info@"+own, out["password"].(string)); err != nil {
+		t.Fatalf("sign-in with the separate mailbox: %v", err)
+	}
+	svc, _ := database.GetDomainByName(domain)
+	code, out = call("/mailboxes/add", url.Values{"domain_id": {fmt.Sprint(svc.ID)}, "local_part": {"second" + login}})
+	if code != 201 {
+		t.Fatalf("extra address on the service domain: %d %v", code, out)
+	}
+	if b, _ := database.Balance(u.ID); b != 10 {
+		t.Fatalf("balance after two mailboxes = %d, want 10", b)
+	}
+	if code, _ := call("/mailboxes/add", url.Values{"domain_id": {fmt.Sprint(domID)}, "local_part": {"third"}}); code != 402 {
+		t.Fatalf("third mailbox with 10 Stars: %d", code)
+	}
+	// The separate mailbox's sending counts against the owner's limits.
+	mb, _ := database.GetMailbox(domID, "info")
+	if owner, err := database.OutboundClass(mb.PrincipalID); err != nil || owner != db.OutboundPaid {
+		t.Fatalf("class of the separate mailbox = %q, %v", owner, err)
+	}
+	if code, out := call(fmt.Sprintf("/mailboxes/%d/delete", mb.ID), nil); code != 200 {
+		t.Fatalf("delete mailbox: %d %v", code, out)
+	}
+	_, _ = database.Exec(`DELETE FROM mailboxes WHERE user_id = $1`, u.ID)
 }

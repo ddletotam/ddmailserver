@@ -56,7 +56,7 @@ func (b *bot) showBalance(ctx context.Context, chat int64, from tgUser) {
 		fmt.Fprintf(&sb, "\n<b>%s</b> — %d ⭐ в месяц\n%s\n", html.EscapeString(f.Title), f.Price, html.EscapeString(f.Description))
 		switch {
 		case f.Code == "mailbox":
-			sb.WriteString("Подключается в кабинете при создании ящика.\n")
+			sb.WriteString("Создаётся в кабинете: https://mail.lunlun.email/domains — там же свои домены (бесплатно).\n")
 		case f.Status == "active" && f.Working:
 			fmt.Fprintf(&sb, "✅ Подключено, следующее списание %s\n", dateRU(f.PaidUntil))
 			kb.Rows = append(kb.Rows, []button{{Text: "Отключить «" + f.Title + "»", Data: cbCancel + f.Code}})

@@ -143,6 +143,9 @@ func (db *DB) EnableFeature(userID int64, feature string, refID int64, price int
 		if _, err := tx.Exec(`UPDATE subscriptions SET status = 'active', updated_at = $2 WHERE id = $1`, s.ID, now); err != nil {
 			return nil, 0, err
 		}
+		if err := setMailboxBySub(tx, s.ID, true); err != nil {
+			return nil, 0, err
+		}
 		s.Status = "active"
 		b, err := balanceOf(tx, userID)
 		if err != nil {
@@ -169,6 +172,9 @@ func (db *DB) EnableFeature(userID int64, feature string, refID int64, price int
 	if _, err := tx.Exec(`INSERT INTO balance_ops (user_id, kind, amount, subscription_id, note, created_at)
 		VALUES ($1, 'charge', $2, $3, $4, $5)`, userID, -price, s.ID, feature, now); err != nil {
 		return nil, 0, fmt.Errorf("charge %s: %w", feature, err)
+	}
+	if err := setMailboxBySub(tx, s.ID, true); err != nil {
+		return nil, 0, err
 	}
 	return &s, b - price, tx.Commit()
 }
@@ -199,6 +205,25 @@ const (
 // Returns how many were renewed and suspended.
 func (db *DB) RenewSubscriptions() (renewed, suspended int, err error) {
 	now := timeutil.Now()
+	// Cancelled ones whose paid month is over end here; a mailbox stops.
+	ended, err := db.Query(`UPDATE subscriptions SET status = 'ended', updated_at = $1
+		WHERE status = 'cancelled' AND paid_until <= $1 RETURNING id`, now)
+	if err != nil {
+		return 0, 0, fmt.Errorf("end cancelled subscriptions: %w", err)
+	}
+	var endedIDs []int64
+	for ended.Next() {
+		var id int64
+		if err := ended.Scan(&id); err == nil {
+			endedIDs = append(endedIDs, id)
+		}
+	}
+	ended.Close()
+	for _, id := range endedIDs {
+		if err := setMailboxBySub(db, id, false); err != nil {
+			log.Printf("billing: subscription %d: %v", id, err)
+		}
+	}
 	rows, err := db.Query(`SELECT DISTINCT user_id FROM subscriptions WHERE status = 'active' AND paid_until <= $1`,
 		now+3*24*3600*1000)
 	if err != nil {
@@ -286,6 +311,9 @@ func (db *DB) renewUser(userID, now int64) (renewed, suspended int, err error) {
 		}
 		if d.paidUntil+GracePeriod <= now {
 			if _, err := tx.Exec(`UPDATE subscriptions SET status = 'suspended', updated_at = $2 WHERE id = $1`, d.id, now); err != nil {
+				return 0, 0, err
+			}
+			if err := setMailboxBySub(tx, d.id, false); err != nil {
 				return 0, 0, err
 			}
 			suspended++
@@ -419,4 +447,14 @@ func (db *DB) BalanceHistory(userID int64, limit int) ([]BalanceOp, error) {
 		out = append(out, o)
 	}
 	return out, rows.Err()
+}
+
+// setMailboxBySub turns the mailbox of a per-mailbox subscription on or off:
+// off, it takes no mail and its own sign-in stops; its mail is kept.
+func setMailboxBySub(q querier, subID int64, enabled bool) error {
+	if _, err := q.Exec(`UPDATE mailboxes SET enabled = $2 WHERE id = (
+		SELECT ref_id FROM subscriptions WHERE id = $1 AND feature = 'mailbox')`, subID, enabled); err != nil {
+		return fmt.Errorf("mailbox of subscription %d: %w", subID, err)
+	}
+	return nil
 }

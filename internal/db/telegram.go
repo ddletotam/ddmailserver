@@ -155,3 +155,17 @@ func (db *DB) CreateTelegramAccount(tgUserID int64, login, domain string, domain
 	}
 	return u, nil
 }
+
+// GetTelegramAccountByUser returns the Telegram link of a user;
+// ErrTelegramNotLinked — the user did not sign up through the bot.
+func (db *DB) GetTelegramAccountByUser(userID int64) (*TelegramAccount, error) {
+	var tg int64
+	err := db.QueryRow(`SELECT tg_user_id FROM telegram_links WHERE user_id = $1`, userID).Scan(&tg)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrTelegramNotLinked
+	}
+	if err != nil {
+		return nil, err
+	}
+	return db.GetTelegramAccount(tg)
+}

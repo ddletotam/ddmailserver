@@ -53,6 +53,10 @@ const (
 // OutboundClass returns the class of userID's outgoing mail; "" — the
 // server's own users (the default route).
 func (db *DB) OutboundClass(userID int64) (string, error) {
+	userID, err := billingOwner(db, userID)
+	if err != nil {
+		return "", err
+	}
 	since, err := freeTierSince(db, userID)
 	if err != nil || since == 0 {
 		return "", err

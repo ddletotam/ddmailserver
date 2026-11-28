@@ -290,6 +290,7 @@ func (b *bot) showAccount(ctx context.Context, chat int64, a *account) {
 			{{Text: "Баланс и платные возможности", Data: cbFeatures}},
 			{{Text: "Новый пароль", Data: cbPassword}},
 			{{Text: "Настройки почтовых программ", Data: cbSettings}},
+			{{Text: "Кабинет: домены и ящики", URL: "https://mail.lunlun.email/domains"}},
 			{{Text: "Приложение DDMail", URL: b.cfg.siteURL + "/apps.html"}},
 		}})
 }

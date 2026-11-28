@@ -342,6 +342,15 @@ func (s *Server) setupRoutes() {
 
 	// Recovery key display (after registration)
 
+	// The user's own domains and mailboxes (docs/lunlun-bot-plan.md)
+	web.HandleFunc("/domains", s.HandleMyDomainsPage).Methods("GET")
+	web.HandleFunc("/domains/add", s.HandleMyAddDomain).Methods("POST")
+	web.HandleFunc("/domains/{id:[0-9]+}/verify", s.HandleMyVerifyDomain).Methods("POST")
+	web.HandleFunc("/domains/{id:[0-9]+}/delete", s.HandleMyDeleteDomain).Methods("POST")
+	web.HandleFunc("/mailboxes/add", s.HandleMyAddMailbox).Methods("POST")
+	web.HandleFunc("/mailboxes/{id:[0-9]+}/password", s.HandleMyMailboxPassword).Methods("POST")
+	web.HandleFunc("/mailboxes/{id:[0-9]+}/delete", s.HandleMyDeleteMailbox).Methods("POST")
+
 	// Accounts web pages
 	web.HandleFunc("/accounts", s.HandleAccountsPage).Methods("GET")
 	web.HandleFunc("/accounts/list", s.HandleAccountsList).Methods("GET")

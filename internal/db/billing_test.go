@@ -127,3 +127,46 @@ func TestRefundNewestUnspent(t *testing.T) {
 		t.Fatalf("too expensive: %v", err)
 	}
 }
+
+func TestUnpaidMailboxStops(t *testing.T) {
+	d, raw, uid := billingEnv(t)
+	var domID, mbID int64
+	if err := raw.QueryRow(`INSERT INTO domains (domain, user_id, enabled, created_at, verified, verify_token)
+		VALUES ($1, $2, true, 0, true, 'x') RETURNING id`, fmt.Sprintf("stop%d.test", uid), uid).Scan(&domID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = raw.Exec(`DELETE FROM mailboxes WHERE domain_id = $1`, domID); _, _ = raw.Exec(`DELETE FROM domains WHERE id = $1`, domID) })
+	if err := raw.QueryRow(`INSERT INTO mailboxes (user_id, domain_id, local_part, enabled, created_at) VALUES ($1, $2, 'a', true, 0) RETURNING id`,
+		uid, domID).Scan(&mbID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.AddTopUp(uid, 25, fmt.Sprintf("m%d", uid)); err != nil {
+		t.Fatal(err)
+	}
+	sub, _, err := d.EnableFeature(uid, FeatureMailbox, mbID, 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`UPDATE subscriptions SET paid_until = $2 WHERE id = $1`, sub.ID, timeutil.Now()-GracePeriod-1000); err != nil {
+		t.Fatal(err)
+	}
+	if _, s, err := d.RenewSubscriptions(); err != nil || s != 1 {
+		t.Fatalf("suspend: %d %v", s, err)
+	}
+	var on bool
+	_ = raw.QueryRow(`SELECT enabled FROM mailboxes WHERE id = $1`, mbID).Scan(&on)
+	if on {
+		t.Fatal("an unpaid mailbox still takes mail")
+	}
+	// Paid again: back on.
+	if _, err := d.AddTopUp(uid, 25, fmt.Sprintf("m%d-2", uid)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := d.EnableFeature(uid, FeatureMailbox, mbID, 25); err != nil {
+		t.Fatal(err)
+	}
+	_ = raw.QueryRow(`SELECT enabled FROM mailboxes WHERE id = $1`, mbID).Scan(&on)
+	if !on {
+		t.Fatal("a paid-again mailbox is still off")
+	}
+}

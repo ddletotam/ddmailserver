@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto"
 	"errors"
 	"flag"
 	"fmt"
@@ -266,6 +267,21 @@ func main() {
 
 	// DKIM signing of direct-delivery outgoing mail (one key per domain).
 	dkimSigner := dkimsign.New(cfg.DKIM.Selector, cfg.DKIM.KeyDir)
+	if dkimSigner == nil {
+		dkimSigner = dkimsign.NewEmpty(cfg.DKIM.Selector)
+	}
+	// Users' own domains: keys made by the server, kept in the database.
+	dkimSigner.SetResolver(func(domain string) crypto.Signer {
+		k, err := database.DKIMSigner(domain)
+		if err != nil {
+			log.Printf("DKIM: key of %s: %v", domain, err)
+			return nil
+		}
+		if k == nil {
+			return nil
+		}
+		return k
+	})
 	if dkimSigner == nil {
 		log.Printf("DKIM signing disabled (dkim.selector/dkim.key_dir not configured)")
 	}

@@ -1,0 +1,162 @@
+{{define "content"}}
+<div class="row row-cards">
+    <div class="col-12"><div id="result"></div></div>
+
+    {{if .Billed}}
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body d-flex flex-wrap gap-3 align-items-center">
+                <div><span class="text-muted">Баланс:</span> <b>{{.Balance}} ⭐</b></div>
+                <div class="text-muted">Ящик — {{.MailboxPrice}} ⭐ в месяц, каждый отдельно; списывается с баланса. Свой домен — бесплатно.</div>
+                <a class="btn btn-sm btn-outline-primary ms-auto" href="{{.BotURL}}" target="_blank" rel="noopener">Пополнить в боте</a>
+            </div>
+        </div>
+    </div>
+    {{end}}
+
+    {{with .Service}}
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">Адреса на {{.Domain.Domain}}</h3></div>
+            <div class="card-body">
+                {{template "mailboxes" .}}
+                {{template "mailbox-form" .}}
+            </div>
+        </div>
+    </div>
+    {{end}}
+
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">Свои домены</h3></div>
+            <div class="card-body">
+                <form id="domain-form" class="d-flex gap-2">
+                    <input type="text" name="domain" class="form-control" placeholder="example.com" required>
+                    <button type="submit" class="btn btn-primary text-nowrap">Добавить домен</button>
+                </form>
+                <div class="text-muted small mt-2">Почта на вашем домене: добавьте домен, внесите записи DNS у регистратора и нажмите «Проверить». Подключение домена бесплатное, ящики на нём — платные.</div>
+            </div>
+        </div>
+    </div>
+
+    {{range .Domains}}
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between">
+                <h3 class="card-title">{{.Domain.Domain}}
+                    {{if .Domain.Verified}}<span class="badge bg-green-lt ms-2">подтверждён</span>{{else}}<span class="badge bg-yellow-lt ms-2">ждёт подтверждения</span>{{end}}
+                </h3>
+                <div class="btn-list">
+                    {{if not .Domain.Verified}}<button class="btn btn-sm btn-primary" data-post="/domains/{{.Domain.ID}}/verify">Проверить</button>{{end}}
+                    <button class="btn btn-sm btn-outline-danger" data-post="/domains/{{.Domain.ID}}/delete" data-confirm="Удалить домен {{.Domain.Domain}}?">Удалить</button>
+                </div>
+            </div>
+            <div class="card-body">
+                <details {{if not .Domain.Verified}}open{{end}}>
+                    <summary class="text-muted">Записи DNS</summary>
+                    <div class="table-responsive mt-2">
+                        <table class="table table-sm">
+                            <thead><tr><th>Тип</th><th>Имя</th><th>Значение</th><th></th></tr></thead>
+                            <tbody>
+                            {{range .Records}}
+                                <tr><td>{{.Type}}</td><td><code>{{.Name}}</code></td><td><code style="word-break:break-all">{{.Value}}</code></td><td class="text-muted small">{{.Why}}</td></tr>
+                            {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                </details>
+                {{if .Domain.Verified}}
+                    {{template "mailboxes" .}}
+                    {{template "mailbox-form" .}}
+                {{end}}
+            </div>
+        </div>
+    </div>
+    {{end}}
+</div>
+
+<script>
+(function () {
+    function post(url, body) {
+        return fetch(url, { method: 'POST', credentials: 'same-origin', body: body }).then(function (r) {
+            return r.json().catch(function () { return {}; }).then(function (j) {
+                if (!r.ok) throw new Error((j && j.error) || r.statusText);
+                return j;
+            });
+        });
+    }
+    function say(text, kind) {
+        var box = document.getElementById('result');
+        box.innerHTML = '';
+        var d = document.createElement('div');
+        d.className = 'alert alert-' + (kind || 'danger');
+        d.textContent = text;
+        box.appendChild(d);
+        window.scrollTo(0, 0);
+    }
+    function showPassword(j) {
+        if (j.password) {
+            say('Ящик ' + (j.address || '') + ': пароль ' + j.password + ' — сохраните его, он показывается один раз. Серверы: {{.MailHost}}, IMAP 993 и SMTP 465, SSL/TLS.', 'info');
+            return true;
+        }
+        return false;
+    }
+    document.getElementById('domain-form').addEventListener('submit', function (e) {
+        e.preventDefault();
+        post('/domains/add', new FormData(e.target)).then(function () { location.reload(); }).catch(function (err) { say(err.message); });
+    });
+    document.querySelectorAll('form.mailbox-form').forEach(function (f) {
+        f.addEventListener('submit', function (e) {
+            e.preventDefault();
+            post('/mailboxes/add', new FormData(f)).then(function (j) {
+                if (!showPassword(j)) { location.reload(); }
+            }).catch(function (err) { say(err.message); });
+        });
+    });
+    document.querySelectorAll('[data-post]').forEach(function (b) {
+        b.addEventListener('click', function () {
+            if (b.dataset.confirm && !confirm(b.dataset.confirm)) return;
+            post(b.dataset.post).then(function (j) {
+                if (!showPassword(j)) { location.reload(); }
+            }).catch(function (err) { say(err.message); });
+        });
+    });
+})();
+</script>
+{{end}}
+
+{{define "mailboxes"}}
+{{if .Mailboxes}}
+<table class="table table-sm mt-3">
+    <tbody>
+    {{range .Mailboxes}}
+    <tr>
+        <td><b>{{.Address}}</b>{{if .Separate}} <span class="badge bg-blue-lt">отдельный вход</span>{{end}}{{if not .Enabled}} <span class="badge bg-red-lt">отключён</span>{{end}}</td>
+        <td class="text-muted small">
+            {{if eq .Paid "active"}}оплачен, продление {{.Until}}{{else if eq .Paid "cancelled"}}работает до {{.Until}}{{else if eq .Paid "ended"}}оплата закончилась{{end}}
+        </td>
+        <td class="text-end">
+            {{if .Separate}}<button class="btn btn-sm btn-outline-secondary" data-post="/mailboxes/{{.ID}}/password">Новый пароль</button>{{end}}
+            {{if .Paid}}<button class="btn btn-sm btn-outline-danger" data-post="/mailboxes/{{.ID}}/delete" data-confirm="Удалить {{.Address}} вместе со всей почтой? Отменить нельзя.">Удалить</button>{{end}}
+        </td>
+    </tr>
+    {{end}}
+    </tbody>
+</table>
+{{end}}
+{{end}}
+
+{{define "mailbox-form"}}
+<form class="mailbox-form d-flex flex-wrap gap-2 mt-3">
+    <input type="hidden" name="domain_id" value="{{.Domain.ID}}">
+    <div class="input-group" style="max-width:420px">
+        <input type="text" name="local_part" class="form-control" placeholder="имя" required>
+        <span class="input-group-text">@{{.Domain.Domain}}</span>
+    </div>
+    <select name="kind" class="form-select w-auto">
+        <option value="own">для себя — почта в этот аккаунт</option>
+        <option value="separate">отдельный вход — для другого человека</option>
+    </select>
+    <button type="submit" class="btn btn-primary text-nowrap">Создать ящик</button>
+</form>
+{{end}}

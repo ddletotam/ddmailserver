@@ -71,6 +71,16 @@
                                 <span class="nav-link-title">{{t "nav.accounts"}}</span>
                             </a>
                         </li>
+                        {{if not .User.IsAdmin}}
+                        <li class="nav-item">
+                            <a class="nav-link" href="/domains">
+                                <span class="nav-link-icon d-md-none d-lg-inline-block">
+                                    <i class="ti ti-world"></i>
+                                </span>
+                                <span class="nav-link-title">{{t "nav.domains"}}</span>
+                            </a>
+                        </li>
+                        {{end}}
                         <li class="nav-item">
                             <a class="nav-link" href="/calendars">
                                 <span class="nav-link-icon d-md-none d-lg-inline-block">
