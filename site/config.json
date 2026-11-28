@@ -7,9 +7,8 @@
   "web_url": "https://mail.lunlun.email",
   "support_email": "support@lunlun.email",
   "signup": {
-    "open": false,
-    "url": "https://mail.lunlun.email/login",
-    "request_subject": "Хочу адрес на lunlun.email"
+    "bot": "robotohobot",
+    "url": "https://t.me/robotohobot"
   },
   "stores": {
     "appstore": {
@@ -39,5 +38,27 @@
       "live": true,
       "sub": "deb и rpm, GitHub"
     }
-  }
+  },
+  "free": {
+    "storage_gb": 1,
+    "send_per_day": 50,
+    "recipients_per_day": 20
+  },
+  "paid": [
+    {
+      "title": "Другие ящики",
+      "price": 50,
+      "text": "Сервер забирает почту из других ваших ящиков по IMAP и отправляет через их SMTP — вся почта на всех устройствах."
+    },
+    {
+      "title": "+10 ГБ",
+      "price": 50,
+      "text": "Ящик 11 ГБ вместо 1 ГБ."
+    },
+    {
+      "title": "Отправка без лимитов",
+      "price": 150,
+      "text": "Без суточных ограничений на число писем и получателей."
+    }
+  ]
 }

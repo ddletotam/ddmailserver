@@ -85,22 +85,33 @@ def snippets(cfg):
         store_button("Linux", d["linux"].get("sub", "компьютер"), d["linux"]),
     ])
     sup = cfg["support_email"]
-    if cfg["signup"]["open"]:
-        signup_href = cfg["signup"]["url"]
-        signup_label = "Зарегистрироваться"
-        signup_note = "Регистрация занимает минуту: имя пользователя и пароль."
-    else:
-        subj = cfg["signup"]["request_subject"].replace(" ", "%20")
-        signup_href = f"mailto:{sup}?subject={subj}"
-        signup_label = "Оставить заявку"
-        signup_note = ("Сейчас адреса выдаются по заявкам. Напишите, какой адрес хотите, "
-                       "— пришлём данные для входа.")
+    # Регистрация — только через Telegram-бота (решение 2026-11-28).
+    bot = cfg["signup"]["bot"]
+    signup_href = cfg["signup"]["url"]
+    signup_label = "Получить адрес"
+    signup_note = (f"Адрес выдаёт наш Telegram-бот @{bot}: выберите логин — и почта готова. "
+                   "Бесплатно, один адрес на аккаунт Telegram.")
+    fr = cfg["free"]
+    rows = "".join(
+        f'<tr><td><b>{html.escape(p["title"])}</b><br><span class="muted">{html.escape(p["text"])}</span></td>'
+        f'<td class="nowrap">{p["price"]} ⭐ / мес</td></tr>'
+        for p in cfg["paid"])
+    pricing = (
+        '<div class="grid">'
+        f'<div class="card"><h3>Бесплатно</h3><p>Адрес на {html.escape(cfg["domain"])}, ящик {fr["storage_gb"]} ГБ, '
+        f'до {fr["send_per_day"]} писем и {fr["recipients_per_day"]} разных получателей в сутки. '
+        'Приложение, календарь, задачи, контакты и мгновенные уведомления — тоже бесплатно.</p></div>'
+        '<div class="card"><h3>Что хотите — то и подключаете</h3><p>Тарифов нет: каждая возможность подключается '
+        'отдельно и оплачивается помесячно звёздами Telegram в боте. Отменить можно в любой момент.</p></div>'
+        '</div>'
+        f'<div class="table-wrap" style="margin-top:24px"><table><tr><th>Возможность</th><th>Цена</th></tr>{rows}</table></div>')
     return {
         "stores-mobile": f'<div class="stores">{mobile}</div>',
         "stores-desktop": f'<div class="stores">{desktop}</div>',
         "signup-href": html.escape(signup_href),
         "signup-label": signup_label,
         "signup-note": signup_note,
+        "pricing": pricing,
         "year": str(date.today().year),
     }
 
