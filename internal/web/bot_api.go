@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -294,6 +295,10 @@ func (s *Server) handleBotCreateAccount(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	log.Printf("bot api: signed up %s@%s (user %d)", login, b.domain, u.ID)
+	// The lunlun.io account with the same password (internal/maillink).
+	lctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	s.ProvisionLunlun(lctx, u.ID, login+"@"+b.domain, password)
+	cancel()
 	respondJSON(w, http.StatusCreated, map[string]string{
 		"login": login, "address": login + "@" + b.domain, "password": password,
 	})
@@ -324,6 +329,9 @@ func (s *Server) handleBotResetPassword(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	log.Printf("bot api: password reset for %s@%s (user %d)", a.Username, b.domain, a.UserID)
+	lctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	s.lunlunPassword(lctx, a.UserID, password)
+	cancel()
 	respondJSON(w, http.StatusOK, map[string]string{
 		"login": a.Username, "address": a.Username + "@" + b.domain, "password": password,
 	})

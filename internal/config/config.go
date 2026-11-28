@@ -25,6 +25,16 @@ type Config struct {
 	// Outbound — откуда уходит прямая доставка по классу отправителя
 	// (docs/lunlun-bot-plan.md, п. 6): free, paid. Нет класса — как у сервера.
 	Outbound map[string]OutboundRoute `yaml:"outbound"`
+	// Lunlun — связка с хранилищем lunlun.io (internal/maillink). Нет
+	// секрета — выключена.
+	Lunlun LunlunConfig `yaml:"lunlun"`
+}
+
+// LunlunConfig — связка почты сервиса с lunlun.io.
+type LunlunConfig struct {
+	SecretFile string `yaml:"secret_file"` // общий с lunlun секрет
+	API        string `yaml:"api"`         // http://127.0.0.1:3200 — внутреннее API lunlun, мимо nginx
+	SSO        string `yaml:"sso"`         // https://lunlun.io/sso — вход по пропуску
 }
 
 // OutboundRoute — исходящий IP и имя для EHLO. У IP обязана быть PTR-запись

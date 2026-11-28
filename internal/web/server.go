@@ -28,6 +28,8 @@ type Server struct {
 	database *db.DB
 	// bot — служебное API бота регистрации (bot_api.go); nil — выключено.
 	bot *botAPI
+	// lunlun — связка с lunlun.io (lunlun_link.go); nil — выключена.
+	lunlun *lunlunLink
 	// messages owns message mutations (flags, delete, purge) and the
 	// upstream sync they imply — shared with the IMAP server.
 	messages        *msgsvc.Service
@@ -166,6 +168,7 @@ func (s *Server) setupRoutes() {
 
 	// Telegram sign-up bot service API — before the generic /api subrouters.
 	s.registerBotRoutes()
+	s.registerLunlunRoutes()
 
 	// Auth routes with rate limiting (5 attempts per minute per IP)
 	authRouter := s.router.PathPrefix("/api").Subrouter()
@@ -345,6 +348,7 @@ func (s *Server) setupRoutes() {
 	// The user's own domains and mailboxes (docs/lunlun-bot-plan.md)
 	web.HandleFunc("/domains", s.HandleMyDomainsPage).Methods("GET")
 	web.HandleFunc("/billing", s.HandleMyBillingPage).Methods("GET")
+	web.HandleFunc("/sso/lunlun", s.HandleSSOToLunlun).Methods("GET")
 	web.HandleFunc("/domains/add", s.HandleMyAddDomain).Methods("POST")
 	web.HandleFunc("/domains/{id:[0-9]+}/verify", s.HandleMyVerifyDomain).Methods("POST")
 	web.HandleFunc("/domains/{id:[0-9]+}/delete", s.HandleMyDeleteDomain).Methods("POST")

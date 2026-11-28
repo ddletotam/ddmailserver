@@ -32,6 +32,8 @@ type MyBillingData struct {
 	Subs    []BillingSub
 	History []BillingLine
 	BotURL  string
+	// Space: one for mail and files (lunlun.io); QuotaMB 0 — no quota.
+	MailMB, FilesMB, QuotaMB int64
 }
 
 var featureTitles = map[string]string{
@@ -59,6 +61,10 @@ func (s *Server) HandleMyBillingPage(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if data.Balance, err = s.database.Balance(user.ID); err != nil {
 		log.Printf("billing page: %v", err)
+	}
+	if sp, err := s.database.SpaceOf(user.ID); err == nil {
+		data.MailMB, data.QuotaMB = sp.MailBytes>>20, sp.QuotaBytes>>20
+		data.FilesMB = s.database.FilesBytes(user.ID) >> 20
 	}
 	subs, _ := s.database.Subscriptions(user.ID)
 	now := time.Now().UnixMilli()

@@ -6,10 +6,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/ddletotam/ddmailserver/internal/maillink"
 	"log"
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -470,6 +472,30 @@ func main() {
 	if err := webSrv.SetAdminNetworks(cfg.Security.AdminNetworks); err != nil {
 		log.Printf("WARNING: %v", err)
 	}
+	// Link with lunlun.io (internal/maillink): one account and one space for
+	// mail and files.
+	if f := cfg.Lunlun.SecretFile; f != "" {
+		secret, err := os.ReadFile(f)
+		if err != nil {
+			log.Printf("WARNING: lunlun: %v — link stays off", err)
+		} else {
+			ll := &maillink.Lunlun{Base: cfg.Lunlun.API, Secret: []byte(strings.TrimSpace(string(secret))), SSO: cfg.Lunlun.SSO}
+			webSrv.SetLunlun(ll)
+			database.SetFilesBytes(func(userID int64) int64 {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				n, err := ll.FilesBytes(ctx, userID)
+				if err != nil {
+					log.Printf("lunlun: files of user %d: %v", userID, err)
+					return 0
+				}
+				return n
+			})
+			go webSrv.RunLunlunReconcile(context.Background())
+			log.Printf("Link with lunlun.io enabled (%s)", cfg.Lunlun.API)
+		}
+	}
+
 	// Telegram sign-up bot API (docs/lunlun-bot-plan.md): the secret lives in
 	// its own file, never in config.yaml.
 	if f := cfg.BotAPI.SecretFile; f != "" {

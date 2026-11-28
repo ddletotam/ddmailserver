@@ -203,25 +203,31 @@ func checkFreeTierSend(q querier, msg *models.OutboxMessage) error {
 
 // FreeTierOverQuota: a free account's storage has reached the free quota.
 func (db *DB) FreeTierOverQuota(userID int64) (bool, error) {
-	userID, err := billingOwner(db, userID)
-	if err != nil {
+	sp, err := db.SpaceOf(userID)
+	if err != nil || sp.QuotaBytes == 0 {
 		return false, err
 	}
-	since, err := freeTierSince(db, userID)
-	if err != nil || since == 0 {
-		return false, err
+	used := sp.MailBytes
+	if db.filesBytes != nil {
+		owner, err := billingOwner(db, userID)
+		if err != nil {
+			return false, err
+		}
+		used += db.filesBytes(owner) // the space is shared with lunlun.io
 	}
-	quotaMB := int64(FreeQuotaMB)
-	if paid, err := hasEntitlement(db, userID, FeatureExtraStorage); err != nil {
-		return false, err
-	} else if paid {
-		quotaMB += ExtraStorageMB
+	return used >= sp.QuotaBytes, nil
+}
+
+// SetFilesBytes sets where the bytes a user's files take in lunlun.io come
+// from; the space is one for mail and files (docs/lunlun-bot-plan.md).
+func (db *DB) SetFilesBytes(f func(userID int64) int64) { db.filesBytes = f }
+
+// FilesBytes is what the user's files take in lunlun.io; 0 without the link.
+func (db *DB) FilesBytes(userID int64) int64 {
+	if db.filesBytes == nil {
+		return 0
 	}
-	var used int64
-	if err := db.QueryRow(`SELECT COALESCE(SUM(size), 0) FROM messages WHERE user_id IN `+ownedUsers, userID).Scan(&used); err != nil {
-		return false, fmt.Errorf("storage of user %d: %w", userID, err)
-	}
-	return used >= quotaMB*1024*1024, nil
+	return db.filesBytes(userID)
 }
 
 func limitValue(q querier, key string) (int64, error) {

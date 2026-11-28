@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ddletotam/ddmailserver/internal/db"
+	"github.com/ddletotam/ddmailserver/internal/maillink"
 	"github.com/ddletotam/ddmailserver/internal/models"
 	"github.com/ddletotam/ddmailserver/migrations"
 	"github.com/gorilla/mux"
@@ -361,4 +362,84 @@ func TestMyDomainsAndMailboxes(t *testing.T) {
 		}
 	}
 	_, _ = database.Exec(`DELETE FROM mailboxes WHERE user_id = $1`, u.ID)
+}
+
+// The link with lunlun.io: an account there on sign-up, the same password on
+// reset, space for lunlun, sign-in from lunlun without a password.
+func TestLunlunLink(t *testing.T) {
+	s, database, domain := newBotEnv(t)
+	secret := []byte("0123456789abcdef0123456789abcdef-link")
+	var created, passwords []string
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+string(secret) {
+			http.Error(w, "no", 401)
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		switch {
+		case r.URL.Path == "/internal/v1/users":
+			created = append(created, fmt.Sprint(body["login"], "/", body["password"]))
+			_, _ = w.Write([]byte(`{"id":501}`))
+		case strings.HasSuffix(r.URL.Path, "/password"):
+			passwords = append(passwords, fmt.Sprint(body["password"]))
+			w.WriteHeader(204)
+		case strings.HasPrefix(r.URL.Path, "/internal/v1/usage/"):
+			_, _ = w.Write([]byte(`{"files_bytes":2000000000}`))
+		}
+	}))
+	defer fake.Close()
+	ll := &maillink.Lunlun{Base: fake.URL, Secret: secret, SSO: "https://lunlun.example/sso"}
+	s.SetLunlun(ll)
+	s.registerLunlunRoutes()
+	database.SetFilesBytes(func(u int64) int64 { n, _ := ll.FilesBytes(context.Background(), u); return n })
+	defer database.SetFilesBytes(nil)
+
+	tg := 6_000_000_000_000 + time.Now().UnixNano()%1_000_000_000
+	login := fmt.Sprintf("files%d", tg%100000)
+	code, out := botCall(t, s, "POST", "/api/bot/v1/accounts", fmt.Sprintf(`{"tg_user_id":%d,"login":%q}`, tg, login))
+	if code != 201 {
+		t.Fatalf("create: %d %v", code, out)
+	}
+	t.Cleanup(func() { _, _ = database.Exec(`DELETE FROM telegram_links WHERE tg_user_id = $1`, tg) })
+	if len(created) != 1 || created[0] != login+"@"+domain+"/"+out["password"].(string) {
+		t.Fatalf("lunlun account: %v", created)
+	}
+	u, _ := database.GetUserByUsername(login)
+	if ok, _ := database.HasLunlunLink(u.ID); !ok {
+		t.Fatal("link not recorded")
+	}
+	_, out = botCall(t, s, "POST", fmt.Sprintf("/api/bot/v1/accounts/%d/password", tg), "")
+	if len(passwords) != 1 || passwords[0] != out["password"] {
+		t.Fatalf("lunlun password on reset: %v", passwords)
+	}
+
+	// lunlun asks about space; through nginx — not visible.
+	req := httptest.NewRequest("GET", fmt.Sprintf("/api/link/v1/space/%d", u.ID), nil)
+	req.Header.Set("Authorization", "Bearer "+string(secret))
+	rec := httptest.NewRecorder()
+	s.router.ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"quota_bytes":1073741824`) {
+		t.Fatalf("space: %d %s", rec.Code, rec.Body.String())
+	}
+	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+	rec = httptest.NewRecorder()
+	s.router.ServeHTTP(rec, req)
+	if rec.Code != 404 {
+		t.Fatalf("space through nginx: %d", rec.Code)
+	}
+	// 2 GB of files fill the 1 GB space: mail is refused.
+	if full, err := database.FreeTierOverQuota(u.ID); err != nil || !full {
+		t.Fatalf("over quota with files: %v %v", full, err)
+	}
+
+	// From lunlun.io into the cabinet with a ticket; once only.
+	tok := maillink.Sign(secret, u.ID, time.Now())
+	for i, want := range []string{"/domains", "/login"} {
+		rec = httptest.NewRecorder()
+		s.router.ServeHTTP(rec, httptest.NewRequest("GET", "/sso?t="+tok, nil))
+		if loc := rec.Header().Get("Location"); loc != want {
+			t.Fatalf("sso try %d: %d → %q, want %q", i, rec.Code, loc, want)
+		}
+	}
 }

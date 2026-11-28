@@ -9,6 +9,16 @@
             </div>
         </div>
     </div>
+    {{if .QuotaMB}}
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="mb-2">Место: занято <b>{{.MailMB}} МБ</b> почтой и <b>{{.FilesMB}} МБ</b> файлами в <a href="/sso/lunlun">lunlun.io</a> из <b>{{.QuotaMB}} МБ</b>.</div>
+                <div class="text-muted small">Место одно на почту всех ваших ящиков и файлы. Больше места — «+10 ГБ» в боте.</div>
+            </div>
+        </div>
+    </div>
+    {{end}}
     <div class="col-12">
         <div class="card">
             <div class="card-header"><h3 class="card-title">Подключено</h3></div>

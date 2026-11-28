@@ -25,6 +25,8 @@ type DB struct {
 	// keys remembers derived keys of stored secrets (see crypto.KeyCache);
 	// nil — every decryption derives its key anew.
 	keys *crypto.KeyCache
+	// filesBytes: bytes a user's files take in lunlun.io (SetFilesBytes).
+	filesBytes func(userID int64) int64
 }
 
 // Tx wraps a sql.Tx with encryption key for DB operations
