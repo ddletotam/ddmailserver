@@ -180,6 +180,12 @@ def build(out):
     (out / "sitemap.xml").write_text(
         f'<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{urls}</urlset>\n',
         encoding="utf-8")
+    # Файлы подтверждения владения доменом (почтовые постмастеры и т. п.):
+    # site/root/* кладутся в корень сайта как есть.
+    if (HERE / "root").is_dir():
+        for f in (HERE / "root").iterdir():
+            if f.is_file():
+                shutil.copyfile(f, out / f.name)
     (out / "robots.txt").write_text(f"User-agent: *\nAllow: /\nSitemap: {site}/sitemap.xml\n", encoding="utf-8")
     return built
 
