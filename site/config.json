@@ -30,8 +30,9 @@
       "live": true
     },
     "windows": {
-      "url": "",
-      "live": false
+      "url": "https://github.com/ddletotam/ddmailserver/releases/latest",
+      "live": true,
+      "sub": "установщик, GitHub"
     },
     "linux": {
       "url": "https://github.com/ddletotam/ddmailserver/releases/latest",
