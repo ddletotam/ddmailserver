@@ -137,6 +137,7 @@ func newTestBot() (*bot, *fakeTG, *fakeAPI) {
 	tg := &fakeTG{}
 	api := &fakeAPI{accounts: map[int64]*account{}, taken: map[string]bool{"busy": true}, until: map[string]int64{}}
 	b := newBot(config{siteURL: "https://lunlun.email", mailHost: "mail.lunlun.email", credsTTL: time.Hour}, tg, api)
+	b.del = loadDeletions("") // in memory
 	return b, tg, api
 }
 
@@ -265,5 +266,22 @@ func TestPaymentFlow(t *testing.T) {
 	step(b, paidMsg("f:nothing", "ch2"))
 	if len(tg.refunded) != 1 || tg.refunded[0] != "ch2" {
 		t.Fatalf("refunds: %v", tg.refunded)
+	}
+}
+
+func TestDeletionsSurviveRestart(t *testing.T) {
+	path := t.TempDir() + "/deletions.json"
+	d := loadDeletions(path)
+	now := time.Now()
+	d.add(1, 10, now.Add(-time.Minute))
+	d.add(1, 11, now.Add(time.Hour))
+	// «Restart»: a fresh process reads the file.
+	d2 := loadDeletions(path)
+	due := d2.due(now)
+	if len(due) != 1 || due[0].Message != 10 {
+		t.Fatalf("due after restart: %+v", due)
+	}
+	if left := loadDeletions(path).due(now.Add(2 * time.Hour)); len(left) != 1 || left[0].Message != 11 {
+		t.Fatalf("left: %+v", left)
 	}
 }

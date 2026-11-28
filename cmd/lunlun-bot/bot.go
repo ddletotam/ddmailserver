@@ -66,14 +66,18 @@ type bot struct {
 	awaitingLogin map[int64]bool
 	// lastAction throttles a user to one action per second.
 	lastAction map[int64]time.Time
+	// del: password messages waiting to be deleted (deletions.go).
+	del *deletions
 }
 
 func newBot(c config, tg messenger, api accounts) *bot {
-	return &bot{cfg: c, tg: tg, api: api, awaitingLogin: map[int64]bool{}, lastAction: map[int64]time.Time{}}
+	return &bot{cfg: c, tg: tg, api: api, awaitingLogin: map[int64]bool{}, lastAction: map[int64]time.Time{},
+		del: loadDeletions(c.stateDir + "/deletions.json")}
 }
 
 func (b *bot) run(ctx context.Context) {
 	go b.deliverNotices(ctx)
+	go b.runDeletions(ctx)
 	var offset int64
 	for ctx.Err() == nil {
 		ups, err := b.tg.getUpdates(ctx, offset)
@@ -361,12 +365,7 @@ func (b *bot) sendCredentials(ctx context.Context, chat int64, a *account, title
 		log.Printf("send credentials: %v", err)
 		return
 	}
-	go func() {
-		time.Sleep(b.cfg.credsTTL)
-		if err := b.tg.deleteMessage(context.Background(), chat, id); err != nil {
-			log.Printf("delete credentials message: %v", err)
-		}
-	}()
+	b.del.add(chat, id, time.Now().Add(b.cfg.credsTTL))
 }
 
 func (b *bot) settingsText(address string) string {
