@@ -94,6 +94,13 @@ func TestFreeTierSendLimits(t *testing.T) {
 	if err := send(fresh, "someone-new@example.com"); err != nil {
 		t.Fatalf("with send_limits paid: %v", err)
 	}
+	// ... but raised, not removed.
+	for i := 0; i < PaidRecipientsPerDay; i++ {
+		_ = send(fresh, fmt.Sprintf("bulk%d@example.com", i))
+	}
+	if err := send(fresh, "one-more@example.com"); !errors.Is(err, ErrRecipientLimit) {
+		t.Fatalf("paid account past %d recipients: %v", PaidRecipientsPerDay, err)
+	}
 	_, _ = raw.Exec(`DELETE FROM entitlements WHERE user_id = $1`, fresh)
 
 	// After the warm-up week: the full 20 recipients.
@@ -135,6 +142,15 @@ func TestFreeTierSendLimits(t *testing.T) {
 			t.Fatalf("after bounces, try %d: %v", i, err)
 		}
 	}
+	// Paying for raised limits does not lift the autostop.
+	if _, err := raw.Exec(`INSERT INTO entitlements (user_id, feature, until, updated_at) VALUES ($1, $2, $3, 0)`,
+		bouncy, FeatureSendLimits, timeutil.Now()+3600*1000); err != nil {
+		t.Fatal(err)
+	}
+	if err := send(bouncy, "ok@example.com"); !errors.Is(err, ErrSendStopped) {
+		t.Fatalf("paid account after bounces: %v", err)
+	}
+	_, _ = raw.Exec(`DELETE FROM entitlements WHERE user_id = $1`, bouncy)
 	var notices int
 	if err := raw.QueryRow(`SELECT COUNT(*) FROM bot_notices WHERE tg_user_id = $1 AND kind = 'send_stopped'`,
 		tag%1_000_000_000+bouncy).Scan(&notices); err != nil || notices != 1 {

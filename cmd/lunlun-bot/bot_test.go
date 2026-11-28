@@ -65,7 +65,7 @@ func (f *fakeAPI) features(_ context.Context, tg int64) ([]feature, error) {
 	}
 	return []feature{
 		{Code: "external_accounts", Title: "Другие ящики", Price: 100, Until: f.until["external_accounts"]},
-		{Code: "send_limits", Title: "Отправка без лимитов", Price: 50, Until: f.until["send_limits"]},
+		{Code: "send_limits", Title: "Больше отправки", Price: 50, Until: f.until["send_limits"]},
 	}, nil
 }
 func (f *fakeAPI) recordPayment(_ context.Context, p payment) (int64, error) {

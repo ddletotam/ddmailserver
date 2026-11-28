@@ -60,8 +60,8 @@ var botFeatureCatalog = []botFeature{
 		Description: "Сервер забирает почту из других ящиков по IMAP и отправляет через их SMTP — почта всех адресов видна на всех устройствах."},
 	{Code: db.FeatureExtraStorage, Title: "+10 ГБ",
 		Description: "Ящик 11 ГБ вместо 1 ГБ."},
-	{Code: db.FeatureSendLimits, Title: "Отправка без лимитов",
-		Description: "Без суточных ограничений бесплатного ящика на число писем и получателей."},
+	{Code: db.FeatureSendLimits, Title: "Больше отправки",
+		Description: "До 300 писем и 100 разных получателей в сутки вместо 50 и 20."},
 }
 
 // SetBotPrices sets the monthly price in Stars of each paid feature; a
