@@ -1,0 +1,37 @@
+{{define "content"}}
+<div class="row row-cards">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body d-flex flex-wrap gap-3 align-items-center">
+                <div class="h2 m-0">{{.Balance}} ⭐</div>
+                <div class="text-muted">Пополнение, подключение возможностей и возврат неизрасходованного — в Telegram-боте.</div>
+                <a class="btn btn-primary ms-auto" href="{{.BotURL}}" target="_blank" rel="noopener">Открыть бота</a>
+            </div>
+        </div>
+    </div>
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">Подключено</h3></div>
+            <div class="card-body">
+                {{if .Subs}}
+                <table class="table table-sm">
+                    {{range .Subs}}<tr><td>{{.Title}}</td><td class="text-muted">{{.State}}</td></tr>{{end}}
+                </table>
+                {{else}}<div class="text-muted">Ничего платного не подключено.</div>{{end}}
+            </div>
+        </div>
+    </div>
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">История</h3></div>
+            <div class="card-body">
+                {{if .History}}
+                <table class="table table-sm">
+                    {{range .History}}<tr><td class="text-muted text-nowrap">{{.Date}}</td><td>{{.What}}</td><td class="text-end text-nowrap">{{if gt .Amount 0}}+{{end}}{{.Amount}} ⭐</td></tr>{{end}}
+                </table>
+                {{else}}<div class="text-muted">Операций пока не было.</div>{{end}}
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}

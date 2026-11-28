@@ -49,7 +49,8 @@ func newBotEnv(t *testing.T) (*Server, *db.DB, string) {
 		VALUES ($1, (SELECT min(id) FROM users), true, 0, true, 'x')`, domain); err != nil {
 		t.Fatalf("insert domain: %v", err)
 	}
-	s := &Server{database: database, router: mux.NewRouter()}
+	m := NewI18nManager()
+	s := &Server{database: database, router: mux.NewRouter(), i18nManager: m, i18n: m.Get("ru")}
 	s.registerBotRoutes()
 	if err := s.SetBotAPI(botTestSecret, domain, nil); err != nil {
 		t.Fatalf("SetBotAPI: %v", err)
@@ -302,7 +303,9 @@ func TestMyDomainsAndMailboxes(t *testing.T) {
 	if code, _ := call(fmt.Sprintf("/domains/%d/verify", domID), nil); code != 409 {
 		t.Fatalf("verify without the record: %d", code)
 	}
-	s.lookupTXT = func(context.Context, string) ([]string, error) { return []string{"ddmail-verify=" + d.VerifyToken}, nil }
+	s.lookupTXT = func(context.Context, string) ([]string, error) {
+		return []string{"ddmail-verify=" + d.VerifyToken}, nil
+	}
 	if code, out := call(fmt.Sprintf("/domains/%d/verify", domID), nil); code != 200 {
 		t.Fatalf("verify: %d %v", code, out)
 	}
@@ -342,6 +345,20 @@ func TestMyDomainsAndMailboxes(t *testing.T) {
 	}
 	if code, out := call(fmt.Sprintf("/mailboxes/%d/delete", mb.ID), nil); code != 200 {
 		t.Fatalf("delete mailbox: %d %v", code, out)
+	}
+	// The cabinet pages render with what was just made.
+	for _, page := range []string{"/domains", "/billing"} {
+		req := httptest.NewRequest("GET", page, nil)
+		req = req.WithContext(context.WithValue(req.Context(), userContextKey, u))
+		rec := httptest.NewRecorder()
+		if page == "/domains" {
+			s.HandleMyDomainsPage(rec, req)
+		} else {
+			s.HandleMyBillingPage(rec, req)
+		}
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "⭐") {
+			t.Fatalf("%s: %d %.300s", page, rec.Code, rec.Body.String())
+		}
 	}
 	_, _ = database.Exec(`DELETE FROM mailboxes WHERE user_id = $1`, u.ID)
 }

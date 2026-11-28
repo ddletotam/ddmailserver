@@ -135,7 +135,10 @@ func TestUnpaidMailboxStops(t *testing.T) {
 		VALUES ($1, $2, true, 0, true, 'x') RETURNING id`, fmt.Sprintf("stop%d.test", uid), uid).Scan(&domID); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = raw.Exec(`DELETE FROM mailboxes WHERE domain_id = $1`, domID); _, _ = raw.Exec(`DELETE FROM domains WHERE id = $1`, domID) })
+	t.Cleanup(func() {
+		_, _ = raw.Exec(`DELETE FROM mailboxes WHERE domain_id = $1`, domID)
+		_, _ = raw.Exec(`DELETE FROM domains WHERE id = $1`, domID)
+	})
 	if err := raw.QueryRow(`INSERT INTO mailboxes (user_id, domain_id, local_part, enabled, created_at) VALUES ($1, $2, 'a', true, 0) RETURNING id`,
 		uid, domID).Scan(&mbID); err != nil {
 		t.Fatal(err)

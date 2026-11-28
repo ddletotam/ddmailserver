@@ -344,6 +344,7 @@ func (s *Server) setupRoutes() {
 
 	// The user's own domains and mailboxes (docs/lunlun-bot-plan.md)
 	web.HandleFunc("/domains", s.HandleMyDomainsPage).Methods("GET")
+	web.HandleFunc("/billing", s.HandleMyBillingPage).Methods("GET")
 	web.HandleFunc("/domains/add", s.HandleMyAddDomain).Methods("POST")
 	web.HandleFunc("/domains/{id:[0-9]+}/verify", s.HandleMyVerifyDomain).Methods("POST")
 	web.HandleFunc("/domains/{id:[0-9]+}/delete", s.HandleMyDeleteDomain).Methods("POST")
