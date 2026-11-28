@@ -169,6 +169,7 @@ func (s *Server) setupRoutes() {
 	// Telegram sign-up bot service API — before the generic /api subrouters.
 	s.registerBotRoutes()
 	s.registerLunlunRoutes()
+	s.registerListRoutes()
 
 	// Auth routes with rate limiting (5 attempts per minute per IP)
 	authRouter := s.router.PathPrefix("/api").Subrouter()
@@ -355,6 +356,10 @@ func (s *Server) setupRoutes() {
 	web.HandleFunc("/mailboxes/add", s.HandleMyAddMailbox).Methods("POST")
 	web.HandleFunc("/mailboxes/{id:[0-9]+}/password", s.HandleMyMailboxPassword).Methods("POST")
 	web.HandleFunc("/mailboxes/{id:[0-9]+}/delete", s.HandleMyDeleteMailbox).Methods("POST")
+	web.HandleFunc("/lists", s.HandleMyListsPage).Methods("GET")
+	web.HandleFunc("/lists/add", s.HandleMyAddList).Methods("POST")
+	web.HandleFunc("/lists/{id:[0-9]+}/delete", s.HandleMyDeleteList).Methods("POST")
+	web.HandleFunc("/lists/{id:[0-9]+}/subscribers/{sid:[0-9]+}/delete", s.HandleMyRemoveSubscriber).Methods("POST")
 
 	// Accounts web pages
 	web.HandleFunc("/accounts", s.HandleAccountsPage).Methods("GET")

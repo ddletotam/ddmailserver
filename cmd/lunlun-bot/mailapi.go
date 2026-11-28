@@ -200,3 +200,52 @@ func (m *mailAPI) reserveRefund(ctx context.Context, tg int64, charge string) (i
 func (m *mailAPI) cancelRefund(ctx context.Context, tg int64, charge string) error {
 	return m.do(ctx, http.MethodDelete, fmt.Sprintf("/accounts/%d/refunds/%s", tg, url.PathEscape(charge)), nil, nil)
 }
+
+type listInfo struct {
+	Title   string `json:"title"`
+	Address string `json:"address"`
+	Enabled bool   `json:"enabled"`
+	Full    bool   `json:"full"`
+}
+
+func (m *mailAPI) listInfo(ctx context.Context, code string) (*listInfo, error) {
+	var l listInfo
+	err := m.do(ctx, http.MethodGet, "/lists/"+url.PathEscape(code), nil, &l)
+	return &l, err
+}
+
+type subscribeResult struct {
+	Status  string `json:"status"` // active | pending
+	Email   string `json:"email"`
+	Title   string `json:"title"`
+	Address string `json:"address"`
+}
+
+// subscribe puts email (own — the user's own address) on a list; errCode:
+// not_found, off, full, already, pending, too_many, invalid_email, banned.
+func (m *mailAPI) subscribe(ctx context.Context, code string, tg int64, email string, own bool) (*subscribeResult, error) {
+	var r subscribeResult
+	err := m.do(ctx, http.MethodPost, "/lists/"+url.PathEscape(code)+"/subscribers",
+		map[string]any{"tg_user_id": tg, "email": email, "own": own}, &r)
+	return &r, err
+}
+
+type listSubscription struct {
+	ID      int64  `json:"id"`
+	Title   string `json:"title"`
+	Address string `json:"address"`
+	Email   string `json:"email"`
+	Status  string `json:"status"`
+}
+
+func (m *mailAPI) listSubscriptions(ctx context.Context, tg int64) ([]listSubscription, error) {
+	var r struct {
+		Lists []listSubscription `json:"lists"`
+	}
+	err := m.do(ctx, http.MethodGet, fmt.Sprintf("/accounts/%d/lists", tg), nil, &r)
+	return r.Lists, err
+}
+
+func (m *mailAPI) unsubscribe(ctx context.Context, tg, id int64) error {
+	return m.do(ctx, http.MethodDelete, fmt.Sprintf("/accounts/%d/lists/%d", tg, id), nil, nil)
+}

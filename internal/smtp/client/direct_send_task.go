@@ -1,11 +1,14 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log"
+	"mime"
 	"net"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -53,6 +56,59 @@ type DirectSendTask struct {
 	sendExternal func(from string, to []string, msg []byte, hostname string) map[string]error
 	// now is the clock for DSN dates (tests).
 	now func() time.Time
+	// lists takes letters to mailing-list addresses; nil — there are none.
+	lists ListPoster
+}
+
+// ListPoster queues a letter sent to a mailing-list address
+// (db.PostToList); db.ErrListNotFound — the address is not a list.
+type ListPoster interface {
+	PostToList(addr string, senderUserID, outboxID int64, subject string, raw []byte) (*db.MailingList, error)
+}
+
+// SetListPoster enables posting to mailing lists hosted here.
+func (t *DirectSendTask) SetListPoster(p ListPoster) {
+	t.lists = p
+}
+
+// postToLists hands the recipients that are mailing lists to the list
+// sender and returns the rest for ordinary routing.
+func (t *DirectSendTask) postToLists(msg *models.OutboxMessage, raw []byte, recipients []string) (rest []string, delivered int, failed []FailedRecipient, pending []pendingRecipient) {
+	if t.lists == nil {
+		return recipients, 0, nil, nil
+	}
+	subject := ""
+	if m, err := mail.ReadMessage(bytes.NewReader(raw)); err == nil {
+		subject = m.Header.Get("Subject")
+		if dec, derr := new(mime.WordDecoder).DecodeHeader(subject); derr == nil {
+			subject = dec
+		}
+	}
+	for _, r := range recipients {
+		addr := envelopeAddress(r)
+		_, err := t.lists.PostToList(addr, msg.UserID, msg.ID, subject, raw)
+		var why string
+		switch {
+		case errors.Is(err, db.ErrListNotFound):
+			rest = append(rest, r)
+			continue
+		case err == nil:
+			delivered++
+			continue
+		case errors.Is(err, db.ErrListNotOwner):
+			why = "Писать в рассылку может только её владелец"
+		case errors.Is(err, db.ErrListOff):
+			why = "Рассылка выключена или остановлена: проверьте оплату и сообщения бота"
+		case errors.Is(err, db.ErrListPostLimit):
+			why = fmt.Sprintf("В рассылку можно отправить не больше %d писем в сутки", db.ListPostsPerDay)
+		default:
+			pending = append(pending, pendingRecipient{address: addr, err: err})
+			continue
+		}
+		failed = append(failed, FailedRecipient{Address: addr, Status: "5.7.1", Reason: outbox.ReasonRejected,
+			Diagnostic: "smtp; 550 5.7.1 " + why, Detail: why})
+	}
+	return rest, delivered, failed, pending
 }
 
 // SetLocalDeliverer enables in-process delivery to the domains this server
@@ -233,7 +289,11 @@ func (t *DirectSendTask) Execute(ctx context.Context) error {
 		parsed = &parser.ParsedMessage{RawData: emailData, RawSize: int64(len(emailData))}
 	}
 
+	recipients, listDelivered, listFailed, listPending := t.postToLists(msg, original, recipients)
 	route := routeRecipients(t.local, msg.UserID, recipients)
+	route.self += listDelivered
+	route.failed = append(route.failed, listFailed...)
+	route.pending = append(route.pending, listPending...)
 	if len(route.external) > 0 && !t.signer.Has(msg.From) {
 		// Без подписи (и без SPF у домена) Mail.ru отвечает «550 spam
 		// message rejected» (аудит 2026-11-14, №6) — пусть это будет видно

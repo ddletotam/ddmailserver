@@ -48,6 +48,24 @@ type botAPI struct {
 	domain string
 	nets   []*net.IPNet
 	prices map[string]int
+	// botName (without @) and publicURL (the cabinet) — for subscribe,
+	// confirm and unsubscribe links of mailing lists.
+	botName   string
+	publicURL string
+}
+
+// SetBotLinks sets the bot's name and the cabinet's public URL.
+func (s *Server) SetBotLinks(botName, publicURL string) {
+	if s.bot != nil {
+		s.bot.botName, s.bot.publicURL = botName, publicURL
+	}
+}
+
+func (s *Server) botURL() string {
+	if s.bot != nil && s.bot.botName != "" {
+		return "https://t.me/" + s.bot.botName
+	}
+	return "https://t.me/robotohobot"
 }
 
 // botFeature is a paid feature as the bot sells it.
@@ -70,6 +88,8 @@ var botFeatureCatalog = []botFeature{
 		Description: "Ящик 11 ГБ вместо 1 ГБ."},
 	{Code: db.FeatureMailbox, Title: "Ещё ящик",
 		Description: "Дополнительный ящик на lunlun.email или на своём домене — для себя или с отдельным входом. Создаётся в кабинете, оплачивается за каждый."},
+	{Code: db.FeatureMailingList, Title: "Рассылка",
+		Description: "Свой список рассылки: пишете письмо на адрес рассылки — оно уходит всем подписчикам. Подписываются люди сами, через этого бота. Создаётся в кабинете, цена — по числу подписчиков."},
 	{Code: db.FeatureSendLimits, Title: "Больше отправки",
 		Description: "До 300 писем и 100 разных получателей в сутки вместо 50 и 20."},
 }
@@ -115,6 +135,10 @@ func (s *Server) registerBotRoutes() {
 	r.HandleFunc("/accounts/{tg:[0-9]+}/refunds", s.handleBotRefundable).Methods("GET")
 	r.HandleFunc("/accounts/{tg:[0-9]+}/refunds/{charge}", s.handleBotReserveRefund).Methods("POST")
 	r.HandleFunc("/accounts/{tg:[0-9]+}/refunds/{charge}", s.handleBotCancelRefund).Methods("DELETE")
+	r.HandleFunc("/lists/{code}", s.handleBotList).Methods("GET")
+	r.HandleFunc("/lists/{code}/subscribers", s.handleBotSubscribe).Methods("POST")
+	r.HandleFunc("/accounts/{tg:[0-9]+}/lists", s.handleBotListSubscriptions).Methods("GET")
+	r.HandleFunc("/accounts/{tg:[0-9]+}/lists/{id:[0-9]+}", s.handleBotUnsubscribe).Methods("DELETE")
 	r.HandleFunc("/notices", s.handleBotNotices).Methods("GET")
 	r.HandleFunc("/notices/{id:[0-9]+}/sent", s.handleBotNoticeSent).Methods("POST")
 }
@@ -387,6 +411,9 @@ func (s *Server) handleBotBilling(w http.ResponseWriter, r *http.Request) {
 	out := []botFeature{}
 	for _, f := range botFeatureCatalog {
 		price := s.bot.prices[f.Code]
+		if f.Code == db.FeatureMailingList { // the smallest tier: «от N ⭐»
+			price = s.bot.prices[db.ListTierPriceKey(db.ListTiers[0])]
+		}
 		if price <= 0 {
 			continue
 		}

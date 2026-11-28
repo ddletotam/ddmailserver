@@ -60,6 +60,11 @@ type BotAPIConfig struct {
 	// (external_accounts, extra_storage, send_limits). Нет цены — функция в
 	// боте не продаётся.
 	Prices map[string]int `yaml:"prices"`
+	// BotName — имя бота без @: ссылки подписки на рассылки. Пусто — robotohobot.
+	BotName string `yaml:"bot_name"`
+	// PublicURL — адрес кабинета для ссылок в письмах рассылок (подтверждение,
+	// отписка). Пусто — https://mail.<domain>.
+	PublicURL string `yaml:"public_url"`
 }
 
 // PushConfig — доставка push-уведомлений о новой почте (ios-behavior-contract

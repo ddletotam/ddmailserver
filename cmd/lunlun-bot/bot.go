@@ -38,6 +38,10 @@ type accounts interface {
 	refundable(ctx context.Context, tg int64) ([]topUp, error)
 	reserveRefund(ctx context.Context, tg int64, charge string) (int, error)
 	cancelRefund(ctx context.Context, tg int64, charge string) error
+	listInfo(ctx context.Context, code string) (*listInfo, error)
+	subscribe(ctx context.Context, code string, tg int64, email string, own bool) (*subscribeResult, error)
+	listSubscriptions(ctx context.Context, tg int64) ([]listSubscription, error)
+	unsubscribe(ctx context.Context, tg, id int64) error
 }
 
 var botCommands = []command{
@@ -45,6 +49,7 @@ var botCommands = []command{
 	{"password", "Новый пароль"},
 	{"settings", "Настройки почтовых программ"},
 	{"balance", "Баланс и платные возможности"},
+	{"lists", "Мои подписки на рассылки"},
 	{"refund", "Вернуть неизрасходованные звёзды"},
 	{"paysupport", "Вопросы по оплате"},
 	{"help", "Помощь"},
@@ -74,6 +79,9 @@ type bot struct {
 	mu sync.Mutex
 	// awaitingLogin: users who accepted the terms and are choosing a login.
 	awaitingLogin map[int64]bool
+	// awaitingEmail: users subscribing to a list (code) who are to send the
+	// address.
+	awaitingEmail map[int64]string
 	// lastAction throttles a user to one action per second.
 	lastAction map[int64]time.Time
 	// del: password messages waiting to be deleted (deletions.go).
@@ -81,7 +89,7 @@ type bot struct {
 }
 
 func newBot(c config, tg messenger, api accounts) *bot {
-	return &bot{cfg: c, tg: tg, api: api, awaitingLogin: map[int64]bool{}, lastAction: map[int64]time.Time{},
+	return &bot{cfg: c, tg: tg, api: api, awaitingLogin: map[int64]bool{}, awaitingEmail: map[int64]string{}, lastAction: map[int64]time.Time{},
 		del: loadDeletions(c.stateDir + "/deletions.json")}
 }
 
@@ -202,10 +210,22 @@ func (b *bot) awaiting(user int64) bool {
 }
 
 func (b *bot) onText(ctx context.Context, chat int64, from tgUser, text string) {
-	switch strings.ToLower(strings.SplitN(text, "@", 2)[0]) {
+	cmd, arg, _ := strings.Cut(text, " ")
+	cmd = strings.ToLower(strings.SplitN(cmd, "@", 2)[0])
+	if strings.HasPrefix(cmd, "/") {
+		b.setAwaitingEmail(from.ID, "")
+	}
+	switch cmd {
 	case "/start":
 		b.setAwaiting(from.ID, false)
+		if code, ok := strings.CutPrefix(strings.TrimSpace(arg), listStartPrefix); ok && code != "" {
+			b.offerList(ctx, chat, from, code)
+			return
+		}
 		b.start(ctx, chat, from)
+		return
+	case "/lists":
+		b.showListSubscriptions(ctx, chat, from)
 		return
 	case "/password":
 		b.askPassword(ctx, chat, from)
@@ -224,6 +244,10 @@ func (b *bot) onText(ctx context.Context, chat int64, from tgUser, text string) 
 		return
 	case "/paysupport":
 		b.say(ctx, chat, b.paySupportText(), nil)
+		return
+	}
+	if code := b.awaitedList(from.ID); code != "" {
+		b.subscribeTo(ctx, chat, from, code, text, false)
 		return
 	}
 	if b.awaiting(from.ID) {
@@ -256,6 +280,13 @@ func (b *bot) onButton(ctx context.Context, chat int64, from tgUser, data string
 		b.askTopUp(ctx, chat, from, strings.TrimPrefix(data, cbTopUp))
 	case data == cbRefund:
 		b.showRefunds(ctx, chat, from)
+	case strings.HasPrefix(data, cbListOwn):
+		b.subscribeTo(ctx, chat, from, strings.TrimPrefix(data, cbListOwn), "", true)
+	case strings.HasPrefix(data, cbListOther):
+		b.setAwaitingEmail(from.ID, strings.TrimPrefix(data, cbListOther))
+		b.say(ctx, chat, "Пришлите адрес почты, на который присылать письма. На него придёт письмо со ссылкой для подтверждения.", nil)
+	case strings.HasPrefix(data, cbListOff):
+		b.unsubscribeList(ctx, chat, from, strings.TrimPrefix(data, cbListOff))
 	case strings.HasPrefix(data, cbRefundDo):
 		b.refund(ctx, chat, from, strings.TrimPrefix(data, cbRefundDo))
 	}
@@ -405,7 +436,7 @@ func (b *bot) settingsText(address string) string {
 
 func (b *bot) helpText() string {
 	return "/start — ваш адрес или регистрация\n/password — новый пароль\n/settings — настройки почтовых программ\n" +
-		"/balance — баланс и платные возможности\n/refund — вернуть неизрасходованные звёзды\n/paysupport — вопросы по оплате\n\n" +
+		"/balance — баланс и платные возможности\n/lists — мои подписки на рассылки\n/refund — вернуть неизрасходованные звёзды\n/paysupport — вопросы по оплате\n\n" +
 		"Сайт сервиса: " + b.cfg.siteURL
 }
 

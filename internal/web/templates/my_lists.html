@@ -1,0 +1,116 @@
+{{define "content"}}
+<div class="row row-cards">
+    <div class="col-12"><div id="result"></div></div>
+
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">Новая рассылка</h3></div>
+            <div class="card-body">
+                <form id="list-form" class="row g-2">
+                    <div class="col-md-6">
+                        <div class="input-group">
+                            <input type="text" name="local_part" class="form-control" placeholder="news" required>
+                            <span class="input-group-text">@</span>
+                            <select name="domain_id" class="form-select">
+                                {{range .Domains}}<option value="{{.ID}}">{{.Domain}}</option>{{end}}
+                            </select>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <input type="text" name="title" class="form-control" placeholder="Название — так рассылка подписана у получателей" maxlength="100" required>
+                    </div>
+                    <div class="col-md-6">
+                        <select name="tier" class="form-select">
+                            {{range .Tiers}}<option value="{{.Size}}">до {{.Size}} подписчиков{{if .Price}} — {{.Price}} ⭐ в месяц{{end}}</option>{{end}}
+                        </select>
+                    </div>
+                    <div class="col-md-6"><button type="submit" class="btn btn-primary">Создать рассылку</button></div>
+                </form>
+                <div class="text-muted small mt-3">
+                    Как это работает: пишете письмо на адрес рассылки со своего ящика — оно уходит каждому подписчику отдельно,
+                    от имени рассылки, ответы приходят вам. Не больше 5 писем в сутки.<br>
+                    Подписываются люди только сами — по ссылке на бота, с подтверждением адреса. Загрузить свой список адресов нельзя.
+                    В каждом письме есть ссылка «Отписаться». Если за сутки 5 адресов подписчиков окажутся несуществующими, рассылка остановится на сутки.
+                    {{if .Billed}}<br>Оплата — с баланса ({{.Balance}} ⭐), раз в месяц, за каждую рассылку. <a href="{{.BotURL}}" target="_blank" rel="noopener">Пополнить в боте</a>.{{end}}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {{range .Lists}}
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between">
+                <h3 class="card-title">{{.Title}} <span class="text-muted ms-2">{{.Address}}</span>
+                    {{if not .Enabled}}<span class="badge bg-red-lt ms-2">выключена: не оплачена</span>{{end}}
+                    {{if .Stopped}}<span class="badge bg-yellow-lt ms-2">остановлена до {{.Stopped}}</span>{{end}}
+                </h3>
+                <button class="btn btn-sm btn-outline-danger" data-post="/lists/{{.ID}}/delete" data-confirm="Удалить рассылку {{.Address}} вместе со списком подписчиков? Отменить нельзя.">Удалить</button>
+            </div>
+            <div class="card-body">
+                <div class="mb-2">Подписчиков: <b>{{.Active}}</b> из {{.Tier}}{{if .Pending}}, ждут подтверждения: {{.Pending}}{{end}}.
+                    {{if eq .Paid "active"}}<span class="text-muted">Оплачена, продление {{.Until}}.</span>{{else if eq .Paid "cancelled"}}<span class="text-muted">Работает до {{.Until}}.</span>{{else if eq .Paid "ended"}}<span class="text-muted">Оплата закончилась.</span>{{end}}
+                </div>
+                <div class="input-group mb-3" style="max-width:560px">
+                    <span class="input-group-text">Ссылка для подписки</span>
+                    <input type="text" class="form-control" value="{{.Link}}" readonly onclick="this.select()">
+                </div>
+                {{if .Issues}}
+                <div class="text-muted mb-1">Последние письма</div>
+                <table class="table table-sm">
+                    {{range .Issues}}<tr><td>{{.Subject}}</td><td class="text-muted small">{{fmtDateTime .CreatedAt}}</td>
+                        <td class="small">доставлено {{.Sent}}{{if .Pending}}, в очереди {{.Pending}}{{end}}{{if .Failed}}, не доставлено {{.Failed}}{{end}}</td></tr>{{end}}
+                </table>
+                {{end}}
+                {{if .Subscribers}}
+                <details>
+                    <summary class="text-muted">Подписчики</summary>
+                    <table class="table table-sm mt-2">
+                        {{range .Subscribers}}
+                        <tr>
+                            <td>{{.Email}}</td>
+                            <td class="text-muted small">{{if eq .Status "active"}}подписан{{else if eq .Status "pending"}}ждёт подтверждения{{else if eq .Status "bounced"}}адрес не существует{{else}}отписался{{end}}</td>
+                            <td class="text-end">{{if or (eq .Status "active") (eq .Status "pending")}}<button class="btn btn-sm btn-outline-secondary" data-post="/lists/{{.ListID}}/subscribers/{{.ID}}/delete" data-confirm="Убрать {{.Email}} из рассылки?">Убрать</button>{{end}}</td>
+                        </tr>
+                        {{end}}
+                    </table>
+                </details>
+                {{end}}
+            </div>
+        </div>
+    </div>
+    {{end}}
+</div>
+
+<script>
+(function () {
+    function post(url, body) {
+        return fetch(url, { method: 'POST', credentials: 'same-origin', body: body }).then(function (r) {
+            return r.json().catch(function () { return {}; }).then(function (j) {
+                if (!r.ok) throw new Error((j && j.error) || r.statusText);
+                return j;
+            });
+        });
+    }
+    function say(text) {
+        var box = document.getElementById('result');
+        box.innerHTML = '';
+        var d = document.createElement('div');
+        d.className = 'alert alert-danger';
+        d.textContent = text;
+        box.appendChild(d);
+        window.scrollTo(0, 0);
+    }
+    document.getElementById('list-form').addEventListener('submit', function (e) {
+        e.preventDefault();
+        post('/lists/add', new FormData(e.target)).then(function () { location.reload(); }).catch(function (err) { say(err.message); });
+    });
+    document.querySelectorAll('[data-post]').forEach(function (b) {
+        b.addEventListener('click', function () {
+            if (b.dataset.confirm && !confirm(b.dataset.confirm)) return;
+            post(b.dataset.post).then(function () { location.reload(); }).catch(function (err) { say(err.message); });
+        });
+    });
+})();
+</script>
+{{end}}

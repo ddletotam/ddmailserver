@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/ddletotam/ddmailserver/internal/lists"
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ddletotam/ddmailserver/internal/authfail"
@@ -77,6 +79,36 @@ type Scheduler struct {
 	// outbound: source IP and EHLO name of direct delivery by sender class
 	// (db.OutboundClass); empty — the system default for everyone.
 	outbound map[string]OutboundRoute
+	// lists sends mailing-list letters; nil — lists are off. Set after the
+	// scheduler started (the bot API is configured later), hence atomic.
+	lists atomic.Pointer[lists.Sender]
+}
+
+// OutboundList is the outbound class of mailing-list letters: their own
+// source IP, so complaints about a list don't hurt ordinary mail. Without it
+// a list goes out by its owner's class.
+const OutboundList = "list"
+
+// EnableLists turns mailing lists on: letters to list addresses are taken
+// from their owners and sent to subscribers every tick. baseURL is where the
+// confirm and unsubscribe links point, botName — the sign-up bot.
+func (s *Scheduler) EnableLists(baseURL, botName string) {
+	s.lists.Store(&lists.Sender{Store: s.database, Local: s.localDelivery, Signer: s.dkimSigner,
+		Hostname: s.getHostname(), BaseURL: baseURL, BotName: botName, Route: s.listRoute})
+}
+
+func (s *Scheduler) listRoute(owner int64) (net.IP, string) {
+	if r, ok := s.outbound[OutboundList]; ok {
+		return r.IP, r.Helo
+	}
+	if len(s.outbound) > 0 {
+		if class, err := s.database.OutboundClass(owner); err == nil {
+			if r, ok := s.outbound[class]; ok {
+				return r.IP, r.Helo
+			}
+		}
+	}
+	return nil, ""
 }
 
 // OutboundRoute is where one class of senders' direct mail leaves from.
@@ -377,6 +409,9 @@ func (s *Scheduler) scheduleAllAccounts() {
 
 	// Schedule SMTP send tasks
 	s.scheduleSMTPSend()
+	if ls := s.lists.Load(); ls != nil {
+		go ls.Run(s.ctx)
+	}
 
 	// Schedule CalDAV sync tasks
 	s.scheduleCalendarSync(paused)
@@ -577,6 +612,9 @@ func (s *Scheduler) scheduleSMTPSend() {
 			}
 			direct.SetDeliveryTracker(tracker)
 			direct.SetLocalDeliverer(s.localDelivery)
+			if s.lists.Load() != nil {
+				direct.SetListPoster(s.database)
+			}
 			sendTask = direct
 		} else {
 			// Relay through external SMTP account

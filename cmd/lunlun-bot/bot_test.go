@@ -59,6 +59,46 @@ type fakeAPI struct {
 	topups      map[string]int
 	enabled     map[string]bool
 	reserved    []string
+	listSubs    map[int64][]listSubscription // tg → subscriptions
+}
+
+func (f *fakeAPI) listInfo(_ context.Context, code string) (*listInfo, error) {
+	if code != "abc" {
+		return nil, &apiError{404, "not_found"}
+	}
+	return &listInfo{Title: "Новости", Address: "news@example.com", Enabled: true}, nil
+}
+
+func (f *fakeAPI) subscribe(_ context.Context, code string, tg int64, email string, own bool) (*subscribeResult, error) {
+	if own {
+		email = f.accounts[tg].Address
+	} else if !strings.Contains(email, "@") {
+		return nil, &apiError{400, "invalid_email"}
+	}
+	status := "pending"
+	if own {
+		status = "active"
+	}
+	if f.listSubs == nil {
+		f.listSubs = map[int64][]listSubscription{}
+	}
+	f.listSubs[tg] = append(f.listSubs[tg], listSubscription{ID: int64(len(f.listSubs[tg]) + 1), Title: "Новости",
+		Address: "news@example.com", Email: email, Status: status})
+	return &subscribeResult{Status: status, Email: email, Title: "Новости", Address: "news@example.com"}, nil
+}
+
+func (f *fakeAPI) listSubscriptions(_ context.Context, tg int64) ([]listSubscription, error) {
+	return f.listSubs[tg], nil
+}
+
+func (f *fakeAPI) unsubscribe(_ context.Context, tg, id int64) error {
+	for i, s := range f.listSubs[tg] {
+		if s.ID == id {
+			f.listSubs[tg] = append(f.listSubs[tg][:i], f.listSubs[tg][i+1:]...)
+			return nil
+		}
+	}
+	return &apiError{404, "not_found"}
 }
 
 func (f *fakeAPI) billing(_ context.Context, tg int64) (*billing, error) {
@@ -332,5 +372,48 @@ func TestDeletionsSurviveRestart(t *testing.T) {
 	}
 	if left := loadDeletions(path).due(now.Add(2 * time.Hour)); len(left) != 1 || left[0].Message != 11 {
 		t.Fatalf("left: %+v", left)
+	}
+}
+
+func TestListSubscribeFlow(t *testing.T) {
+	b, tg, api := newTestBot()
+	const stranger, member = 7, 8
+
+	// No account: the bot asks for an address and sends a confirmation.
+	step(b, msg(stranger, "/start l_abc"))
+	if !strings.Contains(tg.last().text, "Новости") || b.awaitedList(stranger) != "abc" {
+		t.Fatalf("offer: %+v", tg.last())
+	}
+	step(b, msg(stranger, "not an address"))
+	if !strings.Contains(tg.last().text, "не похоже") || b.awaitedList(stranger) != "abc" {
+		t.Fatalf("bad address: %q", tg.last().text)
+	}
+	step(b, msg(stranger, "me@example.org"))
+	if !strings.Contains(tg.last().text, "подтвердить") || b.awaitedList(stranger) != "" {
+		t.Fatalf("pending: %q", tg.last().text)
+	}
+
+	// With an account: one button, own address, active at once.
+	api.accounts[member] = &account{Login: "vasya", Address: "vasya@lunlun.email"}
+	step(b, msg(member, "/start l_abc"))
+	if kb := tg.last().kb; kb == nil || kb.Rows[0][0].Data != cbListOwn+"abc" {
+		t.Fatalf("member offer: %+v", tg.last())
+	}
+	step(b, press(member, cbListOwn+"abc"))
+	if !strings.Contains(tg.last().text, "vasya@lunlun.email") {
+		t.Fatalf("own: %q", tg.last().text)
+	}
+	step(b, msg(member, "/lists"))
+	if kb := tg.last().kb; kb == nil || kb.Rows[0][0].Data != cbListOff+"1" {
+		t.Fatalf("lists: %+v", tg.last())
+	}
+	step(b, press(member, cbListOff+"1"))
+	if !strings.Contains(tg.last().text, "отписаны") || len(api.listSubs[member]) != 0 {
+		t.Fatalf("unsubscribe: %q", tg.last().text)
+	}
+
+	step(b, msg(member, "/start l_zzz"))
+	if !strings.Contains(tg.last().text, "нет") {
+		t.Fatalf("unknown list: %q", tg.last().text)
 	}
 }

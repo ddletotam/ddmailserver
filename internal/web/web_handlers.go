@@ -142,7 +142,8 @@ func (s *Server) buildFuncMap(data interface{}) template.FuncMap {
 	userLang := s.getUserLanguage(data)
 	i18n := s.i18nManager.Get(userLang)
 	return template.FuncMap{
-		"t": i18n.T,
+		"t":           i18n.T,
+		"fmtDateTime": fmtDateTime,
 		"substr": func(str string, start, end int) string {
 			if len(str) < end {
 				return str

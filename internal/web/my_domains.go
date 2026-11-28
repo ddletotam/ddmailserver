@@ -126,7 +126,7 @@ func (s *Server) HandleMyDomainsPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 		return
 	}
-	data := MyDomainsData{PageData: PageData{Title: "Домены и ящики", User: user}, MailHost: s.mailHost(), BotURL: "https://t.me/robotohobot"}
+	data := MyDomainsData{PageData: PageData{Title: "Домены и ящики", User: user}, MailHost: s.mailHost(), BotURL: s.botURL()}
 	subs, _ := s.database.Subscriptions(user.ID)
 	data.Balance, _ = s.database.Balance(user.ID)
 	data.Billed = s.billed(user.ID)
@@ -315,6 +315,9 @@ func (s *Server) HandleMyAddMailbox(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if !validLocalPart(local) {
 		respondError(w, http.StatusBadRequest, "Так адрес не записывается: латиница, цифры, точка, дефис, подчёркивание")
+		return
+	} else if _, err := s.database.MailingListByAddress(local + "@" + d.Domain); err == nil {
+		respondError(w, http.StatusConflict, "Этот адрес занят рассылкой")
 		return
 	}
 	separate := r.FormValue("kind") == "separate"

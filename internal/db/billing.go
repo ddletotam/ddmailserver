@@ -449,12 +449,17 @@ func (db *DB) BalanceHistory(userID int64, limit int) ([]BalanceOp, error) {
 	return out, rows.Err()
 }
 
-// setMailboxBySub turns the mailbox of a per-mailbox subscription on or off:
-// off, it takes no mail and its own sign-in stops; its mail is kept.
+// setMailboxBySub turns the mailbox or mailing list of a per-item
+// subscription on or off: an off mailbox takes no mail and its own sign-in
+// stops, an off list takes no letters and no subscribers; nothing is deleted.
 func setMailboxBySub(q querier, subID int64, enabled bool) error {
 	if _, err := q.Exec(`UPDATE mailboxes SET enabled = $2 WHERE id = (
 		SELECT ref_id FROM subscriptions WHERE id = $1 AND feature = 'mailbox')`, subID, enabled); err != nil {
 		return fmt.Errorf("mailbox of subscription %d: %w", subID, err)
+	}
+	if _, err := q.Exec(`UPDATE mailing_lists SET enabled = $2 WHERE id = (
+		SELECT ref_id FROM subscriptions WHERE id = $1 AND feature = 'mailing_list')`, subID, enabled); err != nil {
+		return fmt.Errorf("list of subscription %d: %w", subID, err)
 	}
 	return nil
 }

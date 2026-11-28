@@ -71,7 +71,8 @@ func loginTaken(q querier, login, domain string, domainID int64) (bool, error) {
 	var taken bool
 	err := q.QueryRow(`
 		SELECT EXISTS (SELECT 1 FROM users WHERE lower(username) IN ($1, $2))
-		    OR EXISTS (SELECT 1 FROM mailboxes WHERE domain_id = $3 AND lower(local_part) = $1)`,
+		    OR EXISTS (SELECT 1 FROM mailboxes WHERE domain_id = $3 AND lower(local_part) = $1)
+		    OR EXISTS (SELECT 1 FROM mailing_lists WHERE domain_id = $3 AND local_part = $1)`,
 		login, login+"@"+domain, domainID).Scan(&taken)
 	if err != nil {
 		return false, fmt.Errorf("check login %q: %w", login, err)

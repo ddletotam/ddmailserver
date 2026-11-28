@@ -507,6 +507,17 @@ func main() {
 		} else {
 			webSrv.SetBotPrices(cfg.BotAPI.Prices)
 			log.Printf("Bot API enabled for domain %s, %d paid features priced", cfg.BotAPI.Domain, len(cfg.BotAPI.Prices))
+			// Mailing lists ride on the bot: subscribing is done there.
+			botName, publicURL := cfg.BotAPI.BotName, strings.TrimRight(cfg.BotAPI.PublicURL, "/")
+			if botName == "" {
+				botName = "robotohobot"
+			}
+			if publicURL == "" {
+				publicURL = "https://mail." + cfg.BotAPI.Domain
+			}
+			webSrv.SetBotLinks(botName, publicURL)
+			scheduler.EnableLists(publicURL, botName)
+			log.Printf("Mailing lists enabled (links %s, bot @%s)", publicURL, botName)
 		}
 	}
 	// Queueing a message is not sending it: without this hook the outbox row

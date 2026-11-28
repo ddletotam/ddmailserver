@@ -171,6 +171,13 @@ func (s *Session) checkLocalRecipient(to string) error {
 	}
 	var reject *localdelivery.RejectError
 	if errors.As(err, &reject) {
+		// A mailing-list address is no mailbox, yet takes the owner's
+		// letters; who may post is decided when the letter is sent.
+		if s.database != nil {
+			if _, lerr := s.database.MailingListByAddress(s.extractEmail(to)); lerr == nil {
+				return nil
+			}
+		}
 		log.Printf("SMTP: rejecting local recipient %s: %s", logmask.Addr(to), reject.Message)
 		return &smtp.SMTPError{
 			Code:         reject.Code,
