@@ -246,7 +246,8 @@ func (b *bot) start(ctx context.Context, chat int64, from tgUser) {
 		b.say(ctx, chat, fmt.Sprintf(
 			"Здравствуйте! Это регистрация в почте <b>lunlun.email</b>.\n\n"+
 				"Бесплатно — один адрес вида <code>логин@lunlun.email</code> на аккаунт Telegram. "+
-				"Войти в почту можно из приложения DDMail или любой почтовой программы.\n\n"+
+				"Войти в почту можно из приложения DDMail или любой почтовой программы. "+
+				"Дополнительные возможности — другие ящики, +10 ГБ и другие — подключаются здесь же, помесячно за звёзды.\n\n"+
 				"Перед регистрацией прочитайте <a href=\"%s/terms.html\">условия использования</a> "+
 				"и <a href=\"%s/privacy.html\">политику конфиденциальности</a>.",
 			b.cfg.siteURL, b.cfg.siteURL),
@@ -307,6 +308,8 @@ func (b *bot) create(ctx context.Context, chat int64, from tgUser, login string)
 	case err == nil:
 		b.setAwaiting(from.ID, false)
 		b.sendCredentials(ctx, chat, a, "Готово! Почта создана.")
+		// The menu right away: paid features, new password, settings.
+		b.showAccount(ctx, chat, a)
 	case code == "registered":
 		b.setAwaiting(from.ID, false)
 		b.say(ctx, chat, "У вас уже есть адрес — бесплатно выдаётся один на аккаунт Telegram.", nil)

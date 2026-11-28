@@ -176,8 +176,12 @@ func TestSignUpFlow(t *testing.T) {
 		t.Fatalf("free login: %+v", tg.last())
 	}
 	step(b, press(user, cbCreate+"vasya"))
-	if api.accounts[user] == nil || !strings.Contains(tg.last().text, "Secret123secret4") || b.awaiting(user) {
-		t.Fatalf("create: %+v", tg.last())
+	creds := tg.sent[len(tg.sent)-2]
+	if api.accounts[user] == nil || !strings.Contains(creds.text, "Secret123secret4") || b.awaiting(user) {
+		t.Fatalf("create: %+v", creds)
+	}
+	if kb := tg.last().kb; kb == nil || kb.Rows[0][0].Data != cbFeatures {
+		t.Fatalf("menu after sign-up: %+v", tg.last())
 	}
 
 	// Back again: the account, not the terms.
